@@ -144,6 +144,7 @@ where
     + From<UnexpectedEot<L::Offset, Lang, <L::Token as Token<'inp>>::Kind>>,
   Lang: ?Sized,
 {
+  #[inline]
   fn parse_input(
     &mut self,
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,

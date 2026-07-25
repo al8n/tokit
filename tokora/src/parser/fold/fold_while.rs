@@ -1,7 +1,5 @@
 use super::*;
 
-use crate::span::Span as _;
-
 /// A fold parser that accumulates results while a condition is met, with a fallible accumulator.
 ///
 /// # Completeness (0.3.0): Complete-only — the mode wall
@@ -92,6 +90,10 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let mut output = (self.init)();
+    let mut committed = inp.span().end();
+    // The terminal-latch baseline for the absence check after the loop: comparing the live latch
+    // against it keeps that witness attempt-relative. One offset clone per fold.
+    let latch = inp.latch_snapshot();
     loop {
       // A short decision window can be a genuine end of input (Stop), but one truncated by a
       // terminal scanner stop is not: surface the committed end-of-input error rather than
@@ -111,6 +113,32 @@ where
           output = (self.acc)(output, self.f.parse_input(inp)?);
         }
       }
+
+      // A `Continue` cycle that consumed nothing re-sees the same lookahead and would decide
+      // `Continue` forever. The progress metric is committed consumption (`span().end()`), never the
+      // cache-front cursor — a lookahead fill moves that across skipped trivia without consuming,
+      // reading a zero-width element as false progress. `<=`, not `==`: the watermark cannot regress
+      // within a cycle, so anything not strictly ahead is a stall.
+      let new_committed = inp.span().end();
+      if new_committed <= committed {
+        break;
+      }
+      committed = new_committed;
+    }
+
+    // Both ways out of the loop — the condition's `Stop` and the no-progress stall — conclude
+    // *absence*: "no more elements". The element's own lookahead can latch a terminal scanner stop
+    // and still return `Ok` with a short window, leaving the pre-trip tokens cached, so a stall may
+    // rest on a truncated view; and the next decision window is then served whole from that cache,
+    // with no terminal flag for the gate above to see, so a `Stop` on it may too. One check on the
+    // single success path covers both, unbypassable by either. Attempt-relative, so an inherited
+    // boundary is not mis-charged here.
+    if inp.latched_during_attempt(&latch) {
+      return Err(
+        crate::error::UnexpectedEot::eot_of(inp.span().end())
+          .into_terminal()
+          .into(),
+      );
     }
 
     Ok(output)
@@ -176,6 +204,10 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let mut output = (self.init)();
+    let mut committed = inp.span().end();
+    // The terminal-latch baseline for the absence check after the loop: comparing the live latch
+    // against it keeps that witness attempt-relative. One offset clone per fold.
+    let latch = inp.latch_snapshot();
     loop {
       // A short decision window can be a genuine end of input (Stop), but one truncated by a
       // terminal scanner stop is not: surface the committed end-of-input error rather than
@@ -196,6 +228,32 @@ where
           output = (self.acc)(output, new)?;
         }
       }
+
+      // A `Continue` cycle that consumed nothing re-sees the same lookahead and would decide
+      // `Continue` forever. The progress metric is committed consumption (`span().end()`), never the
+      // cache-front cursor — a lookahead fill moves that across skipped trivia without consuming,
+      // reading a zero-width element as false progress. `<=`, not `==`: the watermark cannot regress
+      // within a cycle, so anything not strictly ahead is a stall.
+      let new_committed = inp.span().end();
+      if new_committed <= committed {
+        break;
+      }
+      committed = new_committed;
+    }
+
+    // Both ways out of the loop — the condition's `Stop` and the no-progress stall — conclude
+    // *absence*: "no more elements". The element's own lookahead can latch a terminal scanner stop
+    // and still return `Ok` with a short window, leaving the pre-trip tokens cached, so a stall may
+    // rest on a truncated view; and the next decision window is then served whole from that cache,
+    // with no terminal flag for the gate above to see, so a `Stop` on it may too. One check on the
+    // single success path covers both, unbypassable by either. Attempt-relative, so an inherited
+    // boundary is not mis-charged here.
+    if inp.latched_during_attempt(&latch) {
+      return Err(
+        crate::error::UnexpectedEot::eot_of(inp.span().end())
+          .into_terminal()
+          .into(),
+      );
     }
 
     Ok(output)
@@ -277,6 +335,10 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let mut output = (self.init)();
+    let mut committed = inp.span().end();
+    // The terminal-latch baseline for the absence check after the loop: comparing the live latch
+    // against it keeps that witness attempt-relative. One offset clone per fold.
+    let latch = inp.latch_snapshot();
     loop {
       // A short decision window can be a genuine end of input (Stop), but one truncated by a
       // terminal scanner stop is not: surface the committed end-of-input error rather than
@@ -299,6 +361,32 @@ where
           output = (self.acc)(output, new, state)?;
         }
       }
+
+      // A `Continue` cycle that consumed nothing re-sees the same lookahead and would decide
+      // `Continue` forever. The progress metric is committed consumption (`span().end()`), never the
+      // cache-front cursor — a lookahead fill moves that across skipped trivia without consuming,
+      // reading a zero-width element as false progress. `<=`, not `==`: the watermark cannot regress
+      // within a cycle, so anything not strictly ahead is a stall.
+      let new_committed = inp.span().end();
+      if new_committed <= committed {
+        break;
+      }
+      committed = new_committed;
+    }
+
+    // Both ways out of the loop — the condition's `Stop` and the no-progress stall — conclude
+    // *absence*: "no more elements". The element's own lookahead can latch a terminal scanner stop
+    // and still return `Ok` with a short window, leaving the pre-trip tokens cached, so a stall may
+    // rest on a truncated view; and the next decision window is then served whole from that cache,
+    // with no terminal flag for the gate above to see, so a `Stop` on it may too. One check on the
+    // single success path covers both, unbypassable by either. Attempt-relative, so an inherited
+    // boundary is not mis-charged here.
+    if inp.latched_during_attempt(&latch) {
+      return Err(
+        crate::error::UnexpectedEot::eot_of(inp.span().end())
+          .into_terminal()
+          .into(),
+      );
     }
 
     Ok(output)

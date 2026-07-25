@@ -19,7 +19,7 @@
 use core::cell::Cell;
 use std::rc::Rc;
 
-use generic_arraydeque::typenum::{U1, U4};
+use generic_arraydeque::typenum::{U1, U2, U4};
 use tokora::{
   Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext,
   Token as TokenTrait, TryParseInput,
@@ -29,14 +29,14 @@ use tokora::{
     UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter, Verbose,
   },
   error::{
-    UnexpectedEot,
+    Unclosed, UnexpectedEot,
     syntax::{FullContainer, MissingSyntax, TooFew, TooMany},
     token::{MissingToken, SeparatedError, UnexpectedToken},
   },
   lexer::LogosLexer,
   logos::{self, Logos},
   parser::Action,
-  punct::Comma,
+  punct::{CloseParen, Comma, OpenParen, Paren},
   state::State,
   token::PunctuatorToken,
   try_parse_input::ParseAttempt,
@@ -90,12 +90,18 @@ enum Tok {
   Num(i64),
   #[token(",", |lex| { lex.extras.increase(); })]
   Comma,
+  #[token("(", |lex| { lex.extras.increase(); })]
+  LParen,
+  #[token(")", |lex| { lex.extras.increase(); })]
+  RParen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Kind {
   Num,
   Comma,
+  LParen,
+  RParen,
 }
 
 impl core::fmt::Display for Tok {
@@ -109,6 +115,8 @@ impl core::fmt::Display for Kind {
     f.write_str(match self {
       Kind::Num => "number",
       Kind::Comma => ",",
+      Kind::LParen => "(",
+      Kind::RParen => ")",
     })
   }
 }
@@ -121,6 +129,8 @@ impl TokenTrait<'_> for Tok {
     match self {
       Tok::Num(_) => Kind::Num,
       Tok::Comma => Kind::Comma,
+      Tok::LParen => Kind::LParen,
+      Tok::RParen => Kind::RParen,
     }
   }
 
@@ -133,12 +143,33 @@ impl PunctuatorToken<'_> for Tok {
   fn comma() -> Option<Self::Kind> {
     Some(Kind::Comma)
   }
+
+  fn open_paren() -> Option<Self::Kind> {
+    Some(Kind::LParen)
+  }
+
+  fn close_paren() -> Option<Self::Kind> {
+    Some(Kind::RParen)
+  }
 }
 
-// The `Comma` separator punctuator classifies against this token stream by kind.
+// The `Comma` separator and `Paren` delimiter punctuators classify against this token stream by
+// kind.
 impl From<Comma<(), (), ()>> for Kind {
   fn from(_: Comma<(), (), ()>) -> Self {
     Kind::Comma
+  }
+}
+
+impl From<OpenParen<(), (), ()>> for Kind {
+  fn from(_: OpenParen<(), (), ()>) -> Self {
+    Kind::LParen
+  }
+}
+
+impl From<CloseParen<(), (), ()>> for Kind {
+  fn from(_: CloseParen<(), (), ()>) -> Self {
+    Kind::RParen
   }
 }
 
@@ -210,6 +241,12 @@ impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for CErr {
 
 impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for CErr {
   fn from(_: TooMany<S, Lang>) -> Self {
+    CErr::Ordinary
+  }
+}
+
+impl<Delimiter, S, Lang: ?Sized> From<Unclosed<Delimiter, S, Lang>> for CErr {
+  fn from(_: Unclosed<Delimiter, S, Lang>) -> Self {
     CErr::Ordinary
   }
 }
@@ -410,5 +447,170 @@ fn r3_while_decision_trip_surfaces_terminal() {
     out,
     Err(CErr::Eot),
     "the mid-window while-list trip surfaces the committed end-of-input error, got {out:?}"
+  );
+}
+
+// ── The while-list decision gate is eager: the terminal flag outranks a fallible `decide` and a
+//    zero-width `Continue` that would otherwise swallow the stop through the no-progress guard ──
+
+#[test]
+fn while_condition_error_does_not_preempt_a_terminal_stop() {
+  // `1 2` under a limit of 1, window `U2`: the front `1` scans cleanly, the second window slot trips
+  // — a one-token window with `terminal == true`. The condition treats a truncated (`len < W`)
+  // window as untrustworthy and returns an ordinary error. That fallible `decide` runs before the
+  // arm-level terminal check, so only an eager gate surfaces the stop ahead of it. RED today: the
+  // ordinary error preempts the terminal stop.
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, Silent<CErr>>>,
+  ) -> Result<Vec<i64>, CErr> {
+    let cond = |mut peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
+                _: &mut Silent<CErr>|
+     -> Result<Action, CErr> {
+      if peeked.len() < 2 {
+        return Err(CErr::Ordinary);
+      }
+      Ok(match peeked.pop_front() {
+        Some(tok) if matches!(tok.token(), Tok::Num(_)) => Action::Continue,
+        _ => Action::Stop,
+      })
+    };
+    let elem = |_inp: &mut InputRef<
+      'inp,
+      '_,
+      TLexer<'inp>,
+      ParserContext<'inp, TLexer<'inp>, Silent<CErr>>,
+    >|
+     -> Result<i64, CErr> { Ok(0) };
+    elem
+      .repeated_while::<_, U2>(cond)
+      .collect()
+      .parse_input(inp)
+  }
+
+  let ctx: ParserContext<'_, TLexer<'_>, Silent<CErr>> = ParserContext::new(Silent::new());
+  let out = Parser::with_parser_and_context(parse, ctx)
+    .parse_str_with_state("1 2", ScanLimiter::with_limit(1));
+  assert_eq!(
+    out,
+    Err(CErr::Eot),
+    "a fallible condition on a trip-truncated window must not preempt the terminal stop, got {out:?}"
+  );
+}
+
+#[test]
+fn while_zero_width_continue_does_not_swallow_a_terminal_stop() {
+  // `1 2` under a limit of 1, window `U2`: the second window slot trips — a one-token window with
+  // `terminal == true`. The condition always continues, and the element consumes nothing, so the
+  // no-progress guard fires and ends the list cleanly — swallowing the stop. RED today: `Ok`, not
+  // the terminal end-of-input error.
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, Silent<CErr>>>,
+  ) -> Result<Vec<i64>, CErr> {
+    let cond = |_peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
+                _: &mut Silent<CErr>|
+     -> Result<Action, CErr> { Ok(Action::Continue) };
+    let elem = |_inp: &mut InputRef<
+      'inp,
+      '_,
+      TLexer<'inp>,
+      ParserContext<'inp, TLexer<'inp>, Silent<CErr>>,
+    >|
+     -> Result<i64, CErr> { Ok(0) };
+    elem
+      .repeated_while::<_, U2>(cond)
+      .collect()
+      .parse_input(inp)
+  }
+
+  let ctx: ParserContext<'_, TLexer<'_>, Silent<CErr>> = ParserContext::new(Silent::new());
+  let out = Parser::with_parser_and_context(parse, ctx)
+    .parse_str_with_state("1 2", ScanLimiter::with_limit(1));
+  assert_eq!(
+    out,
+    Err(CErr::Eot),
+    "a zero-width `Continue` on a trip-truncated window must not swallow the terminal stop through \
+     the no-progress guard, got {out:?}"
+  );
+}
+
+#[test]
+fn delim_while_condition_error_does_not_preempt_a_terminal_stop() {
+  // The delimited twin of `while_condition_error_does_not_preempt_a_terminal_stop`. `(1 2` under a
+  // limit of 2, window `U2`: the opener and the front `1` scan cleanly, the second window slot trips.
+  // The fallible condition must not preempt the terminal stop the eager gate surfaces.
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, Silent<CErr>>>,
+  ) -> Result<Vec<i64>, CErr> {
+    let cond = |mut peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
+                _: &mut Silent<CErr>|
+     -> Result<Action, CErr> {
+      if peeked.len() < 2 {
+        return Err(CErr::Ordinary);
+      }
+      Ok(match peeked.pop_front() {
+        Some(tok) if matches!(tok.token(), Tok::Num(_)) => Action::Continue,
+        _ => Action::Stop,
+      })
+    };
+    let elem = |_inp: &mut InputRef<
+      'inp,
+      '_,
+      TLexer<'inp>,
+      ParserContext<'inp, TLexer<'inp>, Silent<CErr>>,
+    >|
+     -> Result<i64, CErr> { Ok(0) };
+    elem
+      .repeated_while::<_, U2>(cond)
+      .delimited::<Paren<(), (), ()>>()
+      .collect()
+      .parse_input(inp)
+  }
+
+  let ctx: ParserContext<'_, TLexer<'_>, Silent<CErr>> = ParserContext::new(Silent::new());
+  let out = Parser::with_parser_and_context(parse, ctx)
+    .parse_str_with_state("(1 2", ScanLimiter::with_limit(2));
+  assert_eq!(
+    out,
+    Err(CErr::Eot),
+    "a fallible condition on a trip-truncated window must not preempt the terminal stop inside \
+     delimiters, got {out:?}"
+  );
+}
+
+#[test]
+fn delim_while_zero_width_continue_does_not_swallow_a_terminal_stop() {
+  // The delimited twin of `while_zero_width_continue_does_not_swallow_a_terminal_stop`. `(1 2` under
+  // a limit of 2, window `U2`: the second window slot trips. A zero-width `Continue` makes no
+  // progress; without the eager gate the trip-truncated front token would reach the epilogue's close
+  // probe and be misread as a spurious wrong closer while the stop is swallowed. Surfacing the
+  // terminal end-of-input error before that epilogue is reached also removes that spurious diagnostic.
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, Silent<CErr>>>,
+  ) -> Result<Vec<i64>, CErr> {
+    let cond = |_peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
+                _: &mut Silent<CErr>|
+     -> Result<Action, CErr> { Ok(Action::Continue) };
+    let elem = |_inp: &mut InputRef<
+      'inp,
+      '_,
+      TLexer<'inp>,
+      ParserContext<'inp, TLexer<'inp>, Silent<CErr>>,
+    >|
+     -> Result<i64, CErr> { Ok(0) };
+    elem
+      .repeated_while::<_, U2>(cond)
+      .delimited::<Paren<(), (), ()>>()
+      .collect()
+      .parse_input(inp)
+  }
+
+  let ctx: ParserContext<'_, TLexer<'_>, Silent<CErr>> = ParserContext::new(Silent::new());
+  let out = Parser::with_parser_and_context(parse, ctx)
+    .parse_str_with_state("(1 2", ScanLimiter::with_limit(2));
+  assert_eq!(
+    out,
+    Err(CErr::Eot),
+    "a zero-width `Continue` on a trip-truncated window inside delimiters must surface the terminal \
+     stop, not swallow it and report a spurious wrong closer, got {out:?}"
   );
 }

@@ -1168,3 +1168,77 @@ fn test_repeated_while_delimited_zero_consumption_terminates() {
     "the no-progress cycle terminates through the close-delimiter epilogue"
   );
 }
+
+// == 13. Committed-progress guard: leading-trivia twins =======================
+
+#[test]
+fn zero_width_element_with_leading_trivia_stops_after_one_element() {
+  // The leading space in `" 1"` is skipped trivia, so the driver's decision peek jumps the
+  // cache-front cursor to the token start without consuming anything. A cursor-keyed guard reads
+  // that as progress and runs one extra cycle, pushing a phantom element; the committed-consumption
+  // metric stops after the first.
+  fn parse<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  ) -> Result<Vec<i64>, RWError>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter:
+      Emitter<'inp, TestLexer<'inp>, Error = RWError> + FullContainerEmitter<'inp, TestLexer<'inp>>,
+  {
+    let elem =
+      |_inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>| -> Result<i64, RWError> { Ok(0) };
+    elem
+      .repeated_while::<_, U1>(decide_num_rw::<Ctx>)
+      .collect()
+      .parse_input(inp)
+  }
+  let r: Vec<i64> = Parser::with_context(rw_ctx())
+    .apply(parse)
+    .parse_str(" 1")
+    .unwrap();
+  assert_eq!(
+    r.len(),
+    1,
+    "the committed-progress guard must stop after one element despite the leading trivia gap"
+  );
+}
+
+#[test]
+fn delimited_zero_width_element_with_leading_trivia_stops_after_one_element() {
+  // The delimited twin: the space after the opener in `"[ 1]"` is the trivia gap. A `Verbose`
+  // emitter keeps the drive going past the epilogue's close-position diagnostic so the element
+  // count is observable — a cursor-keyed guard pushes two, the committed metric one.
+  fn parse<'inp>(
+    inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<RWError>>,
+    >,
+  ) -> Result<Vec<i64>, RWError> {
+    let elem = |_inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<RWError>>,
+    >|
+     -> Result<i64, RWError> { Ok(0) };
+    elem
+      .repeated_while::<_, U1>(
+        decide_num_rw::<ParserContext<'inp, TestLexer<'inp>, Verbose<RWError>>>,
+      )
+      .delimited::<Bracket<(), (), ()>>()
+      .collect()
+      .parse_input(inp)
+  }
+  let ctx = ParserContext::new(Verbose::<RWError>::new());
+  let r: Vec<i64> = Parser::with_context(ctx)
+    .apply(parse)
+    .parse_str("[ 1]")
+    .unwrap();
+  assert_eq!(
+    r.len(),
+    1,
+    "the committed-progress guard must stop after one element inside delimiters despite the trivia gap"
+  );
+}

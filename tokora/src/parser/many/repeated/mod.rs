@@ -4,6 +4,7 @@ use crate::{
   TryParseInput,
   emitter::FullContainerEmitter,
   error::syntax::FullContainer,
+  span::Span as _,
   try_parse_input::{Accept, Decline},
 };
 
@@ -249,6 +250,8 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
     Ctx::Emitter: Emitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
     Ctx: ParseContext<'inp, L, Lang>,
     Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, Lang>,
+    // The absence-exit gate surfaces a terminal scanner stop as this end-of-input error.
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: crate::container::Container<O>,
     RH: RepeatedHandler<'inp, 'c, O, L, Ctx, Lang, Cmpl>,
   {
@@ -256,6 +259,10 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
     let mut num = 0;
     let anchor = inp.cursor().clone();
     let mut cursor = anchor.clone();
+    let mut committed = inp.span().end();
+    // The terminal-latch baseline for the absence exit below: comparing the live latch against it
+    // keeps that witness attempt-relative. One offset clone per collection, off the per-element path.
+    let latch = inp.latch_snapshot();
 
     loop {
       match self.f.try_parse_input(inp) {
@@ -289,11 +296,32 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
         }
       }
 
-      let new_cursor = inp.cursor().clone();
-      if new_cursor.as_inner() == cursor.as_inner() {
+      // A cycle that consumed nothing re-sees the same input and would retry forever. The progress
+      // metric is committed consumption (`span().end()`), never the cache-front cursor — a lookahead
+      // fill (a `try_expect` decline pushing a token back) moves that across skipped trivia without
+      // consuming, reading a zero-width element as false progress. `<=`, not `==`: the watermark
+      // cannot regress within a cycle, so anything not strictly ahead is a stall. `cursor` stays the
+      // error-span anchor.
+      let new_committed = inp.span().end();
+      if new_committed <= committed {
         break;
       }
-      cursor = new_cursor;
+      committed = new_committed;
+      cursor = inp.cursor().clone();
+    }
+
+    // Both ways out of the loop above — the element declining, and a cycle that committed nothing —
+    // conclude *absence*: "no more elements". An element's own lookahead can latch a terminal
+    // scanner stop and still hand it back `Ok` with a short window, so that conclusion may rest on a
+    // truncated view. Surface the stop instead of ending cleanly. Attempt-relative against the entry
+    // snapshot, so a boundary an enclosing lookahead already latched is not mis-charged here. The
+    // end-of-input anchors on the committed end, matching the decision-window and consume gates.
+    if inp.latched_during_attempt(&latch) {
+      return Err(
+        UnexpectedEot::eot_of(inp.span().end())
+          .into_terminal()
+          .into(),
+      );
     }
 
     rh.on_stop(num, inp, &anchor)

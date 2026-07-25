@@ -55,6 +55,10 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
     trace_event!(inp, "separated_while");
     let mut state = State::Start;
     let anchor = inp.cursor().clone();
+    let mut committed = inp.span().end();
+    // The terminal-latch baseline for the absence exits below: comparing the live latch against it
+    // keeps that witness attempt-relative. One offset clone per collection.
+    let latch = inp.latch_snapshot();
     let mut num_elems = 0;
 
     loop {
@@ -65,27 +69,25 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
       match inp.try_expect_or_stop(|tok| Sep::eval(&tok.data.kind()))? {
         Some(tok) => {
           state = self.handle_separator(state, inp, tok, container, separator_state_handler)?;
+          committed = inp.span().end();
 
           continue;
         }
         None => {
-          // Decision-window gate. `peek_with_emitter_terminal` reports (at no extra hot-path cost)
-          // whether the fill came back short because of a terminal scanner stop — a mid-window trip
-          // the condition would otherwise read as a clean end. Surface that as terminal at either
-          // swallow point (an empty window, or an `Action::Stop`); `Continue` needs no check, as the
-          // element parse re-lexes the frontier and surfaces the stop itself.
+          // A short decision window can be a genuine end of input, but one truncated by a terminal
+          // scanner stop is not: surface the committed end-of-input error before anything else.
+          // `decide` is fallible and emitting, and neither it nor the continue-state work may run
+          // first — no call may preempt the terminal stop. `end` is the committed watermark,
+          // captured before the peek (the fill never advances it).
+          let end = inp.span().end();
           let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
+          if terminal {
+            return Err(UnexpectedEot::eot_of(end).into_terminal().into());
+          }
 
           let front_span = match peeked.front() {
             None => {
               drop(peeked);
-              if terminal {
-                return Err(
-                  UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
-                    .into_terminal()
-                    .into(),
-                );
-              }
               return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
             }
             Some(front) => front
@@ -98,9 +100,15 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
 
           match self.condition.decide(peeked, emitter)? {
             Action::Stop => {
-              if terminal {
+              // A stop concludes *absence*: "no more elements". The element's own lookahead can latch
+              // a terminal scanner stop and still return `Ok` with a short window, leaving the
+              // pre-trip tokens cached — this window is then served whole from that cache, so it
+              // carries no terminal flag for the gate above to see and the condition reads a truncated
+              // view as the end of the list. Attempt-relative, so an inherited boundary is not
+              // mis-charged here.
+              if inp.latched_during_attempt(&latch) {
                 return Err(
-                  UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+                  UnexpectedEot::eot_of(inp.span().end())
                     .into_terminal()
                     .into(),
                 );
@@ -120,6 +128,29 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
               )?;
             }
           }
+
+          // An `Action::Continue` cycle that consumed nothing re-sees the same lookahead and would
+          // decide `Continue` forever. The progress metric is committed consumption (`span().end()`),
+          // never the cache-front cursor — a lookahead fill moves that across skipped trivia without
+          // consuming, reading a zero-width element as false progress. `<=`, not `==`: the watermark
+          // cannot regress within a cycle, so anything not strictly ahead is a stall.
+          let new_committed = inp.span().end();
+          if new_committed <= committed {
+            // A stall concludes *absence*: "no more elements". The element's own lookahead can latch
+            // a terminal scanner stop and still return `Ok` with a short window, so that conclusion
+            // may rest on a truncated view — a case neither the separator-slot gate nor the decision
+            // gate above can see, since the latch happens after both. Attempt-relative, so an
+            // inherited boundary is not mis-charged here.
+            if inp.latched_during_attempt(&latch) {
+              return Err(
+                UnexpectedEot::eot_of(inp.span().end())
+                  .into_terminal()
+                  .into(),
+              );
+            }
+            return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
+          }
+          committed = new_committed;
         }
       }
     }

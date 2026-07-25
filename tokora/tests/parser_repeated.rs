@@ -683,3 +683,35 @@ fn test_repeated_unbounded_spanned_ok() {
   let spanned = r.unwrap();
   assert_eq!(*spanned.data(), vec![1, 2, 3]);
 }
+
+#[test]
+fn zero_width_peeking_element_with_leading_trivia_stops_after_one_push() {
+  // Trivia-gap twin for the plain `repeated` no-progress guard: the element peeks the frontier
+  // (moving the cache-front cursor across the leading trivia in `" 1"`) but consumes nothing, then
+  // accepts. A cursor-keyed guard reads that jump as progress and pushes a phantom second element;
+  // the committed-consumption metric stops after the first push.
+  fn parse<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  ) -> Result<Vec<i64>, RPError>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter:
+      Emitter<'inp, TestLexer<'inp>, Error = RPError> + FullContainerEmitter<'inp, TestLexer<'inp>>,
+  {
+    let elem =
+      |inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>| -> Result<ParseAttempt<i64>, RPError> {
+        let _ = inp.peek_one()?;
+        Ok(ParseAttempt::Accept(1))
+      };
+    elem.repeated().collect().parse_input(inp)
+  }
+  let r: Vec<i64> = Parser::with_context(rp_ctx())
+    .apply(parse)
+    .parse_str(" 1")
+    .unwrap();
+  assert_eq!(
+    r.len(),
+    1,
+    "the committed-progress guard must stop after one push despite the leading trivia gap"
+  );
+}

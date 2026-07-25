@@ -15,7 +15,7 @@ use tokora::{
   emitter::{
     Fatal, FullContainerEmitter, MissingLeadingSeparatorEmitter, MissingTrailingSeparatorEmitter,
     SeparatedEmitter, TooFewEmitter, TooManyEmitter, UnclosedEmitter,
-    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
+    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter, Verbose,
   },
   punct::Bracket,
   try_parse_input::ParseAttempt,
@@ -2132,4 +2132,42 @@ fn require_leading_allow_trailing_bounded_mid_range() {
     .parse_str("[,1,2,3]")
     .unwrap();
   assert_eq!(r, vec![1, 2, 3]);
+}
+
+#[test]
+fn zero_width_element_with_leading_trivia_stops_after_one_element() {
+  // The space after the opener in `"[ 1]"` is the trivia gap: the separator-slot scan jumps the
+  // cache-front cursor to the token start without consuming anything. A cursor-keyed guard reads
+  // that as progress and runs one extra cycle, pushing a phantom second element (and a spurious
+  // missing separator); the committed metric stops after the first. A `Verbose` emitter keeps the
+  // drive past the epilogue's close-position diagnostic so the element count is observable.
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, Verbose<E>>>,
+  ) -> Result<Vec<i64>, E> {
+    let elem = |inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<E>>,
+    >|
+     -> Result<ParseAttempt<i64>, E> {
+      let _ = inp.peek_one()?;
+      Ok(ParseAttempt::Accept(0))
+    };
+    elem
+      .separated_by_comma()
+      .delimited_by_brackets()
+      .collect()
+      .parse_input(inp)
+  }
+  let ctx = ParserContext::new(Verbose::<E>::new());
+  let r: Vec<i64> = Parser::with_context(ctx)
+    .apply(parse)
+    .parse_str("[ 1]")
+    .unwrap();
+  assert_eq!(
+    r.len(),
+    1,
+    "the committed-progress guard must stop after one element inside delimiters despite the trivia gap"
+  );
 }

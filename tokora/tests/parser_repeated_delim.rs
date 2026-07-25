@@ -11,7 +11,7 @@ mod common;
 use tokora::{
   Accumulator, Emitter, InputRef, Lexer, Parse, ParseContext, ParseInput, Parser, ParserContext,
   Token as TokenTrait, TryParseInput,
-  emitter::{FullContainerEmitter, TooFewEmitter, TooManyEmitter, UnclosedEmitter},
+  emitter::{FullContainerEmitter, TooFewEmitter, TooManyEmitter, UnclosedEmitter, Verbose},
   error::{
     Unclosed, UnexpectedEot,
     syntax::{FullContainer, TooFew, TooMany},
@@ -688,4 +688,49 @@ fn test_repeated_delimited_five_elements() {
     .apply(parse_rd_list)
     .parse_str("[10 20 30 40 50]");
   assert_eq!(r.unwrap(), vec![10, 20, 30, 40, 50]);
+}
+
+// == 16. Committed-progress guard: leading-trivia twin ========================
+
+#[test]
+fn zero_width_peeking_element_with_leading_trivia_stops_after_one_push() {
+  // The space after the opener in `"[ 1]"` is the trivia gap. The element peeks the frontier
+  // (moving the cache-front cursor across it) but consumes nothing, then accepts. A cursor-keyed
+  // guard reads that jump as progress and pushes a phantom second element; the committed metric
+  // stops after the first. A `Verbose` emitter keeps the drive past the epilogue's close-position
+  // diagnostic so the element count is observable.
+  fn parse<'inp>(
+    inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<RDError>>,
+    >,
+  ) -> Result<Vec<i64>, RDError> {
+    let elem = |inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<RDError>>,
+    >|
+     -> Result<ParseAttempt<i64>, RDError> {
+      let _ = inp.peek_one()?;
+      Ok(ParseAttempt::Accept(1))
+    };
+    elem
+      .repeated()
+      .delimited_by_brackets()
+      .collect()
+      .parse_input(inp)
+  }
+  let ctx = ParserContext::new(Verbose::<RDError>::new());
+  let r: Vec<i64> = Parser::with_context(ctx)
+    .apply(parse)
+    .parse_str("[ 1]")
+    .unwrap();
+  assert_eq!(
+    r.len(),
+    1,
+    "the committed-progress guard must stop after one push inside delimiters despite the trivia gap"
+  );
 }

@@ -1461,3 +1461,36 @@ fn require_surrounded_at_most_single() {
     .unwrap();
   assert_eq!(r, vec![1]);
 }
+
+#[test]
+fn zero_width_element_with_leading_trivia_stops_after_one_element() {
+  // The leading space in `" 1"` is skipped trivia, so the separator-slot scan jumps the cache-front
+  // cursor to the token start without consuming anything. A cursor-keyed guard reads that as
+  // progress and runs one extra cycle; in `State::Element` that cycle emits a spurious missing
+  // separator, which the fail-fast emitter turns into an error. The committed-consumption metric
+  // stops after the first element with no diagnostic, so the parse succeeds with one element.
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, Fatal<E>>>,
+  ) -> Result<Vec<i64>, E> {
+    let elem = |inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Fatal<E>>,
+    >|
+     -> Result<ParseAttempt<i64>, E> {
+      let _ = inp.peek_one()?;
+      Ok(ParseAttempt::Accept(0))
+    };
+    elem.separated_by_comma().collect().parse_input(inp)
+  }
+  let r: Result<Vec<i64>, E> = Parser::with_context(full_ctx())
+    .apply(parse)
+    .parse_str(" 1");
+  assert!(
+    r.is_ok(),
+    "the committed-progress guard must stop after one element with no spurious missing separator, \
+     got {r:?}"
+  );
+  assert_eq!(r.unwrap().len(), 1);
+}
