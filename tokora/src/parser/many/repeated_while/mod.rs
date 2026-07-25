@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use crate::{emitter::FullContainerEmitter, error::syntax::FullContainer};
+use crate::{emitter::FullContainerEmitter, error::syntax::FullContainer, span::Span as _};
 
 use super::*;
 
@@ -301,23 +301,34 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
   {
     trace_event!(inp, "repeated_while");
     let anchor = inp.cursor().clone();
-    let mut cursor = anchor.clone();
+    let mut committed = inp.span().end();
+    // The terminal-latch baseline for the absence exits below: comparing the live latch against it
+    // keeps that witness attempt-relative. One offset clone per collection.
+    let latch = inp.latch_snapshot();
     let mut nums = 0;
 
     loop {
-      // Decision-window gate. `peek_with_emitter_terminal` reports whether the fill came back short
-      // because of a terminal scanner stop; the flag is computed by the peek itself, so the
-      // `Continue` (success) path pays nothing extra. A mid-window trip hands the condition a
-      // truncated window it naturally reads as `Stop`, so surface that as terminal instead of a
-      // clean end — an enclosing recovery re-raises it. `Continue` needs no check: the element parse
-      // re-lexes the frontier and surfaces the stop itself.
+      // A short decision window can be a genuine end of input, but one truncated by a terminal
+      // scanner stop is not: surface the committed end-of-input error before anything else. `decide`
+      // is fallible and emitting, and a zero-width element makes no progress that would re-lex the
+      // frontier, so neither may run first — no call may preempt the terminal stop. `end` is the
+      // committed watermark, captured before the peek (the fill never advances it).
+      let end = inp.span().end();
       let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
+      if terminal {
+        return Err(UnexpectedEot::eot_of(end).into_terminal().into());
+      }
 
       match self.condition.decide(peeked, emitter)? {
         Action::Stop => {
-          if terminal {
+          // A stop concludes *absence*: "no more elements". The element's own lookahead can latch a
+          // terminal scanner stop and still return `Ok` with a short window, leaving the pre-trip
+          // tokens cached — this window is then served whole from that cache, so it carries no
+          // terminal flag for the gate above to see and the condition reads a truncated view as the
+          // end of the construct. Attempt-relative, so an inherited boundary is not mis-charged here.
+          if inp.latched_during_attempt(&latch) {
             return Err(
-              UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+              UnexpectedEot::eot_of(inp.span().end())
                 .into_terminal()
                 .into(),
             );
@@ -339,15 +350,29 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
         }
       }
 
-      // The progress guard (parity with `Repeated::parse`): a `Continue` cycle whose element
-      // parser consumed nothing would see the same lookahead and decide `Continue` forever.
-      // No progress means no more elements — stop, exactly as an `Action::Stop` would.
-      let new_cursor = inp.cursor().clone();
-      if new_cursor.as_inner() == cursor.as_inner() {
+      // A `Continue` cycle that consumed nothing re-sees the same lookahead and would decide
+      // `Continue` forever. The progress metric is committed consumption (`span().end()`), never the
+      // cache-front cursor — a lookahead fill moves that across skipped trivia without consuming,
+      // reading a zero-width element as false progress. `<=`, not `==`: the watermark cannot regress
+      // within a cycle, so anything not strictly ahead is a stall.
+      let new_committed = inp.span().end();
+      if new_committed <= committed {
+        // A stall concludes *absence*: "no more elements". The element's own lookahead can latch a
+        // terminal scanner stop and still return `Ok` with a short window, so that conclusion may
+        // rest on a truncated view — the decision gate above cannot see it, because the latch happens
+        // after it. Surface the stop instead of ending cleanly; attempt-relative against the entry
+        // snapshot, so an inherited boundary is not mis-charged here.
+        if inp.latched_during_attempt(&latch) {
+          return Err(
+            UnexpectedEot::eot_of(inp.span().end())
+              .into_terminal()
+              .into(),
+          );
+        }
         let span = inp.span_since(&anchor);
         return rh.on_stop(nums, inp, &anchor).map(|_| span);
       }
-      cursor = new_cursor;
+      committed = new_committed;
     }
   }
 }

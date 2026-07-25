@@ -56,6 +56,10 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     let mut state = State::Start;
     let anchor = inp.cursor().clone();
     let mut cursor = anchor.clone();
+    let mut committed = inp.span().end();
+    // The terminal-latch baseline for the element-absence exits below: comparing the live latch
+    // against it keeps their witness attempt-relative. One offset clone per collection.
+    let latch = inp.latch_snapshot();
     let mut num_elems = 0;
 
     loop {
@@ -82,6 +86,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         Some(tok) => {
           state = self.handle_separator(state, inp, container, separator_state_handler, tok)?;
           cursor = inp.cursor().clone();
+          committed = inp.span().end();
           continue;
         }
       };
@@ -98,7 +103,20 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
           let span = inp.span_since(&cursor);
           inp.emitter().emit_error(Spanned::new(span, e))?;
         }
-        Ok(Decline) => return self.handle_end(state, inp, &anchor, num_elems, end_state_handler),
+        // The decline concludes *absence*, but the element's own lookahead can latch a terminal
+        // scanner stop and still return `Ok` with a short window, so that conclusion may rest on a
+        // truncated view — a case the separator-slot gate above cannot see, since the latch happens
+        // after it. Attempt-relative, so an inherited boundary is not mis-charged here.
+        Ok(Decline) => {
+          if inp.latched_during_attempt(&latch) {
+            return Err(
+              UnexpectedEot::eot_of(inp.span().end())
+                .into_terminal()
+                .into(),
+            );
+          }
+          return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
+        }
         Ok(Accept(elem)) => {
           // if the peeked token belongs to an element, check the current state
           state = self.handle_continue(
@@ -114,10 +132,27 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         }
       }
 
+      // A cycle that consumed nothing re-sees the same input and would retry forever. The progress
+      // metric is committed consumption (`span().end()`), never the cache-front cursor — a lookahead
+      // fill (a `try_expect_or_stop` decline pushing a token back) moves that across skipped trivia
+      // without consuming, reading a zero-width element as false progress. `<=`, not `==`: the
+      // watermark cannot regress within a cycle, so anything not strictly ahead is a stall. `cursor`
+      // stays the error-span anchor.
+      let new_committed = inp.span().end();
       let new_cursor = inp.cursor().clone();
-      if new_cursor.as_inner() == cursor.as_inner() {
+      if new_committed <= committed {
+        // The stall concludes *absence* on the same truncated-view risk as the decline arm above:
+        // surface a stop this attempt latched rather than ending the list cleanly.
+        if inp.latched_during_attempt(&latch) {
+          return Err(
+            UnexpectedEot::eot_of(inp.span().end())
+              .into_terminal()
+              .into(),
+          );
+        }
         return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
       }
+      committed = new_committed;
       cursor = new_cursor;
     }
   }

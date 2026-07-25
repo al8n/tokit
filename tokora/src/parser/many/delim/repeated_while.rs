@@ -5,6 +5,7 @@ use crate::{
   delimiter::Delimiter,
   emitter::{FullContainerEmitter, UnclosedEmitter},
   error::{Unclosed, syntax::FullContainer},
+  span::Span as _,
 };
 
 use super::*;
@@ -84,7 +85,10 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     }
 
     let mut nums = 0;
-    let mut elem_cur = inp.cursor().clone();
+    let mut committed = inp.span().end();
+    // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the opener's
+    // own scan is not charged to the element loop. One offset clone per collection.
+    let latch = inp.latch_snapshot();
 
     loop {
       // Probe the close position WITHOUT consuming, so a terminal scanner stop is not
@@ -109,17 +113,32 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
         // The closer is absent (a wrong token or genuine EOF) — consult the stop
         // condition to decide whether another element is expected.
         close => {
-          // Decision-window gate. `peek_with_emitter_terminal` reports (at no extra hot-path cost)
-          // whether the fill came back short because of a terminal scanner stop — a mid-window trip
-          // past the probed close position that the condition would otherwise read as a clean
-          // `Stop`. Surface that as terminal instead, ahead of any close-miss diagnostic.
+          // A short decision window can be a genuine end of input, but one truncated by a terminal
+          // scanner stop is not: surface the committed end-of-input error before anything else.
+          // `decide` is fallible and emitting, and a zero-width element makes no progress that would
+          // re-lex the frontier — leaving the trip-truncated front token at the epilogue's close
+          // probe where it reads as a spurious wrong closer — so neither may run first: no call may
+          // preempt the terminal stop. `end` is the committed watermark, captured before the peek
+          // (the fill never advances it).
+          let end = inp.span().end();
           let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
+          if terminal {
+            return Err(UnexpectedEot::eot_of(end).into_terminal().into());
+          }
           match self.parser.condition.decide(peeked, emitter)? {
             // missing ending delimiter
             Action::Stop => {
-              if terminal {
+              // No closer plus a stop conclude *absence*: "no more elements, and nothing closed
+              // them". The element's own lookahead can latch a terminal scanner stop and still return
+              // `Ok` with a short window, leaving the pre-trip tokens cached — this decision window
+              // is then served whole from that cache, so it carries no terminal flag for the gate
+              // above to see, and the same cached token reads as a spurious wrong closer. The verdict
+              // in hand is necessarily a close miss (a `Close` committed and returned in the outer arm
+              // above, a `Tripped` propagated there), so no genuine close is gated; attempt-relative
+              // against the post-opener snapshot.
+              if inp.latched_during_attempt(&latch) {
                 return Err(
-                  UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+                  UnexpectedEot::eot_of(inp.span().end())
                     .into_terminal()
                     .into(),
                 );
@@ -169,15 +188,17 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
         }
       }
 
-      // The progress guard (parity with `DelimitedBy<Repeated>`): a `Continue` cycle whose
-      // element parser consumed nothing would fail the same close-delimiter check and see the
-      // same lookahead forever. No progress means no more elements — break to the close-
-      // delimiter epilogue below, exactly as the plain `Repeated` driver does.
-      let new_cursor = inp.cursor().clone();
-      if new_cursor.as_inner() == elem_cur.as_inner() {
+      // A `Continue` cycle that consumed nothing re-sees the same close-delimiter check and lookahead
+      // and would loop forever. The progress metric is committed consumption (`span().end()`), never
+      // the cache-front cursor — a lookahead fill moves that across skipped trivia without consuming,
+      // reading a zero-width element as false progress. `<=`, not `==`: the watermark cannot regress
+      // within a cycle, so anything not strictly ahead is a stall. Break to the close-delimiter
+      // epilogue below, exactly as the plain `Repeated` driver does.
+      let new_committed = inp.span().end();
+      if new_committed <= committed {
         break;
       }
-      elem_cur = new_cursor;
+      committed = new_committed;
     }
 
     // No progress was made — treat as end of elements (the same epilogue as
@@ -185,12 +206,36 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     // otherwise, then run the stop handler on the delimited span. The four-way probe
     // keeps a terminal scanner stop out of the `Unclosed` path.
     match inp.probe_close(|t| Delim::is_close(&t.data.kind()))? {
-      // The closer is at hand: commit the carried token by value — no re-scan.
+      // The closer is at hand: commit the carried token by value — no re-scan. A cache-first
+      // verdict on a real pre-trip token, so the construct genuinely closed and stays a success.
       CloseStatus::Close(ct) => container.on_close_delimiter(inp.commit_probed(ct)),
-      CloseStatus::WrongToken(tok) => inp
-        .emitter()
-        .emit_unexpected_token(Delim::unexpected_close_token(tok))?,
+      CloseStatus::WrongToken(tok) => {
+        // No closer: the stall plus this verdict conclude *absence*, and the element's own lookahead
+        // can latch a terminal scanner stop after the decision gate ran and still return `Ok` with a
+        // short window, so that conclusion may rest on a truncated view. Surface the stop ahead of
+        // the close-miss diagnostic; attempt-relative against the post-opener snapshot.
+        if inp.latched_during_attempt(&latch) {
+          return Err(
+            UnexpectedEot::eot_of(inp.span().end())
+              .into_terminal()
+              .into(),
+          );
+        }
+        inp
+          .emitter()
+          .emit_unexpected_token(Delim::unexpected_close_token(tok))?
+      }
       CloseStatus::Eof => {
+        // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate
+        // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the stop,
+        // so an `Eof` verdict cannot coexist with one.
+        if inp.latched_during_attempt(&latch) {
+          return Err(
+            UnexpectedEot::eot_of(inp.span().end())
+              .into_terminal()
+              .into(),
+          );
+        }
         // EOI — no tokens left, no close delimiter: the opener was never closed.
         if let Some(open_span) = open_span.clone() {
           inp

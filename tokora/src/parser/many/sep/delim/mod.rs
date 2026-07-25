@@ -7,6 +7,7 @@ use crate::{
   emitter::{FullContainerEmitter, SeparatedEmitter, UnclosedEmitter},
   error::Unclosed,
   punct::Punctuator,
+  span::Span as _,
   try_parse_input::{Accept, Decline},
 };
 
@@ -107,6 +108,10 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
 
     let elems_start = inp.cursor().clone();
     let mut cursor = elems_start.clone();
+    let mut committed = inp.span().end();
+    // The terminal-latch baseline for the element-absence exits below, taken AFTER the opener so the
+    // opener's own scan is not charged to the element loop. One offset clone per collection.
+    let latch = inp.latch_snapshot();
     let state = loop {
       let mut ps = None;
       let peek_span = match inp.try_expect_map(|t| {
@@ -135,6 +140,7 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
           } else {
             state = parser.handle_separator(state, inp, container, separator_state_handler, tok)?;
             cursor = inp.cursor().clone();
+            committed = inp.span().end();
             continue;
           }
         }
@@ -152,6 +158,8 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
           let span = inp.span_since(&cursor);
           inp.emitter().emit_error(Spanned::new(span, e))?;
         }
+        // The decline concludes *absence*. The gate for that conclusion sits in the epilogue's
+        // close-miss arms below, where a real cached closer has already been ruled out.
         Ok(Decline) => break state,
         Ok(Accept(elem)) => {
           // if the peeked token belongs to an element, check the current state
@@ -168,10 +176,18 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
         }
       }
 
+      // A cycle that consumed nothing re-sees the same input and would retry forever. The progress
+      // metric is committed consumption (`span().end()`), never the cache-front cursor — a lookahead
+      // fill (a `try_expect_map` decline pushing a token back) moves that across skipped trivia
+      // without consuming, reading a zero-width element as false progress. `<=`, not `==`: the
+      // watermark cannot regress within a cycle, so anything not strictly ahead is a stall. `cursor`
+      // stays the error-span anchor.
+      let new_committed = inp.span().end();
       let new_cursor = inp.cursor().clone();
-      if new_cursor.as_inner() == cursor.as_inner() {
+      if new_committed <= committed {
         break state;
       }
+      committed = new_committed;
       cursor = new_cursor;
     };
 
@@ -185,15 +201,41 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     let mut close_carrier = None;
     match inp.probe_close(|tok| Delim::is_close(&tok.data.kind()))? {
       // The closer is at hand: no close miss. Carry it out; committed by value after the
-      // end-state pass.
+      // end-state pass. A cache-first verdict on a real pre-trip token, so the construct
+      // genuinely closed and stays a success even if an element's lookahead latched a
+      // terminal stop past that closer.
       CloseStatus::Close(ct) => close_carrier = Some(ct),
       // (b) a wrong token sits where the closer should: unexpected-token, expected-close.
-      CloseStatus::WrongToken(tok) => inp
-        .emitter()
-        .emit_unexpected_token(Delim::unexpected_close_token(tok))?,
+      CloseStatus::WrongToken(tok) => {
+        // No closer: the loop's absence exit plus this verdict conclude "no more elements", and an
+        // element's own lookahead can latch a terminal scanner stop and still return `Ok` with a
+        // short window, so that conclusion may rest on a truncated view. Surface the stop ahead of
+        // the close-miss diagnostic; attempt-relative against the post-opener snapshot, so an
+        // inherited boundary is not mis-charged here.
+        if inp.latched_during_attempt(&latch) {
+          return Err(
+            UnexpectedEot::eot_of(inp.span().end())
+              .into_terminal()
+              .into(),
+          );
+        }
+        inp
+          .emitter()
+          .emit_unexpected_token(Delim::unexpected_close_token(tok))?
+      }
       // (a) genuine end of input with the opener still open: never closed — the ONE
       // `Unclosed` path.
       CloseStatus::Eof => {
+        // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate
+        // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the stop,
+        // so an `Eof` verdict cannot coexist with one.
+        if inp.latched_during_attempt(&latch) {
+          return Err(
+            UnexpectedEot::eot_of(inp.span().end())
+              .into_terminal()
+              .into(),
+          );
+        }
         if let Some(open_span) = open_span.clone() {
           inp
             .emitter()

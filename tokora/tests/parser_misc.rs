@@ -598,6 +598,56 @@ fn try_fold_with_error_propagates() {
   assert!(Parser::new().apply(p).parse_str("3 10").is_err());
 }
 
+#[test]
+fn try_fold_with_zero_width_element_stops_after_one_accumulation() {
+  fn p<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<usize, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    // Accepts without ever touching `inp`, up to a budget: a driver missing the no-progress
+    // guard loops until the budget runs out instead of the input running out.
+    let mut budget = 5usize;
+    let elem = move |_inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>| -> Result<ParseAttempt<usize>, ()> {
+      Ok(if budget > 0 {
+        budget -= 1;
+        ParseAttempt::Accept(1)
+      } else {
+        ParseAttempt::Decline
+      })
+    };
+    elem
+      .try_fold_with(|| 0usize, |acc, x, _state| Ok(acc + x))
+      .parse_input(inp)
+  }
+  let result = Parser::new().apply(p).parse_str("").unwrap();
+  assert_eq!(result, 1);
+}
+
+#[test]
+fn try_fold_with_zero_width_peeking_element_stops_after_one_accumulation() {
+  // Trivia-gap twin of the above for the `advanced` (`!=`-form) guard: the element peeks the
+  // frontier (moving the cache-front cursor across the leading trivia in `" 1"`) but consumes
+  // nothing. A cursor-keyed `advanced` reads that jump as progress and runs one extra cycle; the
+  // committed-consumption metric stops after the first accumulation.
+  fn p<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<usize, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    let elem =
+      |inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>| -> Result<ParseAttempt<usize>, ()> {
+        let _ = inp.peek_one()?;
+        Ok(ParseAttempt::Accept(1))
+      };
+    elem
+      .try_fold_with(|| 0usize, |acc, x, _state| Ok(acc + x))
+      .parse_input(inp)
+  }
+  let result = Parser::new().apply(p).parse_str(" 1").unwrap();
+  assert_eq!(result, 1);
+}
+
 // ── Fold: try_fold_while_with ───────────────────────────────────────────────
 
 fn while_num<'inp, Ctx>(
@@ -667,6 +717,34 @@ fn try_fold_while_with_error() {
       .parse_input(inp)
   }
   assert!(Parser::new().apply(p).parse_str("3 10 +").is_err());
+}
+
+#[test]
+fn try_fold_while_with_zero_width_element_stops_after_one_accumulation() {
+  fn p<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<usize, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    // Continues unconditionally, up to a budget, ignoring the peeked window entirely.
+    let mut budget = 5usize;
+    let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
+                     _emitter: &mut Ctx::Emitter|
+          -> Result<Action, ()> {
+      Ok(if budget > 0 {
+        budget -= 1;
+        Action::Continue
+      } else {
+        Action::Stop
+      })
+    };
+    let elem = |_inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>| -> Result<usize, ()> { Ok(1) };
+    elem
+      .try_fold_while_with::<_, _, _, U1>(cond, || 0usize, |acc, x, _state| Ok(acc + x))
+      .parse_input(inp)
+  }
+  let result = Parser::new().apply(p).parse_str("").unwrap();
+  assert_eq!(result, 1);
 }
 
 // ── try_expect_map with cached tokens ───────────────────────────────────────

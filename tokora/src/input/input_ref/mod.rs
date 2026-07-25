@@ -432,6 +432,45 @@ where
     self.reached_boundary(self.cursor().as_inner())
   }
 
+  /// Snapshots the terminal-stop latch for an attempt-relative absence witness.
+  ///
+  /// The latch is not monotone: a trip raises it (keeping the most-poisoned, smallest boundary), a
+  /// checkpoint restore returns it to whatever the checkpoint saved — raising it, or clearing it —
+  /// and a `rekey_offset_facts` rebase clears it outright. What holds is
+  /// that every one of those transitions lands the field on a *value*, so plain equality against this
+  /// snapshot is exactly the question an absence exit needs answered: is the latch the same one this
+  /// attempt started with, or a different one it produced along the way?
+  ///
+  /// Taken once per driver attempt (not per element), so it costs one offset clone per collection.
+  #[inline(always)]
+  pub(crate) fn latch_snapshot(&self) -> Option<L::Offset> {
+    self.poison_boundary.clone()
+  }
+
+  /// Returns whether a terminal scanner stop is latched *and differs from the one this attempt
+  /// started with* ([`latch_snapshot`](Self::latch_snapshot)).
+  ///
+  /// The witness for a driver's **absence** exits — the no-progress stall and the element-decline
+  /// break — which conclude "no more elements" from what the element saw. An element's own lookahead
+  /// ([`peek`](Self::peek), [`peek_one`](Self::peek_one), [`peek_with_emitter`](Self::peek_with_emitter))
+  /// latches a trip and still returns `Ok` with a short window, so an element can decline, or accept
+  /// consuming nothing, on evidence a terminal stop truncated.
+  ///
+  /// Presence-plus-change, deliberately **not** positional. A positional reading (is the boundary at
+  /// or before some cursor or offset?) is not restore-stable: an element may latch a trip, open an
+  /// [`attempt`](Self::attempt), consume the cached pre-trip tokens, and decline — the restore rewinds
+  /// the cursor, the cache and the watermark *behind* the boundary, while the latch survives because
+  /// the checkpoint saved it after the trip took it. Every positional witness reads clean there
+  /// though the stop is live and already diagnosed. Comparing values instead sees it, and still keeps
+  /// the witness attempt-relative: a boundary an enclosing lookahead latched before the driver
+  /// started compares equal, so it is never mis-charged to this attempt — the misattribution
+  /// [`at_committed_boundary`](Self::at_committed_boundary) had to rule out for the element-error
+  /// gates.
+  #[inline(always)]
+  pub(crate) fn latched_during_attempt(&self, since: &Option<L::Offset>) -> bool {
+    self.poison_boundary.is_some() && *self.poison_boundary != *since
+  }
+
   /// Lexes the next token unless doing so would cross the poison boundary.
   ///
   /// Once the position the next token would be lexed at (`lex_at`, threaded by the
@@ -1342,6 +1381,10 @@ where
   ///
   /// If there are cached tokens, the cursor points to the start
   /// of the first cached token; otherwise, it points to the current position.
+  ///
+  /// This is the lookahead (cache-front) position: a peek or a scan decline moves it across skipped
+  /// bytes without committing anything. It is **not** a progress metric — for committed progress
+  /// compare [`span().end()`](Self::span).
   #[inline(always)]
   pub fn cursor(&self) -> &Cursor<'inp, 'closure, L> {
     Cursor::from_ref(

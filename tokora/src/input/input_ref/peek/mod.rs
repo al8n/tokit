@@ -141,6 +141,9 @@ where
   /// reading the short window as a decline. The flag is `true` only when the window came back
   /// *shorter than requested* because of a terminal stop; a full window, a genuine end of input, and
   /// a partial-input frontier holdback all report `false`.
+  ///
+  /// Callers must consult the flag **immediately**, before any fallible or emitting call (`decide`,
+  /// element handlers, close probes): an ordinary error raised in between preempts the terminal stop.
   #[inline]
   pub fn peek_with_emitter_terminal<'p, W>(
     &'p mut self,

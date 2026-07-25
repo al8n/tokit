@@ -451,6 +451,22 @@ fn foldrn_empty() {
 }
 
 #[test]
+fn foldrn_unbounded_num_on_empty_input() {
+  // `num = usize::MAX` is the documented "unbounded" sentinel; eagerly reserving that many
+  // slots up front panics with a capacity overflow before any input is read.
+  fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<i64, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    inp.foldrn(|| 99i64, |acc, tok| acc + extract_num(tok), usize::MAX)
+  }
+
+  let result = Parser::new().apply(parse).parse_str("").unwrap();
+  assert_eq!(result, 99);
+}
+
+#[test]
 fn foldrn_fewer_than_n() {
   fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<i64, ()>
   where

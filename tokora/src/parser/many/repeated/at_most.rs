@@ -18,6 +18,7 @@ where
   F: TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
   Ctx::Emitter: TooManyEmitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
   Ctx: ParseContext<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Container: Default + crate::container::Container<O>,
 {
   #[inline(always)]
@@ -52,6 +53,7 @@ where
   F: TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
   Ctx::Emitter: TooManyEmitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
   Ctx: ParseContext<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Container: Default + crate::container::Container<O>,
 {
   #[inline(always)]
@@ -93,6 +95,7 @@ where
   F: TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
   Ctx::Emitter: TooManyEmitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
   Ctx: ParseContext<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Container: crate::container::Container<O>,
 {
   fn parse_input(

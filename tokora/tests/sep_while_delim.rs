@@ -18,7 +18,7 @@ use tokora::{
   emitter::{
     Fatal, FullContainerEmitter, MissingLeadingSeparatorEmitter, MissingTrailingSeparatorEmitter,
     SeparatedEmitter, TooFewEmitter, TooManyEmitter, UnclosedEmitter,
-    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
+    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter, Verbose,
   },
   parser::Action,
   punct::Bracket,
@@ -28,6 +28,10 @@ use common::{TestLexer, Token};
 
 fn full_ctx() -> ParserContext<'static, TestLexer<'static>, Fatal<E>> {
   ParserContext::new(Fatal::new())
+}
+
+fn verbose_ctx() -> ParserContext<'static, TestLexer<'static>, Verbose<E>> {
+  ParserContext::new(Verbose::new())
 }
 
 // ── Condition: continue iff the next token is a number ────────────────────────
@@ -1075,4 +1079,98 @@ fn rlat_bounded_missing_leading() {
     .apply(parse_rlat_bounded)
     .parse_str("[1,2,3,]");
   assert!(r.is_err());
+}
+
+// ── Zero-width element guard ──────────────────────────────────────────────────
+//
+// A `Verbose` (recording, non-fatal) emitter keeps the drive going past the missing-separator
+// diagnostics a would-be livelock emits on every repeated cycle, so the oracle below can tell an
+// unguarded loop (runs the element's full budget) apart from a guarded one (stops after the
+// first accept). The opener is followed by one real token so the peek/decide cycle is reached at
+// all — an immediate closer would exit before ever calling the condition. Unlike the undelimited
+// form, stopping still leaves that real token unconsumed and un-closed, so one `Unclosed`-family
+// diagnostic from the epilogue's own close-position probe is expected on both the guarded and
+// unguarded runs — it is not the livelock signal, so it is not asserted on here.
+
+#[test]
+fn zero_width_element_stops_after_one_element() {
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, Verbose<E>>>,
+  ) -> Result<Vec<i64>, E> {
+    let mut budget = 5usize;
+    let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
+                     _emitter: &mut Verbose<E>|
+          -> Result<Action, E> {
+      Ok(if budget > 0 {
+        budget -= 1;
+        Action::Continue
+      } else {
+        Action::Stop
+      })
+    };
+    let elem = |_inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<E>>,
+    >|
+     -> Result<i64, E> { Ok(0) };
+    elem
+      .separated_by_comma_while::<_, U1>(cond)
+      .delimited::<Bracket<(), (), ()>>()
+      .collect()
+      .parse_input(inp)
+  }
+
+  let r: Vec<i64> = Parser::with_context(verbose_ctx())
+    .apply(parse)
+    .parse_str("[1]")
+    .unwrap();
+  assert_eq!(r.len(), 1, "zero-width guard must stop after one element");
+}
+
+#[test]
+fn zero_width_element_with_leading_trivia_stops_after_one_element() {
+  // Trivia-gap twin of the above: the space after the opener in `"[ 1]"` is skipped trivia, so the
+  // first decision peek jumps the cache-front cursor to the token start without consuming anything.
+  // A cursor-keyed guard reads that as progress and runs one extra cycle, pushing a phantom second
+  // element (and, in `State::Element`, a spurious missing separator). The committed-consumption
+  // metric stops after the first element.
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, Verbose<E>>>,
+  ) -> Result<Vec<i64>, E> {
+    let mut budget = 5usize;
+    let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
+                     _emitter: &mut Verbose<E>|
+          -> Result<Action, E> {
+      Ok(if budget > 0 {
+        budget -= 1;
+        Action::Continue
+      } else {
+        Action::Stop
+      })
+    };
+    let elem = |_inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<E>>,
+    >|
+     -> Result<i64, E> { Ok(0) };
+    elem
+      .separated_by_comma_while::<_, U1>(cond)
+      .delimited::<Bracket<(), (), ()>>()
+      .collect()
+      .parse_input(inp)
+  }
+
+  let r: Vec<i64> = Parser::with_context(verbose_ctx())
+    .apply(parse)
+    .parse_str("[ 1]")
+    .unwrap();
+  assert_eq!(
+    r.len(),
+    1,
+    "the committed-progress guard must stop after one element despite the leading trivia gap"
+  );
 }

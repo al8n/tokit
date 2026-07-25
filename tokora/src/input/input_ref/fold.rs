@@ -121,7 +121,10 @@ where
     Op: FnMut(O, Spanned<L::Token, L::Span>) -> O,
   {
     let mut output = init();
-    let mut buf = std::vec::Vec::with_capacity(num);
+    // `num` is an upper bound the caller may set to `usize::MAX` to mean "unbounded"; reserving
+    // it up front would try to allocate that many slots before a single token is read. Let the
+    // buffer grow with actual consumption instead.
+    let mut buf = std::vec::Vec::new();
 
     let mut n = 0;
     loop {

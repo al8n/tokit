@@ -18,11 +18,11 @@ mod common;
 
 use generic_arraydeque::typenum::U1;
 use tokora::{
-  Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser,
+  Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext,
   cache::Peeked,
   emitter::{
     FullContainerEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter,
-    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
+    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter, Verbose,
   },
   error::{
     UnexpectedEot,
@@ -933,4 +933,121 @@ fn test_sep_while_plain_leading_comma_err() {
   let r: Result<Vec<i64>, _> = Parser::new().apply(parse_while_plain).parse_str(",1+");
   // Plain: leading comma triggers emit_unexpected_leading_separator
   assert!(r.is_err());
+}
+
+// ── Zero-width element guard ──────────────────────────────────────────────────
+//
+// A `Verbose` (recording, non-fatal) emitter keeps the drive going past the missing-separator
+// diagnostics a would-be livelock emits on every repeated cycle, so the oracles below can tell
+// an unguarded loop (runs the element's full budget, re-entering the missing-separator path on
+// every cycle past the first) apart from a guarded one (stops after the first accept, never
+// re-entering it).
+
+fn verbose_while_ctx() -> ParserContext<'static, TestLexer<'static>, Verbose<WhileError>> {
+  ParserContext::new(Verbose::new())
+}
+
+#[test]
+fn test_sep_while_zero_width_element_stops_after_one_element() {
+  fn parse<'inp>(
+    inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<WhileError>>,
+    >,
+  ) -> Result<Vec<i64>, WhileError> {
+    // Continues unconditionally, up to a budget, ignoring the peeked window entirely: the
+    // element it drives never consumes, so an unguarded loop would otherwise run forever.
+    let mut budget = 5usize;
+    let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
+                     _emitter: &mut Verbose<WhileError>|
+          -> Result<Action, WhileError> {
+      Ok(if budget > 0 {
+        budget -= 1;
+        Action::Continue
+      } else {
+        Action::Stop
+      })
+    };
+    let elem = |_inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<WhileError>>,
+    >|
+     -> Result<i64, WhileError> { Ok(0) };
+    let out = elem
+      .separated_by_comma_while::<_, U1>(cond)
+      .collect()
+      .parse_input(inp)?;
+    assert_eq!(
+      inp.emitter().errors().len(),
+      0,
+      "a single accepted element must not re-enter the missing-separator path"
+    );
+    Ok(out)
+  }
+
+  let r: Vec<i64> = Parser::with_context(verbose_while_ctx())
+    .apply(parse)
+    .parse_str("1+")
+    .unwrap();
+  assert_eq!(r.len(), 1, "zero-width guard must stop after one element");
+}
+
+#[test]
+fn test_sep_while_zero_width_element_with_leading_trivia_stops_after_one_element() {
+  // Trivia-gap twin of the above: the leading space in `" 1+"` is skipped trivia, so the driver's
+  // first decision peek jumps the cache-front cursor from the committed start to the token start
+  // without consuming anything. A cursor-keyed guard reads that as progress and runs one extra
+  // cycle — pushing a phantom element and, in `State::Element`, emitting a spurious missing
+  // separator. The committed-consumption metric stops after the first element with no diagnostic.
+  fn parse<'inp>(
+    inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<WhileError>>,
+    >,
+  ) -> Result<Vec<i64>, WhileError> {
+    let mut budget = 5usize;
+    let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
+                     _emitter: &mut Verbose<WhileError>|
+          -> Result<Action, WhileError> {
+      Ok(if budget > 0 {
+        budget -= 1;
+        Action::Continue
+      } else {
+        Action::Stop
+      })
+    };
+    let elem = |_inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<WhileError>>,
+    >|
+     -> Result<i64, WhileError> { Ok(0) };
+    let out = elem
+      .separated_by_comma_while::<_, U1>(cond)
+      .collect()
+      .parse_input(inp)?;
+    assert_eq!(
+      inp.emitter().errors().len(),
+      0,
+      "a single accepted element behind leading trivia must not re-enter the missing-separator path"
+    );
+    Ok(out)
+  }
+
+  let r: Vec<i64> = Parser::with_context(verbose_while_ctx())
+    .apply(parse)
+    .parse_str(" 1+")
+    .unwrap();
+  assert_eq!(
+    r.len(),
+    1,
+    "the committed-progress guard must stop after one element despite the leading trivia gap"
+  );
 }

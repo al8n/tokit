@@ -4,6 +4,7 @@ use crate::{
   container::Container as ContainerT,
   emitter::{FullContainerEmitter, SeparatedEmitter, UnclosedEmitter},
   error::Unclosed,
+  span::Span as _,
 };
 
 use super::*;
@@ -102,6 +103,10 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     let mut num_elems = 0;
 
     let elems_start = inp.cursor().clone();
+    let mut committed = inp.span().end();
+    // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the opener's
+    // own scan is not charged to the element loop. One offset clone per collection.
+    let latch = inp.latch_snapshot();
     loop {
       let mut is_sep = false;
       match inp.try_expect(|tok| {
@@ -115,6 +120,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
         Some(tok) => {
           if is_sep {
             state = parser.handle_separator(state, inp, tok, container, separator_state_handler)?;
+            committed = inp.span().end();
             continue;
           }
 
@@ -123,13 +129,17 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
           return Ok(inp.span_since(&anchor));
         }
         None => {
-          // Decision-window gate. `peek_with_emitter_terminal` reports (at no extra hot-path cost)
-          // whether the fill came back short because of a terminal scanner stop. The empty-window
-          // path below already reclassifies the close position with `probe_close` (which surfaces
-          // `Tripped`); this flag closes the remaining gap — a mid-window trip *past* the cached
-          // front token, where the condition reads `Stop` and `probe_close` would then see the
-          // front token and miss the stop.
+          // A short decision window can be a genuine end of input, but one truncated by a terminal
+          // scanner stop is not: surface the committed end-of-input error before anything else.
+          // `decide` is fallible and emitting, the continue-state work and the close probe would
+          // otherwise preempt it, and a zero-width element leaves the trip-truncated front token at
+          // the close-probe position where it reads as a spurious wrong closer. `end` is the
+          // committed watermark, captured before the peek (the fill never advances it).
+          let end = inp.span().end();
           let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
+          if terminal {
+            return Err(UnexpectedEot::eot_of(end).into_terminal().into());
+          }
 
           let front_span = match peeked.front() {
             None => {
@@ -189,15 +199,6 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
 
           match parser.condition.decide(peeked, emitter)? {
             Action::Stop => {
-              // A mid-window terminal scanner stop is not a clean end of list: surface it ahead of
-              // any close-miss diagnostic, so an enclosing recovery re-raises it.
-              if terminal {
-                return Err(
-                  UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
-                    .into_terminal()
-                    .into(),
-                );
-              }
               // PRIMARY — classify the close position WITHOUT consuming (`probe_close`
               // leaves the scanned token cached) and emit the close-status diagnostic
               // before the end-state secondaries: under a fail-fast emitter
@@ -206,14 +207,42 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
               // four-way probe also keeps a terminal scanner stop out of `Unclosed`.
               let mut close_carrier = None;
               match inp.probe_close(|tok| Delim::is_close(&tok.data.kind()))? {
-                // The closer is at hand: carry it out; committed by value below.
+                // The closer is at hand: carry it out; committed by value below. The probe is
+                // cache-first, so this verdict rests on a REAL pre-trip token: the list genuinely
+                // closed and stays a success even if the element's lookahead latched a terminal stop
+                // somewhere past that closer.
                 CloseStatus::Close(ct) => close_carrier = Some(ct),
                 // (b) a wrong token sits where the closer should be.
-                CloseStatus::WrongToken(tok) => inp
-                  .emitter()
-                  .emit_unexpected_token(Delim::unexpected_close_token(tok))?,
+                CloseStatus::WrongToken(tok) => {
+                  // No closer: the stop plus this verdict conclude *absence*, and the element's own
+                  // lookahead can latch a terminal scanner stop and still return `Ok` with a short
+                  // window, leaving the pre-trip tokens cached — the decision window above is then
+                  // served whole from that cache, so it carries no terminal flag, and the same cached
+                  // token reads as a spurious wrong closer here. Surface the stop ahead of the
+                  // close-miss diagnostic; attempt-relative against the post-opener snapshot.
+                  if inp.latched_during_attempt(&latch) {
+                    return Err(
+                      UnexpectedEot::eot_of(inp.span().end())
+                        .into_terminal()
+                        .into(),
+                    );
+                  }
+                  inp
+                    .emitter()
+                    .emit_unexpected_token(Delim::unexpected_close_token(tok))?
+                }
                 // (a) end of input with the opener still open: never closed.
                 CloseStatus::Eof => {
+                  // Same absence conclusion as the wrong-token arm above, so the same gate. No
+                  // legitimate `Unclosed` is lost: a scan that reaches a live boundary stops there and
+                  // reports the stop, so an `Eof` verdict cannot coexist with one.
+                  if inp.latched_during_attempt(&latch) {
+                    return Err(
+                      UnexpectedEot::eot_of(inp.span().end())
+                        .into_terminal()
+                        .into(),
+                    );
+                  }
                   if let Some(open_span) = open_span.clone() {
                     inp
                       .emitter()
@@ -255,6 +284,82 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                 container,
                 continue_state_handler,
               )?;
+
+              // An `Action::Continue` cycle that consumed nothing re-sees the same lookahead and
+              // would decide `Continue` forever. The progress metric is committed consumption
+              // (`span().end()`), never the cache-front cursor — a lookahead fill moves that across
+              // skipped trivia without consuming, reading a zero-width element as false progress.
+              // `<=`, not `==`: the watermark cannot regress within a cycle, so anything not strictly
+              // ahead is a stall.
+              let new_committed = inp.span().end();
+              if new_committed <= committed {
+                let mut close_carrier = None;
+                match inp.probe_close(|tok| Delim::is_close(&tok.data.kind()))? {
+                  // The closer is at hand: carry it out; committed by value below. A cache-first
+                  // verdict on a real pre-trip token, so the construct genuinely closed and stays a
+                  // success.
+                  CloseStatus::Close(ct) => close_carrier = Some(ct),
+                  // (b) a wrong token sits where the closer should be.
+                  CloseStatus::WrongToken(tok) => {
+                    // No closer: the stall plus this verdict conclude *absence*, and the element's
+                    // own lookahead can latch a terminal scanner stop after the decision gate ran and
+                    // still return `Ok` with a short window, so that conclusion may rest on a
+                    // truncated view. Surface the stop ahead of the close-miss diagnostic;
+                    // attempt-relative against the post-opener snapshot.
+                    if inp.latched_during_attempt(&latch) {
+                      return Err(
+                        UnexpectedEot::eot_of(inp.span().end())
+                          .into_terminal()
+                          .into(),
+                      );
+                    }
+                    inp
+                      .emitter()
+                      .emit_unexpected_token(Delim::unexpected_close_token(tok))?
+                  }
+                  // (a) end of input with the opener still open: never closed.
+                  CloseStatus::Eof => {
+                    // Same absence conclusion as the wrong-token arm above, so the same gate. No
+                    // legitimate `Unclosed` is lost: a scan that reaches a live boundary stops there
+                    // and reports the stop, so an `Eof` verdict cannot coexist with one.
+                    if inp.latched_during_attempt(&latch) {
+                      return Err(
+                        UnexpectedEot::eot_of(inp.span().end())
+                          .into_terminal()
+                          .into(),
+                      );
+                    }
+                    if let Some(open_span) = open_span.clone() {
+                      inp
+                        .emitter()
+                        .emit_unclosed(Unclosed::<Delim, L::Span, Lang>::of(
+                          open_span,
+                          Delim::name(),
+                        ))?;
+                    }
+                  }
+                  // A terminal scanner stop: its own diagnostic already explains the
+                  // halt — propagate it and add no `Unclosed`.
+                  CloseStatus::Tripped => {
+                    return Err(
+                      UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+                        .into_terminal()
+                        .into(),
+                    );
+                  }
+                }
+
+                // SECONDARY — the end-state diagnostics, after the primary.
+                parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+
+                // Commit the carried closer by value (no re-scan) at the same program point as
+                // the old deferred `try_expect` — after the end-state pass.
+                if let Some(ct) = close_carrier {
+                  container.on_close_delimiter(inp.commit_probed(ct));
+                }
+                return Ok(inp.span_since(&elems_start));
+              }
+              committed = new_committed;
             }
           }
         }
