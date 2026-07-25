@@ -237,3 +237,115 @@ fn verbose_missing_element_and_separator_same_offset_both_recorded() {
     "missing-element and missing-separator at the same offset are both retained"
   );
 }
+
+// ── The separator's name reaches the collected diagnostic ─────────────────────
+//
+// The driver knows the separator's name and hands it to the emitter; the emitter hands it to
+// the conversion; the conversion is a blanket a downstream error type cannot override. This
+// pins the whole pipeline rather than the conversion in isolation: the fixtures above discard
+// the payload, so a name that never left the driver would look identical to one that arrived.
+
+/// A downstream error type that keeps the separator name the conversions stamp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NamedError {
+  MissingSeparator(Option<String>),
+  Other,
+}
+
+impl From<()> for NamedError {
+  fn from(_: ()) -> Self {
+    NamedError::Other
+  }
+}
+
+impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, Lang>>
+  for NamedError
+{
+  fn from(_: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
+    NamedError::Other
+  }
+}
+
+impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, Kind, S, Lang>>
+  for NamedError
+{
+  fn from(_: SeparatedError<'a, T, Kind, S, Lang>) -> Self {
+    NamedError::Other
+  }
+}
+
+impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for NamedError {
+  fn from(_: MissingSyntax<O, Lang>) -> Self {
+    NamedError::Other
+  }
+}
+
+impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for NamedError {
+  fn from(_: FullContainer<S, Lang>) -> Self {
+    NamedError::Other
+  }
+}
+
+impl From<UnexpectedEot> for NamedError {
+  fn from(_: UnexpectedEot) -> Self {
+    NamedError::Other
+  }
+}
+
+impl<'a, Kind: Clone, O, Lang: ?Sized> From<MissingToken<'a, Kind, O, Lang>> for NamedError {
+  fn from(err: MissingToken<'a, Kind, O, Lang>) -> Self {
+    NamedError::MissingSeparator(err.name().map(|n| n.as_str().to_string()))
+  }
+}
+
+#[test]
+fn driver_end_to_end_names_the_separator() {
+  fn parse<'inp>(
+    inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<NamedError>>,
+    >,
+  ) -> Result<Vec<i64>, NamedError> {
+    let out = try_named
+      .separated_by_comma()
+      .require_trailing()
+      .collect()
+      .parse_input(inp)?;
+
+    let collected: Vec<&NamedError> = inp.emitter().errors().values().flatten().collect();
+    assert_eq!(
+      collected,
+      vec![&NamedError::MissingSeparator(Some("COMMA".to_string()))],
+      "the separator's own name must reach the collected diagnostic"
+    );
+    Ok(out)
+  }
+
+  fn try_named<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  ) -> Result<ParseAttempt<i64>, NamedError>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = NamedError>,
+  {
+    inp
+      .try_expect(|t| matches!(t.data(), Token::Num(_)))
+      .map(|opt| match opt {
+        None => ParseAttempt::Decline,
+        Some(tok) => ParseAttempt::Accept(match tok.into_data() {
+          Token::Num(n) => n,
+          _ => unreachable!(),
+        }),
+      })
+  }
+
+  let ctx: ParserContext<'static, TestLexer<'static>, Verbose<NamedError>> =
+    ParserContext::new(Verbose::new());
+  let out: Vec<i64> = Parser::with_context(ctx)
+    .apply(parse)
+    .parse_str("1,2,3")
+    .unwrap();
+  assert_eq!(out, vec![1, 2, 3]);
+}

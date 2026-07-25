@@ -52,10 +52,15 @@ where
   T: From<SeparatedErrorOf<'a, L, Lang>>,
 {
   #[inline(always)]
-  fn from_unexpected_trailing_separator(_name: CowStr, err: UnexpectedTokenOf<'a, L, Lang>) -> Self
+  fn from_unexpected_trailing_separator(name: CowStr, err: UnexpectedTokenOf<'a, L, Lang>) -> Self
   where
     L: Lexer<'a>,
   {
-    SeparatedError::trailing(err).into()
+    // The separator's name is data the driver had and the payload did not. Stamping it here is
+    // the only place it can reach a downstream error type: this blanket captures every type
+    // that implements `From<SeparatedErrorOf>` — which such a type must, to compose with the rest of
+    // the conversion family — so coherence forbids it from writing its own impl to recover the
+    // name.
+    SeparatedError::trailing(err).with_name(name).into()
   }
 }

@@ -19,12 +19,11 @@ where
   where
     L: Lexer<'inp>,
   {
+    // Record on the shared emission log (same path as `emit_error` / `emit_unclosed`) so the
+    // diagnostic rewinds precisely with an abandoned speculative branch. The key is the
+    // offending separator token's own span.
     let span = err.span_ref().clone();
-    self
-      .errs
-      .entry(span)
-      .or_default()
-      .push(E::from_unexpected_leading_separator(name, err));
+    self.record(span, E::from_unexpected_leading_separator(name, err));
     Ok(())
   }
 }

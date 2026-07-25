@@ -390,12 +390,14 @@ fn message_mut() {
 
 #[test]
 fn into_components() {
-  let mt: MissingToken<'_, (), usize> =
-    MissingToken::new(42).with_message(CowStr::from_static("msg"));
-  let (off, exp, msg) = mt.into_components();
+  let mt: MissingToken<'_, (), usize> = MissingToken::new(42)
+    .with_message(CowStr::from_static("msg"))
+    .with_name(CowStr::from_static("comma"));
+  let (off, exp, msg, name) = mt.into_components();
   assert_eq!(off, 42);
   assert!(exp.is_none());
   assert_eq!(msg.unwrap().as_str(), "msg");
+  assert_eq!(name.unwrap().as_str(), "comma");
 }
 
 #[test]

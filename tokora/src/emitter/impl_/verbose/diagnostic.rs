@@ -7,11 +7,12 @@
 //! storage and carry no formatting policy — so a downstream adapter (ariadne, miette, a bespoke
 //! reporter) can map each entry onto its own report kind without tokora taking on any dependency.
 
+use core::iter::FusedIterator;
 use std::{collections::BTreeMap, vec::Vec};
 
 use derive_more::{IsVariant, TryUnwrap, Unwrap};
 
-use super::Channel;
+use super::{Channel, store::LogEntry};
 use crate::emitter::Severity;
 
 /// What one collected [`Diagnostic`] carries — the record kind and its payload.
@@ -134,15 +135,19 @@ impl<'a, S, E> Diagnostic<'a, S, E> {
 /// error and warning channels **and** the recovery-hole channel — in true emission order.
 ///
 /// Constructed by [`Verbose::diagnostics`](super::Verbose::diagnostics). It walks the emitter's
-/// shared emission `log`; each log entry names a channel and a span, and the iterator hands back
-/// the matching payload and label snapshot from that channel as a [`Diagnostic`] tagged with its
-/// [`DiagnosticKind`]. A per-channel, per-span cursor tracks how far into each span's group the
-/// walk has advanced, so same-span records come out in the order they were emitted. The result
-/// is the three span-keyed maps *interleaved* on one timeline — the ordering a renderer wants and
-/// that no single map can express alone.
+/// shared emission `log`; each log entry names a channel, a span, and the slot the record took
+/// in that span's group when it was emitted, so the iterator hands back the matching payload and
+/// label snapshot by direct index. The result is the three span-keyed maps *interleaved* on one
+/// timeline — the ordering a renderer wants and that no single map can express alone.
+///
+/// Because the walk is one log entry per step with no per-span bookkeeping, the iterator is
+/// **exact-size**: [`len`](ExactSizeIterator::len) and
+/// [`size_hint`](Iterator::size_hint) report the true number of remaining diagnostics at every
+/// point, including after partial consumption, and it is [`FusedIterator`] — once exhausted it
+/// keeps returning `None`. Building one allocates nothing.
 #[derive(Debug)]
 pub struct Diagnostics<'a, S, E> {
-  log: &'a [(Channel, S)],
+  log: &'a [LogEntry<S>],
   errs: &'a BTreeMap<S, Vec<E>>,
   err_labels: &'a BTreeMap<S, Vec<Vec<&'static str>>>,
   warns: &'a BTreeMap<S, Vec<E>>,
@@ -150,17 +155,18 @@ pub struct Diagnostics<'a, S, E> {
   holes: &'a BTreeMap<S, Vec<usize>>,
   hole_labels: &'a BTreeMap<S, Vec<Vec<&'static str>>>,
   index: usize,
-  err_cursor: BTreeMap<&'a S, usize>,
-  warn_cursor: BTreeMap<&'a S, usize>,
-  hole_cursor: BTreeMap<&'a S, usize>,
 }
 
 impl<'a, S, E> Diagnostics<'a, S, E> {
   /// Builds the iterator from the emitter's channels and shared log.
+  ///
+  /// Scoped to the `verbose` subtree: the sole caller is the store's own
+  /// `diagnostics()`, and the parameters name the store's internal log
+  /// representation, which no wider visibility should be able to spell.
   #[inline(always)]
   #[allow(clippy::too_many_arguments)]
-  pub(crate) fn new(
-    log: &'a [(Channel, S)],
+  pub(super) const fn new(
+    log: &'a [LogEntry<S>],
     errs: &'a BTreeMap<S, Vec<E>>,
     err_labels: &'a BTreeMap<S, Vec<Vec<&'static str>>>,
     warns: &'a BTreeMap<S, Vec<E>>,
@@ -177,9 +183,6 @@ impl<'a, S, E> Diagnostics<'a, S, E> {
       holes,
       hole_labels,
       index: 0,
-      err_cursor: BTreeMap::new(),
-      warn_cursor: BTreeMap::new(),
-      hole_cursor: BTreeMap::new(),
     }
   }
 }
@@ -192,25 +195,25 @@ where
 
   #[inline]
   fn next(&mut self) -> Option<Self::Item> {
-    let (channel, span) = self.log.get(self.index)?;
+    let LogEntry {
+      channel,
+      span,
+      slot,
+    } = self.log.get(self.index)?;
     self.index += 1;
+    let slot = *slot;
 
-    // The `Channel` tag routes to the maps this entry was recorded in; the per-channel cursor
-    // advances one step into this span's group, mirroring how `record`/`record_warning`/
-    // `record_hole` appended it. Group index == prior same-span emissions in this channel, so
-    // the three timelines interleave exactly as they were emitted.
+    // The `Channel` tag routes to the maps this entry was recorded in, and the slot recorded
+    // at emit time indexes straight into this span's group — no per-walk cursor state, so the
+    // three timelines interleave exactly as they were emitted for the cost of one lookup.
     match *channel {
       Channel::Diagnostic(severity) => {
-        let (groups, labels, cursor) = match severity {
-          Severity::Error => (self.errs, self.err_labels, &mut self.err_cursor),
-          Severity::Warning => (self.warns, self.warn_labels, &mut self.warn_cursor),
+        let (groups, labels) = match severity {
+          Severity::Error => (self.errs, self.err_labels),
+          Severity::Warning => (self.warns, self.warn_labels),
         };
-        let slot = cursor.entry(span).or_insert(0);
-        let idx = *slot;
-        *slot += 1;
-
-        let payload = &groups[span][idx];
-        let labels = labels[span][idx].as_slice();
+        let payload = &groups[span][slot];
+        let labels = labels[span][slot].as_slice();
         let kind = match severity {
           Severity::Error => DiagnosticKind::Error(payload),
           Severity::Warning => DiagnosticKind::Warning(payload),
@@ -218,12 +221,8 @@ where
         Some(Diagnostic::new(span, labels, kind))
       }
       Channel::SkippedRegion => {
-        let slot = self.hole_cursor.entry(span).or_insert(0);
-        let idx = *slot;
-        *slot += 1;
-
-        let skipped = self.holes[span][idx];
-        let labels = self.hole_labels[span][idx].as_slice();
+        let skipped = self.holes[span][slot];
+        let labels = self.hole_labels[span][slot].as_slice();
         Some(Diagnostic::new(
           span,
           labels,
@@ -232,4 +231,16 @@ where
       }
     }
   }
+
+  /// Exact on every step: one log entry is one diagnostic, and `index` never passes the log's
+  /// length.
+  #[inline]
+  fn size_hint(&self) -> (usize, Option<usize>) {
+    let rest = self.log.len() - self.index;
+    (rest, Some(rest))
+  }
 }
+
+impl<S, E> ExactSizeIterator for Diagnostics<'_, S, E> where S: Ord {}
+
+impl<S, E> FusedIterator for Diagnostics<'_, S, E> where S: Ord {}

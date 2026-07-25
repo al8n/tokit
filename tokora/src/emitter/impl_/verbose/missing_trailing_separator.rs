@@ -19,12 +19,12 @@ where
   where
     L: Lexer<'inp>,
   {
+    // Record on the shared emission log (same path as `emit_error` / `emit_unclosed`) so the
+    // diagnostic rewinds precisely with an abandoned speculative branch. The key is the
+    // zero-width span at the offset where the trailing separator should have been.
     let off = err.offset_ref().clone();
-    self
-      .errs
-      .entry(S::new(off.clone(), off))
-      .or_default()
-      .push(E::from_missing_trailing_separator(name, err));
+    let span = S::new(off.clone(), off);
+    self.record(span, E::from_missing_trailing_separator(name, err));
     Ok(())
   }
 }

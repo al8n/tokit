@@ -12,12 +12,10 @@ where
   where
     L: Lexer<'a>,
   {
+    // Record on the shared emission log (same path as `emit_error` / `emit_unclosed`) so the
+    // diagnostic rewinds precisely with an abandoned speculative branch.
     let span = err.span().clone();
-    self
-      .errs
-      .entry(span)
-      .or_default()
-      .push(E::from_full_container(err));
+    self.record(span, E::from_full_container(err));
     Ok(())
   }
 }
