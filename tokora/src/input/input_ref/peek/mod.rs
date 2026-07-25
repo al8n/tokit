@@ -85,7 +85,7 @@ where
   > {
     let mut buf = GenericArrayDeque::<_, U1>::new();
     self
-      .peek_with_emitter_inner::<U1>(&mut buf)
+      .peek_with_emitter_inner::<U1>(&mut buf, &mut false)
       .map(|_| buf.pop_front())
   }
 
@@ -126,21 +126,56 @@ where
   {
     let mut peeked = GenericArrayDeque::new();
     self
-      .peek_with_emitter_inner::<W>(&mut peeked)
+      .peek_with_emitter_inner::<W>(&mut peeked, &mut false)
       .map(|emitter| (peeked, emitter))
   }
 
+  /// Peeks tokens to fill the window and reports whether the fill was cut short by a **terminal
+  /// scanner stop** — a fresh resource-limit trip during the fill, or an already-latched poison
+  /// boundary at the cursor.
+  ///
+  /// The peek contract is that a short window is not itself an error (it may be a genuine end of
+  /// input, or a partial-input frontier). The returned flag lets a decision-window combinator tell
+  /// the one case that class hides apart: a window truncated by a terminal stop is not evidence the
+  /// construct ended, so such a combinator surfaces the committed end-of-input error rather than
+  /// reading the short window as a decline. The flag is `true` only when the window came back
+  /// *shorter than requested* because of a terminal stop; a full window, a genuine end of input, and
+  /// a partial-input frontier holdback all report `false`.
+  #[inline]
+  pub fn peek_with_emitter_terminal<'p, W>(
+    &'p mut self,
+  ) -> Result<
+    (Peeked<'p, 'inp, L, W>, bool, &'p mut Ctx::Emitter),
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
+  >
+  where
+    W: Window,
+  {
+    let mut peeked = GenericArrayDeque::new();
+    let mut terminal = false;
+    self
+      .peek_with_emitter_inner::<W>(&mut peeked, &mut terminal)
+      .map(|emitter| (peeked, terminal, emitter))
+  }
+
   /// Internal implementation for peeking tokens.
+  ///
+  /// `terminal` is set to `true` iff the fill returned a window shorter than requested because of a
+  /// terminal scanner stop (a fresh trip, or a pre-latched poison boundary) rather than a genuine
+  /// end of input or a partial-input frontier — see
+  /// [`peek_with_emitter_terminal`](Self::peek_with_emitter_terminal).
   #[inline]
   #[allow(unused_assignments)]
   fn peek_with_emitter_inner<'p, W>(
     &'p mut self,
     buf: &mut Peeked<'p, 'inp, L, W>,
+    terminal: &mut bool,
   ) -> Result<&'p mut Ctx::Emitter, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     W: Window,
   {
     trace_event!(self, "peek");
+    *terminal = false;
     let buf_len = buf.len();
     let remaining_cap = buf.capacity() - buf_len;
     let mut in_cache = self.cache().len();
@@ -158,8 +193,10 @@ where
 
     // A sticky limit trip latches a poison boundary at the durable frontier: once
     // the cursor reaches it, never rebuild a lexer to scan past the trip. Serve
-    // whatever is already cached and stop.
+    // whatever is already cached and stop. The request went unmet at a latched
+    // boundary — a terminal stop, not a genuine end of input.
     if self.reached_boundary(self.offset()) {
+      *terminal = true;
       self.cache.peek::<W>(buf);
       return Ok(self.session.emitter);
     }
@@ -239,6 +276,9 @@ where
     );
 
     if tripped {
+      // The fill was cut short by a fresh trip: report it terminal so a decision-window
+      // combinator surfaces the stop instead of reading the short window as a decline.
+      *terminal = true;
       // Truncate the result at the durability boundary. A limit trip latched the
       // input mid-overflow, so a post-peek `next()` will drain the cache-resident
       // prefix (already copied into `buf` above) and then stop — it can never

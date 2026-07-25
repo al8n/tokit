@@ -272,11 +272,17 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
           num += 1;
         }
         Ok(Decline) => break,
-        // The never-recoverable gate (0.3.0): under Partial non-final, the element's
-        // `Err` can be the frontier `Incomplete` — an unfinished construct, not a
-        // malformed one. Re-raise it untouched instead of spending it as a diagnostic;
-        // constant-false (and compiled away) under `Complete`.
-        Err(err) if Cmpl::is_incomplete_error(&err) => return Err(err),
+        // The never-recoverable gate and its terminal dual: the element's `Err` can be the
+        // frontier `Incomplete` (an unfinished construct, const-false under `Complete`) or a
+        // terminal scanner stop (a tripped limit). Neither is malformed, so re-raise it untouched
+        // instead of spending it as a diagnostic. The terminal witness reads the *committed cursor*
+        // ([`at_committed_boundary`]), so it is attempt-relative: a boundary a prior lookahead
+        // already latched (a prefilled cache leaving the lex offset at it) does not mis-charge an
+        // element that failed ordinarily before reaching it. Evaluated only on the failure arm, so a
+        // successful element does zero terminal work.
+        Err(err) if Cmpl::is_incomplete_error(&err) || inp.at_committed_boundary() => {
+          return Err(err);
+        }
         Err(err) => {
           let span = inp.span_since(&cursor);
           inp.emitter().emit_error(Spanned::new(span, err))?;

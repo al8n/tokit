@@ -10,6 +10,7 @@ where
   W: Window,
   Ctx: ParseContext<'inp, L, Lang>,
   Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Container: Default + crate::container::Container<O>,
 {
   #[inline(always)]
@@ -38,6 +39,7 @@ where
   W: Window,
   Ctx: ParseContext<'inp, L, Lang>,
   Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Container: Default + crate::container::Container<O>,
 {
   #[inline(always)]
@@ -66,6 +68,7 @@ where
   W: Window,
   Ctx: ParseContext<'inp, L, Lang>,
   Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Container: crate::container::Container<O>,
 {
   fn parse_input(

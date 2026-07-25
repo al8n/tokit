@@ -238,6 +238,12 @@ where
   /// dispatch tables), which keeps `Set` a single trailing type parameter rather than forcing a
   /// lifetime onto the whole type.
   expected: Option<Expected<'static, Set>>,
+  /// Whether this end-of-input error stands in for a **terminal scanner stop** (a resource-limit
+  /// trip, or the poison boundary it latches) rather than a genuine end of input. `false` for every
+  /// ordinary constructor; raised only through [`into_terminal`](Self::into_terminal). Read back
+  /// through [`is_terminal`](Self::is_terminal) — the signal recovery keys off via
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal) to re-raise the stop instead of recovering it.
+  terminal: bool,
   _lang: PhantomData<Lang>,
 }
 
@@ -567,6 +573,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
       name,
       hint,
       expected: None,
+      terminal: false,
       _lang: PhantomData,
     }
   }
@@ -607,6 +614,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
       name: None,
       hint,
       expected: None,
+      terminal: false,
       _lang: PhantomData,
     }
   }
@@ -738,6 +746,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
       name: self.name,
       hint: f(self.hint),
       expected: self.expected,
+      terminal: self.terminal,
       _lang: PhantomData,
     }
   }
@@ -916,6 +925,7 @@ where
       name,
       hint,
       expected,
+      terminal: false,
       _lang: PhantomData,
     }
   }
@@ -929,6 +939,31 @@ where
   #[inline(always)]
   pub const fn expected(&self) -> Option<&Expected<'static, Set>> {
     self.expected.as_ref()
+  }
+
+  /// Returns whether this end-of-input error stands in for a **terminal scanner stop** — a
+  /// resource-limit trip, or the poison boundary it latches — rather than a genuine end of input.
+  ///
+  /// `false` for every ordinary constructor; `true` only after [`into_terminal`](Self::into_terminal).
+  /// This is the signal [`MaybeTerminal`](crate::error::MaybeTerminal) exposes so recovery re-raises
+  /// the stop instead of spending it as a recoverable failure.
+  #[inline(always)]
+  pub const fn is_terminal(&self) -> bool {
+    self.terminal
+  }
+
+  /// Marks this end-of-input error as standing in for a **terminal scanner stop**, returning it by
+  /// value.
+  ///
+  /// The attempt/decline leaves and the delimited close use this so a resource-limit trip surfaces
+  /// as the committed form's end-of-input error yet stays distinguishable from a genuine end of
+  /// input — see [`is_terminal`](Self::is_terminal) and
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal).
+  #[inline(always)]
+  #[must_use]
+  pub fn into_terminal(mut self) -> Self {
+    self.terminal = true;
+    self
   }
 }
 
@@ -995,5 +1030,15 @@ impl<Hint, O, Lang: ?Sized> From<(O, Hint)> for UnexpectedEnd<Hint, O, Lang> {
   #[inline(always)]
   fn from((offset, hint): (O, Hint)) -> Self {
     Self::of(offset, hint)
+  }
+}
+
+impl<Hint, O, Lang: ?Sized, Set> crate::error::MaybeTerminal for UnexpectedEnd<Hint, O, Lang, Set>
+where
+  Set: Clone + 'static,
+{
+  #[inline(always)]
+  fn is_terminal(&self) -> bool {
+    self.terminal
   }
 }

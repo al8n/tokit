@@ -208,7 +208,7 @@ where
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
-    let open_span = match inp.next()? {
+    let open_span = match inp.next_or_stop()? {
       Some(sp) if D::is_open(&sp.data().kind()) => sp.into_span(),
       Some(sp) => return Err(D::unexpected_open_token(sp).into()),
       None => return Err(UnexpectedEot::eot_of(inp.span().end()).into()),
@@ -305,8 +305,12 @@ where
       ))
     }
     // A terminal scanner stop already carries its own diagnostic: surface the committed form's
-    // end-of-input error and add no `Unclosed`.
-    CloseStatus::Tripped => Err(UnexpectedEot::eot_of(inp.span().end()).into()),
+    // end-of-input error, marked terminal so recovery re-raises it, and add no `Unclosed`.
+    CloseStatus::Tripped => Err(
+      UnexpectedEot::eot_of(inp.span().end())
+        .into_terminal()
+        .into(),
+    ),
   }
 }
 

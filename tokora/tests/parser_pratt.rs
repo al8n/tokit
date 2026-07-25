@@ -10,7 +10,7 @@ mod common;
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, SimpleSpan,
   emitter::PrattEmitter,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs, token::UnexpectedTokenOf},
+  error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot, token::UnexpectedTokenOf},
   parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt_of},
   span::Spanned,
   token::PrattToken,
@@ -43,6 +43,12 @@ impl From<UnexpectedEoLhs> for PrattError {
 
 impl From<UnexpectedEoRhs> for PrattError {
   fn from(_: UnexpectedEoRhs) -> Self {
+    PrattError
+  }
+}
+
+impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for PrattError {
+  fn from(_: UnexpectedEot<O, Lang>) -> Self {
     PrattError
   }
 }

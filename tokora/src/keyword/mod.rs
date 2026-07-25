@@ -200,7 +200,7 @@ macro_rules! keyword {
               ::core::convert::From<$crate::error::UnexpectedEot<L::Offset, Lang>>,
           {
             inp
-              .try_expect(|t| ::core::cmp::PartialEq::eq(
+              .try_expect_or_stop(|t| ::core::cmp::PartialEq::eq(
                 &$crate::__private::token::KeywordToken::keyword(t.into_data()),
                 &::core::option::Option::Some($kw),
               ))
@@ -248,7 +248,7 @@ macro_rules! keyword {
               ::core::convert::From<$crate::error::UnexpectedEot<L::Offset, Lang>>
               + ::core::convert::From<$crate::error::token::UnexpectedToken<'inp, L::Token, <L::Token as $crate::Token<'inp>>::Kind, L::Span, Lang>>,
           {
-            match inp.next()? {
+            match inp.next_or_stop()? {
               ::core::option::Option::Some(spanned) => {
                 if ::core::cmp::PartialEq::eq(
                   &$crate::__private::token::KeywordToken::keyword(spanned.data()),

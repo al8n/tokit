@@ -375,16 +375,18 @@ use tokora::{
   Balance, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser,
   cache::DefaultCache,
   emitter::Verbose,
-  error::MaybeIncomplete,
+  error::{MaybeIncomplete, MaybeTerminal},
 };
 
-// THE NEVER-RECOVERABLE LAW. `skip_then_retry` requires the emitter's error type to answer
-// one question: *are you an `Incomplete`?* An `Incomplete` is re-raised untouched, before any
-// skip and from any retry — because recovery synthesises progress over a construct that is
-// *malformed*, while an incomplete one is merely *unfinished*, and skipping it would throw
-// away input that has not arrived yet. `CalcError` is never incomplete (it parses whole
-// strings), so the trait's default answer — `false` — is the right one.
+// THE NEVER-RECOVERABLE LAW AND ITS TERMINAL DUAL. `skip_then_retry` requires the emitter's error
+// type to answer two questions: *are you an `Incomplete`?* and *are you a terminal scanner stop?*
+// Either one is re-raised untouched, before any skip and from any retry — recovery synthesises
+// progress over a *malformed* construct, while an incomplete one is merely *unfinished* (skipping
+// it throws away input that has not arrived) and a terminal stop is a limit no skip can clear.
+// `CalcError` is never either (it parses whole strings with no resource limit), so the traits'
+// default answers — `false` — are the right ones.
 impl MaybeIncomplete for CalcError {}
+impl MaybeTerminal for CalcError {}
 
 # #[derive(Debug, Clone, PartialEq)]
 # enum Stmt<'a> {

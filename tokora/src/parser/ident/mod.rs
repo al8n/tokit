@@ -46,11 +46,13 @@ impl Ident<(), ()> {
     Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   {
-    inp.try_expect(|t| t.data.is_identifier()).map(|res| {
-      res
-        .map(|tok| Ident::new(tok.into_span(), inp.slice()))
-        .into()
-    })
+    inp
+      .try_expect_or_stop(|t| t.data.is_identifier())
+      .map(|res| {
+        res
+          .map(|tok| Ident::new(tok.into_span(), inp.slice()))
+          .into()
+      })
   }
 
   /// A parser that parses an identifier, erroring when the next token is not an
@@ -96,7 +98,7 @@ impl Ident<(), ()> {
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>
       + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>,
   {
-    match inp.next()? {
+    match inp.next_or_stop()? {
       Some(spanned) => {
         if spanned.data().is_identifier() {
           Ok(Ident::new(spanned.into_span(), inp.slice()))

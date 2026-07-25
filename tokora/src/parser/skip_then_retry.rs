@@ -1,4 +1,8 @@
-use crate::{Token, error::MaybeIncomplete, input::DelimClass};
+use crate::{
+  Token,
+  error::{MaybeIncomplete, MaybeTerminal},
+  input::DelimClass,
+};
 
 use super::*;
 
@@ -96,7 +100,7 @@ where
   L: Lexer<'inp>,
   L::State: Clone,
   Ctx: ParseContext<'inp, L, Lang>,
-  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: MaybeIncomplete,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: MaybeIncomplete + MaybeTerminal,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
 {
@@ -106,10 +110,11 @@ where
   ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
     // First attempt, exactly `Recover`'s shape: speculate through `try_attempt` so a failure
     // rolls back to the pre-parse state (position, lexer state, emissions), and re-raise an
-    // `Incomplete` untouched before any skip — the never-recoverable law.
+    // `Incomplete` — or a terminal scanner stop — untouched before any skip, since no skipping
+    // clears either (the never-recoverable law and its terminal dual).
     let mut err = match inp.try_attempt(|input| self.parser.parse_input(input)) {
       Ok(output) => return Ok(output),
-      Err(e) if e.is_incomplete() => return Err(e),
+      Err(e) if e.is_incomplete() || e.is_terminal() => return Err(e),
       Err(e) => e,
     };
 
@@ -133,9 +138,9 @@ where
 
       match inp.try_attempt(|input| self.parser.parse_input(input)) {
         Ok(output) => return Ok(output),
-        // The law applies to every raise: an `Incomplete` from a retry re-raises unchanged,
-        // with no further skipping.
-        Err(e) if e.is_incomplete() => return Err(e),
+        // The law applies to every raise: an `Incomplete` or a terminal scanner stop from a retry
+        // re-raises unchanged, with no further skipping.
+        Err(e) if e.is_incomplete() || e.is_terminal() => return Err(e),
         Err(e) => {
           // The progress guard: a cycle that consumed nothing — zero-skip sync, and the
           // failed retry rolled back to the same spot — must not loop. Bail with the error
@@ -174,6 +179,7 @@ mod tests {
     Primary,
     Retry,
     Incomplete,
+    Terminal,
     Lex,
   }
 
@@ -201,6 +207,25 @@ mod tests {
   impl crate::error::MaybeIncomplete for RtErr {
     fn is_incomplete(&self) -> bool {
       matches!(self, RtErr::Incomplete)
+    }
+  }
+
+  // The terminal twin: a terminal-marked end-of-input value (the way `try_expect_or_stop` and the
+  // delimited close build one) maps to `Terminal`, kept coherent with `is_terminal()` so the
+  // terminal dual of the never-recoverable law holds for the value the input layer surfaces.
+  impl From<crate::error::UnexpectedEot<usize>> for RtErr {
+    fn from(e: crate::error::UnexpectedEot<usize>) -> Self {
+      if e.is_terminal() {
+        RtErr::Terminal
+      } else {
+        RtErr::Lex
+      }
+    }
+  }
+
+  impl crate::error::MaybeTerminal for RtErr {
+    fn is_terminal(&self) -> bool {
+      matches!(self, RtErr::Terminal)
     }
   }
 
@@ -480,6 +505,63 @@ mod tests {
     assert_eq!(calls.get(), 1, "the parser ran once; no retry");
     assert!(!classified.get(), "the classifier never runs");
     assert!(!synced.get(), "the sync predicate never runs");
+    let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+    assert_eq!(holes, 0, "nothing was skipped");
+  }
+
+  #[test]
+  fn skip_then_retry_reraises_a_terminal_stop_before_any_skip() {
+    // The terminal dual: a terminal scanner stop is not a malformed construct — skipping to a sync
+    // point and retrying only re-trips the same limit — so it must re-raise before any skip, exactly
+    // as an Incomplete does. The value is built via `From<UnexpectedEot>` with the terminal marker
+    // set (the way `try_expect_or_stop` builds it); the classifier and sync predicate never run and
+    // nothing is skipped.
+    let surfaced: RtErr = crate::error::UnexpectedEot::eot_of(4usize)
+      .into_terminal()
+      .into();
+    assert_eq!(surfaced, RtErr::Terminal);
+    assert!(surfaced.is_terminal());
+
+    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::new("1 2 3");
+    let mut emitter = Verbose::<RtErr>::new();
+    let calls = Rc::new(Cell::new(0));
+    let classified = Cell::new(false);
+    let synced = Cell::new(false);
+    {
+      let mut inp = input.as_ref(&mut emitter);
+      let mut p = SkipThenRetry::<_, _, _, (), Lex<'_>, Ctx<'_>, ()>::new(
+        FailWith {
+          err: surfaced.clone(),
+          calls: calls.clone(),
+        },
+        |_k: &RtKind| {
+          classified.set(true);
+          Balance::<()>::Neutral
+        },
+        |_t: Spanned<&RtTok, &SimpleSpan>| {
+          synced.set(true);
+          false
+        },
+      );
+      assert_eq!(
+        p.parse_input(&mut inp),
+        Err(surfaced),
+        "a terminal stop is re-raised untouched, before any skip"
+      );
+    }
+    assert_eq!(
+      calls.get(),
+      1,
+      "the parser ran once; no retry for a terminal stop"
+    );
+    assert!(
+      !classified.get(),
+      "the classifier never runs for a terminal stop"
+    );
+    assert!(
+      !synced.get(),
+      "the sync predicate never runs for a terminal stop"
+    );
     let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
     assert_eq!(holes, 0, "nothing was skipped");
   }

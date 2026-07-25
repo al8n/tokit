@@ -44,6 +44,8 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
     Sep: Punctuator<'inp, L, Lang>,
     Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
     Ctx: ParseContext<'inp, L, Lang>,
+    // The separator-slot and decision-window gates surface a terminal scanner stop as this error.
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: ContainerT<O> + SeparatorHandler<'inp, L>,
     W: Window,
     EH: EndStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang>,
@@ -56,18 +58,34 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
     let mut num_elems = 0;
 
     loop {
-      match inp.try_expect(|tok| Sep::eval(&tok.data.kind()))? {
+      // Separator-slot decision gate: `try_expect_or_stop` (not `try_expect`) so a terminal scanner
+      // stop at the separator slot surfaces as its terminal-marked end-of-input error rather than
+      // folding into `Ok(None)` and ending the list cleanly. Attempt-relative (the boundary is
+      // consulted only on the empty-cache scan path, where the lex offset equals the cursor).
+      match inp.try_expect_or_stop(|tok| Sep::eval(&tok.data.kind()))? {
         Some(tok) => {
           state = self.handle_separator(state, inp, tok, container, separator_state_handler)?;
 
           continue;
         }
         None => {
-          let (peeked, emitter) = inp.peek_with_emitter::<W>()?;
+          // Decision-window gate. `peek_with_emitter_terminal` reports (at no extra hot-path cost)
+          // whether the fill came back short because of a terminal scanner stop — a mid-window trip
+          // the condition would otherwise read as a clean end. Surface that as terminal at either
+          // swallow point (an empty window, or an `Action::Stop`); `Continue` needs no check, as the
+          // element parse re-lexes the frontier and surfaces the stop itself.
+          let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
 
           let front_span = match peeked.front() {
             None => {
               drop(peeked);
+              if terminal {
+                return Err(
+                  UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+                    .into_terminal()
+                    .into(),
+                );
+              }
               return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
             }
             Some(front) => front
@@ -80,6 +98,13 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
 
           match self.condition.decide(peeked, emitter)? {
             Action::Stop => {
+              if terminal {
+                return Err(
+                  UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+                    .into_terminal()
+                    .into(),
+                );
+              }
               return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
             }
             Action::Continue => {

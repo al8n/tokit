@@ -813,3 +813,44 @@ fn overflow_peek_trip_truncates_phantom_tokens() {
     "every staged/cached/trip token freed exactly once (no leak, no double-drop)"
   );
 }
+
+// The discrimination the decision-window combinators (`peek_then`, `peek_then_choice`, the
+// `*_while` folds) build on: a peek window truncated by a terminal scanner stop is flagged
+// `terminal`, while a genuine end of input and a full window are not. That flag is what lets those
+// combinators surface a trip rather than read the short window as a decline.
+#[test]
+fn peek_with_emitter_terminal_flags_a_trip_but_not_eof() {
+  use generic_arraydeque::typenum::U3;
+
+  let peek3 = |src: &'static str, limit: usize| {
+    let cache = crate::cache::DefaultCache::<'_, TripLexer<'_>>::default();
+    let mut emitter = crate::emitter::Silent::<TripErr>::new();
+    let mut input = crate::input::Input::<TripLexer<'_>, TripCtx<'_>, ()>::with_state_and_cache(
+      src,
+      TripLimiter::with_limit(limit),
+      cache,
+    );
+    let mut inp = input.as_ref(&mut emitter);
+    let (peeked, terminal, _e) = inp.peek_with_emitter_terminal::<U3>().unwrap();
+    (peeked.len(), terminal)
+  };
+
+  // A fresh trip during the fill: a short window, flagged terminal (1 and 2 scan, 3 trips).
+  assert_eq!(
+    peek3("1 2 3 4 5", 2),
+    (2, true),
+    "a trip-truncated window is short and flagged terminal"
+  );
+  // A genuine end of input: a short window, but NOT terminal.
+  assert_eq!(
+    peek3("1 2", usize::MAX),
+    (2, false),
+    "a genuine end of input is short but not terminal"
+  );
+  // A full window under a roomy limit: not terminal.
+  assert_eq!(
+    peek3("1 2 3 4", usize::MAX),
+    (3, false),
+    "a full window is not terminal"
+  );
+}

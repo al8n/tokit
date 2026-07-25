@@ -5,6 +5,7 @@ use generic_arraydeque::typenum::U1;
 use crate::{
   Accumulator, Decision, Emitter, ErrorOf, Lexer, ParseCtx, ParseInput, Window,
   cache::{Peeked, PeekedTokenExt},
+  error::UnexpectedEot,
   input::InputRef,
   parser::Action,
   punct::Punctuator,
@@ -156,6 +157,9 @@ where
   Sep: Punctuator<'inp, L, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang>,
   Peek: FnMut(&L::Token) -> bool,
+  // The `separated_while` engine surfaces a terminal scanner stop at its separator/decision gates
+  // as this end-of-input error.
+  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang>| {
     item
@@ -268,6 +272,9 @@ where
   Lang: ?Sized,
   P: ParseInput<'inp, L, T, Ctx, Lang>,
   Until: FnMut(&L::Token) -> bool,
+  // The `repeated_while` engine surfaces a terminal scanner stop at its decision gate as this
+  // end-of-input error.
+  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang>| {
     item

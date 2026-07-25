@@ -293,6 +293,9 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
     W: Window,
     Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>,
     Ctx: ParseContext<'inp, L, Lang>,
+    // The decision-window gate surfaces a mid-window terminal scanner stop as this end-of-input
+    // error.
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: crate::container::Container<O>,
     RH: RepeatedHandler<'inp, 'c, O, L, Ctx, Lang>,
   {
@@ -302,10 +305,23 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
     let mut nums = 0;
 
     loop {
-      let (peeked, emitter) = inp.peek_with_emitter::<W>()?;
+      // Decision-window gate. `peek_with_emitter_terminal` reports whether the fill came back short
+      // because of a terminal scanner stop; the flag is computed by the peek itself, so the
+      // `Continue` (success) path pays nothing extra. A mid-window trip hands the condition a
+      // truncated window it naturally reads as `Stop`, so surface that as terminal instead of a
+      // clean end — an enclosing recovery re-raises it. `Continue` needs no check: the element parse
+      // re-lexes the frontier and surfaces the stop itself.
+      let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
 
       match self.condition.decide(peeked, emitter)? {
         Action::Stop => {
+          if terminal {
+            return Err(
+              UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+                .into_terminal()
+                .into(),
+            );
+          }
           let span = inp.span_since(&anchor);
           return rh.on_stop(nums, inp, &anchor).map(|_| span);
         }

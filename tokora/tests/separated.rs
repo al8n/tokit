@@ -14,6 +14,7 @@ use tokora::{
     UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
   },
   error::{
+    UnexpectedEot,
     syntax::{FullContainer, MissingSyntax, TooFew, TooMany},
     token::{MissingToken, SeparatedError, UnexpectedToken},
   },
@@ -72,6 +73,14 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, Kind, S, La
 
 impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for SepError {
   fn from(_: MissingSyntax<O, Lang>) -> Self {
+    SepError
+  }
+}
+
+// The separated driver's separator-slot decision gate surfaces a terminal scanner stop as this
+// end-of-input error (the bound the delimited variants already required).
+impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for SepError {
+  fn from(_: UnexpectedEot<O, Lang>) -> Self {
     SepError
   }
 }

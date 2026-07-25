@@ -1,4 +1,4 @@
-use crate::{ErrorOf, Lexer, ParseCtx, Token, input::InputRef};
+use crate::{ErrorOf, Lexer, ParseCtx, Token, error::UnexpectedEot, input::InputRef};
 
 /// The result [`peek_kind`] returns: the next token's kind, `None` at end of input, or
 /// the propagated error.
@@ -97,9 +97,14 @@ where
   L: Lexer<'inp>,
   Ctx: ParseCtx<'inp, L, Lang>,
   Lang: ?Sized,
+  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>,
 {
   let mut kind = None;
-  inp.try_expect(|spanned| {
+  // `try_expect_or_stop` with an always-decline predicate: it captures the next token's
+  // kind and leaves the token in place (so a committed arm still parses it), yet a terminal
+  // scanner stop at the cursor surfaces as an end-of-input error instead of an absent-token
+  // `None` — the dispatch must not read a tripped limit as "no token here".
+  inp.try_expect_or_stop(|spanned| {
     kind = Some(<L::Token as Token<'inp>>::kind(spanned.data));
     false
   })?;
