@@ -169,7 +169,14 @@ where
       // Built through `UnexpectedEnd` (not the `UnexpectedEot` alias) so the expected-set element
       // type is inferred as the token kind from `self.table`, matching the `From` bound above.
       Dispatched::Eot => {
-        Err(UnexpectedEnd::eot_expected_one_of(inp.span().end(), self.table).into())
+        // A terminal scanner stop at the dispatch point peeks as `None` too; mark it terminal so an
+        // enclosing recovery re-raises it, while a genuine end of input stays recoverable.
+        let eot = UnexpectedEnd::eot_expected_one_of(inp.span().end(), self.table);
+        if inp.at_latched_boundary() {
+          Err(eot.into_terminal().into())
+        } else {
+          Err(eot.into())
+        }
       }
       Dispatched::Miss { span, found } => Err(
         UnexpectedToken::<_, _, _, Lang>::expected_one_of(span, self.table)

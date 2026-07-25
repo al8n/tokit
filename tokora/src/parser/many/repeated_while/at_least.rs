@@ -11,6 +11,7 @@ where
   Condition: Decision<'inp, L, Ctx::Emitter, W, Lang>,
   W: Window,
   Ctx::Emitter: TooFewEmitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Ctx: ParseContext<'inp, L, Lang>,
   Container: Default + crate::container::Container<O>,
 {
@@ -39,6 +40,7 @@ where
   Condition: Decision<'inp, L, Ctx::Emitter, W, Lang>,
   W: Window,
   Ctx::Emitter: TooFewEmitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Ctx: ParseContext<'inp, L, Lang>,
   Container: Default + crate::container::Container<O>,
 {
@@ -72,6 +74,7 @@ where
   Condition: Decision<'inp, L, Ctx::Emitter, W, Lang>,
   W: Window,
   Ctx::Emitter: TooFewEmitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Ctx: ParseContext<'inp, L, Lang>,
   Container: crate::container::Container<O>,
 {

@@ -101,6 +101,7 @@ that attach position/text to the token. [`expect`](crate::parser::expect) is pre
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -232,6 +233,7 @@ unwrap(self) -> Unwrapped<…>                          // where Self: ParseInpu
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -364,6 +366,7 @@ consumed. `spanned`/`sliced`/`located` are taught in [chapter 3](super::ch03_com
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -487,6 +490,7 @@ and_then<T, U>(self, f: T) -> AndThen<…>             // f: FnMut(O) -> Result<
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -619,6 +623,7 @@ the bridges between the two trait worlds.
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -760,6 +765,7 @@ fold<Init, Acc>(self, init: Init, acc: Acc) -> Fold<…> // Init: FnMut() -> O, 
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -882,6 +888,7 @@ separated_while<Sep, Cond, W>(self, cond: Cond) -> SeparatedWhile<…>  // eleme
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1018,6 +1025,7 @@ bounded(self, min, max)         delimited::<Delim>(self) -> DelimitedBy<Self, De
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1151,6 +1159,7 @@ list_of<…>(item: P, until: Until) -> impl FnMut(&mut InputRef) -> Result<Vec<T
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1299,6 +1308,7 @@ try_delimited<D, …>(inner) / try_parens(inner) / … -> the same, wrapped in O
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Comma, Semi, LParen, RParen, LBracket, RBracket, LBrace, RBrace, LAngle, RAngle }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1447,6 +1457,7 @@ node_at(mark: EventMark, kind: u16, p: P) -> NodeAt<P>
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1570,6 +1581,7 @@ no-op over a non-collecting emitter.
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
+# impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Ident(char), Comma, Semi, Plus, Star, LParen, RParen, LBracket, RBracket }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

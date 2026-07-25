@@ -94,7 +94,7 @@ macro_rules! try_expect_punct {
           <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>
             + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>,
         {
-          match self.next()? {
+          match self.next_or_stop()? {
             Some(spanned) => {
               <Spanned<L::Token, L::Span> as SpannedPunctuatorToken<'inp, L, Lang>>::[< expect_ $punct >](spanned).map_err(Into::into)
             },
@@ -304,9 +304,14 @@ where
       }));
     }
     // E4: an already-latched poison boundary at the cursor is a terminal stop,
-    // not proof of absence — surface the committed form's end-of-input error.
+    // not proof of absence — surface the committed form's end-of-input error,
+    // marked terminal so recovery re-raises it.
     if self.reached_boundary(self.offset()) {
-      return Err(UnexpectedEot::eot_of(self.span().end()).into());
+      return Err(
+        UnexpectedEot::eot_of(self.span().end())
+          .into_terminal()
+          .into(),
+      );
     }
     let mut lex_at = self.offset().clone();
     let mut lexer = self.lexer();
@@ -325,8 +330,12 @@ where
       }
       // E3: a fresh trip whose diagnostic a recovering emitter accepted. (A fatal
       // emitter never reaches this arm — its rejection propagated out of
-      // `scan_with` above.)
-      Scan::Tripped => Err(UnexpectedEot::eot_of(self.span().end()).into()),
+      // `scan_with` above.) Marked terminal so recovery re-raises it.
+      Scan::Tripped => Err(
+        UnexpectedEot::eot_of(self.span().end())
+          .into_terminal()
+          .into(),
+      ),
       Scan::Eof => {
         // E5 belt-and-braces: an exhaustion produced by refusing to cross a
         // pre-latched boundary is terminal, not genuine end of input. (Under
@@ -334,7 +343,11 @@ where
         // non-boundary exhaustion, so Eof implies boundary there — this check
         // makes that explicit in Complete mode too.) One cold compare.
         if self.reached_boundary(&lex_at) {
-          Err(UnexpectedEot::eot_of(self.span().end()).into())
+          Err(
+            UnexpectedEot::eot_of(self.span().end())
+              .into_terminal()
+              .into(),
+          )
         } else {
           Ok(None) // E2: genuine end of input — the documented decline.
         }
@@ -492,6 +505,57 @@ where
       return self.try_expect_map_on_input(pred);
     }
 
+    let mut output = None;
+    Ok(
+      self
+        .cache
+        .pop_front_if(|t| match pred(t.token().copied()) {
+          Some(out) => {
+            output = Some(out);
+            true
+          }
+          None => false,
+        })
+        .map(|tok| {
+          let (lexed, state) = tok.into_components();
+          let (span, tok) = lexed.into_components();
+          self.commit_token(&tok, &span);
+          *self.state = state;
+          (output.unwrap(), Spanned::new(span, tok))
+        }),
+    )
+  }
+
+  /// Tries to advance to the next valid token, mapping it through `pred` — like
+  /// [`try_expect_map`](Self::try_expect_map), except that a **terminal stop is an error,
+  /// never a decline**.
+  ///
+  /// This is the map-shaped twin of [`try_expect_or_stop`](Self::try_expect_or_stop): `Ok(None)`
+  /// means the thing attempted is **definitely absent** (the next valid token mapped to `None` and
+  /// stays at the cache front, or the input has genuinely ended), while a terminal stop — a
+  /// resource-limit trip on this scan, or an already-latched poison boundary — surfaces as the same
+  /// terminal-marked end-of-input error the committed forms raise. It is the primitive a map-shaped
+  /// attempt (the token-pratt LHS/RHS classifier) should build on when a decline commits it to a
+  /// different parse.
+  #[inline(always)]
+  pub fn try_expect_map_or_stop<O, F>(
+    &mut self,
+    mut pred: F,
+  ) -> Result<
+    Option<(O, Spanned<L::Token, L::Span>)>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
+  >
+  where
+    F: FnMut(Spanned<&L::Token, &L::Span>) -> Option<O>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+  {
+    trace_event!(self, "try_expect_map_or_stop");
+    if self.cache.is_empty() {
+      return self.try_expect_map_or_stop_on_input(pred);
+    }
+
+    // A cached token is a REAL token: a decline against it is definite absence —
+    // identical to `try_expect_map`'s cache arm.
     let mut output = None;
     Ok(
       self
@@ -679,6 +743,67 @@ where
         }
       }
       Scan::Tripped | Scan::Eof => Ok(None),
+    }
+  }
+
+  /// The cache-empty scan path of [`try_expect_map_or_stop`](Self::try_expect_map_or_stop), split out to mirror `try_expect_map`'s shape and forced inline alongside it into the token-pratt hot loop.
+  #[inline(always)]
+  fn try_expect_map_or_stop_on_input<O, F>(
+    &mut self,
+    mut pred: F,
+  ) -> Result<
+    Option<(O, Spanned<L::Token, L::Span>)>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
+  >
+  where
+    F: FnMut(Spanned<&L::Token, &L::Span>) -> Option<O>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+  {
+    // An already-latched poison boundary at the cursor is a terminal stop, not proof
+    // of absence — mirrors `try_expect_or_stop`'s E4.
+    if self.reached_boundary(self.offset()) {
+      return Err(
+        UnexpectedEot::eot_of(self.span().end())
+          .into_terminal()
+          .into(),
+      );
+    }
+    let mut lex_at = self.offset().clone();
+    let mut lexer = self.lexer();
+    match self.scan_with(&mut lexer, &mut lex_at, &AtCursor)? {
+      Scan::Token(tok) => match pred(tok.as_ref()) {
+        Some(output) => {
+          self.commit_token(tok.data(), tok.span_ref());
+          *self.state = lexer.into_state();
+          Ok(Some((output, tok)))
+        }
+        None => {
+          let (span, t) = tok.into_components();
+          let ct = CachedToken::new(Spanned::new(span, t), lexer.state().clone());
+          let _ = self.cache_push_back(ct);
+          Ok(None) // definite absence — the token stays at the cache front.
+        }
+      },
+      // A fresh trip whose diagnostic a recovering emitter accepted, marked terminal so
+      // recovery re-raises it — mirrors `try_expect_or_stop`'s E3.
+      Scan::Tripped => Err(
+        UnexpectedEot::eot_of(self.span().end())
+          .into_terminal()
+          .into(),
+      ),
+      Scan::Eof => {
+        // An exhaustion produced by refusing to cross a pre-latched boundary is terminal,
+        // not genuine end of input — mirrors `try_expect_or_stop`'s E5.
+        if self.reached_boundary(&lex_at) {
+          Err(
+            UnexpectedEot::eot_of(self.span().end())
+              .into_terminal()
+              .into(),
+          )
+        } else {
+          Ok(None)
+        }
+      }
     }
   }
 }

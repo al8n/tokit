@@ -248,6 +248,10 @@ macro_rules! impl_separated_parse {
       Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>
         + FullContainerEmitter<'inp, L, Lang>
         $($emitters)*,
+      // The separator-slot decision gate surfaces a terminal scanner stop as this end-of-input
+      // error (`try_expect_or_stop`); the plain separated families carry the bound the delimited
+      // ones already required.
+      <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L>,
     {
@@ -273,6 +277,10 @@ macro_rules! impl_separated_parse {
       Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>
         + FullContainerEmitter<'inp, L, Lang>
         $($emitters)*,
+      // The separator-slot decision gate surfaces a terminal scanner stop as this end-of-input
+      // error (`try_expect_or_stop`); the plain separated families carry the bound the delimited
+      // ones already required.
+      <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L>,
     {
@@ -298,6 +306,10 @@ macro_rules! impl_separated_parse {
       Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>
         + FullContainerEmitter<'inp, L, Lang>
         $($emitters)*,
+      // The separator-slot decision gate surfaces a terminal scanner stop as this end-of-input
+      // error (`try_expect_or_stop`); the plain separated families carry the bound the delimited
+      // ones already required.
+      <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: ContainerT<O> + SeparatorHandler<'inp, L>,
     {
@@ -328,6 +340,10 @@ macro_rules! impl_separated_parse {
       Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>
         + FullContainerEmitter<'inp, L, Lang>
         $($emitters)*,
+      // The separator-slot decision gate surfaces a terminal scanner stop as this end-of-input
+      // error (`try_expect_or_stop`); the plain separated families carry the bound the delimited
+      // ones already required.
+      <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: ContainerT<O> + SeparatorHandler<'inp, L>,
     {
@@ -929,6 +945,10 @@ macro_rules! impl_separated_while_parse {
       Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>
         + FullContainerEmitter<'inp, L, Lang>
         $($emitters)*,
+      // The separator-slot decision gate surfaces a terminal scanner stop as this end-of-input
+      // error (`try_expect_or_stop`); the plain separated families carry the bound the delimited
+      // ones already required.
+      <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L>,
       W: Window,
@@ -956,6 +976,10 @@ macro_rules! impl_separated_while_parse {
       Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>
         + FullContainerEmitter<'inp, L, Lang>
         $($emitters)*,
+      // The separator-slot decision gate surfaces a terminal scanner stop as this end-of-input
+      // error (`try_expect_or_stop`); the plain separated families carry the bound the delimited
+      // ones already required.
+      <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L>,
       W: Window,
@@ -983,6 +1007,10 @@ macro_rules! impl_separated_while_parse {
       Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>
         + FullContainerEmitter<'inp, L, Lang>
         $($emitters)*,
+      // The separator-slot decision gate surfaces a terminal scanner stop as this end-of-input
+      // error (`try_expect_or_stop`); the plain separated families carry the bound the delimited
+      // ones already required.
+      <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: ContainerT<O> + SeparatorHandler<'inp, L>,
       W: Window,
@@ -1015,6 +1043,10 @@ macro_rules! impl_separated_while_parse {
       Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>
         + FullContainerEmitter<'inp, L, Lang>
         $($emitters)*,
+      // The separator-slot decision gate surfaces a terminal scanner stop as this end-of-input
+      // error (`try_expect_or_stop`); the plain separated families carry the bound the delimited
+      // ones already required.
+      <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: ContainerT<O> + SeparatorHandler<'inp, L>,
       W: Window,

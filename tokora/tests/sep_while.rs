@@ -25,6 +25,7 @@ use tokora::{
     UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
   },
   error::{
+    UnexpectedEot,
     syntax::{FullContainer, MissingSyntax, TooFew, TooMany},
     token::{MissingToken, SeparatedError, UnexpectedToken},
   },
@@ -86,6 +87,14 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, Kind, S, La
 
 impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for WhileError {
   fn from(_: MissingSyntax<O, Lang>) -> Self {
+    WhileError
+  }
+}
+
+// The separated_while driver's separator-slot and decision-window gates surface a terminal scanner
+// stop as this end-of-input error (the bound the delimited variants already required).
+impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for WhileError {
+  fn from(_: UnexpectedEot<O, Lang>) -> Self {
     WhileError
   }
 }

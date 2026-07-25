@@ -22,6 +22,7 @@ use tokora::{
     UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
   },
   error::{
+    UnexpectedEot,
     syntax::{FullContainer, MissingSyntax, TooFew, TooMany},
     token::{MissingToken, SeparatedError, SeparatorPosition, UnexpectedToken},
   },
@@ -69,6 +70,14 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, Kind, S, La
 impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for SepErr {
   fn from(_: MissingSyntax<O, Lang>) -> Self {
     SepErr::Sep(SeparatorPosition::Element)
+  }
+}
+
+// A terminal scanner stop at the separator slot surfaces as this end-of-input error — not a
+// separator-position diagnostic.
+impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for SepErr {
+  fn from(_: UnexpectedEot<O, Lang>) -> Self {
+    SepErr::Other
   }
 }
 

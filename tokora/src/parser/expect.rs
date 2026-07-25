@@ -125,7 +125,7 @@ where
     &mut self,
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   ) -> Result<Spanned<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-    match inp.next()? {
+    match inp.next_or_stop()? {
       None => Err(UnexpectedEot::eot_of(inp.span().end()).into()),
       Some(tok) => match self.is.check(tok.data()) {
         Ok(_) => Ok(tok),
@@ -235,6 +235,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Classifier: Check<L::Token>,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
 {
   #[inline(always)]
   fn try_parse_input(
@@ -255,6 +256,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Classifier: Check<L::Token>,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
 {
   #[inline(always)]
   fn try_parse_input(
@@ -265,7 +267,7 @@ where
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
   > {
     inp
-      .try_expect(|tok| self.is.check(tok.data()))
+      .try_expect_or_stop(|tok| self.is.check(tok.data()))
       .map(Into::into)
   }
 }
@@ -278,6 +280,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Classifier: Check<L::Token>,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
 {
   #[inline(always)]
   fn try_parse_input(
@@ -305,6 +308,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Classifier: Check<L::Token>,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
 {
   #[inline(always)]
   fn try_parse_input(
@@ -337,6 +341,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Classifier: Check<L::Token>,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
 {
   #[inline(always)]
   fn try_parse_input(

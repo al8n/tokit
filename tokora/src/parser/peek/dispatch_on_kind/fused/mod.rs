@@ -61,8 +61,13 @@ use crate::{
 /// unconsumed. A hit still commits the head and returns [`ParseAttempt::Accept`]; an error
 /// from the selected branch remains an `Err`.
 ///
-/// Both routes use [`try_expect_map`](InputRef::try_expect_map), so lexer errors keep the
-/// existing emission behavior even if the dispatch ultimately declines.
+/// The committed route uses [`try_expect_map`](InputRef::try_expect_map); the tentative route uses
+/// its terminal-aware twin [`try_expect_map_or_stop`](InputRef::try_expect_map_or_stop). Both keep
+/// lexer errors' existing emission behavior even when the dispatch ultimately declines. The
+/// tentative route additionally tells a real non-table token (a decline) apart from a terminal
+/// scanner stop — a resource-limit trip, or the poison boundary it latches — **attempt-relatively**
+/// (against the token in hand, never the lex offset), surfacing the terminal stop as an `Err` so a
+/// choice caller cannot commit a different alternative over a tripped limit.
 ///
 /// # Why this combinator can never meet a partial-input frontier token
 ///
@@ -187,9 +192,18 @@ where
             .with_found(found)
             .into(),
         ),
-        // End of input (or a latched limit boundary) at a committed dispatch point:
-        // the whole table as the expected set, exactly as `DispatchOnKind`'s `Eot` arm.
-        None => Err(UnexpectedEnd::eot_expected_one_of(inp.span().end(), table).into()),
+        // End of input (or a latched limit boundary) at a committed dispatch point: the whole
+        // table as the expected set, exactly as `DispatchOnKind`'s `Eot` arm. A terminal scanner
+        // stop maps to `None` here too, so mark it terminal — an enclosing recovery re-raises it —
+        // while a genuine end of input stays recoverable.
+        None => {
+          let eot = UnexpectedEnd::eot_expected_one_of(inp.span().end(), table);
+          if inp.at_latched_boundary() {
+            Err(eot.into_terminal().into())
+          } else {
+            Err(eot.into())
+          }
+        }
       },
     }
   }
@@ -203,6 +217,11 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   <L::Token as Token<'inp>>::Kind: 'static,
   Lang: ?Sized,
+  // The tentative route surfaces a terminal stop through `try_expect_map_or_stop`, whose terminal
+  // end-of-input error uses the primitive's own (default) expected set — hence the plain
+  // `UnexpectedEot<L::Offset, Lang>` bound the whole `_or_stop` family carries, not the
+  // table-kinded one the committed route builds.
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
 {
   #[inline(always)]
   fn try_parse_input(
@@ -216,10 +235,18 @@ where
       "dispatch table has more entries than branches",
     );
 
-    // `try_expect_map` commits only hits. Its miss/EOT path leaves valid input in place
-    // (while preserving lexer-error emission), which is exactly a tentative decline.
+    // `try_expect_map_or_stop` commits only hits, and it tells definite absence apart from a
+    // terminal scanner stop **attempt-relatively** — against the token in hand, not the lex offset.
+    // A cache-hit classifier miss (the next valid token is a real, non-table token, left at the
+    // cache front) and a genuine end of input both return `Ok(None)` = a tentative decline; a
+    // genuine scan trip, or an already-latched poison boundary at the cursor, instead surfaces the
+    // committed forms' terminal end-of-input error on the `Err` channel. This is why a prior wide
+    // peek that latched the lex offset ahead of the cursor cannot mis-charge an ordinary miss as
+    // terminal (the lex-offset `at_latched_boundary` witness this route used did): a choice caller
+    // still takes another alternative on a real non-table token, while a tripped limit is never
+    // swallowed as a decline.
     let table = self.table;
-    match inp.try_expect_map(|tok| {
+    match inp.try_expect_map_or_stop(|tok| {
       table
         .iter()
         .position(|candidate| *candidate == tok.data.kind())
@@ -229,6 +256,9 @@ where
         .parser
         .parse_token_choice(inp, &Branch::from_index(index), head)
         .map(ParseAttempt::Accept),
+      // Definite absence — a real non-table token at the cache front, or a genuine end of input —
+      // is a tentative decline. A terminal scanner stop never reaches here: the primitive raised
+      // it on the `Err` channel above.
       None => Ok(ParseAttempt::Decline),
     }
   }

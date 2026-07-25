@@ -45,6 +45,8 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
     Ctx: ParseContext<'inp, L, Lang>,
     Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, Lang>,
+    // The separator-slot decision gate surfaces a terminal scanner stop as this end-of-input error.
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: ContainerT<O> + SeparatorHandler<'inp, L>,
     EH: EndStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang, Cmpl>,
     CH: ContinueStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang, Cmpl>,
@@ -58,7 +60,14 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
 
     loop {
       let mut ps = None;
-      let peek_span = match inp.try_expect(|t| {
+      // Separator-slot decision gate. `try_expect_or_stop` (not `try_expect`) so a terminal
+      // scanner stop at the separator slot surfaces as its terminal-marked end-of-input error
+      // rather than folding into `Ok(None)` and ending the list cleanly — the peek-layer twin of
+      // the element gate's terminal re-raise. Its terminal report is attempt-relative (it consults
+      // the boundary only on the empty-cache scan path, where the lex offset equals the cursor), so
+      // a prefilled cache cannot false-positive it; a genuine absence (wrong token / real EOI) still
+      // declines to `Ok(None)`.
+      let peek_span = match inp.try_expect_or_stop(|t| {
         if Sep::eval(&t.data.kind()) {
           true
         } else {
@@ -78,10 +87,13 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
       };
 
       match self.f.try_parse_input(inp) {
-        // The never-recoverable gate (0.3.0): a frontier `Incomplete` from the element
-        // parser re-raises untouched — never spent as a diagnostic. Constant-false under
-        // `Complete`.
-        Err(e) if Cmpl::is_incomplete_error(&e) => return Err(e),
+        // The never-recoverable gate and its terminal dual: a frontier `Incomplete` (const-false
+        // under `Complete`) or a terminal scanner stop from the element parser re-raises untouched —
+        // never spent as a diagnostic, since no further input clears either. The terminal witness
+        // reads the *committed cursor* ([`at_committed_boundary`]), so a boundary a prior lookahead
+        // already latched does not mis-charge an ordinary element failure short of it. Failure-arm
+        // only — a successful element does zero terminal work; no `MaybeTerminal` bound needed.
+        Err(e) if Cmpl::is_incomplete_error(&e) || inp.at_committed_boundary() => return Err(e),
         Err(e) => {
           let span = inp.span_since(&cursor);
           inp.emitter().emit_error(Spanned::new(span, e))?;

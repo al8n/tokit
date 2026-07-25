@@ -12,7 +12,7 @@ use crate::{
   ParseContext, Token, Window,
   cache::{CachedToken, CachedTokenOf, CachedTokenRefOf, MaybeRefCachedTokenOf, Peeked},
   emitter::Emitter,
-  error::token::UnexpectedToken,
+  error::{UnexpectedEot, token::UnexpectedToken},
   span::Spanned,
   utils::Expected,
 };
@@ -396,6 +396,40 @@ where
   #[inline(always)]
   fn reached_boundary(&self, pos: &L::Offset) -> bool {
     matches!(self.poison_boundary.as_ref(), Some(b) if pos >= b)
+  }
+
+  /// Returns whether a terminal scanner stop sits at or past the **lex offset** (the back of the
+  /// cache).
+  ///
+  /// This is the witness for a **cache-empty** program point — a committed peek/dispatch that maps
+  /// its `None` outcome (`try_expect*`'s empty-cache scan path, [`peek`](Self::peek), the fused
+  /// dispatch EOT arm): there the lex offset equals the committed cursor, so reading the offset is
+  /// exactly reading the cursor. It is *not* attempt-relative where a prefilled cache can advance
+  /// the lex offset to or past the boundary while the committed cursor lags behind — a resilient
+  /// collection loop, whose element may only replay cached tokens, must use
+  /// [`at_committed_boundary`](Self::at_committed_boundary) instead.
+  #[inline(always)]
+  pub(crate) fn at_latched_boundary(&self) -> bool {
+    self.reached_boundary(self.offset())
+  }
+
+  /// Returns whether a terminal scanner stop — a resource-limit trip, or the poison boundary it
+  /// latches — sits at or before the **committed cursor**.
+  ///
+  /// The attempt-relative witness for the resilient collection loops. A trip latches at the cursor
+  /// it scans from ([`AtCursor`]); an element that reaches the poison consumes up to it, so its
+  /// committed cursor lands at or past the boundary. Reading the *committed cursor* — not the lex
+  /// offset [`at_latched_boundary`](Self::at_latched_boundary) reads — is what makes this
+  /// attempt-relative: a prior lookahead can leave the cache prefilled with the lex offset already
+  /// at the boundary, but an element that fails *ordinarily* while only replaying cached tokens
+  /// before it leaves the committed cursor short of the boundary, so this stays `false` and the
+  /// ordinary failure is not mis-charged as terminal. Those loops re-raise the element's own error
+  /// on it — the input-side twin of [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal),
+  /// needing no terminal bound on the emitter error type. Kept on the failure arm, so a successful
+  /// element does zero terminal work.
+  #[inline(always)]
+  pub(crate) fn at_committed_boundary(&self) -> bool {
+    self.reached_boundary(self.cursor().as_inner())
   }
 
   /// Lexes the next token unless doing so would cross the poison boundary.
@@ -1807,6 +1841,102 @@ where
         Ok(Some(tok))
       }
       Scan::Tripped | Scan::Eof => Ok(None),
+    }
+  }
+
+  /// Consumes the next valid token like [`next`](Self::next), except that a **terminal stop is an
+  /// error, never a silent end of input** — the committed-consume sibling of
+  /// [`try_expect_or_stop`](Self::try_expect_or_stop).
+  ///
+  /// [`next`](Self::next) folds three distinct outcomes into `Ok(None)`: a genuine end of input, a
+  /// fresh resource-limit trip (a `Scan::Tripped`), and an already-latched poison boundary at the
+  /// cursor. For a **committed** leaf — one that turns `next() == None` into an
+  /// [`UnexpectedEot`](crate::error::UnexpectedEot) — that fold is a false negative: a fresh trip
+  /// becomes a plain, *recoverable* end-of-input error, so [`Recover`](crate::parser::Recover)
+  /// synthesizes a value and re-enters the scanner, re-tripping the same limit instead of re-raising
+  /// it. No input ever clears a tripped limit, so a terminal stop must be re-raised untouched exactly
+  /// as an [`Incomplete`](crate::error::Incomplete) is — see the [never-recoverable
+  /// dual](crate::error::MaybeTerminal).
+  ///
+  /// So this draws the same split the attempt/decline primitives draw:
+  ///
+  /// - `Ok(Some(tok))` — a real consumed token;
+  /// - `Ok(None)` — a **genuine** end of input; the caller builds its plain `UnexpectedEot`, exactly
+  ///   as it did off `next() == None`;
+  /// - `Err(..)` — a terminal stop (a fresh trip, or the poison boundary it latches), surfaced as the
+  ///   committed form's end-of-input error already marked terminal via
+  ///   [`into_terminal`](crate::error::UnexpectedEnd::into_terminal), so recovery re-raises it. A
+  ///   fatal emitter's rejection of the trip diagnostic still propagates from the scan itself.
+  ///
+  /// # Zero-cost on the success path
+  ///
+  /// The terminal classification lives only on the cold exhaustion arms — the pre-latched-boundary
+  /// short-circuit and the `Tripped`/`Eof` outcomes of the one scan. A cache hit and a
+  /// `Scan::Token` return the token with no terminal work, so this is [`next`](Self::next) plus a
+  /// single boundary compare on the end-of-input arm. The terminal signal rides inside the
+  /// `UnexpectedEot` value, so no [`MaybeTerminal`](crate::error::MaybeTerminal) bound reaches the
+  /// caller — the same boundary-witness discipline the resilient collection loops gate on.
+  pub fn next_or_stop(
+    &mut self,
+  ) -> Result<Option<Spanned<L::Token, L::Span>>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+  {
+    if let Some(cached_token) = self.cache_mut().pop_front() {
+      // A cached token is a REAL token (the cache never holds errors): never terminal — the identical
+      // fast path `next` takes.
+      let (spanned_lexed, extras) = cached_token.into_components();
+      let (span, lexed) = spanned_lexed.into_components();
+      self.commit_token(&lexed, &span);
+      *self.state = extras;
+      return Ok(Some(Spanned::new(span, lexed)));
+    }
+
+    // A sticky limit trip latches a poison boundary at the cursor: a terminal stop, not genuine end
+    // of input, so surface the terminal-marked end-of-input error where `next` returns a plain
+    // `None`. Mirrors `try_expect_or_stop`'s E4.
+    if self.reached_boundary(self.offset()) {
+      return Err(
+        UnexpectedEot::eot_of(self.span().end())
+          .into_terminal()
+          .into(),
+      );
+    }
+
+    // `next` commits no progress before a poisoned or exhausted outcome, so it latches at the cursor
+    // (`AtCursor`); the exhaustion is classified on the cold arms below.
+    let mut lex_at = self.offset().clone();
+    let mut lexer = self.lexer();
+    match self.scan_with(&mut lexer, &mut lex_at, &AtCursor)? {
+      Scan::Token(tok) => {
+        self.commit_token(tok.data(), tok.span_ref());
+        *self.state = lexer.into_state();
+        Ok(Some(tok))
+      }
+      // A fresh trip whose diagnostic a recovering emitter accepted (a fatal emitter's rejection
+      // already propagated out of `scan_with`), marked terminal so recovery re-raises it. Mirrors
+      // `try_expect_or_stop`'s E3.
+      Scan::Tripped => Err(
+        UnexpectedEot::eot_of(self.span().end())
+          .into_terminal()
+          .into(),
+      ),
+      Scan::Eof => {
+        // An exhaustion produced by refusing to cross a pre-latched boundary is terminal, not genuine
+        // end of input (under `Partial` non-final, `scan_with` already surfaced `Incomplete` for every
+        // non-boundary exhaustion, so `Eof` implies boundary there — this makes it explicit in
+        // `Complete` mode too). One cold compare. Mirrors `try_expect_or_stop`'s E5.
+        if self.reached_boundary(&lex_at) {
+          Err(
+            UnexpectedEot::eot_of(self.span().end())
+              .into_terminal()
+              .into(),
+          )
+        } else {
+          Ok(None) // genuine end of input — the documented plain-EOT case.
+        }
+      }
     }
   }
 

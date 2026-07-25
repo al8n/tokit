@@ -58,7 +58,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     // Sync the input to the next token boundary, any lexer errors will be emitted during this process.
     let anchor = inp.cursor().clone();
     let mut first_kind = None;
-    let left_delimiter = inp.try_expect(|tok| {
+    let left_delimiter = inp.try_expect_or_stop(|tok| {
       let (span, tok) = tok.into_components();
       match Delim::is_open(&tok.kind()) {
         false => {
@@ -89,8 +89,9 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
       (None, Some(wrong)) => {
         inp.emitter().emit_unexpected_token(wrong)?;
       }
-      // Nothing was observed at the opener position: a genuinely empty opener slot (a terminal
-      // scanner stop lands here too — its predicate never ran) — the one EOI path.
+      // Nothing was observed at the opener position: a genuinely empty opener slot — the one
+      // genuine EOI path. A terminal scanner stop no longer lands here — `try_expect_or_stop`
+      // surfaces it directly above — so this end-of-input error stays recoverable.
       (None, None) => {
         return Err(UnexpectedEot::eot_of(inp.cursor().as_inner().clone()).into());
       }
@@ -122,7 +123,13 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
           return Ok(inp.span_since(&anchor));
         }
         None => {
-          let (peeked, emitter) = inp.peek_with_emitter::<W>()?;
+          // Decision-window gate. `peek_with_emitter_terminal` reports (at no extra hot-path cost)
+          // whether the fill came back short because of a terminal scanner stop. The empty-window
+          // path below already reclassifies the close position with `probe_close` (which surfaces
+          // `Tripped`); this flag closes the remaining gap — a mid-window trip *past* the cached
+          // front token, where the condition reads `Stop` and `probe_close` would then see the
+          // front token and miss the stop.
+          let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
 
           let front_span = match peeked.front() {
             None => {
@@ -158,7 +165,11 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                 // A terminal scanner stop: its own diagnostic already explains the
                 // halt — propagate it and add no `Unclosed`.
                 CloseStatus::Tripped => {
-                  return Err(UnexpectedEot::eot_of(inp.cursor().as_inner().clone()).into());
+                  return Err(
+                    UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+                      .into_terminal()
+                      .into(),
+                  );
                 }
               }
 
@@ -178,6 +189,15 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
 
           match parser.condition.decide(peeked, emitter)? {
             Action::Stop => {
+              // A mid-window terminal scanner stop is not a clean end of list: surface it ahead of
+              // any close-miss diagnostic, so an enclosing recovery re-raises it.
+              if terminal {
+                return Err(
+                  UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+                    .into_terminal()
+                    .into(),
+                );
+              }
               // PRIMARY — classify the close position WITHOUT consuming (`probe_close`
               // leaves the scanned token cached) and emit the close-status diagnostic
               // before the end-state secondaries: under a fail-fast emitter
@@ -206,7 +226,11 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                 // A terminal scanner stop: its own diagnostic already explains the
                 // halt — propagate it and add no `Unclosed`.
                 CloseStatus::Tripped => {
-                  return Err(UnexpectedEot::eot_of(inp.cursor().as_inner().clone()).into());
+                  return Err(
+                    UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+                      .into_terminal()
+                      .into(),
+                  );
                 }
               }
 

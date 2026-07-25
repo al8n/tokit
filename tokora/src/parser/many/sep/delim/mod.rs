@@ -62,7 +62,7 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     // Sync the input to the next token boundary, any lexer errors will be emitted during this process.
     let anchor = inp.cursor().clone();
     let mut first_kind = None;
-    let left_delimiter = inp.try_expect(|tok| {
+    let left_delimiter = inp.try_expect_or_stop(|tok| {
       let (span, tok) = tok.into_components();
       match Delim::is_open(&tok.kind()) {
         false => {
@@ -93,8 +93,9 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       (None, Some(wrong)) => {
         inp.emitter().emit_unexpected_token(wrong)?;
       }
-      // Nothing was observed at the opener position: a genuinely empty opener slot (a terminal
-      // scanner stop lands here too — its predicate never ran) — the one EOI path.
+      // Nothing was observed at the opener position: a genuinely empty opener slot — the one
+      // genuine EOI path. A terminal scanner stop no longer lands here — `try_expect_or_stop`
+      // surfaces it directly above — so this end-of-input error stays recoverable.
       (None, None) => {
         return Err(UnexpectedEot::eot_of(inp.cursor().as_inner().clone()).into());
       }
@@ -140,10 +141,13 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       };
 
       match parser.f.try_parse_input(inp) {
-        // The never-recoverable gate (0.3.0): a frontier `Incomplete` from the element
-        // parser re-raises untouched — never spent as a diagnostic. Constant-false under
-        // `Complete`.
-        Err(e) if Cmpl::is_incomplete_error(&e) => return Err(e),
+        // The never-recoverable gate and its terminal dual: a frontier `Incomplete` (const-false
+        // under `Complete`) or a terminal scanner stop from the element parser re-raises untouched —
+        // never spent as a diagnostic, since no further input clears either. The terminal witness
+        // reads the *committed cursor* ([`at_committed_boundary`]), so a boundary a prior lookahead
+        // already latched does not mis-charge an ordinary element failure short of it. Failure-arm
+        // only — a successful element does zero terminal work; no `MaybeTerminal` bound needed.
+        Err(e) if Cmpl::is_incomplete_error(&e) || inp.at_committed_boundary() => return Err(e),
         Err(e) => {
           let span = inp.span_since(&cursor);
           inp.emitter().emit_error(Spanned::new(span, e))?;
@@ -202,7 +206,11 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       // A terminal scanner stop (limit trip / latched poison): its own diagnostic
       // already explains the halt — propagate it and add no `Unclosed` on top.
       CloseStatus::Tripped => {
-        return Err(UnexpectedEot::eot_of(inp.cursor().as_inner().clone()).into());
+        return Err(
+          UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
+            .into_terminal()
+            .into(),
+        );
       }
     }
 

@@ -1,6 +1,6 @@
 use crate::{
   emitter::PrattEmitter,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs},
+  error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot},
   parser::{
     PrattFoldTokenInfix, PrattFoldTokenPostfix, PrattFoldTokenPrefix, PrattInfix, PrattLHS,
     PrattPower, PrattRHS, Precedenced,
@@ -59,6 +59,7 @@ where
   where
     L::Token: PrattToken<'inp, Expr, Power>,
     Ctx::Emitter: PrattEmitter<'inp, L, Lang>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Power: PrattPower,
     FoldPrefix: PrattFoldTokenPrefix<'inp, Power, L, Ctx, Lang>,
     FoldInfix: PrattFoldTokenInfix<'inp, Power, L, Ctx, Lang>,
@@ -108,6 +109,7 @@ where
   where
     L::Token: PrattToken<'inp, Expr, Power>,
     Ctx::Emitter: PrattEmitter<'inp, L, Lang>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Power: PrattPower,
     FoldPrefix: PrattFoldTokenPrefix<'inp, Power, L, Ctx, Lang>,
     FoldInfix: PrattFoldTokenInfix<'inp, Power, L, Ctx, Lang>,
@@ -132,12 +134,15 @@ where
   where
     L::Token: PrattToken<'inp, Expr, Power>,
     Ctx::Emitter: PrattEmitter<'inp, L, Lang>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Power: PrattPower,
     FoldPrefix: PrattFoldTokenPrefix<'inp, Power, L, Ctx, Lang>,
     FoldInfix: PrattFoldTokenInfix<'inp, Power, L, Ctx, Lang>,
     FoldPostfix: PrattFoldTokenPostfix<'inp, Power, L, Ctx, Lang>,
   {
-    let Some((lhs, tok)) = self.try_expect_map(|tok| tok.try_pratt_lhs())? else {
+    // A terminal scanner stop at the LHS position is not "no expression here" — surface it
+    // instead of declining, so a tripped limit cannot masquerade as an empty expression.
+    let Some((lhs, tok)) = self.try_expect_map_or_stop(|tok| tok.try_pratt_lhs())? else {
       return Ok(None);
     };
 
@@ -160,7 +165,9 @@ where
     // Step 2: parse rhs -- either an infix/postfix operator or the end of this pratt expression
     let mut prev_op_is_neither: Option<Power> = None;
     while !self.is_eoi() {
-      let Some((rhs, tok)) = self.try_expect_map(|tok| {
+      // A terminal scanner stop mid-loop is not "the expression is complete" — surface it
+      // rather than breaking, so a tripped limit cannot end the expression early.
+      let Some((rhs, tok)) = self.try_expect_map_or_stop(|tok| {
         tok.try_pratt_rhs().and_then(|rhs| match rhs {
           PrattRHS::Postfix(precedenced) => {
             let power = precedenced.into_precedence();

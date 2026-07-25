@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::span::Span as _;
+
 /// A fold parser that accumulates results while a condition is met, with a fallible accumulator.
 ///
 /// # Completeness (0.3.0): Complete-only — the mode wall
@@ -78,6 +80,8 @@ where
   Init: FnMut() -> O,
   Acc: FnMut(O, O) -> O,
   W: Window,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
+    From<crate::error::UnexpectedEot<L::Offset, Lang>>,
 {
   fn parse_input(
     &mut self,
@@ -89,7 +93,18 @@ where
   {
     let mut output = (self.init)();
     loop {
-      let (peeked, emitter) = inp.peek_with_emitter::<W>()?;
+      // A short decision window can be a genuine end of input (Stop), but one truncated by a
+      // terminal scanner stop is not: surface the committed end-of-input error rather than
+      // reading the stop as a legitimate end of the fold.
+      let end = inp.span().end();
+      let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
+      if terminal {
+        return Err(
+          crate::error::UnexpectedEot::eot_of(end)
+            .into_terminal()
+            .into(),
+        );
+      }
       match self.condition.decide(peeked, emitter)? {
         Action::Stop => break,
         Action::Continue => {
@@ -149,6 +164,8 @@ where
   Init: FnMut() -> O,
   Acc: FnMut(O, O) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
   W: Window,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
+    From<crate::error::UnexpectedEot<L::Offset, Lang>>,
 {
   fn parse_input(
     &mut self,
@@ -160,7 +177,18 @@ where
   {
     let mut output = (self.init)();
     loop {
-      let (peeked, emitter) = inp.peek_with_emitter::<W>()?;
+      // A short decision window can be a genuine end of input (Stop), but one truncated by a
+      // terminal scanner stop is not: surface the committed end-of-input error rather than
+      // reading the stop as a legitimate end of the fold.
+      let end = inp.span().end();
+      let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
+      if terminal {
+        return Err(
+          crate::error::UnexpectedEot::eot_of(end)
+            .into_terminal()
+            .into(),
+        );
+      }
       match self.condition.decide(peeked, emitter)? {
         Action::Stop => break,
         Action::Continue => {
@@ -237,6 +265,8 @@ where
     ParseState<'_, 'inp, '_, L, Ctx, Lang>,
   ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
   W: Window,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
+    From<crate::error::UnexpectedEot<L::Offset, Lang>>,
 {
   fn parse_input(
     &mut self,
@@ -248,7 +278,18 @@ where
   {
     let mut output = (self.init)();
     loop {
-      let (peeked, emitter) = inp.peek_with_emitter::<W>()?;
+      // A short decision window can be a genuine end of input (Stop), but one truncated by a
+      // terminal scanner stop is not: surface the committed end-of-input error rather than
+      // reading the stop as a legitimate end of the fold.
+      let end = inp.span().end();
+      let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
+      if terminal {
+        return Err(
+          crate::error::UnexpectedEot::eot_of(end)
+            .into_terminal()
+            .into(),
+        );
+      }
       match self.condition.decide(peeked, emitter)? {
         Action::Stop => break,
         Action::Continue => {

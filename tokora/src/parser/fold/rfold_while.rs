@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::span::Span as _;
+
 /// A parser that repeatedly applies another parser, buffers outputs, and folds them in reverse
 /// order while a condition is met.
 #[derive(Debug, Clone, Copy)]
@@ -55,6 +57,8 @@ where
   Init: FnMut() -> O,
   Acc: FnMut(O, O) -> O,
   W: Window,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
+    From<crate::error::UnexpectedEot<L::Offset, Lang>>,
 {
   #[inline(always)]
   fn parse_input(
@@ -68,7 +72,18 @@ where
     let mut buf = std::vec::Vec::new();
 
     loop {
-      let (peeked, emitter) = inp.peek_with_emitter::<W>()?;
+      // A short decision window can be a genuine end of input (Stop), but one truncated by a
+      // terminal scanner stop is not: surface the committed end-of-input error rather than
+      // reading the stop as a legitimate end of the fold.
+      let end = inp.span().end();
+      let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
+      if terminal {
+        return Err(
+          crate::error::UnexpectedEot::eot_of(end)
+            .into_terminal()
+            .into(),
+        );
+      }
       match self.condition.decide(peeked, emitter)? {
         Action::Stop => break,
         Action::Continue => {

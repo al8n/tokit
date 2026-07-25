@@ -1,4 +1,7 @@
-use crate::{error::MaybeIncomplete, input::Cursor};
+use crate::{
+  error::{MaybeIncomplete, MaybeTerminal},
+  input::Cursor,
+};
 
 use super::*;
 
@@ -339,7 +342,7 @@ where
   R: RecoverInput<'inp, L, O, Ctx, Lang, Cmpl>,
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
-  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: MaybeIncomplete,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: MaybeIncomplete + MaybeTerminal,
   Lang: ?Sized,
   Cmpl: Completeness,
 {
@@ -356,11 +359,13 @@ where
     // from the restored position exactly as the raw save/restore pair did.
     match inp.try_attempt(|input| self.parser.parse_input(input)) {
       Ok(output) => Ok(output),
-      // The never-recoverable law: an `Incomplete` rides the `Err` channel untouched. Recovery
-      // fabricates a value from a malformed construct, but an incomplete one is merely
-      // unfinished, so re-raise it verbatim rather than invoking the recoverer — see
-      // [`Incomplete`](crate::error::Incomplete) / [`MaybeIncomplete`](crate::error::MaybeIncomplete).
-      Err(e) if e.is_incomplete() => Err(e),
+      // The never-recoverable law and its terminal dual: an `Incomplete` (more input may fix
+      // this) and a terminal scanner stop (no input ever will) both ride the `Err` channel
+      // untouched. Recovery fabricates a value from a *malformed* construct; neither an
+      // unfinished construct nor a tripped limit is that, so re-raise verbatim rather than
+      // invoking the recoverer — see [`MaybeIncomplete`](crate::error::MaybeIncomplete) and
+      // [`MaybeTerminal`](crate::error::MaybeTerminal).
+      Err(e) if e.is_incomplete() || e.is_terminal() => Err(e),
       Err(e) => self.recoverer.recover_input(inp, e),
     }
   }
@@ -513,7 +518,7 @@ where
   R: InplaceRecoverInput<'inp, L, O, Ctx, Lang, Cmpl>,
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
-  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: MaybeIncomplete,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: MaybeIncomplete + MaybeTerminal,
   Lang: ?Sized,
   Cmpl: Completeness,
 {
@@ -527,11 +532,13 @@ where
     let cursor = inp.cursor().clone();
     match self.parser.parse_input(inp) {
       Ok(output) => Ok(output),
-      // The never-recoverable law: an `Incomplete` rides the `Err` channel untouched. Recovery
-      // fabricates a value from a malformed construct, but an incomplete one is merely
-      // unfinished, so re-raise it verbatim rather than invoking the recoverer — see
-      // [`Incomplete`](crate::error::Incomplete) / [`MaybeIncomplete`](crate::error::MaybeIncomplete).
-      Err(e) if e.is_incomplete() => Err(e),
+      // The never-recoverable law and its terminal dual: an `Incomplete` (more input may fix
+      // this) and a terminal scanner stop (no input ever will) both ride the `Err` channel
+      // untouched. Recovery fabricates a value from a *malformed* construct; neither an
+      // unfinished construct nor a tripped limit is that, so re-raise verbatim rather than
+      // invoking the recoverer — see [`MaybeIncomplete`](crate::error::MaybeIncomplete) and
+      // [`MaybeTerminal`](crate::error::MaybeTerminal).
+      Err(e) if e.is_incomplete() || e.is_terminal() => Err(e),
       Err(e) => self.recoverer.inplace_recover_input(inp, cursor, e),
     }
   }
@@ -562,8 +569,10 @@ mod tests {
     }
   }
 
-  // `LexErr` never carries an incomplete signal, so it takes the blanket `false` default.
+  // `LexErr` never carries an incomplete or terminal signal, so it takes the blanket `false`
+  // default for both discrimination hooks.
   impl crate::error::MaybeIncomplete for LexErr {}
+  impl crate::error::MaybeTerminal for LexErr {}
 
   #[derive(Debug, Clone, PartialEq, Eq, crate::logos::Logos)]
   #[logos(crate = crate::logos, skip r"[ \t\r\n]+")]
@@ -669,11 +678,13 @@ mod tests {
 
   // ── The never-recoverable law: Recover re-raises an Incomplete, untouched ──────
 
-  // An error type that can carry an incomplete signal (`Incomplete`) or an ordinary failure
-  // (`Other`). `is_incomplete()` is what `Recover` keys the law off of.
+  // An error type that can carry an incomplete signal (`Incomplete`), a terminal scanner stop
+  // (`Terminal`), or an ordinary failure (`Other`). `is_incomplete()` and `is_terminal()` are what
+  // `Recover` keys the never-recoverable law (and its terminal dual) off of.
   #[derive(Debug, Clone, PartialEq)]
   enum RecErr {
     Incomplete,
+    Terminal,
     Other,
   }
 
@@ -703,6 +714,26 @@ mod tests {
   impl From<crate::error::Incomplete<usize>> for RecErr {
     fn from(_: crate::error::Incomplete<usize>) -> Self {
       RecErr::Incomplete
+    }
+  }
+
+  // The terminal twin of the incomplete conversion: a terminal-marked end-of-input value (the way
+  // `try_expect_or_stop` and the delimited close build one) maps to `Terminal`, a genuine one to
+  // `Other`. Pairing it with `MaybeTerminal` keeps construct-and-detect coherent, which is what makes
+  // the terminal dual of the never-recoverable law hold end to end.
+  impl From<crate::error::UnexpectedEot<usize>> for RecErr {
+    fn from(e: crate::error::UnexpectedEot<usize>) -> Self {
+      if e.is_terminal() {
+        RecErr::Terminal
+      } else {
+        RecErr::Other
+      }
+    }
+  }
+
+  impl crate::error::MaybeTerminal for RecErr {
+    fn is_terminal(&self) -> bool {
+      matches!(self, RecErr::Terminal)
     }
   }
 
@@ -821,6 +852,81 @@ mod tests {
     let r = rec.parse_input(&mut inp);
     assert_eq!(r, Ok(()), "an ordinary error is recovered");
     assert!(invoked.get(), "the recoverer runs for an ordinary error");
+  }
+
+  // ── The terminal dual: Recover re-raises a terminal scanner stop, untouched ──────
+  //
+  // A terminal stop is not a malformed construct — no amount of skipping or re-attempting clears a
+  // tripped limit — so, like an Incomplete, it must re-raise on the `Err` channel rather than reach
+  // the recoverer, which would otherwise synthesize a value from a recovery that should never have
+  // begun.
+
+  // The law, value-asserted: when the primary fails with a terminal stop, `Recover` re-raises it
+  // verbatim and NEVER invokes the recoverer.
+  #[test]
+  fn recover_reraises_terminal_and_never_invokes_recoverer() {
+    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::new("1 2 3");
+    let mut emitter = Silent::<RecErr>::new();
+    let mut inp = input.as_ref(&mut emitter);
+
+    let invoked = core::cell::Cell::new(false);
+    let mut rec = Recover::<_, _, (), Lex<'_>, RCtx<'_>, ()>::new(
+      FailWith(RecErr::Terminal),
+      FlagRecover { invoked: &invoked },
+    );
+
+    let r = rec.parse_input(&mut inp);
+    assert_eq!(
+      r,
+      Err(RecErr::Terminal),
+      "a terminal stop is re-raised untouched on the Err channel"
+    );
+    assert!(
+      !invoked.get(),
+      "the recoverer must never run for a terminal stop"
+    );
+  }
+
+  // The value the attempt/decline leaves actually surface is built via `From<UnexpectedEot>` with
+  // the terminal marker set (the way `try_expect_or_stop` and the delimited close build it). Prove
+  // that value reports itself terminal — while a genuine end of input does not — and that `Recover`
+  // re-raises it untouched: the terminal dual wired to the real surfacing mechanism.
+  #[test]
+  fn recover_reraises_a_from_terminal_built_error() {
+    let surfaced: RecErr = crate::error::UnexpectedEot::eot_of(7usize)
+      .into_terminal()
+      .into();
+    assert_eq!(
+      surfaced,
+      RecErr::Terminal,
+      "a terminal-marked end-of-input value maps to the terminal variant"
+    );
+    assert!(
+      surfaced.is_terminal(),
+      "an error built the way the leaves build it must report itself terminal"
+    );
+    let genuine: RecErr = crate::error::UnexpectedEot::eot_of(7usize).into();
+    assert!(
+      !genuine.is_terminal(),
+      "a genuine end of input is not a terminal stop"
+    );
+
+    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::new("1 2 3");
+    let mut emitter = Silent::<RecErr>::new();
+    let mut inp = input.as_ref(&mut emitter);
+
+    let invoked = core::cell::Cell::new(false);
+    let mut rec = Recover::<_, _, (), Lex<'_>, RCtx<'_>, ()>::new(
+      FailWith(surfaced.clone()),
+      FlagRecover { invoked: &invoked },
+    );
+
+    let r = rec.parse_input(&mut inp);
+    assert_eq!(r, Err(surfaced), "the terminal stop is re-raised untouched");
+    assert!(
+      !invoked.get(),
+      "the recoverer never runs for a terminal stop"
+    );
   }
 
   // ── The same law, binding the in-place path: InplaceRecover re-raises an Incomplete ──────
@@ -955,5 +1061,33 @@ mod tests {
     assert_eq!(r, Ok(()), "an ordinary error is recovered in place");
     assert!(invoked.get(), "the recoverer runs for an ordinary error");
     assert_eq!(vdiags(&mut inp), 1, "and its diagnostic is on the log");
+  }
+
+  // The terminal dual on the in-place path: a terminal scanner stop is re-raised verbatim, the
+  // recoverer never runs, and nothing is emitted. The in-place path cannot undo a recovery it should
+  // never have begun, so re-raising before the handler runs is the only correct order.
+  #[test]
+  fn inplace_recover_reraises_terminal_and_never_invokes_recoverer() {
+    let mut input = Input::<Lex<'_>, VCtx<'_>, ()>::new("1 2 3");
+    let mut emitter = Verbose::<RecErr>::new();
+    let mut inp = input.as_ref(&mut emitter);
+
+    let invoked = core::cell::Cell::new(false);
+    let mut rec = InplaceRecover::<_, _, (), Lex<'_>, VCtx<'_>, ()>::new(
+      VFailWith(RecErr::Terminal),
+      InplaceFlagRecover { invoked: &invoked },
+    );
+
+    let r = rec.parse_input(&mut inp);
+    assert_eq!(
+      r,
+      Err(RecErr::Terminal),
+      "a terminal stop is re-raised untouched on the Err channel"
+    );
+    assert!(
+      !invoked.get(),
+      "the recoverer must never run for a terminal stop"
+    );
+    assert_eq!(vdiags(&mut inp), 0, "and nothing is emitted on its behalf");
   }
 }

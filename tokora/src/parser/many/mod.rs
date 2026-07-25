@@ -33,10 +33,14 @@ mod gate_census {
   //! GATE_CENSUS — the section-4 never-recoverable gate sites, locked by count.
   //!
   //! Every resilient emit-and-continue loop body in the try-driven collection families
-  //! must gate on `Cmpl::is_incomplete_error` FIRST, so a frontier `Incomplete` from the
-  //! element parser re-raises instead of being spent as a diagnostic. One gate per
-  //! swallow site; the census pins both the total and the per-file placement so a new
-  //! resilient loop cannot land ungated (extend the list, then gate it).
+  //! must gate on `Cmpl::is_incomplete_error` FIRST, and re-raise a terminal scanner stop
+  //! (`inp.at_committed_boundary()`) alongside it, so neither a frontier `Incomplete` nor a
+  //! tripped limit from the element parser is spent as a diagnostic. The terminal witness reads
+  //! the *committed cursor* (attempt-relative: a boundary a prior lookahead already latched does
+  //! not mis-charge an ordinary element failure short of it), and rides the failure arm so a
+  //! successful element does zero terminal work. One gate per swallow site; the census pins the
+  //! total, the per-file placement, and the terminal re-raise so a new resilient loop cannot land
+  //! ungated or without the terminal dual (extend the list, then gate it both ways).
 
   #[test]
   fn every_resilient_swallow_site_is_gated() {
@@ -54,11 +58,86 @@ mod gate_census {
         swallows, gated,
         "{name}: every emit-and-continue swallow needs exactly one incomplete gate"
       );
+      // The terminal dual: every incomplete gate carries the terminal re-raise in the same
+      // guard, so a tripped limit re-raises instead of being emitted-and-continued. The witness
+      // is the attempt-relative, committed-cursor form (never the lex-offset `at_latched_boundary`,
+      // which a prefilled cache would make false-positive on an ordinary element failure).
+      let terminal = src.matches("|| inp.at_committed_boundary()").count();
+      assert_eq!(
+        gated, terminal,
+        "{name}: every incomplete gate must re-raise a terminal stop too \
+         (`|| inp.at_committed_boundary()`)"
+      );
       gates += gated;
     }
     assert_eq!(
       gates, 4,
       "the try-driven families carry exactly four gated loop bodies"
     );
+  }
+
+  /// Every `*_while` driver's decision-window peek is terminal-aware: it uses the
+  /// terminal-reporting `peek_with_emitter_terminal` (never the bare `peek_with_emitter`, whose
+  /// short window a mid-window trip would hide) and surfaces the stop with `into_terminal`, so a
+  /// resource-limit trip during the decision peek is never read as a clean end of list.
+  #[test]
+  fn every_while_decision_gate_is_terminal_aware() {
+    let sites = [
+      (
+        "many/repeated_while/mod.rs",
+        include_str!("repeated_while/mod.rs"),
+      ),
+      (
+        "many/delim/repeated_while.rs",
+        include_str!("delim/repeated_while.rs"),
+      ),
+      (
+        "many/sep_while/parse/mod.rs",
+        include_str!("sep_while/parse/mod.rs"),
+      ),
+      (
+        "many/sep_while/delim/mod.rs",
+        include_str!("sep_while/delim/mod.rs"),
+      ),
+    ];
+    for (name, src) in sites {
+      assert!(
+        src.contains("peek_with_emitter_terminal::<"),
+        "{name}: the decision-window peek must use the terminal-reporting variant \
+         (`peek_with_emitter_terminal`)"
+      );
+      assert!(
+        !src.contains("peek_with_emitter::<"),
+        "{name}: no bare decision-window peek may remain — a mid-window trip would hide in its \
+         short window; use `peek_with_emitter_terminal`"
+      );
+      assert!(
+        src.contains("into_terminal()"),
+        "{name}: a decision-window terminal stop must be surfaced (`into_terminal`)"
+      );
+    }
+  }
+
+  /// Every non-delimited separated driver's separator-slot decision gate is terminal-aware: it
+  /// probes with `try_expect_or_stop` (never the bare `try_expect`, whose `Ok(None)` folds a trip
+  /// together with genuine absence and ends the list cleanly). The delimited separated drivers
+  /// route their separator-slot `None` through `probe_close`, whose `Tripped` arm surfaces the stop
+  /// instead — so they are exempt here and covered by that path.
+  #[test]
+  fn every_nondelim_separator_slot_surfaces_terminal() {
+    let sites = [
+      ("many/sep/parse/mod.rs", include_str!("sep/parse/mod.rs")),
+      (
+        "many/sep_while/parse/mod.rs",
+        include_str!("sep_while/parse/mod.rs"),
+      ),
+    ];
+    for (name, src) in sites {
+      assert!(
+        src.contains("try_expect_or_stop(|t"),
+        "{name}: the separator-slot decision gate must probe with `try_expect_or_stop`, so a \
+         terminal stop surfaces instead of folding into a clean end"
+      );
+    }
   }
 }

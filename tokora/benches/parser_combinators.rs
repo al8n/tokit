@@ -38,7 +38,7 @@ use tokora::{
     UnexpectedTrailingSeparatorEmitter,
   },
   error::{
-    MaybeIncomplete, UnexpectedEnd,
+    MaybeIncomplete, MaybeTerminal, UnexpectedEnd,
     syntax::{FullContainer, MissingSyntax, TooFew, TooMany},
     token::{MissingToken, SeparatedError, UnexpectedToken},
   },
@@ -235,9 +235,11 @@ impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> f
   }
 }
 
-// `skip_then_retry` consults this before it skips: an `Incomplete` is never recovered.
-// A `Complete`-mode parse can never produce one, so the trait's default answer is right.
+// `skip_then_retry` consults these before it skips: an `Incomplete` and a terminal scanner stop
+// are never recovered. A `Complete`-mode parse with no resource limit can produce neither, so the
+// traits' default answers are right.
 impl MaybeIncomplete for BenchError {}
+impl MaybeTerminal for BenchError {}
 
 // ── Elements ──────────────────────────────────────────────────────────────────
 
