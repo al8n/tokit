@@ -1028,9 +1028,9 @@ fn speculation_cannot_end_the_stream() {
     txn.rollback_to(sp);
     txn.rollback();
   }
-  inp.begin_point();
+  let point = inp.begin_point();
   let _ = inp.next();
-  inp.rollback_point();
+  inp.rollback_point(point);
 
   // The world did not move: no parser said the stream ended, so it did not end.
   assert!(
@@ -1104,9 +1104,9 @@ fn rollback_cannot_un_end_a_sealed_stream() {
     txn.rollback_to(sp);
     txn.rollback();
   }
-  inp.begin_point();
+  let point = inp.begin_point();
   let _ = inp.next();
-  inp.rollback_point();
+  inp.rollback_point(point);
 
   assert!(
     inp.is_final(),

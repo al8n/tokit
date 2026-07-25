@@ -36,7 +36,7 @@ pub use input::{
 };
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
-pub use input::{SavepointId, StackedTransaction};
+pub use input::{SavepointId, SessionPointId, StackedTransaction};
 pub use lexer::{Lexed, Lexer, SliceOf};
 pub use located::*;
 pub use parse_choice::*;

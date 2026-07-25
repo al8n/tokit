@@ -310,6 +310,24 @@ where
   /// transaction's scope.
   #[inline]
   pub fn savepoint(&mut self) -> SavepointId<'txn> {
+    // CAPTURE_WINDOW — preflight this savepoint's slot before anything is captured.
+    // `self.input.save()` below registers a lineage entry and an emitter mark that only the
+    // `saves.push` hands an owner (a `Checkpoint` has no `Drop`: it cannot reach the input or the
+    // emitter to settle itself). If anything between the capture and that push unwound — a
+    // `capacity overflow` panic, or a panicking allocator — the capture would be dropped raw, its
+    // lineage entry and emitter mark stranded with no rollback, commit, `forget_kept_checkpoint`,
+    // or release able to find them; and with no `saves` entry pushed, none of the guard's own
+    // life-ending paths could settle it either.
+    //
+    // The window holds exactly one allocation site — this `push` onto `saves`, a `Vec` by default
+    // and a `SmallVec` that spills past its inline 2 under `smallvec_1`, whose `reserve` compares
+    // against the *inline* capacity too and so spills here rather than in the push. A savepoint is
+    // deliberately NOT pinned (only the transaction's base is, in `begin_stacked_with`), so unlike
+    // `begin_point` this site has no second container to reserve. Everything else in the window is
+    // allocation-free by inspection: `(seq, ckp)` is a tuple of a `Copy` scalar and a move.
+    // (`seq` is taken before the capture, so the counter bump is outside the window; the
+    // `SavepointId` literal is built after the push, likewise outside it.)
+    self.saves.reserve(1);
     // Sequence numbers come from the input, not this transaction, so they never reset:
     // an id can only ever match the one live slot that pushed it (or none, if stale).
     let seq = self.input.next_savepoint_seq();
@@ -331,7 +349,8 @@ where
   /// checkpoint and immediately re-saving at the now-current position, swapping the fresh
   /// checkpoint into `sp`'s slot. This preserves the classic SQL loop of rolling back to
   /// the same savepoint any number of times; it costs one extra `O(1)` save per call on
-  /// this cold path.
+  /// this cold path, plus one settle per destroyed savepoint (the same per-entry work
+  /// [`release`](Self::release) and [`commit`](Self::commit) already pay).
   ///
   /// # Panics
   ///
@@ -348,16 +367,33 @@ where
   #[inline]
   pub fn rollback_to(&mut self, sp: SavepointId<'txn>) {
     let idx = self.slot(sp);
-    // Drop the younger savepoints' checkpoints. Their live-checkpoint ids are still on
-    // the input stack at this point; the restore below pops the stack down through the
-    // target, which sweeps every one of them off in the same step.
-    self.saves.truncate(idx + 1);
+    // Settle the younger savepoints one at a time, newest-first, BEFORE the single restore
+    // below — never by truncating the vector, which would drop their checkpoints raw.
+    // Dropping them raw is not enough because the restore forwards only the TARGET's emitter
+    // mark, and a capture taken with no intervening events reads the very same mark: a rewind
+    // spends what sits strictly above the mark plus the newest capture at it, so every older
+    // capture at that same reading survives as mark-keyed bookkeeping nothing will ever
+    // spend. Settling each one also keeps every removed id the live-stack top when it is
+    // forgotten (the `O(1)` fast path), exactly as `release`/`commit` do.
+    while self.saves.len() > idx + 1 {
+      let (_, ckp) = self
+        .saves
+        .pop()
+        .expect("len > idx + 1 implies a value to pop");
+      self.input.forget_kept_checkpoint(ckp);
+    }
     let (seq, ckp) = self
       .saves
       .pop()
       .expect("slot() returned a valid index into `saves`");
     // Restore consumes the stored checkpoint; re-save at the restored position and
     // reinstall it under the same `seq` so `sp` survives for repeated rollbacks.
+    //
+    // CAPTURE_WINDOW — this re-save needs no preflight, and must not grow one: the pops above
+    // freed at least this very slot, so `len < capacity` holds and the `push` is a write into
+    // spare capacity for `Vec` and `SmallVec` alike (a pop never shrinks either). Nothing between
+    // the capture and the push allocates — the tuple is a `Copy` scalar and a move — and the
+    // restore that precedes it is complete before the capture is taken.
     self.input.restore(ckp);
     let fresh = self.input.save();
     self.saves.push((seq, fresh));
@@ -446,8 +482,13 @@ where
   #[inline]
   pub fn rollback(mut self) {
     trace_event!(self.input, "rollback");
-    // Restoring the base pops the live stack down through it, carrying off every
-    // savepoint id in one step; the savepoint checkpoints then just drop with `self`.
+    // Settle every savepoint first, newest-first, for the reason `rollback_to` spells out: the
+    // restore below forwards only the BASE's emitter mark, which cannot name captures that
+    // read the same value. Restoring the base then pops the live stack down through it,
+    // carrying off any id a settle already removed as a no-op.
+    while let Some((_, ckp)) = self.saves.pop() {
+      self.input.forget_kept_checkpoint(ckp);
+    }
     if let Some(base) = self.base.take() {
       // Unpin the begin point FIRST so the checked restore does not see it as pinned — rolling
       // back to the guard's own base is legal. A raw restore *below* the base (through this
@@ -507,8 +548,10 @@ where
   /// are already taken, so this is a no-op whatever the policy.
   ///
   /// - [`Rollback`](super::Rollback): roll back to the begin point (the database default,
-  ///   all savepoints and progress discarded). Restoring the base pops the live stack down
-  ///   through it, carrying off every savepoint id in one step.
+  ///   all savepoints and progress discarded). Every savepoint is settled first, youngest
+  ///   first, then the base is restored — a savepoint's emitter mark can read the same value
+  ///   as the base's, so the one rewind cannot settle it (see
+  ///   [`rollback_to`](Self::rollback_to)).
   /// - [`Commit`](super::Commit): keep the progress, forgetting every savepoint id
   ///   (youngest first) then the base — the same lineage-id hygiene as
   ///   [`commit`](Self::commit).
@@ -523,13 +566,21 @@ where
   #[inline]
   fn drop(&mut self) {
     if P::ROLLBACK_ON_DROP {
+      // Settle every savepoint before the base's rewind, newest-first — the same per-entry
+      // discipline the commit arm below applies, and required for the same reason
+      // `rollback_to` spells out: the rewind forwards only the base's emitter mark and cannot
+      // name captures that read the same value. Unconditional: when the stale-base backstop
+      // skips the rewind, these settles are simply the whole reclamation. The funnel is
+      // assert-free, so this stays silent even mid-unwind.
+      while let Some((_, ckp)) = self.saves.pop() {
+        self.input.forget_kept_checkpoint(ckp);
+      }
       if let Some(base) = self.base.take() {
         // Unpin the begin point first — exception-safe, so it happens even though the rewind
         // below may be skipped (a `Drop` may run mid-unwind, where panicking is forbidden). The
         // pin check makes the base go-stale case unreachable in allocator builds, so this
-        // normally rewinds — popping the live stack down through the base, carrying off every
-        // savepoint id in one step, as before; the skip stays as a backstop. An explicit
-        // `rollback` reports a stale base loudly instead.
+        // normally rewinds — popping the live stack down through the base; the skip stays as a
+        // backstop. An explicit `rollback` reports a stale base loudly instead.
         self.input.unpin_checkpoint(base.ckp_id);
         self.input.restore_unchecked_if_live(base);
       }

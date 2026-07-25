@@ -4944,6 +4944,9 @@ where
   }
 }
 
+/// The mark is the log length: a reading of the emission state, keyed on no table.
+impl crate::emitter::ValueKeyedEmitter for MatrixEmitter {}
+
 type MatrixCtx<'a> = (MatrixEmitter, DefaultCache<'a, BalLexer<'a>>);
 type MatrixRef<'inp, 'closure> = InputRef<'inp, 'closure, BalLexer<'inp>, MatrixCtx<'inp>, ()>;
 

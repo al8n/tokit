@@ -214,7 +214,7 @@ pub use input_ref::{
 pub(crate) use lineage::Lineage;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
-pub use input_ref::{SavepointId, StackedTransaction};
+pub use input_ref::{SavepointId, SessionPointId, StackedTransaction};
 
 mod checkpoint;
 mod completeness;

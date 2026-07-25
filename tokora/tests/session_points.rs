@@ -20,7 +20,7 @@ mod common;
 
 use common::{TestLexer, Token};
 use tokora::{
-  Emitter, InputRef, Parse, ParseContext, Parser, ParserContext,
+  Emitter, InputRef, Parse, ParseContext, Parser, ParserContext, SessionPointId,
   emitter::Verbose,
   error::{UnexpectedEot, token::UnexpectedToken},
   span::{SimpleSpan, Spanned},
@@ -78,13 +78,19 @@ type Ir<'a, 'inp, 'closure> = &'a mut InputRef<
 /// in between.
 struct Driver<'a, 'inp, 'closure> {
   inp: Ir<'a, 'inp, 'closure>,
+  /// The ids of the open marks, oldest first. A driver whose speculation is non-lexical has to
+  /// keep this itself — which is the point: the settle verbs name the mark rather than trusting a
+  /// position, so a mark cannot be settled by accident once the stack has moved under it.
+  marks: Vec<SessionPointId<'closure>>,
 }
 
 impl<'inp> Driver<'_, 'inp, '_> {
-  /// Mark the current position. Note the signature: it returns **nothing**. There is no guard to
-  /// store, so nothing stays borrowed, so `step()` below is callable with the mark still open.
+  /// Mark the current position. Note what is *not* in the signature: no guard, and no borrow held
+  /// afterwards — only a plain id stored in a field — so `step()` below is callable with the mark
+  /// still open.
   fn mark(&mut self) {
-    self.inp.begin_point();
+    let point = self.inp.begin_point();
+    self.marks.push(point);
   }
 
   /// Consume one real token and hand back its source text — a separate call, made *through* an
@@ -108,10 +114,11 @@ impl<'inp> Driver<'_, 'inp, '_> {
 
   /// Decide the newest open mark: keep its work, or take it all back.
   fn decide(&mut self, keep: bool) {
+    let point = self.marks.pop().expect("a mark is open");
     if keep {
-      self.inp.commit_point();
+      self.inp.commit_point(point);
     } else {
-      self.inp.rollback_point();
+      self.inp.rollback_point(point);
     }
   }
 
@@ -150,7 +157,10 @@ struct Trace<'a> {
 
 /// Marks, consumes two real tokens across separate calls, emits a diagnostic, then rolls back.
 fn rollback_session<'inp>(inp: Ir<'_, 'inp, '_>) -> Result<Trace<'inp>, SessionError> {
-  let mut d = Driver { inp };
+  let mut d = Driver {
+    inp,
+    marks: Vec::new(),
+  };
 
   // One token of committed work before any speculation.
   assert_eq!(d.step()?, Some("1"), "committed work precedes the session");
@@ -229,7 +239,10 @@ fn rollback_restores_the_cursor_and_the_emission_log() {
 // ── 2. Commit: the work through the point is kept ─────────────────────────────
 
 fn commit_session<'inp>(inp: Ir<'_, 'inp, '_>) -> Result<Trace<'inp>, SessionError> {
-  let mut d = Driver { inp };
+  let mut d = Driver {
+    inp,
+    marks: Vec::new(),
+  };
 
   assert_eq!(d.step()?, Some("1"));
   let at_mark = d.at();
@@ -298,7 +311,10 @@ struct Nested<'a> {
 }
 
 fn nested_session<'inp>(inp: Ir<'_, 'inp, '_>) -> Result<Nested<'inp>, SessionError> {
-  let mut d = Driver { inp };
+  let mut d = Driver {
+    inp,
+    marks: Vec::new(),
+  };
   let mut depths = Vec::new();
 
   depths.push(d.depth()); // 0
@@ -401,14 +417,14 @@ fn session_around_a_parser(inp: Ir<'_, '_, '_>) -> Result<(i64, usize, usize, i6
   let start = *inp.cursor().as_inner();
 
   // Mark, then hand the input — mark and all — to a plain parser that consumes through it.
-  inp.begin_point();
+  let point = inp.begin_point();
   let speculative = sum_two_numbers(inp)?;
   let depth_inside = inp.points();
   let moved = *inp.cursor().as_inner();
   assert!(moved > start, "the sub-parser consumed through the point");
 
   // Take it all back and re-run the same parser: it must see the same tokens again.
-  inp.rollback_point();
+  inp.rollback_point(point);
   assert_eq!(
     *inp.cursor().as_inner(),
     start,

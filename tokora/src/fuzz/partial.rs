@@ -254,9 +254,9 @@ fn seal_survives_rollback(src: &[u8], budget: usize, complete: &[Tok]) {
     txn.rollback_to(sp);
     txn.rollback();
   }
-  ir.begin_point();
+  let point = ir.begin_point();
   let _ = ir.next();
-  ir.rollback_point();
+  ir.rollback_point(point);
 
   // The stream is STILL ended. Nothing a parser did could have un-ended it.
   assert!(

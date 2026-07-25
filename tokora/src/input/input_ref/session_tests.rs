@@ -145,7 +145,7 @@ fn session_point_commit_keeps_consumed_tokens() {
   let mut emitter = Verbose::<NumErr>::new();
   let mut ir = input.as_ref(&mut emitter);
 
-  ir.begin_point();
+  let point = ir.begin_point();
   assert_eq!(ir.points(), 1, "the point is live");
 
   // Real parsing, through the open point, one separate call at a time.
@@ -154,7 +154,7 @@ fn session_point_commit_keeps_consumed_tokens() {
   let after_two = *ir.cursor().as_inner();
   emit(&mut ir, 0, NumErr::Lex);
 
-  ir.commit_point();
+  ir.commit_point(point);
   assert_eq!(ir.points(), 0, "the point settled");
   assert_eq!(
     *ir.cursor().as_inner(),
@@ -181,7 +181,7 @@ fn session_point_rollback_puts_the_tokens_back() {
   assert_eq!(take(&mut ir), "1", "committed work before the session");
   let mark = *ir.cursor().as_inner();
 
-  ir.begin_point();
+  let point = ir.begin_point();
   assert_eq!(take(&mut ir), "2");
   emit(&mut ir, 2, NumErr::Lex);
   assert_eq!(take(&mut ir), "3");
@@ -192,7 +192,7 @@ fn session_point_rollback_puts_the_tokens_back() {
     "the session moved the cursor"
   );
 
-  ir.rollback_point();
+  ir.rollback_point(point);
   assert_eq!(ir.points(), 0, "the point settled");
   assert_eq!(
     *ir.cursor().as_inner(),
@@ -236,7 +236,7 @@ fn session_point_rollback_restores_state_and_poison() {
     assert!(ir.next().unwrap().is_none(), "the 3rd scan trips → None");
     let tripped = *ir.cursor().as_inner();
 
-    ir.begin_point(); // saves the tripped lineage: state, poison, watermark, emission mark
+    let point = ir.begin_point(); // saves the tripped lineage: state, poison, watermark, mark
     assert_eq!(ir.points(), 1);
 
     // Speculative work through the point: re-key the regime (dropping poison, resetting the
@@ -255,7 +255,7 @@ fn session_point_rollback_restores_state_and_poison() {
       "the un-poisoned stream yields again"
     );
 
-    ir.rollback_point();
+    ir.rollback_point(point);
     assert_eq!(ir.points(), 0, "the point settled");
     assert_eq!(
       ir.state().limitation(),
@@ -309,19 +309,19 @@ fn session_points_nest_lifo() {
 
   assert_eq!(take(&mut ir), "1");
   let at1 = *ir.cursor().as_inner();
-  ir.begin_point(); // P1 marks "after 1"
+  let p1 = ir.begin_point(); // P1 marks "after 1"
 
   assert_eq!(take(&mut ir), "2");
-  ir.begin_point(); // P2 marks "after 2"
+  let p2 = ir.begin_point(); // P2 marks "after 2"
 
   assert_eq!(take(&mut ir), "3");
   let at3 = *ir.cursor().as_inner();
-  ir.begin_point(); // P3 marks "after 3"
+  let p3 = ir.begin_point(); // P3 marks "after 3"
 
   assert_eq!(take(&mut ir), "4");
   assert_eq!(ir.points(), 3, "three live points");
 
-  ir.rollback_point(); // newest: back to P3's mark
+  ir.rollback_point(p3); // newest: back to P3's mark
   assert_eq!(ir.points(), 2);
   assert_eq!(
     *ir.cursor().as_inner(),
@@ -329,7 +329,7 @@ fn session_points_nest_lifo() {
     "rolled back to the newest point's mark"
   );
 
-  ir.commit_point(); // middle: keep the current position, release the point
+  ir.commit_point(p2); // middle: keep the current position, release the point
   assert_eq!(ir.points(), 1);
   assert_eq!(
     *ir.cursor().as_inner(),
@@ -337,7 +337,7 @@ fn session_points_nest_lifo() {
     "commit keeps the current position"
   );
 
-  ir.rollback_point(); // oldest: back to P1's mark, unaffected by the middle commit
+  ir.rollback_point(p1); // oldest: back to P1's mark, unaffected by the middle commit
   assert_eq!(ir.points(), 0);
   assert_eq!(
     *ir.cursor().as_inner(),
@@ -356,7 +356,10 @@ fn session_point_commit_misuse_panics() {
   let mut emitter = Silent::<NumErr>::new();
   let mut ir = input.as_ref(&mut emitter);
 
-  ir.commit_point(); // zero live points → panic
+  // Settling twice with the same id: the second call finds nothing open at all.
+  let point = ir.begin_point();
+  ir.commit_point(point);
+  ir.commit_point(point); // zero live points → panic
 }
 
 #[test]
@@ -366,7 +369,183 @@ fn session_point_rollback_misuse_panics() {
   let mut emitter = Silent::<NumErr>::new();
   let mut ir = input.as_ref(&mut emitter);
 
-  ir.rollback_point(); // zero live points → panic
+  let point = ir.begin_point();
+  ir.rollback_point(point);
+  ir.rollback_point(point); // zero live points → panic
+}
+
+// ── 3b. The id is a name, not a position ──────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "session point settled out of order")]
+fn settling_an_older_point_while_a_younger_one_is_open_is_refused() {
+  // Naming the outer point while the inner one is still open. Settling by position would have
+  // taken the INNER point and silently applied the outer's intent to it — the shifted-target
+  // class the id exists to close.
+  let mut input = silent_input("1 2 3 4");
+  let mut emitter = Silent::<NumErr>::new();
+  let mut ir = input.as_ref(&mut emitter);
+
+  let outer = ir.begin_point();
+  let _ = ir.next().unwrap().expect("1");
+  let _inner = ir.begin_point();
+  ir.rollback_point(outer);
+}
+
+#[test]
+#[should_panic(expected = "stale session point")]
+fn settling_an_already_settled_point_under_a_live_one_is_refused() {
+  // The mirror: an id whose point is gone, while an unrelated point is open. A positional settle
+  // would have spent the live one.
+  let mut input = silent_input("1 2 3 4");
+  let mut emitter = Silent::<NumErr>::new();
+  let mut ir = input.as_ref(&mut emitter);
+
+  let first = ir.begin_point();
+  ir.commit_point(first);
+  let _second = ir.begin_point();
+  ir.commit_point(first);
+}
+
+#[test]
+fn a_reissued_point_never_reuses_a_settled_point_s_identity() {
+  // Non-positional AND non-reused: a fresh point opened at the same depth, and even at the same
+  // position, is a different point. The checkpoint-id source is monotone and never reset, so a
+  // stale id can never be mistaken for the fresh one occupying its old slot.
+  let mut input = silent_input("1 2 3 4");
+  let mut emitter = Silent::<NumErr>::new();
+  let mut ir = input.as_ref(&mut emitter);
+
+  let first = ir.begin_point();
+  ir.commit_point(first);
+  let second = ir.begin_point();
+  assert_ne!(
+    first, second,
+    "a reopened point at the same depth is a distinct identity"
+  );
+  ir.commit_point(second);
+  assert_eq!(ir.points(), 0);
+}
+
+// ── 3c. The id names its INPUT, not merely its point ──────────────────────────────────────────
+//
+// The `'closure` brand separates the handles one parser can hold, with a single residual: two
+// inputs borrowed in one scope share that brand region, so the compiler unifies them and one
+// input's id type-checks against the other's handle. A checkpoint id is unique only *within* an
+// input — every input numbers from the same start — so the id also carries the address of its
+// input's own poison-boundary slot, and a settle refuses a mismatch before it scans anything.
+//
+// That address is taken through the handle's borrow, so it names the slot inside the `Input`
+// rather than the field inside the handle. The distinction is what keeps the refusal from firing
+// on the handle's own reborrows and moves, which the two tests below hold it to.
+
+#[test]
+#[should_panic(expected = "foreign session point")]
+fn settling_a_point_from_another_input_is_refused() {
+  // Both handles are taken *before* either point opens, so the two brand regions coincide and
+  // passing input A's id to input B type-checks. (Taking B's handle after A's point would instead
+  // be a compile error — the brand's own half of the job.) Both inputs are fresh, so the two
+  // points carry the *same* checkpoint id: the live-point scan alone would find a genuine match
+  // and settle B's own point under A's intent.
+  let mut input_a = silent_input("1 2 3 4");
+  let mut emitter_a = Silent::<NumErr>::new();
+  let mut input_b = silent_input("1 2 3 4");
+  let mut emitter_b = Silent::<NumErr>::new();
+
+  let mut ir_a = input_a.as_ref(&mut emitter_a);
+  let mut ir_b = input_b.as_ref(&mut emitter_b);
+
+  let point_a = ir_a.begin_point();
+  let point_b = ir_b.begin_point();
+  assert_eq!(
+    point_a.ckp(),
+    point_b.ckp(),
+    "two fresh inputs number their checkpoints from the same start — the collision the nonce \
+     exists to catch"
+  );
+
+  ir_b.commit_point(point_a);
+}
+
+/// Settles `point` behind a plain `&mut` reborrow of the handle — the shape every nested parser
+/// call takes.
+fn settle_behind_a_reborrow<'closure>(
+  ir: &mut VerboseIr<'_, 'closure>,
+  point: super::SessionPointId<'closure>,
+) {
+  ir.commit_point(point);
+}
+
+/// Settles `point` on a handle **moved** into this frame, and drops the handle here. The id
+/// remembers a slot in the `Input`, which the move cannot relocate — the handle's own storage is
+/// not what it names.
+fn settle_on_a_moved_handle<'closure>(
+  mut ir: VerboseIr<'_, 'closure>,
+  point: super::SessionPointId<'closure>,
+) {
+  ir.commit_point(point);
+}
+
+#[test]
+fn a_point_settles_across_the_handle_s_reborrows() {
+  // A point is opened in one call and settled in another, so between the two the handle is passed
+  // onward every way the crate allows. Each of these settles is legal and must be honored; an
+  // input identity that changed with the handle would turn all three into false refusals.
+  let mut input = verbose_input("1 2 3 4 5 6");
+  let mut emitter = Verbose::<NumErr>::new();
+  let mut ir = input.as_ref(&mut emitter);
+
+  // (a) A `&mut` reborrow into a nested parser, with the id handed along beside it.
+  let reborrowed = ir.begin_point();
+  assert_eq!(take(&mut ir), "1");
+  settle_behind_a_reborrow(&mut ir, reborrowed);
+  assert_eq!(ir.points(), 0, "the settle behind a reborrow was honored");
+
+  // (b) A guard's `DerefMut`: opened and settled through the guard, which reaches the same handle
+  //     through a `&mut` of its own.
+  {
+    let mut guard = ir.begin();
+    let through_guard = guard.begin_point();
+    assert_eq!(take(&mut guard), "2");
+    guard.commit_point(through_guard);
+    guard.commit();
+  }
+  assert_eq!(ir.points(), 0, "the settle through a guard was honored");
+
+  // (c) Held across an `attempt`, whose closure receives the handle reborrowed through the
+  //     attempt's own guard — so the point outlives a reborrow it was not opened on.
+  let across = ir.begin_point();
+  let attempted: Option<()> = ir.attempt(|ir| {
+    assert_eq!(take(ir), "3");
+    Some(())
+  });
+  assert!(attempted.is_some(), "the attempt kept its progress");
+  ir.commit_point(across);
+  assert_eq!(ir.points(), 0, "the settle across an attempt was honored");
+}
+
+#[test]
+fn a_point_settles_on_a_handle_that_moved() {
+  // The handle is moved out of this frame with the point still open. Its fields travel with it,
+  // the `Input`'s do not — so a settle after the move is legal, and the id must still resolve.
+  let mut input = verbose_input("1 2 3");
+  let mut emitter = Verbose::<NumErr>::new();
+  {
+    let mut ir = input.as_ref(&mut emitter);
+    let point = ir.begin_point();
+    assert_eq!(take(&mut ir), "1");
+    settle_on_a_moved_handle(ir, point);
+  }
+  assert_eq!(
+    input.pinned_checkpoints_len(),
+    0,
+    "the commit through the moved handle released the point's pin"
+  );
+  assert_eq!(
+    input.live_checkpoints_len(),
+    0,
+    "…and its live-checkpoint lineage entry"
+  );
 }
 
 // ── 4. A session point pins its base ─────────────────────────────────────────────────────────
@@ -385,8 +564,119 @@ fn session_point_is_pinned() {
 
   let a = ir.save(); // raw checkpoint, below the session point
   let _ = ir.next().unwrap().expect("consume 1"); // advance past A
-  ir.begin_point(); // pins the base, above A
+  let _point = ir.begin_point(); // pins the base, above A
   ir.restore(a); // panics: restoring A would pop the still-pinned base off the lineage
+}
+
+// ── 4b. A guard that rolls back on DROP reconciles the points opened inside it ────────────────
+//
+// The pin makes a rewind below an open point panic where it is *requested* — but only on the
+// checked `restore`. A guard's rolling-back drop rewinds through the unchecked path (it may run
+// mid-unwind, where a panic is forbidden), so it cannot refuse: it has to reconcile instead,
+// abandoning every point younger than its base before rewinding below them.
+
+#[test]
+fn guard_drop_rollback_reconciles_the_open_session_point() {
+  // `Rollback` is `begin`'s default policy, so this is the shape every `?` early-return through
+  // a guard scope takes. The point opened inside the guard describes a lineage the rollback
+  // destroys; leaving it on the stack would let a later settle rewind to a timeline that no
+  // longer exists.
+  let mut input = silent_input("1 2 3 4 5");
+  let mut emitter = Silent::<NumErr>::new();
+  {
+    let mut ir = input.as_ref(&mut emitter);
+    let _ = ir.next().unwrap().expect("committed work before the guard");
+    let before = *ir.cursor().as_inner();
+    let baseline = ir.live_checkpoints_len();
+
+    {
+      let mut guard = ir.begin();
+      let _point = guard.begin_point();
+      let _ = guard
+        .next()
+        .unwrap()
+        .expect("speculative work through the point");
+      // …and the guard is dropped undecided: rollback-on-drop, below the open point.
+    }
+
+    assert_eq!(
+      ir.points(),
+      0,
+      "the rollback abandoned the point it invalidated"
+    );
+    assert_eq!(
+      ir.live_checkpoints_len(),
+      baseline,
+      "…and released its lineage entry"
+    );
+    assert_eq!(
+      *ir.cursor().as_inner(),
+      before,
+      "the guard still rolled back to its own base"
+    );
+  }
+  assert_eq!(
+    input.pinned_checkpoints_len(),
+    0,
+    "…and its pin: the pin set holds exactly the live begin points"
+  );
+}
+
+#[test]
+#[should_panic(expected = "no live session point")]
+fn settling_a_point_a_guard_drop_reconciled_is_refused() {
+  // The flip side of the reconciliation: the point is *gone*, so settling afterwards is refused
+  // by the session verb itself. Before the reconciliation the stale entry was still on the stack
+  // and the settle rewound to a dead lineage — caught, in debug builds only, as a non-LIFO
+  // restore at the settle rather than at the cause.
+  let mut input = silent_input("1 2 3 4 5");
+  let mut emitter = Silent::<NumErr>::new();
+  let mut ir = input.as_ref(&mut emitter);
+  let point = {
+    let mut guard = ir.begin();
+    let point = guard.begin_point();
+    let _ = guard.next().unwrap().expect("1");
+    point
+  };
+  ir.rollback_point(point);
+}
+
+#[test]
+fn attempt_panic_with_an_open_point_leaves_no_stranded_point() {
+  // The unwind twin: `attempt` holds its begin point in a rolling-back guard precisely so a
+  // panic out of user code settles it, and that settle must reconcile a point the closure left
+  // open. A caught panic hands the host an input with nothing stranded on its behalf.
+  let mut input = silent_input("1 2 3 4 5");
+  let mut emitter = Silent::<NumErr>::new();
+  {
+    let mut ir = input.as_ref(&mut emitter);
+    let baseline = ir.live_checkpoints_len();
+
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _: Option<()> = ir.attempt(|ir| {
+        let _point = ir.begin_point();
+        let _ = ir.next().unwrap().expect("1");
+        panic!("the attempt's closure unwinds")
+      });
+    }));
+    assert!(caught.is_err(), "the panic unwound out of the attempt");
+
+    assert_eq!(
+      ir.points(),
+      0,
+      "the unwind's rollback reconciled the point opened inside it"
+    );
+    assert_eq!(
+      ir.live_checkpoints_len(),
+      baseline,
+      "…and left no live lineage entry behind"
+    );
+  }
+  assert_eq!(
+    input.pinned_checkpoints_len(),
+    0,
+    "…and nothing pinned on the caught panic's behalf"
+  );
 }
 
 // ── 5. The depth accessor through the lifecycle ──────────────────────────────────────────────
@@ -398,13 +688,13 @@ fn session_depth_accessor() {
   let mut ir = input.as_ref(&mut emitter);
 
   assert_eq!(ir.points(), 0, "a fresh reference has no points");
-  ir.begin_point();
+  let outer = ir.begin_point();
   assert_eq!(ir.points(), 1);
-  ir.begin_point();
+  let inner = ir.begin_point();
   assert_eq!(ir.points(), 2, "nesting deepens the stack");
-  ir.commit_point();
+  ir.commit_point(inner);
   assert_eq!(ir.points(), 1, "committing the newest lowers the depth");
-  ir.rollback_point();
+  ir.rollback_point(outer);
   assert_eq!(ir.points(), 0, "rolling back the oldest empties the stack");
 }
 
@@ -419,12 +709,12 @@ fn settled_points_do_not_grow_the_lineage() {
   let mut ir = input.as_ref(&mut emitter);
 
   for i in 0..4 {
-    ir.begin_point();
+    let point = ir.begin_point();
     let _ = ir.next().unwrap();
     if i % 2 == 0 {
-      ir.commit_point();
+      ir.commit_point(point);
     } else {
-      ir.rollback_point();
+      ir.rollback_point(point);
     }
     assert_eq!(
       ir.live_checkpoints_len(),
@@ -450,9 +740,9 @@ fn dropping_the_handle_releases_the_open_points() {
   let mut emitter = Silent::<NumErr>::new();
   {
     let mut ir = input.as_ref(&mut emitter);
-    ir.begin_point();
+    let _outer = ir.begin_point();
     let _ = ir.next().unwrap().expect("1");
-    ir.begin_point();
+    let _inner = ir.begin_point();
     let _ = ir.next().unwrap().expect("2");
     assert_eq!(ir.points(), 2, "two points are open");
     assert_eq!(
@@ -485,7 +775,7 @@ fn dropping_the_handle_keeps_the_progress_of_the_open_points() {
   {
     let mut ir = input.as_ref(&mut emitter);
     assert_eq!(take(&mut ir), "1", "committed work before the session");
-    ir.begin_point();
+    let _point = ir.begin_point();
     assert_eq!(take(&mut ir), "2", "speculative work through the point");
     assert_eq!(take(&mut ir), "3");
     emit(&mut ir, 0, NumErr::Lex);
@@ -521,7 +811,7 @@ fn a_second_handle_rewinds_across_an_abandoned_point() {
   {
     let mut ir = input.as_ref(&mut emitter);
     let _ = ir.next().unwrap().expect("1");
-    ir.begin_point(); // opened, pinned — and never settled
+    let _point = ir.begin_point(); // opened, pinned — and never settled
     let _ = ir.next().unwrap().expect("2");
   }
   let mut ir = input.as_ref(&mut emitter);
@@ -535,9 +825,9 @@ fn a_second_handle_rewinds_across_an_abandoned_point() {
 
   // A fresh session point, and an attempt that declines — both rewind through the same checked
   // `restore`, and neither may see a stale pin.
-  ir.begin_point();
+  let point = ir.begin_point();
   let _ = ir.next().unwrap().expect("3");
-  ir.rollback_point();
+  ir.rollback_point(point);
   assert_eq!(*ir.cursor().as_inner(), at, "the new point rolled back");
 
   assert!(

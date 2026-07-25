@@ -74,7 +74,7 @@
 //! | [`cache_pushes`](Lineage::cache_pushes) | `Lineage` | lineage memo | pure-copy the saved value |
 //! | [`live_ckpts`](Lineage) | `Lineage` | lineage memo | pop through the restored id |
 //! | [`pinned`](Lineage) | `Lineage` | lineage memo | nothing (a restore does not change which guards are live) |
-//! | `points` (open session points) | `Session` | lineage memo | nothing (a rewind *below* an open point is refused by its pin) |
+//! | `points` (open session points) | `Session` | lineage memo | settle the suffix below the restored id (the *checked* rewind is refused by the pin first) |
 //! | [`next_ckp_id`](Lineage) | `Lineage` | monotone id source | **nothing** — rewinding would reissue a live id |
 //! | [`savepoint_seq`](Lineage) | `Lineage` | monotone id source | **nothing** — same |
 //! | `finality` (`is_final`) | `Input` (snapshot on `InputRef`) | **world fact** | **nothing** — and it cannot change while a handle lives |
@@ -342,6 +342,25 @@ impl Lineage {
     id
   }
 
+  /// CAPTURE_WINDOW — reserves the one slot [`open`](Self::open) is about to push into, so that
+  /// push cannot allocate and therefore cannot unwind.
+  ///
+  /// [`open`](Self::open) *is* half of a capture (the other half is the emitter mark): it records
+  /// a live entry that only a later settle — a restore, or [`forget`](Self::forget) through
+  /// `forget_kept_checkpoint` — can remove. A [`Checkpoint`](super::Checkpoint) has no `Drop` (it
+  /// cannot reach the input or the emitter to settle itself), so an unwind out of the push would
+  /// leave the entry with no owner at all. Calling this first moves the only fallible step to a
+  /// moment when nothing is captured yet: either it panics with nothing to strand, or the push is
+  /// infallible. Amortization is unchanged: a reserve that finds room is a compare, and one that
+  /// does not performs exactly the geometric growth the `push` would have performed. The guarantee
+  /// holds for `Vec` and for `SmallVec` alike — the latter's `reserve` compares against the
+  /// *inline* capacity when it has not spilled, so a stack sitting exactly at that capacity spills
+  /// to the heap here rather than in the push.
+  #[inline(always)]
+  pub(crate) fn reserve_open(&mut self) {
+    self.live_ckpts.reserve(1);
+  }
+
   /// Returns whether `id` is still live on the lineage stack. Backs both the
   /// [`StackedTransaction`](super::StackedTransaction) savepoint-staleness check (every allocator
   /// build) and, in debug + ptr builds, [`restore`](super::InputRef::restore)'s non-LIFO panic.
@@ -393,6 +412,25 @@ impl Lineage {
   #[inline(always)]
   pub(crate) fn pin(&mut self, id: u64) {
     self.pinned.push(id);
+  }
+
+  /// CAPTURE_WINDOW — reserves the one slot [`pin`](Self::pin) is about to push into, so that push
+  /// cannot allocate and therefore cannot unwind.
+  ///
+  /// Every pinning caller pins its begin point *after* taking the capture and *before* the capture
+  /// has an owner (a [`Transaction`](super::Transaction), a
+  /// [`StackedTransaction`](super::StackedTransaction), or the session-point stack), and this stack
+  /// is a **second** container, distinct from the one the capture will land in: reserving the
+  /// destination alone leaves the pin push as a live allocation site inside that window. An unwind
+  /// there drops the capture raw — no rollback, no commit, no `forget_kept_checkpoint`, no emitter
+  /// release — and, since the owner was never constructed, nothing else can settle it either. So
+  /// the caller reserves here first, with nothing yet captured to strand. Same guarantee for `Vec`
+  /// and for `SmallVec`: the latter's `reserve` compares against the *inline* capacity too, so a
+  /// pin set sitting exactly at its inline capacity spills to the heap here rather than in the
+  /// push.
+  #[inline(always)]
+  pub(crate) fn reserve_pin(&mut self) {
+    self.pinned.reserve(1);
   }
 
   /// Removes `id` from the pin set when its guard, attempt, or session point settles. Mirrors

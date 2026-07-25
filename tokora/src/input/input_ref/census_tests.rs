@@ -1,5 +1,6 @@
-//! SETTLE_CENSUS / RELEASE_CENSUS — the source censuses of every place a committed token
-//! settles, and of every place an emitter checkpoint is spent or forgotten.
+//! SETTLE_CENSUS / RELEASE_CENSUS / CAPTURE_WINDOW — the source censuses of every place a
+//! committed token settles, every place an emitter checkpoint is spent or forgotten, and every
+//! place one is taken behind the preflight reservation that keeps an unwind from stranding it.
 //!
 //! # Why a census, and why here
 //!
@@ -92,6 +93,35 @@ fn count(hay: &str, needle: &str) -> usize {
     .filter(|line| !line.trim_start().starts_with("//"))
     .map(|line| line.matches(needle).count())
     .sum()
+}
+
+/// The source lines of a two-space-indented `fn <name>(` in `hay`, from its signature
+/// through the closing brace at that same indentation.
+///
+/// Body-scoped rather than file-scoped because the law below is per-path: it is not enough
+/// that a file mentions the funnel N times, each *exit path* has to route through it. The
+/// censused files are rustfmt-formatted with two-space indentation, so a method's own closing
+/// brace is the first `  }` at or after its signature and every brace inside it is deeper.
+fn method_body(hay: &str, name: &str) -> std::string::String {
+  // Most censused methods take no generics of their own (`fn name(`); a few — `guard_with`,
+  // `begin_stacked_with` — carry one (`fn name<D: DropPolicy>(`), so the signature's own
+  // parameter list opens with `<` rather than `(`. Either opener starts the same body search.
+  let paren = std::format!("fn {name}(");
+  let generic = std::format!("fn {name}<");
+  let lines: std::vec::Vec<&str> = hay.lines().collect();
+  let start = lines
+    .iter()
+    .position(|line| {
+      line.starts_with("  ")
+        && !line.starts_with("   ")
+        && (line.contains(&paren) || line.contains(&generic))
+    })
+    .unwrap_or_else(|| panic!("RELEASE_CENSUS: no two-space-indented `fn {name}(` in the source"));
+  let len = lines[start..]
+    .iter()
+    .position(|line| *line == "  }")
+    .unwrap_or_else(|| panic!("RELEASE_CENSUS: `fn {name}` has no closing brace at its indent"));
+  lines[start..=start + len].join("\n")
 }
 
 /// Counts call sites of a method: `self.<name>(` + `ir.<name>(` receivers.
@@ -285,9 +315,9 @@ fn settle_census_adopt_is_the_single_skip_settle() {
 // event sink) strands one row per committed guard, forever. The keep paths funnel:
 //
 // - every kept `Checkpoint` goes through `InputRef::forget_kept_checkpoint` — the raw
-//   commit, both transaction guards' commit and commit-on-drop arms, the stacked guard's
-//   savepoint release/commit/drop — which pairs the lineage forget with the emitter
-//   release in one body;
+//   commit, both transaction guards' commit and commit-on-drop arms, every stacked-guard
+//   path that ends the savepoint stack's life, and the session-point suffix a rewind
+//   invalidates — which pairs the lineage forget with the emitter release in one body;
 // - every kept `ThroughEntry` goes through `ScanMode::on_commit` — called on each of the
 //   five committing exits of `skip_until` (boundary drain, fatal lex propagation, trip,
 //   stop, fatal report propagation); the sixth exit is `on_eof`, which spends the mark
@@ -385,7 +415,12 @@ fn release_census_every_checkpoint_capture_is_paired() {
 fn release_census_kept_checkpoints_funnel_through_one_body() {
   // (file, expected `forget_kept_checkpoint` mentions, who they are)
   let expected: &[(&str, usize, &str)] = &[
-    ("mod.rs", 2, "the definition + `commit_checkpoint`"),
+    (
+      "mod.rs",
+      3,
+      "the definition + `commit_checkpoint` + `abandon_points_above` (the session-point \
+       suffix a rewind invalidates)",
+    ),
     (
       "transaction/mod.rs",
       2,
@@ -393,9 +428,10 @@ fn release_census_kept_checkpoints_funnel_through_one_body() {
     ),
     (
       "stacked/mod.rs",
-      5,
-      "savepoint `release` + `commit` (savepoints, base) + the commit-on-drop arm \
-       (savepoints, base)",
+      8,
+      "savepoint `release` + `rollback_to`'s younger-savepoint drain + `commit` (savepoints, \
+       base) + whole `rollback`'s savepoint drain + both drop arms (the rollback arm's \
+       savepoint drain; the commit arm's savepoints and base)",
     ),
   ];
   for (name, want, who) in expected {
@@ -448,6 +484,58 @@ fn release_census_kept_checkpoints_funnel_through_one_body() {
   );
 }
 
+/// RELEASE_CENSUS — every path that ends the savepoint stack's life routes **each entry**
+/// through the kept-checkpoint funnel.
+///
+/// The savepoint stack is the one place a [`Checkpoint`](super::Checkpoint) is held outside a
+/// guard's own base field, and a savepoint's emitter mark can *read the same value* as the
+/// base's — a capture taken with no intervening events reads the same emission length. A
+/// rewind spends what sits strictly above the mark plus the newest capture at it, so one
+/// restore can never settle the older aliases: each of the five life-ending paths has to walk
+/// the stack itself. Counted per method body, because the law is per exit path rather than per
+/// file.
+#[test]
+fn release_census_every_savepoint_life_end_settles_through_the_funnel() {
+  let stacked = source("stacked/mod.rs");
+
+  // (method, expected funnel calls in its body, what they settle)
+  let expected: &[(&str, usize, &str)] = &[
+    ("release", 1, "the released savepoint and every younger one"),
+    ("rollback_to", 1, "every savepoint younger than the target"),
+    ("commit", 2, "every savepoint, then the base"),
+    (
+      "rollback",
+      1,
+      "every savepoint (the base is settled by its own restore)",
+    ),
+    (
+      "drop",
+      3,
+      "the rollback arm's savepoints, and the commit arm's savepoints and base",
+    ),
+  ];
+  for (method, want, who) in expected {
+    let got = count(&method_body(stacked, method), "forget_kept_checkpoint(");
+    assert!(
+      got == *want,
+      "RELEASE_CENSUS drift: `StackedTransaction::{method}` routes {got} entries through \
+       `forget_kept_checkpoint`, expected {want} ({who}). Every path that ends the savepoint \
+       stack's life must settle each entry through the funnel; a savepoint checkpoint dropped \
+       raw strands mark-keyed emitter bookkeeping in every build (grep RELEASE_CENSUS)."
+    );
+  }
+
+  // …and no bulk removal may shortcut the walk: each of these drops the removed entries'
+  // checkpoints raw, which is exactly the shape the per-entry settle replaces.
+  for bulk in ["saves.truncate(", "saves.clear(", "saves.drain("] {
+    assert!(
+      count(stacked, bulk) == 0,
+      "RELEASE_CENSUS drift: `stacked/mod.rs` removes savepoints in bulk (`{bulk}`), dropping \
+       their checkpoints without settling them (grep RELEASE_CENSUS)."
+    );
+  }
+}
+
 /// RELEASE_CENSUS — the scanner's kept snapshots: `skip_until` has six exits; five keep
 /// the scan's progress and settle the snapshot through `ScanMode::on_commit`, the sixth
 /// (`on_eof`) spends the mark by rewinding. A new exit must pick one, in the same
@@ -488,5 +576,291 @@ fn release_census_trait_declares_and_blanket_forwards() {
      `emitter/mod.rs` — the defaulted declaration and the `&mut U` blanket forward. \
      A defaulted-not-forwarded method silently no-ops through `&mut` emitters \
      (grep RELEASE_CENSUS)."
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// CAPTURE_WINDOW — between taking a capture (`save`, `Emitter::checkpoint`, `Checkpoint::new`)
+// and the moment it has an owner able to settle it — a `Transaction`, a `StackedTransaction`, a
+// pushed session point or savepoint, or the finished `Checkpoint`/`ThroughEntry` itself — nothing
+// may allocate or otherwise unwind. `Checkpoint` has no `Drop` (it cannot reach the input or the
+// borrowed emitter to settle itself), so an unwind inside that window drops the capture raw: no
+// rollback, no commit, no `forget_kept_checkpoint`, no release — a stranded lineage entry, a
+// stranded pin, and a stranded emitter mark, with nothing left that knows any of the three exist.
+//
+// The fix is a preflight taken before the capture: reserve the destination container's slot, or —
+// where the fallible step is a caller-supplied clone rather than a container push — hoist that
+// clone above the capture instead. Either way, once the capture is taken, its landing is either
+// already-reserved capacity or has nothing fallible left ahead of it. Eight sites close a window
+// this way:
+//
+// - `guard_with` (so `begin`/`begin_with` and both attempts) and `begin_stacked_with` each pin
+//   their captured begin point into the lineage's pin stack — a SECOND container, distinct from
+//   the one `save` itself reserves — via `reserve_pin_slot`, called before `save`;
+// - `begin_point` does the same, and ALSO lands its capture on the session's own point stack,
+//   reserved via `session.points.reserve(1)`, likewise before `save`;
+// - `save_checkpoint` — the shared body every `save` funnels through — reserves the
+//   live-checkpoint stack's slot with `reserve_open` before EITHER of its own two registrations
+//   (the emitter mark, then the lineage entry that follows it);
+// - `StackedTransaction::savepoint` reserves its slot in the savepoint stack before capturing;
+// - `sync_through`, `sync_through_then_peek_with_emitter`, and `sync_balanced` take only an
+//   emitter mark (no lineage entry, no pin, so no container to reserve): their preflight is a
+//   hoist — the caller-supplied dedup-watermark clone moves above the mark, so nothing fallible
+//   is left between the mark and the finished `ThroughEntry` that owns it.
+//
+// One capture is a documented exception rather than a ninth site: `rollback_to`'s re-save needs
+// no reservation of its own, because the savepoint pops immediately above it already free the
+// very slot its push lands in.
+//
+// A capture site added without its preflight is dropped raw by the very first unwinding
+// insertion after it. Take the reservation (or the hoist) before the capture — a capture taken
+// before its owner can accept it is stranded by an unwinding insertion — then extend this census
+// in the same commit (grep CAPTURE_WINDOW).
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/// The lineage module source, censused for the two preflight-reservation primitives
+/// `reserve_open` and `reserve_pin`.
+const LINEAGE_MOD: &str = include_str!("../lineage.rs");
+
+/// The code lines of `hay` rejoined without its `//`-prefixed lines — the same filter [`count`]
+/// applies, kept as text rather than a count so a capture site's ordering can be checked
+/// positionally without a comment that merely mentions a call site shifting what counts as its
+/// first occurrence.
+fn code_only(hay: &str) -> std::string::String {
+  hay
+    .lines()
+    .filter(|line| !line.trim_start().starts_with("//"))
+    .collect::<std::vec::Vec<_>>()
+    .join("\n")
+}
+
+/// CAPTURE_WINDOW — the three lineage pin-stack captures: `guard_with` (hence `begin`/
+/// `begin_with` and both attempts), `begin_stacked_with`, and `begin_point` each call
+/// `reserve_pin_slot` before `save`, so the `pin_checkpoint` push that follows the capture lands
+/// in already-reserved capacity. `begin_point` reserves a second, distinct container the same
+/// way: the session's own point stack.
+#[test]
+fn capture_window_pin_stack_reservations_precede_their_save() {
+  let mod_src = source("mod.rs");
+
+  // Inventory: exactly three `self.save()` captures live in this file, one per pin-stack site.
+  // A fourth capture anywhere in the censused sources is new and has not yet earned a preflight.
+  let got = calls(mod_src, "save");
+  assert!(
+    got == 3,
+    "CAPTURE_WINDOW drift: `mod.rs` has {got} `self.save()` capture(s), expected 3 \
+     (`guard_with`, `begin_stacked_with`, `begin_point`). A capture taken before its owner can \
+     accept it is stranded by an unwinding insertion — reserve the destination slot with \
+     `reserve_pin_slot` BEFORE calling `save`, then extend this census in the same commit \
+     (grep CAPTURE_WINDOW)."
+  );
+  for (name, src) in SOURCES {
+    if *name == "mod.rs" {
+      continue;
+    }
+    assert!(
+      calls(src, "save") == 0,
+      "CAPTURE_WINDOW drift: `{name}` gained a `self.save()` capture outside `mod.rs`. Reserve \
+       its destination slot BEFORE the capture — a capture taken before its owner can accept it \
+       is stranded by an unwinding insertion — then register the site in this census (grep \
+       CAPTURE_WINDOW)."
+    );
+  }
+
+  // Ordering, per site: the reservation must precede the capture it guards, not merely appear
+  // somewhere in the same function.
+  for method in ["guard_with", "begin_stacked_with", "begin_point"] {
+    let body = code_only(&method_body(mod_src, method));
+    let reserve_pos = body.find("self.reserve_pin_slot()").unwrap_or_else(|| {
+      panic!(
+        "CAPTURE_WINDOW drift: `InputRef::{method}` no longer reserves the pin-stack slot \
+         before its capture. Take the reservation before the capture — a capture taken before \
+         its owner can accept it is stranded by an unwinding insertion (grep CAPTURE_WINDOW)."
+      )
+    });
+    let save_pos = body.find("self.save()").unwrap_or_else(|| {
+      panic!(
+        "CAPTURE_WINDOW: `InputRef::{method}` no longer captures via `self.save()`; update \
+         this census (grep CAPTURE_WINDOW)."
+      )
+    });
+    assert!(
+      reserve_pos < save_pos,
+      "CAPTURE_WINDOW drift: `InputRef::{method}` calls `reserve_pin_slot` AFTER `save` rather \
+       than before. Take the reservation before the capture — a capture taken before its owner \
+       can accept it is stranded by an unwinding insertion (grep CAPTURE_WINDOW)."
+    );
+  }
+
+  // `begin_point`'s second container: the session point stack, reserved before the same capture.
+  let begin_point_body = code_only(&method_body(mod_src, "begin_point"));
+  let points_reserve_pos = begin_point_body
+    .find("self.session.points.reserve(1)")
+    .unwrap_or_else(|| {
+      panic!(
+        "CAPTURE_WINDOW drift: `InputRef::begin_point` no longer reserves the session point \
+         stack's slot before its capture. Take the reservation before the capture — a capture \
+         taken before its owner can accept it is stranded by an unwinding insertion (grep \
+         CAPTURE_WINDOW)."
+      )
+    });
+  let save_pos = begin_point_body
+    .find("self.save()")
+    .expect("checked above: begin_point captures via `self.save()`");
+  assert!(
+    points_reserve_pos < save_pos,
+    "CAPTURE_WINDOW drift: `InputRef::begin_point` reserves the session point stack's slot \
+     AFTER `save` rather than before (grep CAPTURE_WINDOW)."
+  );
+}
+
+/// CAPTURE_WINDOW — `save_checkpoint`, the shared body every `save` funnels through, reserves
+/// the live-checkpoint stack's slot with `reserve_open` before EITHER of its own two
+/// registrations: the emitter mark it takes, then the lineage entry `open` records into the
+/// slot just reserved.
+#[test]
+fn capture_window_save_checkpoint_reserves_before_either_registration() {
+  let body = code_only(&method_body(source("mod.rs"), "save_checkpoint"));
+
+  let reserve_pos = body
+    .find("self.session.lineage.reserve_open()")
+    .unwrap_or_else(|| {
+      panic!(
+        "CAPTURE_WINDOW drift: `InputRef::save_checkpoint` no longer reserves the \
+         live-checkpoint stack's slot before its registrations. Take the reservation before the \
+         capture — a capture taken before its owner can accept it is stranded by an unwinding \
+         insertion (grep CAPTURE_WINDOW)."
+      )
+    });
+  let emitter_pos = body
+    .find("self.session.emitter.checkpoint()")
+    .expect("CAPTURE_WINDOW: `save_checkpoint` no longer takes an emitter mark");
+  let open_pos = body
+    .find("self.session.lineage.open()")
+    .expect("CAPTURE_WINDOW: `save_checkpoint` no longer opens a lineage entry");
+
+  assert!(
+    reserve_pos < emitter_pos && reserve_pos < open_pos,
+    "CAPTURE_WINDOW drift: `InputRef::save_checkpoint` takes a registration — the emitter mark \
+     or the lineage entry — before reserving the live-checkpoint stack's slot. Take the \
+     reservation before the capture — a capture taken before its owner can accept it is \
+     stranded by an unwinding insertion (grep CAPTURE_WINDOW)."
+  );
+}
+
+/// CAPTURE_WINDOW — `StackedTransaction::savepoint` reserves its slot in the savepoint stack
+/// before capturing. `rollback_to`'s re-save is the one documented exception: the savepoint pops
+/// immediately above it already free the slot its push lands in, so it needs — and must not
+/// grow — a reservation of its own.
+#[test]
+fn capture_window_savepoint_reservation_precedes_its_save() {
+  let stacked_src = source("stacked/mod.rs");
+
+  // Inventory: exactly two `self.input.save()` captures in this file — `savepoint`'s fresh mark
+  // and `rollback_to`'s re-save. A third capture anywhere in the censused sources is new and has
+  // not yet earned its preflight treatment.
+  let got = count(stacked_src, "self.input.save()");
+  assert!(
+    got == 2,
+    "CAPTURE_WINDOW drift: `stacked/mod.rs` has {got} `self.input.save()` capture(s), expected \
+     2 (`savepoint`, `rollback_to`). A capture taken before its owner can accept it is stranded \
+     by an unwinding insertion — reserve its destination slot BEFORE the capture, then extend \
+     this census in the same commit (grep CAPTURE_WINDOW)."
+  );
+  for (name, src) in SOURCES {
+    if *name == "stacked/mod.rs" {
+      continue;
+    }
+    assert!(
+      count(src, "self.input.save()") == 0,
+      "CAPTURE_WINDOW drift: `{name}` gained a `self.input.save()` capture outside \
+       `stacked/mod.rs` (grep CAPTURE_WINDOW)."
+    );
+  }
+
+  // `savepoint`: the reservation must precede the capture.
+  let savepoint_body = code_only(&method_body(stacked_src, "savepoint"));
+  let reserve_pos = savepoint_body
+    .find("self.saves.reserve(1)")
+    .unwrap_or_else(|| {
+      panic!(
+        "CAPTURE_WINDOW drift: `StackedTransaction::savepoint` no longer reserves its slot \
+         before its capture. Take the reservation before the capture — a capture taken before \
+         its owner can accept it is stranded by an unwinding insertion (grep CAPTURE_WINDOW)."
+      )
+    });
+  let save_pos = savepoint_body
+    .find("self.input.save()")
+    .expect("CAPTURE_WINDOW: `savepoint` no longer captures via `self.input.save()`");
+  assert!(
+    reserve_pos < save_pos,
+    "CAPTURE_WINDOW drift: `StackedTransaction::savepoint` reserves its slot AFTER the capture \
+     rather than before (grep CAPTURE_WINDOW)."
+  );
+
+  // `rollback_to`'s re-save is exempt by construction; a reservation appearing here would either
+  // be dead weight or, worse, mask the day this exemption stops holding.
+  let rollback_to_body = code_only(&method_body(stacked_src, "rollback_to"));
+  assert!(
+    !rollback_to_body.contains(".reserve("),
+    "CAPTURE_WINDOW drift: `StackedTransaction::rollback_to` grew a reservation call. Its \
+     re-save is exempt by construction — the savepoint pops immediately above it already free \
+     the slot its push lands in; if that no longer holds, restructure the exemption rather than \
+     adding a reservation silently (grep CAPTURE_WINDOW)."
+  );
+}
+
+/// CAPTURE_WINDOW — the three sync-entry snapshots capture only an emitter mark (no lineage
+/// entry, no pin, so no container to reserve): their preflight hoists the caller-supplied
+/// dedup-watermark clone above the mark instead, so nothing fallible is left between the mark
+/// and the `ThroughEntry` that owns it.
+#[test]
+fn capture_window_sync_entry_snapshots_hoist_the_fallible_clone_first() {
+  let sites: &[(&str, usize)] = &[("sync_through.rs", 2), ("sync_balanced.rs", 1)];
+  for (name, want) in sites {
+    let code = code_only(source(name));
+    let clone_positions: std::vec::Vec<usize> = code
+      .match_indices("self.emitted_error_end.clone()")
+      .map(|(i, _)| i)
+      .collect();
+    let mark_positions: std::vec::Vec<usize> = code
+      .match_indices("self.session.emitter.checkpoint()")
+      .map(|(i, _)| i)
+      .collect();
+    assert!(
+      clone_positions.len() == *want && mark_positions.len() == *want,
+      "CAPTURE_WINDOW drift: `{name}` has {} watermark clone(s) and {} emitter capture(s), \
+       expected {want} of each — one `ThroughEntry` snapshot per sync entry point (grep \
+       CAPTURE_WINDOW).",
+      clone_positions.len(),
+      mark_positions.len()
+    );
+    for (clone_pos, mark_pos) in clone_positions.iter().zip(mark_positions.iter()) {
+      assert!(
+        clone_pos < mark_pos,
+        "CAPTURE_WINDOW drift: `{name}` takes an emitter mark before hoisting the \
+         dedup-watermark clone above it. The clone is caller-supplied `Offset::clone` code that \
+         may allocate; taken after the mark it becomes a fallible step between the capture and \
+         its owner. Hoist the clone before the capture — a capture taken before its owner can \
+         accept it is stranded by an unwinding insertion (grep CAPTURE_WINDOW)."
+      );
+    }
+  }
+}
+
+/// CAPTURE_WINDOW — the reservation primitives themselves: `Lineage::reserve_open` and
+/// `Lineage::reserve_pin` are each defined exactly once, so every call above names the one
+/// reservation body this census locks the order against.
+#[test]
+fn capture_window_reservation_primitives_are_defined_once() {
+  assert!(
+    count(LINEAGE_MOD, "fn reserve_open(") == 1,
+    "CAPTURE_WINDOW drift: `Lineage::reserve_open` must be defined exactly once, in \
+     `lineage.rs` (grep CAPTURE_WINDOW)."
+  );
+  assert!(
+    count(LINEAGE_MOD, "fn reserve_pin(") == 1,
+    "CAPTURE_WINDOW drift: `Lineage::reserve_pin` must be defined exactly once, in `lineage.rs` \
+     (grep CAPTURE_WINDOW)."
   );
 }

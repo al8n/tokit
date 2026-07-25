@@ -64,11 +64,22 @@ where
     // progress en route to it), so this snapshot goes unused on those paths; only the no-match
     // end-of-input exit rewinds to it. This is an internal positional rewind, not a `Checkpoint`:
     // it threads no lineage entry.
+    //
+    // CAPTURE_WINDOW — the watermark clone is hoisted above the mark deliberately. The emitter mark
+    // IS a capture: it owes a `rewind` or a `release` on every exit (RELEASE_CENSUS), and only
+    // `skip_until`, once it owns `snapshot`, can pay. `L::Offset::clone` is caller-supplied code
+    // that may allocate, so evaluating it as a later argument would leave a fallible step BETWEEN
+    // the capture and its owner, where an unwind strands one mark-keyed row of the emitter's
+    // checkpoint stack with nothing left that knows to reclaim it. Taken first, it can only fail
+    // while no mark exists. The rest of the window is infallible: the two clones ahead of the mark
+    // are outside it, `ThroughEntry::new` is a `const fn` that only moves, and the `&mut` reborrows
+    // between the binding and `skip_until` allocate nothing.
+    let error_end = self.emitted_error_end.clone();
     let snapshot = ThroughEntry::new(
       self.span.clone(),
       self.state.clone(),
       self.session.emitter.checkpoint(),
-      self.emitted_error_end.clone(),
+      error_end,
     );
 
     // `SyncThrough` consumes the match (`Scanned::Found`) — the same two lines whether the scanner
@@ -153,11 +164,17 @@ where
     // Snapshot the pre-call state BEFORE the scan, so the no-match end-of-input exit can rewind the
     // FULL pre-call state — the drained cache prefix and the diagnostics alike (see
     // [`sync_through`](Self::sync_through)).
+    //
+    // CAPTURE_WINDOW — the watermark clone is hoisted above the mark for the reason
+    // [`sync_through`](Self::sync_through) gives: a caller-supplied `L::Offset::clone` evaluated
+    // after the capture would be a fallible step between the mark and the `skip_until` call that
+    // owns (and settles) it, and an unwind there strands one row of the emitter's checkpoint stack.
+    let error_end = self.emitted_error_end.clone();
     let snapshot = ThroughEntry::new(
       self.span.clone(),
       self.state.clone(),
       self.session.emitter.checkpoint(),
-      self.emitted_error_end.clone(),
+      error_end,
     );
 
     match self.skip_until::<SyncThrough, _, _>(&mut pred, &mut exp, snapshot)? {
