@@ -64,6 +64,13 @@ pub type MissingTokenOf<'inp, L, Lang = ()> = MissingToken<
 /// It's commonly used in parsers to provide
 /// detailed error messages when the input doesn't match the expected syntax.
 ///
+/// Three optional channels ride alongside the offset, each answering a different question:
+/// [`expected`](Self::expected) is machine-readable (token *kinds*), [`message`](Self::message)
+/// is the caller's free text, and [`name`](Self::name) is the human-readable name of the token
+/// this error is about — what a separated-sequence driver calls its separator, for instance.
+/// They are separate because a conversion that needs to stamp one must not have to choose
+/// between clobbering another and dropping its own information.
+///
 /// # Type Parameters
 ///
 /// * `T` - The type of the actual token that was found
@@ -95,6 +102,7 @@ pub struct MissingToken<'a, Kind: Clone, O = usize, Lang: ?Sized = ()> {
   offset: O,
   expected: Option<Expected<'a, Kind>>,
   message: Option<CowStr>,
+  name: Option<CowStr>,
   _lang: PhantomData<Lang>,
 }
 
@@ -115,11 +123,13 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
     offset: O,
     expected: Option<Expected<'a, Kind>>,
     message: Option<CowStr>,
+    name: Option<CowStr>,
   ) -> Self {
     Self {
       offset,
       expected,
       message,
+      name,
       _lang: PhantomData,
     }
   }
@@ -130,7 +140,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// without specifying what token was found or expected.
   #[inline(always)]
   pub const fn of(offset: O) -> Self {
-    Self::new_in(offset, None, None)
+    Self::new_in(offset, None, None, None)
   }
 
   /// Adds knowledge to the `MissingToken` error.
@@ -139,7 +149,21 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// to the error, which can be useful for debugging or reporting.
   #[inline(always)]
   pub fn with_message(self, message: CowStr) -> Self {
-    Self::new_in(self.offset, self.expected, Some(message))
+    Self::new_in(self.offset, self.expected, Some(message), self.name)
+  }
+
+  /// Stamps the human-readable name of the token this error is about — the separator name a
+  /// separated-sequence driver supplied, for the errors the separator conversions produce.
+  ///
+  /// A channel of its own rather than a phrasing pushed into
+  /// [`with_message`](Self::with_message): the message is the caller's free text, and a
+  /// conversion that overwrote it would lose whatever the caller meant by it — while a
+  /// conversion that declined to overwrite it would lose the name instead. Keeping the two
+  /// apart also keeps the name safe from [`with_expected`](Self::with_expected), which clears
+  /// the message channel.
+  #[inline(always)]
+  pub fn with_name(self, name: CowStr) -> Self {
+    Self::new_in(self.offset, self.expected, self.message, Some(name))
   }
 
   /// Creates a missing token error without a found token.
@@ -162,7 +186,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// ```
   #[inline(always)]
   pub fn with_expected(self, expected: Expected<'a, Kind>) -> Self {
-    Self::new_in(self.offset, Some(expected), None)
+    Self::new_in(self.offset, Some(expected), None, self.name)
   }
 
   /// Creates a new missing token error with a single expected token.
@@ -183,7 +207,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// ```
   #[inline(always)]
   pub const fn expected_one(offset: O, expected: Kind) -> Self {
-    Self::new_in(offset, Some(Expected::one(expected)), None)
+    Self::new_in(offset, Some(Expected::one(expected)), None, None)
   }
 
   /// Creates a new missing token error with a single expected token.
@@ -204,7 +228,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// ```
   #[inline(always)]
   pub const fn expected_one_with_found(offset: O, expected: Kind) -> Self {
-    Self::new_in(offset, Some(Expected::one(expected)), None)
+    Self::new_in(offset, Some(Expected::one(expected)), None, None)
   }
 
   /// Creates a new missing token error with multiple expected tokens.
@@ -225,7 +249,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// ```
   #[inline(always)]
   pub const fn expected_one_of(offset: O, expected: &'static [Kind]) -> Self {
-    Self::new_in(offset, Some(Expected::one_of(expected)), None)
+    Self::new_in(offset, Some(Expected::one_of(expected)), None, None)
   }
 
   /// Creates a new missing token error with multiple expected tokens.
@@ -246,7 +270,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// ```
   #[inline(always)]
   pub const fn expected_one_of_with_found(offset: O, expected: &'static [Kind]) -> Self {
-    Self::new_in(offset, Some(Expected::one_of(expected)), None)
+    Self::new_in(offset, Some(Expected::one_of(expected)), None, None)
   }
 
   /// Returns the offset of the missing token.
@@ -313,6 +337,12 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
     self.message.as_mut()
   }
 
+  /// Returns the stamped token name, if any — see [`with_name`](Self::with_name).
+  #[inline(always)]
+  pub const fn name(&self) -> Option<&CowStr> {
+    self.name.as_ref()
+  }
+
   /// Returns a reference to the expected token(s).
   ///
   /// # Examples
@@ -377,29 +407,47 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
       offset: self.offset,
       expected: self.expected.map(f),
       message: self.message,
+      name: self.name,
       _lang: PhantomData,
     }
   }
 
-  /// Consumes the error and returns its components.
+  /// Consumes the error and returns its components: the offset, the expected token(s), the
+  /// optional message, and the stamped token [`name`](Self::name), in field order.
   ///
-  /// This method deconstructs the error into its constituent parts:
-  /// the offset, expected token(s), and optional message.
+  /// The name is returned rather than dropped for the same reason
+  /// [`SeparatedError::into_components`](crate::error::token::SeparatedError::into_components)
+  /// returns its own: a downstream `From<MissingToken>` impl that takes the error apart is
+  /// precisely the consumer the separator conversions stamp the name for, and those
+  /// conversions are blanket impls such a type cannot override. A tuple that omitted the name
+  /// would simply move the loss one seam further along.
+  ///
+  /// The message and the name are both `Option<CowStr>` but are distinct channels — the
+  /// caller's free text and the token's own name — and arrive in that order.
   ///
   /// # Examples
   ///
   /// ```
-  /// use tokora::{SimpleSpan, utils::Expected, error::token::MissingToken};
+  /// use tokora::{SimpleSpan, utils::{CowStr, Expected}, error::token::MissingToken};
   ///
-  /// let error: MissingToken<'_, &str, SimpleSpan> = MissingToken::expected_one(SimpleSpan::new(5, 6), "}");
-  /// let (offset, expected, message) = error.into_components();
+  /// let error: MissingToken<'_, &str, SimpleSpan> =
+  ///     MissingToken::expected_one(SimpleSpan::new(5, 6), "}").with_name(CowStr::from_static("brace"));
+  /// let (offset, expected, message, name) = error.into_components();
   /// assert_eq!(offset, SimpleSpan::new(5, 6));
   /// assert_eq!(expected, Some(Expected::one("}")));
   /// assert_eq!(message, None);
+  /// assert_eq!(name.as_ref().map(CowStr::as_str), Some("brace"));
   /// ```
   #[inline(always)]
-  pub fn into_components(self) -> (O, Option<Expected<'a, Kind>>, Option<CowStr>) {
-    (self.offset, self.expected, self.message)
+  pub fn into_components(
+    self,
+  ) -> (
+    O,
+    Option<Expected<'a, Kind>>,
+    Option<CowStr>,
+    Option<CowStr>,
+  ) {
+    (self.offset, self.expected, self.message, self.name)
   }
 }
 
@@ -420,29 +468,37 @@ impl<Kind: Clone, O, Lang: ?Sized> MissingToken<'_, Kind, O, Lang> {
       .field("offset", &self.offset)
       .field("expected", &self.expected)
       .field("message", &self.message)
+      .field("name", &self.name)
       .finish()
   }
 
   /// Formats the error using the provided formatter in display style.
+  ///
+  /// A stamped [`name`](Self::name) is quoted into the opening clause — `missing token
+  /// 'comma' at 12` — matching how the rest of the crate renders a token's own name
+  /// (`unclosed delimiter '('`, `unopened delimiter ')'`). Naming it there rather than
+  /// appending a clause is what makes the separator conversions' stamp reach a reader: the
+  /// point of the channel is that the diagnostic says *which* separator was missing, not that
+  /// one was.
+  ///
+  /// Without a name the rendering is byte-for-byte what it always was, so the channel is
+  /// purely additive for every error that never carried one.
   #[inline(always)]
   pub fn display_fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
   where
     O: core::fmt::Display,
     Kind: core::fmt::Display,
   {
-    match &self.expected {
-      Some(expected) => match &self.message {
-        Some(message) => write!(
-          f,
-          "missing token at {}, expected {}, message: {}",
-          self.offset, expected, message
-        ),
-        None => write!(f, "missing token at {}, expected {}", self.offset, expected),
-      },
-      None => match &self.message {
-        Some(message) => write!(f, "missing token at {}, message: {}", self.offset, message),
-        None => write!(f, "missing token at {}", self.offset),
-      },
+    match &self.name {
+      Some(name) => write!(f, "missing token '{}' at {}", name, self.offset)?,
+      None => write!(f, "missing token at {}", self.offset)?,
     }
+    if let Some(expected) = &self.expected {
+      write!(f, ", expected {}", expected)?;
+    }
+    if let Some(message) = &self.message {
+      write!(f, ", message: {}", message)?;
+    }
+    Ok(())
   }
 }

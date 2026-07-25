@@ -15,6 +15,10 @@ mod missing_trailing;
 mod unexpected_leading;
 mod unexpected_trailing;
 
+#[cfg(test)]
+#[cfg(any(feature = "std", feature = "alloc"))]
+mod name_census;
+
 /// An emitter that handles missing separator or repeated separators found during parsing.
 pub trait SeparatedEmitter<'inp, L, Lang: ?Sized = ()>: Emitter<'inp, L, Lang> {
   /// Emits an error or warning for a missing separator found during parsing.
@@ -82,11 +86,16 @@ where
     + From<MissingSyntaxOf<'a, L, Lang>>,
 {
   #[inline(always)]
-  fn from_missing_separator(_name: CowStr, err: MissingTokenOf<'a, L, Lang>) -> Self
+  fn from_missing_separator(name: CowStr, err: MissingTokenOf<'a, L, Lang>) -> Self
   where
     L: Lexer<'a>,
   {
-    err.into()
+    // The separator's name is data the driver had and the payload did not. Stamping it here is
+    // the only place it can reach a downstream error type: this blanket captures every type
+    // that implements `From<MissingTokenOf>` — which such a type must, to compose with the rest of
+    // the conversion family — so coherence forbids it from writing its own impl to recover the
+    // name.
+    err.with_name(name).into()
   }
 
   #[inline(always)]

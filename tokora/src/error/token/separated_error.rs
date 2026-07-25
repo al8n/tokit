@@ -6,8 +6,15 @@
 //! lets a downstream error type absorb leading / trailing separator errors
 //! through a single `From<SeparatedError<..>>` impl and tell them apart via the
 //! [`position`](SeparatedError::position) field.
+//!
+//! The separator's own [`name`](SeparatedError::name) rides as data for the same reason. The
+//! driver knows it — `","`, `"comma"`, whatever the punctuator calls itself — and the
+//! conversion into a downstream error type happens inside a blanket impl that a downstream
+//! type cannot override (doing so is a coherence error, since it already implements
+//! `From<SeparatedError<..>>`). So the blanket has to put the name *in the payload*, or the
+//! name is lost for every user of the family.
 
-use crate::{Lexer, Token, error::token::UnexpectedToken, span::SimpleSpan};
+use crate::{Lexer, Token, error::token::UnexpectedToken, span::SimpleSpan, utils::CowStr};
 
 /// Where, within a separated sequence, a separator-related error occurred.
 ///
@@ -60,6 +67,7 @@ pub type SeparatedErrorOf<'inp, L, Lang = ()> = SeparatedError<
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SeparatedError<'a, T, Kind: Clone, S = SimpleSpan, Lang: ?Sized = ()> {
   position: SeparatorPosition,
+  name: Option<CowStr>,
   inner: UnexpectedToken<'a, T, Kind, S, Lang>,
 }
 
@@ -70,7 +78,11 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'a, T, Kind, S, Lang> {
     position: SeparatorPosition,
     inner: UnexpectedToken<'a, T, Kind, S, Lang>,
   ) -> Self {
-    Self { position, inner }
+    Self {
+      position,
+      name: None,
+      inner,
+    }
   }
 
   /// Creates a `SeparatedError` at the [`Leading`](SeparatorPosition::Leading) position.
@@ -91,10 +103,28 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'a, T, Kind, S, Lang> {
     Self::new(SeparatorPosition::Element, inner)
   }
 
+  /// Stamps the human-readable separator name the driver supplied (`Sep::name()`), so a
+  /// downstream `From<SeparatedError<..>>` impl — and the default diagnostics — can say
+  /// *which* separator was involved.
+  #[inline(always)]
+  pub fn with_name(self, name: CowStr) -> Self {
+    Self {
+      position: self.position,
+      name: Some(name),
+      inner: self.inner,
+    }
+  }
+
   /// Returns the position at which this separator error occurred.
   #[inline(always)]
   pub const fn position(&self) -> SeparatorPosition {
     self.position
+  }
+
+  /// Returns the stamped separator name, if any — see [`with_name`](Self::with_name).
+  #[inline(always)]
+  pub const fn name(&self) -> Option<&CowStr> {
+    self.name.as_ref()
   }
 
   /// Returns a reference to the wrapped [`UnexpectedToken`].
@@ -109,16 +139,30 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'a, T, Kind, S, Lang> {
     &mut self.inner
   }
 
-  /// Consumes the error, returning the wrapped [`UnexpectedToken`].
+  /// Consumes the error, returning the wrapped [`UnexpectedToken`] and **dropping** both the
+  /// [`position`](Self::position) and the stamped [`name`](Self::name) — this is the "I only
+  /// want the token" seam. Use [`into_components`](Self::into_components) to take the error
+  /// apart without losing what makes it a *separator* error.
   #[inline(always)]
   pub fn into_inner(self) -> UnexpectedToken<'a, T, Kind, S, Lang> {
     self.inner
   }
 
-  /// Consumes the error, returning its position and wrapped [`UnexpectedToken`].
+  /// Consumes the error, returning its position, its stamped separator name, and the wrapped
+  /// [`UnexpectedToken`].
+  ///
+  /// The name is returned rather than dropped on purpose: this is the destructuring seam of
+  /// the very type that exists to carry the separator's identity, and a tuple that quietly
+  /// omitted it would recreate the loss the name channel was added to close.
   #[inline(always)]
-  pub fn into_components(self) -> (SeparatorPosition, UnexpectedToken<'a, T, Kind, S, Lang>) {
-    (self.position, self.inner)
+  pub fn into_components(
+    self,
+  ) -> (
+    SeparatorPosition,
+    Option<CowStr>,
+    UnexpectedToken<'a, T, Kind, S, Lang>,
+  ) {
+    (self.position, self.name, self.inner)
   }
 }
 
@@ -137,6 +181,7 @@ where
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     f.debug_struct("SeparatedError")
       .field("position", &self.position)
+      .field("name", &self.name)
       .field("span", self.inner.span_ref())
       .field("found", &self.inner.found())
       .field("expected", &self.inner.expected())

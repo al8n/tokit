@@ -11,11 +11,11 @@ where
   where
     L: Lexer<'a>,
   {
-    self
-      .errs
-      .entry(err.span_ref().clone())
-      .or_default()
-      .push(E::from_too_few(err));
+    // Record on the shared emission log (same path as `emit_error` / `emit_unclosed`) so the
+    // diagnostic rewinds precisely with an abandoned speculative branch. The span is bound
+    // out before the payload moves into the conversion.
+    let span = err.span_ref().clone();
+    self.record(span, E::from_too_few(err));
     Ok(())
   }
 }

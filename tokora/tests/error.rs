@@ -1723,10 +1723,38 @@ fn missing_token_bump() {
 fn missing_token_into_components() {
   let e: MissingToken<'_, &str, SimpleSpan> =
     MissingToken::expected_one(SimpleSpan::new(5, 6), "}");
-  let (offset, expected, message) = e.into_components();
+  let (offset, expected, message, name) = e.into_components();
   assert_eq!(offset, SimpleSpan::new(5, 6));
   assert_eq!(expected, Some(Expected::one("}")));
   assert_eq!(message, None);
+  assert_eq!(name, None);
+}
+
+// The destructuring seam has to carry the name for the same reason the channel exists: a
+// downstream `From<MissingToken>` that takes the error apart is exactly the consumer the
+// separator conversions stamp the name for, and a tuple that omitted it would put the loss
+// back one step further along.
+#[test]
+fn missing_token_into_components_yields_the_stamped_name() {
+  let e: MissingToken<'_, &str, SimpleSpan> =
+    MissingToken::expected_one(SimpleSpan::new(5, 6), "}").with_name(CowStr::from_static("comma"));
+  let (offset, expected, message, name) = e.into_components();
+  assert_eq!(offset, SimpleSpan::new(5, 6));
+  assert_eq!(expected, Some(Expected::one("}")));
+  assert_eq!(message, None);
+  assert_eq!(name.as_ref().map(CowStr::as_str), Some("comma"));
+}
+
+// The two `Option<CowStr>` slots are distinct channels, so destructuring must not conflate
+// them: a name and a message set together come back in their own positions.
+#[test]
+fn missing_token_into_components_keeps_name_and_message_apart() {
+  let e: MissingToken<'_, &str, SimpleSpan> = MissingToken::of(SimpleSpan::new(5, 6))
+    .with_name(CowStr::from_static("comma"))
+    .with_message(CowStr::from_static("needed"));
+  let (_offset, _expected, message, name) = e.into_components();
+  assert_eq!(message.as_ref().map(CowStr::as_str), Some("needed"));
+  assert_eq!(name.as_ref().map(CowStr::as_str), Some("comma"));
 }
 
 #[test]
@@ -1736,6 +1764,24 @@ fn missing_token_map_expected() {
 
   let e: MissingToken<'_, &str> = MissingToken::expected_one(0, "identifier");
   let _mapped = e.map_expected(|ex| Expected::one(ex.unwrap_one().to_string()));
+}
+
+// `map_expected` rebuilds the struct field by field, so it is the one transform that can drop
+// a channel by omission rather than by decision. Every channel it is not there to change must
+// come out the other side.
+#[test]
+#[cfg(any(feature = "std", feature = "alloc"))]
+fn missing_token_map_expected_preserves_the_other_channels() {
+  use std::string::ToString;
+
+  let e: MissingToken<'_, &str> = MissingToken::expected_one(7, "identifier")
+    .with_message(CowStr::from_static("needed"))
+    .with_name(CowStr::from_static("comma"));
+  let mapped = e.map_expected(|ex| Expected::one(ex.unwrap_one().to_string()));
+
+  assert_eq!(mapped.offset(), 7);
+  assert_eq!(mapped.message().map(CowStr::as_str), Some("needed"));
+  assert_eq!(mapped.name().map(CowStr::as_str), Some("comma"));
 }
 
 #[test]
@@ -1805,6 +1851,81 @@ fn missing_token_display_fmt_neither() {
   assert!(s.contains("missing token"));
 }
 
+// The stamped name is the whole point of the name channel: a separated-sequence driver knows
+// what its separator is called, and the default rendering is the path on which that reaches a
+// human. A renderer that ignored it would leave every such diagnostic saying only that *a*
+// token was missing.
+#[test]
+#[cfg(any(feature = "std", feature = "alloc"))]
+fn missing_token_display_fmt_names_the_stamped_token() {
+  struct Show<'a>(MissingToken<'a, &'a str, usize>);
+
+  impl core::fmt::Display for Show<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+      self.0.display_fmt(f)
+    }
+  }
+
+  let bare: MissingToken<'_, &str, usize> =
+    MissingToken::of(5).with_name(CowStr::from_static("comma"));
+  assert_eq!(format!("{}", Show(bare)), "missing token 'comma' at 5");
+
+  // `Expected`'s own `Display` already opens with the word "expected", so the composed
+  // rendering doubles it. That is this renderer's long-standing output and is pinned, not
+  // introduced, here.
+  let expected: MissingToken<'_, &str, usize> =
+    MissingToken::expected_one(5, "}").with_name(CowStr::from_static("comma"));
+  assert_eq!(
+    format!("{}", Show(expected)),
+    "missing token 'comma' at 5, expected expected '}'"
+  );
+
+  let both: MissingToken<'_, &str, usize> = MissingToken::expected_one(5, "}")
+    .with_name(CowStr::from_static("comma"))
+    .with_message(CowStr::from_static("needed"));
+  assert_eq!(
+    format!("{}", Show(both)),
+    "missing token 'comma' at 5, expected expected '}', message: needed"
+  );
+}
+
+// The name is additive: an error that never carried one must render exactly as it always did,
+// so adding the channel cannot silently reword every existing diagnostic.
+#[test]
+#[cfg(any(feature = "std", feature = "alloc"))]
+fn missing_token_display_fmt_unnamed_is_unchanged() {
+  struct Show<'a>(MissingToken<'a, &'a str, usize>);
+
+  impl core::fmt::Display for Show<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+      self.0.display_fmt(f)
+    }
+  }
+
+  let bare: MissingToken<'_, &str, usize> = MissingToken::of(5);
+  assert_eq!(format!("{}", Show(bare)), "missing token at 5");
+
+  let expected: MissingToken<'_, &str, usize> = MissingToken::expected_one(5, "}");
+  assert_eq!(
+    format!("{}", Show(expected)),
+    "missing token at 5, expected expected '}'"
+  );
+
+  let message: MissingToken<'_, &str, usize> =
+    MissingToken::of(5).with_message(CowStr::from_static("needed"));
+  assert_eq!(
+    format!("{}", Show(message)),
+    "missing token at 5, message: needed"
+  );
+
+  let both: MissingToken<'_, &str, usize> =
+    MissingToken::expected_one(5, "}").with_message(CowStr::from_static("needed"));
+  assert_eq!(
+    format!("{}", Show(both)),
+    "missing token at 5, expected expected '}', message: needed"
+  );
+}
+
 #[test]
 #[cfg(any(feature = "std", feature = "alloc"))]
 fn missing_token_debug_fmt() {
@@ -1819,6 +1940,26 @@ fn missing_token_debug_fmt() {
   let e: MissingToken<'_, &str, usize> = MissingToken::expected_one(5, "}");
   let s = format!("{:?}", Show(e));
   assert!(s.contains("MissingToken"));
+}
+
+// The debug rendering is the other reader of the name channel; it names the field so a stamped
+// name is visible without going through the accessor.
+#[test]
+#[cfg(any(feature = "std", feature = "alloc"))]
+fn missing_token_debug_fmt_shows_the_stamped_name() {
+  struct Show<'a>(MissingToken<'a, &'a str, usize>);
+
+  impl core::fmt::Debug for Show<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+      self.0.debug_fmt(f)
+    }
+  }
+
+  let e: MissingToken<'_, &str, usize> =
+    MissingToken::expected_one(5, "}").with_name(CowStr::from_static("comma"));
+  let s = format!("{:?}", Show(e));
+  assert!(s.contains("name"), "{s}");
+  assert!(s.contains("comma"), "{s}");
 }
 
 #[test]

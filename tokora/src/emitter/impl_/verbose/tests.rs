@@ -236,3 +236,33 @@ fn verbose_hole_records_interleave_into_diagnostics_in_emission_order() {
     Some(Severity::Warning)
   );
 }
+
+// The replay iterator reports its true remaining count at every step, so a renderer can size
+// its own buffer up front — and stays fused once exhausted.
+#[test]
+fn diagnostics_len_is_exact_after_partial_consumption() {
+  let mut v = Verbose::<(), SimpleSpan>::new();
+  let a = SimpleSpan::new(0usize, 1usize);
+  let b = SimpleSpan::new(2usize, 5usize);
+
+  emit(&mut v, a); // log[0]: error at a
+  hole(&mut v, b, 3); // log[1]: hole at b
+  emit(&mut v, b); // log[2]: error at b
+
+  let mut diags = v.diagnostics();
+  assert_eq!(diags.len(), 3, "all three records are pending");
+  assert_eq!(diags.size_hint(), (3, Some(3)));
+
+  assert!(diags.next().is_some());
+  assert_eq!(diags.len(), 2, "one consumed, two exact");
+  assert_eq!(diags.size_hint(), (2, Some(2)));
+
+  assert_eq!(diags.by_ref().count(), 2, "the rest replay");
+  assert_eq!(diags.len(), 0);
+  assert_eq!(diags.size_hint(), (0, Some(0)));
+
+  // Fused: past the end it keeps returning `None` with an exact zero remaining.
+  assert!(diags.next().is_none());
+  assert!(diags.next().is_none());
+  assert_eq!(diags.size_hint(), (0, Some(0)));
+}

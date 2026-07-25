@@ -17,12 +17,12 @@ where
   where
     L: Lexer<'a>,
   {
+    // Record on the shared emission log (same path as `emit_error` / `emit_unclosed`) so the
+    // diagnostic rewinds precisely with an abandoned speculative branch. The key is the
+    // zero-width span at the offset the operand ran out.
     let off = err.offset_ref().clone();
-    self
-      .errs
-      .entry(S::new(off.clone(), off))
-      .or_default()
-      .push(E::from_unexpected_end_of_lhs(err));
+    let span = S::new(off.clone(), off);
+    self.record(span, E::from_unexpected_end_of_lhs(err));
     Ok(())
   }
 
@@ -34,12 +34,12 @@ where
   where
     L: Lexer<'a>,
   {
+    // Record on the shared emission log (same path as `emit_error` / `emit_unclosed`) so the
+    // diagnostic rewinds precisely with an abandoned speculative branch. The key is the
+    // zero-width span at the offset the operand ran out.
     let off = err.offset_ref().clone();
-    self
-      .errs
-      .entry(S::new(off.clone(), off))
-      .or_default()
-      .push(E::from_unexpected_end_of_rhs(err));
+    let span = S::new(off.clone(), off);
+    self.record(span, E::from_unexpected_end_of_rhs(err));
     Ok(())
   }
 }
