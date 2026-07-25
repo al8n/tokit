@@ -32,6 +32,7 @@ use super::{
 use crate::{
   InputRef,
   emitter::Emitter,
+  input::SessionPointId,
   span::{SimpleSpan, Spanned},
 };
 
@@ -152,16 +153,18 @@ pub(crate) fn run(src: &[u8], seq_seed: u64, cov: &mut Coverage) {
   let abandon = Rng::new(seq_seed ^ 0xABA4_D04E_5EED_5EED).chance(1, 3);
   let seq = gen_session(&mut rng, abandon);
 
-  // Each live point remembers the emission count, state tag, and cursor captured when it opened.
-  let mut stack: Vec<(u64, u64, usize)> = Vec::new();
+  // Each live point remembers its id plus the emission count, state tag, and cursor captured when
+  // it opened. Carrying the id is not bookkeeping for the oracle's sake: it is what a real driver
+  // must do, since the settle verbs name the point rather than a position.
+  let mut stack: Vec<(SessionPointId<'_>, u64, u64, usize)> = Vec::new();
   let mut cur_tag: u64 = ir.state().tag;
 
   for sop in seq {
     match sop {
       SOp::Begin => {
         let snap = (count(&mut ir), cur_tag, at(&ir));
-        ir.begin_point();
-        stack.push(snap);
+        let point = ir.begin_point();
+        stack.push((point, snap.0, snap.1, snap.2));
         assert_eq!(
           ir.points(),
           stack.len(),
@@ -180,8 +183,8 @@ pub(crate) fn run(src: &[u8], seq_seed: u64, cov: &mut Coverage) {
       SOp::Commit => {
         cov.mark(Op::SessionCommit);
         let before = at(&ir);
-        ir.commit_point();
-        stack.pop();
+        let (point, ..) = stack.pop().expect("generator keeps the stream well-formed");
+        ir.commit_point(point);
         assert_eq!(
           ir.points(),
           stack.len(),
@@ -196,9 +199,9 @@ pub(crate) fn run(src: &[u8], seq_seed: u64, cov: &mut Coverage) {
       }
       SOp::Rollback => {
         cov.mark(Op::SessionRollback);
-        let (saved_count, saved_tag, saved_at) =
+        let (point, saved_count, saved_tag, saved_at) =
           stack.pop().expect("generator keeps the stream well-formed");
-        ir.rollback_point();
+        ir.rollback_point(point);
         cur_tag = saved_tag;
         assert_eq!(
           ir.points(),
@@ -279,9 +282,9 @@ pub(crate) fn run(src: &[u8], seq_seed: u64, cov: &mut Coverage) {
 
   // Oracle: the second handle speculates freely over the region the abandoned points covered — a
   // rewind here must not trip a pin left behind by a point nobody holds.
-  ir.begin_point();
+  let point = ir.begin_point();
   let _ = ir.next().expect("complete + non-fatal");
-  ir.rollback_point();
+  ir.rollback_point(point);
   assert_eq!(
     at(&ir),
     at_drop,

@@ -577,9 +577,12 @@ where
   /// their parallel-map groups by value, never consulting a mark-keyed row. A kept branch
   /// therefore leaves nothing behind that a release could reclaim; the default empty body is
   /// the whole implementation, spelled out here so the choice is legible rather than
-  /// incidental. Emitters that *do* key bookkeeping on marks (a checkpoint stack in an
-  /// event-buffering sink) override this to pop the kept row — see the advisory contract on
-  /// [`release`](Emitter::release).
+  /// incidental. That property is exactly what makes `Verbose` a
+  /// [`ValueKeyedEmitter`](crate::emitter::ValueKeyedEmitter), and therefore admissible inside
+  /// the recording CST sink. An emitter that *does* key bookkeeping on marks overrides this to
+  /// pop the kept row — see the advisory contract on [`release`](Emitter::release) for where such
+  /// an emitter belongs (the input layer's own seam, where the settle discipline is 1:1, not
+  /// inside a wrapper).
   #[inline(always)]
   fn release(&mut self, checkpoint: u64) {
     let _ = checkpoint;

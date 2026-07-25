@@ -294,10 +294,16 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// success, a stacked guard's savepoint release, a session
   /// [`commit_point`](crate::InputRef::commit_point), a sync scan that found its target or
   /// otherwise kept its progress — hands it here. `release(m)` tells the emitter that `m`
-  /// will **never** be rewound to by that settle, so any bookkeeping keyed on the mark (a
-  /// checkpoint stack in an event-buffering sink, for instance) can be reclaimed instead of
-  /// stranding one dead row per committed guard — commit-heavy loops (a pratt operator loop
-  /// saves per iteration) would otherwise grow such state without bound.
+  /// will **never** be rewound to by that settle, so any bookkeeping keyed on the mark can be
+  /// reclaimed instead of stranding one dead row per committed guard — commit-heavy loops (a
+  /// pratt operator loop saves per iteration) would otherwise grow such state without bound.
+  ///
+  /// The mark-keyed bookkeeping this exists for is the kind that lives at the **input layer's
+  /// own seam**, where the settle discipline is 1:1 — one capture, one settle, right here. Do
+  /// not read it as licence to key per-capture state inside a *wrapper*: a wrapper's inner
+  /// emitter is settled by the wrapper's own rules, and the recording CST sink deliberately
+  /// forwards no release at all (its inner must be a [`ValueKeyedEmitter`], which by
+  /// definition has nothing to reclaim).
   ///
   /// # Contract: advisory, and strictly bookkeeping
   ///
@@ -309,9 +315,13 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// pops entries by value — legitimately inherit the no-op default, and stateless emitters
   /// ([`Fatal`], [`Silent`], [`Ignored`](crate::utils::marker::Ignored)) have nothing to
   /// reclaim in the first place. One mark is released at most once, and marks arrive
-  /// last-in, first-out on the crate's own paths (guards and scans settle newest-first;
-  /// a session point abandoned with its handle releases at the handle's drop, newest-first,
-  /// possibly mid-unwind — which is why releasing must stay observably pure and panic-free).
+  /// last-in, first-out on the crate's own paths (guards and scans settle newest-first).
+  /// Two settles are newest-first *within their own family* but may interleave the families,
+  /// so they are not globally last-in, first-out: a session point abandoned with its handle
+  /// releases at the handle's drop, and a guard's rollback-on-drop releases the savepoints it
+  /// holds and then the session points it invalidates. Both can run **mid-unwind**, which is
+  /// why releasing must stay observably pure and panic-free — and why no compliant emitter can
+  /// observe the order in the first place: the end state is the same multiset either way.
   /// A mark abandoned outside those paths (an `unstable-raw` checkpoint merely dropped) is
   /// simply never released — bounded-but-unswept bookkeeping, reclaimed by the next
   /// enclosing `rewind`/`release` at or below it, per the crate's unspecified-but-bounded
@@ -489,6 +499,65 @@ where
     (**self).exit_label()
   }
 }
+
+/// Marks an [`Emitter`] whose checkpoint reading is a **value**, not a key into a table.
+///
+/// [`checkpoint`](Emitter::checkpoint) returns a `u64`, and two very different emitters satisfy
+/// that signature:
+///
+/// - **value-keyed** — the reading *is* a fact about the emission state and nothing else exists:
+///   [`Verbose`]'s mark is its log length, a token tracker's is its count, a stateless emitter's
+///   is the constant `0`. [`rewind`](Emitter::rewind) restores by value — reclaiming everything
+///   above the mark as a range — and [`release`](Emitter::release) has nothing to reclaim.
+/// - **table-keyed** — the reading is a *key* into per-capture bookkeeping the emitter allocated
+///   at [`checkpoint`](Emitter::checkpoint) time and expects to reclaim at the matching settle.
+///
+/// This marker asserts the former. It is a semantic promise the type system cannot check:
+///
+/// > **Equal emission state implies equal reading.** The reading is a function of the emission
+/// > *state*, never of the *call history*: capturing a mark does not change what a later capture
+/// > returns, and two captures with no emission between them read the same value.
+///
+/// That is strictly stronger than "a pure monotone reading" — a per-call counter is monotone and
+/// allocates nothing, yet reads differently on its second call, which the promise excludes.
+///
+/// # Why the promise is load bearing
+///
+/// The recording CST sink requires it for **correctness**, not tidiness. It keys one mark-stack
+/// row per live capture on the event-log length, so captures taken with no events between them
+/// are *aliases*: same mark, same frozen depth, same inner reading. Its settles remove "the
+/// newest row at this mark", which is exact only because aliased rows are indistinguishable —
+/// removing any one of them leaves the same multiset of live rows. An inner whose reading varied
+/// per capture would break that algebra: the rows would differ, and spending the wrong one hands
+/// a later rewind an inner target that never described the surviving log. Separately, the sink's
+/// [`release`](Emitter::release) deliberately forwards nothing, so a table-keyed inner would
+/// strand one allocated row per committed capture with nothing able to reclaim it.
+///
+/// # Implementors
+///
+/// Every emitter this crate offers: [`Verbose`], [`Fatal`], [`Silent`],
+/// [`Ignored`](crate::utils::marker::Ignored), and `&mut U` for value-keyed `U`, so a borrowed
+/// emitter composes exactly like an owned one. Implement it for your own emitter if — and only
+/// if — it keeps the promise above.
+///
+/// The recording `Sink` is deliberately **not** an implementor: its own
+/// [`checkpoint`](Emitter::checkpoint) pushes a row it expects a later settle to reclaim, which
+/// is precisely the table-keyed shape. A sink wrapping a sink is therefore a compile error rather
+/// than a configuration that strands a row per capture.
+pub trait ValueKeyedEmitter {}
+
+// The roster, in one place so "which emitters may sit inside the sink" is a single legible list
+// rather than a property scattered across the impl modules.
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl<Error, S, Lang: ?Sized> ValueKeyedEmitter for Verbose<Error, S, Lang> {}
+impl<T: ?Sized, Lang: ?Sized> ValueKeyedEmitter for Fatal<T, Lang> {}
+impl<T: ?Sized, Lang: ?Sized> ValueKeyedEmitter for Silent<T, Lang> {}
+impl<T: ?Sized> ValueKeyedEmitter for crate::utils::marker::Ignored<T> {}
+
+/// Forwarded so a **borrowed** emitter is as composable as an owned one: `Emitter` is
+/// implemented for `&mut U`, and without this a value-keyed emitter would lose the property the
+/// moment it was passed by reference.
+impl<U: ValueKeyedEmitter> ValueKeyedEmitter for &mut U {}
 
 /// A trait bound for generic emitter error conversion.
 pub trait FromEmitterError<'a, L, Lang: ?Sized = ()> {

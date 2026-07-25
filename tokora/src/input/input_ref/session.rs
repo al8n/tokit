@@ -38,6 +38,90 @@ use crate::emitter::Emitter;
 
 use super::{Checkpoint, Lexer, Lineage};
 
+/// An opaque handle to one open [session point](super::InputRef::begin_point).
+///
+/// Returned by [`begin_point`](super::InputRef::begin_point) and required by
+/// [`commit_point`](super::InputRef::commit_point) and
+/// [`rollback_point`](super::InputRef::rollback_point). It is a small `Copy` token that holds no
+/// borrow — a session point is deliberately non-lexical, so the id has to be storable beside the
+/// input it belongs to, in a driver's own state, across calls.
+///
+/// # Not a position, and not an index
+///
+/// The id names *this point*, not a slot. It carries the point's never-reused checkpoint id, so it
+/// cannot be made to name a different point by the stack shifting under it: an id whose point is
+/// gone — already settled, or abandoned by an enclosing rollback — is **refused**, where a
+/// positional settle would silently have taken whatever was newest. Settles stay newest-first (the
+/// stack *is* the nesting order); naming an older open point is refused as out of order rather than
+/// quietly collapsing the ones above it.
+///
+/// # How a misused id is caught
+///
+/// - **Cross-handle misuse** — using an id on a different handle, even one taken from the same
+///   input — is a **compile error**: the id is branded with the handle's invariant `'closure`
+///   lifetime, exactly like the [`Checkpoint`] it stands for, and two handles a parser can hold
+///   never unify their brands.
+/// - **Foreign use** — the one construction the brand cannot separate is two inputs borrowed in a
+///   single crate-internal scope: their `'closure` regions coincide, so the compiler unifies them
+///   and one input's id type-checks against the other's handle. The id therefore also carries a
+///   **nonce** identifying its input, and a settle refuses a mismatch in every build. That check
+///   is load bearing rather than a nicety: every input numbers its checkpoints from the same
+///   start, so two fresh inputs each hold a live point under the *same* id, and a scan of the
+///   live points alone would settle the wrong input's point silently. Address reuse after an
+///   input dies is ruled out by the brand rather than by the nonce — a live id keeps its own
+///   input's loan open. This mirrors [`SavepointId`](super::SavepointId), which closes the same
+///   residual the same way.
+/// - **Stale or out-of-order use** — panics in every build, via a scan of the live points.
+///
+/// A point whose id is dropped can no longer be settled; it is abandoned with the handle instead,
+/// keeping its progress (see [`begin_point`](super::InputRef::begin_point)). That is why
+/// `begin_point` is `#[must_use]`.
+#[cfg(any(feature = "std", feature = "alloc"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SessionPointId<'closure> {
+  /// The point's live-checkpoint lineage id, drawn from the input's monotone checkpoint-id source
+  /// and therefore never reused for the input's life. It is what makes the id non-positional: the
+  /// settle scans the live points for this exact value rather than trusting a position.
+  ckp: u64,
+  /// The identity of the input that issued this id: the address of that input's own
+  /// poison-boundary slot, captured at [`begin_point`](super::InputRef::begin_point). Two
+  /// simultaneously-live inputs are distinct structs at distinct addresses, so this separates
+  /// their points where the `'closure` brand cannot — and it must, because `ckp` alone does not:
+  /// both inputs draw from a counter that starts at the same value.
+  nonce: usize,
+  /// Invariant in `'closure`, the handle's emitter borrow. The fn-pointer form (not a bare
+  /// reference, which would be covariant and defeat the brand) is what keeps an id from being
+  /// used against another handle's point stack.
+  _brand: PhantomData<fn(&'closure ()) -> &'closure ()>,
+}
+
+#[cfg(any(feature = "std", feature = "alloc"))]
+impl SessionPointId<'_> {
+  /// Brands `ckp` — the checkpoint id of the point just pushed — as this handle's id, stamped
+  /// with `nonce`, the identity of the input the point lives on.
+  #[inline(always)]
+  pub(super) const fn new(ckp: u64, nonce: usize) -> Self {
+    Self {
+      ckp,
+      nonce,
+      _brand: PhantomData,
+    }
+  }
+
+  /// The checkpoint id this token names.
+  #[inline(always)]
+  pub(super) const fn ckp(&self) -> u64 {
+    self.ckp
+  }
+
+  /// The identity of the input that issued this token — see the field.
+  #[inline(always)]
+  pub(super) const fn nonce(&self) -> usize {
+    self.nonce
+  }
+}
+
 /// The lineage memos and emitter borrow an [`InputRef`](super::InputRef) writes through, together
 /// with its live session points — see the [module docs](self) for why they are one cell.
 pub(crate) struct Session<'inp, 'closure, L, E, Lang: ?Sized = ()>
@@ -120,10 +204,12 @@ where
       // — ground truth (borrowed): the emission log, rolled back by truncation to the saved
       //   mark. Held in this cell so the abandoning drop can release an open point's mark.
       emitter: _,
-      // — lineage memo, handle-local: the open session points. A restore does NOT rewind this
-      //   stack; a rewind reaching *below* an open point is refused outright by that point's pin
-      //   (`Lineage::assert_restore_preserves_pins`), so the stack cannot be left describing a
-      //   lineage that no longer exists.
+      // — lineage memo, handle-local: the open session points. A restore does not *rewind* this
+      //   stack, it RECONCILES it: the checked rewind refuses to reach below an open point at all
+      //   (`Lineage::assert_restore_preserves_pins`), and the unchecked one — a guard's
+      //   rolling-back drop, which may run mid-unwind and so may not refuse anything — settles
+      //   the suffix it invalidates (`InputRef::abandon_points_above`). Either way the stack
+      //   cannot be left describing a lineage that no longer exists.
       #[cfg(any(feature = "std", feature = "alloc"))]
         points: _,
       #[cfg(not(any(feature = "std", feature = "alloc")))]

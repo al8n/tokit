@@ -226,11 +226,20 @@ where
     // end-of-input exit can restore the FULL pre-call state. A match or a limit trip commits the
     // skipped prefix, so this snapshot goes unused on those paths. This is an internal
     // positional rewind, not a `Checkpoint`: it threads no lineage entry.
+    //
+    // CAPTURE_WINDOW — the watermark clone is hoisted above the mark for the reason
+    // [`sync_through`](Self::sync_through) gives: a caller-supplied `L::Offset::clone` evaluated
+    // after the capture would be a fallible step between the mark and the `skip_until` call that
+    // owns (and settles) it, and an unwind there strands one row of the emitter's checkpoint stack.
+    // The `depth`/`skipped`/`first`/`last` bindings and the `decide` closure that sit between the
+    // snapshot and `skip_until` are all infallible (scalar zeroes, `None`s, and a closure
+    // construction that captures by reference).
+    let error_end = self.emitted_error_end.clone();
     let snapshot = ThroughEntry::new(
       self.span.clone(),
       self.state.clone(),
       self.session.emitter.checkpoint(),
-      self.emitted_error_end.clone(),
+      error_end,
     );
 
     let mut depth = 0usize;

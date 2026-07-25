@@ -24,6 +24,9 @@ use super::{
 
 pub(crate) use session::Session;
 
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use session::SessionPointId;
+
 mod consume_cached;
 mod drop_policy;
 mod fold;
@@ -838,6 +841,22 @@ where
   fn guard_with<D: DropPolicy>(
     &mut self,
   ) -> Transaction<'_, 'inp, 'closure, L, Ctx, Lang, D, Cmpl> {
+    // CAPTURE_WINDOW — preflight the pin set BEFORE the capture. `save` below registers a lineage
+    // entry and an emitter mark that nothing can settle until the `Transaction` literal at the end
+    // of this body exists, because `Checkpoint` has no `Drop` (it cannot reach the input or the
+    // emitter). Between the two sits exactly one fallible step — the `pin_checkpoint` push onto the
+    // pin set, a `Vec` by default and a `SmallVec` that spills past its inline capacity under
+    // `smallvec_1`. If that growth unwound (`capacity overflow`, or a panicking allocator) the
+    // capture would be dropped raw, and with no guard constructed nothing else would ever find its
+    // pin, its lineage entry, or its mark. Reserving here means either this call panics with
+    // nothing yet captured, or the push is a write into reserved capacity. Nothing in between
+    // touches the pin set: `save` only pushes onto the *live-checkpoint* stack (whose own slot it
+    // reserves for itself — see `save_checkpoint`).
+    //
+    // The rest of the window is allocation-free by inspection: `ckp.ckp_id` is a `u64` field read,
+    // and the `Transaction` literal only moves (`Some(ckp)` is a move, `PhantomData` a ZST).
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    self.reserve_pin_slot();
     let ckp = self.save();
     // Pin the begin point: a raw restore below it (through the guard's `DerefMut`) now panics at
     // the restore. Every settle path (commit, rollback, Drop — both policy flavors) unpins.
@@ -916,6 +935,21 @@ where
     &mut self,
   ) -> StackedTransaction<'_, 'inp, 'closure, L, Ctx, Lang, D, Cmpl> {
     trace_event!(self, "begin_stacked");
+    // CAPTURE_WINDOW — preflight the pin set BEFORE the capture, for exactly the reason
+    // `guard_with` gives: `save` below registers a lineage entry and an emitter mark that only the
+    // `StackedTransaction` literal at the end of this body can settle (a `Checkpoint` has no
+    // `Drop`), and the `pin_checkpoint` push onto the pin set — `Vec` by default, an inline-spilling
+    // `SmallVec` under `smallvec_1` — is the one allocation site inside that window. Reserving here
+    // either panics with nothing yet captured or makes the push a write into reserved capacity;
+    // nothing in between touches the pin set (`save` grows only the live-checkpoint stack, whose
+    // slot it reserves for itself).
+    //
+    // The rest of the window is allocation-free by inspection: `base.ckp_id` is a `u64` field read,
+    // and every field expression of the literal is infallible — `Some(base)` and `nonce` are moves,
+    // `_policy` a ZST, and `saves: Default::default()` is `Vec::new`/`SmallVec::new`, neither of
+    // which allocates. (The nonce is read before the capture, not after, so it is outside the
+    // window either way.)
+    self.reserve_pin_slot();
     // Nonce = the address of this Input's `poison_boundary` field, an Input-owned slot the
     // `InputRef` holds a `&mut` to. Two simultaneously-live Inputs are distinct structs at
     // distinct addresses (the field is never zero-sized), so their nonces differ and a
@@ -957,29 +991,38 @@ where
   /// ones:
   ///
   /// ```ignore
-  /// inp.begin_point();          // mark — nothing is borrowed afterwards
+  /// let p = inp.begin_point();  // mark — nothing is borrowed afterwards
   /// let t = inp.next()?;        // parse, in this call or a later one
   /// let u = inp.next()?;        // …and again
-  /// inp.rollback_point();       // unmark: cursor, span, state, cache, diagnostics all return
+  /// inp.rollback_point(p);      // unmark: cursor, span, state, cache, diagnostics all return
   /// ```
   ///
   /// Settle the point with [`commit_point`](Self::commit_point) (keep the progress) or
-  /// [`rollback_point`](Self::rollback_point) (return to it). The stack *is* the last-in,
-  /// first-out order — points settle newest-first — so nesting is structural and needs no id.
-  /// [`points`](Self::points) is the live depth.
+  /// [`rollback_point`](Self::rollback_point) (return to it), naming it by the
+  /// [`SessionPointId`] this returns. The stack *is* the last-in, first-out order — points settle
+  /// newest-first — so nesting stays structural; the id is what stops a settle from naming a
+  /// *shifted* target, and what makes a stale one a refusal rather than a silent settle of
+  /// whatever happens to be newest. [`points`](Self::points) is the live depth.
   ///
   /// # A point pins its base
   ///
   /// A session point is the base of a speculative scope, so it carries the same hazard a guard
   /// base does until it is settled: a rewind reaching *below* it would tear its foundation out.
-  /// The pin makes such a rewind **panic where it is requested** rather than corrupt the timeline
-  /// silently. Two ways to reach it, both caller bugs:
+  /// Two ways to reach it, both caller bugs, and each answered where it can be:
   ///
-  /// - a raw [`restore`](Self::restore) below the point (reachable only under `unstable-raw`);
-  /// - leaving a point open across the end of an enclosing guard or attempt, whose own settle then
-  ///   rewinds below it.
+  /// - a **checked** rewind below the point — a raw [`restore`](Self::restore) (reachable only
+  ///   under `unstable-raw`), or an enclosing guard's or attempt's *explicit* rollback — is
+  ///   refused outright: the pin makes it **panic where it is requested** rather than corrupt the
+  ///   timeline silently;
+  /// - a guard's or attempt's **rollback on drop** cannot refuse anything (a `Drop` may run while
+  ///   already unwinding, where panicking is forbidden), so it **reconciles** instead: every point
+  ///   younger than its base is abandoned — unpinned, its lineage entry dropped, its emitter mark
+  ///   released — before the rewind, exactly as dropping the handle abandons a point still open.
+  ///   The point's progress is not rolled back separately; the guard's own rewind subsumes it.
   ///
-  /// Settle your points before the scope that opened them ends and neither can arise.
+  /// Settle your points before the scope that opened them ends and neither arises. What never
+  /// happens either way is the third outcome: a point left on the stack describing a lineage the
+  /// rewind destroyed.
   ///
   /// # Contract: a point is scoped to *this handle*, and never outlives it
   ///
@@ -1030,6 +1073,11 @@ where
   /// `src/input/input_ref/session_tests.rs`), and
   /// `abandoned_session_points_release_their_emitter_marks` (in `src/cst/sink/tests.rs`).
   ///
+  /// The [`SessionPointId`] does not change this: an id merely dropped is not a signal, so a point
+  /// whose id went out of scope is abandoned exactly like one whose driver forgot it, and its
+  /// progress is still kept. The id makes a *settle* exact; keep-on-abandon is a separate, and
+  /// deliberate, policy choice. `#[must_use]` is the one nudge available at the type level.
+  ///
   /// # Fuzz coverage
   ///
   /// The abandon path is in the fuzz alphabet as `Op::SessionAbandon` (`session.abandon(drop)`);
@@ -1037,60 +1085,150 @@ where
   #[cfg(any(feature = "std", feature = "alloc"))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
   #[inline]
-  pub fn begin_point(&mut self) {
+  #[must_use = "a session point that is never settled is abandoned with the handle, keeping its \
+                progress; hold the id to commit or roll it back"]
+  pub fn begin_point(&mut self) -> SessionPointId<'closure> {
     trace_event!(self, "begin_point");
+    // CAPTURE_WINDOW — preflight BOTH containers this point will land in, before anything is
+    // captured. `save` below registers a lineage entry and an emitter mark that only the
+    // `points.push` at the end of this body hands an owner (a `Checkpoint` has no `Drop`: it
+    // cannot reach the input or the emitter to settle itself). If anything between the capture and
+    // that push unwound — a `capacity overflow` panic, or a panicking allocator — the capture
+    // would be dropped raw, its pin, lineage entry, and emitter mark stranded with no rollback,
+    // commit, `forget_kept_checkpoint`, or release able to find them; and because no session point
+    // was pushed, `Session::drop` could not release it either.
+    //
+    // The window holds exactly two allocation sites, in TWO DIFFERENT containers, so both are
+    // reserved here:
+    //
+    // - `pin_checkpoint` pushes onto the lineage **pin set** (`Vec` by default, a `SmallVec` that
+    //   spills past its inline capacity under `smallvec_1`);
+    // - `points.push` pushes onto the session **point stack** (`Vec`).
+    //
+    // Reserving both first means either this preflight panics with nothing yet captured, or every
+    // remaining step is a write into reserved capacity. Nothing in between consumes either
+    // reservation: `save` grows only the live-checkpoint stack (whose own slot it reserves for
+    // itself — see `save_checkpoint`), and neither it nor anything else here pushes onto the pin
+    // set or the point stack.
+    //
+    // The rest of the window is allocation-free by inspection: `ckp.ckp_id` is a `u64` field read
+    // and `SessionPointId::new` is a `const fn` over two `Copy` scalars plus `PhantomData`.
+    self.session.points.reserve(1);
+    self.reserve_pin_slot();
+    // Nonce = the address of this Input's `poison_boundary` field, exactly as `begin_stacked`
+    // derives it (see there for why this slot, and why the brand — not the address — answers
+    // address reuse). Taken through `&*`, so it is the address of the *pointee*, which lives in
+    // the `Input` this handle mutably borrows for its whole life: it therefore identifies the
+    // input rather than the handle, and is the same value at the settle however the handle was
+    // reborrowed — or moved — in between.
+    let nonce = core::ptr::from_ref(&*self.poison_boundary).addr();
     let ckp = self.save();
+    // The id names the point by its never-reused checkpoint id, so it stays exact however the
+    // stack moves under it, and by the input's nonce, because that id is only unique *within* an
+    // input.
+    let id = SessionPointId::new(ckp.ckp_id, nonce);
     // Pin the base exactly like a guard: a rewind reaching below this point now panics at that
     // rewind instead of silently invalidating the session's foundation. Every settle path unpins —
-    // `commit_point`, `rollback_point`, and the handle's `Drop` for a point abandoned outright.
+    // `commit_point`, `rollback_point`, the enclosing rewind's reconciliation, and the handle's
+    // `Drop` for a point abandoned outright.
     self.pin_checkpoint(ckp.ckp_id);
     self.session.points.push(ckp);
+    id
   }
 
-  /// Settles the newest session point by **committing** it: pops it off the internal stack,
+  /// Takes the newest open session point after checking that `point` names it.
+  ///
+  /// The whole runtime half of [`SessionPointId`]'s guarantee. Four refusals, each in every
+  /// build, because settling the wrong point corrupts a timeline silently:
+  ///
+  /// - `point` belongs to a **different input** — the one misuse the `'closure` brand cannot
+  ///   separate (two inputs borrowed in a single scope unify their brands). It is refused *first*,
+  ///   before the checks below touch the stack, because a checkpoint id is unique only within one
+  ///   input: every input numbers from the same start, so the scans would find a genuine match on
+  ///   the wrong input and settle its point;
+  /// - nothing open at all — the caller has lost track of its own points;
+  /// - `point` is open but not the newest — settling it would collapse the ones above it, which
+  ///   the newest-first law does not allow;
+  /// - `point` is not open at all — already settled, or abandoned by an enclosing rollback that
+  ///   reached below it. A positional settle would silently have taken whatever was newest.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline]
+  fn take_point(
+    &mut self,
+    point: SessionPointId<'closure>,
+    verb: &str,
+  ) -> Checkpoint<'inp, 'closure, L> {
+    // The input's identity, derived exactly as `begin_point` stamped it. Stable across the
+    // handle's reborrows because it addresses the `Input`-owned slot, not this handle's field.
+    assert!(
+      point.nonce() == core::ptr::from_ref(&*self.poison_boundary).addr(),
+      "foreign session point: it belongs to a different input"
+    );
+    match self.session.points.last() {
+      Some(newest) if newest.ckp_id == point.ckp() => {}
+      Some(_) => {
+        if self
+          .session
+          .points
+          .iter()
+          .any(|open| open.ckp_id == point.ckp())
+        {
+          panic!(
+            "session point settled out of order: a younger point is still open (points settle \
+             newest-first)"
+          )
+        }
+        panic!("stale session point: it was already settled, or an enclosing rollback abandoned it")
+      }
+      None => panic!("no live session point to {verb}"),
+    }
+    self
+      .session
+      .points
+      .pop()
+      .expect("just observed as the newest open point")
+  }
+
+  /// Settles the session point `point` names by **committing** it: pops it off the internal stack,
   /// releases its pin, and keeps every bit of progress made since it opened — the consuming
   /// [`commit`](Self::commit) that releases the checkpoint's lineage entry.
   ///
   /// # Panics
   ///
-  /// Panics with a message prefixed `no live session point` when there is no open point to
-  /// commit.
+  /// Panics with a message prefixed `no live session point` when nothing is open, and refuses a
+  /// `point` that belongs to another input (`foreign session point`), is not the newest open one
+  /// (`session point settled out of order`), or is no longer open at all (`stale session point`) —
+  /// see [`SessionPointId`].
   #[cfg(any(feature = "std", feature = "alloc"))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
   #[inline]
-  pub fn commit_point(&mut self) {
+  pub fn commit_point(&mut self, point: SessionPointId<'closure>) {
     trace_event!(self, "commit_point");
-    let ckp = self
-      .session
-      .points
-      .pop()
-      .expect("no live session point to commit");
+    let ckp = self.take_point(point, "commit");
     // Kept, not restored: unpin the base, then the raw consuming commit keeps the progress and
     // releases the lineage entry.
     self.unpin_checkpoint(ckp.ckp_id);
     self.commit(ckp);
   }
 
-  /// Settles the newest session point by **rolling back** to it: pops it off the internal stack,
-  /// releases its pin **first** — so restoring to the point does not trip its own pin, mirroring
-  /// the guards' settle ordering — then performs the checked [`restore`](Self::restore). Position,
-  /// span, lexer state, token cache, emission log, dedup watermark, and poison boundary all return
-  /// to where the point opened.
+  /// Settles the session point `point` names by **rolling back** to it: pops it off the internal
+  /// stack, releases its pin **first** — so restoring to the point does not trip its own pin,
+  /// mirroring the guards' settle ordering — then performs the checked [`restore`](Self::restore).
+  /// Position, span, lexer state, token cache, emission log, dedup watermark, and poison boundary
+  /// all return to where the point opened.
   ///
   /// # Panics
   ///
-  /// Panics with a message prefixed `no live session point` when there is no open point to roll
-  /// back.
+  /// Panics with a message prefixed `no live session point` when nothing is open, and refuses a
+  /// `point` that belongs to another input (`foreign session point`), is not the newest open one
+  /// (`session point settled out of order`), or is no longer open at all (`stale session point`) —
+  /// see [`SessionPointId`].
   #[cfg(any(feature = "std", feature = "alloc"))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
   #[inline]
-  pub fn rollback_point(&mut self) {
+  pub fn rollback_point(&mut self, point: SessionPointId<'closure>) {
     trace_event!(self, "rollback_point");
-    let ckp = self
-      .session
-      .points
-      .pop()
-      .expect("no live session point to roll back");
+    let ckp = self.take_point(point, "roll back");
     // Unpin the base FIRST so the checked restore below does not see the point's own begin point
     // as pinned — rolling back to it is legal. A rewind *below* it would already have panicked at
     // that rewind (the pin's detect-at-cause check).
@@ -1183,6 +1321,21 @@ where
   #[inline]
   pub(crate) fn pin_checkpoint(&mut self, id: u64) {
     self.session.lineage.pin(id);
+  }
+
+  /// CAPTURE_WINDOW — reserves the pin set's slot so the
+  /// [`pin_checkpoint`](Self::pin_checkpoint) that follows a capture cannot allocate.
+  ///
+  /// Every pinning site ([`guard_with`](Self::guard_with) — hence
+  /// [`begin_with`](Self::begin_with) and both attempts —
+  /// [`begin_stacked_with`](Self::begin_stacked_with), and [`begin_point`](Self::begin_point))
+  /// takes its capture first and only then pins it, so the pin push sits *inside* the window
+  /// where the capture has no owner. Call this **before** the capture; see
+  /// [`Lineage::reserve_pin`](super::Lineage::reserve_pin) for the full argument.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[inline]
+  pub(crate) fn reserve_pin_slot(&mut self) {
+    self.session.lineage.reserve_pin();
   }
 
   /// Removes `id` from the pin set when its guard, attempt, or session point settles; see
@@ -1350,28 +1503,74 @@ where
   }
 
   /// Shared body of the [`save`](Self::save) twins.
+  ///
+  /// # CAPTURE_WINDOW — the two registrations come last, and cannot unwind
+  ///
+  /// A capture is two registrations a later settle has to find: the **lineage entry**
+  /// ([`Lineage::open`](super::Lineage::open)) and the **emitter mark**
+  /// ([`Emitter::checkpoint`]). Neither has an owner until the [`Checkpoint`] this returns
+  /// exists, and `Checkpoint` deliberately has no `Drop` — a `Drop` could not reach the input or
+  /// the borrowed emitter to settle itself — so an unwind after the first registration and before
+  /// the finished value strands it outright: no restore spends it, no `forget_kept_checkpoint`
+  /// releases it, nothing knows it is there. The body is therefore ordered so that **every**
+  /// fallible step runs while nothing is captured:
+  ///
+  /// 1. the clones and reads. `Cache::front_span`, and the `Cursor`/`L::Span`/`L::State`/
+  ///    `L::Offset` clones, are all caller-supplied code that may allocate or panic; here an
+  ///    unwind strands nothing at all;
+  /// 2. the live-checkpoint stack's slot is reserved — the last fallible step, still with nothing
+  ///    captured (see [`Lineage::reserve_open`](super::Lineage::reserve_open));
+  /// 3. the emitter mark is taken. Nothing is registered on *this* side yet, so an unwind out of
+  ///    the emitter strands nothing here; the crate's own `Sink` is itself fail-atomic at this
+  ///    point (its captured inner reading is a pure value whose `release` is a no-op, so a failed
+  ///    mark-row push owes no settle);
+  /// 4. `Lineage::open` records the entry into the slot reserved in (2) — it cannot allocate, so
+  ///    it cannot unwind, so the mark taken in (3) cannot be orphaned by it;
+  /// 5. `Checkpoint::new` is a `const fn` that only moves its arguments.
   #[inline(always)]
   fn save_checkpoint(&mut self) -> Checkpoint<'inp, 'closure, L> {
-    // Open a lineage entry (every allocator build): take a fresh id, record it on the
+    // (1) Every fallible step first — caller-supplied `Clone`/`Cache` code, with nothing captured
+    // yet for an unwind to strand.
+    let cursor = self.cursor().clone();
+    let span = self.span.clone();
+    let state = self.state.clone();
+    let emitted_error_end = self.emitted_error_end.clone();
+    let poison_boundary = self.poison_boundary.clone();
+    let cache_pushes = self.session.lineage.cache_pushes();
+    #[cfg(all(
+      debug_assertions,
+      any(feature = "std", feature = "alloc"),
+      target_has_atomic = "ptr"
+    ))]
+    let input_id = self.witness.input_id();
+    // (2) The live-checkpoint stack's slot, so the `open` in (4) is a write into reserved
+    // capacity. Nothing between here and there pushes onto that stack.
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    self.session.lineage.reserve_open();
+    // (3) The emitter mark: the first registration, and deliberately the one taken while the
+    // lineage side is still clean.
+    let emitter_checkpoint = self.session.emitter.checkpoint();
+    // (4) Open a lineage entry (every allocator build): take a fresh id, record it on the
     // live-checkpoint stack, and stamp it into the checkpoint. `restore` pops the stack down
     // through that id, and a `StackedTransaction` checks the id is still present before honoring
     // a savepoint — the check that makes stale savepoints panic on release and no-ptr targets.
     #[cfg(any(feature = "std", feature = "alloc"))]
     let ckp_id = self.session.lineage.open();
+    // (5) Moves only.
     Checkpoint::new(
-      self.cursor().clone(),
-      self.span.clone(),
-      self.state.clone(),
-      self.session.emitter.checkpoint(),
-      self.emitted_error_end.clone(),
-      self.poison_boundary.clone(),
-      self.session.lineage.cache_pushes(),
+      cursor,
+      span,
+      state,
+      emitter_checkpoint,
+      emitted_error_end,
+      poison_boundary,
+      cache_pushes,
       #[cfg(all(
         debug_assertions,
         any(feature = "std", feature = "alloc"),
         target_has_atomic = "ptr"
       ))]
-      self.witness.input_id(),
+      input_id,
       #[cfg(any(feature = "std", feature = "alloc"))]
       ckp_id,
     )
@@ -1723,8 +1922,65 @@ where
   /// before calling in (skipping a dead base), and an explicit
   /// [`rollback`](Transaction::rollback) restores through the checked [`restore`](Self::restore),
   /// panicking on that stale case since it never runs during an unwind.
+  /// Settles every [session point](Self::begin_point) younger than `target_id` — the suffix a
+  /// rewind to that checkpoint invalidates — the whole body of
+  /// [`restore_unchecked`](Self::restore_unchecked)'s reconciliation, deliberately **outlined**.
+  ///
+  /// Reached only by a rewind that reaches below an open point, which no correct driver does on a
+  /// hot path, so `#[cold]` + `#[inline(never)]` leaves the caller a single `is_empty` branch —
+  /// the same reason the session cell outlines its abandoning drop, and it matters here for the
+  /// same reason: `restore_unchecked` is `inline(always)` and sits on every rollback path.
+  ///
+  /// Newest-first, so [`Lineage::unpin`](super::Lineage::unpin) and the funnel's `forget` each
+  /// take their `O(1)` stack-top path and each emitter mark is released newest-first. Keyed on
+  /// the checkpoint id because it is the monotone order of the live-checkpoint stack: a point
+  /// whose id is above the target's is exactly one the pop-through below invalidates.
+  ///
+  /// Silent by necessity, not by preference: the callers that can reach a live younger point are
+  /// the guards' rolling-back `Drop` and the unwind paths under
+  /// [`attempt`](Self::attempt)/[`try_attempt`](Self::try_attempt), which may run while already
+  /// unwinding. The *checked* [`restore`](Self::restore) never gets here with a younger point
+  /// live — the point's pin refuses it at the cause first, loudly — so this is the reconciliation
+  /// for exactly the paths that are forbidden to panic.
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[cold]
+  #[inline(never)]
+  fn abandon_points_above(&mut self, target_id: u64) {
+    while self
+      .session
+      .points
+      .last()
+      .is_some_and(|point| point.ckp_id > target_id)
+    {
+      let point = self
+        .session
+        .points
+        .pop()
+        .expect("guarded by the loop condition");
+      // The same unpin-then-settle a `commit_point` performs, and like it the popped
+      // `Checkpoint` is dropped WITHOUT restoring: the rewind this reconciliation precedes is
+      // what moves the position, all the way down to its own target.
+      self.unpin_checkpoint(point.ckp_id);
+      self.forget_kept_checkpoint(point);
+    }
+  }
+
   #[inline(always)]
   pub(crate) fn restore_unchecked(&mut self, checkpoint: Checkpoint<'inp, '_, L>) {
+    // Reconcile the session-point suffix FIRST: a rewind below an open point tears that point's
+    // foundation out, so the points it invalidates must be settled rather than left describing a
+    // lineage that no longer exists. Session points are deliberately non-lexical, so — unlike
+    // nested guards, which borrowck serializes — one can still be live when an enclosing scope
+    // rewinds below it. Doing it here rather than at each guard's drop site covers every route
+    // into a rewind, the raw one included, and puts the mark releases ahead of the rewind that
+    // spends the target's own mark (each family newest-first).
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    {
+      if !self.session.points.is_empty() {
+        self.abandon_points_above(checkpoint.ckp_id);
+      }
+    }
+
     // Maintain the lineage stack in every allocator build: pop it down through the restored
     // id (invalidating it and every younger checkpoint). An absent id is a no-op — a raw
     // restore to a checkpoint an earlier restore already invalidated (release's

@@ -410,6 +410,10 @@ where
   }
 }
 
+/// The emission count is a reading of the emission state and nothing else — a monotone
+/// mirror of `Verbose`'s log length — so `CountEmitter` may sit inside the recording sink.
+impl crate::emitter::ValueKeyedEmitter for CountEmitter {}
+
 /// The event channel, defaulted: `CountEmitter` records no tree, so the CST fuzz ops run
 /// their no-op halves here (inert marks, ignored wraps) and the harness's `node`-bearing
 /// scripts satisfy the `Ctx::Emitter: CstEmitter` bound. The recording twin — the same

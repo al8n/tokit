@@ -32,7 +32,7 @@ use crate::{
   emitter::{
     CstEmitter, Emitter, FullContainerEmitter, MissingLeadingSeparatorEmitter,
     MissingTrailingSeparatorEmitter, PrattEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter,
-    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
+    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter, ValueKeyedEmitter,
   },
   error::{
     UnexpectedEoLhs, UnexpectedEoRhs,
@@ -224,12 +224,16 @@ fn bump_witness(next: &core::sync::atomic::AtomicUsize) -> usize {
 /// leaves the inner untouched in release (the sink never fabricates a reading).
 ///
 /// A table-keyed emitter — one that allocates per-`checkpoint` bookkeeping behind interior
-/// mutability and reclaims it per-`release` — is **not supported as the inner**: the sink
-/// re-spends its base reading across no-row **origin** rewinds, drops row readings above a rewound
-/// target by value, and settles rows out of stack order under mixed raw use, all of which
-/// presuppose readings. Such an emitter belongs at the input layer's direct seam, where the
-/// settle discipline is 1:1 — the sink's own mark stack is exactly that shape, and the input
-/// layer does release it.
+/// mutability and reclaims it per-`release` — is **rejected as the inner at compile time**: the
+/// sink re-spends its base reading across no-row **origin** rewinds, drops row readings above a
+/// rewound target by value, and settles rows out of stack order under mixed raw use, all of which
+/// presuppose readings — and equal-mark rows are interchangeable only while the reading is a
+/// function of emission state. The requirement is therefore the [`ValueKeyedEmitter`] bound on
+/// this type's [`Emitter`] impl and on [`new`](Self::new), not a convention; see that trait for
+/// the exact promise and the roster of implementors. Such an emitter belongs at the input layer's
+/// direct seam, where the settle discipline is 1:1 — the sink's own mark stack is exactly that
+/// shape, and the input layer does release it. A sink is not a value-keyed emitter either, so a
+/// sink cannot wrap a sink.
 ///
 /// # Construction
 ///
@@ -432,8 +436,80 @@ where
   /// let _sink: Sink<'_, Syntactic<'_>, Verbose<()>> =
   ///   Sink::new(Verbose::new(), |_| 0, 90, 91);
   /// ```
+  ///
+  /// # Compile-time wall: value-keyed inners only
+  ///
+  /// The *Inner-emitter contract* above is in the type system: the inner must be a
+  /// [`ValueKeyedEmitter`]. A table-keyed emitter — one that allocates per-`checkpoint`
+  /// bookkeeping behind interior mutability and reclaims it per-`release` — is refused here
+  /// rather than accepted and then silently stranded (the sink's `release` forwards nothing, so
+  /// such an inner would leak one row per committed capture):
+  ///
+  /// ```compile_fail
+  /// use core::cell::RefCell;
+  /// use tokora::{
+  ///   Lexer, SimpleSpan, Token, cst::Sink, emitter::Emitter, input::Cursor, span::Spanned,
+  /// };
+  ///
+  /// /// A table-keyed emitter: `checkpoint` allocates a row and hands back its index.
+  /// #[derive(Default)]
+  /// struct TableKeyed {
+  ///   rows: RefCell<Vec<u64>>,
+  /// }
+  ///
+  /// impl<'a, L, Lang: ?Sized> Emitter<'a, L, Lang> for TableKeyed {
+  ///   type Error = ();
+  ///   fn emit_lexer_error(
+  ///     &mut self,
+  ///     _e: Spanned<<L::Token as Token<'a>>::Error, L::Span>,
+  ///   ) -> Result<(), ()> where L: Lexer<'a> { Ok(()) }
+  ///   fn emit_unexpected_token(
+  ///     &mut self,
+  ///     _e: tokora::error::token::UnexpectedTokenOf<'a, L, Lang>,
+  ///   ) -> Result<(), ()> where L: Lexer<'a> { Ok(()) }
+  ///   fn emit_error(&mut self, _e: Spanned<(), L::Span>) -> Result<(), ()>
+  ///   where L: Lexer<'a> { Ok(()) }
+  ///   fn checkpoint(&self) -> u64 {
+  ///     let mut rows = self.rows.borrow_mut();
+  ///     rows.push(0);
+  ///     rows.len() as u64 - 1 // a KEY, not a reading of the emission state
+  ///   }
+  ///   fn rewind(&mut self, _c: &Cursor<'a, '_, L>, _m: u64) where L: Lexer<'a> {}
+  /// }
+  ///
+  /// # #[derive(Debug, Clone, Copy)]
+  /// # struct STok;
+  /// # impl Token<'_> for STok {
+  /// #   type Kind = u8;
+  /// #   type Error = ();
+  /// #   const SURFACES_TRIVIA: bool = true;
+  /// #   fn kind(&self) -> u8 { 0 }
+  /// #   fn is_trivia(&self) -> bool { false }
+  /// # }
+  /// # struct Lossless<'a> { src: &'a str, state: () }
+  /// # impl<'inp> Lexer<'inp> for Lossless<'inp> {
+  /// #   type State = (); type Source = str; type Token = STok;
+  /// #   type Span = SimpleSpan; type Offset = usize;
+  /// #   fn new(src: &'inp str) -> Self { Self { src, state: () } }
+  /// #   fn with_state(src: &'inp str, state: ()) -> Self { Self { src, state } }
+  /// #   fn check(&self) -> Result<(), ()> { Ok(()) }
+  /// #   fn state(&self) -> &() { &self.state }
+  /// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+  /// #   fn into_state(self) -> () { self.state }
+  /// #   fn source(&self) -> &'inp str { self.src }
+  /// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(0, 0) }
+  /// #   fn slice(&self) -> &'inp str { "" }
+  /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
+  /// #   fn bump(&mut self, _: &usize) {}
+  /// # }
+  /// let _sink: Sink<'_, Lossless<'_>, TableKeyed> =
+  ///   Sink::new(TableKeyed::default(), |_| 0, 90, 91);
+  /// ```
   #[inline]
-  pub fn new(inner: E, mapper: fn(&L::Token) -> u16, error_kind: u16, gap_kind: u16) -> Self {
+  pub fn new(inner: E, mapper: fn(&L::Token) -> u16, error_kind: u16, gap_kind: u16) -> Self
+  where
+    E: ValueKeyedEmitter,
+  {
     const {
       assert!(
         L::SURFACES_TRIVIA,
@@ -695,7 +771,10 @@ where
 impl<'inp, L, E, Lang> Emitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: Emitter<'inp, L, Lang>,
+  // The *Inner-emitter contract* on the type, in the type system. This is where the requirement
+  // belongs rather than on the struct: `checkpoint`, `rewind` and `release` — the three methods
+  // whose exactness the promise underwrites — are all right here.
+  E: Emitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   type Error = E::Error;
@@ -962,7 +1041,7 @@ where
 impl<'inp, L, E, Lang> CstEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: Emitter<'inp, L, Lang>,
+  E: Emitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   fn cst_start(&mut self, kind: u16)
@@ -1083,7 +1162,7 @@ where
 impl<'inp, L, E, Lang> TooFewEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: TooFewEmitter<'inp, L, Lang>,
+  E: TooFewEmitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   #[inline]
@@ -1098,7 +1177,7 @@ where
 impl<'inp, L, E, Lang> TooManyEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: TooManyEmitter<'inp, L, Lang>,
+  E: TooManyEmitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   #[inline]
@@ -1113,7 +1192,7 @@ where
 impl<'inp, L, E, Lang> FullContainerEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: FullContainerEmitter<'inp, L, Lang>,
+  E: FullContainerEmitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   #[inline]
@@ -1128,7 +1207,7 @@ where
 impl<'inp, L, E, Lang> SeparatedEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: SeparatedEmitter<'inp, L, Lang>,
+  E: SeparatedEmitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   #[inline]
@@ -1155,7 +1234,7 @@ where
 impl<'inp, L, E, Lang> MissingLeadingSeparatorEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: MissingLeadingSeparatorEmitter<'inp, L, Lang>,
+  E: MissingLeadingSeparatorEmitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   #[inline]
@@ -1176,7 +1255,7 @@ where
 impl<'inp, L, E, Lang> MissingTrailingSeparatorEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: MissingTrailingSeparatorEmitter<'inp, L, Lang>,
+  E: MissingTrailingSeparatorEmitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   #[inline]
@@ -1197,7 +1276,7 @@ where
 impl<'inp, L, E, Lang> UnexpectedLeadingSeparatorEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>,
+  E: UnexpectedLeadingSeparatorEmitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   #[inline]
@@ -1218,7 +1297,7 @@ where
 impl<'inp, L, E, Lang> UnexpectedTrailingSeparatorEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>,
+  E: UnexpectedTrailingSeparatorEmitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   #[inline]
@@ -1239,7 +1318,7 @@ where
 impl<'inp, L, E, Lang> PrattEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
-  E: PrattEmitter<'inp, L, Lang>,
+  E: PrattEmitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
   #[inline]

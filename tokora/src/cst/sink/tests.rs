@@ -490,7 +490,7 @@ fn abandoned_session_points_release_their_emitter_marks() {
   for cycle in 0..3 {
     {
       let mut inp = input.as_ref(&mut sink);
-      inp.begin_point();
+      let _point = inp.begin_point();
       let _ = inp.next().expect("verbose collects").expect("a token");
       // …and the handle dies here with the point still open.
     }
@@ -1829,6 +1829,9 @@ impl<'a, L, Lang: ?Sized> Emitter<'a, L, Lang> for CountingEmitter {
   }
 }
 
+/// The defaulted constant mark is trivially a reading of the emission state.
+impl crate::emitter::ValueKeyedEmitter for CountingEmitter {}
+
 type CountingSink<'inp> = Sink<'inp, MiniLexer<'inp>, CountingEmitter>;
 type CountingCtx<'inp> = (CountingSink<'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
 
@@ -1973,6 +1976,9 @@ impl<'a, L, Lang: ?Sized> Emitter<'a, L, Lang> for JournalingEmitter {
     self.journal.push(JEntry::Token);
   }
 }
+
+/// The mark is the journal length: a reading of the emission state, keyed on no table.
+impl crate::emitter::ValueKeyedEmitter for JournalingEmitter {}
 
 type JournalingSink<'inp> = Sink<'inp, MiniLexer<'inp>, JournalingEmitter>;
 type JournalingCtx<'inp> = (JournalingSink<'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
@@ -2230,5 +2236,251 @@ fn out_of_range_rewind_spends_no_live_row() {
     sink.inner_ref().journal,
     std::vec![JEntry::Token],
     "the inner rewound to the row's captured reading — no ghost of the abandoned token"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Every stacked savepoint's capture is settled on every abandon path
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// A savepoint's mark is the event-log length, so savepoints taken with no events between
+// them all read the SAME mark. A single rewind cannot name them: it drops rows strictly
+// above the mark plus the newest row at it, which leaves every older aliased row behind as
+// a dead row the stack still counts. The abandon paths therefore have to settle each
+// capture individually, newest-first, before the one rewind that returns to the target.
+// The oracle is the row count: it must return to zero on every path.
+
+/// The type alias the stacked-settle probes share.
+type StackedCtx<'inp> = (VerboseSink<'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
+
+/// A sink with `depth` nodes open, ready to be wrapped in an input.
+fn sink_with_open_nodes<'inp>(depth: usize) -> VerboseSink<'inp> {
+  let mut sink = verbose_sink();
+  for _ in 0..depth {
+    sink.cst_start(K_NODE);
+  }
+  sink
+}
+
+/// Closes `depth` enclosing nodes through the handle's emitter — the valid closes whose
+/// depth baseline a dead row would corrupt.
+fn close_open_nodes(sink: &mut VerboseSink<'_>, depth: usize) {
+  for _ in 0..depth {
+    CstEmitter::<MiniLexer<'_>, ()>::cst_finish(sink);
+  }
+}
+
+/// `rollback_to` keeps the target and destroys every younger savepoint. Each of those
+/// younger captures aliases the target's mark here, so each must be settled on its own
+/// before the single restore.
+#[test]
+fn stacked_rollback_to_settles_every_aliased_savepoint_row() {
+  let mut sink = sink_with_open_nodes(1);
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  {
+    let mut inp = input.as_ref(&mut sink);
+    let mut txn = inp.begin_stacked();
+    let sp1 = txn.savepoint();
+    let _sp2 = txn.savepoint();
+    let _sp3 = txn.savepoint();
+    txn.rollback_to(sp1);
+    txn.commit();
+    close_open_nodes(inp.emitter(), 1);
+  }
+  assert_eq!(
+    sink.rows_len(),
+    0,
+    "`rollback_to` + `commit` must leave no live row: the younger savepoints' captures \
+     alias the target's mark, and a single restore cannot name them"
+  );
+}
+
+/// The whole-transaction rollback restores only the begin point, so the savepoints above it
+/// have to be settled first.
+#[test]
+fn stacked_whole_rollback_settles_every_aliased_savepoint_row() {
+  let mut sink = sink_with_open_nodes(1);
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  {
+    let mut inp = input.as_ref(&mut sink);
+    let mut txn = inp.begin_stacked();
+    let _sp1 = txn.savepoint();
+    let _sp2 = txn.savepoint();
+    txn.rollback();
+    close_open_nodes(inp.emitter(), 1);
+  }
+  assert_eq!(
+    sink.rows_len(),
+    0,
+    "a whole `rollback` must settle every savepoint capture before restoring the base"
+  );
+}
+
+/// The rolling-back drop — `begin_stacked`'s default policy, and the arm every `?`
+/// early-return and every unwind through a stacked scope takes. It holds the savepoint
+/// checkpoints at the moment their marks die, so it is the only place they can be settled.
+#[test]
+fn stacked_rollback_on_drop_settles_every_aliased_savepoint_row() {
+  let mut sink = sink_with_open_nodes(1);
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  {
+    let mut inp = input.as_ref(&mut sink);
+    {
+      let mut txn = inp.begin_stacked();
+      let _sp1 = txn.savepoint();
+      let _sp2 = txn.savepoint();
+      // …dropped undecided: the rollback-on-drop arm.
+    }
+    close_open_nodes(inp.emitter(), 1);
+  }
+  assert_eq!(
+    sink.rows_len(),
+    0,
+    "an undecided rolling-back drop must settle every savepoint capture, exactly as the \
+     commit-policy arm does"
+  );
+}
+
+/// The same law across open-node depths: a row carries the derived depth frozen at its
+/// capture, and that frozen fact is what a later depth recount anchors on. Settling has to
+/// be exact at every depth, and every enclosing close must stay accepted.
+#[test]
+fn stacked_savepoint_rows_settle_at_every_open_node_depth() {
+  for depth in 1..=3usize {
+    let mut sink = sink_with_open_nodes(depth);
+    let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+    {
+      let mut inp = input.as_ref(&mut sink);
+      {
+        let mut txn = inp.begin_stacked();
+        let _sp1 = txn.savepoint();
+        let _sp2 = txn.savepoint();
+        let _sp3 = txn.savepoint();
+      }
+      close_open_nodes(inp.emitter(), depth);
+    }
+    assert_eq!(
+      sink.rows_len(),
+      0,
+      "depth {depth}: every aliased capture must be settled whatever the frozen depth"
+    );
+  }
+}
+
+/// The raw-restore leg: a raw restore below the savepoints (but above the base) leaves them
+/// off the live lineage — detect-at-use — but their emitter captures are still live rows,
+/// and the guard's drop is still the only holder of the checkpoints that carry them.
+#[test]
+fn stacked_raw_restore_below_savepoints_still_settles_their_rows() {
+  let mut sink = sink_with_open_nodes(1);
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  {
+    let mut inp = input.as_ref(&mut sink);
+    {
+      let mut txn = inp.begin_stacked();
+      let raw = txn.save();
+      let _sp1 = txn.savepoint();
+      let _sp2 = txn.savepoint();
+      txn.restore(raw);
+      // …then dropped undecided, with two lineage-invalidated savepoints still held.
+    }
+    close_open_nodes(inp.emitter(), 1);
+  }
+  assert_eq!(
+    sink.rows_len(),
+    0,
+    "a lineage-invalidated savepoint still owns an emitter capture: the drop must settle it"
+  );
+}
+
+/// The control: `release` and `commit` already settle each capture individually, so they are
+/// exact over aliased marks. They are the shape the abandon paths must match.
+#[test]
+fn stacked_release_and_commit_settle_every_aliased_row() {
+  let mut sink = sink_with_open_nodes(1);
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  {
+    let mut inp = input.as_ref(&mut sink);
+    let mut txn = inp.begin_stacked();
+    let sp1 = txn.savepoint();
+    let _sp2 = txn.savepoint();
+    let _sp3 = txn.savepoint();
+    txn.release(sp1);
+    txn.commit();
+    close_open_nodes(inp.emitter(), 1);
+  }
+  assert_eq!(
+    sink.rows_len(),
+    0,
+    "the settle-each funnel is exact over aliased marks"
+  );
+}
+
+/// The composition of the two settle families on the one drop path: session points and
+/// savepoints interleave (a point can be opened through the guard), so a rolling-back drop
+/// has to settle **both** — the savepoints from the guard's own stack, the point from the
+/// rewind's reconciliation — before the base's rewind sweeps what is left.
+#[test]
+fn interleaved_session_point_and_savepoints_all_settle_on_drop() {
+  let mut sink = sink_with_open_nodes(1);
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  {
+    let mut inp = input.as_ref(&mut sink);
+    {
+      let mut txn = inp.begin_stacked();
+      let _sp1 = txn.savepoint();
+      let _point = txn.begin_point();
+      let _sp2 = txn.savepoint();
+      // …dropped undecided, with the point still open between the two savepoints.
+    }
+    assert_eq!(inp.points(), 0, "the rollback reconciled the open point");
+    close_open_nodes(inp.emitter(), 1);
+  }
+  assert_eq!(
+    sink.rows_len(),
+    0,
+    "both settle families ran: no savepoint capture and no session-point capture is left"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// The inner-emitter contract is a bound, and it survives being borrowed
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A **borrowed** inner is as admissible as an owned one: `Emitter` is implemented for
+/// `&mut U`, and the value-keyed promise is forwarded through that same shape, so
+/// `Sink<&mut Verbose>` composes exactly like `Sink<Verbose>` — captures settle to zero rows
+/// and the inner keeps every diagnostic below a kept mark. (A table-keyed inner is refused at
+/// compile time instead; the wall is the `compile_fail` example on `Sink::new`.)
+#[test]
+fn a_borrowed_value_keyed_inner_composes_like_an_owned_one() {
+  type BorrowedSink<'inp, 'e> = Sink<'inp, MiniLexer<'inp>, &'e mut Verbose<TestErr>>;
+  type BorrowedCtx<'inp, 'e> = (BorrowedSink<'inp, 'e>, DefaultCache<'inp, MiniLexer<'inp>>);
+
+  let mut verbose = Verbose::<TestErr>::new();
+  {
+    let mut sink: BorrowedSink<'_, '_> = Sink::new(&mut verbose, map_tok, K_ERR, K_GAP);
+    let mut input = Input::<'_, MiniLexer<'_>, BorrowedCtx<'_, '_>, ()>::new("abcdef");
+    {
+      let mut inp = input.as_ref(&mut sink);
+      // A committed attempt and a declined one, both capturing at the same buffer length.
+      let committed: Option<()> = inp.attempt(|inp| inp.next().ok().flatten().map(|_| ()));
+      assert!(committed.is_some());
+      let declined: Option<()> = inp.attempt(|inp| {
+        let _ = inp.next();
+        None
+      });
+      assert!(declined.is_none());
+    }
+    assert_eq!(
+      sink.rows_len(),
+      0,
+      "every capture settled through the borrowed inner exactly as through an owned one"
+    );
+  }
+  assert_eq!(
+    verbose.errors().len(),
+    0,
+    "the borrowed inner is still the one the sink forwarded to"
   );
 }

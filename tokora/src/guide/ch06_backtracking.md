@@ -576,13 +576,16 @@ struct Driver<'a, 'inp, 'closure, Ctx> {
 
 A **session point** is the non-lexical form. It is a *value on the input*, not a borrow of it:
 [`begin_point`](crate::InputRef::begin_point) pushes a checkpoint onto the input's own stack and
-**returns nothing**. Nothing stays borrowed, so the whole consume surface — [`next`](crate::InputRef::next),
+hands back a plain [`SessionPointId`](crate::SessionPointId) — a `Copy` token, not a borrow, so
+nothing stays borrowed and the whole consume surface — [`next`](crate::InputRef::next),
 [`try_expect`](crate::InputRef::try_expect), any parser you hand the input to — is still callable
 with the point open, in this call and in later ones.
 [`commit_point`](crate::InputRef::commit_point) keeps the work;
 [`rollback_point`](crate::InputRef::rollback_point) takes it all back — cursor, lexer state, the
-token cache, and the diagnostics emitted since the mark. Points settle newest-first, so the stack
-*is* the last-in, first-out order and nesting needs no ids;
+token cache, and the diagnostics emitted since the mark. Both take the id. Points still settle
+newest-first, so the stack *is* the last-in, first-out order; what the id buys is that a settle
+names *its own* point — an id whose point is gone is refused instead of quietly settling whatever
+is newest, and it cannot come to mean a different point as the stack moves under it.
 [`points()`](crate::InputRef::points) is the live depth.
 
 Here is the shape the guards cannot express: `Speculator` holds the input, `mark`s in one call,
@@ -658,7 +661,7 @@ parses in the next, and decides in a third.
 # impl From<UnexpectedEot> for CalcError {
 #   fn from(_: UnexpectedEot) -> Self { CalcError::UnexpectedEnd }
 # }
-use tokora::{Emitter, InputRef, Parse, ParseContext, Parser};
+use tokora::{Emitter, InputRef, Parse, ParseContext, Parser, SessionPointId};
 
 # fn expect_tok<'inp, Ctx>(
 #   inp: &mut InputRef<'inp, '_, CalcLexer<'inp>, Ctx>,
@@ -691,13 +694,14 @@ use tokora::{Emitter, InputRef, Parse, ParseContext, Parser};
 #   }
 # }
 /// A driver that holds the input and is stepped through separate calls. Note what `mark` does
-/// **not** return: there is no guard to store, so nothing stays borrowed — which is precisely
+/// **not** return: no guard, only a plain id — so nothing stays borrowed, which is precisely
 /// why `parse` below is callable with a mark still open.
 struct Speculator<'a, 'inp, 'closure, Ctx>
 where
   Ctx: ParseContext<'inp, CalcLexer<'inp>>,
 {
   inp: &'a mut InputRef<'inp, 'closure, CalcLexer<'inp>, Ctx>,
+  open: Vec<SessionPointId<'closure>>,
 }
 
 impl<'inp, Ctx> Speculator<'_, 'inp, '_, Ctx>
@@ -705,9 +709,10 @@ where
   Ctx: ParseContext<'inp, CalcLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, CalcLexer<'inp>, Error = CalcError>,
 {
-  /// Call 1: mark where we are. Returns nothing — the borrow ends here.
+  /// Call 1: mark where we are. The id goes in a field — no borrow is held.
   fn mark(&mut self) {
-    self.inp.begin_point();
+    let point = self.inp.begin_point();
+    self.open.push(point);
   }
 
   /// Call 2: parse for real, *through* the open mark.
@@ -720,9 +725,16 @@ where
     Ok(self.inp.try_expect(|t| matches!(t.data(), Tok::Semi))?.is_some())
   }
 
-  /// Call 4: decide — long after the mark was made.
-  fn keep(&mut self) { self.inp.commit_point(); }
-  fn undo(&mut self) { self.inp.rollback_point(); }
+  /// Call 4: decide — long after the mark was made, by naming the mark.
+  fn keep(&mut self) {
+    let point = self.open.pop().expect("a mark is open");
+    self.inp.commit_point(point);
+  }
+
+  fn undo(&mut self) {
+    let point = self.open.pop().expect("a mark is open");
+    self.inp.rollback_point(point);
+  }
 
   fn depth(&self) -> usize { self.inp.points() }
 }
@@ -736,7 +748,7 @@ where
   Ctx: ParseContext<'inp, CalcLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, CalcLexer<'inp>, Error = CalcError>,
 {
-  let mut spec = Speculator { inp };
+  let mut spec = Speculator { inp, open: Vec::new() };
 
   spec.mark();                       // ── the point opens …
   assert_eq!(spec.depth(), 1);
