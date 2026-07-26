@@ -526,6 +526,104 @@ fn foldr_within_empty() {
   assert_eq!(result, 77);
 }
 
+// The two tests above are the whole of `foldr_within`'s pre-existing coverage, and both sit
+// outside the band where its epilogue matters: `foldr_within_reverses_order` feeds exactly
+// `W::CAPACITY` accepted tokens, so the capacity `break` runs the drain, and
+// `foldr_within_empty` feeds none, so the drain is vacuous either way. Every run of length
+// `1 ..= CAPACITY - 1` leaves the loop through the predicate-decline arm; the three tests
+// below cover that band.
+
+#[test]
+fn foldr_within_short_run_folds_every_consumed_token() {
+  use generic_arraydeque::typenum::U3;
+
+  fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<(i64, bool), ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    // Capacity 3, but only two accepted tokens: the run ends on the predicate decline, not on
+    // the capacity break. 0*2+2=2, 2*2+1=5.
+    let folded = inp.foldr_within::<_, U3, _, _, _>(
+      |t| matches!(t.data(), Token::Num(_)),
+      || 0i64,
+      |acc, tok| acc * 2 + extract_num(tok),
+    )?;
+    let next_is_plus = matches!(inp.next()?.map(|s| s.into_data()), Some(Token::Plus));
+    Ok((folded, next_is_plus))
+  }
+
+  let (folded, next_is_plus) = Parser::new().apply(parse).parse_str("1 2 +").unwrap();
+  assert_eq!(
+    folded, 5,
+    "a run shorter than the window still has to be folded: both ints were consumed into the \
+     buffer, so returning the untouched initializer would silently drop them"
+  );
+  assert!(
+    next_is_plus,
+    "the accepted run is consumed exactly once — the token after it is still `+`"
+  );
+}
+
+#[test]
+fn foldr_within_decline_after_partial_run() {
+  use generic_arraydeque::typenum::U3;
+
+  fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<(i64, i64), ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    // The predicate accepts only the first token, so the run is one element long.
+    let mut seen = false;
+    let folded = inp.foldr_within::<_, U3, _, _, _>(
+      |t| {
+        if seen || !matches!(t.data(), Token::Num(_)) {
+          false
+        } else {
+          seen = true;
+          true
+        }
+      },
+      || 0i64,
+      |acc, tok| acc * 10 + extract_num(tok),
+    )?;
+    let survivor = inp.next()?.map(extract_num).unwrap_or(-1);
+    Ok((folded, survivor))
+  }
+
+  let (folded, survivor) = Parser::new().apply(parse).parse_str("1 2").unwrap();
+  assert_eq!(folded, 1, "the single accepted token is folded");
+  assert_eq!(
+    survivor, 2,
+    "the declined token is not consumed — it survives at the cache front"
+  );
+}
+
+#[test]
+fn foldr_within_every_length_below_capacity() {
+  use generic_arraydeque::typenum::U4;
+
+  fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<i64, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    inp.foldr_within::<_, U4, _, _, _>(
+      |t| matches!(t.data(), Token::Num(_)),
+      || 0i64,
+      |acc, tok| acc * 10 + extract_num(tok),
+    )
+  }
+
+  // Window capacity 4; runs of 1, 2 and 3 all leave through the decline arm. The right fold
+  // reads the run backwards, so `1 2 3` folds to 321.
+  for (src, expected) in [("1 +", 1i64), ("1 2 +", 21), ("1 2 3 +", 321)] {
+    let result = Parser::new().apply(parse).parse_str(src).unwrap();
+    assert_eq!(result, expected, "input {src:?}");
+  }
+}
+
 // ── try_expect_map ──────────────────────────────────────────────────────────
 
 #[test]

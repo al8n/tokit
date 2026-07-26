@@ -179,26 +179,22 @@ sep_delim_tests!(rlat_bnd, { .allow_trailing().bounded(2, 4).require_leading() }
 //
 // Every case above feeds an input that already SATISFIES its configured bounds/policy,
 // so the 64-test matrix asserts only non-emptiness and never exercises the try-driven
-// `sep/delim` closer on a violation. Issue #90 is exactly that: the mid-scan-closer
-// arm (`sep/delim/mod.rs`) returns as soon as the closer is found, without ever reaching
+// `sep/delim` closer on a violation. Issue #90 was exactly that: the mid-scan-closer
+// arm (`sep/delim/mod.rs`) returned as soon as the closer was found, without ever reaching
 // the post-loop `handle_end` pass that enforces count bounds and separator policy — so on
-// a well-formed, properly-closed list the bound/policy check never runs. These two pin
-// what the driver ACTUALLY does today on inputs that violate their own configured bounds:
-// a clean `Ok`, with zero diagnostics recorded. Fixing this should flip both assertions to
-// the diagnostic the sibling drivers already emit for the same shape (non-delim and
-// `sep_while`-delim both report it).
+// a well-formed, properly-closed list the bound/policy check never ran. These two are the
+// witnesses for the fix: a closed construct is still a construct whose count bounds and
+// separator policy must be judged (INVARIANT E), and the diagnostic must be the one the
+// sibling drivers already emit for the same shape (non-delim and `sep_while`-delim both
+// report it).
 
-/// Pins CURRENT WRONG behavior (issue #90): once fixed, this should record a
-/// `TooFew(1, 2)` on the `[1]` parse.
-///
-/// `[1]` under `.at_least(2)`: the closer is found mid-scan on this already-well-formed,
-/// properly-closed list, so the driver returns through the `is_closed` arm without ever
-/// reaching `handle_end`, and the `at_least(2)` bound is never checked.
+/// A properly closed `[1]` under `.at_least(2)` violates its own bound, and the mid-scan
+/// closer arm now runs the end-state pass, so exactly one `TooFew(1, 2)` is recorded.
 #[test]
-fn at_least_violation_inside_delim_returns_clean_ok() {
+fn at_least_violation_inside_delim_records_too_few() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, Verbose<E>>>,
-  ) -> Result<Vec<i64>, E> {
+  ) -> Result<(Vec<i64>, usize), E> {
     let out = try_num
       .separated_by_comma()
       .at_least(2)
@@ -206,63 +202,62 @@ fn at_least_violation_inside_delim_returns_clean_ok() {
       .collect()
       .parse_input(inp)?;
     let errs = inp.emitter().errors();
+    let count = errs.values().map(|v| v.len()).sum();
     assert!(
-      errs.is_empty(),
-      "pinned bug (issue #90): today `handle_end` never runs on this path, so no \
-       `TooFew` is recorded (found {errs:?}) — fixing it must record exactly one \
-       TooFew(1, 2)"
+      !errs.is_empty(),
+      "the mid-scan closer runs `handle_end`, so the `at_least(2)` bound must fire on \
+       a one-element list"
     );
-    Ok(out)
+    Ok((out, count))
   }
 
-  let r: Vec<i64> = Parser::with_context(verbose_ctx())
+  let (r, count) = Parser::with_context(verbose_ctx())
     .apply(parse)
     .parse_str("[1]")
     .unwrap();
+  assert_eq!(count, 1, "exactly one diagnostic — the `TooFew`");
   assert_eq!(
     r,
     vec![1],
-    "pinned bug (issue #90): a bounds-violating list (1 element under at_least(2)) \
-     still parses clean — the count bound never fires on the try-driven delim path"
+    "the bound is a secondary: the elements are still collected and the parse still \
+     recovers under `Verbose`"
   );
 }
 
-/// Pins CURRENT WRONG behavior (issue #90): once fixed, this should record an
-/// unexpected-trailing-separator diagnostic on the `[1,]` parse.
-///
-/// `[1,]` under the **default** policy (no `.allow_trailing()`/`.require_trailing()` at
-/// all — trailing separators are unexpected unless explicitly allowed): the mid-scan
-/// closer arm accepts the list before the end-state pass that would reject the trailing
-/// comma ever runs, regardless of which policy is configured — the bug is dead code on
-/// this path, not a specific policy's gap.
+/// A properly closed `[1,]` under the **default** policy (no `.allow_trailing()` /
+/// `.require_trailing()` at all — trailing separators are unexpected unless explicitly
+/// allowed) now reaches the end-state pass that rejects the trailing comma.
 #[test]
-fn default_policy_trailing_separator_inside_delim_returns_clean_ok() {
+fn default_policy_trailing_separator_inside_delim_records_diagnostic() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, Verbose<E>>>,
-  ) -> Result<Vec<i64>, E> {
+  ) -> Result<(Vec<i64>, usize), E> {
     let out = try_num
       .separated_by_comma()
       .delimited::<Bracket<(), (), ()>>()
       .collect()
       .parse_input(inp)?;
     let errs = inp.emitter().errors();
+    let count = errs.values().map(|v| v.len()).sum();
     assert!(
-      errs.is_empty(),
-      "pinned bug (issue #90): today `handle_end` never runs on this path, so no \
-       trailing-separator diagnostic is recorded (found {errs:?}) — fixing it must \
-       record an error"
+      !errs.is_empty(),
+      "the mid-scan closer runs `handle_end`, so the default policy must reject the \
+       trailing separator"
     );
-    Ok(out)
+    Ok((out, count))
   }
 
-  let r: Vec<i64> = Parser::with_context(verbose_ctx())
+  let (r, count) = Parser::with_context(verbose_ctx())
     .apply(parse)
     .parse_str("[1,]")
     .unwrap();
   assert_eq!(
+    count, 1,
+    "exactly one diagnostic — the unexpected trailing separator"
+  );
+  assert_eq!(
     r,
     vec![1],
-    "pinned bug (issue #90): a trailing separator the default policy should reject \
-     still parses clean — no leading/trailing allowance was ever configured"
+    "the policy violation is a secondary: the element is still collected"
   );
 }

@@ -2683,11 +2683,14 @@ fn test_sep_while_delim_require_surrounded_bounded_too_many() {
 // Error-path tests: sep/delim/
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// Note: sep/delim (TryParseInput) stops when the element parser declines,
-// so at_most/at_least/bounded limits and require_trailing are only enforced
-// when the element parser declines mid-parse, NOT when the close delimiter
-// is encountered. The error tests here cover cases that DO trigger errors:
-// require_leading (missing leading comma), missing delimiters, empty input, etc.
+// Note: sep/delim (TryParseInput) leaves its element loop two ways — the element parser
+// declining, and the close delimiter committing mid-scan — and BOTH run the end-state pass,
+// so at_most/at_least/bounded and the separator policy are enforced on a properly closed list
+// exactly as they are on a truncated one (INVARIANT E: every `Ok`-returning exit runs the
+// end-state pass exactly once). This section covers the error shapes that reach the loop's
+// other exits: require_leading (missing leading comma), missing delimiters, empty input, etc.
+// The count-bound and trailing-policy violations on a closed list are pinned in
+// `sep_delim_extra.rs` and, across all eight drivers, in `end_state_parity.rs`.
 
 // ── require_surrounded fail (missing leading) ────────────────────────────────
 

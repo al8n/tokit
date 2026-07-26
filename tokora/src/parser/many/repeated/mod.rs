@@ -3,7 +3,6 @@ use core::marker::PhantomData;
 use crate::{
   TryParseInput,
   emitter::FullContainerEmitter,
-  error::syntax::FullContainer,
   span::Span as _,
   try_parse_input::{Accept, Decline},
 };
@@ -257,6 +256,7 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
   {
     trace_event!(inp, "repeated");
     let mut num = 0;
+    let mut full = false;
     let anchor = inp.cursor().clone();
     let mut cursor = anchor.clone();
     let mut committed = inp.span().end();
@@ -268,15 +268,7 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
       match self.f.try_parse_input(inp) {
         Ok(Accept(item)) => {
           rh.on_element(num, inp, &anchor)?;
-          if container.push(item).is_err() {
-            let span = inp.span_since(&cursor);
-            inp.emitter().emit_full_container(FullContainer::of(
-              span,
-              num,
-              container.max_capacity(),
-            ))?;
-          }
-          num += 1;
+          push_element(&mut num, &mut full, container, item, inp, &anchor)?;
         }
         Ok(Decline) => break,
         // The never-recoverable gate and its terminal dual: the element's `Err` can be the

@@ -114,7 +114,7 @@ impl With<Minimum, Maximum> {
     if num_elems > maximum {
       inp
         .emitter()
-        .emit_too_many(TooMany::of(full_span.clone(), num_elems, maximum))?;
+        .emit_too_many(TooMany::of(full_span.clone(), maximum + 1, maximum))?;
     }
     Ok(full_span)
   }
@@ -162,7 +162,7 @@ impl Maximum {
     if num_elems > maximum {
       inp
         .emitter()
-        .emit_too_many(TooMany::of(full_span.clone(), num_elems, maximum))?;
+        .emit_too_many(TooMany::of(full_span.clone(), maximum + 1, maximum))?;
     }
     Ok(full_span)
   }

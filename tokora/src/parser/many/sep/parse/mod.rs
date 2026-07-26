@@ -2,10 +2,7 @@ use crate::{
   TryParseInput,
   container::Container as ContainerT,
   emitter::{FullContainerEmitter, SeparatedEmitter},
-  error::{
-    syntax::{FullContainer, MissingSyntaxOf},
-    token::MissingTokenOf,
-  },
+  error::{syntax::MissingSyntaxOf, token::MissingTokenOf},
   input::Cursor,
   punct::Punctuator,
   span::Span,
@@ -61,6 +58,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     // against it keeps their witness attempt-relative. One offset clone per collection.
     let latch = inp.latch_snapshot();
     let mut num_elems = 0;
+    let mut full = false;
 
     loop {
       let mut ps = None;
@@ -126,6 +124,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
             peek_span,
             elem,
             &mut num_elems,
+            &mut full,
             container,
             continue_state_handler,
           )?;
@@ -177,7 +176,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     match state {
       // happy path, we found a separator after an element
       State::Element => {
-        // Change the current state to Separator.
+        container.observe_separator(&sep_tok);
         state = State::Separator(sep_tok);
       }
       // First token is a separator, we found another leading separator
@@ -191,24 +190,18 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
             sep_tok.span_ref().start(),
           ))?;
 
-        // As we have emitted the missing element error, so the behavior of the state machine
-        // should be as if we have successfully parsed an element here.
-        // So we push the new separator token into the container,
-        // and change the state to Separator.
-        // TODO(al8n): return error when separator container is full?
-        let sep = sep_tok;
-        container.on_separator(sep.clone());
-        state = State::Separator(sep);
+        // As we have emitted the missing element error, the state machine behaves as if an
+        // element had been parsed here, so this separator opens a new separator state.
+        container.observe_separator(&sep_tok);
+        state = State::Separator(sep_tok);
       }
       // first token is a separator
       State::Start => {
         // we do not need to check leading spec here, as we cached the leading separator token,
         // the check will be done when we find the first element or reach the end of input
-        let st = sep_tok;
-        handler.handle_start_state(inp, &st)?;
-        // TODO(al8n): return error when separator container is full?
-        container.on_separator(st.clone());
-        state = State::Leading(st);
+        handler.handle_start_state(inp, &sep_tok)?;
+        container.observe_separator(&sep_tok);
+        state = State::Leading(sep_tok);
       }
       // we are in separator state, so the next token should be an element,
       State::Separator(_) => {
@@ -219,9 +212,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
             sep_tok.span_ref().start(),
           ))?;
 
-        // TODO(al8n): return error when separator container is full?
-        let sep_tok = sep_tok;
-        container.on_separator(sep_tok.clone());
+        container.observe_separator(&sep_tok);
         state = State::Separator(sep_tok);
       }
     }
@@ -237,6 +228,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     peek_span: L::Span,
     element: O,
     num_elems: &mut usize,
+    full: &mut bool,
     container: &mut Container,
     handler: &Handler,
   ) -> Result<State<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
@@ -254,26 +246,12 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     match state {
       // happy path, we found a separator before an element
       State::Separator(_) => {
-        if push(num_elems, container, element).is_err() {
-          let span = inp.span_since(anchor);
-          inp.emitter().emit_full_container(FullContainer::of(
-            span,
-            *num_elems,
-            container.max_capacity(),
-          ))?;
-        }
+        push_element(num_elems, full, container, element, inp, anchor)?;
         state = State::Element;
       }
       // we are in leading state,
       State::Leading(_) => {
-        if push(num_elems, container, element).is_err() {
-          let span = inp.span_since(anchor);
-          inp.emitter().emit_full_container(FullContainer::of(
-            span,
-            *num_elems,
-            container.max_capacity(),
-          ))?;
-        }
+        push_element(num_elems, full, container, element, inp, anchor)?;
         state = State::Element;
       }
       // nothing before element, parse the first element
@@ -281,14 +259,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // let the passing handler deal with the start state
         handler.handle_start_state(inp, peek_span.start())?;
 
-        if push(num_elems, container, element).is_err() {
-          let span = inp.span_since(anchor);
-          inp.emitter().emit_full_container(FullContainer::of(
-            span,
-            *num_elems,
-            container.max_capacity(),
-          ))?;
-        }
+        push_element(num_elems, full, container, element, inp, anchor)?;
 
         state = State::Element;
       }
@@ -301,17 +272,8 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
           .emitter()
           .emit_missing_separator(Sep::name(), MissingTokenOf::<'_, L, Lang>::of(off))?;
 
-        handler.handle_too_many_element(*num_elems, inp, anchor)?;
-
         // parse the next element
-        if push(num_elems, container, element).is_err() {
-          let span = inp.span_since(anchor);
-          inp.emitter().emit_full_container(FullContainer::of(
-            span,
-            *num_elems,
-            container.max_capacity(),
-          ))?;
-        }
+        push_element(num_elems, full, container, element, inp, anchor)?;
         state = State::Element;
       }
     }
@@ -349,12 +311,4 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
       }
     })
   }
-}
-
-#[inline(always)]
-fn push<C, T>(nums: &mut usize, container: &mut C, item: T) -> Result<(), T>
-where
-  C: crate::container::Container<T>,
-{
-  container.push(item).inspect(|_| *nums += 1)
 }

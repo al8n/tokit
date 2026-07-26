@@ -43,7 +43,17 @@ impl<S, Lang: ?Sized> FullContainer<S, Lang> {
     &self.span
   }
 
-  /// Returns the number of elements found.
+  /// Returns the number of elements found: the elements the container held when it refused a
+  /// push, **plus the refused one**. For any container that refuses only when full, that is
+  /// [`capacity()`](Self::capacity)` + 1`.
+  ///
+  /// The diagnostic is emitted once per construct, at the first refusal — a container that
+  /// refuses one push refuses every later one, so a per-dropped-element count would climb past
+  /// the capacity it names.
+  ///
+  /// A custom container that refuses a push *below* its advertised
+  /// [`Container::max_capacity`](crate::container::Container::max_capacity) yields a `nums`
+  /// that does not exceed `capacity()`. That reports what actually happened and is left as is.
   #[inline(always)]
   pub const fn nums(&self) -> usize {
     self.nums
