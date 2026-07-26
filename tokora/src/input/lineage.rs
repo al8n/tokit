@@ -120,6 +120,10 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     state: _,
     span: _,
     cache: _,
+    // — ground truth, and uncounted: the parked front token is not a cache entry, so restore
+    //   CLEARS it rather than replaying it (the region re-lexes and, by the `Lexer` determinism
+    //   contract, reproduces it).
+    pending: _,
     // — WORLD FACT: monotone, driver-owned, restore does NOT touch it (and cannot: no handle may
     //   exist while `Input::seal` runs). See the module docs.
     finality: _,
@@ -161,6 +165,7 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     state: _,
     span: _,
     cache: _,
+    pending: _,
     emitted_error_end: _,
     poison_boundary: _,
     // — WORLD FACT, as a read-only `Copy` snapshot: no mutator, and the handle's borrow of the

@@ -76,6 +76,9 @@ where
   Cmpl: Completeness,
 {
   /// Peeks the next token without advancing the cursor.
+  ///
+  /// A token already waiting at the front of the stream — parked or cached — is served without
+  /// touching the lexer.
   #[inline]
   pub fn peek_one(
     &mut self,
@@ -181,15 +184,26 @@ where
     *terminal = false;
     let buf_len = buf.len();
     let remaining_cap = buf.capacity() - buf_len;
+    // The parked front token is not a cache entry, but it IS the front of the stream, so it takes
+    // a window slot and the fill must not re-lex it.
+    let parked = usize::from(Self::can_park() && self.pending.is_some());
     let mut in_cache = self.cache().len();
     #[cfg(debug_assertions)]
     let initial_in_cache = in_cache;
-    let mut want = remaining_cap.saturating_sub(in_cache);
+    let mut want = remaining_cap.saturating_sub(parked + in_cache);
     #[cfg(debug_assertions)]
     let exp = want;
 
-    // If we already have enough tokens cached, just peek from cache
+    // If enough tokens are already retained, just serve them
     if want == 0 {
+      // The parked token is the front of the stream, so it heads the window and the cache fills in
+      // behind it. Safe unguarded because every caller of this fill passes a buffer with room for at
+      // least one entry.
+      if Self::can_park() {
+        if let Some(parked) = self.pending.as_ref() {
+          buf.push_back(Maybe::Ref(parked.as_ref()));
+        }
+      }
       self.cache.peek::<W>(buf);
       return Ok(self.session.emitter);
     }
@@ -200,6 +214,14 @@ where
     // boundary — a terminal stop, not a genuine end of input.
     if self.reached_boundary(self.offset()) {
       *terminal = true;
+      // The parked token is the front of the stream, so it heads the window and the cache fills in
+      // behind it. Safe unguarded because every caller of this fill passes a buffer with room for at
+      // least one entry.
+      if Self::can_park() {
+        if let Some(parked) = self.pending.as_ref() {
+          buf.push_back(Maybe::Ref(parked.as_ref()));
+        }
+      }
       self.cache.peek::<W>(buf);
       return Ok(self.session.emitter);
     }
@@ -213,17 +235,22 @@ where
     // Otherwise, lex additional tokens to fill the request. `lex_within_boundary`
     // stops the fill at the durable frontier during a replay, so an overflow peek
     // after a restore re-caches only the reproducible prefix.
-    let mut lex_at = self.offset().clone();
-    let mut lexer = self.lexer();
+    let mut resume = self.resume();
+    // The lex position runs the fill loop as a BY-VALUE local (see `scan_with` for why: the opaque
+    // per-token lexer call would otherwise force it to memory on every iteration); the slot is
+    // written back after the loop. The two `?`-returns inside the loop skip that write-back, which
+    // is sound because `resume` is function-local and dies with them.
+    let ResumeParts { lexer, at: at_slot } = resume.parts_mut();
+    let mut lex_at = at_slot.clone();
     while want > 0 {
-      if let Some(item) = self.lex_within_boundary(&mut lexer, &mut lex_at) {
+      if let Some(item) = self.lex_within_boundary(lexer, &mut lex_at) {
         // The one classifier ([`InputRef::classify`]), shared with the scanner: a terminal trip is
         // probed and LATCHED before the frontier holdback can withhold anything, so a peek can no
         // more disguise a limit trip as "more input may help" than a consume can. `AtCursor` is the
         // peek's frontier — a peek commits no progress, so a trip latches at the cursor, which
-        // during a fill is the end of the last CACHED token (the staged overflow is not durable;
-        // see the truncation below).
-        match self.classify(&lexer, &AtCursor, item) {
+        // during a fill is the end of the newest RETAINED token (the staged overflow is not
+        // durable; see the truncation below).
+        match self.classify(lexer, &AtCursor, item) {
           // Frontier holdback (partial, non-final), reached only by a NON-terminal item: it may
           // extend with more input, so it must never enter the cache — a later `next()` serves
           // cached tokens without re-lexing, which would bypass the scan-path holdback — nor be
@@ -253,7 +280,7 @@ where
             let cached = CachedToken::new(tok, lexer.state().clone());
 
             // Try to cache the token; if cache is full, stage it for the output buffer
-            match self.cache_push_back(cached) {
+            match self.cache_append(cached) {
               Ok(()) => {
                 in_cache += 1;
               }
@@ -269,12 +296,22 @@ where
         break;
       }
     }
+    *at_slot = lex_at;
 
-    // Fill buffer from cache (this covers both cached tokens and any we just added)
+    // Fill the buffer from the front of the stream (this covers a parked token, the cached ones,
+    // and any this fill just added)
     // SAFETY: Cache.peek() returns slice of initialized tokens, guaranteed by trait contract
+    // The parked token is the front of the stream, so it heads the window and the cache fills in
+    // behind it. Safe unguarded because every caller of this fill passes a buffer with room for at
+    // least one entry.
+    if Self::can_park() {
+      if let Some(parked) = self.pending.as_ref() {
+        buf.push_back(Maybe::Ref(parked.as_ref()));
+      }
+    }
     self.cache.peek::<W>(buf);
     debug_assert!(
-      buf_len + in_cache == buf.len(),
+      buf_len + parked + in_cache == buf.len(),
       "Cache peek returned unexpected number of tokens"
     );
 
@@ -304,7 +341,7 @@ where
     #[cfg(debug_assertions)]
     {
       debug_assert!(
-        buf.len() == buf_len + in_cache + yielded,
+        buf.len() == buf_len + parked + in_cache + yielded,
         "buffer length mismatch after adding overflowed tokens"
       );
       if want == 0 {

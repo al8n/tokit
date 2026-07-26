@@ -1338,7 +1338,7 @@ fn non_lifo_poison_boundary_restore_is_rejected_in_debug() {
 use crate::state::token_tracker::{TokenLimitExceeded, TokenLimiter};
 
 #[derive(Debug, Clone, PartialEq)]
-enum ByValErr {
+pub(super) enum ByValErr {
   Lex,
   Limit,
 }
@@ -1357,6 +1357,14 @@ impl From<TokenLimitExceeded> for ByValErr {
 
 impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, Lang>> for ByValErr {
   fn from(_: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
+    ByValErr::Lex
+  }
+}
+
+// The `*_or_stop` primitives raise the committed end-of-input error where their plain siblings
+// decline, so a fixture that exercises both needs the conversion.
+impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for ByValErr {
+  fn from(_: UnexpectedEot<O, Lang>) -> Self {
     ByValErr::Lex
   }
 }
@@ -1680,23 +1688,23 @@ fn sync_through_then_peek_trip_after_skips_commits_the_diagnosed_prefix() {
   assert_eq!(limit, 1, "the limit trip is diagnosed exactly once (`3`)");
 }
 
-/// Pins CURRENT WRONG behavior (issue #89): `consumed`/`limit_diags` below should read
-/// the disciplined values (stop at 2, one diagnostic at the 3rd) once it is fixed.
+/// A widen-then-drain round (`peek::<U1>` → `peek::<U2>` → `peek::<U3>`, then consume the
+/// window) against a by-value limit of 2, at the shape and the numbers that used to let three
+/// times the configured budget through.
 ///
-/// Repeated widen-then-drain rounds (`peek::<U1>` → `peek::<U2>` → `peek::<U3>`, then
-/// consume the window), by-value limit 2 — this reproduces the bug at its exact shape and
-/// numbers. `lexer()` pairs COMMITTED state with the cache-back offset
-/// (`input_ref/mod.rs`), and each top-level `peek` call that widens an already-nonempty
-/// cache re-derives its fill's starting state from that pair instead of the cache's
-/// newest entry's own stored state — so a *separate* `peek::<U2>` call made after
-/// `peek::<U1>` (nothing consumed in between, so committed state is unchanged) re-fills
-/// token 2 as if token 1 had never been scanned. Consuming then adopts each entry's own
-/// (wrongly resumed) state, so the by-value limiter's committed count silently falls
-/// behind the true number of tokens consumed. This is the by-value counterpart to
-/// `ProbeLimiter`'s `Rc`-shared tally: a shared tally can never go "missing" the way
-/// committed STATE can, so it cannot see this class of bug.
+/// Each top-level `peek` that widens an already-nonempty cache builds a fresh lexer, and the
+/// pair it resumes from is the whole question. Pairing the COMMITTED state with the retained
+/// run's end offset re-fills token 2 as though token 1 had never been scanned — nothing was
+/// consumed in between, so the committed state has not moved — and consuming then adopts each
+/// entry's own wrongly-resumed state, so the by-value limiter's committed count silently falls
+/// behind the number of tokens actually consumed, round after round. Resuming from the newest
+/// retained token's own stored state instead makes the tally exact, so the limit binds at 2
+/// however the caller widened.
+///
+/// This is the by-value counterpart to `ProbeLimiter`'s `Rc`-shared tally: a shared tally can
+/// never go "missing" the way committed STATE can, so it cannot see this class of bug.
 #[test]
-fn widen_then_drain_repeated_bypasses_the_by_value_limit() {
+fn widen_then_drain_holds_the_by_value_limit() {
   use generic_arraydeque::typenum::{U1, U2, U3};
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
@@ -1710,43 +1718,26 @@ fn widen_then_drain_repeated_bypasses_the_by_value_limit() {
   let mut consumed = 0usize;
   {
     let mut inp = input.as_ref(&mut emitter);
-    // Rounds 0 and 1 each widen 1→2→3 and drain all three — every fill and every drain
-    // succeeds, even though the limit is 2: the committed count never truly reaches 3.
-    for round in 0..2 {
-      assert_eq!(
-        inp.peek::<U1>().map(|w| w.len()),
-        Ok(1),
-        "round {round}: U1 fill"
-      );
-      assert_eq!(
-        inp.peek::<U2>().map(|w| w.len()),
-        Ok(2),
-        "round {round}: U2 fill"
-      );
-      assert_eq!(
-        inp.peek::<U3>().map(|w| w.len()),
-        Ok(3),
-        "round {round}: U3 fill"
-      );
-      for i in 0..3 {
-        match inp.next() {
-          Ok(Some(_)) => consumed += 1,
-          other => panic!("round {round} token {i}: expected a token, got {other:?}"),
-        }
-      }
+    assert_eq!(inp.peek::<U1>().map(|w| w.len()), Ok(1), "U1 fill");
+    assert_eq!(inp.peek::<U2>().map(|w| w.len()), Ok(2), "U2 fill");
+    // The third step lexes token 3 under token 2's post-state, which is where the tally
+    // reaches the limit: the fill trips, latches, and comes back short.
+    assert_eq!(
+      inp.peek::<U3>().map(|w| w.len()),
+      Ok(2),
+      "the third token trips the limit, so the widening fill stops short"
+    );
+    while inp.next().unwrap().is_some() {
+      consumed += 1;
     }
-    // Round 2: the 7th scanned token finally trips — a single-shot fill session (unlike
-    // the separate top-level calls above) threads state correctly within itself, so the
-    // trip is exact once it is reached at all.
+    // There is no second round: the boundary the trip latched holds the drain at the same
+    // point the fill stopped.
     assert_eq!(
       inp.peek::<U1>().map(|w| w.len()),
       Ok(0),
-      "round 2: the trip empties the fill"
+      "the latched boundary empties every later fill"
     );
-    assert!(
-      inp.next().unwrap().is_none(),
-      "the boundary the trip latched stops next() at the same point"
-    );
+    assert!(inp.next().unwrap().is_none());
   }
 
   let limit_diags: usize = emitter
@@ -1757,14 +1748,12 @@ fn widen_then_drain_repeated_bypasses_the_by_value_limit() {
     .count();
 
   assert_eq!(
-    consumed, 6,
-    "pinned bug (issue #89): a limit of 2 should stop consumption at 2 tokens; the \
-     widen-then-drain pattern instead lets 3x the configured budget through before the \
-     limiter trips"
+    consumed, 2,
+    "a limit of 2 stops consumption at 2 tokens, whatever the lookahead pattern"
   );
   assert_eq!(
     limit_diags, 1,
-    "pinned bug (issue #89): exactly one Limit diagnostic fires — three rounds late"
+    "the limit trip is diagnosed exactly once, at the third token"
   );
 }
 
@@ -4139,7 +4128,7 @@ use crate::input::Balance;
 
 #[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
 #[logos(crate = crate::logos, extras = TokenLimiter, skip r"[ \t\r\n]+")]
-enum BalTok {
+pub(super) enum BalTok {
   #[regex(r"[0-9]+", |lex| { lex.extras.increase(); })]
   Num,
   #[token("(", |lex| { lex.extras.increase(); })]
@@ -4174,7 +4163,7 @@ impl core::fmt::Display for BalTok {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum BalKind {
+pub(super) enum BalKind {
   Num,
   LParen,
   RParen,
@@ -4213,7 +4202,7 @@ impl Token<'_> for BalTok {
   }
 }
 
-type BalLexer<'a> = LogosLexer<'a, BalTok>;
+pub(super) type BalLexer<'a> = LogosLexer<'a, BalTok>;
 type BalVerboseCtx<'a> = (Verbose<ByValErr>, DefaultCache<'a, BalLexer<'a>>);
 type BalFatalCtx<'a> = (
   crate::emitter::Fatal<ByValErr>,
@@ -4221,7 +4210,7 @@ type BalFatalCtx<'a> = (
 );
 
 /// The parenthesis pair table: `(` opens, `)` closes, everything else is neutral.
-fn parens(kind: &BalKind) -> Balance<char> {
+pub(super) fn parens(kind: &BalKind) -> Balance<char> {
   match kind {
     BalKind::LParen => Balance::Open('('),
     BalKind::RParen => Balance::Close('('),
@@ -5827,6 +5816,209 @@ fn cache_transparency_known_divergences() {
       }
     }
   }
+}
+
+// ── The resume frontier: one bundled (state, offset) pair ─────────────────────
+//
+// `InputRef` builds a temporary lexer per operation, and the two facts it resumes from —
+// the lexer state, and the byte offset to bump it to — describe one point in time. They are
+// not independent: the state IS a function of the tokens lexed up to that offset. Reading
+// the offset from the newest retained token while reading the state from the committed
+// field pairs a position with a state from before the retained run, so the token after that
+// run is lexed under a stale tally.
+//
+// `BalLexer`'s by-value `TokenLimiter` is the oracle for exactly that, because the tally
+// lives IN the lexer state and therefore rewinds with it. A widening lookahead
+// (`U1` → `U2` → `U3`) is the shape that makes the two facts diverge: every step lexes one
+// more token while the committed state stands still.
+//
+// `ProbeLimiter` cannot see any of this — its counter is shared through an `Rc<Cell>`, so a
+// temporary lexer's increments outlive the state they were made under and a rewound tally
+// is invisible. That is why these use `TokenLimiter`/`BalLexer`; do not "upgrade" them to
+// the shared limiter.
+
+/// The three peek call patterns a lookahead-equivalence oracle compares.
+#[derive(Clone, Copy, Debug)]
+enum Lookahead {
+  /// No lookahead at all.
+  None,
+  /// One three-deep peek.
+  Wide,
+  /// A widening sequence of peeks — the pattern that separates the retained run's end from
+  /// the committed state.
+  Widening,
+}
+
+/// The observables of a full drain under `pattern`: the consumed spans, the final committed
+/// tally, and the diagnostics, in order.
+fn drain_under_lookahead(
+  src: &str,
+  limit: usize,
+  pattern: Lookahead,
+) -> (std::vec::Vec<SimpleSpan>, usize, std::vec::Vec<ByValErr>) {
+  use generic_arraydeque::typenum::{U1, U2, U3};
+
+  let mut emitter = Verbose::<ByValErr>::new();
+  let mut input = Input::<BalLexer<'_>, BalVerboseCtx<'_>, ()>::with_state_and_cache(
+    src,
+    TokenLimiter::with_limitation(limit),
+    DefaultCache::<'_, BalLexer<'_>>::default(),
+  );
+  let (spans, tokens) = {
+    let mut inp = input.as_ref(&mut emitter);
+    match pattern {
+      Lookahead::None => {}
+      Lookahead::Wide => {
+        let _ = inp.peek::<U3>().unwrap();
+      }
+      Lookahead::Widening => {
+        let _ = inp.peek::<U1>().unwrap();
+        let _ = inp.peek::<U2>().unwrap();
+        let _ = inp.peek::<U3>().unwrap();
+      }
+    }
+    let mut spans = std::vec::Vec::new();
+    while let Some(tok) = inp.next().unwrap() {
+      spans.push(*tok.span_ref());
+    }
+    (spans, inp.state().tokens())
+  };
+  let diagnostics = emitter.errors().values().flatten().cloned().collect();
+  (spans, tokens, diagnostics)
+}
+
+#[test]
+fn widening_peek_does_not_resume_under_stale_state() {
+  use generic_arraydeque::typenum::{U1, U2, U3};
+
+  // "1 2 3 4 5 6 7" behind a two-token limit. Every widening step lexes exactly one more
+  // token, so the newest retained token must carry the tally of the whole retained run.
+  let mut emitter = Verbose::<ByValErr>::new();
+  let mut input = Input::<BalLexer<'_>, BalVerboseCtx<'_>, ()>::with_state_and_cache(
+    "1 2 3 4 5 6 7",
+    TokenLimiter::with_limitation(2),
+    DefaultCache::<'_, BalLexer<'_>>::default(),
+  );
+  let consumed = {
+    let mut inp = input.as_ref(&mut emitter);
+
+    assert_eq!(inp.peek::<U1>().unwrap().len(), 1);
+    assert_eq!(
+      inp.cache().back().unwrap().state().tokens(),
+      1,
+      "one token lexed, so the newest retained token carries a tally of one"
+    );
+
+    assert_eq!(inp.peek::<U2>().unwrap().len(), 2);
+    assert_eq!(
+      inp.cache().back().unwrap().state().tokens(),
+      2,
+      "the second token is lexed under the first token's post-state, so the tally is two"
+    );
+
+    // The third token would take the tally past the limit, so the fill trips instead of
+    // caching it: the window comes back short and the boundary latches at the second
+    // token's end.
+    assert_eq!(
+      inp.peek::<U3>().unwrap().len(),
+      2,
+      "the third token trips the limit, so the fill stops with a short window"
+    );
+    assert_eq!(
+      inp.cache().back().unwrap().state().tokens(),
+      2,
+      "a tripped token never enters the cache, so the newest retained tally stays two"
+    );
+
+    let mut consumed = 0usize;
+    while inp.next().unwrap().is_some() {
+      consumed += 1;
+    }
+    consumed
+  };
+
+  assert_eq!(
+    consumed, 2,
+    "a two-token limit bounds the drain at two tokens however deep the caller peeked"
+  );
+  let limits = emitter
+    .errors()
+    .values()
+    .flatten()
+    .filter(|e| **e == ByValErr::Limit)
+    .count();
+  assert_eq!(limits, 1, "the limit trip is diagnosed exactly once");
+}
+
+#[test]
+fn resume_frontier_pairs_state_with_offset() {
+  use generic_arraydeque::typenum::{U1, U2, U3};
+
+  // The pairing law, read directly off the cache: the state a retained token carries is the
+  // state that produced it, so a run of `k` retained tokens ends on a tally of `k`. Nothing
+  // is consumed, so the committed tally stays at zero throughout — which is precisely why
+  // resuming from it would be wrong.
+  let mut emitter = Verbose::<ByValErr>::new();
+  let mut input = Input::<BalLexer<'_>, BalVerboseCtx<'_>, ()>::with_state_and_cache(
+    "1 2 3",
+    TokenLimiter::new(),
+    DefaultCache::<'_, BalLexer<'_>>::default(),
+  );
+  let mut inp = input.as_ref(&mut emitter);
+
+  assert_eq!(inp.peek::<U1>().unwrap().len(), 1);
+  assert_eq!(inp.cache().back().unwrap().state().tokens(), 1);
+
+  assert_eq!(inp.peek::<U2>().unwrap().len(), 2);
+  assert_eq!(
+    inp.cache().back().unwrap().state().tokens(),
+    2,
+    "the second retained token was lexed under the first one's post-state"
+  );
+
+  assert_eq!(inp.peek::<U3>().unwrap().len(), 3);
+  assert_eq!(
+    inp.cache().back().unwrap().state().tokens(),
+    3,
+    "the third retained token was lexed under the second one's post-state"
+  );
+
+  assert_eq!(
+    inp.state().tokens(),
+    0,
+    "a peek consumes nothing, so the committed tally never moves — resuming from it \
+     would rewind the retained run"
+  );
+  assert_eq!(
+    inp.offset(),
+    &5,
+    "the resume offset is the newest retained token's end"
+  );
+}
+
+#[test]
+fn lookahead_equivalence_over_call_patterns() {
+  // The general oracle: for a deterministic lexer whose state accumulates monotonically,
+  // the tokens a full drain yields, the final committed state and the diagnostic sequence
+  // are functions of the token stream — never of how deep, or in how many steps, the caller
+  // looked ahead first.
+  let none = drain_under_lookahead("1 2 3 4 5 6 7", 2, Lookahead::None);
+  let wide = drain_under_lookahead("1 2 3 4 5 6 7", 2, Lookahead::Wide);
+  let widening = drain_under_lookahead("1 2 3 4 5 6 7", 2, Lookahead::Widening);
+
+  assert_eq!(
+    none, wide,
+    "one wide peek before the drain must not change what the drain observes"
+  );
+  assert_eq!(
+    none, widening,
+    "a widening peek sequence before the drain must not change what the drain observes"
+  );
+  assert_eq!(
+    none.0.len(),
+    2,
+    "the two-token limit is what bounds every one of the three programs"
+  );
 }
 
 // ── The CST event channel joins the oracles (`rowan`) ─────────────────────────

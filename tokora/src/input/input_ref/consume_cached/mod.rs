@@ -7,17 +7,19 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Cmpl: Completeness,
 {
-  /// Consumes one token from the peeked tokens and returns the consumed token if any, the cursor is advanced.
+  /// Consumes one token already lexed and waiting at the front of the stream, returning it if
+  /// there is one; the cursor is advanced.
   #[inline(always)]
   pub fn consume_cached_one(&mut self) -> Option<Spanned<L::Token, L::Span>> {
-    let tok = self.cache_mut().pop_front()?;
+    let tok = self.take_front()?;
     let (tok, extras): (Spanned<L::Token, L::Span>, _) = tok.into_components();
     self.commit_token(tok.data(), tok.span_ref());
     *self.state = extras;
     Some(tok)
   }
 
-  /// Consumes tokens from cache until the predicate returns `true`.
+  /// Consumes tokens already lexed and waiting at the front of the stream until the predicate
+  /// returns `true`.
   ///
   /// Advances the cursor to the end of the last consumed token.
   /// Returns the last consumed token.
@@ -28,7 +30,7 @@ where
   {
     let mut last = None;
     // pop from cache if not matching
-    while let Some(tok) = self.cache_mut().pop_front_if(|t| !f(t)) {
+    while let Some(tok) = self.take_front_if(|t| !f(t)) {
       let (tok, state) = tok.into_components();
       self.commit_token(tok.data(), tok.span_ref());
       *self.state = state;
@@ -38,7 +40,8 @@ where
     last
   }
 
-  /// Consumes tokens from cache while the predicate returns `true`.
+  /// Consumes tokens already lexed and waiting at the front of the stream while the predicate
+  /// returns `true`.
   ///
   /// Advances the cursor to the end of the last consumed token.
   /// Returns the last consumed token.
@@ -50,15 +53,16 @@ where
     self.consume_cached_to(|t| !f(t))
   }
 
-  /// Consumes all cached tokens.
+  /// Consumes every token already lexed and waiting at the front of the stream — a parked one
+  /// included.
   ///
-  /// Advances the cursor to the end of the last cached token.
+  /// Advances the cursor to the end of the last of them.
   /// Returns the last consumed token.
   ///
   /// Drains **per token** through [`consume_cached_to`](Self::consume_cached_to) (with a
-  /// never-matching predicate), so every cached token — not only the last — settles through
-  /// the one commit primitive. The observable result is unchanged: the cache empties, the
-  /// cursor lands at the end of the last cached token with its state, and the last token is
+  /// never-matching predicate), so every retained token — not only the last — settles through
+  /// the one commit primitive. The observable result is unchanged: the front empties, the
+  /// cursor lands at the end of the last retained token with its state, and the last token is
   /// returned; but each token in the run commits individually, exactly as it would have had
   /// the caller consumed them one by one.
   #[inline(always)]

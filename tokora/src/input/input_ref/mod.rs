@@ -74,6 +74,9 @@ mod tests;
 mod partial_tests;
 
 #[cfg(all(test, feature = "logos", feature = "std"))]
+mod capacity_tests;
+
+#[cfg(all(test, feature = "logos", feature = "std"))]
 mod session_tests;
 
 /// A reference to an `Input` instance.
@@ -87,6 +90,9 @@ where
   pub(super) state: &'closure mut L::State,
   pub(super) span: &'closure mut L::Span,
   pub(super) cache: &'closure mut Ctx::Cache,
+  /// The parked front token — see [`Input`](super::Input)'s field of the same name for the law it
+  /// exists to keep true. Reached only through the five `front` primitives.
+  pub(super) pending: &'closure mut Option<CachedTokenOf<'inp, L>>,
   /// A **read-only snapshot** of the owning [`Input`]'s finality world cell (a ZST for
   /// [`Complete`], a `bool` for [`Partial`]), copied by value at
   /// [`as_ref`](super::Input::as_ref). The frontier rules read it only under
@@ -149,12 +155,14 @@ where
     self.cache
   }
 
-  /// Pushes a lexed token onto the back of the cache, recording the accepted push on the lineage
-  /// memos ([`Lineage::record_cache_push`](super::Lineage::record_cache_push)) so
-  /// [`save`](Self::save) can snapshot the count and [`restore`](Self::restore) drop exactly the
-  /// entries pushed since. A full cache hands the token back and records nothing.
+  /// FRONT_CENSUS — the peek fill's **back** push: a token appended *behind* the tokens already
+  /// retained, which is the one push in the crate that is genuinely not a put-back (see
+  /// [`hold_front`](Self::hold_front) for those). Records the accepted push on the lineage memos
+  /// ([`Lineage::record_cache_push`](super::Lineage::record_cache_push)) so [`save`](Self::save)
+  /// can snapshot the count and [`restore`](Self::restore) drop exactly the entries pushed since.
+  /// A full cache hands the token back and records nothing.
   #[inline(always)]
-  fn cache_push_back(&mut self, tok: CachedTokenOf<'inp, L>) -> Result<(), CachedTokenOf<'inp, L>> {
+  fn cache_append(&mut self, tok: CachedTokenOf<'inp, L>) -> Result<(), CachedTokenOf<'inp, L>> {
     match self.cache.push_back(tok) {
       Ok(_) => {
         self.session.lineage.record_cache_push();
@@ -162,6 +170,144 @@ where
       }
       Err(tok) => Err(tok),
     }
+  }
+
+  /// `true` only for a cache that can actually refuse a front push (capacity 0): the parked slot
+  /// is written on exactly that refusal, so under a retaining cache
+  /// ([`Cache::RETAINS_FRONT`](crate::cache::Cache::RETAINS_FRONT)) it is statically `None` and
+  /// every probe of it below folds to the plain cache operation.
+  #[inline(always)]
+  fn can_park() -> bool {
+    !<Ctx::Cache as Cache<'inp, L, Lang>>::RETAINS_FRONT
+  }
+
+  /// FRONT_CENSUS — the front of the consumer-visible token stream, read-only: the parked token if
+  /// one is held, else the cache front. The stream order is `parked?` then the cache, so this
+  /// consults the slot first.
+  #[inline(always)]
+  fn front(&self) -> Option<CachedTokenRefOf<'_, 'inp, L>> {
+    if Self::can_park() && self.pending.is_some() {
+      return Self::front_parked(self.pending);
+    }
+    self.cache().front()
+  }
+
+  /// Cold half of [`front`](Self::front): reached only with a token actually parked, kept out of
+  /// line so the primitive stays small enough not to disturb its callers' inlining.
+  #[cold]
+  #[inline(never)]
+  fn front_parked<'s>(
+    pending: &'s Option<CachedTokenOf<'inp, L>>,
+  ) -> Option<CachedTokenRefOf<'s, 'inp, L>> {
+    pending.as_ref().map(|parked| parked.as_ref())
+  }
+
+  /// FRONT_CENSUS — whether a lexed token is already available without touching the lexer.
+  #[inline(always)]
+  fn has_front(&self) -> bool {
+    (Self::can_park() && self.pending.is_some()) || !self.cache().is_empty()
+  }
+
+  /// FRONT_CENSUS — takes the front token out of the stream. Not a settle: the caller commits it
+  /// through [`commit_token`](Self::commit_token), exactly as it did off a cache pop.
+  #[inline(always)]
+  fn take_front(&mut self) -> Option<CachedTokenOf<'inp, L>> {
+    if Self::can_park() && self.pending.is_some() {
+      return self.take_front_parked();
+    }
+    self.cache_mut().pop_front()
+  }
+
+  /// Cold half of [`take_front`](Self::take_front) — see [`front_parked`](Self::front_parked).
+  #[cold]
+  #[inline(never)]
+  fn take_front_parked(&mut self) -> Option<CachedTokenOf<'inp, L>> {
+    self.pending.take()
+  }
+
+  /// FRONT_CENSUS — takes the front token only if `pred` accepts it; a decline leaves it exactly
+  /// where it was (parked slot or cache front), which is what makes a decline "definite absence"
+  /// in every cache capacity.
+  #[inline(always)]
+  fn take_front_if<F>(&mut self, pred: F) -> Option<CachedTokenOf<'inp, L>>
+  where
+    F: FnOnce(CachedTokenRefOf<'_, 'inp, L>) -> bool,
+  {
+    if Self::can_park() && self.pending.is_some() {
+      return self.take_front_if_parked(pred);
+    }
+    self.cache_mut().pop_front_if(pred)
+  }
+
+  /// Cold half of [`take_front_if`](Self::take_front_if) — see
+  /// [`front_parked`](Self::front_parked).
+  #[cold]
+  #[inline(never)]
+  fn take_front_if_parked<F>(&mut self, pred: F) -> Option<CachedTokenOf<'inp, L>>
+  where
+    F: FnOnce(CachedTokenRefOf<'_, 'inp, L>) -> bool,
+  {
+    match self.pending.as_ref() {
+      Some(parked) => pred(parked.as_ref()).then(|| self.pending.take()).flatten(),
+      None => None,
+    }
+  }
+
+  /// FRONT_CENSUS — **the** put-back: puts a token the crate decided not to consume back at the
+  /// front of the stream. The one home of the "an unconsumed token lives at the front" law, for
+  /// the scanner's `to`-shaped stops and every `try_expect*`/`probe_close` decline alike.
+  ///
+  /// # Never a settle
+  ///
+  /// SETTLE_CENSUS lists `unconsume` among the non-settles; this is that put-back generalized, and
+  /// it inherits the same posture: nothing is committed, so no [`Emitter::commit_token`] hook
+  /// fires here.
+  ///
+  /// # Only the push history knows the origin
+  ///
+  /// A token **popped off the cache** goes back into the slot it left, so the cache is exactly what
+  /// it was and its push count must not move. A token that was **lexed** by the caller, or
+  /// **unparked** a moment ago, is a new cache entry if the cache takes it — precisely the entry a
+  /// peek would have made — so its push is recorded and a checkpoint saved before this call drops
+  /// it on restore. Getting that backwards over-drops a genuinely pre-save entry
+  /// ([`restore`](Self::restore) drops the entries pushed since the save, from the back).
+  ///
+  /// A cache that refuses the push keeps the token anyway — parked, uncounted, outside the cache.
+  #[inline(always)]
+  fn hold_front(&mut self, tok: CachedTokenOf<'inp, L>, origin: Origin) {
+    debug_assert!(
+      self.pending.is_none(),
+      "a second token was parked over a live one",
+    );
+    match self.cache_mut().push_front(tok) {
+      Ok(_) => {
+        if !matches!(origin, Origin::Cache) {
+          self.session.lineage.record_cache_push();
+        }
+      }
+      Err(tok) => self.park(tok),
+    }
+  }
+
+  /// Cold half of [`hold_front`](Self::hold_front): the cache refused the put-back, so the token
+  /// parks in the slot outside it. Out of line so the put-back sites stay small — see
+  /// [`front_parked`](Self::front_parked).
+  #[cold]
+  #[inline(never)]
+  fn park(&mut self, tok: CachedTokenOf<'inp, L>) {
+    // A refusing cache under `RETAINS_FRONT` is lying about its contract: fail loudly at the cause
+    // instead of silently losing the token (the parked-slot reads are compiled out under that
+    // declaration, so the slot would never be consulted again).
+    assert!(
+      Self::can_park(),
+      "a `Cache` declaring RETAINS_FRONT refused a front push into an empty cache",
+    );
+    debug_assert!(
+      self.cache().is_empty(),
+      "a `Cache` refused a front push into a non-empty cache — the parked token would sit \
+       behind entries that are newer than it",
+    );
+    *self.pending = Some(tok);
   }
 
   /// Returns a reference to the underlying input source.
@@ -345,6 +491,10 @@ where
   #[inline]
   fn rekey_offset_facts(&mut self) {
     self.cache_mut().clear();
+    // The parked front token goes with the cache: it was lexed under the dead regime too. Cleared
+    // BEFORE the cursor read below, so the watermark re-anchors at the committed position rather
+    // than at the dropped token's start — which would suppress re-emission across the gap.
+    *self.pending = None;
     *self.poison_boundary = None;
     let committed = self.cursor().as_inner().clone();
     *self.emitted_error_end = committed;
@@ -404,7 +554,8 @@ where
   /// Returns whether a terminal scanner stop sits at or past the **lex offset** (the back of the
   /// cache).
   ///
-  /// This is the witness for a **cache-empty** program point — a committed peek/dispatch that maps
+  /// This is the witness for a program point with **nothing at the front** (nothing parked, cache
+  /// empty) — a committed peek/dispatch that maps
   /// its `None` outcome (`try_expect*`'s empty-cache scan path, [`peek`](Self::peek), the fused
   /// dispatch EOT arm): there the lex offset equals the committed cursor, so reading the offset is
   /// exactly reading the cursor. It is *not* attempt-relative where a prefilled cache can advance
@@ -540,6 +691,14 @@ where
   }
 
   /// Returns `true` if reached the end of input.
+  ///
+  /// # Prefer [`is_exhausted`](Self::is_exhausted) in a loop gate
+  ///
+  /// This is a **frontier** question — *has the scanner reached the end of the buffer?* — and it
+  /// answers `true` the moment any lookahead lexes through the end, while the tokens that
+  /// lookahead produced are still sitting unconsumed in front of the caller. A driver loop gated
+  /// on it therefore stops early exactly when someone peeked far enough, which makes the parse a
+  /// function of the caller's lookahead history rather than of the token stream.
   #[inline(always)]
   #[doc(alias = "is_eof")]
   #[doc(alias = "end_of_input")]
@@ -547,32 +706,123 @@ where
     self.offset().ge(&self.input.len())
   }
 
-  /// Creates a lexer positioned at the end of the cache or current cursor.
+  /// Returns `true` if the input is exhausted **for a consumer**: no lexed token is waiting and
+  /// the lexer frontier has reached the end of the buffer.
   ///
-  /// This internal method constructs a fresh Logos lexer with the current state and
-  /// positions it to continue lexing from where the cache ends (or from the cursor
-  /// if the cache is empty).
+  /// This is the predicate a driver loop wants, and [`is_eoi`](Self::is_eoi) is not it — see its
+  /// docs for why a frontier question makes a loop stop as a function of how deep someone peeked.
+  ///
+  /// It is also **independent of the cache implementation**: a capacity that retains a token
+  /// answers `false` because that token is waiting; a capacity that retains nothing answers
+  /// `false` because its lex frontier is still behind that token's start.
+  ///
+  /// # `false` does not promise a token
+  ///
+  /// The frontier this reads is the end of the newest item the input *committed* or retained, and
+  /// a plain [`next`](Self::next) drain never commits past the last token's end — so over a source
+  /// with trailing lexer-skipped bytes this stays `false` after the stream is fully drained, in
+  /// every capacity. The scans that settle at exhaustion ([`skip_while`](Self::skip_while) and the
+  /// `sync` family, and therefore the `padded` combinators) do commit the lexer's end and do reach
+  /// `true`. So a consume's own outcome is the authoritative end-of-stream signal and this
+  /// predicate is the *gate*: it never turns `true` early, and its residual `false` is broken by
+  /// the loop's own handling of an empty consume.
+  ///
+  /// # Partial mode
+  ///
+  /// On a non-final [`Partial`](crate::input::Partial) input this is the end of the *buffer*, not
+  /// the end of the *stream*: `true` here means a consume would surface an
+  /// [`Incomplete`](crate::error::Incomplete), not `None`. A refill driver must treat it as
+  /// "ask for more bytes", never as "the construct ended".
+  ///
+  /// # Fuzz coverage
+  ///
+  /// In the fuzz alphabet as `Op::IsExhausted`; see `OP_SURFACE_CENSUS` in `src/fuzz/ops.rs`.
+  #[inline(always)]
+  pub fn is_exhausted(&self) -> bool {
+    !self.has_front() && self.is_eoi()
+  }
+
+  /// Creates a lexer resuming at the **lookahead frontier** — the end of the newest token the
+  /// consumer has not yet consumed, under the state that produced it — or, with nothing
+  /// retained, at the committed position under the committed state.
+  ///
+  /// # The pair is read from ONE value
+  ///
+  /// A retained token carries its own post-token state (a [`CachedToken`] is exactly that
+  /// pair), and that is the state the byte after it must be lexed under. Reading the offset
+  /// from the retained token and the state from the *committed* field would resume at the right
+  /// byte under a state from before the retained run: a widening lookahead then lexes token
+  /// `k + 1` under the state from before token 1, a by-value [`Lexer::State`] limiter
+  /// under-counts by the whole retained run, and the same grammar over the same input parses
+  /// differently depending on how deep the caller peeked.
   #[inline(always)]
   pub fn lexer(&self) -> L
   where
     L::State: Clone,
   {
-    self.lexer_from(self.state.clone(), self.offset())
+    self.resume().into_lexer()
   }
 
-  /// The resume constructor behind [`lexer`](Self::lexer): a fresh lexer under `state`, bumped to
-  /// `at`.
+  /// The lookahead-frontier resume: [`lexer`](Self::lexer) plus the offset it was bumped to, as
+  /// one value.
   ///
-  /// [`lexer`](Self::lexer) is the case that resumes from the *committed* facts — the current state,
-  /// at the end of the last lexed token — which is only the right pair while every lexed token is
-  /// either consumed or cached. A scan that holds tokens behind an uncommitted frontier (the sync
-  /// loop, which settles its skipped tokens there rather than writing each one back) resumes from
-  /// that frontier instead, and says so by passing it.
+  /// Each arm reads **both** halves of the pair from a single carrier, which is what makes the
+  /// pairing impossible to get wrong; the three-way match is the same one — in the same order —
+  /// that [`offset`](Self::offset) walks, so the two always agree by construction.
+  /// RESUME_CENSUS — one of exactly two `Resume` constructors.
   #[inline(always)]
-  fn lexer_from(&self, state: L::State, at: &L::Offset) -> L {
+  fn resume(&self) -> Resume<L, L::Offset>
+  where
+    L::State: Clone,
+  {
+    match self.cache().back() {
+      // The newest retained token: its post-token state, at its end. One value, both facts.
+      Some(back) => self.resume_from(back.state.clone(), back.token.span.end_ref()),
+      None => {
+        if Self::can_park() && self.pending.is_some() {
+          // Nothing cached, but a token is parked at the front: it is then the newest retained
+          // token, and carries the same pair.
+          return self.resume_parked();
+        }
+        // Nothing retained: the committed pair, which is what `offset()` reports here too.
+        self.resume_from(self.state.clone(), self.span.end_ref())
+      }
+    }
+  }
+
+  /// Cold parked arm of [`resume`](Self::resume) — see [`front_parked`](Self::front_parked).
+  /// RESUME_CENSUS — reads BOTH halves of the pair from the parked token, one value.
+  #[cold]
+  #[inline(never)]
+  fn resume_parked(&self) -> Resume<L, L::Offset>
+  where
+    L::State: Clone,
+  {
+    let parked = self.pending.as_ref().expect("checked by the caller");
+    self.resume_from(parked.state.clone(), parked.token.span.end_ref())
+  }
+
+  /// The scan's resume: an [`AtFrontier`] is already the bundled (span, state) pair a scan
+  /// threads, so this reads both halves from it. RESUME_CENSUS — the second of two.
+  #[inline(always)]
+  fn resume_at_frontier(&self, frontier: &AtFrontier<L::Span, L::State>) -> Resume<L, L::Offset>
+  where
+    L::State: Clone,
+  {
+    self.resume_from(frontier.state.clone(), frontier.span.end_ref())
+  }
+
+  /// Shared body: build a fresh lexer under `state`, bump it to `at`, and keep `at` as the lex
+  /// position. Private to the two constructors above (RESUME_CENSUS), which is what keeps the
+  /// (state, offset) pair from being assembled anywhere else.
+  #[inline(always)]
+  fn resume_from(&self, state: L::State, at: &L::Offset) -> Resume<L, L::Offset> {
     let mut lexer = L::with_state(self.input, state);
     lexer.bump(at);
-    lexer
+    Resume {
+      lexer,
+      at: at.clone(),
+    }
   }
 
   /// Sets the cursor to the specified position, clamped to the input length.
@@ -1586,6 +1836,14 @@ where
   /// compare [`span().end()`](Self::span).
   #[inline(always)]
   pub fn cursor(&self) -> &Cursor<'inp, 'closure, L> {
+    // Stream order is `parked?` then the cache, so a parked token — when there is one — is where
+    // the next consume starts. Reading the cache front first would report a token that is NEWER
+    // than the parked one.
+    if Self::can_park() {
+      if let Some(parked) = self.pending.as_ref() {
+        return Cursor::from_ref(parked.token.span.start_ref());
+      }
+    }
     Cursor::from_ref(
       self
         .cache()
@@ -1600,11 +1858,19 @@ where
   /// This is the end of the last lexed token (cached or otherwise).
   #[inline(always)]
   pub fn offset(&self) -> &L::Offset {
-    self
-      .cache()
-      .back_span()
-      .map(|s| s.end_ref())
-      .unwrap_or_else(|| self.span.end_ref())
+    // The NEWEST retained token — the mirror of `cursor`'s oldest. The cache back is newer than a
+    // parked front, so it wins; the parked token only answers when nothing is cached.
+    match self.cache().back_span() {
+      Some(span) => span.end_ref(),
+      None => {
+        if Self::can_park() {
+          if let Some(parked) = self.pending.as_ref() {
+            return parked.token.span.end_ref();
+          }
+        }
+        self.span.end_ref()
+      }
+    }
   }
 
   /// Rewinds the input to `checkpoint`'s save point.
@@ -1988,6 +2254,12 @@ where
     #[cfg(any(feature = "std", feature = "alloc"))]
     self.live_pop_through(checkpoint.ckp_id);
 
+    // The parked front token is not a cache entry and is not counted, so a restore drops it
+    // outright rather than replaying it. Sound for the same reason the tail-drop below is: the
+    // restored span/state land at or before its start, so the region re-lexes and — by the `Lexer`
+    // determinism contract — reproduces it. Only a cache that retains nothing can park anything,
+    // and re-lexing everything is that cache's baseline behaviour.
+    *self.pending = None;
     self.cache_mut().rewind(&checkpoint);
     // Drop the cache entries pushed after the save. They were lexed on the continuation
     // this restore abandons, and the cache memoizes only their token *values*, not the
@@ -2113,7 +2385,7 @@ where
   where
     Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   {
-    if let Some(cached_token) = self.cache_mut().pop_front() {
+    if let Some(cached_token) = self.take_front() {
       let (spanned_lexed, extras) = cached_token.into_components();
       let (span, lexed) = spanned_lexed.into_components();
       self.commit_token(&lexed, &span);
@@ -2131,12 +2403,11 @@ where
 
     // `next()` commits no progress before a poisoned or exhausted outcome, so it
     // latches at the cursor and yields `None` on both a trip and end of input.
-    let mut lex_at = self.offset().clone();
-    let mut lexer = self.lexer();
-    match self.scan_with(&mut lexer, &mut lex_at, &AtCursor)? {
+    let mut resume = self.resume();
+    match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
         self.commit_token(tok.data(), tok.span_ref());
-        *self.state = lexer.into_state();
+        *self.state = resume.into_lexer().into_state();
         Ok(Some(tok))
       }
       Scan::Tripped | Scan::Eof => Ok(None),
@@ -2175,6 +2446,7 @@ where
   /// single boundary compare on the end-of-input arm. The terminal signal rides inside the
   /// `UnexpectedEot` value, so no [`MaybeTerminal`](crate::error::MaybeTerminal) bound reaches the
   /// caller — the same boundary-witness discipline the resilient collection loops gate on.
+  #[inline]
   pub fn next_or_stop(
     &mut self,
   ) -> Result<Option<Spanned<L::Token, L::Span>>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
@@ -2182,9 +2454,9 @@ where
     Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   {
-    if let Some(cached_token) = self.cache_mut().pop_front() {
-      // A cached token is a REAL token (the cache never holds errors): never terminal — the identical
-      // fast path `next` takes.
+    if let Some(cached_token) = self.take_front() {
+      // A retained token is a REAL token (nothing at the front is ever an error): never terminal —
+      // the identical fast path `next` takes.
       let (spanned_lexed, extras) = cached_token.into_components();
       let (span, lexed) = spanned_lexed.into_components();
       self.commit_token(&lexed, &span);
@@ -2205,12 +2477,11 @@ where
 
     // `next` commits no progress before a poisoned or exhausted outcome, so it latches at the cursor
     // (`AtCursor`); the exhaustion is classified on the cold arms below.
-    let mut lex_at = self.offset().clone();
-    let mut lexer = self.lexer();
-    match self.scan_with(&mut lexer, &mut lex_at, &AtCursor)? {
+    let mut resume = self.resume();
+    match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
         self.commit_token(tok.data(), tok.span_ref());
-        *self.state = lexer.into_state();
+        *self.state = resume.into_lexer().into_state();
         Ok(Some(tok))
       }
       // A fresh trip whose diagnostic a recovering emitter accepted (a fatal emitter's rejection
@@ -2226,7 +2497,7 @@ where
         // end of input (under `Partial` non-final, `scan_with` already surfaced `Incomplete` for every
         // non-boundary exhaustion, so `Eof` implies boundary there — this makes it explicit in
         // `Complete` mode too). One cold compare. Mirrors `try_expect_or_stop`'s E5.
-        if self.reached_boundary(&lex_at) {
+        if self.reached_boundary(resume.at()) {
           Err(
             UnexpectedEot::eot_of(self.span().end())
               .into_terminal()
@@ -2316,8 +2587,8 @@ where
   /// method. The precedence therefore has exactly one home: a driver cannot re-derive it, and a
   /// third driver cannot get it wrong. `frontier` chooses where a trip latches — [`AtCursor`] for
   /// scans that commit no progress first (`next`, `try_expect*`, and the peek fill, which commits
-  /// nothing and latches at the end of the last CACHED token), [`AtFrontier`] for scans that consume
-  /// tokens as they go.
+  /// nothing and latches at the end of the newest RETAINED token), [`AtFrontier`] for scans that
+  /// consume tokens as they go.
   ///
   /// The complete path is untouched: [`Verdict::Withheld`] is built only under `Cmpl::PARTIAL`, a
   /// `false` constant for [`Complete`](crate::input::Complete), so the holdback — and the whole
@@ -2401,54 +2672,81 @@ where
   #[inline]
   fn scan_with<Fr>(
     &mut self,
-    lexer: &mut L,
-    lex_at: &mut L::Offset,
+    parts: ResumeParts<'_, L, L::Offset>,
     frontier: &Fr,
   ) -> Result<Scan<'inp, L>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     Fr: Frontier<'inp, L>,
     Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   {
-    while let Some(item) = self.lex_within_boundary(lexer, lex_at) {
-      match self.classify(lexer, frontier, item) {
-        Verdict::Token(tok) => return Ok(Scan::Token(tok)),
-        // A terminal trip: the poison boundary is already latched, so even the fatal exit below
-        // keeps it. Emit the diagnostic and stop — this arm runs whether or not the tripping token
-        // sits on the frontier, which is the whole of the law.
-        Verdict::Trip(err) => {
-          return match self.emit_lexer_error_deduped(err) {
-            Ok(()) => Ok(Scan::Tripped),
-            Err(e) => Err(self.settle_fatal(lexer, e)),
-          };
-        }
-        Verdict::Error(err) => match self.emit_lexer_error_deduped(err) {
-          Ok(()) => {
-            // Non-limit error: skip over it and keep scanning for a token. The frontier does NOT
-            // move — an error is not a token. `lex_at` already carries the scan past it, and the
-            // token this loop goes on to find carries the post-error lexer state, so the position
-            // is threaded by the same two things that thread it everywhere else. Settling the
-            // error behind the frontier would put its span into `self.span` — which every other
-            // path in this crate reserves for the last consumed TOKEN — and, worse, would make
-            // that span depend on WHO crossed the error: a scan crosses it and would move; a
-            // *peek* that lexed the same region into the cache never can. See `AtFrontier`.
+    // The lex position runs the loop as a BY-VALUE local: the per-token `Lexer::lex` call is
+    // opaque and reached through a pointer into the `Resume` allocation, so a position living in
+    // that same allocation must be spilled and kept coherent around every call. A separate local
+    // is provably unaliased by the call and stays in a register; the slot is written back once, at
+    // the block's single exit below.
+    let ResumeParts { lexer, at: at_slot } = parts;
+    let mut lex_at = at_slot.clone();
+    let result = 'scan: {
+      while let Some(item) = self.lex_within_boundary(lexer, &mut lex_at) {
+        match self.classify(lexer, frontier, item) {
+          Verdict::Token(tok) => break 'scan Ok(Scan::Token(tok)),
+          // A terminal trip: the poison boundary is already latched, so even the fatal exit below
+          // keeps it. Emit the diagnostic and stop — this arm runs whether or not the tripping
+          // token sits on the frontier, which is the whole of the law.
+          Verdict::Trip(err) => {
+            break 'scan match self.emit_lexer_error_deduped(err) {
+              Ok(()) => Ok(Scan::Tripped),
+              Err(e) => Err(self.settle_fatal(lexer, e)),
+            };
           }
-          Err(e) => return Err(self.settle_fatal(lexer, e)),
-        },
-        // The holdback, reached only by a non-terminal item (see `classify`).
-        Verdict::Withheld(at) => return Err(Cmpl::surface_incomplete(at)),
+          Verdict::Error(err) => match self.emit_lexer_error_deduped(err) {
+            Ok(()) => {
+              // Non-limit error: skip over it and keep scanning for a token. The frontier does NOT
+              // move — an error is not a token. `lex_at` already carries the scan past it, and the
+              // token this loop goes on to find carries the post-error lexer state, so the
+              // position is threaded by the same two things that thread it everywhere else.
+              // Settling the error behind the frontier would put its span into `self.span` — which
+              // every other path in this crate reserves for the last consumed TOKEN — and, worse,
+              // would make that span depend on WHO crossed the error: a scan crosses it and would
+              // move; a *peek* that lexed the same region into the cache never can. See
+              // `AtFrontier`.
+            }
+            Err(e) => break 'scan Err(self.settle_fatal(lexer, e)),
+          },
+          // The holdback, reached only by a non-terminal item (see `classify`).
+          Verdict::Withheld(at) => break 'scan Err(Cmpl::surface_incomplete(at)),
+        }
       }
-    }
 
-    // Non-final EOF (rule 3): the lexer is exhausted, but in partial non-final mode more input
-    // may still arrive, so this is not genuine end of input — surface Incomplete. A poison-boundary
-    // trip is exempt: it is a terminal limit outcome (re-lexing the same prefix re-trips), so it
-    // stands as `Eof` — the same precedence `classify` applies to an item, applied to exhaustion.
-    // Const-gated, so `Complete` never reaches this and yields `Eof` as before.
-    if Cmpl::PARTIAL && !self.is_final() && !self.reached_boundary(lex_at) {
-      return Err(Cmpl::surface_incomplete(lex_at.clone()));
-    }
+      // Non-final EOF (rule 3): the lexer is exhausted, but in partial non-final mode more input
+      // may still arrive, so this is not genuine end of input — surface Incomplete. A
+      // poison-boundary trip is exempt: it is a terminal limit outcome (re-lexing the same prefix
+      // re-trips), so it stands as `Eof` — the same precedence `classify` applies to an item,
+      // applied to exhaustion. Const-gated, so `Complete` never reaches this and yields `Eof` as
+      // before.
+      if Cmpl::PARTIAL && !self.is_final() && !self.reached_boundary(&lex_at) {
+        // Report where the LEXER stopped, not where the last item it handed back ended. A driver
+        // reads this offset to decide how much of its buffer was consumed, and the lexer's
+        // position is that fact: the lex position only advances on an item, so every byte the
+        // lexer SKIPS before exhaustion (trailing whitespace, a comment tail) would otherwise go
+        // unreported — `"foo "` claiming 3 while the lexer stands at 4, `"   "` claiming 0 while
+        // it stands at 3. `SyncTo::on_eof` already treats `lexer.span()` as the lexer's end for
+        // exactly this reason (it commits there).
+        //
+        // Floored by the lex position and clamped to the buffer, because `Lexer::span()` after
+        // exhaustion is the one point the trait leaves to the implementation: the floor keeps a
+        // lexer that reports a stale span from *retracting* the frontier below the items it
+        // actually yielded, and the clamp keeps one that over-reports from handing a refill driver
+        // an offset past its own buffer (the same clamp `set_span` applies).
+        let frontier = lexer.span().end().max(lex_at.clone()).min(self.input.len());
+        break 'scan Err(Cmpl::surface_incomplete(frontier));
+      }
 
-    Ok(Scan::Eof)
+      Ok(Scan::Eof)
+    };
+    // The one write-back: `Resume.at` observes the loop's final position on every exit path.
+    *at_slot = lex_at;
+    result
   }
 }
 
@@ -2577,4 +2875,84 @@ impl<'inp, L: Lexer<'inp>> Frontier<'inp, L> for AtFrontier<L::Span, L::State> {
   fn boundary(&self, _cursor: &L::Offset) -> L::Offset {
     self.span.end_ref().clone()
   }
+}
+
+/// Where a token being put back came from — the *only* thing [`InputRef::hold_front`] needs to
+/// know, and only for the cache-push history.
+#[derive(Clone, Copy)]
+enum Origin {
+  /// Popped off the cache front: putting it back is a no-op on the push history.
+  Cache,
+  /// Unparked from the front slot: never counted as a cache push, so a cache that now accepts it
+  /// gains a genuinely new entry.
+  Parked,
+  /// Lexed by the caller once the front had run out: same as `Parked` for accounting.
+  Lexer,
+}
+
+/// The one value a fresh lexer resumes from: the lexer, already bumped to its resume offset,
+/// and that offset.
+///
+/// The pair is a *type* rather than two locals because the two facts are not independent — the
+/// state **is** a function of the tokens lexed up to that offset — and a driver holding a lexer
+/// built from one state beside an offset read from another silently resumes at the right byte
+/// under the wrong state. Both fields are written once, by one of the two constructors on
+/// [`InputRef`] ([`resume`](InputRef::resume), [`resume_at_frontier`](InputRef::resume_at_frontier)),
+/// and each of those reads **one** bundled source: the newest [`CachedToken`], the committed
+/// `(state, span)` pair, or an [`AtFrontier`]. There is no way to assemble a `Resume` from two
+/// independently chosen facts, and [`scan_with`](InputRef::scan_with) accepts nothing but the
+/// [`ResumeParts`] view of one, so a driver cannot re-derive the pairing and get it wrong.
+/// [`lex_within_boundary`](InputRef::lex_within_boundary) — reached only from the two loops that
+/// hold such a view — takes the halves as separate `&mut` for the codegen reason `ResumeParts`
+/// documents; RESUME_CENSUS locks the constructor count and both caller lists.
+struct Resume<L, Off> {
+  lexer: L,
+  at: Off,
+}
+
+impl<L, Off> Resume<L, Off> {
+  /// The lexer, for the read-only questions a driver asks of it (its state, its span).
+  #[inline(always)]
+  const fn lexer(&self) -> &L {
+    &self.lexer
+  }
+
+  /// The position the next token will be lexed at.
+  #[inline(always)]
+  const fn at(&self) -> &Off {
+    &self.at
+  }
+
+  /// The two halves the single lexing site advances together. RESUME_CENSUS — the one
+  /// mutation surface, and therefore the one place the pairing could drift apart. The parts are
+  /// handed out as [`ResumeParts`] — two separate `&mut`, constructible only here — so the lexing
+  /// entry points still accept nothing a driver could assemble from independently chosen facts.
+  #[inline(always)]
+  const fn parts_mut(&mut self) -> ResumeParts<'_, L, Off> {
+    ResumeParts {
+      lexer: &mut self.lexer,
+      at: &mut self.at,
+    }
+  }
+
+  /// Takes the lexer out, for the accept arms that adopt its state.
+  #[inline(always)]
+  fn into_lexer(self) -> L {
+    self.lexer
+  }
+}
+
+/// The mutable view of a [`Resume`] the lexing entry points operate on: the same bundled pair, as
+/// **two separate `&mut`**.
+///
+/// Two independent borrows rather than one `&mut Resume` for a load-bearing codegen reason: the
+/// per-token `Lexer::lex` call is opaque and reached through `lexer`, and when both halves live
+/// behind one pointer the compiler must assume that call may read or write `at`, forcing `at` into
+/// memory across every loop iteration. As two `&mut` params the aliasing is ruled out and the lex
+/// position stays in a register. Constructible only by [`Resume::parts_mut`] (fields private to
+/// this module tree), so a driver still cannot hand the lexing entry points an independently
+/// assembled (lexer, offset) pair.
+struct ResumeParts<'r, L, Off> {
+  lexer: &'r mut L,
+  at: &'r mut Off,
 }

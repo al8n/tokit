@@ -11,6 +11,9 @@ macro_rules! blackhole {
     {
       type Options = ();
 
+      // Retains nothing: every push refuses, so the parked-front machinery stays live.
+      const RETAINS_FRONT: bool = false;
+
       #[inline(always)]
       fn new() -> Self {
         Default::default()

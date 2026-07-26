@@ -100,6 +100,17 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// The options for creating a new cache.
   type Options;
 
+  /// Whether a [`push_front`](Cache::push_front) into an **empty** cache always succeeds —
+  /// i.e. the cache can retain at least one token.
+  ///
+  /// When `true`, the input layer's parked-front machinery (the retained home for a put-back a
+  /// cache refuses) is statically unreachable and compiles out of every hot path. A cache that
+  /// declares `true` and then refuses a front push into an empty cache is a contract violation
+  /// and panics at the refusal site rather than losing the token.
+  ///
+  /// Conservative default: `false` (the parked slot stays live; only performance is affected).
+  const RETAINS_FRONT: bool = false;
+
   /// Creates a new, empty cache.
   fn new() -> Self
   where

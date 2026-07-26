@@ -14,8 +14,8 @@
 //! implemented skip-and-stop, and each settled the stopping token its own way. Nothing forced the
 //! two to agree, and they repeatedly did not.
 //!
-//! So there is now exactly one implementation. The loop takes its next token from the cache while
-//! the cache has one and from the lexer once it does not ([`Fetched`], carried as the crate's
+//! So there is now exactly one implementation. The loop takes its next token from the front of the
+//! stream while one is there and from the lexer once there is not ([`Fetched`], carried as the crate's
 //! [`CachedToken`] — a lexed token plus the state that produced it — whichever way it arrived).
 //! That fetch is the *whole* of the difference: the predicate is evaluated at one site, the
 //! skip-and-report is one method, and the stop settles through one [`ScanMode`] hook that cannot
@@ -53,16 +53,17 @@
 //! so it lives here once and the contracts documented on the public methods are structural instead
 //! of re-implemented per method.
 //!
-//! # An unconsumed token lives at the cache front
+//! # An unconsumed token lives at the front of the stream
 //!
 //! That is the invariant a `to`-shaped stop settles on, and it is not new: a token whose predicate
-//! declined it is exactly what [`try_expect`](InputRef::try_expect) puts back into the cache, and
-//! the cache front is the one place [`cursor`](InputRef::cursor) reads. The old scanners broke it —
+//! declined it is exactly what [`try_expect`](InputRef::try_expect) puts back to the front, and
+//! the front is the one place [`cursor`](InputRef::cursor) reads. The old scanners broke it —
 //! they threw a *lexed* stopping token away and let the caller re-lex it, while keeping a *cached*
 //! one — so the same call left a different resume cursor (and returned a different zero-skip
 //! [`Hole`](super::Hole)) depending on how deep the caller had peeked. Settling through
 //! [`InputRef::unconsume`] restores the invariant on *both* origins, so the cursor after a stop is
-//! the stopping token's start no matter who lexed it.
+//! the stopping token's start no matter who lexed it — and, under a cache that retains nothing, in
+//! the parked front slot `Input` keeps outside the cache for exactly this promise.
 
 use super::*;
 
@@ -74,7 +75,7 @@ where
   L: Lexer<'inp>,
 {
   /// The scan stopped on a token. A `through` policy consumes it and carries it here; a
-  /// `to`-shaped policy leaves it unconsumed at the cache front and carries `None` (its caller
+  /// `to`-shaped policy leaves it unconsumed at the front of the stream and carries `None` (its caller
   /// peeks it straight back out, or — for `skip_while` — pays it no further attention).
   Found(Option<Spanned<L::Token, L::Span>>),
   /// End of input or a poison trip — nothing stopped the scan. The position is already settled per
@@ -83,22 +84,12 @@ where
   Exhausted,
 }
 
-/// Where the loop got the token it is deciding on.
-///
-/// The origin may change **how** a token is obtained and **how** its consumption is committed —
-/// never what a caller can observe afterwards. It survives the fetch for exactly one reason: the
-/// cache's push history. Putting a *popped* token back is a no-op on that history, while a *lexed*
-/// one becomes a new cache entry; see [`InputRef::unconsume`], the single place that knows.
-#[derive(Clone, Copy)]
-enum Origin {
-  /// Popped off the cache front — it was lexed and counted by an earlier peek.
-  Cache,
-  /// Lexed by this loop, once the cache had run out.
-  Lexer,
-}
-
 /// One token under decision: the token, its span, and the lexer state that produced it — the
 /// crate's [`CachedToken`], which is precisely that triple, whichever origin it arrived from.
+///
+/// The [`Origin`] rides along for exactly one reason: the cache's push history. Putting a *popped*
+/// token back is a no-op on that history, while a *lexed* or *unparked* one becomes a new cache
+/// entry; see [`InputRef::hold_front`], the single place that knows.
 ///
 /// Normalizing both origins into this one carrier is what makes the rest of the loop origin-blind:
 /// the predicate, the skip-and-report, and the stop settle all take a `Fetched` and cannot tell a
@@ -143,7 +134,7 @@ impl<Span, State, Offset> ThroughEntry<Span, State, Offset> {
 /// [module docs](self)).
 ///
 /// [`SyncTo`] and [`SkipWhile`] stop before the token (committing at the frontier, leaving it
-/// unconsumed at the cache front) and, at end of input, commit at the lexer's end; [`SyncThrough`]
+/// unconsumed at the front of the stream) and, at end of input, commit at the lexer's end; [`SyncThrough`]
 /// consumes the token and, at end of input, rewinds the full pre-call state; [`SyncBalanced`] takes
 /// one settle from each. All four are zero-sized; the pred/exp closures and the pre-call snapshot
 /// are threaded through [`skip_until`](InputRef::skip_until) rather than held here.
@@ -172,7 +163,7 @@ where
 
   /// Settle the input on the token the scan stopped on, and produce the carried token. A
   /// `to`-shaped mode commits at `frontier` (the end of the last skipped token, i.e. before the
-  /// stop), leaves the token unconsumed at the cache front, and returns `None`; a `through` mode
+  /// stop), leaves the token unconsumed at the front of the stream, and returns `None`; a `through` mode
   /// consumes it (commits at its span, adopting the state that produced it) and returns
   /// `Some(tok)`.
   fn on_stop(
@@ -221,11 +212,11 @@ where
     frontier: AtFrontier<L::Span, L::State>,
     stopper: Fetched<'inp, L>,
   ) -> Option<Spanned<L::Token, L::Span>> {
-    // Leave the token unconsumed — which in this crate means AT THE CACHE FRONT, the home of every
-    // lexed-but-not-consumed token (`try_expect`'s decline puts one back there too) and the one
-    // place `cursor()` reads. The caller peeks it straight back out. Doing this for a token the
-    // loop LEXED, and not only for one it popped, is what makes the resume cursor after a stop a
-    // fact about the stream instead of about the caller's lookahead depth.
+    // Leave the token unconsumed — which in this crate means AT THE FRONT OF THE STREAM, the home
+    // of every lexed-but-not-consumed token (`try_expect`'s decline puts one back there too) and
+    // the one place `cursor()` reads. The caller peeks it straight back out. Doing this for a token
+    // the loop LEXED, and not only for one it popped, is what makes the resume cursor after a stop
+    // a fact about the stream instead of about the caller's lookahead depth.
     ir.unconsume(stopper);
     // Commit before the stop: the end of the last skipped token, with the state that produced it.
     ir.commit_at(frontier);
@@ -334,7 +325,7 @@ where
   ) -> Option<Spanned<L::Token, L::Span>> {
     // Stop before the sync point, exactly as `sync_to` does — which is also what places the
     // zero-skip hole: `sync_balanced` anchors it at `cursor()`, and the cursor is the match's start
-    // because the match is left at the cache front here, cached or lexed.
+    // because the match is left at the front of the stream here, cached, parked or lexed.
     <SyncTo as ScanMode<'inp, L, Ctx, Lang, Cmpl>>::on_stop(ir, frontier, stopper)
   }
 
@@ -363,9 +354,9 @@ where
 /// else.
 ///
 /// The settle is `SyncTo`'s, verbatim, and that is the point: the token that stopped a trivia skip
-/// is left where every unconsumed token in this crate lives — the cache front — so `cursor()` after
-/// a `skip_while` (and therefore after a `padded`) is a fact about the token stream, not about how
-/// deep the caller had peeked.
+/// is left where every unconsumed token in this crate lives — the front of the stream — so
+/// `cursor()` after a `skip_while` (and therefore after a `padded`) is a fact about the token
+/// stream, not about how deep the caller had peeked.
 pub(super) struct SkipWhile;
 
 impl<'inp, L, Ctx, Lang, Cmpl> ScanMode<'inp, L, Ctx, Lang, Cmpl> for SkipWhile
@@ -415,8 +406,8 @@ where
   /// **The** scanner: skip tokens — diagnosing each as unexpected if the mode says so — until
   /// `pred` stops the scan or the input is exhausted, then settle per the [`ScanMode`] `M`.
   ///
-  /// The loop takes each token from the cache while the cache has one and from the lexer once it
-  /// does not — and that is the only thing the two origins change. `pred` is evaluated at a single
+  /// The loop takes each token from the front of the stream while one is there and from the lexer
+  /// once there is not — and that is the only thing the two origins change. `pred` is evaluated at a single
   /// site, exactly once per token, so a stateful `FnMut` cannot tell a drained cache from a fresh
   /// lex; the skip-and-report is [`skip_and_report`](Self::skip_and_report), one method for both;
   /// and the stopping token settles through [`ScanMode::on_stop`], which is handed the same carrier
@@ -492,62 +483,71 @@ where
     // The lexer, built the moment the cache runs out — under the frontier's state and at its end,
     // which is exactly where the drained cache left the lex position. A call answered entirely out
     // of the cache never builds one.
-    let mut lexing: Option<(L, L::Offset)> = None;
+    let mut lexing: Option<Resume<L, L::Offset>> = None;
 
     loop {
       // ── The one place the two origins differ: where the next token comes from ──
-      let fetched = match self.cache.pop_front() {
-        // A cached token arrives with the state that lexed it, already counted by the peek that
-        // cached it.
-        Some(tok) => Fetched {
+      // A retained token arrives with the state that lexed it. One popped off the CACHE was
+      // already counted by the peek that cached it; one taken out of the parked slot never was,
+      // so putting it back is a genuinely new entry for a cache that now has room.
+      let fetched = if Self::can_park() && self.pending.is_some() {
+        Fetched {
+          tok: self.take_front_parked().expect("probed just above"),
+          origin: Origin::Parked,
+        }
+      } else if let Some(tok) = self.take_front() {
+        // Reached with the parked slot provably empty, so this is the cache pop.
+        Fetched {
           tok,
           origin: Origin::Cache,
-        },
-        None => {
-          if lexing.is_none() {
-            let at = frontier.span.end_ref().clone();
-            // A sticky limit trip latches a poison boundary: once the lex position has reached the
-            // durable frontier there is no token left to scan. Commit what the loop already
-            // skipped — real progress — and yield the exhausted outcome without rebuilding a lexer.
-            if self.reached_boundary(&at) {
-              self.commit_at(frontier);
-              M::on_commit(self, snapshot);
-              return Ok(Scanned::Exhausted);
-            }
-            lexing = Some((self.lexer_from(frontier.state.clone(), &at), at));
+        }
+      } else {
+        if lexing.is_none() {
+          let at = frontier.span.end_ref().clone();
+          // A sticky limit trip latches a poison boundary: once the lex position has reached the
+          // durable frontier there is no token left to scan. Commit what the loop already
+          // skipped — real progress — and yield the exhausted outcome without rebuilding a lexer.
+          if self.reached_boundary(&at) {
+            self.commit_at(frontier);
+            M::on_commit(self, snapshot);
+            return Ok(Scanned::Exhausted);
           }
-          let (lexer, lex_at) = lexing.as_mut().expect("the lexer is built just above");
-          // `scan_with` centralizes the poison latch, the dedup watermark, the partial-input
-          // frontier rules, and the fatal-emit discipline, handing back only the events this loop
-          // must decide.
-          match self.scan_with(lexer, lex_at, &frontier) {
-            Ok(Scan::Token(tok)) => Fetched {
-              tok: CachedToken::new(tok, lexer.state().clone()),
-              origin: Origin::Lexer,
-            },
-            Ok(Scan::Tripped) => {
-              // Commit the skipped prefix at the durable frontier — the end of the last skipped
-              // token — so a later scan yields the poisoned outcome there instead of stranding
-              // those tokens at the cursor. That commit is real progress, so any diagnostics made
-              // over it persist.
-              self.commit_at(frontier);
-              M::on_commit(self, snapshot);
-              return Ok(Scanned::Exhausted);
-            }
-            Ok(Scan::Eof) => {
-              let (lexer, _) = lexing.take().expect("the lexer is built just above");
-              M::on_eof(self, lexer, snapshot);
-              return Ok(Scanned::Exhausted);
-            }
-            Err(e) => {
-              // A fatal rejection of a crossed lexer error's diagnostic: `settle_fatal` already
-              // committed the position inside `scan_with`, so this exit KEEPS the scan's progress
-              // and the entry snapshot will never be restored — settle it as kept. The frontier
-              // is deliberately not committed here, exactly as before: the rejected item is an
-              // error, not a skipped token.
-              M::on_commit(self, snapshot);
-              return Err(e);
-            }
+          lexing = Some(self.resume_at_frontier(&frontier));
+        }
+        let resume = lexing.as_mut().expect("the lexer is built just above");
+        // `scan_with` centralizes the poison latch, the dedup watermark, the partial-input
+        // frontier rules, and the fatal-emit discipline, handing back only the events this loop
+        // must decide.
+        match self.scan_with(resume.parts_mut(), &frontier) {
+          Ok(Scan::Token(tok)) => Fetched {
+            tok: CachedToken::new(tok, resume.lexer().state().clone()),
+            origin: Origin::Lexer,
+          },
+          Ok(Scan::Tripped) => {
+            // Commit the skipped prefix at the durable frontier — the end of the last skipped
+            // token — so a later scan yields the poisoned outcome there instead of stranding
+            // those tokens at the cursor. That commit is real progress, so any diagnostics made
+            // over it persist.
+            self.commit_at(frontier);
+            M::on_commit(self, snapshot);
+            return Ok(Scanned::Exhausted);
+          }
+          Ok(Scan::Eof) => {
+            let lexer = lexing
+              .take()
+              .expect("the lexer is built just above")
+              .into_lexer();
+            M::on_eof(self, lexer, snapshot);
+            return Ok(Scanned::Exhausted);
+          }
+          Err(e) => {
+            // A fatal rejection of a crossed lexer error's diagnostic: `settle_fatal` already
+            // committed the position inside `scan_with`, so this exit KEEPS the scan's progress
+            // and the entry snapshot will never be restored — settle it as kept. The frontier
+            // is deliberately not committed here, exactly as before: the rejected item is an
+            // error, not a skipped token.
+            M::on_commit(self, snapshot);
+            return Err(e);
           }
         }
       };
@@ -616,33 +616,16 @@ where
   }
 
   /// Puts a token the scan decided **not** to consume back where an unconsumed token lives: the
-  /// front of the cache. This is how every `to`-shaped stop settles — the recovery scans and the
-  /// trivia skip alike — and it is the same call whichever origin the token came from, so the cache
-  /// after a stop holds that token at its front either way and [`cursor`](Self::cursor) reads the
-  /// same resume position either way.
+  /// front of the stream. This is how every `to`-shaped stop settles — the recovery scans and the
+  /// trivia skip alike — and it is the same call whichever origin the token came from, so the
+  /// front after a stop holds that token either way and [`cursor`](Self::cursor) reads the same
+  /// resume position either way.
   ///
-  /// # Only the push history knows the difference
-  ///
-  /// A token the loop **popped** off the cache goes straight back into the slot it left: the cache
-  /// is then exactly what it was, so its push count must not move. A token the loop **lexed** is a
-  /// NEW cache entry — precisely the one a peek would have made — so its push is recorded, and a
-  /// checkpoint saved before this call drops it on restore, exactly as it drops a peek's.
-  ///
-  /// Getting that backwards is not cosmetic: [`restore_unchecked`](Self::restore_unchecked) drops
-  /// the last `cache_pushes - saved` entries from the **back**, so counting a round-trip as a push
-  /// would over-drop a genuinely pre-save entry — evicting lookahead the caller had already paid to
-  /// lex, on a restore that should have kept it.
-  ///
-  /// The loop lexes only once the cache has run out, and pops at most one token before deciding on
-  /// it, so the push back always has the room it needs. A cache that accepts no push at all (a
-  /// zero-capacity `BlackHole`) simply drops the token, which re-lexes on demand: the only
-  /// behaviour such a cache can have — and, holding no tokens, the only origin it can ever produce
-  /// is the lexer, so it has nothing to diverge from.
+  /// The put-back itself, and the push-history accounting the [`Origin`] exists for, live in
+  /// [`hold_front`](Self::hold_front); this keeps the scanner-facing name.
   #[inline(always)]
   fn unconsume(&mut self, fetched: Fetched<'inp, L>) {
     let Fetched { tok, origin } = fetched;
-    if self.cache.push_front(tok).is_ok() && matches!(origin, Origin::Lexer) {
-      self.session.lineage.record_cache_push();
-    }
+    self.hold_front(tok, origin);
   }
 }

@@ -183,6 +183,12 @@ impl<'a> Lexer<'a> for SyntacticLexer<'a> {
       self.start += 1;
     }
     if self.start >= self.src.len() {
+      // Exhausted after skipping a trailing run of spaces: land the reported span at the
+      // position actually reached rather than leaving `start` past a stale `end`. The input
+      // layer reads `span()` here as the lexer's own end — a scan's exhaustion commit, and
+      // the frontier a non-final EOF reports — so it must stay a well-ordered span, and one
+      // that names the position the skipped bytes carried the lexer to.
+      self.end = self.start;
       return None;
     }
     let mut e = self.start + 1;

@@ -3,6 +3,43 @@
 All notable changes to this crate are documented here. The project follows semantic
 versioning; before 1.0, a minor bump (0.x → 0.(x+1)) signals a breaking change.
 
+## Unreleased
+
+### Added
+
+- **`InputRef::is_exhausted()`** — the consumer-exhaustion predicate: no lexed token is waiting and
+  the lexer frontier has reached the end of the buffer. This is the correct gate for a driver loop,
+  where `is_eoi()` is not: `is_eoi` answers `true` the moment any lookahead lexes through the end,
+  while the tokens that lookahead produced are still unconsumed. `is_exhausted()` is independent of
+  the cache implementation.
+- **`Cache::RETAINS_FRONT`** — a new trait constant declaring that a front push into an **empty**
+  cache always succeeds, i.e. the cache can retain at least one token. It defaults to `false`, so
+  the addition is semver-compatible and an existing implementation keeps working unchanged. A cache
+  that declares `true` lets the input layer prove its parked-front slot statically unreachable, so
+  every probe of it folds away at monomorphization; the shipped caches declare it accordingly
+  (`Option` `true`, `GenericArrayDeque<_, N>` `N != 0`, the black holes `false`). A cache that
+  declares `true` and then refuses a front push into an empty cache is violating the contract, and
+  now panics at the refusal rather than losing the token.
+
+### Fixed
+
+- **A token left unconsumed by a `to`-shaped scan stop or by a `try_expect*` / `probe_close`
+  decline is now retained even when the configured `Cache` refuses it**, so the cursor, offset,
+  `is_eoi`, the `sync_balanced` hole anchor and the lexer-state tally after such a stop are the
+  same under every cache capacity — including a zero-capacity `()`, where the token used to be
+  dropped and re-lexed by the next call. `ClosePayload::CacheFront` is renamed
+  `ClosePayload::AtFront` (crate-internal).
+- **`InputRef::lexer()` now resumes under the state that produced the newest retained token**
+  rather than under the committed state, so a widening lookahead no longer lexes the token after
+  a retained run as if that run had never been scanned. A by-value `Lexer::State` limiter is no
+  longer bypassed by the lookahead pattern, and the tokens a drain yields, the final state and
+  the diagnostics it emits no longer depend on how deep — or in how many steps — the caller
+  peeked first.
+- **A non-final EOF now reports the lexer's own end offset** instead of the end of the last item
+  it yielded, so bytes the lexer skipped before exhaustion (trailing whitespace, a comment tail)
+  are no longer omitted from the `Incomplete` frontier a refill driver reads. The reported offset
+  is floored by what was already lexed and clamped to the buffer.
+
 ## 0.7.3 (2026-07-24)
 
 ### Added

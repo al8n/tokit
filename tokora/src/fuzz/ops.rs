@@ -88,6 +88,8 @@ define_ops! {
   SyncBalanced => "sync_balanced",
   /// `InputRef::is_eoi` — end-of-input query.
   IsEoi => "is_eoi",
+  /// `InputRef::is_exhausted` — consumer-exhaustion query (the driver-loop gate).
+  IsExhausted => "is_exhausted",
   /// `Input::seal` / `InputRef::is_final` — the partial-input finality world fact: monotone, and driver-only (a handle can READ it; nothing but the owning input can write it).
   Seal => "seal",
   /// `InputRef::attempt(|_| Some(..))` — a closure attempt whose progress is kept.
@@ -140,7 +142,7 @@ define_ops! {
 /// in the **same** commit: add the `define_ops!` line, wire the op into a generator so the coverage
 /// test exercises it, add its executor arm, and drop a `# Fuzz coverage` note in the op-adding
 /// module's contract docs pointing here. `grep OP_SURFACE_CENSUS` finds every anchor.
-pub const EXPECTED_OP_COUNT: usize = 34;
+pub const EXPECTED_OP_COUNT: usize = 35;
 
 // Compile-time census tripwire: the alphabet cannot change size without this failing to compile at
 // a named location, forcing the checklist above.
