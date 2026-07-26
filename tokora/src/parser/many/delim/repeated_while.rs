@@ -4,7 +4,7 @@ use crate::{
   container::Container as ContainerT,
   delimiter::Delimiter,
   emitter::{FullContainerEmitter, UnclosedEmitter},
-  error::{Unclosed, syntax::FullContainer},
+  error::Unclosed,
   span::Span as _,
 };
 
@@ -85,6 +85,7 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     }
 
     let mut nums = 0;
+    let mut full = false;
     let mut committed = inp.span().end();
     // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the opener's
     // own scan is not charged to the element loop. One offset clone per collection.
@@ -174,15 +175,8 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
             }
             Action::Continue => {
               // TODO(al8n): tracing dropped element
-              if let Err(_e) = container.push(self.parser.f.parse_input(inp)?) {
-                let span = inp.span_since(&anchor);
-                inp.emitter().emit_full_container(FullContainer::of(
-                  span,
-                  nums,
-                  container.max_capacity(),
-                ))?;
-              }
-              nums += 1;
+              let item = self.parser.f.parse_input(inp)?;
+              push_element(&mut nums, &mut full, container, item, inp, &anchor)?;
             }
           }
         }

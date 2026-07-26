@@ -20,17 +20,52 @@ mod require_trailing;
 mod unbounded;
 
 /// A handler for separator events during parsing.
+///
+/// # Delivery law
+///
+/// [`on_separator`](Self::on_separator) is called **exactly once for every separator token a
+/// driver consumes, in source order** — the leading one, every one between elements, every
+/// duplicate in a run, and the trailing one. Before this release the happy-path and trailing
+/// separators were never delivered and only the anomalous ones were, i.e. the exact complement
+/// of this law, so a container that recorded separators recorded the wrong set.
 pub trait SeparatorHandler<'inp, L> {
-  /// Called when a separator is encountered.
+  /// Whether this handler observes separators at all.
+  ///
+  /// A container that ignores them sets this to `false` and the drivers skip both the call and
+  /// the clone that feeds it — the guard is a monomorphized constant, so delivery costs a
+  /// non-observing container nothing. Defaults to `true` so an existing implementor keeps
+  /// receiving every separator.
+  const OBSERVES_SEPARATORS: bool = true;
+
+  /// Called once for each separator token the driver consumes, in source order.
   fn on_separator(&mut self, sep: Spanned<L::Token, L::Span>)
   where
     L: Lexer<'inp>;
+
+  /// Delivers `sep` iff this handler observes separators.
+  ///
+  /// Drivers call this, never [`on_separator`](Self::on_separator) directly: the clone the call
+  /// needs lives inside the constant-guarded branch, so it folds away entirely for a
+  /// non-observing container.
+  #[inline(always)]
+  fn observe_separator(&mut self, sep: &Spanned<L::Token, L::Span>)
+  where
+    L: Lexer<'inp>,
+  {
+    if Self::OBSERVES_SEPARATORS {
+      self.on_separator(sep.clone());
+    }
+  }
 }
 
 impl<'inp, L, T> SeparatorHandler<'inp, L> for &mut T
 where
   T: ?Sized + SeparatorHandler<'inp, L>,
 {
+  // Load-bearing: without the forward every mut-ref container would fall back to the `true`
+  // default and pay the clone on a path whose backing type does not observe separators.
+  const OBSERVES_SEPARATORS: bool = T::OBSERVES_SEPARATORS;
+
   #[inline(always)]
   fn on_separator(&mut self, sep: Spanned<L::Token, L::Span>)
   where
@@ -43,6 +78,8 @@ where
 macro_rules! blackhole_separator_handler {
   ($ty:ty) => {
     impl<'inp, L> SeparatorHandler<'inp, L> for $ty {
+      const OBSERVES_SEPARATORS: bool = false;
+
       #[inline(always)]
       fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
       where
@@ -53,6 +90,8 @@ macro_rules! blackhole_separator_handler {
   };
   (@generic $ty:ty) => {
     impl<'inp, L, T> SeparatorHandler<'inp, L> for $ty {
+      const OBSERVES_SEPARATORS: bool = false;
+
       #[inline(always)]
       fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
       where
@@ -71,6 +110,8 @@ impl<'inp, L, T, N> SeparatorHandler<'inp, L> for GenericArrayDeque<T, N>
 where
   N: ArrayLength,
 {
+  const OBSERVES_SEPARATORS: bool = false;
+
   #[inline(always)]
   fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
   where
@@ -88,6 +129,8 @@ const _: () = {
   where
     LenT: heapless_0_9::LenType,
   {
+    const OBSERVES_SEPARATORS: bool = false;
+
     #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
@@ -97,6 +140,8 @@ const _: () = {
   }
 
   impl<'inp, L, T, const N: usize> SeparatorHandler<'inp, L> for Deque<T, N> {
+    const OBSERVES_SEPARATORS: bool = false;
+
     #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
@@ -112,6 +157,8 @@ const _: () = {
   use std::{collections::vec_deque::VecDeque, vec::Vec};
 
   impl<'inp, L, T> SeparatorHandler<'inp, L> for Vec<T> {
+    const OBSERVES_SEPARATORS: bool = false;
+
     #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
@@ -121,6 +168,8 @@ const _: () = {
   }
 
   impl<'inp, L, T> SeparatorHandler<'inp, L> for VecDeque<T> {
+    const OBSERVES_SEPARATORS: bool = false;
+
     #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
@@ -135,6 +184,8 @@ const _: () = {
   where
     N: smallvec_1::Array<Item = T>,
   {
+    const OBSERVES_SEPARATORS: bool = false;
+
     #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
@@ -153,6 +204,8 @@ const _: () = {
   where
     N: Array<Item = T>,
   {
+    const OBSERVES_SEPARATORS: bool = false;
+
     #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
@@ -162,6 +215,8 @@ const _: () = {
   }
 
   impl<'inp, L, T> SeparatorHandler<'inp, L> for SliceVec<'_, T> {
+    const OBSERVES_SEPARATORS: bool = false;
+
     #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
@@ -177,6 +232,8 @@ const _: () = {
     where
       A: Array<Item = T>,
     {
+      const OBSERVES_SEPARATORS: bool = false;
+
       #[inline(always)]
       fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
       where
@@ -517,20 +574,6 @@ pub(super) trait ContinueStateHandler<
   where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>;
-
-  #[inline(always)]
-  fn handle_too_many_element(
-    &self,
-    _: usize,
-    _: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
-    _: &Cursor<'inp, 'closure, L>,
-  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
-  where
-    L: Lexer<'inp>,
-    Ctx: ParseContext<'inp, L, Lang>,
-  {
-    Ok(())
-  }
 }
 
 pub(super) trait SeparatorStateHandler<

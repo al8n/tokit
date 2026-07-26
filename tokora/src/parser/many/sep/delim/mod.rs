@@ -105,9 +105,9 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     let mut state: State<L::Token, L::Span> = State::Start;
     let parser = &mut self.parser;
     let mut num_elems = 0;
+    let mut full = false;
 
-    let elems_start = inp.cursor().clone();
-    let mut cursor = elems_start.clone();
+    let mut cursor = inp.cursor().clone();
     let mut committed = inp.span().end();
     // The terminal-latch baseline for the element-absence exits below, taken AFTER the opener so the
     // opener's own scan is not charged to the element loop. One offset clone per collection.
@@ -133,10 +133,20 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
         },
         Some((is_closed, tok)) => {
           if is_closed {
-            // The closer is committed mid-scan: no close miss, and (as before) no
-            // end-state pass on this path.
+            // A closer committed mid-scan closes the construct — and a closed construct is
+            // still a construct whose count bounds and separator policy must be judged. This
+            // arm used to return straight out, so `handle_end` ran only when the loop broke,
+            // i.e. only on MALFORMED input: on every well-formed, properly closed list the
+            // entire end-state policy was dead code, while the while-sibling
+            // (`sep_while/delim/mod.rs`) ran it on the identical path.
+            //
+            // No close-miss primary belongs here — the closer is present. No terminal-latch
+            // gate belongs here either: the closer was READ AND COMMITTED, so this exit rests
+            // on a real token rather than on an absence conclusion, and `latched_during_attempt`
+            // guards only absence exits.
+            parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
             container.on_close_delimiter(tok);
-            return Ok(inp.span_since(&elems_start));
+            return Ok(inp.span_since(&anchor));
           } else {
             state = parser.handle_separator(state, inp, container, separator_state_handler, tok)?;
             cursor = inp.cursor().clone();
@@ -170,6 +180,7 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
             peek_span,
             elem,
             &mut num_elems,
+            &mut full,
             container,
             continue_state_handler,
           )?;
@@ -257,8 +268,11 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     }
 
     // SECONDARY — the end-state diagnostics (counts, separator policy), recorded after
-    // the primary under a recovering emitter.
-    let elems_span = parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+    // the primary under a recovering emitter. Its returned span is a DIAGNOSTIC anchor, not
+    // the construct span, and is deliberately discarded: a delimited driver returns the whole
+    // construct, opener through closer, measured after the closer commits — the same
+    // convention `delim/repeated{,_while}.rs` and `sep_while/delim/mod.rs` use.
+    parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
 
     // Commit the carried closer by value (no re-scan) at the same program point as the
     // old deferred `try_expect` — after the end-state pass.
@@ -266,6 +280,6 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       container.on_close_delimiter(inp.commit_probed(ct));
     }
 
-    Ok(elems_span)
+    Ok(inp.span_since(&anchor))
   }
 }

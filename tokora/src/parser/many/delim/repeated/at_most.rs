@@ -49,7 +49,7 @@ where
         if nums > max {
           inp
             .emitter()
-            .emit_too_many(TooMany::of(span.clone(), nums, max))?;
+            .emit_too_many(TooMany::of(span.clone(), max + 1, max))?;
         }
         Ok(())
       },

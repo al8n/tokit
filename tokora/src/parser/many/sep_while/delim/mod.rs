@@ -101,8 +101,8 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     let mut state: State<L::Token, L::Span> = State::Start;
     let parser = &mut self.parser;
     let mut num_elems = 0;
+    let mut full = false;
 
-    let elems_start = inp.cursor().clone();
     let mut committed = inp.span().end();
     // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the opener's
     // own scan is not charged to the element loop. One offset clone per collection.
@@ -187,7 +187,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
               // recorded after the primary under a recovering emitter.
               parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
 
-              return Ok(inp.span_since(&elems_start));
+              return Ok(inp.span_since(&anchor));
             }
             Some(front) => front
               .as_maybe_ref()
@@ -271,7 +271,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
               if let Some(ct) = close_carrier {
                 container.on_close_delimiter(inp.commit_probed(ct));
               }
-              return Ok(inp.span_since(&elems_start));
+              return Ok(inp.span_since(&anchor));
             }
             Action::Continue => {
               // if the peeked token belongs to an element, check the current state
@@ -281,6 +281,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                 &anchor,
                 &front_span,
                 &mut num_elems,
+                &mut full,
                 container,
                 continue_state_handler,
               )?;
@@ -357,7 +358,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                 if let Some(ct) = close_carrier {
                   container.on_close_delimiter(inp.commit_probed(ct));
                 }
-                return Ok(inp.span_since(&elems_start));
+                return Ok(inp.span_since(&anchor));
               }
               committed = new_committed;
             }

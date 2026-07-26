@@ -522,6 +522,26 @@ fn rfold_stops_at_non_num() {
   assert_eq!(Parser::new().apply(p).parse_str("1 2 +").unwrap(), 3);
 }
 
+/// Family pin for the buffered-fold class: `RFold` buffers its elements and drains them on a
+/// single tail, so the drain must run on the *decline* exit too and must run in reverse. The
+/// two pre-existing pins each cover one half — `rfold_reverses_accumulated` is order-sensitive
+/// but consumes its whole input, `rfold_stops_at_non_num` has the decline exit but a
+/// commutative accumulator. This one is both at once.
+#[test]
+fn rfold_short_run_reverse_folds_on_the_decline_exit() {
+  fn p<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<i64, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    try_num
+      .rfold(|| 0i64, |acc, x| acc * 10 + x)
+      .parse_input(inp)
+  }
+  // Declines at "+" with [1, 2] buffered; right-to-left that is 0*10+2=2, 2*10+1=21.
+  assert_eq!(Parser::new().apply(p).parse_str("1 2 +").unwrap(), 21);
+}
+
 #[test]
 fn rfold_zero_width_element_does_not_buffer_unboundedly() {
   fn p<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<usize, ()>
