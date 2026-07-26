@@ -105,28 +105,6 @@ where
   {
     Ok(())
   }
-
-  #[inline(always)]
-  fn handle_too_many_element(
-    &self,
-    num_elems: usize,
-    inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
-    anchor: &Cursor<'inp, 'closure, L>,
-  ) -> Result<(), <<Ctx>::Emitter as Emitter<'inp, L, Lang>>::Error>
-  where
-    L: Lexer<'inp>,
-    Ctx: ParseContext<'inp, L, Lang>,
-  {
-    let max = self.get();
-    if num_elems >= max {
-      let span = inp.span_since(anchor);
-      inp
-        .emitter()
-        .emit_too_many(TooMany::of(span, num_elems, max))?;
-    }
-
-    Ok(())
-  }
 }
 
 impl<'inp, 'closure, Sep, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
@@ -174,9 +152,16 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let max = self.get();
-    if nums > max {
+    // `nums` is the count BEFORE this element, so it takes every value 0, 1, 2, … exactly
+    // once: `== max` fires exactly once per construct, on the element that first pushes the
+    // count past the limit, and never again. `> max` fired on every element beyond `max + 1`,
+    // and `on_stop` delegating here fired once more on top. The payload is the first count
+    // that exceeds the limit — `max + 1`, never `max`, which named a count that does not.
+    if nums == max {
       let span = inp.span_since(anchor);
-      inp.emitter().emit_too_many(TooMany::of(span, nums, max))?;
+      inp
+        .emitter()
+        .emit_too_many(TooMany::of(span, max + 1, max))?;
     }
 
     Ok(())
@@ -185,7 +170,7 @@ where
   #[inline(always)]
   fn on_stop(
     &self,
-    nums: usize,
+    _: usize,
     inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
     anchor: &Cursor<'inp, 'closure, L>,
   ) -> Result<L::Span, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
@@ -193,9 +178,10 @@ where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
   {
-    <Self as RepeatedHandler<'inp, 'closure, O, L, Ctx, Lang, Cmpl>>::on_element(
-      self, nums, inp, anchor,
-    )
-    .map(|_| inp.span_since(anchor))
+    // No max check here: every `RepeatedHandler` consumer calls `on_element` for EVERY element
+    // (pinned by `MID_LOOP_PAIRING_CENSUS`), and a construct exceeds `max` iff some element saw
+    // `nums == max`, so the mid-loop hook has already reported it exactly once. Delegating here
+    // was the duplicate.
+    Ok(inp.span_since(anchor))
   }
 }

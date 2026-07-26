@@ -5,7 +5,7 @@ use crate::{
   container::Container as ContainerT,
   delimiter::Delimiter,
   emitter::{FullContainerEmitter, UnclosedEmitter},
-  error::{Unclosed, syntax::FullContainer},
+  error::Unclosed,
   span::Span as _,
   try_parse_input::{Accept, Decline},
 };
@@ -88,6 +88,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     };
 
     let mut nums = 0;
+    let mut full = false;
     let mut elem_cur = inp.cursor().clone();
     let mut committed = inp.span().end();
     // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the
@@ -109,18 +110,8 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
           let span = inp.span_since(&elem_cur);
           inp.emitter().emit_error(Spanned::new(span, err))?;
         }
-        Ok(Accept(nxt)) => {
-          // TODO(al8n): tracing dropped element
-          if let Err(_e) = container.push(nxt) {
-            let span = inp.span_since(&anchor);
-            inp.emitter().emit_full_container(FullContainer::of(
-              span,
-              nums,
-              container.max_capacity(),
-            ))?;
-          }
-          nums += 1;
-        }
+        // TODO(al8n): tracing dropped element
+        Ok(Accept(nxt)) => push_element(&mut nums, &mut full, container, nxt, inp, &anchor)?,
         // no more elemnts.
         Ok(Decline) => {
           // Classify the close position with the four-way probe so a terminal scanner

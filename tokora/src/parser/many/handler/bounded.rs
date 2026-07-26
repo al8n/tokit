@@ -112,25 +112,6 @@ where
   {
     Ok(())
   }
-
-  #[inline(always)]
-  fn handle_too_many_element(
-    &self,
-    num_elems: usize,
-    inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
-    anchor: &Cursor<'inp, 'closure, L>,
-  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
-  where
-    L: Lexer<'inp>,
-    Ctx: ParseContext<'inp, L, Lang>,
-  {
-    <Maximum as ContinueStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang, Cmpl>>::handle_too_many_element(
-      self.secondary(),
-      num_elems,
-      inp,
-      anchor,
-    )
-  }
 }
 
 impl<'inp, 'closure, Sep, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
@@ -178,9 +159,14 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let max = self.secondary().get();
-    if nums > max {
+    // `nums` is the count BEFORE this element, so `== max` fires exactly once per construct —
+    // see `Maximum::on_element` for the full argument. The payload is the first count that
+    // exceeds the limit.
+    if nums == max {
       let span = inp.span_since(anchor);
-      inp.emitter().emit_too_many(TooMany::of(span, nums, max))?;
+      inp
+        .emitter()
+        .emit_too_many(TooMany::of(span, max + 1, max))?;
     }
     Ok(())
   }
@@ -203,9 +189,8 @@ where
       inp.emitter().emit_too_few(TooFew::of(span, nums, min))?;
     }
 
-    <Self as RepeatedHandler<'inp, 'closure, O, L, Ctx, Lang, Cmpl>>::on_element(
-      self, nums, inp, anchor,
-    )
-    .map(|_| inp.span_since(anchor))
+    // The minimum is end-detected and stays here; the maximum is not re-checked, because the
+    // mid-loop `on_element` hook has already reported it exactly once.
+    Ok(inp.span_since(anchor))
   }
 }

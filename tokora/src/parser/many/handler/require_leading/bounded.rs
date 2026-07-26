@@ -123,25 +123,6 @@ where
       .emitter()
       .emit_missing_leading_separator(Sep::name(), MissingTokenOf::<'_, L, Lang>::of(off))
   }
-
-  #[inline(always)]
-  fn handle_too_many_element(
-    &self,
-    num_elems: usize,
-    inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
-    anchor: &Cursor<'inp, 'closure, L>,
-  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
-  where
-    L: Lexer<'inp>,
-    Ctx: ParseContext<'inp, L, Lang>,
-  {
-    <Maximum as ContinueStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang, Cmpl>>::handle_too_many_element(
-      self.parser.secondary(),
-      num_elems,
-      inp,
-      anchor,
-    )
-  }
 }
 
 impl<'inp, 'closure, Sep, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>

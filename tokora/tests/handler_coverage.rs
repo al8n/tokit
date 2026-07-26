@@ -1826,13 +1826,20 @@ fn alrt_bounded_leading_only_recovery() {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 36. Missing separator tests (consecutive elements without commas)
-//     These trigger ContinueStateHandler::handle_too_many_element
+//     These reach the `State::Element` arm of `handle_continue`, which reports the missing
+//     separator and keeps parsing. The count bound is NOT checked here: it is checked once,
+//     by the end-state pass, on the true parsed count. The mid-loop `handle_too_many_element`
+//     hook these rows once exercised was deleted — it duplicated the end check with an
+//     understated payload, and its only callers were these malformed-input arms, so it was
+//     never a resource guard. Its coverage is retired, not lost: the end check owns the
+//     maximum, and `end_state_parity.rs` case A pins one `TooMany` per construct across all
+//     eight drivers.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // -- allow_trailing + at_most --
 #[test]
 fn at_at_most_missing_sep_recovery() {
-  // "1 2 3" with at_most(2): parse 1 (Element), see 2 (no comma) → handle_too_many_element
+  // "1 2 3" with at_most(2): parse 1 (Element), see 2 (no comma) → missing-separator report
   let r = Parser::with_context(recovering_ctx())
     .apply(parse_at_at_most_2)
     .parse_str("1 2 3");

@@ -40,6 +40,52 @@ versioning; before 1.0, a minor bump (0.x → 0.(x+1)) signals a breaking change
   are no longer omitted from the `Incomplete` frontier a refill driver reads. The reported offset
   is floored by what was already lexed and clamped to the buffer.
 
+### Fixed (behaviour-breaking)
+
+Six deliberate behaviour changes, all in the repetition drivers' end-state accounting. No
+API is removed or renamed.
+
+1. **A properly closed separated + delimited list now reports its count bounds and separator
+   policy.** `…separated_by_*().delimited::<D>()` left its element loop through the mid-scan
+   closer without running the end-state pass, so on every well-formed, properly closed list the
+   whole of `at_least` / `at_most` / `bounded` and the leading/trailing separator policy was
+   dead code — the sibling `separated_*_while` driver ran it on the identical path. Under a
+   recovering emitter such a list now records the diagnostic it always should have; under a
+   fail-fast emitter a bounds- or policy-violating closed list is now an `Err` where it used to
+   be a silent `Ok`.
+2. **`TooMany` is emitted once per construct, with a count that exceeds the limit it names.**
+   `nums()` is now `limit() + 1` at every emission site. It used to be either the running count
+   (so the same four-element history yielded a different payload from each builder) or, from
+   the mid-loop hook, the limit itself — a "found 2 … exceeds … 2" that contradicted itself.
+   The duplicate emission (mid-loop hook plus a delegating end check) is gone.
+3. **`FullContainer` is emitted once per construct**, on the whole-construct span in every
+   driver, with a `nums()` that includes the refused element. A container that refuses one push
+   refuses every later one, so the old per-dropped-element re-emission produced a count that
+   climbed past the capacity it named.
+4. **Count bounds now judge the elements the driver parsed, not the ones the container
+   stored.** In the separated drivers a bounded container used to turn a satisfied `at_least`
+   into a spurious `TooFew`, and — worse — to swallow a violated `at_most` entirely by clamping
+   the count the check reads. Only bounded-capacity containers are affected; with `Vec`,
+   `VecDeque`, `SmallVec` and `TinyVec` the stored and parsed counts are always equal.
+5. **`SeparatorHandler::on_separator` now receives every separator in source order.** It used
+   to receive the exact complement of its documented contract — only the leading separator and
+   the duplicates in a run, never the happy-path or trailing ones. A container that ignores
+   separators can opt out with the new defaulted `SeparatorHandler::OBSERVES_SEPARATORS`
+   associated const, which suppresses both the call and the clone that feeds it; every
+   container in this crate does. Adding the const makes `SeparatorHandler` no longer
+   object-safe — `dyn SeparatorHandler` no longer compiles. Nothing in this crate used it.
+6. **The delimited separated drivers return the whole construct's span**, opener through
+   closer, on every success exit. Some exits previously returned a span measured from the first
+   element instead, so the returned span excluded the opener and depended on which exit the
+   parse took.
+
+### Fixed
+
+- **`InputRef::foldr_within` no longer drops a run shorter than its window.** The exhaustion
+  arm returned the untouched initializer *after* consuming the run into the fold's buffer, so
+  every run of length `1 ..= W::CAPACITY - 1` was silently discarded on the `Ok` path. Both
+  exits now converge on the single reverse drain, as the sibling `foldrn` already did.
+
 ## 0.7.3 (2026-07-24)
 
 ### Added

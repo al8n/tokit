@@ -1055,12 +1055,17 @@ fn test_repeated_while_delimited_at_most_then_at_least_too_many() {
 
 // == full container under Verbose: continues, records, and terminates =========
 
-// With a capacity-1 container fed more elements than it can hold, the `repeated_while`
-// loop calls `emit_full_container` on every overflowing push. Under `Verbose` that call
-// records the error and returns `Ok`, so the loop no longer short-circuits on the first
-// overflow. It must still terminate: the loop's other exits (the condition returning
-// `Stop`, or the element parser failing) are reached on any bounded input. The trailing
-// `+` sentinel makes the condition return `Stop`, so the parse halts and returns.
+// With a capacity-1 container fed more elements than it can hold, the `repeated_while` loop
+// reports the refusal ONCE — a container that refuses one push refuses every later one, so
+// re-emitting per dropped element produced a count that climbed past the capacity it named.
+// Under `Verbose` that call records the error and returns `Ok`, so the loop no longer
+// short-circuits on the first overflow. It must still terminate: the loop's other exits (the
+// condition returning `Stop`, or the element parser failing) are reached on any bounded input.
+// The trailing `+` sentinel makes the condition return `Stop`, so the parse halts and returns.
+//
+// This pins the once-per-construct latch on the repeated wing; the payload it carries
+// (`FullContainer(2, 1)`) is pinned across all eight drivers by `tests/end_state_parity.rs`
+// case D, which this file's payload-free `RWError` cannot observe.
 #[test]
 fn test_repeated_while_full_container_verbose_records_and_terminates() {
   fn parse<'inp>(
@@ -1079,10 +1084,12 @@ fn test_repeated_while_full_container_verbose_records_and_terminates() {
       .parse_input(inp)?;
     // Only the first element fit into the capacity-1 container.
     assert_eq!(out, Some(1));
-    // The overflowing elements were recorded rather than aborting the parse.
-    assert!(
-      !inp.emitter().errors().is_empty(),
-      "full-container overflow recorded under Verbose"
+    // The overflow was recorded rather than aborting the parse — and recorded exactly once,
+    // however many later pushes the full container went on to refuse.
+    let recorded: usize = inp.emitter().errors().values().map(|v| v.len()).sum();
+    assert_eq!(
+      recorded, 1,
+      "a full container reports its refusal once per construct, not once per dropped element"
     );
     Ok(out)
   }

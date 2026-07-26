@@ -2006,19 +2006,28 @@ where
 
 #[test]
 fn delim_at_least_empty() {
-  // Empty brackets with at_least(2) — exercises the at_least check in delimited context
+  // Empty brackets with at_least(2): the closer commits mid-scan with no elements at all, so
+  // this reaches the end-state pass through its `State::Start` arm. Under `Fatal` the `TooFew`
+  // is the error.
   let r = Parser::with_context(full_ctx())
     .apply(parse_delim_at_least_2)
     .parse_str("[]");
-  let _ = r;
+  assert!(
+    r.is_err(),
+    "a closed but empty list still violates `at_least(2)`"
+  );
 }
 
 #[test]
 fn delim_at_least_single() {
+  // Same, through the `State::Element` arm: one element under `at_least(2)`.
   let r = Parser::with_context(full_ctx())
     .apply(parse_delim_at_least_2)
     .parse_str("[1]");
-  let _ = r;
+  assert!(
+    r.is_err(),
+    "a closed one-element list still violates `at_least(2)`"
+  );
 }
 
 #[test]
