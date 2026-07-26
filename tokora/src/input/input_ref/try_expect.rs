@@ -58,11 +58,12 @@ where
   /// [`commit_probed`](InputRef::commit_probed) settles it by value with no re-lex — the
   /// cache-independent path a blackhole `()` needs (a pushed-back closer would be dropped).
   Scanned(CachedTokenOf<'inp, L>),
-  /// Left at the **cache front** (classified by peek, *not* popped), so `cursor` stays put and
-  /// the closer survives an intervening error for recovery. [`commit_probed`](InputRef::commit_probed)
-  /// pops it and settles it at the commit point — the same cache-pop-commit `try_expect` uses,
-  /// which never re-lexes.
-  CacheFront,
+  /// Left at the **front of the stream** — the cache front, or the parked slot when the cache
+  /// refuses to hold it — classified by peek, *not* popped, so `cursor` stays put and the closer
+  /// survives an intervening error for recovery. [`commit_probed`](InputRef::commit_probed) takes
+  /// it and settles it at the commit point — the same front-take-commit `try_expect` uses, which
+  /// never re-lexes.
+  AtFront,
 }
 
 macro_rules! try_expect_punct {
@@ -246,6 +247,7 @@ where
   /// `Ok(None)` also covers a terminal stop (limit trip / latched poison
   /// boundary); when a decline commits the caller to a different parse, use
   /// [`try_expect_or_stop`](Self::try_expect_or_stop).
+  #[inline]
   pub fn try_expect<F>(
     &mut self,
     mut pred: F,
@@ -254,12 +256,12 @@ where
     F: FnMut(Spanned<&L::Token, &L::Span>) -> bool,
   {
     trace_event!(self, "try_expect");
-    if self.cache.is_empty() {
+    if !self.has_front() {
       return self.try_expect_on_input(pred);
     }
 
     // pop from cache if matching
-    Ok(self.cache.pop_front_if(|t| pred(t.token)).map(|tok| {
+    Ok(self.take_front_if(|t| pred(t.token)).map(|tok| {
       let (lexed, state) = tok.into_components();
       let (span, tok) = lexed.into_components();
       self.commit_token(&tok, &span);
@@ -283,6 +285,7 @@ where
   /// itself). This is the primitive an attempt/decline caller should build on
   /// when a decline commits it to a different parse — see the `try_*` delimited
   /// shapes.
+  #[inline]
   pub fn try_expect_or_stop<F>(
     &mut self,
     mut pred: F,
@@ -292,10 +295,10 @@ where
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   {
     trace_event!(self, "try_expect_or_stop");
-    if !self.cache.is_empty() {
+    if self.has_front() {
       // A cached token is a REAL token (the cache never holds errors): a decline
       // against it is definite absence — identical to `try_expect`'s cache arm.
-      return Ok(self.cache.pop_front_if(|t| pred(t.token)).map(|tok| {
+      return Ok(self.take_front_if(|t| pred(t.token)).map(|tok| {
         let (lexed, state) = tok.into_components();
         let (span, tok) = lexed.into_components();
         self.commit_token(&tok, &span);
@@ -313,18 +316,17 @@ where
           .into(),
       );
     }
-    let mut lex_at = self.offset().clone();
-    let mut lexer = self.lexer();
-    match self.scan_with(&mut lexer, &mut lex_at, &AtCursor)? {
+    let mut resume = self.resume();
+    match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
         if pred(tok.as_ref()) {
           self.commit_token(tok.data(), tok.span_ref());
-          *self.state = lexer.into_state();
+          *self.state = resume.into_lexer().into_state();
           Ok(Some(tok))
         } else {
           let (span, tok) = tok.into_components();
-          let ct = CachedToken::new(Spanned::new(span, tok), lexer.state().clone());
-          let _ = self.cache_push_back(ct);
+          let ct = CachedToken::new(Spanned::new(span, tok), resume.lexer().state().clone());
+          self.hold_front(ct, Origin::Lexer);
           Ok(None) // E1: definite absence — the token stays at the cache front.
         }
       }
@@ -342,7 +344,7 @@ where
         // Partial non-final, `scan_with` already surfaced Incomplete for every
         // non-boundary exhaustion, so Eof implies boundary there — this check
         // makes that explicit in Complete mode too.) One cold compare.
-        if self.reached_boundary(&lex_at) {
+        if self.reached_boundary(resume.at()) {
           Err(
             UnexpectedEot::eot_of(self.span().end())
               .into_terminal()
@@ -376,6 +378,7 @@ where
   /// [`try_expect_or_stop`](Self::try_expect_or_stop) draws — so it is never misread
   /// as EOF and never grows a spurious `Unclosed`. A fatal emitter's rejection of the
   /// trip diagnostic still propagates from the scan itself as `Err`.
+  #[inline]
   pub(crate) fn probe_close<F>(
     &mut self,
     mut pred: F,
@@ -384,16 +387,16 @@ where
     F: FnMut(Spanned<&L::Token, &L::Span>) -> bool,
   {
     trace_event!(self, "probe_close");
-    if !self.cache.is_empty() {
+    if self.has_front() {
       // A cached token is a REAL token (the cache never holds errors). Classify the front by
       // PEEK — do NOT pop it here: the probe stays cursor-neutral so a deferred commit
       // (`separated`/`separated_while`, which run `handle_end` before committing) spans the
       // elements correctly and keeps the closer in the cache if that pass errors. It is popped
       // and settled later by `commit_probed`. `Spanned<&_, &_>` is `Copy`, so `pred` and the
       // owned clone read the same peeked reference.
-      let peeked = self.cache.front().expect("cache is non-empty").token;
+      let peeked = self.front().expect("a front token is present").token;
       return Ok(if pred(peeked) {
-        CloseStatus::Close(ClosePayload::CacheFront)
+        CloseStatus::Close(ClosePayload::AtFront)
       } else {
         CloseStatus::WrongToken(peeked.cloned())
       });
@@ -403,9 +406,8 @@ where
     if self.reached_boundary(self.offset()) {
       return Ok(CloseStatus::Tripped);
     }
-    let mut lex_at = self.offset().clone();
-    let mut lexer = self.lexer();
-    match self.scan_with(&mut lexer, &mut lex_at, &AtCursor)? {
+    let mut resume = self.resume();
+    match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
         if pred(tok.as_ref()) {
           // Close (scan origin): carry the scanned closer OUT by value (token + post-token
@@ -415,7 +417,7 @@ where
           let (span, token) = tok.into_components();
           Ok(CloseStatus::Close(ClosePayload::Scanned(CachedToken::new(
             Spanned::new(span, token),
-            lexer.into_state(),
+            resume.into_lexer().into_state(),
           ))))
         } else {
           // WrongToken: unchanged — best-effort push-back, owned clone for the
@@ -424,8 +426,8 @@ where
           // the out-of-scope note in the spec.)
           let wrong = Spanned::new(tok.span_ref().clone(), tok.data().clone());
           let (span, token) = tok.into_components();
-          let ct = CachedToken::new(Spanned::new(span, token), lexer.state().clone());
-          let _ = self.cache_push_back(ct);
+          let ct = CachedToken::new(Spanned::new(span, token), resume.lexer().state().clone());
+          self.hold_front(ct, Origin::Lexer);
           Ok(CloseStatus::WrongToken(wrong))
         }
       }
@@ -435,7 +437,7 @@ where
       Scan::Eof => {
         // An exhaustion produced by refusing to cross a pre-latched boundary is
         // terminal, not genuine end of input — mirrors `try_expect_or_stop`'s E5.
-        if self.reached_boundary(&lex_at) {
+        if self.reached_boundary(resume.at()) {
           Ok(CloseStatus::Tripped)
         } else {
           Ok(CloseStatus::Eof)
@@ -452,11 +454,11 @@ where
   /// - [`Scanned`](ClosePayload::Scanned): the token carried out of the scan is settled by
   ///   value — the path a blackhole `()` needs (a pushed-back closer would be dropped and
   ///   re-lexed).
-  /// - [`CacheFront`](ClosePayload::CacheFront): the closer was left at the cache front by the
-  ///   probe; pop it now (`try_expect`'s cache arm, which never re-lexes) and settle it. Popping
-  ///   here — not at probe time — keeps `cursor` neutral until this commit point, so the
+  /// - [`AtFront`](ClosePayload::AtFront): the closer was left at the front of the stream by the
+  ///   probe; take it now (`try_expect`'s front arm, which never re-lexes) and settle it. Taking
+  ///   it here — not at probe time — keeps `cursor` neutral until this commit point, so the
   ///   deferred (`separated`) drivers span `handle_end` correctly and an error before this call
-  ///   leaves the closer in the cache for recovery.
+  ///   leaves the closer at the front for recovery.
   ///
   /// The caller runs this immediately (immediate-commit drivers) or deferred past the
   /// end-of-list pass (`separated`/`separated_while`).
@@ -467,12 +469,11 @@ where
   ) -> Spanned<L::Token, L::Span> {
     let carried = match payload {
       ClosePayload::Scanned(carried) => carried,
-      // The probe left the closer at the cache front; pop it at the commit point (never a
-      // re-lex — a cached token is a fully lexed token).
-      ClosePayload::CacheFront => self
-        .cache
-        .pop_front()
-        .expect("commit_probed(CacheFront): the probed closer is still at the cache front"),
+      // The probe left the closer at the front of the stream; take it at the commit point (never
+      // a re-lex — a retained token is a fully lexed token).
+      ClosePayload::AtFront => self
+        .take_front()
+        .expect("commit_probed(AtFront): the probed closer is still at the front"),
     };
     let (lexed, state) = carried.into_components();
     let (span, tok) = lexed.into_components();
@@ -490,6 +491,7 @@ where
   /// `Ok(None)` also covers a terminal stop (limit trip / latched poison
   /// boundary); when a decline commits the caller to a different parse, use
   /// [`try_expect_or_stop`](Self::try_expect_or_stop).
+  #[inline]
   pub fn try_expect_map<O, F>(
     &mut self,
     mut pred: F,
@@ -501,15 +503,14 @@ where
     F: FnMut(Spanned<&L::Token, &L::Span>) -> Option<O>,
   {
     trace_event!(self, "try_expect_map");
-    if self.cache.is_empty() {
+    if !self.has_front() {
       return self.try_expect_map_on_input(pred);
     }
 
     let mut output = None;
     Ok(
       self
-        .cache
-        .pop_front_if(|t| match pred(t.token().copied()) {
+        .take_front_if(|t| match pred(t.token().copied()) {
           Some(out) => {
             output = Some(out);
             true
@@ -550,7 +551,7 @@ where
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   {
     trace_event!(self, "try_expect_map_or_stop");
-    if self.cache.is_empty() {
+    if !self.has_front() {
       return self.try_expect_map_or_stop_on_input(pred);
     }
 
@@ -559,8 +560,7 @@ where
     let mut output = None;
     Ok(
       self
-        .cache
-        .pop_front_if(|t| match pred(t.token().copied()) {
+        .take_front_if(|t| match pred(t.token().copied()) {
           Some(out) => {
             output = Some(out);
             true
@@ -600,12 +600,12 @@ where
     ) -> Option<Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>>,
   {
     trace_event!(self, "try_expect_and_then");
-    if self.cache.is_empty() {
+    if !self.has_front() {
       return self.try_expect_and_then_on_input(pred);
     }
 
     let mut output = None;
-    if let Some(tok) = self.cache.pop_front_if(|t| match pred(t.token().copied()) {
+    if let Some(tok) = self.take_front_if(|t| match pred(t.token().copied()) {
       Some(res) => {
         output = Some(res);
         true
@@ -647,21 +647,20 @@ where
       return Ok(None);
     }
 
-    let mut lex_at = self.offset().clone();
-    let mut lexer = self.lexer();
+    let mut resume = self.resume();
 
-    match self.scan_with(&mut lexer, &mut lex_at, &AtCursor)? {
+    match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => match pred(tok.as_ref()) {
         Some(output) => {
           self.commit_token(tok.data(), tok.span_ref());
-          *self.state = lexer.into_state();
+          *self.state = resume.into_lexer().into_state();
           output.map(|o| Some((o, tok)))
         }
         None => {
           let (span, tok) = tok.into_components();
           // put back the token into cache as it was peeked
-          let ct = CachedToken::new(Spanned::new(span, tok), lexer.state().clone());
-          let _ = self.cache_push_back(ct);
+          let ct = CachedToken::new(Spanned::new(span, tok), resume.lexer().state().clone());
+          self.hold_front(ct, Origin::Lexer);
           Ok(None)
         }
       },
@@ -685,20 +684,19 @@ where
       return Ok(None);
     }
 
-    let mut lex_at = self.offset().clone();
-    let mut lexer = self.lexer();
+    let mut resume = self.resume();
 
-    match self.scan_with(&mut lexer, &mut lex_at, &AtCursor)? {
+    match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
         if pred(tok.as_ref()) {
           self.commit_token(tok.data(), tok.span_ref());
-          *self.state = lexer.into_state();
+          *self.state = resume.into_lexer().into_state();
           Ok(Some(tok))
         } else {
           let (span, tok) = tok.into_components();
           // put back the token into cache as it was peeked
-          let ct = CachedToken::new(Spanned::new(span, tok), lexer.state().clone());
-          let _ = self.cache_push_back(ct);
+          let ct = CachedToken::new(Spanned::new(span, tok), resume.lexer().state().clone());
+          self.hold_front(ct, Origin::Lexer);
           Ok(None)
         }
       }
@@ -725,20 +723,19 @@ where
       return Ok(None);
     }
 
-    let mut lex_at = self.offset().clone();
-    let mut lexer = self.lexer();
+    let mut resume = self.resume();
 
-    match self.scan_with(&mut lexer, &mut lex_at, &AtCursor)? {
+    match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
         if let Some(out) = pred(tok.as_ref()) {
           self.commit_token(tok.data(), tok.span_ref());
-          *self.state = lexer.into_state();
+          *self.state = resume.into_lexer().into_state();
           Ok(Some((out, tok)))
         } else {
           let (span, tok) = tok.into_components();
           // put back the token into cache as it was peeked
-          let ct = CachedToken::new(Spanned::new(span, tok), lexer.state().clone());
-          let _ = self.cache_push_back(ct);
+          let ct = CachedToken::new(Spanned::new(span, tok), resume.lexer().state().clone());
+          self.hold_front(ct, Origin::Lexer);
           Ok(None)
         }
       }
@@ -768,19 +765,18 @@ where
           .into(),
       );
     }
-    let mut lex_at = self.offset().clone();
-    let mut lexer = self.lexer();
-    match self.scan_with(&mut lexer, &mut lex_at, &AtCursor)? {
+    let mut resume = self.resume();
+    match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => match pred(tok.as_ref()) {
         Some(output) => {
           self.commit_token(tok.data(), tok.span_ref());
-          *self.state = lexer.into_state();
+          *self.state = resume.into_lexer().into_state();
           Ok(Some((output, tok)))
         }
         None => {
           let (span, t) = tok.into_components();
-          let ct = CachedToken::new(Spanned::new(span, t), lexer.state().clone());
-          let _ = self.cache_push_back(ct);
+          let ct = CachedToken::new(Spanned::new(span, t), resume.lexer().state().clone());
+          self.hold_front(ct, Origin::Lexer);
           Ok(None) // definite absence — the token stays at the cache front.
         }
       },
@@ -794,7 +790,7 @@ where
       Scan::Eof => {
         // An exhaustion produced by refusing to cross a pre-latched boundary is terminal,
         // not genuine end of input — mirrors `try_expect_or_stop`'s E5.
-        if self.reached_boundary(&lex_at) {
+        if self.reached_boundary(resume.at()) {
           Err(
             UnexpectedEot::eot_of(self.span().end())
               .into_terminal()

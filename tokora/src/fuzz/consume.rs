@@ -115,6 +115,7 @@ const LEAVES: &[Op] = &[
   Op::SyncThrough,
   Op::SyncBalanced,
   Op::IsEoi,
+  Op::IsExhausted,
   Op::Seal,
   Op::Mark,
   Op::StartAt,
@@ -253,6 +254,7 @@ fn run_step(
     | Op::SyncThrough
     | Op::SyncBalanced
     | Op::IsEoi
+    | Op::IsExhausted
     | Op::Seal
     | Op::Mark
     | Op::StartAt
@@ -781,6 +783,19 @@ fn run_leaf(
       // not asserted.)
       if model.o >= model.len() {
         assert!(eoi, "is_eoi: false at end of input");
+      }
+    }
+    Op::IsExhausted => {
+      // Sound one-directional check: exhausted implies the model is at the end of input. The
+      // converse does not hold — a drain that ends on lexer-skipped bytes leaves the committed
+      // frontier short of the buffer end, so the gate stays false with the stream already empty.
+      // That direction is the safe one: the gate never turns true while a token is still
+      // consumable.
+      if ir.is_exhausted() {
+        assert!(
+          model.o >= model.len(),
+          "is_exhausted: true with input left to consume"
+        );
       }
     }
     Op::Seal => {

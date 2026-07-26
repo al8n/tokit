@@ -253,14 +253,11 @@ fn nonfinal_eof_surfaces_incomplete() {
   // frontier token and yields normally. The whitespace tail then exhausts the lexer at a non-final
   // EOF, which surfaces Incomplete rather than genuine end of input.
   //
-  // This pins the CURRENT (incorrect) behavior: the offset the crate actually reports
-  // today is `Incomplete(3)`, not `Incomplete(4)`, the true frontier (the buffer end,
-  // after the trailing space the lexer skipped before hitting EOF). `lex_at` only
-  // advances when the lexer yields an item (`mod.rs`'s `lex_within_boundary`), so bytes
-  // it skips before a non-final EOF advance the real position but not the reported one —
-  // a stale fact for a refill driver deciding how much of its buffer was consumed. Issue
-  // #89 tracks this; update the pin to `Incomplete(4)` when it is fixed. This used to be
-  // a wildcard (`Err(PErr::Incomplete(_))`), which is exactly what hid the staleness.
+  // The reported offset is where the LEXER stopped, not where the last item it handed back
+  // ended: the trailing space is consumed input, and a refill driver that subtracts this
+  // offset from its buffer length to size the un-consumed tail must not count it as
+  // pending. So the frontier here is 4, the buffer end, even though the last yielded item
+  // ended at 3.
   let run = run_partial("foo ", false);
   assert_eq!(
     run.kinds,
@@ -269,21 +266,18 @@ fn nonfinal_eof_surfaces_incomplete() {
   );
   assert_eq!(
     run.result,
-    Err(PErr::Incomplete(3)),
-    "pinned stale offset (issue #89) — the true frontier is 4 (the buffer end); the \
-     skipped trailing space is not reflected"
+    Err(PErr::Incomplete(4)),
+    "the frontier is the lexer's end (4), not the last item's end (3) — the skipped \
+     trailing space is consumed input"
   );
   assert_eq!(run.emitted, 0);
 }
 
-/// Pins CURRENT (incorrect) behavior tracked by issue #89: the pin should become
-/// `Incomplete(3)` (the true frontier — every byte of `"   "` was consumed by the lexer
-/// before the non-final EOF) once it is fixed. Companion to `nonfinal_eof_surfaces_incomplete`,
-/// at the staleness's sharpest: an all-skipped buffer reports offset `0` — `lex_at` never
-/// advances past its initial value because the lexer never yields a single item, even
-/// though it scanned every byte.
+/// The trailing-skip case at its sharpest: an all-skipped buffer yields no item at all, so
+/// an offset derived from the last yielded item would never leave its initial value even
+/// though the lexer scanned every byte. Companion to `nonfinal_eof_surfaces_incomplete`.
 #[test]
-fn nonfinal_eof_after_an_all_skipped_buffer_reports_a_stale_offset() {
+fn nonfinal_eof_after_an_all_skipped_buffer_reports_the_lexer_end() {
   let run = run_partial("   ", false);
   assert!(
     run.kinds.is_empty(),
@@ -291,9 +285,8 @@ fn nonfinal_eof_after_an_all_skipped_buffer_reports_a_stale_offset() {
   );
   assert_eq!(
     run.result,
-    Err(PErr::Incomplete(0)),
-    "pinned stale offset (issue #89) — the true frontier is 3 (every byte was consumed); \
-     lex_at never advanced because the lexer never yielded an item"
+    Err(PErr::Incomplete(3)),
+    "every byte was consumed by the lexer, so the refill frontier is 3"
   );
   assert_eq!(run.emitted, 0);
 }
@@ -301,11 +294,190 @@ fn nonfinal_eof_after_an_all_skipped_buffer_reports_a_stale_offset() {
 #[test]
 fn nonfinal_eof_on_empty_buffer() {
   // An empty non-final chunk is entirely Incomplete: nothing to yield, more may arrive.
-  // (The staleness pinned above does not apply here: with zero bytes total, the
-  // stale-vs-true frontier distinction collapses — both are 0.)
+  // With zero bytes the lexer's end and the buffer end coincide at 0.
   let run = run_partial("", false);
   assert!(run.kinds.is_empty());
   assert_eq!(run.result, Err(PErr::Incomplete(0)));
+}
+
+// ── The non-final EOF frontier's floor and clamp ─────────────────────────────────────
+//
+// `Lexer::span()` once the lexer is exhausted is the one point the lexer contract leaves to
+// the implementation, so the frontier a non-final EOF reports is floored by what was already
+// lexed and clamped to the buffer. The logos backend reports the buffer end there, which
+// makes both bounds inert on it — so they are exercised here by a hand-written lexer that
+// reports a deliberately wrong post-exhaustion span, once in each direction.
+
+/// What [`FrontierLexer`] reports from [`Lexer::span`] once it is exhausted. It travels in
+/// the lexer state because `Lexer::with_state` is the only channel the input layer
+/// configures a rebuilt lexer through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EofSpan {
+  /// Retracts to the start of the buffer — behind every item the lexer yielded.
+  Retracts,
+  /// Overshoots well past the end of the buffer.
+  Overshoots,
+}
+
+impl State for EofSpan {
+  type Error = ();
+
+  fn check(&self) -> Result<(), Self::Error> {
+    Ok(())
+  }
+}
+
+/// A hand-written lexer over the [`PTok`] vocabulary. It skips ASCII whitespace between
+/// tokens exactly as the logos-backed fixture does — so the trailing-skip shape is the same
+/// — and its only unusual behaviour is the span it reports at exhaustion ([`EofSpan`]).
+struct FrontierLexer<'a> {
+  src: &'a str,
+  at: usize,
+  span: crate::span::SimpleSpan,
+  state: EofSpan,
+}
+
+impl<'a> crate::Lexer<'a> for FrontierLexer<'a> {
+  type State = EofSpan;
+  type Source = str;
+  type Token = PTok;
+  type Span = crate::span::SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a Self::Source) -> Self {
+    Self::with_state(src, EofSpan::Retracts)
+  }
+
+  fn with_state(src: &'a Self::Source, state: Self::State) -> Self {
+    Self {
+      src,
+      at: 0,
+      span: crate::span::SimpleSpan { start: 0, end: 0 },
+      state,
+    }
+  }
+
+  fn check(&self) -> Result<(), <Self::Token as Token<'a>>::Error> {
+    Ok(())
+  }
+
+  fn state(&self) -> &Self::State {
+    &self.state
+  }
+
+  fn state_mut(&mut self) -> &mut Self::State {
+    &mut self.state
+  }
+
+  fn into_state(self) -> Self::State {
+    self.state
+  }
+
+  fn source(&self) -> &'a Self::Source {
+    self.src
+  }
+
+  fn span(&self) -> Self::Span {
+    self.span
+  }
+
+  fn slice(&self) -> &'a str {
+    &self.src[self.span.start..self.span.end]
+  }
+
+  fn lex(&mut self) -> Option<Result<Self::Token, <Self::Token as Token<'a>>::Error>> {
+    let bytes = self.src.as_bytes();
+    while self.at < bytes.len() && bytes[self.at].is_ascii_whitespace() {
+      self.at += 1;
+    }
+    if self.at >= bytes.len() {
+      self.span = match self.state {
+        EofSpan::Retracts => crate::span::SimpleSpan { start: 0, end: 0 },
+        EofSpan::Overshoots => crate::span::SimpleSpan {
+          start: bytes.len(),
+          end: bytes.len() + 32,
+        },
+      };
+      return None;
+    }
+    let start = self.at;
+    let first = bytes[start];
+    // Always advance at least one byte, so every item has the nonempty span the contract
+    // requires.
+    self.at += 1;
+    let lexed = if first.is_ascii_digit() {
+      while self.at < bytes.len() && bytes[self.at].is_ascii_digit() {
+        self.at += 1;
+      }
+      Ok(PTok::Num)
+    } else if first.is_ascii_lowercase() {
+      while self.at < bytes.len() && bytes[self.at].is_ascii_lowercase() {
+        self.at += 1;
+      }
+      Ok(PTok::Word)
+    } else {
+      Err(())
+    };
+    self.span = crate::span::SimpleSpan {
+      start,
+      end: self.at,
+    };
+    Some(lexed)
+  }
+
+  fn bump(&mut self, n: &Self::Offset) {
+    self.at += *n;
+    self.span = crate::span::SimpleSpan {
+      start: self.at,
+      end: self.at,
+    };
+  }
+}
+
+type FrontierCtx<'a> = (Verbose<PErr>, DefaultCache<'a, FrontierLexer<'a>>);
+
+/// Drives a non-final partial input over `src` with the hand-written lexer in `mode`,
+/// draining `next()` to its first stop.
+fn run_frontier(src: &str, mode: EofSpan) -> Result<Option<()>, PErr> {
+  let mut input = Input::<FrontierLexer<'_>, FrontierCtx<'_>, (), Partial>::with_state_and_cache(
+    src,
+    mode,
+    DefaultCache::<'_, FrontierLexer<'_>>::default(),
+  );
+  let mut emitter = Verbose::<PErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+  loop {
+    match inp.next() {
+      Ok(Some(_)) => {}
+      Ok(None) => break Ok(None),
+      Err(e) => break Err(e),
+    }
+  }
+}
+
+#[test]
+fn nonfinal_eof_offset_is_never_behind_the_last_item() {
+  // The floor. This lexer reports a post-exhaustion span of `0..0`, behind everything it
+  // yielded; the frontier must still be at least the end of the last item ("bar", 4..7),
+  // never the retracted 0.
+  assert_eq!(
+    run_frontier("foo bar ", EofSpan::Retracts),
+    Err(PErr::Incomplete(7)),
+    "a lexer whose post-exhaustion span retracts must not drag the refill frontier \
+     behind the items it already yielded"
+  );
+}
+
+#[test]
+fn nonfinal_eof_offset_is_clamped_to_the_buffer() {
+  // The clamp. This lexer reports a post-exhaustion span ending far past the buffer; the
+  // frontier must not hand a refill driver an offset outside its own buffer.
+  assert_eq!(
+    run_frontier("foo bar ", EofSpan::Overshoots),
+    Err(PErr::Incomplete(8)),
+    "a lexer whose post-exhaustion span overshoots must not push the refill frontier \
+     past the buffer end"
+  );
 }
 
 // ── Mid-buffer items are unaffected while partial ─────────────────────────────────────
@@ -2025,13 +2197,13 @@ fn probe_close_cache_front_is_cursor_neutral_and_recovery_safe() {
       _ => panic!("a cached front closer must probe as `Close`"),
     };
     assert!(
-      matches!(payload, ClosePayload::CacheFront),
-      "the cache path classifies the closer by PEEK (CacheFront), never popping it at probe time"
+      matches!(payload, ClosePayload::AtFront),
+      "the cache path classifies the closer by PEEK (AtFront), never popping it at probe time"
     );
     assert_eq!(
       inp.cursor().as_inner(),
       &at_closer,
-      "probe_close(CacheFront) must not advance cursor() — the closer stays at the front \
+      "probe_close(AtFront) must not advance cursor() — the closer stays at the front \
        (span_since(anchor), whose end IS cursor(), must not over-include the closer)"
     );
   }
@@ -2048,7 +2220,7 @@ fn probe_close_cache_front_is_cursor_neutral_and_recovery_safe() {
     inp.peek::<U2>().expect("peek");
     // Classify the closer, then simulate the deferred driver erroring out of `handle_end`
     // before committing: the `Close` payload is discarded uncommitted (dropping it is a no-op —
-    // on the cache path it holds no owned closer, only the `CacheFront` marker). The closer must
+    // on the cache path it holds no owned closer, only the `AtFront` marker). The closer must
     // still be at the cache front (not popped-and-dropped while the trailing token survives).
     match inp.probe_close(|_| true) {
       Ok(CloseStatus::Close(_)) => {}

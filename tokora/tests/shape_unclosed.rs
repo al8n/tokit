@@ -273,12 +273,11 @@ macro_rules! shape_matrix {
         );
       }
 
-      // Model B, cursor-anchored (matching the many-builder): the same wrong-closer-with-trivia
-      // case under the blackhole cache `()`. `probe_close` cannot cache the wrong token, so
-      // `inp.cursor()` stays at the pre-trivia committed frontier (offset 2); the recovery spans
-      // the shape via `span_since(cursor)`, so close.end() == shape.end() == the cursor (offset
-      // 2), never outrunning it. A retaining cache would land at the wrong token's start (offset
-      // 3) instead — see the retaining-cache test above.
+      // The same wrong-closer-with-trivia case under the blackhole cache `()`. `probe_close`
+      // leaves the wrong token at the FRONT OF THE STREAM whatever the capacity — the parked slot
+      // when the cache refuses it — so `inp.cursor()` is that token's start (offset 3) here just
+      // as it is under a retaining cache. The recovery spans the shape via `span_since(cursor)`,
+      // so close.end() == shape.end() == the cursor, and the two capacities agree exactly.
       #[test]
       fn no_cache_verbose_wrong_close_span_invariant() {
         fn go<'inp>(
@@ -298,10 +297,10 @@ macro_rules! shape_matrix {
         );
         assert_eq!(
           span.end(),
-          2,
-          "ends at the committed frontier under the blackhole cache, never outrunning the cursor"
+          3,
+          "ends at the wrong token's start, past the trivia — the same as any other capacity"
         );
-        assert_eq!(close_span, SimpleSpan::new(2, 2));
+        assert_eq!(close_span, SimpleSpan::new(3, 3));
       }
     }
   };
@@ -376,8 +375,8 @@ fn generic_delimited_verbose_wrong_close_with_trivia_span_invariant() {
   assert_eq!(close_span, SimpleSpan::new(3, 3));
 }
 
-// Model B (cursor-anchored), generic path under the blackhole cache `()`: the recovered span
-// ends at the committed frontier (offset 2), never outrunning the cursor.
+// The generic path under the blackhole cache `()`: the recovered span ends at the wrong token's
+// start (offset 3), exactly as it does under a retaining cache.
 #[test]
 fn generic_delimited_no_cache_wrong_close_span_invariant() {
   fn go<'inp>(
@@ -391,7 +390,7 @@ fn generic_delimited_no_cache_wrong_close_span_invariant() {
     .parse_str("(1 ]")
     .unwrap();
   assert_eq!(close_span.end(), span.end());
-  assert_eq!(close_span, SimpleSpan::new(2, 2));
+  assert_eq!(close_span, SimpleSpan::new(3, 3));
 }
 
 // Eof arm cache-independence (Codex R2 asked to confirm): `(1` at EOF under the blackhole cache
@@ -414,9 +413,8 @@ fn parens_no_cache_eof_recovers_zero_width_close() {
   assert_eq!(close_span, SimpleSpan::new(2, 2));
 }
 
-// Model B (cursor-anchored), try-twin path: committed-then-wrong-closer recovers under the
-// blackhole cache and the synthesized closer ends at the committed frontier (offset 2), matching
-// the many-builder.
+// The try-twin path: committed-then-wrong-closer recovers under the blackhole cache and the
+// synthesized closer ends at the wrong token's start (offset 3), matching every other capacity.
 #[test]
 fn try_parens_no_cache_committed_wrong_close_span_invariant() {
   fn go<'inp>(
@@ -430,16 +428,15 @@ fn try_parens_no_cache_committed_wrong_close_span_invariant() {
     .parse_str("(1 ]")
     .unwrap();
   assert_eq!(close_span.end(), span.end());
-  assert_eq!(close_span, SimpleSpan::new(2, 2));
+  assert_eq!(close_span, SimpleSpan::new(3, 3));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Enclosing-parent containment (Codex R3): a recovered shape parsed INSIDE an enclosing parser
-// under the blackhole cache `()` must never outrun the enclosing cursor. Before the cursor-
-// anchored fix the child was anchored at the wrong token's start (offset 3) while the parent's
-// `span_since(cursor)` ended at the committed frontier (offset 2) — the child outran the parent.
-// Model B spans the child via `span_since(cursor)` too, so parent ⊇ child and
-// close.end() == shape.end() == cursor for the generic, named, and try_ forms alike.
+// under the blackhole cache `()` must never outrun the enclosing cursor. Both the child and the
+// parent span via `span_since(cursor)`, so parent ⊇ child and close.end() == shape.end() == cursor
+// for the generic, named, and try_ forms alike — and the cursor is the wrong token's start in
+// every capacity, because a probe's `WrongToken` is retained at the front of the stream.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -466,10 +463,10 @@ fn generic_delimited_no_cache_enclosing_parent_contains_recovered_shape() {
   assert_eq!(close.end(), child.end(), "close ends where the shape ends");
   assert_eq!(
     child.end(),
-    2,
-    "child ends at the committed frontier under the blackhole cache"
+    3,
+    "child ends at the wrong token's start — the same in every capacity"
   );
-  assert_eq!(close, SimpleSpan::new(2, 2));
+  assert_eq!(close, SimpleSpan::new(3, 3));
 }
 
 #[test]
@@ -496,10 +493,10 @@ fn parens_no_cache_enclosing_parent_contains_recovered_shape() {
   assert_eq!(close.end(), child.end(), "close ends where the shape ends");
   assert_eq!(
     child.end(),
-    2,
-    "child ends at the committed frontier under the blackhole cache"
+    3,
+    "child ends at the wrong token's start — the same in every capacity"
   );
-  assert_eq!(close, SimpleSpan::new(2, 2));
+  assert_eq!(close, SimpleSpan::new(3, 3));
 }
 
 #[test]
@@ -526,10 +523,10 @@ fn try_parens_no_cache_enclosing_parent_contains_recovered_shape() {
   assert_eq!(close.end(), child.end(), "close ends where the shape ends");
   assert_eq!(
     child.end(),
-    2,
-    "child ends at the committed frontier under the blackhole cache"
+    3,
+    "child ends at the wrong token's start — the same in every capacity"
   );
-  assert_eq!(close, SimpleSpan::new(2, 2));
+  assert_eq!(close, SimpleSpan::new(3, 3));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

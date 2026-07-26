@@ -379,15 +379,14 @@ where
     .parse_input(inp)
 }
 
-// ── repeated: no-cache RED→GREEN + DefaultCache twin ─────────────────────────────
+// ── repeated: no-cache + DefaultCache twin ───────────────────────────────────────
 
 #[test]
-fn repeated_no_cache_lexes_the_closer_without_the_extra_rescan() {
-  // `(a)`: the element parser declines on `)` (lexing it once, dropped under `()`),
-  // then `probe_close` lexes it a second time to classify it. The fix commits that
-  // probed token by value — so the closer is lexed exactly TWICE, not three times.
-  // Pre-fix the follow-up `try_expect` re-lexed it a third time (the `()` push-back
-  // was dropped): on `main` this counter reads 3.
+fn repeated_no_cache_lexes_the_closer_once() {
+  // `(a)`: the element parser declines on `)`. That decline leaves the closer at the front
+  // of the stream — the parked slot, since `()` retains nothing — so `probe_close` classifies
+  // the token that is already there and `commit_probed` commits it with no re-lex. One lex,
+  // matching the DefaultCache twin below exactly.
   let state = CloserScans::default();
   let counter = state.handle();
   let r: Result<Vec<()>, PcErr> = Parser::with_context(no_cache_ctx())
@@ -399,9 +398,9 @@ fn repeated_no_cache_lexes_the_closer_without_the_extra_rescan() {
   );
   assert_eq!(
     counter.get(),
-    2,
-    "no-cache: closer lexed twice (element decline + probe); the fix removed the third \
-     (follow-up try_expect) re-lex — pre-fix this reads 3"
+    1,
+    "no-cache: the closer is lexed exactly once — the decline retains it at the front \
+     instead of dropping it for the probe to re-lex"
   );
 }
 

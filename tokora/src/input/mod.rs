@@ -197,7 +197,7 @@
 
 use core::marker::PhantomData;
 
-use crate::{ParseContext, span::Span};
+use crate::{ParseContext, cache::CachedTokenOf, span::Span};
 
 use super::*;
 
@@ -426,6 +426,41 @@ where
   state: L::State,
   span: L::Span,
   cache: Ctx::Cache,
+  /// The **parked front token**: one lexed-but-unconsumed token that the configurable cache
+  /// refused to retain.
+  ///
+  /// Every `to`-shaped scan stop and every scan-path decline must leave its token unconsumed, and
+  /// the crate's answer is "an unconsumed token lives at the front of the stream"
+  /// (`input_ref::scan`'s module docs). A zero-capacity cache accepts no push, so that token used
+  /// to be **dropped** — and with it the promise that the cursor after a stop is the stopping
+  /// token's start *no matter who lexed it*. This slot is the retained home the promise needs,
+  /// outside `Ctx::Cache` so no cache implementation can refuse it.
+  ///
+  /// # It is the FRONT of the stream
+  ///
+  /// Logically the stream is `parked?` then `cache[front..back]`. That ordering is why
+  /// [`InputRef::cursor`] consults this slot **first** and [`InputRef::offset`] consults it
+  /// **last** — the parked token is the oldest retained token and the cache back is the newest.
+  ///
+  /// # Occupied only when the cache refused a put-back
+  ///
+  /// Every put-back site runs with a cache that has room (the scanner pops at most one token
+  /// before deciding on it; the `try_expect*`/`probe_close` scan paths are reached only with
+  /// nothing at the front), so for every cache in this crate a refusal means capacity 0, and
+  /// therefore an occupied slot implies an empty cache. The reads do not *depend* on that — they
+  /// are ordered by the stream order above and are correct for any `Cache` — but
+  /// [`InputRef::hold_front`] debug-asserts it, so a `Cache` implementation that refuses a push
+  /// into a non-empty cache is caught at its cause rather than producing an out-of-order front.
+  ///
+  /// # Uncounted, and dropped by every restore
+  ///
+  /// It is *not* a cache entry: it is never recorded on the cache-push counter, and
+  /// [`InputRef::restore`] clears it outright rather than replaying it. That is sound for the same
+  /// reason the cache's post-save tail-drop is: the restored span/state land at or before the
+  /// parked token's start, so the region re-lexes and — by the `Lexer` determinism contract —
+  /// reproduces it. The extra scan a drop costs is the *baseline* behaviour of the only cache that
+  /// can park anything.
+  pending: Option<CachedTokenOf<'inp, L>>,
   /// The completeness finality (`is_final`) storage: the zero-sized `()` for [`Complete`] — so the
   /// complete input has the identical layout it had before this typestate existed — and a `bool`
   /// for [`Partial`]. The frontier rules read it only when [`Completeness::PARTIAL`] holds, so it
@@ -521,6 +556,9 @@ where
       state: self.state.clone(),
       span: self.span.clone(),
       cache: self.cache.clone(),
+      // A clone shares the cache contents, so it shares the parked front too: dropping it would
+      // leave the clone's cursor behind the original's under a cache that retains nothing.
+      pending: self.pending.clone(),
       // The finality flag is `Copy` (a ZST for `Complete`, a `bool` for `Partial`); a clone shares
       // the same completeness regime as the original.
       finality: self.finality,
@@ -561,6 +599,8 @@ where
       .field("state", &self.state)
       .field("span", &self.span)
       .field("cache", &self.cache)
+      // A `CachedToken` has no `Debug`; whether one is parked is the observable that matters.
+      .field("parked", &self.pending.is_some())
       .finish()
   }
 }
@@ -595,6 +635,7 @@ where
       state,
       span: L::Span::new(L::Offset::default(), L::Offset::default()),
       cache: DefaultCache::<'inp, L>::default(),
+      pending: None,
       // Born OPEN: non-final (`Partial`) or final-by-definition (`Complete`). A streaming driver
       // states the world fact by calling [`seal`](Self::seal) when the last chunk lands.
       finality: Cmpl::initial(),
@@ -629,6 +670,7 @@ where
       state,
       span: L::Span::new(L::Offset::default(), L::Offset::default()),
       cache,
+      pending: None,
       // Born OPEN (see the twin above): a streaming driver states the end of the stream by calling
       // [`seal`](Self::seal), the one monotone finality transition.
       finality: Cmpl::initial(),
@@ -712,6 +754,7 @@ where
       input: &self.input,
       state: &mut self.state,
       cache: &mut self.cache,
+      pending: &mut self.pending,
       span: &mut self.span,
       // A read-only SNAPSHOT of the world cell, `Copy` (a ZST for `Complete`) — copied rather than
       // borrowed so the frontier rules read it without an extra word, keeping the `Complete`

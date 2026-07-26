@@ -1,6 +1,8 @@
-//! SETTLE_CENSUS / RELEASE_CENSUS / CAPTURE_WINDOW — the source censuses of every place a
-//! committed token settles, every place an emitter checkpoint is spent or forgotten, and every
-//! place one is taken behind the preflight reservation that keeps an unwind from stranding it.
+//! SETTLE_CENSUS / RELEASE_CENSUS / CAPTURE_WINDOW / RESUME_CENSUS / FRONT_CENSUS — the source
+//! censuses of every place a committed token settles, every place an emitter checkpoint is spent
+//! or forgotten, every place one is taken behind the preflight reservation that keeps an unwind
+//! from stranding it, every place the (state, offset) pair a fresh lexer resumes from is built,
+//! and every place the front of the token stream is reached.
 //!
 //! # Why a census, and why here
 //!
@@ -40,8 +42,30 @@
 //! three non-token paths, and they must **never** grow a settle hook: `settle_fatal`
 //! writes a *rejected lexer error's* span; `SyncTo::on_eof` writes the lexer's span at
 //! exhaustion; `commit_at` batch-writes a whole skipped run's frontier (each skipped
-//! token already settled via `adopt`). Peeks, declines, `unconsume`, and the
-//! position-write surgeries (`set_state`, restores) touch no settle at all.
+//! token already settled via `adopt`). Peeks, declines, `unconsume`/`hold_front`, the
+//! front fetches (`take_front`, `take_front_if`), the peek fill's back push
+//! (`cache_append`), and the position-write surgeries (`set_state`, restores) touch no
+//! settle at all — a fetch is not a commit, and every caller of one still calls
+//! `commit_token` itself.
+//!
+//! **The front of the stream has five primitives** (FRONT_CENSUS): `front`, `has_front`,
+//! `take_front`, `take_front_if`, and `hold_front`. Every consume, peek, probe, put-back
+//! and position read reaches the front through them, never through `Ctx::Cache` directly
+//! — a path that talks to the cache sees a zero-capacity one as empty and re-lexes a token
+//! that is parked right there. The `self.pending` counts the census pins per file are the
+//! checklist: `mod.rs` 16 (the five primitives and the three cold parked halves they gate
+//! into, the `park` write and the head guard above it, `resume` and its cold parked arm,
+//! `cursor`, `offset`, the re-key, the restore), `peek/mod.rs` 4 (one accounting read and
+//! the three window exits), `scan.rs` 1 (the fetch's origin probe), everywhere else 0.
+//!
+//! **Every hot-path probe of the slot is gated on `Cache::RETAINS_FRONT`**, through
+//! `InputRef::can_park()`. Only a cache that can *refuse* a front push into an empty cache
+//! ever parks anything, so under a retaining cache the slot is statically `None` and the
+//! probe folds away at monomorphization. The gate counts are censused beside the slot
+//! counts — `mod.rs` 8, `peek/mod.rs` 4, `scan.rs` 1 — so a new reader of the slot has to
+//! decide its gating rather than inherit an ungated probe; the touches that are
+//! deliberately ungated are the cold ones (the parked halves reached through a gate, the
+//! `park` write, and the two drops in the re-key and the restore).
 //!
 //! Counting is line-based and skips `//`-prefixed lines, so doc references to these
 //! names do not count; only code does. Keep code mentions of the counted names off
@@ -863,4 +887,319 @@ fn capture_window_reservation_primitives_are_defined_once() {
     "CAPTURE_WINDOW drift: `Lineage::reserve_pin` must be defined exactly once, in `lineage.rs` \
      (grep CAPTURE_WINDOW)."
   );
+}
+
+/// RESUME_CENSUS — the (state, offset) pair a fresh lexer resumes from is built in exactly
+/// one body, from exactly one bundled source per arm.
+///
+/// The primary pin is structural, not textual: `Resume`'s fields are private, it has no
+/// public constructor, and `lex_within_boundary`/`scan_with` accept nothing else — so a
+/// driver holding a lexer built from one state beside an offset read from another no longer
+/// type-checks. This census pins the residual that types cannot: that no *second* pairing
+/// site appears, and that no arm of `resume` reads its two halves from two places.
+///
+/// Scoped to the input layer. The conformance kit's resume-faithfulness check builds its own
+/// lexer with `L::with_state` + `bump`; it reads both facts from one captured item and lives
+/// outside this module tree by design, so it is reviewed-and-exempt rather than counted here.
+#[test]
+fn resume_census_one_pairing_site() {
+  let m = source("mod.rs");
+  assert!(
+    count(m, "L::with_state(") == 1,
+    "RESUME_CENSUS drift: a lexer is constructed outside `resume_from`, so the \
+     (state, offset) pair can be assembled from two independently-read facts. Route the \
+     construction through a `Resume` constructor, then update this census in the same commit \
+     (grep RESUME_CENSUS)."
+  );
+  assert!(
+    count(m, "self.resume_from(") == 4,
+    "RESUME_CENSUS drift: `resume_from` has exactly four callers — the cache-back, parked and \
+     committed arms of `resume`, plus `resume_at_frontier`. A new arm must read BOTH halves of \
+     the pair from one value, and say so here (grep RESUME_CENSUS)."
+  );
+
+  // Every arm of `resume` reads its offset from the same value it reads its state from, so
+  // the committed state appears exactly once — in the arm that has nothing retained to read.
+  let body = method_body(m, "resume");
+  assert!(
+    count(&body, "self.state.clone()") == 1,
+    "RESUME_CENSUS drift: only the nothing-retained arm of `resume` may read the committed \
+     state; any other arm reading it pairs a retained token's offset with a state from before \
+     that token (grep RESUME_CENSUS)."
+  );
+  assert!(
+    !body.contains("self.offset()"),
+    "RESUME_CENSUS drift: `resume` must not read `offset()` — that is the second, \
+     independently-read fact the one-value pairing exists to rule out (grep RESUME_CENSUS)."
+  );
+
+  // The scan takes the pair as ONE value — a `ResumeParts`, whose only constructor is
+  // `Resume::parts_mut` — so a driver still cannot hand the lexing entry points a (lexer, offset)
+  // pair it assembled itself.
+  assert!(
+    count(m, "parts: ResumeParts<") == 1,
+    "RESUME_CENSUS drift: `scan_with` is the only `ResumeParts` consumer; a second lexing driver \
+     must join it here (grep RESUME_CENSUS)."
+  );
+  let parts_literals: &[(&str, usize, &str)] = &[
+    (
+      "mod.rs",
+      2,
+      "the constructor in `Resume::parts_mut` + `scan_with`'s destructure",
+    ),
+    ("peek/mod.rs", 1, "the peek fill's destructure"),
+  ];
+  for (name, want, who) in parts_literals {
+    let got = count(source(name), "ResumeParts {");
+    assert!(
+      got == *want,
+      "RESUME_CENSUS drift: `{name}` names the `ResumeParts` literal {got} time(s), expected \
+       {want} ({who}). The struct is the mutable view of a `Resume` and its fields are private to \
+       this module tree; a new literal is a second place the two halves can be paired \
+       (grep RESUME_CENSUS)."
+    );
+  }
+  for (name, src) in SOURCES {
+    if parts_literals.iter().any(|(n, _, _)| n == name) {
+      continue;
+    }
+    assert!(
+      count(src, "ResumeParts {") == 0,
+      "RESUME_CENSUS drift: `{name}` builds a `ResumeParts` outside `Resume::parts_mut` and the \
+       two lexing loops (grep RESUME_CENSUS)."
+    );
+  }
+
+  // `parts_mut` is the one surface that can advance the two halves apart. Its callers are the
+  // drivers that run a scan plus the peek fill; each hands the view straight to a lexing loop and
+  // reads the `Resume` back only after that loop has written its position through.
+  let parts_mut_sites: &[(&str, usize, &str)] = &[
+    ("mod.rs", 2, "`next` + `next_or_stop`"),
+    ("scan.rs", 1, "`skip_until`'s lexer arm"),
+    (
+      "try_expect.rs",
+      6,
+      "`try_expect_or_stop`, `probe_close`, and the four `*_on_input` bodies",
+    ),
+    ("peek/mod.rs", 1, "the peek fill"),
+  ];
+  let mut parts_mut_total = 0;
+  for (name, want, who) in parts_mut_sites {
+    let got = count(source(name), ".parts_mut(");
+    parts_mut_total += got;
+    assert!(
+      got == *want,
+      "RESUME_CENSUS drift: `{name}` calls `Resume::parts_mut` {got} time(s), expected {want} \
+       ({who}) (grep RESUME_CENSUS)."
+    );
+  }
+  assert!(
+    parts_mut_total == 10,
+    "RESUME_CENSUS drift: `Resume::parts_mut` has {parts_mut_total} callers across the input \
+     layer, expected 10 — the nine scan drivers and the peek fill (grep RESUME_CENSUS)."
+  );
+  for (name, src) in SOURCES {
+    if parts_mut_sites.iter().any(|(n, _, _)| n == name) {
+      continue;
+    }
+    assert!(
+      count(src, ".parts_mut(") == 0,
+      "RESUME_CENSUS drift: `{name}` splits a `Resume` into its halves outside the censused \
+       lexing drivers (grep RESUME_CENSUS)."
+    );
+  }
+
+  // The two-borrow lexing entry point is the residual the types no longer carry: `Resume` is
+  // unforgeable, but `lex_within_boundary` takes the halves as plain `&mut`, so nothing but this
+  // count stops a third caller from passing a lexer beside an offset it chose separately.
+  let lex_sites: &[(&str, usize, &str)] = &[
+    ("mod.rs", 2, "the definition + `scan_with`'s loop"),
+    ("peek/mod.rs", 1, "the peek fill's loop"),
+  ];
+  for (name, want, who) in lex_sites {
+    let got = count(source(name), "lex_within_boundary(");
+    assert!(
+      got == *want,
+      "RESUME_CENSUS drift: `{name}` names `lex_within_boundary` {got} time(s), expected {want} \
+       ({who}). It takes the lexer and the position as two separate `&mut` — which is what keeps \
+       the position in a register — so its callers must reach them through `Resume::parts_mut` \
+       and nowhere else (grep RESUME_CENSUS)."
+    );
+  }
+  for (name, src) in SOURCES {
+    if lex_sites.iter().any(|(n, _, _)| n == name) {
+      continue;
+    }
+    assert!(
+      count(src, "lex_within_boundary(") == 0,
+      "RESUME_CENSUS drift: `{name}` lexes through `lex_within_boundary` outside the two censused \
+       loops (grep RESUME_CENSUS)."
+    );
+  }
+
+  // Nowhere else builds one: the fields are private to this module, so a `Resume` literal in
+  // a sibling would be a second pairing site with the same reach.
+  for (name, src) in SOURCES {
+    if *name == "mod.rs" {
+      continue;
+    }
+    assert!(
+      count(src, "Resume {") == 0,
+      "RESUME_CENSUS drift: `{name}` constructs a `Resume` outside `resume_from` \
+       (grep RESUME_CENSUS)."
+    );
+  }
+}
+
+/// FRONT_CENSUS — the front of the token stream (the parked slot, else the cache front) is
+/// reached through five primitives and nowhere else.
+///
+/// A consume path that talks to `Ctx::Cache` directly sees a zero-capacity cache as empty and
+/// re-lexes a token that is parked right there — which is how the scanner's "an unconsumed token
+/// lives at the front" promise was false under `()` for every put-back in the crate. The counts
+/// below are the checklist; the module docs carry the per-file breakdown.
+#[test]
+fn front_census_one_front_surface() {
+  let m = source("mod.rs");
+  // (needle, expected count in `mod.rs`, the primitive that owns it)
+  let homes: &[(&str, usize, &str)] = &[
+    ("self.cache_mut().pop_front()", 1, "take_front"),
+    ("self.cache_mut().pop_front_if(", 1, "take_front_if"),
+    ("self.cache_mut().push_front(", 1, "hold_front"),
+    ("self.cache().front()", 1, "front"),
+    ("self.cache.push_back(", 1, "cache_append"),
+  ];
+  for (needle, want, home) in homes {
+    let got = count(m, needle);
+    assert!(
+      got == *want,
+      "FRONT_CENSUS drift: `mod.rs` has {got} `{needle}` site(s), expected {want} — it belongs \
+       to `{home}` and nowhere else (grep FRONT_CENSUS)."
+    );
+  }
+
+  // The parked slot itself: one count per file, so a bypass in a sibling fails here rather than
+  // compiling quietly.
+  let pending: &[(&str, usize)] = &[("mod.rs", 16), ("peek/mod.rs", 4), ("scan.rs", 1)];
+  for (name, want) in pending {
+    let got = count(source(name), "self.pending");
+    assert!(
+      got == *want,
+      "FRONT_CENSUS drift: `{name}` touches `self.pending` {got} time(s), expected {want}. The \
+       parked slot is reached through the five front primitives; a new reader must justify \
+       itself here, in the same commit (grep FRONT_CENSUS)."
+    );
+  }
+  for (name, src) in SOURCES {
+    if pending.iter().any(|(n, _)| n == name) {
+      continue;
+    }
+    assert!(
+      count(src, "self.pending") == 0,
+      "FRONT_CENSUS drift: `{name}` reaches the parked slot directly instead of through the \
+       `front`/`has_front`/`take_front`/`take_front_if`/`hold_front` primitives \
+       (grep FRONT_CENSUS)."
+    );
+  }
+
+  // Everywhere but `mod.rs`: no direct front access, in either the field or the accessor
+  // spelling — a submodule can write both.
+  for (name, src) in SOURCES {
+    if *name == "mod.rs" {
+      continue;
+    }
+    for needle in [
+      "cache.pop_front(",
+      "cache_mut().pop_front(",
+      "cache.pop_front_if(",
+      "cache_mut().pop_front_if(",
+      "cache.push_front(",
+      "cache_mut().push_front(",
+      "cache.front()",
+      "cache().front()",
+    ] {
+      assert!(
+        count(src, needle) == 0,
+        "FRONT_CENSUS drift: `{name}` reaches the cache's front directly (`{needle}`) instead \
+         of through the five front primitives (grep FRONT_CENSUS)."
+      );
+    }
+  }
+
+  // The peek fill is the one back push, and it is not a put-back; all three of its window exits
+  // must put the parked token in front of the cached run, or a window comes back missing the
+  // token at the front of the stream.
+  let peek = source("peek/mod.rs");
+  assert!(
+    count(peek, "self.cache_append(") == 1,
+    "FRONT_CENSUS drift: the back push belongs to the peek fill alone (grep FRONT_CENSUS)."
+  );
+  let exits = count(peek, "self.cache.peek::<W>(");
+  let prepends = count(peek, "Maybe::Ref(parked.as_ref())");
+  assert!(
+    exits == 3 && prepends == exits,
+    "FRONT_CENSUS drift: the peek fill has {exits} window exit(s) and {prepends} parked \
+     prepend(s) — every exit must head its window with the parked token, or a window at a \
+     latched boundary comes back empty over a live, consumable token (grep FRONT_CENSUS)."
+  );
+}
+
+/// FRONT_CENSUS — every hot-path probe of the parked slot is gated on
+/// [`Cache::RETAINS_FRONT`](crate::cache::Cache::RETAINS_FRONT).
+///
+/// A cache that can retain a token never refuses a front push into an empty cache, and a refusal
+/// is the only thing that parks one — so under such a cache the slot is provably `None` and the
+/// gate deletes the probe at monomorphization. That is what keeps the slot free for the caches
+/// that never park; an ungated probe hands every cache the zero-capacity cache's cost. Counted
+/// beside the slot counts above so a new reader has to decide its gating in the same commit.
+#[test]
+fn front_census_every_probe_is_const_gated() {
+  // The gate reads the const in one body and the contract-violation message names it in the other;
+  // a third mention means a second place decides what the declaration implies.
+  assert!(
+    count(source("mod.rs"), "RETAINS_FRONT") == 2,
+    "FRONT_CENSUS drift: `mod.rs` must name `RETAINS_FRONT` exactly twice — `can_park`'s read of \
+     it and the `park` assert that reports a cache violating it. A new reader of the parked slot \
+     gates on `Self::can_park()`, not on the const directly (grep FRONT_CENSUS)."
+  );
+  assert!(
+    count(source("mod.rs"), "fn can_park(") == 1,
+    "FRONT_CENSUS drift: `can_park` must be defined exactly once, in `mod.rs` \
+     (grep FRONT_CENSUS)."
+  );
+
+  // (file, expected `Self::can_park()` gates, who they are)
+  let gates: &[(&str, usize, &str)] = &[
+    (
+      "mod.rs",
+      8,
+      "`front`, `has_front`, `take_front`, `take_front_if`, `resume`, `cursor`, `offset`, and \
+       `park`'s lying-cache assert",
+    ),
+    (
+      "peek/mod.rs",
+      4,
+      "the window-slot accounting read and the three window exits",
+    ),
+    ("scan.rs", 1, "`skip_until`'s fetch"),
+  ];
+  for (name, want, who) in gates {
+    let got = count(source(name), "Self::can_park()");
+    assert!(
+      got == *want,
+      "FRONT_CENSUS drift: `{name}` gates {got} parked-slot probe(s) on `Self::can_park()`, \
+       expected {want} ({who}). An ungated probe puts the zero-capacity cache's parked slot back \
+       into every other cache's hot path (grep FRONT_CENSUS)."
+    );
+  }
+  for (name, src) in SOURCES {
+    if gates.iter().any(|(n, _, _)| n == name) {
+      continue;
+    }
+    assert!(
+      count(src, "Self::can_park()") == 0,
+      "FRONT_CENSUS drift: `{name}` gates a parked-slot probe of its own; the slot is reached \
+       through the five front primitives (grep FRONT_CENSUS)."
+    );
+  }
 }

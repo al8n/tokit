@@ -13,6 +13,9 @@ where
 {
   type Options = ();
 
+  // Capacity 1: a front push into an empty `Option` always succeeds.
+  const RETAINS_FRONT: bool = true;
+
   #[inline(always)]
   fn new() -> Self {
     None

@@ -16,6 +16,9 @@ where
 {
   type Options = ();
 
+  // A front push into an empty deque succeeds whenever there is any capacity at all.
+  const RETAINS_FRONT: bool = N::USIZE != 0;
+
   #[inline(always)]
   fn new() -> Self {
     Self::new()
