@@ -2,13 +2,25 @@ use crate::{
   emitter::PrattEmitter,
   error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot},
   parser::{
-    PrattFoldTokenInfix, PrattFoldTokenPostfix, PrattFoldTokenPrefix, PrattInfix, PrattLHS,
-    PrattPower, PrattRHS, Precedenced,
+    PrattFloor, PrattFoldTokenInfix, PrattFoldTokenPostfix, PrattFoldTokenPrefix, PrattInfix,
+    PrattLHS, PrattPower, PrattRHS,
   },
   token::PrattToken,
 };
 
 use super::*;
+
+/// The token driver's own RHS report, normalized once by the classifying closure.
+///
+/// The closure has already applied the floor and the non-associative repeat guard, so what
+/// crosses back is only what the fold needs — and, for an infix operator, its **true** binding
+/// power. Re-wrapping a [`PrattRHS`] here would mean handing the driver a power the closure
+/// had already transformed, and reconstructing the original by inverse arithmetic on the far
+/// side; that reconstruction was wrong at the ladder's extremes and misfired the repeat guard.
+enum TokRhs<Power> {
+  Postfix,
+  Infix(PrattInfix<(), (), ()>, Power),
+}
 
 impl<'inp, L, Ctx, Lang: ?Sized> InputRef<'inp, '_, L, Ctx, Lang>
 where
@@ -116,7 +128,7 @@ where
     FoldPostfix: PrattFoldTokenPostfix<'inp, Power, L, Ctx, Lang>,
   {
     self.pratt_in(
-      min_precedence,
+      PrattFloor::Inclusive(min_precedence),
       &mut fold_prefix,
       &mut fold_infix,
       &mut fold_postfix,
@@ -126,7 +138,7 @@ where
   #[inline(always)]
   fn pratt_in<FoldPrefix, FoldInfix, FoldPostfix, Expr, Power>(
     &mut self,
-    min_precedence: Power,
+    min_precedence: PrattFloor<Power>,
     fold_prefix: &mut FoldPrefix,
     fold_infix: &mut FoldInfix,
     fold_postfix: &mut FoldPostfix,
@@ -150,7 +162,8 @@ where
       PrattLHS::Operand(_) => tok,
       PrattLHS::Prefix(precedenced) => {
         let power = precedenced.into_precedence();
-        let Some(operand) = self.pratt_in(power, fold_prefix, fold_infix, fold_postfix)? else {
+        let floor = PrattFloor::Inclusive(power);
+        let Some(operand) = self.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
           self
             .session
             .emitter
@@ -162,34 +175,45 @@ where
       }
     };
 
-    // Step 2: parse rhs -- either an infix/postfix operator or the end of this pratt expression
+    // Step 2: parse rhs -- either an infix/postfix operator or the end of this pratt expression.
+    //
+    // Unconditional: `try_expect_map_or_stop` is already the complete end channel here —
+    // `Ok(None)` is genuine exhaustion or a token this expression declines, and a terminal
+    // scanner stop is an `Err`. A pre-gate on the scanner's frontier asked a different
+    // question and truncated the expression whenever a legal peek had moved that frontier
+    // past the last operator this consumer still had to fold.
+    //
+    // No progress guard, and this is why — the typed driver's hazard has no seam here:
+    //
+    // * **A report cannot be accepted without consuming.** The report is
+    //   [`PrattToken::try_pratt_rhs`], a pure function of one token, and acceptance *is* the
+    //   commit: `try_expect_map_or_stop` commits the token exactly when the closure below
+    //   answers `Some`, and parks it — `Ok(None)`, which leaves the loop — when it answers
+    //   `None`. There is no position at which grammar code can admit an operator and leave
+    //   the input where it was.
+    // * **No fold can move the input.** The token folds take `Spanned` tokens and the
+    //   emitter; none of the three is handed an [`InputRef`], so no fold can advance the
+    //   cursor into a stalled report's place, nor rewind behind a committed one.
+    // * **Every descent is preceded by a commit.** The recursive call happens only in the
+    //   `TokRhs::Infix` arm, after that operator token is committed, and the lexer contract
+    //   makes every token nonzero-width — so depth is bounded by the token count.
     let mut prev_op_is_neither: Option<Power> = None;
-    while !self.is_eoi() {
+    loop {
       // A terminal scanner stop mid-loop is not "the expression is complete" — surface it
       // rather than breaking, so a tripped limit cannot end the expression early.
       let Some((rhs, tok)) = self.try_expect_map_or_stop(|tok| {
         tok.try_pratt_rhs().and_then(|rhs| match rhs {
+          // A classifier may spell the decline as `End`; here it means exactly what `None`
+          // means — the token is not this expression's, and it stays in the stream.
+          PrattRHS::End => None,
           PrattRHS::Postfix(precedenced) => {
             let power = precedenced.into_precedence();
-            if power >= min_precedence {
-              Some(PrattRHS::Postfix(Precedenced::new((), power)))
-            } else {
-              None
-            }
+            min_precedence.admits(&power).then_some(TokRhs::Postfix)
           }
           PrattRHS::Infix(precedenced) => {
             let (infix, lpower) = precedenced.into_components();
-            let rpower = match infix {
-              PrattInfix::Left(_) => lpower.next(),
-              PrattInfix::Right(_) => lpower.prev(),
-              PrattInfix::Neither(_) => lpower.next(),
-            };
-
-            if lpower.lt(&min_precedence) || prev_op_is_neither.as_ref() == Some(&lpower) {
-              None
-            } else {
-              Some(PrattRHS::Infix(Precedenced::new(infix, rpower)))
-            }
+            (min_precedence.admits(&lpower) && prev_op_is_neither.as_ref() != Some(&lpower))
+              .then(|| TokRhs::Infix(infix, lpower))
           }
         })
       })?
@@ -198,16 +222,17 @@ where
       };
 
       match rhs {
-        PrattRHS::Postfix(_) => lhs = fold_postfix.fold_postfix(lhs, tok, self.emitter())?,
-        PrattRHS::Infix(infix) => {
-          let (infix, power) = infix.into_components();
+        TokRhs::Postfix => lhs = fold_postfix.fold_postfix(lhs, tok, self.emitter())?,
+        TokRhs::Infix(infix, lpower) => {
           let is_neither = matches!(infix, PrattInfix::Neither(_));
-          let lpower = if matches!(infix, PrattInfix::Right(_)) {
-            power.next()
+          let floor = if matches!(infix, PrattInfix::Right(_)) {
+            // Right-associative: the right operand admits this operator's own power.
+            PrattFloor::Inclusive(lpower.clone())
           } else {
-            power.prev()
+            // Left- and non-associative: the right operand stops strictly above it.
+            PrattFloor::Exclusive(lpower.clone())
           };
-          let Some(rhs) = self.pratt_in(power, fold_prefix, fold_infix, fold_postfix)? else {
+          let Some(rhs) = self.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
             self
               .session
               .emitter

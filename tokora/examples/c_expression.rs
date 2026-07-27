@@ -277,6 +277,26 @@ impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O,
   }
 }
 
+// The typed pratt driver's stalled-report exits: a report the driver acted on that consumed
+// nothing is a grammar bug, surfaced as the terminal end-of-expression error for the channel
+// that broke the contract — the LHS one for a prefix report, the RHS one for an infix/postfix
+// report — rather than ending the expression with a silent `Ok`.
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoLhs<O, Lang, Set>>
+  for CExprError
+{
+  fn from(_: tokora::error::UnexpectedEoLhs<O, Lang, Set>) -> Self {
+    CExprError::UnexpectedEot
+  }
+}
+
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoRhs<O, Lang, Set>>
+  for CExprError
+{
+  fn from(_: tokora::error::UnexpectedEoRhs<O, Lang, Set>) -> Self {
+    CExprError::UnexpectedEot
+  }
+}
+
 impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CExprError
 where
   L: tokora::Lexer<'inp>,
@@ -291,18 +311,7 @@ where
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Power(i32);
 
-impl PrattPower for Power {
-  fn next(&self) -> Self {
-    Power(self.0 + 1)
-  }
-  fn prev(&self) -> Self {
-    Power(self.0 - 1)
-  }
-}
-
-// Sentinel — must be below Power::default() (= Power(0)) so any real operator
-// beats it and the Pratt loop checkpoint-restores non-operator tokens.
-const SENTINEL: Power = Power(-1);
+impl PrattPower for Power {}
 
 const PREC_TERNARY: Power = Power(2); // ?: postfix (low precedence)
 const PREC_OR: Power = Power(3); // ||
@@ -353,12 +362,11 @@ enum BinOp {
 /// Tag passed from `parse_rhs` to `fold_postfix`.
 #[derive(Debug, Clone, Copy)]
 enum PostfixOp {
-  Inc,      // e++
-  Dec,      // e--
-  Index,    // e[i]  — fold_postfix will consume the index expr and `]`
-  Call,     // e(…)  — fold_postfix will consume args and `)`
-  Ternary,  // e ? t : f — fold_postfix will consume `t`, `:`, `f`
-  Sentinel, // not a real operator; pratt loop restores the checkpoint
+  Inc,     // e++
+  Dec,     // e--
+  Index,   // e[i]  — fold_postfix will consume the index expr and `]`
+  Call,    // e(…)  — fold_postfix will consume args and `)`
+  Ternary, // e ? t : f — fold_postfix will consume `t`, `:`, `f`
 }
 
 #[derive(Debug, Clone)]
@@ -545,10 +553,8 @@ where
     };
   }
 
-  let sentinel = PrattRHS::Postfix(Precedenced::new(PostfixOp::Sentinel, SENTINEL));
-
   match inp.next()? {
-    None => Ok(sentinel),
+    None => Ok(PrattRHS::End),
     Some(tok) => match tok.into_data() {
       // Infix operators (left-associative)
       Token::PipePipe => infix_l!(BinOp::Or, PREC_OR),
@@ -577,10 +583,9 @@ where
       Token::LParen => postfix!(PostfixOp::Call, PREC_POSTFIX),
       Token::Question => postfix!(PostfixOp::Ternary, PREC_TERNARY),
 
-      // Anything else is not an operator: return the sentinel.
-      // The Pratt loop saved a checkpoint before this call and will restore it,
-      // putting the token back into the stream.
-      _ => Ok(sentinel),
+      // Anything else is not an operator of this expression. The Pratt loop restores
+      // whatever this call consumed, putting the token back into the stream.
+      _ => Ok(PrattRHS::End),
     },
   }
 }
@@ -706,10 +711,6 @@ where
         otherwise,
       }))
     }
-
-    // The sentinel is never actually passed to fold_postfix; the Pratt engine
-    // checks the power first and restores the checkpoint when power < min_power.
-    PostfixOp::Sentinel => unreachable!("sentinel should never reach fold_postfix"),
   }
 }
 

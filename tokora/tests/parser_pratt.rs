@@ -243,8 +243,6 @@ enum BinOp {
   Div,
 }
 
-const SENTINEL: Power = Power(-1);
-
 /// LHS parser: numbers, unary minus, and grouped `(expr)`.
 fn comb_parse_lhs<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
@@ -273,7 +271,7 @@ where
   }
 }
 
-/// RHS parser: binary operators and a sentinel for non-operators.
+/// RHS parser: binary operators; anything else ends the expression.
 fn comb_parse_rhs<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
 ) -> Result<PrattRHS<BinOp, BinOp, BinOp, (), Power>, PrattError>
@@ -281,9 +279,8 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = PrattError>,
 {
-  let sentinel = PrattRHS::Postfix(Precedenced::new((), SENTINEL));
   match inp.next()? {
-    None => Ok(sentinel),
+    None => Ok(PrattRHS::End),
     Some(tok) => match tok.into_data() {
       Token::Plus => Ok(PrattRHS::Infix(Precedenced::new(
         PrattInfix::Left(BinOp::Add),
@@ -301,7 +298,7 @@ where
         PrattInfix::Left(BinOp::Div),
         PREC_PROD,
       ))),
-      _ => Ok(sentinel),
+      _ => Ok(PrattRHS::End),
     },
   }
 }
@@ -348,7 +345,7 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = PrattError>,
 {
-  Ok(operand) // sentinel; never actually reached at runtime
+  Ok(operand) // this grammar declares no postfix operator, so nothing folds here
 }
 
 /// Entry-point using the `pratt` combinator API.
@@ -461,18 +458,17 @@ where
   calc_token(inp)
 }
 
-/// Pins CURRENT WRONG behavior (issue #87): `preloaded` should equal `control` (both 3)
-/// once fixed — a parse result must be a function of the token stream, not of lookahead
-/// history.
+/// A parse result is a function of the token stream, not of lookahead history (issue #87).
 ///
 /// The SAME input and grammar parsed two ways: `control` never peeks before delegating
 /// to pratt (empty cache, the equivalence oracle); `preloaded` peeks a U3 window first
-/// (every token of `"1 + 2"` cached, hitting EOI). Today they diverge: the preloaded run
-/// silently truncates the expression to its LHS operand alone — `Ok`-shaped, no
-/// diagnostic on any channel, reachable from safe documented API use (any dispatcher
-/// that peeks before delegating to pratt).
+/// (every token of `"1 + 2"` cached, hitting EOI). These used to diverge — the preloaded
+/// run truncated to its LHS operand alone, `Ok`-shaped and with no diagnostic on any
+/// channel — because the RHS loop pre-gated on the scanner's frontier, which the peek had
+/// already moved to the end of the buffer while `+ 2` sat unconsumed in the cache. The
+/// loop now asks the RHS parser, which is the only thing that knows.
 #[test]
-fn lookahead_equivalence_diverges_when_the_cache_is_preloaded_through_eoi() {
+fn lookahead_equivalence_holds_when_the_cache_is_preloaded_through_eoi() {
   let control: i64 = Parser::new().apply(calc_token).parse_str("1 + 2").unwrap();
   let preloaded: i64 = Parser::new()
     .apply(calc_token_cache_preloaded_through_eoi)
@@ -484,15 +480,13 @@ fn lookahead_equivalence_diverges_when_the_cache_is_preloaded_through_eoi() {
     "the un-peeked control parses the whole expression"
   );
   assert_eq!(
-    preloaded, 1,
-    "pinned bug (issue #87): the preloaded run truncates to the LHS operand alone — the \
-     `is_eoi()` gate reads the scanner's frontier (already at EOI after the U3 fill), not \
-     whether the consumer still has cached tokens left to fold"
+    preloaded, 3,
+    "the preloaded run parses the same expression: a lookahead that reached the end of the \
+     buffer says nothing about whether this consumer still has operators to fold"
   );
-  assert_ne!(
+  assert_eq!(
     control, preloaded,
-    "pinned bug (issue #87): same input, same grammar, different lookahead history — a \
-     true equivalence break; fixing it must make these equal"
+    "same input, same grammar, different lookahead history — the equivalence must hold"
   );
 }
 
@@ -533,9 +527,8 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = PrattError>,
 {
-  let sentinel = PrattRHS::Postfix(Precedenced::new((), SENTINEL));
   match inp.next()? {
-    None => Ok(sentinel),
+    None => Ok(PrattRHS::End),
     Some(tok) => match tok.into_data() {
       Token::Star => Ok(PrattRHS::Infix(Precedenced::new(
         PrattInfix::Right(BinOp::Mul),
@@ -545,7 +538,7 @@ where
         PrattInfix::Left(BinOp::Add),
         DENSE_ADD,
       ))),
-      _ => Ok(sentinel),
+      _ => Ok(PrattRHS::End),
     },
   }
 }
@@ -569,24 +562,23 @@ where
   .parse_input(inp)
 }
 
-/// Pins CURRENT WRONG behavior (issue #93, shares the root cause tracked in #87): once
-/// fixed, this should read `10` (`(2*3)+4`, the correct precedence-respecting parse).
+/// A right-associative operator's right operand stops at that operator's own power — no
+/// weaker operator gets in (issue #93, shares the root cause tracked in #87).
 ///
-/// `*` = Right(3), `+` = Left(2) — dense adjacent levels. The right-associative
-/// recursion floor is computed as `lpower.prev()` (admits `power - 1`) instead of
-/// `lpower` (admits `>= power`), so after binding `*` the recursive RHS call admits `+`
-/// — one whole level lower — INTO the right operand: `2 * 3 + 4` parses as `2 * (3 + 4)`
-/// = 14, not `(2 * 3) + 4` = 10.
+/// `*` = Right(3), `+` = Left(2) — dense adjacent levels. The right-associative recursion
+/// floor used to be computed as `lpower.prev()`, which admits `power - 1`, so after
+/// binding `*` the recursive RHS call admitted `+` — one whole level lower — INTO the
+/// right operand and `2 * 3 + 4` parsed as `2 * (3 + 4)` = 14. Right-associativity means
+/// the floor admits the operator's *own* power (so a second `*` binds inward), not one
+/// below it.
 #[test]
-fn dense_level_right_assoc_floor_binds_a_lower_operator_into_the_rhs() {
+fn dense_level_right_assoc_floor_keeps_lower_operator_out_of_the_rhs() {
   let r: i64 = Parser::new()
     .apply(dense_parse_expr)
     .parse_str("2 * 3 + 4")
     .unwrap();
   assert_eq!(
-    r, 14,
-    "pinned bug (issue #93): `+` (one level below `*`) binds INTO `*`'s right operand — \
-     2*(3+4), not (2*3)+4; the fix (right floor = lpower, not lpower.prev()) flips this \
-     to 10"
+    r, 10,
+    "`+` is one level below `*`, so it must fold the whole `2 * 3` — (2*3)+4, not 2*(3+4)"
   );
 }

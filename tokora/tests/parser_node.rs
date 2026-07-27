@@ -166,6 +166,23 @@ impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O,
   }
 }
 
+// The typed pratt driver's stalled-report exits, one per report channel.
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoLhs<O, Lang, Set>>
+  for TestErr
+{
+  fn from(_: tokora::error::UnexpectedEoLhs<O, Lang, Set>) -> Self {
+    Self::Unexpected
+  }
+}
+
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoRhs<O, Lang, Set>>
+  for TestErr
+{
+  fn from(_: tokora::error::UnexpectedEoRhs<O, Lang, Set>) -> Self {
+    Self::Unexpected
+  }
+}
+
 impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for TestErr
 where
   L: tokora::Lexer<'inp>,
@@ -463,8 +480,6 @@ fn node_opt_absent_records_nothing_present_wraps() {
 
 const PREC_SUM: i64 = 1;
 const PREC_PROD: i64 = 2;
-/// Below the default `min_precedence` (0), so a non-operator token is rolled back.
-const SENTINEL: i64 = -1;
 
 fn pratt_lhs(inp: &mut Ir<'_, '_, '_>) -> Result<PrattLHS<i64, (), i64>, TestErr> {
   match inp.next()? {
@@ -476,14 +491,13 @@ fn pratt_lhs(inp: &mut Ir<'_, '_, '_>) -> Result<PrattLHS<i64, (), i64>, TestErr
 }
 
 fn pratt_rhs(inp: &mut Ir<'_, '_, '_>) -> Result<PrattRHS<u8, u8, u8, (), i64>, TestErr> {
-  let sentinel = PrattRHS::Postfix(Precedenced::new((), SENTINEL));
   Ok(match inp.next()? {
     Some(tok) => match tok.data().0 {
       op @ b'+' => PrattRHS::Infix(Precedenced::new(PrattInfix::Left(op), PREC_SUM)),
       op @ b'*' => PrattRHS::Infix(Precedenced::new(PrattInfix::Left(op), PREC_PROD)),
-      _ => sentinel,
+      _ => PrattRHS::End,
     },
-    None => sentinel,
+    None => PrattRHS::End,
   })
 }
 

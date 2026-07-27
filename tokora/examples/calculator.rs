@@ -190,14 +190,7 @@ impl From<UnexpectedEoRhs> for CalcError {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Power(i32);
 
-impl PrattPower for Power {
-  fn next(&self) -> Self {
-    Power(self.0 + 1)
-  }
-  fn prev(&self) -> Self {
-    Power(self.0 - 1)
-  }
-}
+impl PrattPower for Power {}
 
 // PREC_PAREN is below Power::default() (= Power(0)).
 // When `(` is a prefix, pratt_in is called with min_power = Power(-1).
