@@ -61,6 +61,8 @@ use super::Emitter;
   note = "one generic impl covers every delimiter pair, user-defined ones included: \
           `impl<'i, L: Lexer<'i>, Lang: ?Sized> FromUnclosed<'i, L, Lang> for {Self} \
           {{ fn from_unclosed<D>(e: Unclosed<D, L::Span, Lang>) -> Self {{ /* … */ }} }}`",
+  note = "pin the span if your error stores it — an opaque `L::Span` has no route to a \
+          concrete span type: `L: Lexer<'i, Span = SimpleSpan>`",
   note = "match on `Unclosed::name_ref` to discriminate the pair — `\"()\"`, `\"<>\"`, `\"[]\"`, \
           `\"{{}}\"` for the built-ins — and keep a catch-all arm: `D` is generic, so no arm \
           set is exhaustive"

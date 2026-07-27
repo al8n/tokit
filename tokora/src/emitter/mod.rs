@@ -747,7 +747,9 @@ where
           {{ fn from(e: UnexpectedEot<O, Lang, Set>) -> Self {{ /* … */ }} }}`",
   note = "the delimiter half is one generic impl: \
           `impl<'i, L: Lexer<'i>, Lang: ?Sized> FromUnclosed<'i, L, Lang> for {Self} \
-          {{ fn from_unclosed<D>(e: Unclosed<D, L::Span, Lang>) -> Self {{ /* … */ }} }}`"
+          {{ fn from_unclosed<D>(e: Unclosed<D, L::Span, Lang>) -> Self {{ /* … */ }} }}`",
+  note = "pin the span if your error stores it — an opaque `L::Span` has no route to a \
+          concrete span type: `L: Lexer<'i, Span = SimpleSpan>`"
 )]
 pub trait FromTokenErrors<'inp, L, Lang: ?Sized = ()>:
   From<UnexpectedEot<<L as Lexer<'inp>>::Offset, Lang>>

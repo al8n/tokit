@@ -23,6 +23,10 @@ compiler elaborates the rest.
    method bound moves with it. Type-level per-pair `From` impls still work alongside the
    umbrella, and remain the documented way to discriminate at the type level.
 
+   **Migration:** delete the per-delimiter `From<Unclosed<…>>` bounds from your where-clauses
+   — a residual one now fails as a bare `E0277` with no note, because `From` is a foreign
+   trait we cannot annotate.
+
 3. **The `_of` language twins are gone — 167 public items removed.** Every `X::parse_of` is
    now `X::parse`, inferring `Lang` from the input. This covers 148 punctuator methods
    (74 markers × 2), `Keyword` ×8, `Ident` ×2, `Any` ×3, six free functions, and two more per
