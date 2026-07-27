@@ -127,8 +127,10 @@ pub trait ComposableEmitter<'inp, L, Lang: ?Sized = ()>:
 
 It is blanket-implemented for every emitter that satisfies the whole family, so a bound of
 `E: ComposableEmitter` is interchangeable with spelling out the six sub-traits — and its
-context-side twin, [`ParseCtx`](crate::ParseCtx), collapses a whole parse context to one bound in
-the same way. The four capabilities *outside* the bundle
+context-side twin, [`ComposableParseContext`](crate::ComposableParseContext), collapses a whole parse context to one bound in
+the same way — and goes one rung further, riding
+[`FromTokenErrors`](crate::emitter::FromTokenErrors) on the emitter's `Error` so the leaf `From`
+conversions come with it. The four capabilities *outside* the bundle
 ([`TooManyEmitter`](crate::emitter::TooManyEmitter), the missing-separator pair,
 [`PrattEmitter`](crate::emitter::PrattEmitter), [`CstEmitter`](crate::emitter::CstEmitter)) are the
 less-common ones, named on demand by the parsers that use them; the pre-built emitters implement all
@@ -265,6 +267,7 @@ so nothing but core tokora types is in play.
 # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Plus }
@@ -379,5 +382,5 @@ The emitter is one of the four seams Part III opens onto the same engine:
   or text-shaped, owned or borrowed: the [Source, Slice & storage backends](super::arch_source_slice)
   chapter.
 - **The flat catalog** — every emitter, capability sub-trait, and read-side type as terse reference
-  entries, plus the error taxonomy and the `ParseContext` / `ParseCtx` bundle: the
+  entries, plus the error taxonomy and the `ParseContext` / `ComposableParseContext` bundle: the
   [errors, emitters & context reference](super::ref_errors_emitters_context).

@@ -60,6 +60,18 @@ impl<D, Lang: ?Sized> From<Unclosed<D, SimpleSpan, Lang>> for RE {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for RE
+where
+  L: tokora::Lexer<'inp, Span = SimpleSpan>,
+{
+  fn from_unclosed<D>(err: Unclosed<D, SimpleSpan, Lang>) -> Self {
+    RE::Unclosed {
+      name: err.name_ref().to_string(),
+      start: err.span().start(),
+    }
+  }
+}
+
 impl From<()> for RE {
   fn from(_: ()) -> Self {
     RE::Other
@@ -509,6 +521,21 @@ impl SeqE {
 // The migration arm, span-specific so the opener offset is captured for the asserts.
 impl<D, Lang: ?Sized> From<Unclosed<D, SimpleSpan, Lang>> for SeqE {
   fn from(err: Unclosed<D, SimpleSpan, Lang>) -> Self {
+    SeqE {
+      kind: SeqKind::Unclosed {
+        name: err.name_ref().to_string(),
+        start: err.span().start(),
+      },
+      seq: SEQ.fetch_add(1, Ordering::Relaxed),
+    }
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for SeqE
+where
+  L: tokora::Lexer<'inp, Span = SimpleSpan>,
+{
+  fn from_unclosed<D>(err: Unclosed<D, SimpleSpan, Lang>) -> Self {
     SeqE {
       kind: SeqKind::Unclosed {
         name: err.name_ref().to_string(),

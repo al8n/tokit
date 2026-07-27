@@ -194,6 +194,14 @@ impl<D, S, Lang: ?Sized> From<tokora::error::Unclosed<D, S, Lang>> for PinErr {
     PinErr::Other
   }
 }
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for PinErr
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
+    PinErr::Other
+  }
+}
 impl<'a, S, Lang: ?Sized> From<tokora::error::token::UnexpectedToken<'a, Token, TokenKind, S, Lang>>
   for PinErr
 {
@@ -201,8 +209,10 @@ impl<'a, S, Lang: ?Sized> From<tokora::error::token::UnexpectedToken<'a, Token, 
     PinErr::Other
   }
 }
-impl<O, Lang: ?Sized> From<tokora::error::UnexpectedEot<O, Lang>> for PinErr {
-  fn from(_: tokora::error::UnexpectedEot<O, Lang>) -> Self {
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>>
+  for PinErr
+{
+  fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self {
     PinErr::Other
   }
 }

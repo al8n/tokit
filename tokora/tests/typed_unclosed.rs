@@ -8,6 +8,7 @@ use tokora::{
   Accumulator, FatalContext, InputRef, Parse, ParseContext, ParseInput, Parser, SimpleSpan,
   cache::Peeked,
   delimiter::Delimiter,
+  emitter::FromUnclosed,
   error::{
     Unclosed, UnexpectedEot,
     syntax::{FullContainer, MissingSyntax, TooFew},
@@ -66,14 +67,32 @@ impl From<Unclosed<CustomMarker, SimpleSpan, CustomLang>> for TypedError {
   }
 }
 
+// The umbrella conversion the delimited drivers now demand. `from_unclosed` is generic over
+// the pair, so the typed arm is selected by the runtime name the `Unclosed` carries; the
+// catch-all is mandatory because no arm set over a generic `D` is exhaustive.
+impl<'inp, L> tokora::emitter::FromUnclosed<'inp, L, CustomLang> for TypedError
+where
+  L: tokora::Lexer<'inp, Span = SimpleSpan>,
+{
+  fn from_unclosed<D>(err: Unclosed<D, SimpleSpan, CustomLang>) -> Self {
+    let (span, name) = err.into_components();
+    match name.as_ref() {
+      "[]" => Self::Bracket(Unclosed::of(span, name)),
+      "{}" => Self::Brace(Unclosed::of(span, name)),
+      "custom brackets" => Self::CustomMarker(Unclosed::of(span, name)),
+      _ => Self::Other,
+    }
+  }
+}
+
 impl<'inp, T, K: Clone, S> From<UnexpectedToken<'inp, T, K, S, CustomLang>> for TypedError {
   fn from(_: UnexpectedToken<'inp, T, K, S, CustomLang>) -> Self {
     Self::Other
   }
 }
 
-impl<O> From<UnexpectedEot<O, CustomLang>> for TypedError {
-  fn from(_: UnexpectedEot<O, CustomLang>) -> Self {
+impl<O, Set: Clone + 'static> From<UnexpectedEot<O, CustomLang, Set>> for TypedError {
+  fn from(_: UnexpectedEot<O, CustomLang, Set>) -> Self {
     Self::Other
   }
 }
@@ -201,7 +220,7 @@ fn bare_brace<'inp>(
 #[test]
 fn bare_builtin_markers_preserve_typed_unclosed_conversions_under_custom_language() {
   let bracket =
-    Parser::with_parser_of::<'_, TestLexer<'_>, i64, TypedError, _, CustomLang>(bare_bracket)
+    Parser::with_parser::<'_, TestLexer<'_>, i64, TypedError, _, CustomLang>(bare_bracket)
       .parse_str("[1");
   match bracket {
     Err(TypedError::Bracket(err)) => assert_eq!(err.name_ref(), "[]"),
@@ -209,9 +228,8 @@ fn bare_builtin_markers_preserve_typed_unclosed_conversions_under_custom_languag
     Ok(value) => panic!("expected unclosed bracket, parsed {value}"),
   }
 
-  let brace =
-    Parser::with_parser_of::<'_, TestLexer<'_>, i64, TypedError, _, CustomLang>(bare_brace)
-      .parse_str("{1");
+  let brace = Parser::with_parser::<'_, TestLexer<'_>, i64, TypedError, _, CustomLang>(bare_brace)
+    .parse_str("{1");
   match brace {
     Err(TypedError::Brace(err)) => assert_eq!(err.name_ref(), "{}"),
     Err(other) => panic!("expected Unclosed<Brace, _, CustomLang>, got {other:?}"),
@@ -221,7 +239,7 @@ fn bare_builtin_markers_preserve_typed_unclosed_conversions_under_custom_languag
 
 #[test]
 fn bare_bracket_many_builder_preserves_typed_unclosed_under_custom_language() {
-  let result = Parser::with_parser_of::<'_, TestLexer<'_>, Vec<i64>, TypedError, _, CustomLang>(
+  let result = Parser::with_parser::<'_, TestLexer<'_>, Vec<i64>, TypedError, _, CustomLang>(
     bare_bracket_many,
   )
   .parse_str("[1 2");
@@ -235,7 +253,7 @@ fn bare_bracket_many_builder_preserves_typed_unclosed_under_custom_language() {
 
 #[test]
 fn non_clone_custom_marker_preserves_typed_unclosed_in_delimited_many() {
-  let result = Parser::with_parser_of::<'_, TestLexer<'_>, Vec<i64>, TypedError, _, CustomLang>(
+  let result = Parser::with_parser::<'_, TestLexer<'_>, Vec<i64>, TypedError, _, CustomLang>(
     custom_marker_many,
   )
   .parse_str("[1 2");
@@ -251,4 +269,54 @@ fn non_clone_custom_marker_preserves_typed_unclosed_in_delimited_many() {
 fn map_parser_mut_preserves_non_clone_custom_marker_type() {
   let mut delimited = DelimitedBy::<_, CustomMarker>::new(());
   let _: DelimitedBy<&mut (), CustomMarker> = delimited.map_parser_mut(|parser| parser);
+}
+
+/// The three per-pair `From<Unclosed<D, …>>` impls above coexist with the umbrella
+/// `FromUnclosed` impl, and each is still directly selectable. `FromUnclosed`'s docs promise
+/// exactly this ("a type that also wants type-level discrimination for a specific pair can
+/// still write `impl From<Unclosed<Paren, …>>` alongside this impl; the two do not overlap"),
+/// and the drivers now route through the umbrella — so without this the promise would be
+/// unexercised and the three impls would read as dead code.
+#[test]
+fn per_pair_from_impls_coexist_with_the_umbrella() {
+  let span = SimpleSpan::new(3, 4);
+
+  // Type-level: the pair is chosen by the `Unclosed`'s type parameter.
+  let typed: TypedError = Unclosed::<Bracket, _, CustomLang>::of(span, "[]".into()).into();
+  assert!(matches!(typed, TypedError::Bracket(_)));
+  let typed: TypedError = Unclosed::<Brace, _, CustomLang>::of(span, "{}".into()).into();
+  assert!(matches!(typed, TypedError::Brace(_)));
+  let typed: TypedError =
+    Unclosed::<CustomMarker, _, CustomLang>::of(span, "custom brackets".into()).into();
+  assert!(matches!(typed, TypedError::CustomMarker(_)));
+
+  // Umbrella: the same three pairs, chosen by the runtime name, plus the mandatory
+  // catch-all for a pair the arm set does not name.
+  let via = <TypedError as FromUnclosed<'_, TestLexer<'_>, CustomLang>>::from_unclosed(Unclosed::<
+    Bracket,
+    _,
+    CustomLang,
+  >::of(
+    span,
+    "[]".into(),
+  ));
+  assert!(matches!(via, TypedError::Bracket(_)));
+  let via = <TypedError as FromUnclosed<'_, TestLexer<'_>, CustomLang>>::from_unclosed(Unclosed::<
+    CustomMarker,
+    _,
+    CustomLang,
+  >::of(
+    span,
+    "custom brackets".into(),
+  ));
+  assert!(matches!(via, TypedError::CustomMarker(_)));
+  let via = <TypedError as FromUnclosed<'_, TestLexer<'_>, CustomLang>>::from_unclosed(Unclosed::<
+    Bracket,
+    _,
+    CustomLang,
+  >::of(
+    span,
+    "unnamed pair".into(),
+  ));
+  assert!(matches!(via, TypedError::Other));
 }

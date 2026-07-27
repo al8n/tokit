@@ -3,9 +3,8 @@ use std::vec::Vec;
 use generic_arraydeque::typenum::U1;
 
 use crate::{
-  Accumulator, Decision, Emitter, ErrorOf, Lexer, ParseCtx, ParseInput, Window,
+  Accumulator, ComposableParseContext, Decision, Emitter, ErrorOf, Lexer, ParseInput, Window,
   cache::{Peeked, PeekedTokenExt},
-  error::UnexpectedEot,
   input::InputRef,
   parser::Action,
   punct::Punctuator,
@@ -16,7 +15,7 @@ use crate::{
 /// no next token to offer.
 ///
 /// This is the native form of the closure adapter the smear-side originals wrapped
-/// around [`Peeked`]: naming the [`Decision`] once lets [`separated1`] and [`list_of`]
+/// around [`Peeked`]: naming the [`Decision`] once lets [`separated1`] and [`list`]
 /// hand their caller's bare token predicate straight to the while-drivers.
 struct WhileNext<F>(F);
 
@@ -44,7 +43,7 @@ where
 #[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
 pub type Separated1Of<'inp, L, Ctx, Lang, T> = Result<Vec<T>, ErrorOf<'inp, L, Ctx, Lang>>;
 
-/// The result the parser [`list_of`] builds yields: the collected items, or the
+/// The result the parser [`list`] builds yields: the collected items, or the
 /// propagated error.
 #[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
 pub type ListOf<'inp, L, Ctx, Lang, T> = Result<Vec<T>, ErrorOf<'inp, L, Ctx, Lang>>;
@@ -77,7 +76,8 @@ pub type ListOf<'inp, L, Ctx, Lang, T> = Result<Vec<T>, ErrorOf<'inp, L, Ctx, La
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
@@ -152,14 +152,14 @@ pub fn separated1<'inp, Sep, L, Ctx, Lang, P, T, Peek>(
 ) -> impl for<'c> FnMut(&mut InputRef<'inp, 'c, L, Ctx, Lang>) -> Separated1Of<'inp, L, Ctx, Lang, T>
 where
   L: Lexer<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Sep: Punctuator<'inp, L, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang>,
   Peek: FnMut(&L::Token) -> bool,
   // The `separated_while` engine surfaces a terminal scanner stop at its separator/decision gates
-  // as this end-of-input error.
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>,
+  // as an end-of-input error; the bundle's `From<UnexpectedEot<L::Offset, Lang>>` absorbs it, so
+  // that conversion is no longer restated here.
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang>| {
     item
@@ -196,7 +196,8 @@ where
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
@@ -242,14 +243,14 @@ where
 /// #     None => Err(Error),
 /// #   }
 /// # }
-/// use tokora::{Parse, Parser, parser::list_of};
+/// use tokora::{Parse, Parser, parser::list};
 ///
 /// // Zero-or-more identifiers, stopping at the `}` — which is left in place, so the
 /// // caller's next step still sees it.
 /// fn fields<'a>(
 ///   inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>,
 /// ) -> Result<Vec<char>, Error> {
-///   let items = list_of(ident, |tok| matches!(tok, Tok::CloseBrace))(inp)?;
+///   let items = list(ident, |tok| matches!(tok, Tok::CloseBrace))(inp)?;
 ///   let brace = inp.try_expect(|t| matches!(t.data, Tok::CloseBrace))?;
 ///   assert!(brace.is_some(), "the stop token was left for the caller");
 ///   Ok(items)
@@ -262,19 +263,19 @@ where
 #[inline]
 // STAYS COMPLETE-TYPED (0.3.0, R1.7): same engine class as `separated1` — the body
 // drives `separated_while`, so the closure stays Complete-typed until that engine relaxes.
-pub fn list_of<'inp, L, Ctx, Lang, P, T, Until>(
+pub fn list<'inp, L, Ctx, Lang, P, T, Until>(
   mut item: P,
   mut until: Until,
 ) -> impl for<'c> FnMut(&mut InputRef<'inp, 'c, L, Ctx, Lang>) -> ListOf<'inp, L, Ctx, Lang, T>
 where
   L: Lexer<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   P: ParseInput<'inp, L, T, Ctx, Lang>,
   Until: FnMut(&L::Token) -> bool,
-  // The `repeated_while` engine surfaces a terminal scanner stop at its decision gate as this
-  // end-of-input error.
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>,
+  // The `repeated_while` engine surfaces a terminal scanner stop at its decision gate as an
+  // end-of-input error; the bundle's `From<UnexpectedEot<L::Offset, Lang>>` absorbs it, so that
+  // conversion is no longer restated here.
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang>| {
     item

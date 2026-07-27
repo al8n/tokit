@@ -4,7 +4,7 @@ use crate::{
   TryParseInput,
   container::Container as ContainerT,
   delimiter::Delimiter,
-  emitter::{FullContainerEmitter, UnclosedEmitter},
+  emitter::{FromUnclosed, FullContainerEmitter, UnclosedEmitter},
   error::Unclosed,
   span::Span as _,
   try_parse_input::{Accept, Decline},
@@ -41,7 +41,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, Lang>,
     Ctx::Emitter: FullContainerEmitter<'inp, L, Lang> + UnclosedEmitter<'inp, L, Lang>,
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-      From<UnexpectedEot<L::Offset, Lang>> + From<Unclosed<Delim, L::Span, Lang>>,
+      From<UnexpectedEot<L::Offset, Lang>> + FromUnclosed<'inp, L, Lang>,
     Container: Default + ContainerT<O> + DelimiterHandler<'inp, L>,
   {
     // Sync the input to the next token boundary, any lexer errors will be emitted during this process.

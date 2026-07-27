@@ -221,7 +221,7 @@ fn fail_try_parse_input_returns_error() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
   {
-    fail::<_, _, i64, _>(|| ()).try_parse_input(inp)
+    fail::<_, _, i64, _, _>(|| ()).try_parse_input(inp)
   }
 
   assert!(Parser::new().apply(parse).parse_str("42").is_err());
@@ -249,7 +249,7 @@ fn fail_with_try_parse_input_returns_error() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
   {
-    fail_with::<_, _, i64, _>(|_state| ()).try_parse_input(inp)
+    fail_with::<_, _, i64, _, _>(|_state| ()).try_parse_input(inp)
   }
 
   assert!(Parser::new().apply(parse).parse_str("42").is_err());

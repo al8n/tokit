@@ -128,7 +128,6 @@ where
   P: ParseChoice<'inp, L, O, Ctx, Lang, Id = Branch<N>>,
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
-  <L::Token as Token<'inp>>::Kind: 'static,
   <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
     + From<UnexpectedEot<L::Offset, Lang, <L::Token as Token<'inp>>::Kind>>,
   Lang: ?Sized,

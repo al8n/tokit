@@ -155,8 +155,17 @@ impl From<()> for TestError {
   }
 }
 
-impl<S, Lang: ?Sized> From<UnexpectedEot<S, Lang>> for TestError {
-  fn from(_: UnexpectedEot<S, Lang>) -> Self {
+impl<S, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<S, Lang, Set>> for TestError {
+  fn from(_: UnexpectedEot<S, Lang, Set>) -> Self {
+    TestError
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for TestError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     TestError
   }
 }
@@ -1008,7 +1017,7 @@ fn any_of_basic() {
 }
 
 #[test]
-fn any_spanned_of() {
+fn any_spanned_on_punctuation() {
   fn parse<'inp, Ctx>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
   ) -> Result<Spanned<Token, tokora::SimpleSpan>, TestError>
@@ -1016,14 +1025,14 @@ fn any_spanned_of() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
-    Any::spanned_of().parse_input(inp)
+    Any::spanned().parse_input(inp)
   }
   let result = Parser::new().apply(parse).parse_str("+").unwrap();
   assert!(matches!(result.data(), Token::Plus));
 }
 
 #[test]
-fn any_sliced_of() {
+fn any_sliced_on_punctuation() {
   fn parse<'inp, Ctx>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
   ) -> Result<Sliced<Token, &'inp str>, TestError>
@@ -1031,14 +1040,14 @@ fn any_sliced_of() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
-    Any::sliced_of().parse_input(inp)
+    Any::sliced().parse_input(inp)
   }
   let result = Parser::new().apply(parse).parse_str("+").unwrap();
   assert_eq!(*result.slice_ref(), "+");
 }
 
 #[test]
-fn any_located_of() {
+fn any_located_on_punctuation() {
   fn parse<'inp, Ctx>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
   ) -> Result<tokora::Located<Token, tokora::SimpleSpan, &'inp str>, TestError>
@@ -1046,7 +1055,7 @@ fn any_located_of() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
-    Any::located_of().parse_input(inp)
+    Any::located().parse_input(inp)
   }
   let result = Parser::new().apply(parse).parse_str("+").unwrap();
   assert!(matches!(*result, Token::Plus));
@@ -1271,7 +1280,7 @@ fn try_expect_accept() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
     let mut p =
-      tokora::parser::try_expect::<_, TestLexer, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      tokora::parser::try_expect::<_, TestLexer, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let result = p.try_parse_input(inp)?;
     Ok(matches!(result, ParseAttempt::Accept(_)))
   }
@@ -1287,7 +1296,7 @@ fn try_expect_decline() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
     let mut p =
-      tokora::parser::try_expect::<_, TestLexer, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      tokora::parser::try_expect::<_, TestLexer, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let result = p.try_parse_input(inp)?;
     Ok(matches!(result, ParseAttempt::Decline))
   }
@@ -1303,7 +1312,7 @@ fn try_expect_eoi_decline() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
     let mut p =
-      tokora::parser::try_expect::<_, TestLexer, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      tokora::parser::try_expect::<_, TestLexer, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let result = p.try_parse_input(inp)?;
     Ok(matches!(result, ParseAttempt::Decline))
   }
@@ -1320,7 +1329,8 @@ fn try_expect_spanned_accept() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
-    let p = tokora::parser::try_expect::<_, TestLexer, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+    let p =
+      tokora::parser::try_expect::<_, TestLexer, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     // Use &Expect which implements TryParseInput for Spanned
     let result = (&p).try_parse_input(inp)?;
     Ok(matches!(result, ParseAttempt::Accept(_)))
@@ -1336,7 +1346,8 @@ fn try_expect_spanned_decline() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
-    let p = tokora::parser::try_expect::<_, TestLexer, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+    let p =
+      tokora::parser::try_expect::<_, TestLexer, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let result = (&p).try_parse_input(inp)?;
     Ok(matches!(result, ParseAttempt::Decline))
   }
@@ -1353,7 +1364,8 @@ fn try_expect_spanned_eoi() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
-    let p = tokora::parser::try_expect::<_, TestLexer, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+    let p =
+      tokora::parser::try_expect::<_, TestLexer, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let result = (&p).try_parse_input(inp)?;
     Ok(matches!(result, ParseAttempt::Decline))
   }
@@ -1361,10 +1373,10 @@ fn try_expect_spanned_eoi() {
   assert!(r.unwrap());
 }
 
-// ── expect_of / try_expect_of ───────────────────────────────────────────
+// ── expect / try_expect ───────────────────────────────────────────
 
 #[test]
-fn expect_of_match() {
+fn expect_match_lang_named() {
   fn parse<'inp, Ctx>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
   ) -> Result<Token, TestError>
@@ -1372,7 +1384,7 @@ fn expect_of_match() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
-    tokora::parser::expect_of::<_, TestLexer, Ctx, ()>(|t: &Token| {
+    tokora::parser::expect::<_, TestLexer, Ctx, ()>(|t: &Token| {
       if matches!(t, Token::Num(_)) {
         Ok(())
       } else {
@@ -1386,15 +1398,14 @@ fn expect_of_match() {
 }
 
 #[test]
-fn try_expect_of_accept() {
+fn try_expect_accept_lang_named() {
   fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<bool, TestError>
   where
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
   {
-    let mut p = tokora::parser::try_expect_of::<_, TestLexer, Ctx, ()>(|t: &Token| {
-      matches!(t, Token::Num(_))
-    });
+    let mut p =
+      tokora::parser::try_expect::<_, TestLexer, Ctx, ()>(|t: &Token| matches!(t, Token::Num(_)));
     let result = p.try_parse_input(inp)?;
     Ok(matches!(result, ParseAttempt::Accept(_)))
   }

@@ -16,8 +16,8 @@ use tokora::{
   Token as TokenT, TryParseInput,
   cache::Peeked,
   emitter::{
-    FullContainerEmitter, SeparatedEmitter, UnclosedEmitter, UnexpectedLeadingSeparatorEmitter,
-    UnexpectedTrailingSeparatorEmitter,
+    FromUnclosed, FullContainerEmitter, SeparatedEmitter, UnclosedEmitter,
+    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
   },
   error::{
     Unclosed, UnexpectedEot,
@@ -95,6 +95,34 @@ impl From<Option<Spanned<ParseFloatError>>> for JsonError<'_> {
 impl From<()> for JsonError<'_> {
   fn from(_: ()) -> Self {
     JsonError::Other("unknown error")
+  }
+}
+
+// One umbrella conversion covers every delimiter pair. `from_unclosed` is generic over the
+// pair, so the typed arm is chosen by the runtime name the `Unclosed` carries; the catch-all
+// is mandatory — over a generic `D` no arm set is exhaustive — and must diagnose, not panic.
+impl<'inp, L> FromUnclosed<'inp, L> for JsonError<'_>
+where
+  L: tokora::Lexer<'inp, Span = tokora::SimpleSpan>,
+{
+  fn from_unclosed<D>(err: Unclosed<D, tokora::SimpleSpan>) -> Self {
+    let (span, name) = err.into_components();
+    match name.as_ref() {
+      "[]" => JsonError::UnclosedBracket(Unclosed::of(span, name)),
+      "{}" => JsonError::UnclosedBrace(Unclosed::of(span, name)),
+      _ => JsonError::Other("unclosed delimiter"),
+    }
+  }
+}
+
+// The committed dispatch drivers raise the same end-of-input carrying their `TokenKind`
+// classification table. `JsonError::Eot` holds the default expected-set spelling — a
+// `Set`-generic impl would overlap the derived `From<UnexpectedEot>` above — so this arm
+// re-spells the diagnostic at the default set. The position survives the crossing because
+// `offset`/`name`/`hint` are readable at every `Set`; only the table is dropped.
+impl From<UnexpectedEot<usize, (), TokenKind>> for JsonError<'_> {
+  fn from(err: UnexpectedEot<usize, (), TokenKind>) -> Self {
+    JsonError::Eot(UnexpectedEot::eot(err.offset()))
   }
 }
 
@@ -482,7 +510,7 @@ where
     + UnexpectedTrailingSeparatorEmitter<'inp, JsonLexer<'inp>>,
 {
   string
-    .then_ignore(Colon::parse_of)
+    .then_ignore(Colon::parse)
     .then(json_value::<Ctx>)
     .parse_input(inp)
 }
@@ -617,8 +645,24 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+  use super::{JsonError, TokenKind};
+  use tokora::error::UnexpectedEot;
+
   #[test]
   fn test_example() {
     super::main();
+  }
+
+  // The `Kind`-table spelling of end-of-input reaches `JsonError` with its position intact.
+  // Run with `cargo test --example json`: a bare `cargo test` builds examples but does not
+  // select their unit tests.
+  #[test]
+  fn kind_table_end_of_input_keeps_its_offset() {
+    let raised: UnexpectedEot<usize, (), TokenKind> =
+      UnexpectedEot::eot_expected_one_of(42, &[TokenKind::Bool, TokenKind::Null]);
+    match JsonError::from(raised) {
+      JsonError::Eot(eot) => assert_eq!(eot.offset(), 42),
+      other => panic!("expected the end-of-input arm, got {other:?}"),
+    }
   }
 }

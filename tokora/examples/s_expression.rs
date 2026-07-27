@@ -171,6 +171,26 @@ impl<'inp> From<UnexpectedTokenOf<'inp, SExprLexer<'inp>>> for SExprError {
   }
 }
 
+// The token-level bundle the entry points require: one `Set`-generic end-of-input impl covers
+// both the default expected-set spelling and the `Kind`-table one the committed dispatch
+// drivers raise, and one generic `FromUnclosed` covers every delimiter pair.
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>>
+  for SExprError
+{
+  fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self {
+    SExprError::UnexpectedEot
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for SExprError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
+    SExprError::UnexpectedEot
+  }
+}
+
 // ── AST ───────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]

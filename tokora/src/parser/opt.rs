@@ -1,5 +1,5 @@
 use crate::{
-  ErrorOf, Lexer, ParseCtx, TryParseInput,
+  ComposableParseContext, ErrorOf, Lexer, TryParseInput,
   input::{Completeness, InputRef},
 };
 
@@ -28,7 +28,8 @@ pub type OptOf<'inp, L, Ctx, Lang, O> = Result<Option<O>, ErrorOf<'inp, L, Ctx, 
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
@@ -93,7 +94,7 @@ pub fn opt<'inp, L, Ctx, Lang, P, O, Cmpl>(
 ) -> impl for<'c> FnMut(&mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>) -> OptOf<'inp, L, Ctx, Lang, O>
 where
   L: Lexer<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   P: TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
   Cmpl: Completeness,

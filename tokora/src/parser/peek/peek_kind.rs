@@ -1,4 +1,4 @@
-use crate::{ErrorOf, Lexer, ParseCtx, Token, error::UnexpectedEot, input::InputRef};
+use crate::{ComposableParseContext, ErrorOf, Lexer, Token, input::InputRef};
 
 /// The result [`peek_kind`] returns: the next token's kind, `None` at end of input, or
 /// the propagated error.
@@ -24,7 +24,8 @@ pub type PeekedKind<'inp, L, Ctx, Lang = ()> =
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
@@ -95,9 +96,8 @@ pub fn peek_kind<'inp, L, Ctx, Lang>(
 ) -> PeekedKind<'inp, L, Ctx, Lang>
 where
   L: Lexer<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>,
 {
   let mut kind = None;
   // `try_expect_or_stop` with an always-decline predicate: it captures the next token's

@@ -158,7 +158,19 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// - Must be `Debug` for error messages
   /// - Must be `PartialEq` and `Eq` for comparisons in parsers
   /// - Must be `Hash` for use in hash-based collections
-  type Kind: Copy + core::fmt::Debug + core::fmt::Display + PartialEq + Eq + core::hash::Hash;
+  /// - Must be `'static`, because the kind doubles as the expected-set vocabulary of the
+  ///   end-of-input error ([`UnexpectedEnd`](crate::error::UnexpectedEnd)'s `Set` is
+  ///   `Clone + 'static` at the struct level) and as the element type of the dispatch
+  ///   classification tables (`&'static [Kind]`). Every real kind is a fieldless
+  ///   discriminant enum, so this costs nothing; a borrow-keyed kind such as
+  ///   `Kind = &'inp str` is excluded, deliberately.
+  type Kind: 'static
+    + Copy
+    + core::fmt::Debug
+    + core::fmt::Display
+    + PartialEq
+    + Eq
+    + core::hash::Hash;
 
   /// The error type of this token.
   type Error: Clone + core::fmt::Debug;

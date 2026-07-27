@@ -147,11 +147,11 @@ fn try_parse_twice_slices_each_current_ident() {
 }
 
 #[test]
-fn parse_of_accepts_identifier() {
+fn parse_accepts_identifier_with_span() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Ident<&'inp str, SimpleSpan>, E> {
-    Ident::parse_of(inp)
+    Ident::parse(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("foo");
   let ident = r.unwrap();
@@ -160,11 +160,11 @@ fn parse_of_accepts_identifier() {
 }
 
 #[test]
-fn parse_of_errors_on_non_identifier() {
+fn parse_errors_on_non_identifier() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Ident<&'inp str, SimpleSpan>, E> {
-    Ident::parse_of(inp)
+    Ident::parse(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("123");
   assert_eq!(
@@ -176,11 +176,11 @@ fn parse_of_errors_on_non_identifier() {
 }
 
 #[test]
-fn parse_of_errors_on_empty_input() {
+fn parse_errors_on_empty_input() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Ident<&'inp str, SimpleSpan>, E> {
-    Ident::parse_of(inp)
+    Ident::parse(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("");
   assert_eq!(r.unwrap_err(), E::Eot);

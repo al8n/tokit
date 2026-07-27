@@ -3,7 +3,7 @@
 //! The twin evaluates arithmetic with the **token-level** Pratt API
 //! ([`InputRef::pratt`](tokora::InputRef::pratt)), which folds into synthetic tokens and is
 //! documented CST-unsupported. So this twin uses the **typed** Pratt driver
-//! ([`pratt_of`](tokora::parser::pratt_of)) and its CST seam,
+//! ([`pratt`](tokora::parser::pratt)) and its CST seam,
 //! [`with_cst_kinds`](tokora::parser::Pratt::with_cst_kinds): the driver holds one mark per
 //! expression and wraps each fold in a node whose kind a classifier picks from the operator.
 //! No evaluation happens — the lossless tree is the whole product, and the fold functions do
@@ -22,7 +22,7 @@ use tokora::{
   emitter::{CstEmitter, Fatal},
   error::token::UnexpectedTokenOf,
   logos::{self, Logos},
-  parser::{PrattFoldOp, PrattInfix, PrattLHS, PrattPower, PrattRHS, Precedenced, pratt_of},
+  parser::{PrattFoldOp, PrattInfix, PrattLHS, PrattPower, PrattRHS, Precedenced, pratt},
 };
 
 // ── Lossless lexer ──────────────────────────────────────────────────────────────
@@ -332,7 +332,7 @@ where
   Ctx::Emitter:
     CstEmitter<'inp, CalcLexer<'inp>> + Emitter<'inp, CalcLexer<'inp>, Error = CalcError>,
 {
-  pratt_of(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix)
+  pratt(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix)
     .with_cst_kinds(calc_kinds)
     .parse_input(inp)
 }

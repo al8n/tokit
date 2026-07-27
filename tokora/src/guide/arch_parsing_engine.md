@@ -268,6 +268,7 @@ single-character tokens (digits and `+`), so nothing but core tokora types is in
 # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(u32), Plus }

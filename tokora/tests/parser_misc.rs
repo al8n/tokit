@@ -15,7 +15,7 @@ use tokora::{
   cache::{DefaultCache, Peeked},
   emitter::Ignored,
   error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot, token::UnexpectedToken},
-  parser::{Action, PrattInfix, PrattLHS, PrattRHS, Precedenced, expect, pratt_of},
+  parser::{Action, PrattInfix, PrattLHS, PrattRHS, Precedenced, expect, pratt},
   punct::{CloseParen, Comma, OpenParen, Semicolon},
   span::Spanned,
   try_parse_input::ParseAttempt,
@@ -43,8 +43,17 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, L
   }
 }
 
-impl<S, Lang: ?Sized> From<UnexpectedEot<S, Lang>> for TestError {
-  fn from(_: UnexpectedEot<S, Lang>) -> Self {
+impl<S, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<S, Lang, Set>> for TestError {
+  fn from(_: UnexpectedEot<S, Lang, Set>) -> Self {
+    TestError
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for TestError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     TestError
   }
 }
@@ -89,7 +98,7 @@ enum BinOp {
   Assign,
 }
 
-// LHS parser for pratt_of combinator
+// LHS parser for pratt combinator
 fn pratt_lhs<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
 ) -> Result<PrattLHS<i64, (), Power>, TestError>
@@ -214,7 +223,7 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
 {
-  pratt_of(
+  pratt(
     pratt_lhs,
     pratt_rhs_with_right_neither,
     pratt_fold_prefix,
@@ -232,7 +241,7 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
 {
-  pratt_of(
+  pratt(
     pratt_lhs,
     pratt_rhs_with_right_neither,
     pratt_fold_prefix::<Ctx>,
@@ -253,7 +262,7 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
 {
-  pratt_of(
+  pratt(
     pratt_lhs,
     pratt_rhs_with_right_neither,
     pratt_fold_prefix,

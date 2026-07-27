@@ -608,14 +608,19 @@ fn repeated_while_stops_on_non_num() {
 
 #[test]
 fn parser_default() {
-  let p: tokora::parser::Parser<(), TestLexer<'_>, Token, _, ()> = Default::default();
+  let p: tokora::parser::Parser<
+    (),
+    TestLexer<'_>,
+    Token,
+    tokora::FatalContext<'_, TestLexer<'_>, E>,
+  > = Default::default();
   let result = p.apply(Any::new()).parse_str("+").unwrap();
   assert_eq!(result, Token::Plus);
 }
 
 #[test]
 fn parser_with_parser() {
-  let p = Parser::with_parser::<TestLexer<'_>, Token, (), _>(Any::new());
+  let p = Parser::with_parser::<TestLexer<'_>, Token, (), _, ()>(Any::new());
   let result = p.parse_str("+").unwrap();
   assert_eq!(result, Token::Plus);
 }

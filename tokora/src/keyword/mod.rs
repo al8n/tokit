@@ -164,28 +164,7 @@ macro_rules! keyword {
           ///
           /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token is not the
           /// `" $kw "` keyword, and promises no valid token is consumed.
-          pub fn try_parse<'inp, L, Ctx, Cmpl>(
-            inp: &mut $crate::InputRef<'inp, '_, L, Ctx, (), Cmpl>,
-          ) -> ::core::result::Result<
-            $crate::try_parse_input::ParseAttempt<$name<L::Span, ()>>,
-            <Ctx::Emitter as $crate::Emitter<'inp, L>>::Error,
-          >
-          where
-            L: $crate::Lexer<'inp>,
-            L::Token: $crate::__private::token::KeywordToken<'inp>,
-            Ctx: $crate::ParseContext<'inp, L>,
-            Cmpl: $crate::input::SurfaceIncomplete<'inp, L, Ctx, ()>,
-            <Ctx::Emitter as $crate::Emitter<'inp, L>>::Error:
-              ::core::convert::From<$crate::error::UnexpectedEot<L::Offset>>,
-          {
-            Self::try_parse_of(inp)
-          }
-
-          #[doc = "A parser that parses a token and returns a `" $name "` instance if it matches the `" $kw "` keyword for a specific language."]
-          ///
-          /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token is not the
-          /// `" $kw "` keyword, and promises no valid token is consumed.
-          pub fn try_parse_of<'inp, L, Ctx, Lang: ?::core::marker::Sized, Cmpl>(
+          pub fn try_parse<'inp, L, Ctx, Lang: ?::core::marker::Sized, Cmpl>(
             inp: &mut $crate::InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
           ) -> ::core::result::Result<
             $crate::try_parse_input::ParseAttempt<$name<L::Span, (), Lang>>,
@@ -214,29 +193,7 @@ macro_rules! keyword {
           /// `UnexpectedEot` error.
           ///
           /// The error carries the found token; it does not carry an expected-token entry — the expected keyword is statically known at the call site.
-          pub fn parse<'inp, L, Ctx, Cmpl>(
-            inp: &mut $crate::InputRef<'inp, '_, L, Ctx, (), Cmpl>,
-          ) -> ::core::result::Result<$name<L::Span, ()>, <Ctx::Emitter as $crate::Emitter<'inp, L>>::Error>
-          where
-            L: $crate::Lexer<'inp>,
-            L::Token: $crate::__private::token::KeywordToken<'inp>,
-            Ctx: $crate::ParseContext<'inp, L>,
-            Cmpl: $crate::input::SurfaceIncomplete<'inp, L, Ctx, ()>,
-            <Ctx::Emitter as $crate::Emitter<'inp, L>>::Error:
-              ::core::convert::From<$crate::error::UnexpectedEot<L::Offset>>
-              + ::core::convert::From<$crate::error::token::UnexpectedToken<'inp, L::Token, <L::Token as $crate::Token<'inp>>::Kind, L::Span>>,
-          {
-            Self::parse_of(inp)
-          }
-
-          #[doc = "A parser that parses the `" $kw "` keyword for a specific language, erroring when the next token is not that keyword."]
-          ///
-          /// Unlike [`try_parse_of`](Self::try_parse_of), an unexpected token is converted into an
-          /// `UnexpectedToken` error carrying the found token, and end of input into an
-          /// `UnexpectedEot` error.
-          ///
-          /// The error carries the found token; it does not carry an expected-token entry — the expected keyword is statically known at the call site.
-          pub fn parse_of<'inp, L, Ctx, Lang: ?::core::marker::Sized, Cmpl>(
+          pub fn parse<'inp, L, Ctx, Lang: ?::core::marker::Sized, Cmpl>(
             inp: &mut $crate::InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
           ) -> ::core::result::Result<$name<L::Span, (), Lang>, <Ctx::Emitter as $crate::Emitter<'inp, L, Lang>>::Error>
           where

@@ -206,8 +206,13 @@ impl<'inp> From<UnexpectedTokenOf<'inp, ConfigLexer<'inp>>> for ConfigError {
     ConfigError::Unexpected
   }
 }
-impl From<UnexpectedEot> for ConfigError {
-  fn from(_: UnexpectedEot) -> Self {
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for ConfigError {
+  fn from(_: UnexpectedEot<O, Lang, Set>) -> Self {
+    ConfigError::UnexpectedEnd
+  }
+}
+impl<'inp, L: Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for ConfigError {
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     ConfigError::UnexpectedEnd
   }
 }
@@ -313,7 +318,8 @@ opt-in and one parse of each kind:
 # impl<'inp> From<UnexpectedTokenOf<'inp, ConfigLexer<'inp>>> for ConfigError {
 #   fn from(_: UnexpectedTokenOf<'inp, ConfigLexer<'inp>>) -> Self { ConfigError::Unexpected }
 # }
-# impl From<UnexpectedEot> for ConfigError { fn from(_: UnexpectedEot) -> Self { ConfigError::UnexpectedEnd } }
+# impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for ConfigError { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { ConfigError::UnexpectedEnd } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for ConfigError { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { ConfigError::UnexpectedEnd } }
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, Parser,
   keyword,
@@ -383,7 +389,7 @@ assert!(Parser::new().apply(a_true).parse_str("false").is_err());
 [`UnexpectedEot`](crate::error::UnexpectedEot) — the same two the hand-written parser already
 carried. See the [vocabulary reference](super::ref_vocabulary_macros_features) for the
 [`punctuator!`](crate::punctuator)/[`keyword!`](crate::keyword) macros, delimiter types, and the
-`_of`/`Lang`-generic spellings.
+`Lang`-generic spellings.
 
 ## Step 4 — the hand-written path
 

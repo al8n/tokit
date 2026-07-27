@@ -1,7 +1,11 @@
 #![cfg(all(feature = "std", feature = "logos"))]
 #![allow(warnings)]
 
+mod common;
+
+use common::TestLexer;
 use tokora::SimpleSpan;
+use tokora::emitter::FromUnclosed;
 use tokora::error::*;
 use tokora::utils::{CowStr, Expected, Lexeme, PositionedChar, knowledge::*};
 
@@ -298,10 +302,13 @@ fn unclosed_into_components() {
   assert_eq!(name, CowStr::from("\""));
 }
 
+// The blackhole error type absorbs the unclosed diagnostic through the umbrella
+// (`FromUnclosed`), which quantifies over the delimiter pair; the per-pair
+// `From<Unclosed<D, …>> for ()` it replaced is gone.
 #[test]
 fn unclosed_from_into_unit() {
-  let err = Unclosed::<char>::new(SimpleSpan::new(5, 6), "{".into());
-  let _: () = err.into();
+  let err = Unclosed::<char, SimpleSpan>::new(SimpleSpan::new(5, 6), "{".into());
+  let _: () = <() as FromUnclosed<'_, TestLexer<'_>>>::from_unclosed(err);
 }
 
 #[test]

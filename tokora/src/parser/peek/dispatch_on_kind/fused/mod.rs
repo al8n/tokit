@@ -139,7 +139,6 @@ where
   P: ParseTokenChoice<'inp, L, O, Ctx, Lang, Id = Branch<N>>,
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
-  <L::Token as Token<'inp>>::Kind: 'static,
   <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
     + From<UnexpectedEot<L::Offset, Lang, <L::Token as Token<'inp>>::Kind>>,
   Lang: ?Sized,
@@ -216,7 +215,6 @@ where
   P: ParseTokenChoice<'inp, L, O, Ctx, Lang, Id = Branch<N>>,
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
-  <L::Token as Token<'inp>>::Kind: 'static,
   Lang: ?Sized,
   // The tentative route surfaces a terminal stop through `try_expect_map_or_stop`, whose terminal
   // end-of-input error uses the primitive's own (default) expected set — hence the plain

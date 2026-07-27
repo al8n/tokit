@@ -1131,6 +1131,8 @@ nothing.
 # impl<'a, T, Kd: Clone, S, Lang: ?Sized> From<tokora::error::token::UnexpectedToken<'a, T, Kd, S, Lang>> for QueryError {
 #   fn from(_: tokora::error::token::UnexpectedToken<'a, T, Kd, S, Lang>) -> Self { QueryError::Unexpected }
 # }
+# impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>> for QueryError { fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self { QueryError::Unexpected } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for QueryError { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { QueryError::Unexpected } }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 # #[repr(u16)]
 # enum SyntaxKind {

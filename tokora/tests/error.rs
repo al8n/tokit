@@ -166,6 +166,30 @@ fn unexpected_end_hint_ref() {
   let _ = e.hint();
 }
 
+/// A stand-in for the token-kind table a committed dispatch driver attaches to its
+/// end-of-input error: any `Set` other than the defaulted `&'static str`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DispatchKind(u8);
+
+const DISPATCH_TABLE: &[DispatchKind] = &[DispatchKind(1), DispatchKind(2)];
+
+// `offset`/`offset_ref`/`name`/`hint` do not depend on the expected set, and are readable
+// at every `Set` — not only at the default one every other case in this file sits at.
+// Without that the `Kind`-table spelling of an end-of-input is position-less to a consumer,
+// which is exactly the arm `examples/json.rs` had to map to a bare message.
+#[test]
+fn unexpected_end_reads_are_set_independent() {
+  let e: UnexpectedEnd<TokenHint, usize, (), DispatchKind> =
+    UnexpectedEnd::eot_expected_one_of(42, DISPATCH_TABLE);
+
+  assert_eq!(e.offset(), 42);
+  assert_eq!(*e.offset_ref(), 42);
+  assert_eq!(e.name(), Some("token stream"));
+  let _: &TokenHint = e.hint();
+  // The set itself is still there; the four reads above are simply orthogonal to it.
+  assert!(matches!(e.expected(), Some(Expected::OneOf(_))));
+}
+
 #[test]
 fn unexpected_end_debug() {
   let e = UnexpectedEnd::eof(100usize);

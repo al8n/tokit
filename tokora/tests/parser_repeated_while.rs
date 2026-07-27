@@ -98,6 +98,15 @@ impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for RWError {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for RWError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self {
+    RWError
+  }
+}
+
 // -- Custom emitter -----------------------------------------------------------
 
 struct RWEmitter;
@@ -187,7 +196,7 @@ impl<'inp> UnclosedEmitter<'inp, TestLexer<'inp>> for RWEmitter {
   ) -> Result<(), RWError>
   where
     TestLexer<'inp>: Lexer<'inp>,
-    RWError: From<Unclosed<Delimiter, <TestLexer<'inp> as Lexer<'inp>>::Span>>,
+    RWError: tokora::emitter::FromUnclosed<'inp, TestLexer<'inp>>,
   {
     Err(RWError)
   }

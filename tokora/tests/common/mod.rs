@@ -345,8 +345,8 @@ impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for E {
   }
 }
 
-impl From<UnexpectedEot> for E {
-  fn from(_: UnexpectedEot) -> Self {
+impl<Set: Clone + 'static> From<UnexpectedEot<usize, (), Set>> for E {
+  fn from(_: UnexpectedEot<usize, (), Set>) -> Self {
     E
   }
 }
@@ -371,6 +371,15 @@ impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for E {
 
 impl<Delimiter, S, Lang: ?Sized> From<Unclosed<Delimiter, S, Lang>> for E {
   fn from(_: Unclosed<Delimiter, S, Lang>) -> Self {
+    E
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for E
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<Delimiter>(_: Unclosed<Delimiter, L::Span, Lang>) -> Self {
     E
   }
 }

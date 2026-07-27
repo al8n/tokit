@@ -44,21 +44,20 @@ fn fail_with_copy() {
 }
 
 #[test]
-fn fail_free_fn() {
+fn fail_free_fn_lang_inferred() {
   use crate::lexer::DummyLexer;
   use crate::parse_context::FatalContext;
-  let _f = fail::<'_, fn() -> (), DummyLexer, (), FatalContext<'_, DummyLexer, ()>>(|| ());
+  let _f = fail::<'_, fn() -> (), DummyLexer, (), FatalContext<'_, DummyLexer, ()>, _>(|| ());
 }
 
 #[test]
-fn fail_of_free_fn() {
+fn fail_free_fn_lang_named() {
   use crate::lexer::DummyLexer;
   use crate::parse_context::FatalContext;
-  let _f =
-    fail_of::<'_, fn() -> (), DummyLexer, (), FatalContext<'_, DummyLexer, (), ()>, ()>(|| ());
+  let _f = fail::<'_, fn() -> (), DummyLexer, (), FatalContext<'_, DummyLexer, (), ()>, ()>(|| ());
 }
 
-// FailWith free functions (fail_with, fail_with_of) involve complex
+// The `fail_with` free function involves complex
 // lifetime constraints on ParseState that make standalone construction
 // impractical without a full parser infrastructure. The FailWith::new
 // constructor is already tested above.

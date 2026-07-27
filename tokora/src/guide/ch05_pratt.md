@@ -17,8 +17,8 @@ tokora has two Pratt surfaces:
   *token type itself* classifies each token via [`PrattToken`](crate::token::PrattToken), and
   the folds map tokens to tokens. This is the shape to reach for when the expression's value
   is itself expressible as a token — a calculator that folds `1 + 2` into `Int(3)`.
-- **AST-level** — the [`pratt`](crate::parser::pratt) / [`pratt_of`](crate::parser::pratt_of)
-  combinators. You supply LHS/RHS sub-parsers and folds over *your own node type*, so the
+- **AST-level** — the [`pratt`](crate::parser::pratt)
+  combinator. You supply LHS/RHS sub-parsers and folds over *your own node type*, so the
   result is a tree. That is what a full Calc — the one whose expressions include variables,
   and which therefore cannot fold to a number during the parse — would use.
 
@@ -145,6 +145,9 @@ fn fold_postfix(operand,  operator,                 &mut E) -> Result<Spanned<To
 # }
 # impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Set>> for CalcError {
 #   fn from(_: UnexpectedEnd<H, O, Lang, Set>) -> Self { CalcError::UnexpectedEnd }
+# }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CalcError {
+#   fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { CalcError::UnexpectedEnd }
 # }
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, Parser, SimpleSpan,

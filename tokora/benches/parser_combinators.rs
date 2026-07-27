@@ -199,6 +199,16 @@ impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Se
   }
 }
 
+// The bundle's delimiter half: one generic impl for every pair.
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for BenchError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
+    BenchError
+  }
+}
+
 impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for BenchError {
   fn from(_: FullContainer<S, Lang>) -> Self {
     BenchError

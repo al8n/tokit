@@ -137,6 +137,15 @@ impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for ConfError {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for ConfError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self {
+    ConfError::Unclosed
+  }
+}
+
 impl<O, Lang: ?Sized> From<UnexpectedEoLhs<O, Lang>> for ConfError {
   fn from(_: UnexpectedEoLhs<O, Lang>) -> Self {
     ConfError::EndOfLhs

@@ -83,8 +83,17 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, L
   }
 }
 
-impl<S, Lang: ?Sized> From<UnexpectedEot<S, Lang>> for ExpError {
-  fn from(_: UnexpectedEot<S, Lang>) -> Self {
+impl<S, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<S, Lang, Set>> for ExpError {
+  fn from(_: UnexpectedEot<S, Lang, Set>) -> Self {
+    ExpError
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for ExpError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     ExpError
   }
 }

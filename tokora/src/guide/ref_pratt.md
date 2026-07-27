@@ -14,7 +14,7 @@ differ only in the *currency* the folds trade in.
 
 | | **Token-level** | **AST-level** |
 |---|---|---|
-| Entry | [`InputRef::pratt`](crate::InputRef::pratt) / [`pratt_with_min_precedence`](crate::InputRef::pratt_with_min_precedence) | [`pratt`](crate::parser::pratt) / [`pratt_of`](crate::parser::pratt_of) → [`Pratt`](crate::parser::Pratt) |
+| Entry | [`InputRef::pratt`](crate::InputRef::pratt) / [`pratt_with_min_precedence`](crate::InputRef::pratt_with_min_precedence) | [`pratt`](crate::parser::pratt) → [`Pratt`](crate::parser::Pratt) |
 | Classifier | [`PrattToken`](crate::token::PrattToken) on the token type | `parse_lhs` / `parse_rhs` sub-parsers |
 | Fold currency | `Spanned<Token, Span>` → `Spanned<Token, Span>` | your node type `O` → `O` |
 | Result | `Option<Spanned<Token, Span>>` | `O` |
@@ -203,6 +203,7 @@ re-encoding each result as a `Digit` token.
 # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Set>> for Error { fn from(_: UnexpectedEnd<H, O, Lang, Set>) -> Self { Error } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(i64), Ident(char), Plus, Minus, Star, Caret, LParen, RParen, Semi }
@@ -338,17 +339,16 @@ assert_eq!(eval("-2 ^ 2"), Ok(-4)); //     `^` outranks unary `-`  → -(2 ^ 2)
 
 ## AST-level surface
 
-### `pratt` / `pratt_of`
+### `pratt`
 
-Build a [`Pratt`](crate::parser::Pratt) combinator from two sub-parsers and three folds. `pratt`
-fixes the language marker `Lang = ()`; [`pratt_of`](crate::parser::pratt_of) is the
-language-generic twin (the `_of` convention runs through the whole crate — see the
-[combinator reference](super::ref_combinators)). The result implements
+Build a [`Pratt`](crate::parser::Pratt) combinator from two sub-parsers and three folds. It is
+generic over the language marker and reads it off the input the result is driven with — there is
+one spelling for branded and unbranded grammars alike (the `Lang` convention runs through the
+whole crate — see the [combinator reference](super::ref_combinators)). The result implements
 [`ParseInput`](crate::ParseInput), so you drive it with `.parse_input(inp)`.
 
 ```text
-pratt   (parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix) -> Pratt<…, Lang = ()>
-pratt_of(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix) -> Pratt<…, Lang>
+pratt(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix) -> Pratt<…, Lang>
 // parse_lhs: any parser producing PrattLHS<O, PreOp, Power>
 // parse_rhs: any parser producing PrattRHS<L, R, N, PostOp, Power>
 ```
@@ -399,6 +399,7 @@ it peeked and leaves it for the surrounding grammar. The last stanza adds
 # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Set>> for Error { fn from(_: UnexpectedEnd<H, O, Lang, Set>) -> Self { Error } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # #[derive(Debug, Clone, PartialEq)]
 # enum Tok { Digit(i64), Ident(char), Plus, Minus, Star, Caret, LParen, RParen, Semi }
@@ -610,7 +611,7 @@ assert_eq!(rhs.name(), Some("expression (right hand side)"));
   calculator ladder (grouping-below-floor, right-associativity, prefix operators).
 - [Chapter 15 — C expressions](super::ch15_c_expression_example): the AST-level driver with folds
   that consume further input (index, call, ternary).
-- [Combinator & atom reference](super::ref_combinators): the `_of`/`Lang` convention and the
+- [Combinator & atom reference](super::ref_combinators): the `Lang` convention and the
   broader parser surface the folds compose with.
 - [Errors, emitters & context reference](super::ref_errors_emitters_context): the emitter
   capability model that [`PrattEmitter`](crate::emitter::PrattEmitter) extends.

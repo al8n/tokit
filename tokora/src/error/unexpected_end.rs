@@ -674,40 +674,6 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
     self
   }
 
-  /// Returns the name, if any.
-  ///
-  /// ## Example
-  ///
-  /// ```rust
-  /// use tokora::error::UnexpectedEnd;
-  ///
-  /// let error = UnexpectedEnd::eof(100);
-  /// assert_eq!(error.name(), Some("file"));
-  /// ```
-  #[inline(always)]
-  pub const fn name(&self) -> Option<&str> {
-    match &self.name {
-      Some(name) => Some(name.as_str()),
-      None => None,
-    }
-  }
-
-  /// Returns the hint.
-  ///
-  /// ## Example
-  ///
-  /// ```rust
-  /// use tokora::{error::{UnexpectedEnd, FileHint}};
-  ///
-  /// let error = UnexpectedEnd::eof(100);
-  /// // FileHint is a zero-sized type
-  /// let _ = error.hint();
-  /// ```
-  #[inline(always)]
-  pub const fn hint(&self) -> &Hint {
-    &self.hint
-  }
-
   /// Replace the hint, returning the old one.
   ///
   /// ## Example
@@ -821,30 +787,6 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
     UnexpectedEnd::of(self.offset, f(self.hint))
   }
 
-  /// Returns the offset of the unexpected end.
-  ///
-  /// ## Example
-  ///
-  /// ```rust
-  /// use tokora::error::UnexpectedEnd;
-  ///
-  /// let error = UnexpectedEnd::eof(100);
-  /// assert_eq!(error.offset(), 100);
-  /// ```
-  #[inline(always)]
-  pub const fn offset(&self) -> O
-  where
-    O: Copy,
-  {
-    self.offset
-  }
-
-  /// Returns a reference to the offset of the unexpected end.
-  #[inline(always)]
-  pub const fn offset_ref(&self) -> &O {
-    &self.offset
-  }
-
   /// Returns a mutable reference to the offset of the unexpected end.
   #[inline(always)]
   pub const fn offset_mut(&mut self) -> &mut O {
@@ -892,10 +834,76 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   }
 }
 
+/// The reads that do not depend on the expected set.
+///
+/// These four live here rather than in the `Set`-defaulted block above so that an
+/// end-of-input error carrying a dispatch table — `UnexpectedEot<O, Lang, Kind>`, the
+/// spelling the committed dispatch drivers raise — is still legible. A consumer whose
+/// error enum has one arm per end-of-input spelling has to be able to read the position
+/// off *both*; before this it could only read it off the `&'static str` one, and mapped
+/// the other to a position-less catch-all.
 impl<Hint, O, Lang: ?Sized, Set> UnexpectedEnd<Hint, O, Lang, Set>
 where
   Set: Clone + 'static,
 {
+  /// Returns the offset of the unexpected end.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use tokora::error::UnexpectedEnd;
+  ///
+  /// let error = UnexpectedEnd::eof(100);
+  /// assert_eq!(error.offset(), 100);
+  /// ```
+  #[inline(always)]
+  pub const fn offset(&self) -> O
+  where
+    O: Copy,
+  {
+    self.offset
+  }
+
+  /// Returns a reference to the offset of the unexpected end.
+  #[inline(always)]
+  pub const fn offset_ref(&self) -> &O {
+    &self.offset
+  }
+
+  /// Returns the name, if any.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use tokora::error::UnexpectedEnd;
+  ///
+  /// let error = UnexpectedEnd::eof(100);
+  /// assert_eq!(error.name(), Some("file"));
+  /// ```
+  #[inline(always)]
+  pub const fn name(&self) -> Option<&str> {
+    match &self.name {
+      Some(name) => Some(name.as_str()),
+      None => None,
+    }
+  }
+
+  /// Returns the hint.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use tokora::{error::{UnexpectedEnd, FileHint}};
+  ///
+  /// let error = UnexpectedEnd::eof(100);
+  /// // FileHint is a zero-sized type
+  /// let _ = error.hint();
+  /// ```
+  #[inline(always)]
+  pub const fn hint(&self) -> &Hint {
+    &self.hint
+  }
+
   /// Creates an unexpected end carrying an explicit **optional expected set** — the additive
   /// end-of-input variant. The other constructors leave the set `None`; this is the general form
   /// that populates it.

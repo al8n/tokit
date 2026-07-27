@@ -4,59 +4,11 @@ use crate::Commit;
 
 use super::*;
 
-/// Creates a pratt parser for a specific language
+/// Creates a pratt parser.
+///
+/// `Lang` is read off the input, so an unbranded grammar writes the same call as a branded one.
 #[inline(always)]
 pub fn pratt<
-  'inp,
-  Power,
-  Lhs,
-  Rhs,
-  FoldPrefix,
-  FoldInfix,
-  FoldPostfix,
-  PreOp,
-  LeftAssoc,
-  RightAssoc,
-  NeitherAssoc,
-  PostOp,
-  L,
-  O,
-  Ctx,
->(
-  parse_lhs: Lhs,
-  parse_rhs: Rhs,
-  fold_prefix: FoldPrefix,
-  fold_infix: FoldInfix,
-  fold_postfix: FoldPostfix,
-) -> Pratt<
-  Power,
-  Lhs,
-  Rhs,
-  FoldPrefix,
-  FoldInfix,
-  FoldPostfix,
-  PreOp,
-  LeftAssoc,
-  RightAssoc,
-  NeitherAssoc,
-  PostOp,
-  L,
-  O,
-  Ctx,
->
-where
-  Lhs: ParsePrattLHS<'inp, Power, O, PreOp, L, Ctx>,
-  Rhs: ParsePrattRHS<'inp, Power, LeftAssoc, RightAssoc, NeitherAssoc, PostOp, L, Ctx>,
-  Power: PrattPower,
-  L: Lexer<'inp>,
-  Ctx: ParseContext<'inp, L>,
-{
-  pratt_of(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix)
-}
-
-/// Creates a pratt parser for a specific language
-#[inline(always)]
-pub fn pratt_of<
   'inp,
   Power,
   Lhs,
@@ -108,9 +60,8 @@ where
 
 /// A Pratt parser combinator.
 ///
-/// Built via [`pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix)`](pratt)
-/// or [`pratt_of(lhs, rhs, fold_prefix, fold_infix, fold_postfix)`](pratt_of) and configured with
-/// `.prefix(...)`, `.postfix(...)`, `.infix(...)`, and `.min_precedence(...)` methods.
+/// Built via [`pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix)`](pratt) and configured
+/// with `.prefix(...)`, `.postfix(...)`, `.infix(...)`, and `.min_precedence(...)` methods.
 ///
 /// The trailing `Cst` parameter is the CST seam, [`NoCst`] (inert, zero-cost) unless
 /// [`with_cst_kinds`](Self::with_cst_kinds) configures a fold-to-kind classifier — see

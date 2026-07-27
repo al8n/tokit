@@ -123,6 +123,15 @@ impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for WE {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for WE
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self {
+    WE::Other
+  }
+}
+
 type FatalCtx = ParserContext<'static, TestLexer<'static>, Fatal<WE>>;
 type VerboseCtx<'inp> = ParserContext<'inp, TestLexer<'inp>, Verbose<WE>>;
 

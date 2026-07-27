@@ -43,16 +43,20 @@ impl that wires it in.
 | **Token** | [`UnexpectedToken`](crate::error::token::UnexpectedToken), [`MissingToken`](crate::error::token::MissingToken), [`SeparatedError`](crate::error::token::SeparatedError) | `From<UnexpectedToken>`, `From<MissingToken>`, `From<SeparatedError>` |
 | **End of input** | [`UnexpectedEnd`](crate::error::UnexpectedEnd) (aliases [`UnexpectedEot`](crate::error::UnexpectedEot) / `UnexpectedEof` / `UnexpectedEos`) | `From<UnexpectedEot<O, Lang, Set>>` |
 | **Syntax** | [`TooFew`](crate::error::syntax::TooFew), [`TooMany`](crate::error::syntax::TooMany), [`FullContainer`](crate::error::syntax::FullContainer), [`MissingSyntax`](crate::error::syntax::MissingSyntax) | `From<TooFew>`, `From<TooMany>`, `From<FullContainer>`, `From<MissingSyntax>` |
-| **Delimiter** | [`Unclosed`](crate::error::Unclosed), [`Unopened`](crate::error::Unopened), [`Undelimited`](crate::error::Undelimited), [`Unterminated`](crate::error::Unterminated) | the matching `From<…>` per delimiter atom |
+| **Delimiter** | [`Unclosed`](crate::error::Unclosed), [`Unopened`](crate::error::Unopened), [`Undelimited`](crate::error::Undelimited), [`Unterminated`](crate::error::Unterminated) | [`FromUnclosed`](crate::emitter::FromUnclosed) — **one** impl for every pair; the other three are raised by your own code, so they need a `From<…>` only if you raise them |
 | **Incomplete** | [`Incomplete`](crate::error::Incomplete) — the never-recoverable partial-input signal | *no `From`*; `impl MaybeIncomplete` instead |
 
 ### The traits your error type implements
 
-- **The `From` family.** The one bound the framework actually checks is
-  [`FromEmitterError`](crate::emitter::FromEmitterError) (blanket-implemented from
-  `From<Token::Error> + From<UnexpectedTokenOf>`); the collecting combinators layer more `From`s
-  on top through their own blanket bounds (see [emitters](#emitters) below). You never implement
-  `FromEmitterError` by hand — you write the `From` impls and the blankets do the rest.
+- **The `From` family.** The bound a generic parser actually checks is
+  [`FromTokenErrors`](crate::emitter::FromTokenErrors) — the five token-level conversions as one
+  name: both end-of-input instantiations (one `Set`-generic impl covers both), the unexpected
+  token, the lexer's own `Token::Error`, and [`FromUnclosed`](crate::emitter::FromUnclosed). The
+  entry path additionally names
+  [`FromEmitterError`](crate::emitter::FromEmitterError) (`From<Token::Error> +
+  From<UnexpectedTokenOf>`), and the collecting combinators layer more `From`s on top through
+  their own blanket bounds (see [emitters](#emitters) below). You never implement either bundle
+  by hand — you write the `From` impls, one `FromUnclosed` impl, and the blankets do the rest.
 - [**`MaybeIncomplete`**](crate::error::MaybeIncomplete) — the discrimination hook for the
   [never-recoverable law](super::ch09_streaming): recovery re-raises an [`Incomplete`](crate::error::Incomplete)
   instead of fabricating a value from input that has not arrived. It has a blanket `false`
@@ -161,6 +165,7 @@ enum Error {
     Lex,        // the lexer's own error
     Unexpected, // a wrong token, or a stray separator
     Eot,        // input ended where a token was required
+    Unclosed,   // an opener committed and its closer never arrived
     Missing,    // a required token or element was absent
     Count,      // a repetition/container bound: too few, too many, or full
 }
@@ -173,6 +178,9 @@ impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> f
 }
 impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error {
     fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error::Eot }
+}
+impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Error {
+    fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error::Unclosed }
 }
 impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error {
     fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error::Missing }
@@ -325,6 +333,7 @@ The example runs **one** generic parser under two emitters — fail-fast, then c
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
@@ -428,7 +437,7 @@ assert_eq!(tiers, [Severity::Error]);
 
 ---
 
-## ParseContext / ParseCtx
+## ParseContext / ComposableParseContext
 
 Every parser signature in this book carries a `Ctx` type parameter, yet the tutorials never say
 what it is. A **parse context** is the bundle that supplies the two things a parse needs beyond
@@ -457,19 +466,33 @@ type FatalContext<'inp, L, Error, Lang = ()>
       = ParserContext<'inp, L, Fatal<Error, Lang>, DefaultCache<'inp, L>, Lang>;   // the common alias
 ```
 
-### `ParseCtx` — the one-bound shortcut
+### `ComposableParseContext` — the one bound a grammar function needs
 
-Naming the collecting-emitter family at every generic parser is the six-line ladder the
-[emitters](#emitters) section listed. [`ParseCtx`](crate::ParseCtx) rides
-[`ComposableEmitter`](crate::emitter::ComposableEmitter) on the context's emitter, so a single
-bound unlocks the whole family. It is blanket-implemented for every qualifying
-[`ParseContext`](crate::ParseContext) (the one extra requirement, `SliceOf<'inp, L>: Clone`,
-lives on the blanket impl).
+A parser needs two orthogonal things of its context: an emitter that can **route** every
+diagnostic, and an error type that can **absorb** one. Spelled out, that is the collecting-emitter
+ladder the [emitters](#emitters) section listed *plus* the five `From`s from
+[the error model](#the-error-model) — at every generic parser.
+[`ComposableParseContext`](crate::ComposableParseContext) is both halves as one bound: it rides
+[`ComposableEmitter`](crate::emitter::ComposableEmitter) on the context's emitter and
+[`FromTokenErrors`](crate::emitter::FromTokenErrors) on that emitter's `Error`. It is
+blanket-implemented for every qualifying [`ParseContext`](crate::ParseContext) (the one extra
+requirement, `SliceOf<'inp, L>: Clone`, lives on the blanket impl).
 
 ```text
-trait ParseCtx<'inp, L, Lang = ()>:
-    ParseContext<'inp, L, Lang, Emitter: ComposableEmitter<'inp, L, Lang>> {}
+trait ComposableParseContext<'inp, L, Lang = ()>:
+    ParseContext<'inp, L, Lang,
+        Emitter: ComposableEmitter<'inp, L, Lang,
+            Error: FromTokenErrors<'inp, L, Lang>>> {}
 ```
+
+Both halves are **nested associated-type bounds**, not a free-standing
+`where ErrorOf<…>: …` clause, and that is load-bearing: rustc does not elaborate a where-clause
+predicate whose self type is a projection, so a free clause would make the obligation reappear at
+every use site — which is exactly the restatement this bundle exists to remove.
+
+A context whose error cannot absorb, say, an end-of-input **stops qualifying**. That is the
+intended break: such a context could never have run a real grammar, and it now fails at the bound
+rather than hundreds of frames deep at the first leaf atom that raises one.
 
 ### Aliases
 
@@ -477,7 +500,7 @@ trait ParseCtx<'inp, L, Lang = ()>:
   `<Ctx::Emitter as Emitter<'inp, L, Lang>>::Error`, so a return type stays
   `Result<T, ErrorOf<'inp, L, Ctx, ()>>` instead of the nested projection.
 - [`SliceOf<'inp, L>`](crate::lexer::SliceOf) — the lexer's borrowed source-slice type (`&str`,
-  `&[u8]`, …); the `Clone` bound `ParseCtx` needs.
+  `&[u8]`, …); the `Clone` bound `ComposableParseContext` needs.
 
 ### Naming it in your own parser fn
 
@@ -485,12 +508,12 @@ trait ParseCtx<'inp, L, Lang = ()>:
 |-------|-----------------|----------|
 | **Concrete** | `InputRef<'a, '_, MyLexer<'a>, FatalContext<'a, MyLexer<'a>, MyError>>` | one fixed emitter (the error-model example above) |
 | **Generic context** | `where Ctx: ParseContext<'inp, L>, Ctx::Emitter: Emitter<'inp, L, Error = MyError>` | reusable across emitters (the emitter example above; [chapter 7](super::ch07_diagnostics)) |
-| **+ collecting family** | add `Ctx: ParseCtx<'inp, L>` (or name the extra sub-traits) | you drive `separated` / `repeated` / the `many/` builder |
+| **+ the whole leaf surface** | add `Ctx: ComposableParseContext<'inp, L>` | you drive `separated` / `repeated` / the `many/` builder, a delimited shape, or any leaf atom — it supplies the emitter family *and* the five error conversions, so nothing is restated |
 
-The two aliases and the `ParseCtx` elaboration, on their own — no lexer scaffold needed:
+The two aliases and the `ComposableParseContext` elaboration, on their own — no lexer scaffold needed:
 
 ```rust
-use tokora::{Emitter, ErrorOf, Lexer, ParseContext, ParseCtx};
+use tokora::{Emitter, ErrorOf, Lexer, ParseContext, ComposableParseContext};
 use tokora::emitter::{SeparatedEmitter, TooFewEmitter};
 
 // `ErrorOf` is definitionally the context emitter's `Error` — this identity typechecks
@@ -505,12 +528,12 @@ where
     e
 }
 
-// A single `Ctx: ParseCtx` elaborates to the whole collecting-emitter family: this body
+// A single `Ctx: ComposableParseContext` elaborates to the whole collecting-emitter family: this body
 // calls into code that demands individual capabilities of `Ctx::Emitter`.
 fn collecting<'inp, L, Ctx>()
 where
     L: Lexer<'inp>,
-    Ctx: ParseCtx<'inp, L>,
+    Ctx: ComposableParseContext<'inp, L>,
 {
     fn needs_family<'inp, L, E>()
     where

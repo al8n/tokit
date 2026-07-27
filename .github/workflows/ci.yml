@@ -90,6 +90,11 @@ jobs:
         run: rustup toolchain install 1.87 --no-self-update --profile minimal
       - name: cargo +1.87 check -p tokora --all-features
         run: cargo +1.87 check -p tokora --all-features
+      # R8 (tests/diagnostics.rs): the committed `.stderr` files are pinned to this
+      # toolchain and the test skips itself on any other rustc, so this job is the only
+      # place the trybuild half runs. The file-only half runs in every `test` job.
+      - name: cargo +1.87 test -p tokora --all-features --test diagnostics
+        run: cargo +1.87 test -p tokora --all-features --test diagnostics
 
   # ── Gate: full test suite ───────────────────────────────────────────────────
   test:

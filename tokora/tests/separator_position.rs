@@ -79,8 +79,17 @@ impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for SepErr {
 
 // A terminal scanner stop at the separator slot surfaces as this end-of-input error — not a
 // separator-position diagnostic.
-impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for SepErr {
-  fn from(_: UnexpectedEot<O, Lang>) -> Self {
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for SepErr {
+  fn from(_: UnexpectedEot<O, Lang, Set>) -> Self {
+    SepErr::Other
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for SepErr
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     SepErr::Other
   }
 }

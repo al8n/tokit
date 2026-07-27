@@ -3,7 +3,7 @@
 //! Tests for the Pratt parser API.
 //!
 //! Covers both the token-level API (`InputRef::pratt`) and the combinator
-//! API (`pratt_of`).
+//! API (`pratt`).
 
 mod common;
 
@@ -11,7 +11,7 @@ use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, SimpleSpan,
   emitter::PrattEmitter,
   error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot, token::UnexpectedTokenOf},
-  parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt_of},
+  parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt},
   span::Spanned,
   token::PrattToken,
 };
@@ -47,8 +47,17 @@ impl From<UnexpectedEoRhs> for PrattError {
   }
 }
 
-impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for PrattError {
-  fn from(_: UnexpectedEot<O, Lang>) -> Self {
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for PrattError {
+  fn from(_: UnexpectedEot<O, Lang, Set>) -> Self {
+    PrattError
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for PrattError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     PrattError
   }
 }
@@ -224,7 +233,7 @@ fn test_pratt_token_single_num() {
   assert_eq!(r, 42);
 }
 
-// ── Combinator API (`pratt_of`) ───────────────────────────────────────────────
+// ── Combinator API (`pratt`) ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 enum BinOp {
@@ -342,7 +351,7 @@ where
   Ok(operand) // sentinel; never actually reached at runtime
 }
 
-/// Entry-point using the `pratt_of` combinator API.
+/// Entry-point using the `pratt` combinator API.
 fn comb_parse_expr<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
 ) -> Result<i64, PrattError>
@@ -350,7 +359,7 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = PrattError>,
 {
-  pratt_of(
+  pratt(
     comb_parse_lhs,
     comb_parse_rhs,
     comb_fold_prefix,
@@ -550,7 +559,7 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = PrattError>,
 {
-  pratt_of(
+  pratt(
     dense_parse_lhs,
     dense_parse_rhs,
     comb_fold_prefix,

@@ -1,6 +1,6 @@
-//! A C-style expression parser using [`pratt_of`](tokora::parser::pratt_of).
+//! A C-style expression parser using [`pratt`](tokora::parser::pratt).
 //!
-//! Demonstrates the high-level `pratt_of` combinator API where `parse_lhs` and
+//! Demonstrates the high-level `pratt` combinator API where `parse_lhs` and
 //! `parse_rhs` are full parser functions with access to [`InputRef`](tokora::InputRef),
 //! and fold functions receive typed AST nodes rather than raw tokens.
 //!
@@ -29,7 +29,7 @@ use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, Token as TokenT,
   error::token::UnexpectedTokenOf,
   logos::{self, Logos},
-  parser::{PrattInfix, PrattLHS, PrattPower, PrattRHS, Precedenced, pratt_of},
+  parser::{PrattInfix, PrattLHS, PrattPower, PrattRHS, Precedenced, pratt},
 };
 
 // ── Lexer ─────────────────────────────────────────────────────────────────────
@@ -263,6 +263,26 @@ impl From<LexError> for CExprError {
 impl<'inp> From<UnexpectedTokenOf<'inp, CExprLexer<'inp>>> for CExprError {
   fn from(_: UnexpectedTokenOf<'inp, CExprLexer<'inp>>) -> Self {
     CExprError::UnexpectedToken
+  }
+}
+
+// The token-level bundle the entry points require: one `Set`-generic end-of-input impl covers
+// both the default expected-set spelling and the `Kind`-table one the committed dispatch
+// drivers raise, and one generic `FromUnclosed` covers every delimiter pair.
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>>
+  for CExprError
+{
+  fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self {
+    CExprError::UnexpectedEot
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CExprError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
+    CExprError::UnexpectedEot
   }
 }
 
@@ -693,7 +713,7 @@ where
   }
 }
 
-/// Parses a complete C-style expression using `pratt_of`.
+/// Parses a complete C-style expression using `pratt`.
 ///
 /// Mutual recursion with `parse_lhs` (for grouping) and `fold_postfix`
 /// (for index, call, ternary) is achieved through named functions — there
@@ -705,7 +725,7 @@ where
   Ctx: ParseContext<'inp, CExprLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, CExprLexer<'inp>, Error = CExprError>,
 {
-  pratt_of(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp)
+  pratt(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp)
 }
 
 fn main() {
