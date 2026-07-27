@@ -450,11 +450,4 @@ use tokora::parser::PrattPower;
 #[allow(dead_code)]
 pub struct Power(pub i32);
 
-impl PrattPower for Power {
-  fn next(&self) -> Self {
-    Power(self.0 + 1)
-  }
-  fn prev(&self) -> Self {
-    Power(self.0 - 1)
-  }
-}
+impl PrattPower for Power {}

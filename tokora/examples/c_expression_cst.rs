@@ -196,6 +196,26 @@ impl<'inp> From<UnexpectedTokenOf<'inp, CExprLexer<'inp>>> for CExprError {
   }
 }
 
+// The typed pratt driver's stalled-report exits: a report the driver acted on that consumed
+// nothing is a grammar bug, surfaced as the terminal end-of-expression error for the channel
+// that broke the contract — the LHS one for a prefix report, the RHS one for an infix/postfix
+// report — rather than ending the expression with a silent `Ok`.
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoLhs<O, Lang, Set>>
+  for CExprError
+{
+  fn from(_: tokora::error::UnexpectedEoLhs<O, Lang, Set>) -> Self {
+    CExprError::UnexpectedEot
+  }
+}
+
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoRhs<O, Lang, Set>>
+  for CExprError
+{
+  fn from(_: tokora::error::UnexpectedEoRhs<O, Lang, Set>) -> Self {
+    CExprError::UnexpectedEot
+  }
+}
+
 // ── Unified syntax-kind space ─────────────────────────────────────────────────────
 //
 // The token-image section mirrors the `Token` enum's declaration order; `map_token` bridges
@@ -360,16 +380,8 @@ impl Language for CExprLang {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Power(i32);
 
-impl PrattPower for Power {
-  fn next(&self) -> Self {
-    Power(self.0 + 1)
-  }
-  fn prev(&self) -> Self {
-    Power(self.0 - 1)
-  }
-}
+impl PrattPower for Power {}
 
-const SENTINEL: Power = Power(-1);
 const PREC_TERNARY: Power = Power(2); // ?:
 const PREC_OR: Power = Power(3); // ||
 const PREC_AND: Power = Power(4); // &&
@@ -393,7 +405,6 @@ enum PostfixOp {
   Index,
   Call,
   Ternary,
-  Sentinel,
 }
 
 // ── Pratt parse functions ─────────────────────────────────────────────────────────
@@ -447,10 +458,9 @@ where
       PrattRHS::Infix(Precedenced::new(PrattInfix::Left(()), $prec))
     };
   }
-  let sentinel = PrattRHS::Postfix(Precedenced::new(PostfixOp::Sentinel, SENTINEL));
   inp.skip_while(|t| t.is_trivia())?;
   match inp.next()? {
-    None => Ok(sentinel),
+    None => Ok(PrattRHS::End),
     Some(tok) => Ok(match tok.into_data() {
       // Infix (all left-associative).
       Token::PipePipe => infix_l!(PREC_OR),
@@ -470,7 +480,7 @@ where
       Token::LParen => PrattRHS::Postfix(Precedenced::new(PostfixOp::Call, PREC_POSTFIX)),
       Token::Question => PrattRHS::Postfix(Precedenced::new(PostfixOp::Ternary, PREC_TERNARY)),
       // Not an operator: end the expression; the driver rolls the token back.
-      _ => sentinel,
+      _ => PrattRHS::End,
     }),
   }
 }
@@ -555,9 +565,6 @@ where
       expect(inp, Token::Colon)?;
       parse_expr(inp) // else-branch
     }
-
-    // The sentinel's power is below the floor, so the driver never folds it.
-    PostfixOp::Sentinel => unreachable!("sentinel never reaches fold_postfix"),
   }
 }
 
@@ -571,7 +578,6 @@ fn cexpr_kinds(op: PrattFoldOp<'_, (), (), (), (), PostfixOp>) -> Option<u16> {
       PostfixOp::Index => K::IndexExpr.raw(),
       PostfixOp::Call => K::CallExpr.raw(),
       PostfixOp::Ternary => K::TernaryExpr.raw(),
-      PostfixOp::Sentinel => return None,
     }),
   }
 }

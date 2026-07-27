@@ -7,6 +7,59 @@ versioning; before 1.0, a minor bump (0.x → 0.(x+1)) signals a breaking change
 
 ### Changed (breaking)
 
+The Pratt driver ends an expression when the RHS channel says so, not when the input
+position looks finished — and a report that consumes nothing can no longer be folded.
+
+1. **`PrattRHS` gains an `End` variant.** A grammar says the expression is over on the
+   same channel it uses to report operators, instead of relying on a sentinel operator
+   below the minimum power. Exhaustive matches on `PrattRHS` must add an arm; the
+   compile error is deliberate, which is why the enum is not `#[non_exhaustive]` — a
+   wildcard arm is exactly the silent end-swallowing this change removes.
+
+2. **The `is_eoi` loop gates are gone.** They ended the expression on a *position*,
+   which a lookahead could move: a widening peek made a typed parse of `1+2` return
+   `1`. The RHS channel now decides.
+
+3. **Recursion floors are explicit.** `PrattFloor` replaces the arithmetic that
+   reconstructed a floor from a power. Right-associative operators recurse at their own
+   power (an off-by-one that made a right-associative pin yield 14 where 10 is correct);
+   left and non-associative recurse strictly above it, which also removes the wrong
+   parses the old code produced at `Power::MAX`, where the arithmetic saturated instead
+   of separating. The token flavour carries its true left power rather than
+   reconstructing it.
+
+4. **`PrattPower::next` and `prev` are removed.** They were the arithmetic that made
+   the floor bugs expressible; with them gone, reintroducing driver-side power
+   arithmetic is a compile error rather than a review comment. This breaks callers, not
+   only implementors, and no lint would have flagged them as unused — a required trait
+   method warns nowhere. Note also that every in-repo implementation was non-saturating
+   despite the trait's own documentation asking for saturation, so each carried a latent
+   debug overflow panic.
+
+5. **A report that consumes nothing is refused, terminally.** The typed driver checks
+   committed consumption at the report boundary — after the floor and rejection logic,
+   before any classify, fold, wrap, or recursion — and on a stall rolls the cycle back
+   and returns a terminal `UnexpectedEoLhs` or `UnexpectedEoRhs`. Previously a
+   zero-consumption report could be folded: a prefix reported after a peek recursed at
+   the same position until the stack overflowed, and a zero-width infix produced
+   `Ok(6)` from `1 2 3` with two phantom folds and no diagnostic on any channel.
+
+   This adds `From<UnexpectedEoLhs<…>>` and `From<UnexpectedEoRhs<…>>` to the typed
+   driver's error requirements. They are the engine's terminal exits for a
+   `parse_lhs`/`parse_rhs` contract violation — ordinary operand exhaustion is still
+   `UnexpectedEot` and is unchanged.
+
+6. **The trace channel is more verbose.** With the position gate gone, the RHS channel
+   is consulted at exhaustion, so traces gain the consultations the gate used to skip.
+   Parse results and non-trace output are unchanged.
+
+The token driver needs none of this: `PrattToken::try_pratt_rhs` and `try_pratt_lhs`
+take only `&self` with no `InputRef`, so a report there cannot be made without
+consuming, and no token fold receives an `InputRef`. That asymmetry is why the guard
+lives in one driver and not the other.
+
+### Changed (breaking)
+
 The bound a grammar production writes is now **one line**. Where a production previously
 restated every conversion its callees might need, it names a single context bundle and the
 compiler elaborates the rest.

@@ -81,7 +81,6 @@ macro_rules! ignored_parser {
   };
 }
 
-const PREC_SENTINEL: Power = Power(-1);
 const PREC_SUM: Power = Power(1);
 const PREC_PROD: Power = Power(2);
 const PREC_NEG: Power = Power(3);
@@ -134,9 +133,8 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = TestError>,
 {
-  let sentinel = PrattRHS::Postfix(Precedenced::new((), PREC_SENTINEL));
   match inp.next()? {
-    None => Ok(sentinel),
+    None => Ok(PrattRHS::End),
     Some(tok) => match tok.into_data() {
       Token::Plus => Ok(PrattRHS::Infix(Precedenced::new(
         PrattInfix::Left(BinOp::Add),
@@ -164,7 +162,7 @@ where
         PrattInfix::Neither(BinOp::Add),
         PREC_SUM,
       ))),
-      _ => Ok(sentinel),
+      _ => Ok(PrattRHS::End),
     },
   }
 }

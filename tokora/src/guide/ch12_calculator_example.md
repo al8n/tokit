@@ -125,10 +125,8 @@ use tokora::parser::PrattPower;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Power(i32);
 
-impl PrattPower for Power {
-  fn next(&self) -> Self { Power(self.0 + 1) } // one level tighter
-  fn prev(&self) -> Self { Power(self.0 - 1) } // one level looser
-}
+// Nothing to implement: a binding power is only ever compared, never stepped.
+impl PrattPower for Power {}
 
 const PREC_PAREN: Power = Power(-1); // ( )       — below the floor
 const PREC_SUM: Power = Power(1);    // + -
@@ -141,9 +139,11 @@ assert_eq!(Power::default(), Power(0));
 // `(` sits *below* that floor, so a stray `)` is invisible at the top level and left for the
 // caller — but consumable inside the recursive call a `(` prefix opens (whose floor is PREC_PAREN).
 assert!(PREC_PAREN < Power::default());
-// Associativity is just a one-step move along this ladder (the engine does the stepping).
-assert_eq!(PREC_SUM.next(), PREC_PROD);
-assert_eq!(PREC_EXP.prev(), PREC_NEG);
+// Associativity is how strictly the engine compares against a level, not a move along the
+// ladder: after a left-associative `+` the recursion admits only powers strictly above
+// PREC_SUM, so `*` gets in and another `+` does not.
+assert!(PREC_PROD > PREC_SUM);
+assert!(PREC_NEG < PREC_EXP);
 ```
 
 ## Implement `try_pratt_lhs` and `try_pratt_rhs`
@@ -186,7 +186,7 @@ the one [`Right`](crate::parser::PrattInfix)-associative row; `(`/`)` share `PRE
 # use tokora::parser::PrattPower;
 # #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 # struct Power(i32);
-# impl PrattPower for Power { fn next(&self) -> Self { Power(self.0 + 1) } fn prev(&self) -> Self { Power(self.0 - 1) } }
+# impl PrattPower for Power {}
 # const PREC_PAREN: Power = Power(-1);
 # const PREC_SUM: Power = Power(1);
 # const PREC_PROD: Power = Power(2);
@@ -404,7 +404,7 @@ assertions below are the maintained evaluator's behavior contract, now executabl
 # use tokora::parser::PrattPower;
 # #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 # struct Power(i32);
-# impl PrattPower for Power { fn next(&self) -> Self { Power(self.0 + 1) } fn prev(&self) -> Self { Power(self.0 - 1) } }
+# impl PrattPower for Power {}
 # const PREC_PAREN: Power = Power(-1);
 # const PREC_SUM: Power = Power(1);
 # const PREC_PROD: Power = Power(2);

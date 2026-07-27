@@ -115,6 +115,26 @@ impl<'inp> From<UnexpectedTokenOf<'inp, CalcLexer<'inp>>> for CalcError {
   }
 }
 
+// The typed pratt driver's stalled-report exits: a report the driver acted on that consumed
+// nothing is a grammar bug, surfaced as the terminal end-of-expression error for the channel
+// that broke the contract — the LHS one for a prefix report, the RHS one for an infix/postfix
+// report — rather than ending the expression with a silent `Ok`.
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoLhs<O, Lang, Set>>
+  for CalcError
+{
+  fn from(_: tokora::error::UnexpectedEoLhs<O, Lang, Set>) -> Self {
+    CalcError::UnexpectedEot
+  }
+}
+
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoRhs<O, Lang, Set>>
+  for CalcError
+{
+  fn from(_: tokora::error::UnexpectedEoRhs<O, Lang, Set>) -> Self {
+    CalcError::UnexpectedEot
+  }
+}
+
 // ── Unified syntax-kind space ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -196,18 +216,8 @@ impl Language for CalcLang {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Power(i32);
 
-impl PrattPower for Power {
-  fn next(&self) -> Self {
-    Power(self.0 + 1)
-  }
-  fn prev(&self) -> Self {
-    Power(self.0 - 1)
-  }
-}
+impl PrattPower for Power {}
 
-// A non-operator token ends the expression: parse_rhs returns this below-default sentinel,
-// and the driver rolls the token back for the enclosing context (a `)`, or the top level).
-const SENTINEL: Power = Power(-1);
 const PREC_SUM: Power = Power(1); // + -
 const PREC_PROD: Power = Power(2); // * /
 const PREC_NEG: Power = Power(3); // unary -
@@ -252,7 +262,7 @@ where
   }
 }
 
-/// Right-hand side: an infix operator, or the sentinel that ends the expression.
+/// Right-hand side: an infix operator, or the end of the expression.
 fn parse_rhs<'inp, Ctx>(
   inp: &mut CalcIn<'inp, '_, Ctx>,
 ) -> Result<PrattRHS<(), (), (), (), Power>, CalcError>
@@ -260,10 +270,9 @@ where
   Ctx: ParseContext<'inp, CalcLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, CalcLexer<'inp>, Error = CalcError>,
 {
-  let sentinel = PrattRHS::Postfix(Precedenced::new((), SENTINEL));
   inp.skip_while(|t| t.is_trivia())?;
   match inp.next()? {
-    None => Ok(sentinel),
+    None => Ok(PrattRHS::End),
     Some(tok) => Ok(match tok.into_data() {
       Token::Plus | Token::Minus => {
         PrattRHS::Infix(Precedenced::new(PrattInfix::Left(()), PREC_SUM))
@@ -273,7 +282,7 @@ where
       }
       Token::Caret => PrattRHS::Infix(Precedenced::new(PrattInfix::Right(()), PREC_EXP)),
       // Not an operator (a `)`, or an operand): end here; the driver rolls it back.
-      _ => sentinel,
+      _ => PrattRHS::End,
     }),
   }
 }
@@ -312,11 +321,11 @@ where
   Ctx: ParseContext<'inp, CalcLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, CalcLexer<'inp>, Error = CalcError>,
 {
-  Ok(()) // only the sentinel is a "postfix"; it is rolled back before ever folding
+  Ok(()) // this grammar declares no postfix operator, so nothing folds here
 }
 
-/// The CST seam: each fold's operator picks the node kind that wraps the folded region. The
-/// sentinel (a "postfix") is never folded, so it never reaches here.
+/// The CST seam: each fold's operator picks the node kind that wraps the folded region. This
+/// grammar has no postfix operator, so that arm records nothing.
 fn calc_kinds(op: PrattFoldOp<'_, (), (), (), (), ()>) -> Option<u16> {
   match op {
     PrattFoldOp::Prefix(_) => Some(K::PrefixExpr.raw()),

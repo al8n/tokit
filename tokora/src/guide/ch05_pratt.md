@@ -36,14 +36,17 @@ Both run the same engine; only the currency of the folds differs.
 
 Two of those rows carry the chapter's whole design.
 
-**Associativity is a power adjustment, not a special case.** After a left-associative operator
-the engine recurses with a floor of [`power.next()`](crate::parser::PrattPower::next), so an
-equal-power operator to the right does *not* clear the inner floor and folds into the outer
-call instead — `10 / 2 / 5` groups as `(10 / 2) / 5`. A right-associative operator recurses at
-[`power.prev()`](crate::parser::PrattPower::prev) instead, so the equal-power operator *does*
-clear it and is consumed by the inner call: `2 ^ 3 ^ 2` groups as `2 ^ (3 ^ 2)` = 512. You
-write [`PrattInfix::Left`](crate::parser::PrattInfix) or `PrattInfix::Right`; the `next`/`prev`
-dance is the engine's.
+**Associativity is how strict the floor is, not a special case.** After a left-associative
+operator the engine recurses with a floor that admits only powers *strictly greater* than the
+operator's own, so an equal-power operator to the right does *not* clear the inner floor and
+folds into the outer call instead — `10 / 2 / 5` groups as `(10 / 2) / 5`. A right-associative
+operator recurses with a floor that admits its own power too, so the equal-power operator
+*does* clear it and is consumed by the inner call: `2 ^ 3 ^ 2` groups as `2 ^ (3 ^ 2)` = 512.
+You write [`PrattInfix::Left`](crate::parser::PrattInfix) or `PrattInfix::Right`; picking the
+strictness is the engine's job. Note what it never does: step to a neighbouring level. A
+[`PrattPower`](crate::parser::PrattPower) is only ever compared, so the rule holds at the ends
+of the ladder, where `power ± 1` would have run out of room and silently swapped the two
+behaviours.
 
 **Grouping is an operator pair below the floor.** `(` is a *prefix* operator at power `-1` and
 `)` is a *postfix* operator at the same power. A top-level parse starts at the default floor
@@ -55,9 +58,9 @@ No bracket-matching code and no depth counter: the precedence rule already says 
 ## Binding powers are plain integers
 
 `Power` defaults to `i64`, and tokora implements [`PrattPower`](crate::parser::PrattPower) for
-every standard integer type (saturating at the bounds, so `prev` on the minimum cannot
-underflow). Write `1`, `2`, `-1` and move on. A newtype is still welcome when you want *named*
-levels and a type-checked ladder — the trait is public — but nothing forces one on you.
+every standard integer type. Write `1`, `2`, `-1` and move on. A newtype is still welcome when
+you want *named* levels and a type-checked ladder — the trait is public, and it asks for
+nothing beyond `Default + Clone + Ord` — but nothing forces one on you.
 
 ## The folds must be named functions
 

@@ -39,44 +39,49 @@ example below does.
 
 ## Binding power: `PrattPower`
 
-The precedence of an operator. tokora implements it for every standard integer type (saturating
-at the bounds, so [`prev`](crate::parser::PrattPower::prev) on the minimum cannot underflow), so
-a plain `i64` — the default `Power` throughout — works with no newtype. Implement it yourself
-when you want *named* levels and a type-checked ladder.
+The precedence of an operator: an ordered level, and nothing else. The engine only ever
+*compares* two powers, so the trait adds no methods of its own — anything
+`Default + Clone + Ord` can be a ladder. tokora implements it for every standard integer type,
+so a plain `i64` — the default `Power` throughout — works with no newtype. Implement it
+yourself when you want *named* levels and a type-checked ladder.
 
 ```text
-trait PrattPower: Default + Clone + Ord {
-    fn next(&self) -> Self;   // one level tighter
-    fn prev(&self) -> Self;   // one level looser (use saturating subtraction)
-}
+trait PrattPower: Default + Clone + Ord {}
 ```
 
 ```rust
 use tokora::parser::PrattPower;
 
-assert_eq!(3i64.next(), 4);
-assert_eq!(3i64.prev(), 2);
-// Saturating at the representable bounds — never wraps, never panics.
-assert_eq!(u8::MAX.next(), u8::MAX);
-assert_eq!(i8::MIN.prev(), i8::MIN);
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Prec(i32);
+impl PrattPower for Prec {}
+
+const PREC_SUM: Prec = Prec(1);
+const PREC_PROD: Prec = Prec(2);
+// Only the relative order carries meaning; the numbers themselves never get arithmetic done
+// to them, so gaps in the ladder are free and its extremes are not special.
+assert!(PREC_PROD > PREC_SUM);
+assert_eq!(Prec::default(), Prec(0));
 ```
 
-### Associativity is a power adjustment
+### Associativity is how strict the floor is
 
-Associativity is not a special case in the loop — it is which neighbour of the operator's power
-the engine recurses at. This table is the whole rule:
+Associativity is not a special case in the loop — it is how strictly the engine compares the
+next operator's power against the current one when it recurses into the right operand. This
+table is the whole rule:
 
-| Written | Recurses at | Effect |
+| Written | Right operand admits | Effect |
 |---|---|---|
-| [`PrattInfix::Left`](crate::parser::PrattInfix) | `power.next()` | equal-power operator to the right folds into the *outer* call → `a - b - c` = `(a - b) - c` |
-| [`PrattInfix::Right`](crate::parser::PrattInfix) | `power.prev()` | equal-power operator to the right is consumed by the *inner* call → `a ^ b ^ c` = `a ^ (b ^ c)` |
-| [`PrattInfix::Neither`](crate::parser::PrattInfix) | `power.next()`, then refuses a second operator of the same power | `a == b == c` is rejected |
+| [`PrattInfix::Left`](crate::parser::PrattInfix) | powers `> power` | equal-power operator to the right folds into the *outer* call → `a - b - c` = `(a - b) - c` |
+| [`PrattInfix::Right`](crate::parser::PrattInfix) | powers `>= power` | equal-power operator to the right is consumed by the *inner* call → `a ^ b ^ c` = `a ^ (b ^ c)` |
+| [`PrattInfix::Neither`](crate::parser::PrattInfix) | powers `> power`, then refuses a second operator of the same power | `a == b == c` is rejected |
 
 Two further knobs share the same mechanism:
 
 - **A floor.** A parse runs against a *minimum* binding power (`Power::default()` at the top —
   `0` for an integer power). Operators below the floor are left on the input for the surrounding
-  grammar. A non-operator token maps to a power below the floor so the loop stops there naturally.
+  grammar. A token that is not an operator at all is not a power: an AST-level classifier says
+  [`PrattRHS::End`](crate::parser::PrattRHS) and a token-level one returns `None`.
 - **Grouping is a pair below the floor.** `(` is a *prefix* operator and `)` a *postfix* operator
   at the same sub-floor power: `)` is invisible at the top level (below the floor, left for the
   caller) but consumable inside the recursive call a `(` prefix opens (whose floor is that same
@@ -121,12 +126,15 @@ enum PrattInfix<L, R, N> { Left(L), Right(R), Neither(N) }   // associativity + 
 enum PrattRHS<L, R, N, Post, Power = i64> {     // what follows an operand
     Infix(Precedenced<PrattInfix<L, R, N>, Power>),
     Postfix(Precedenced<Post, Power>),
+    End,                                        //   the expression stops here
 }
 ```
 
-`PrattLHS::try_pratt_lhs`-style classifiers returning `None` (token-level) or a below-floor
-`Postfix` sentinel (AST-level) are how the loop learns a token is *not* part of the expression
-here and stops.
+A token-level classifier returning `None`, and an AST-level one returning `PrattRHS::End`, are
+how the loop learns a token is *not* part of the expression here and stops — at exhaustion just
+the same. Do **not** spell that as a below-floor `Postfix` "sentinel": a sentinel is a real
+operator report, so whether it binds depends on the floor the loop happens to be running at, and
+over an unsigned `Power` there is no value below the default floor to give it.
 
 ---
 
@@ -382,9 +390,9 @@ fn fold_postfix(&mut InputRef, operand: O,           operator: Precedenced<PostO
 
 ### End to end
 
-The same arithmetic, folded into a tree instead of evaluated. A non-operator token maps to a
-below-floor `Postfix` sentinel: its power is under the floor, so the engine rolls back the token
-it peeked and leaves it for the surrounding grammar. The last stanza adds
+The same arithmetic, folded into a tree instead of evaluated. A non-operator token answers
+`PrattRHS::End`, and the engine rolls back the token it read and leaves it for the surrounding
+grammar. The last stanza adds
 [`with_cst_kinds`](crate::parser::Pratt::with_cst_kinds).
 
 ```rust
@@ -460,7 +468,6 @@ const SUM: i64 = 1;
 const PROD: i64 = 2;
 const NEG: i64 = 3;
 const EXP: i64 = 4;
-const BELOW_FLOOR: i64 = -1; // a non-operator: power under the default floor (0)
 
 // lhs — an operand, a prefix operator, or a parenthesised sub-expression.
 fn parse_lhs<'a>(
@@ -483,19 +490,18 @@ fn parse_lhs<'a>(
   }
 }
 
-// rhs — an infix operator, else a below-floor sentinel the engine rolls back.
+// rhs — an infix operator, else `End`; the engine rolls the token back.
 fn parse_rhs<'a>(
   inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>,
 ) -> Result<PrattRHS<char, char, char, char, i64>, Error> {
-  let sentinel = PrattRHS::Postfix(Precedenced::new(' ', BELOW_FLOOR));
   match inp.next()? {
-    None => Ok(sentinel),
+    None => Ok(PrattRHS::End),
     Some(tok) => Ok(match tok.into_data() {
       Tok::Plus => PrattRHS::Infix(Precedenced::new(PrattInfix::Left('+'), SUM)),
       Tok::Minus => PrattRHS::Infix(Precedenced::new(PrattInfix::Left('-'), SUM)),
       Tok::Star => PrattRHS::Infix(Precedenced::new(PrattInfix::Left('*'), PROD)),
       Tok::Caret => PrattRHS::Infix(Precedenced::new(PrattInfix::Right('^'), EXP)),
-      _ => sentinel,
+      _ => PrattRHS::End,
     }),
   }
 }

@@ -9,5 +9,10 @@ pub trait PrattToken<'a, Expr: ?Sized, Power = i64>: Token<'a> {
 
   /// Returns `Some(rhs)` if the token is an infix or postfix operator of the `Expr`,
   /// or `None` if it is not part of the expression at this position.
+  ///
+  /// `None` is this trait's end channel: the token stays in the stream for the surrounding
+  /// grammar. [`PrattRHS::End`] means exactly the same thing here and is treated
+  /// identically, so a classifier shared with the typed driver needs no translation — but
+  /// `None` is the spelling to prefer, since it is the one the signature already offers.
   fn try_pratt_rhs(&self) -> Option<PrattRHS<(), (), (), (), Power>>;
 }
