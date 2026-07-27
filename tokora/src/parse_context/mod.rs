@@ -9,7 +9,7 @@ use core::marker::PhantomData;
 use crate::{
   Cache, Emitter, Lexer,
   cache::DefaultCache,
-  emitter::{ComposableEmitter, Fatal},
+  emitter::{ComposableEmitter, Fatal, FromTokenErrors},
   input::InputContext,
   lexer::SliceOf,
 };
@@ -179,28 +179,47 @@ where
 pub type ErrorOf<'inp, L, Ctx, Lang> =
   <<Ctx as ParseContext<'inp, L, Lang>>::Emitter as Emitter<'inp, L, Lang>>::Error;
 
-/// The context bundle a generic parser atom takes.
+/// The one bound a generic parser atom needs.
 ///
-/// Implemented for every [`ParseContext`] whose emitter is a
-/// [`ComposableEmitter`](crate::emitter::ComposableEmitter) and whose source slice is
-/// [`Clone`], so an atom needs only `Ctx: ParseCtx<'inp, L>` to unlock the entire
-/// emitter surface. The emitter requirement rides on the [`ParseContext`] supertrait as
-/// an associated-type bound so it elaborates to callers of the bundle rather than having
-/// to be restated at every use site; the `SliceOf<'inp, L>: Clone` requirement lives on
-/// the blanket impl (a projection bound cannot be a supertrait), so it gates which
-/// contexts qualify without forcing that clause onto every mention of the bound. Atoms
-/// that clone a slice restate that one bound locally.
+/// A grammar function has two orthogonal requirements of its context: that the emitter can
+/// *route* every diagnostic, and that the error type can *absorb* one. `ComposableParseContext`
+/// carries both. It is implemented for every [`ParseContext`] whose emitter is a
+/// [`ComposableEmitter`](crate::emitter::ComposableEmitter), whose emitter's error absorbs
+/// every token-level failure ([`FromTokenErrors`](crate::emitter::FromTokenErrors)), and
+/// whose source slice is [`Clone`] — so an atom needs only
+/// `Ctx: ComposableParseContext<'inp, L>` and restates nothing.
+///
+/// # Mechanism, and why it is a nested associated-type bound
+///
+/// Both requirements ride the [`ParseContext`] supertrait as *nested* associated-type
+/// bounds — `Emitter: ComposableEmitter<…, Error: FromTokenErrors<…>>` — so they elaborate
+/// to callers of the bundle. A free-standing `where ErrorOf<'inp, L, Ctx, Lang>: …` clause
+/// does **not** work: rustc will not elaborate a where-clause predicate whose self type is
+/// a projection, so the obligation would reappear at every use site. The
+/// `SliceOf<'inp, L>: Clone` requirement lives on the blanket impl instead (a projection
+/// bound cannot be a supertrait), so it gates which contexts qualify without forcing that
+/// clause onto every mention of the bound; atoms that clone a slice restate that one bound
+/// locally.
+///
+/// # What this means for an implementor
+///
+/// Nothing is written: the trait is blanket-implemented, and a context qualifies exactly
+/// when its emitter's error absorbs the five token-level conversions. A context whose error
+/// cannot absorb an end-of-input — which was never able to run a real grammar — now fails
+/// at the bound instead of hundreds of frames deep at the first leaf atom that tries.
 ///
 /// # Examples
 ///
-/// One `ParseCtx` bound stands in for the context ladder — the bundled function can call
-/// into code demanding individual emitter capabilities of `Ctx::Emitter`:
+/// One bound stands in for the emitter ladder *and* the error conversions — the bundled
+/// function can call into code demanding either:
 ///
 /// ```rust
-/// use tokora::{Lexer, ParseCtx};
+/// use tokora::{ComposableParseContext, ErrorOf, Lexer, Token};
 /// use tokora::emitter::{
-///   SeparatedEmitter, TooFewEmitter, UnclosedEmitter, UnexpectedTrailingSeparatorEmitter,
+///   FromUnclosed, SeparatedEmitter, TooFewEmitter, UnclosedEmitter,
+///   UnexpectedTrailingSeparatorEmitter,
 /// };
+/// use tokora::error::{UnexpectedEot, token::UnexpectedTokenOf};
 ///
 /// fn needs_diagnostics<'inp, L, E>()
 /// where
@@ -212,27 +231,49 @@ pub type ErrorOf<'inp, L, Ctx, Lang> =
 /// {
 /// }
 ///
-/// // The single bound elaborates: the whole family is available on `Ctx::Emitter`.
+/// fn needs_conversions<'inp, L, E>()
+/// where
+///   L: Lexer<'inp>,
+///   E: From<UnexpectedEot<L::Offset, ()>>
+///     + From<UnexpectedEot<L::Offset, (), <L::Token as Token<'inp>>::Kind>>
+///     + From<UnexpectedTokenOf<'inp, L>>
+///     + From<<L::Token as Token<'inp>>::Error>
+///     + FromUnclosed<'inp, L>,
+/// {
+/// }
+///
+/// // The single bound elaborates to both halves.
 /// fn atom_shaped<'inp, L, Ctx>()
 /// where
 ///   L: Lexer<'inp>,
-///   Ctx: ParseCtx<'inp, L>,
+///   Ctx: ComposableParseContext<'inp, L>,
 /// {
-///   needs_diagnostics::<L, Ctx::Emitter>()
+///   needs_diagnostics::<L, Ctx::Emitter>();
+///   needs_conversions::<L, ErrorOf<'inp, L, Ctx, ()>>();
 /// }
 /// ```
-pub trait ParseCtx<'inp, L, Lang: ?Sized = ()>:
-  ParseContext<'inp, L, Lang, Emitter: ComposableEmitter<'inp, L, Lang>>
+pub trait ComposableParseContext<'inp, L, Lang: ?Sized = ()>:
+  ParseContext<
+    'inp,
+    L,
+    Lang,
+    Emitter: ComposableEmitter<'inp, L, Lang, Error: FromTokenErrors<'inp, L, Lang>>,
+  >
 where
   L: Lexer<'inp>,
 {
 }
 
-impl<'inp, L, Lang: ?Sized, T> ParseCtx<'inp, L, Lang> for T
+impl<'inp, L, Lang: ?Sized, T> ComposableParseContext<'inp, L, Lang> for T
 where
   L: Lexer<'inp>,
   SliceOf<'inp, L>: Clone,
-  T: ParseContext<'inp, L, Lang, Emitter: ComposableEmitter<'inp, L, Lang>>,
+  T: ParseContext<
+      'inp,
+      L,
+      Lang,
+      Emitter: ComposableEmitter<'inp, L, Lang, Error: FromTokenErrors<'inp, L, Lang>>,
+    >,
 {
 }
 

@@ -139,24 +139,11 @@ fn ctx() -> ParserContext<'static, TestLexer<'static>, TestEm> {
 }
 
 #[test]
-fn parse_exact_of_accepts_matching_keyword() {
+fn parse_exact_errors_on_wrong_keyword() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<Token, SimpleSpan>, E> {
-    Keyword::parse_exact_of(&"if").parse_input(inp)
-  }
-  let r = Parser::with_context(ctx()).apply(parse).parse_str("if");
-  let (span, tok) = r.unwrap().into_components();
-  assert_eq!(tok, Token::If);
-  assert_eq!(span, SimpleSpan::new(0, 2));
-}
-
-#[test]
-fn parse_exact_of_errors_on_wrong_keyword() {
-  fn parse<'inp>(
-    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
-  ) -> Result<Keyword<Token, SimpleSpan>, E> {
-    Keyword::parse_exact_of(&"if").parse_input(inp)
+    Keyword::parse_exact(&"if").parse_input(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("else");
   assert_eq!(
@@ -168,11 +155,11 @@ fn parse_exact_of_errors_on_wrong_keyword() {
 }
 
 #[test]
-fn parse_exact_of_errors_on_empty_input() {
+fn parse_exact_errors_on_empty_input() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<Token, SimpleSpan>, E> {
-    Keyword::parse_exact_of(&"if").parse_input(inp)
+    Keyword::parse_exact(&"if").parse_input(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("");
   assert_eq!(r.unwrap_err(), E::Eot);
@@ -209,11 +196,11 @@ fn try_parse_sliced_slices_each_current_keyword() {
 }
 
 #[test]
-fn parse_of_accepts_any_keyword() {
+fn parse_accepts_else_keyword() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<Token, SimpleSpan>, E> {
-    Keyword::parse_of(inp)
+    Keyword::parse(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("else");
   let (span, tok) = r.unwrap().into_components();
@@ -222,11 +209,11 @@ fn parse_of_accepts_any_keyword() {
 }
 
 #[test]
-fn parse_of_errors_on_non_keyword() {
+fn parse_errors_on_non_keyword() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<Token, SimpleSpan>, E> {
-    Keyword::parse_of(inp)
+    Keyword::parse(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("foo");
   assert_eq!(
@@ -238,11 +225,11 @@ fn parse_of_errors_on_non_keyword() {
 }
 
 #[test]
-fn parse_of_errors_on_empty_input() {
+fn parse_errors_on_empty_input() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<Token, SimpleSpan>, E> {
-    Keyword::parse_of(inp)
+    Keyword::parse(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("");
   assert_eq!(r.unwrap_err(), E::Eot);
@@ -262,11 +249,11 @@ fn parse_accepts_any_keyword() {
 }
 
 #[test]
-fn parse_sliced_of_accepts_any_keyword() {
+fn parse_sliced_accepts_else_keyword() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<&'inp str, SimpleSpan>, E> {
-    Keyword::parse_sliced_of(inp)
+    Keyword::parse_sliced(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("else");
   let (span, source) = r.unwrap().into_components();
@@ -275,11 +262,11 @@ fn parse_sliced_of_accepts_any_keyword() {
 }
 
 #[test]
-fn parse_sliced_of_errors_on_non_keyword() {
+fn parse_sliced_errors_on_non_keyword() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<&'inp str, SimpleSpan>, E> {
-    Keyword::parse_sliced_of(inp)
+    Keyword::parse_sliced(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("foo");
   assert_eq!(
@@ -291,11 +278,11 @@ fn parse_sliced_of_errors_on_non_keyword() {
 }
 
 #[test]
-fn parse_sliced_of_errors_on_empty_input() {
+fn parse_sliced_errors_on_empty_input() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<&'inp str, SimpleSpan>, E> {
-    Keyword::parse_sliced_of(inp)
+    Keyword::parse_sliced(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("");
   assert_eq!(r.unwrap_err(), E::Eot);
@@ -313,11 +300,11 @@ fn parse_sliced_accepts_any_keyword() {
 }
 
 #[test]
-fn parse_exact_sliced_of_accepts_matching_keyword() {
+fn parse_exact_sliced_accepts_matching_keyword_with_span() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<&'inp str, SimpleSpan>, E> {
-    Keyword::parse_exact_sliced_of(&"if").parse_input(inp)
+    Keyword::parse_exact_sliced(&"if").parse_input(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("if");
   let (span, source) = r.unwrap().into_components();
@@ -326,11 +313,11 @@ fn parse_exact_sliced_of_accepts_matching_keyword() {
 }
 
 #[test]
-fn parse_exact_sliced_of_errors_on_wrong_keyword() {
+fn parse_exact_sliced_errors_on_wrong_keyword() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<&'inp str, SimpleSpan>, E> {
-    Keyword::parse_exact_sliced_of(&"if").parse_input(inp)
+    Keyword::parse_exact_sliced(&"if").parse_input(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("else");
   assert_eq!(
@@ -342,11 +329,11 @@ fn parse_exact_sliced_of_errors_on_wrong_keyword() {
 }
 
 #[test]
-fn parse_exact_sliced_of_errors_on_empty_input() {
+fn parse_exact_sliced_errors_on_empty_input() {
   fn parse<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
   ) -> Result<Keyword<&'inp str, SimpleSpan>, E> {
-    Keyword::parse_exact_sliced_of(&"if").parse_input(inp)
+    Keyword::parse_exact_sliced(&"if").parse_input(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("");
   assert_eq!(r.unwrap_err(), E::Eot);

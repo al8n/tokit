@@ -66,9 +66,11 @@ impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for DelimError {
   }
 }
 
-// Required by the `From<UnexpectedEot<L::Offset, Lang>>` bound on delimited parsers.
-impl From<UnexpectedEot> for DelimError {
-  fn from(_: UnexpectedEot) -> Self {
+// Required by the two end-of-input members of `FromTokenErrors`: the `_or_stop` family
+// raises the default expected set, the committed dispatch drivers a `Kind` table. One
+// `Set`-generic impl discharges both.
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for DelimError {
+  fn from(_: UnexpectedEot<O, Lang, Set>) -> Self {
     DelimError
   }
 }
@@ -95,6 +97,15 @@ impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for DelimError {
 
 impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for DelimError {
   fn from(_: Unclosed<D, S, Lang>) -> Self {
+    DelimError
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for DelimError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self {
     DelimError
   }
 }

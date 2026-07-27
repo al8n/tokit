@@ -29,6 +29,7 @@ pub use logos_0_16 as logos;
 
 pub use cache::{Cache, DefaultCache};
 pub use check::Check;
+pub use dialect::{Dialect, DialectErrorOf, DialectInput, DialectSlice, LangOf, LexerOf};
 pub use emitter::{ComposableEmitter, CstEmitter, Emitter};
 pub use input::{
   Balance, Commit, Complete, Completeness, DelimClass, DropPolicy, Hole, InputRef, Partial,
@@ -40,10 +41,12 @@ pub use input::{SavepointId, SessionPointId, StackedTransaction};
 pub use lexer::{Lexed, Lexer, SliceOf};
 pub use located::*;
 pub use parse_choice::*;
-pub use parse_context::{ErrorOf, FatalContext, ParseContext, ParseCtx, ParserContext};
+pub use parse_context::{
+  ComposableParseContext, ErrorOf, FatalContext, ParseContext, ParserContext,
+};
 pub use parse_input::*;
 pub use parse_state::ParseState;
-pub use parser::{Labelled, Parse, Parser, labelled};
+pub use parser::{Labelled, Parse, Parser, labelled, parse, parse_with, parse_with_state};
 pub use require::Require;
 pub use slice::Slice;
 pub use source::Source;
@@ -155,6 +158,16 @@ pub mod punct;
 /// Defines common delimiter types (brackets, braces, parentheses) and utilities
 /// for working with delimited constructs in parsing.
 pub mod delimiter;
+
+/// The dialect anchor: one type per language, naming its lexer and its brand.
+///
+/// A grammar's productions all need the same block of lexer equalities — source, slice, token,
+/// span, offset, token capabilities — and Rust cannot name that block once. The [`Dialect`]
+/// trait is the anchor it hangs off: a consumer writes one impl per language, pins the
+/// projections in a one-line subtrait, and each production then carries two `where`-clause
+/// lines. The [`LexerOf`] / [`LangOf`] / [`DialectSlice`] / [`DialectInput`] /
+/// [`DialectErrorOf`] aliases spell the projections a signature actually mentions.
+pub mod dialect;
 
 /// Source text abstraction for lexers.
 ///

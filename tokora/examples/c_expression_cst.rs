@@ -1,7 +1,7 @@
 //! The lossless-CST twin of `c_expression.rs`.
 //!
 //! Same C-style expression grammar as its twin, built into a **lossless** rowan tree instead
-//! of an [`Expr`] AST. Like the twin it uses the high-level [`pratt_of`](tokora::parser::pratt_of)
+//! of an [`Expr`] AST. Like the twin it uses the high-level [`pratt`](tokora::parser::pratt)
 //! driver — here with its CST seam, [`with_cst_kinds`](tokora::parser::Pratt::with_cst_kinds):
 //! each fold's operator picks the node kind that wraps the folded region. The interesting part
 //! is the **postfix folds that consume tokens**: `e[i]`, `f(args)`, and `e ? t : f` each parse
@@ -23,7 +23,7 @@ use tokora::{
   emitter::{CstEmitter, Fatal},
   error::token::UnexpectedTokenOf,
   logos::{self, Logos},
-  parser::{PrattFoldOp, PrattInfix, PrattLHS, PrattPower, PrattRHS, Precedenced, pratt_of},
+  parser::{PrattFoldOp, PrattInfix, PrattLHS, PrattPower, PrattRHS, Precedenced, pratt},
 };
 
 // ── Lossless lexer ──────────────────────────────────────────────────────────────
@@ -596,7 +596,7 @@ where
   Ctx::Emitter:
     CstEmitter<'inp, CExprLexer<'inp>> + Emitter<'inp, CExprLexer<'inp>, Error = CExprError>,
 {
-  pratt_of(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix)
+  pratt(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix)
     .with_cst_kinds(cexpr_kinds)
     .parse_input(inp)
 }

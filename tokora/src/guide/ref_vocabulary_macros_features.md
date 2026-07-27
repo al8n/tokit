@@ -7,10 +7,10 @@ two public macros that generate it, and the complete Cargo feature matrix.
 
 The vocabulary types are all **span-generic AST fragments**: each is a `Name<S = …, C = (), Lang =
 ()>` carrying a span `S`, optional captured source `C`, and the language marker `Lang`. As with the
-combinators, most parse entry points come in a **base** form (`Lang = ()`) and an **`_of`** form
-generic over `Lang` — `Comma::parse`/`Comma::parse_of`, `If::try_parse`/`If::try_parse_of`. The
-[combinator reference](super::ref_combinators) explains that convention; reach for the base form
-unless you are writing a language-generic library. Since 0.3.0 every one of these entry points
+combinators, each parse entry point is **one** form generic over `Lang`, which it reads off the
+input — `Comma::parse`, `If::try_parse` — so an unbranded grammar and a branded one write the
+identical call. The [combinator reference](super::ref_combinators) explains that convention and
+the one shape where an `_of` suffix survives. Since 0.3.0 every one of these entry points
 is also generic over the input's completeness (a trailing `Cmpl` fn parameter, inferred from
 the handle you pass), so the same `Comma::parse` drives complete and
 [`Partial`](crate::Partial) inputs alike; if you spell an entry point's generics in full, append
@@ -85,12 +85,12 @@ current [`Token`](crate::Token) reports the matching kind — see
 | **Shift** | `ShiftLeft` (`<<`) `ShiftRight` (`>>`) `ShiftArithmeticRight` (`>>>`) |
 | **Trivia** | `Space` `Tab` `Newline` `CarriageReturn` `CarriageReturnNewline` (alias `Crnl`) `Trivia` |
 
-Each built-in exposes four parse entry points; the base pair fixes `Lang = ()`:
+Each built-in exposes two parse entry points, both generic over `Lang`:
 
 ```text
-Comma::parse(inp)      -> Result<Comma<L::Span, ()>, Error>              // error on mismatch/EOI
-Comma::try_parse(inp)  -> Result<ParseAttempt<Comma<L::Span, ()>>, Error>// decline on mismatch
-Comma::parse_of / try_parse_of                                          // Lang-generic twins
+Comma::parse(inp)      -> Result<Comma<L::Span, (), Lang>, Error>              // error on mismatch/EOI
+Comma::try_parse(inp)  -> Result<ParseAttempt<Comma<L::Span, (), Lang>>, Error>// decline on mismatch
+// `Lang` comes from `inp`; at `Lang = ()` the results are `Comma<L::Span, ()>` as before
 // Punctuator trait: kind() -> Kind, eval(&Kind) -> bool, name(), unexpected_token(tok)
 ```
 
@@ -110,6 +110,7 @@ Comma::parse_of / try_parse_of                                          // Lang-
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
@@ -257,9 +258,9 @@ keyword! { (If, "IF", "if"), … }
 // generates, per entry (default span is SimpleSpan):
 pub struct If<S = SimpleSpan, C = (), Lang: ?Sized = ()> { … }
 impl If {
-    fn parse(inp)     -> Result<If<L::Span, ()>, Error>;               // error on mismatch/EOI
-    fn try_parse(inp) -> Result<ParseAttempt<If<L::Span, ()>>, Error>; // decline on mismatch
-    fn parse_of / try_parse_of                                         // Lang-generic twins
+    fn parse(inp)     -> Result<If<L::Span, (), Lang>, Error>;               // error on mismatch/EOI
+    fn try_parse(inp) -> Result<ParseAttempt<If<L::Span, (), Lang>>, Error>; // decline on mismatch
+    // both generic over `Lang`, read off `inp`
 }
 impl Check<T, bool> for If   // predicate: does this token carry the "if" spelling?
 // + UNIT / raw() / as_str() / Display / DisplayHuman / … (like punctuators)
@@ -285,6 +286,7 @@ one-character keyword, so the spelling is `"i"`; a real lexer reports the full w
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
@@ -487,7 +489,7 @@ Only **two** macros are exported (`#[macro_export]`, reachable at the crate root
 | Macro | Generates |
 |-------|-----------|
 | [`punctuator!`](crate::punctuator) | punctuator marker types (`Name<S, C, Lang>` + displays/accessors) |
-| [`keyword!`](crate::keyword) | keyword types **with** `parse`/`try_parse`(`_of`) + a `Check` impl |
+| [`keyword!`](crate::keyword) | keyword types **with** `parse`/`try_parse` + a `Check` impl |
 
 The `separated_by_comma` / `fold_while` / `dispatch_on_kind` "families" from the
 [combinator reference](super::ref_combinators) are generated **methods**, not macros; `paste` and

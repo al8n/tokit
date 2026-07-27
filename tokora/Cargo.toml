@@ -140,6 +140,7 @@ rowan = { version = "0.16", optional = true }
 [dev-dependencies]
 criterion = "0.8"
 tempfile = "3"
+trybuild = "1.0.118"
 
 [lints]
 workspace = true

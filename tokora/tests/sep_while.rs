@@ -93,8 +93,17 @@ impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for WhileError {
 
 // The separated_while driver's separator-slot and decision-window gates surface a terminal scanner
 // stop as this end-of-input error (the bound the delimited variants already required).
-impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for WhileError {
-  fn from(_: UnexpectedEot<O, Lang>) -> Self {
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for WhileError {
+  fn from(_: UnexpectedEot<O, Lang, Set>) -> Self {
+    WhileError
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for WhileError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     WhileError
   }
 }

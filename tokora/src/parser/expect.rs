@@ -361,21 +361,11 @@ where
 }
 
 /// Creates a parser that expects a token matching a specific criterion.
+///
+/// `Lang` is read off the input, so an unbranded grammar writes the same call as a branded one.
 #[must_use]
 #[inline(always)]
-pub fn try_expect<'inp, Classifier, L, Ctx>(classifier: Classifier) -> Expect<Classifier, Ctx>
-where
-  L: Lexer<'inp>,
-  Ctx: ParseContext<'inp, L>,
-  Classifier: Check<L::Token>,
-{
-  try_expect_of(classifier)
-}
-
-/// Creates a parser that expects a token matching a specific criterion for a specific language.
-#[must_use]
-#[inline(always)]
-pub fn try_expect_of<'inp, Classifier, L, Ctx, Lang>(
+pub fn try_expect<'inp, Classifier, L, Ctx, Lang>(
   classifier: Classifier,
 ) -> Expect<Classifier, Ctx, Lang>
 where
@@ -388,23 +378,11 @@ where
 }
 
 /// Creates a parser that expects a token matching a specific criterion.
+///
+/// `Lang` is read off the input, so an unbranded grammar writes the same call as a branded one.
 #[must_use]
 #[inline(always)]
-pub fn expect<'inp, Classifier, L, Ctx>(classifier: Classifier) -> Expect<Classifier, Ctx>
-where
-  L: Lexer<'inp>,
-  Ctx: ParseContext<'inp, L>,
-  <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span>>
-    + From<UnexpectedEot<L::Offset>>,
-  Classifier: Check<L::Token, Result<(), Expected<'inp, <L::Token as Token<'inp>>::Kind>>>,
-{
-  expect_of(classifier)
-}
-
-/// Creates a parser that expects a token matching a specific criterion for a specific language.
-#[must_use]
-#[inline(always)]
-pub fn expect_of<'inp, Classifier, L, Ctx, Lang>(
+pub fn expect<'inp, Classifier, L, Ctx, Lang>(
   classifier: Classifier,
 ) -> Expect<Classifier, Ctx, Lang>
 where

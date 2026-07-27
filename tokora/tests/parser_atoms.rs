@@ -1,6 +1,6 @@
 #![cfg(all(feature = "std", feature = "logos"))]
 
-//! The dialect-free atom surface: the `ComposableEmitter`/`ParseCtx` bundles and the
+//! The dialect-free atom surface: the `ComposableEmitter`/`ComposableParseContext` bundles and the
 //! policy atoms promoted from smear-parser-next (W-MOVE).
 //!
 //! The cases are ported one-for-one from the smear-side suites (`combinator/tests.rs`
@@ -16,8 +16,8 @@ mod common;
 use common::{E, TestLexer, Token, TokenKind};
 
 use tokora::{
-  Emitter, ErrorOf, FatalContext, InputRef, Lexer, Parse, ParseCtx, ParseInput, Parser,
-  ParserContext, SimpleSpan,
+  ComposableParseContext, Emitter, ErrorOf, FatalContext, InputRef, Lexer, Parse, ParseInput,
+  Parser, ParserContext, SimpleSpan,
   emitter::{
     Fatal, FullContainerEmitter, SeparatedEmitter, TooFewEmitter, UnclosedEmitter, Verbose,
   },
@@ -27,7 +27,7 @@ use tokora::{
     token::{MissingToken, SeparatedError, UnexpectedToken},
   },
   parser::{
-    angles, braces, brackets, delimited, list_of, opt, parens, peek_kind, separated1, try_angles,
+    angles, braces, brackets, delimited, list, opt, parens, peek_kind, separated1, try_angles,
     try_braces, try_brackets, try_delimited, try_parens,
   },
   punct::{Brace, Bracket, CloseBrace, Comma, Paren, Semicolon},
@@ -51,7 +51,7 @@ impl IdentifierToken<'_> for Token {
 fn assert_ctx<'inp, L, Ctx>()
 where
   L: Lexer<'inp>,
-  Ctx: ParseCtx<'inp, L>,
+  Ctx: ComposableParseContext<'inp, L>,
 {
 }
 
@@ -86,7 +86,7 @@ where
 fn elaborates<'inp, L, Ctx>()
 where
   L: Lexer<'inp>,
-  Ctx: ParseCtx<'inp, L>,
+  Ctx: ComposableParseContext<'inp, L>,
 {
   requires_separated::<L, Ctx::Emitter>();
   requires_too_few::<L, Ctx::Emitter>();
@@ -148,7 +148,7 @@ fn starts_ident(tok: &Token) -> bool {
   matches!(tok, Token::Ident)
 }
 
-/// Stop-predicate for `list_of`: the next token is the closing brace that ends the
+/// Stop-predicate for `list`: the next token is the closing brace that ends the
 /// list, so the loop stops and leaves the `}` in place.
 fn is_close_brace(tok: &Token) -> bool {
   matches!(tok, Token::RBrace)
@@ -252,18 +252,18 @@ fn separated1_empty_errors() {
   assert!(out.is_ok());
 }
 
-// ── `list_of` (smear: shape/tests.rs) ────────────────────────────────────────
+// ── `list` (smear: shape/tests.rs) ────────────────────────────────────────
 //
 // Zero-or-more idents, no separator, stopping at the `}` the stop predicate accepts.
 // The accept path asserts each item's slice and span, then commits `CloseBrace` to
-// prove `list_of` stopped before the `}` and left it in place.
+// prove `list` stopped before the `}` and left it in place.
 
 #[test]
-fn list_of_three_idents_until_brace() {
+fn list_three_idents_until_brace() {
   let out = drive(
     Fatal::<E>::new(),
     |inp| {
-      let items = list_of(Ident::parse, is_close_brace)(inp)?;
+      let items = list(Ident::parse, is_close_brace)(inp)?;
       assert_eq!(items.len(), 3);
       assert_eq!(*items[0].source_ref(), "a");
       assert_eq!(items[0].span(), SimpleSpan::new(0, 1));
@@ -284,11 +284,11 @@ fn list_of_three_idents_until_brace() {
 // An immediate stop yields an empty list with the stop token left in place — the
 // zero-or-more lower bound, with no diagnostic.
 #[test]
-fn list_of_empty_leaves_stop_token() {
+fn list_empty_leaves_stop_token() {
   let out = drive(
     Fatal::<E>::new(),
     |inp| {
-      let items = list_of(Ident::parse, is_close_brace)(inp)?;
+      let items = list(Ident::parse, is_close_brace)(inp)?;
       assert!(items.is_empty());
       let close = CloseBrace::parse(inp)?;
       assert_eq!(close.span(), &SimpleSpan::new(0, 1));
@@ -655,11 +655,7 @@ fn nested<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
 ) -> Result<Nested<'inp>, ErrorOf<'inp, TestLexer<'inp>, Ctx, ()>>
 where
-  Ctx: ParseCtx<'inp, TestLexer<'inp>>,
-  Ctx::Emitter: UnclosedEmitter<'inp, TestLexer<'inp>>,
-  ErrorOf<'inp, TestLexer<'inp>, Ctx, ()>: From<UnexpectedEot>
-    + From<UnexpectedToken<'inp, Token, TokenKind, SimpleSpan>>
-    + From<Unclosed<Bracket, SimpleSpan>>,
+  Ctx: ComposableParseContext<'inp, TestLexer<'inp>>,
 {
   match peek_kind(inp)? {
     Some(TokenKind::LBracket) => nested
@@ -964,6 +960,236 @@ fn try_delimited_generic_after_opener_is_committed_unterminated_never_declines()
   );
 }
 
+// ── #115: the fluent attempt twins on `ParseInput` ───────────────────────────
+//
+// `try_delimited::<D>()` plus the four named methods. Each is a delegation and holds no
+// state machine of its own, so these re-drive the free-function cases above through a
+// receiver: the decline-and-leave path, the EOT-at-entry decline, and the law that an
+// opener commits. The last case runs both surfaces over the same four inputs and asserts
+// they agree, which is what makes "it delegates" observable rather than merely documented.
+
+#[test]
+fn try_delimited_by_parens_declines_on_wrong_opener_and_leaves_it() {
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      let declined = Ident::parse.try_delimited_by_parens()(inp)?.is_none();
+      // The `{` group is untouched: the committed brace shape parses it whole.
+      let d = Ident::parse.delimited_by_braces().parse_input(inp)?;
+      assert_eq!(d.span(), SimpleSpan::new(0, 3));
+      Ok::<_, E>(declined)
+    },
+    "{x}",
+  );
+  assert!(matches!(out, Ok(true)));
+  // End of input at entry declines too (the `try_` atoms' EOT convention).
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| Ident::parse.try_delimited_by_parens()(inp),
+    "",
+  );
+  assert!(matches!(out, Ok(None)));
+}
+
+#[test]
+fn try_delimited_by_parens_accepts_and_spans_the_whole_group() {
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      let d = Ident::parse.try_delimited_by_parens()(inp)?
+        .expect("the opener is present, so the attempt accepts");
+      assert_eq!(*d.data().source_ref(), "x");
+      assert_eq!(d.data().span(), SimpleSpan::new(1, 2));
+      assert_eq!(d.span(), SimpleSpan::new(0, 3));
+      assert_eq!(d.open_ref().span(), &SimpleSpan::new(0, 1));
+      assert_eq!(d.close_ref().span(), &SimpleSpan::new(2, 3));
+      Ok::<_, E>(())
+    },
+    "(x)",
+  );
+  assert!(out.is_ok());
+}
+
+#[test]
+fn try_delimited_by_parens_after_opener_is_committed_unterminated_never_declines() {
+  // Fatal: committed-then-unterminated reports Unclosed as an `Err`.
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| Ident::parse.try_delimited_by_parens()(inp),
+    "(a",
+  );
+  assert!(out.is_err());
+  // Verbose: it records the Unclosed and recovers with the construct — NOT a silent decline.
+  let out = drive(
+    Verbose::<E>::new(),
+    |inp| Ident::parse.try_delimited_by_parens()(inp),
+    "(a",
+  );
+  assert!(
+    matches!(out, Ok(Some(_))),
+    "committed shape recovers under a recovering emitter, never Ok(None)"
+  );
+}
+
+#[test]
+fn try_delimited_by_braces_declines_and_commits_like_its_free_twin() {
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      let declined = Ident::parse.try_delimited_by_braces()(inp)?.is_none();
+      let d = Ident::parse.delimited_by_parens().parse_input(inp)?;
+      assert_eq!(d.span(), SimpleSpan::new(0, 3));
+      Ok::<_, E>(declined)
+    },
+    "(x)",
+  );
+  assert!(matches!(out, Ok(true)));
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| Ident::parse.try_delimited_by_braces()(inp),
+    "",
+  );
+  assert!(matches!(out, Ok(None)));
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| Ident::parse.try_delimited_by_braces()(inp),
+    "{a",
+  );
+  assert!(out.is_err());
+}
+
+#[test]
+fn try_delimited_by_brackets_declines_and_commits_like_its_free_twin() {
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      let declined = Ident::parse.try_delimited_by_brackets()(inp)?.is_none();
+      let d = Ident::parse.delimited_by_braces().parse_input(inp)?;
+      assert_eq!(d.span(), SimpleSpan::new(0, 3));
+      Ok::<_, E>(declined)
+    },
+    "{x}",
+  );
+  assert!(matches!(out, Ok(true)));
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| Ident::parse.try_delimited_by_brackets()(inp),
+    "",
+  );
+  assert!(matches!(out, Ok(None)));
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| Ident::parse.try_delimited_by_brackets()(inp),
+    "[a",
+  );
+  assert!(out.is_err());
+}
+
+#[test]
+fn try_delimited_by_angles_declines_and_commits_like_its_free_twin() {
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      let declined = Ident::parse.try_delimited_by_angles()(inp)?.is_none();
+      let d = Ident::parse.delimited_by_parens().parse_input(inp)?;
+      assert_eq!(d.span(), SimpleSpan::new(0, 3));
+      Ok::<_, E>(declined)
+    },
+    "(x)",
+  );
+  assert!(matches!(out, Ok(true)));
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| Ident::parse.try_delimited_by_angles()(inp),
+    "",
+  );
+  assert!(matches!(out, Ok(None)));
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| Ident::parse.try_delimited_by_angles()(inp),
+    "<a",
+  );
+  assert!(out.is_err());
+}
+
+#[test]
+fn try_delimited_method_generic_declines_commits_and_nests() {
+  // Wrong opener: decline, leave it, and let the committed shape take the group.
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      let declined = Ident::parse
+        .try_delimited::<Brace>()
+        .parse_input(inp)?
+        .is_none();
+      let d = parens(Ident::parse)(inp)?;
+      assert_eq!(d.span(), SimpleSpan::new(0, 3));
+      Ok::<_, E>(declined)
+    },
+    "(x)",
+  );
+  assert!(matches!(out, Ok(true)));
+  // Committed after the opener.
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| Ident::parse.try_delimited::<Paren>().parse_input(inp),
+    "(a",
+  );
+  assert!(out.is_err());
+  // The receiver may itself be a recursive generic parser, as the committed twin's is.
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      nested
+        .try_delimited::<Bracket>()
+        .parse_input(inp)
+        .map(|d| d.map(|d| Nested::List(Box::new(d.into_data()))))
+    },
+    "[[x]]",
+  )
+  .unwrap();
+  assert_eq!(
+    out,
+    Some(Nested::List(Box::new(Nested::List(Box::new(
+      Nested::Name("x")
+    )))))
+  );
+}
+
+#[test]
+fn try_delimited_by_parens_agrees_with_the_free_function_it_delegates_to() {
+  // The delegation target is the GENERIC free `try_delimited::<Paren>`, not the named
+  // `try_parens` — the named free fn carries its own opener body (§14.2), so only the
+  // generic one is the same code path. Four inputs cover accept, decline-on-wrong-opener,
+  // decline-at-EOT, and the committed-unterminated law.
+  for src in ["(x)", "{x}", "", "(a"] {
+    let via_method = drive(
+      Fatal::<E>::new(),
+      |inp| {
+        Ok::<_, E>(
+          Ident::parse.try_delimited_by_parens()(inp)?.map(|d| (d.span(), *d.data().source_ref())),
+        )
+      },
+      src,
+    );
+    let via_free = drive(
+      Fatal::<E>::new(),
+      |inp| {
+        Ok::<_, E>(
+          try_delimited::<Paren, _, _, _, _, _, _>(Ident::parse)(inp)?
+            .map(|d| (d.span(), *d.data().source_ref())),
+        )
+      },
+      src,
+    );
+    match (via_method, via_free) {
+      (Ok(m), Ok(f)) => assert_eq!(m, f, "method and free form disagreed on {src:?}"),
+      (Err(_), Err(_)) => {}
+      (m, f) => panic!("method/free disagreed on {src:?}: {m:?} vs {f:?}"),
+    }
+  }
+}
+
 // ── Local discriminating error for the generic error-path tests ──────────────
 //
 // `ShapeError` mirrors the shared `E`'s absorb-everything `From` family (so it is a
@@ -997,6 +1223,18 @@ impl<D, Lang: ?Sized> From<Unclosed<D, SimpleSpan, Lang>> for ShapeError {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for ShapeError
+where
+  L: tokora::Lexer<'inp, Span = SimpleSpan>,
+{
+  fn from_unclosed<D>(e: Unclosed<D, SimpleSpan, Lang>) -> Self {
+    ShapeError::Unclosed {
+      name: e.name_ref().to_string(),
+      start: e.span().start(),
+    }
+  }
+}
+
 impl<'a, S, Lang: ?Sized> From<UnexpectedToken<'a, Token, TokenKind, S, Lang>> for ShapeError {
   fn from(e: UnexpectedToken<'a, Token, TokenKind, S, Lang>) -> Self {
     let kind = match e.expected() {
@@ -1007,8 +1245,8 @@ impl<'a, S, Lang: ?Sized> From<UnexpectedToken<'a, Token, TokenKind, S, Lang>> f
   }
 }
 
-impl From<UnexpectedEot> for ShapeError {
-  fn from(_: UnexpectedEot) -> Self {
+impl<Set: Clone + 'static> From<UnexpectedEot<usize, (), Set>> for ShapeError {
+  fn from(_: UnexpectedEot<usize, (), Set>) -> Self {
     ShapeError::Eot
   }
 }

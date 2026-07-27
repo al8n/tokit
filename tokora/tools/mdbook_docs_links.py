@@ -98,7 +98,7 @@ DOCS_RS_MAP = {
   "crate::ParseChoice::peek_then_choice": "trait.ParseChoice.html#method.peek_then_choice",
   "crate::ParseChoice::peek_then_try_choice": "trait.ParseChoice.html#method.peek_then_try_choice",
   "crate::ParseContext": "trait.ParseContext.html",
-  "crate::ParseCtx": "trait.ParseCtx.html",
+  "crate::ComposableParseContext": "trait.ComposableParseContext.html",
   "crate::ParseInput": "trait.ParseInput.html",
   "crate::ParseInput::and_then": "trait.ParseInput.html#method.and_then",
   "crate::ParseInput::by_ref": "trait.ParseInput.html#method.by_ref",

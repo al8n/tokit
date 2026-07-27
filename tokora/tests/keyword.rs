@@ -229,8 +229,17 @@ impl From<CloseBrace<(), (), ()>> for KwTokenKind {
 
 // ── Error type ──────────────────────────────────────────────────────────────
 
-impl<S, Lang: ?Sized> From<UnexpectedEot<S, Lang>> for KwTestError {
-  fn from(_: UnexpectedEot<S, Lang>) -> Self {
+impl<S, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<S, Lang, Set>> for KwTestError {
+  fn from(_: UnexpectedEot<S, Lang, Set>) -> Self {
+    KwTestError
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for KwTestError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     KwTestError
   }
 }

@@ -42,16 +42,25 @@ method-call position it surfaces as `E0599`) — never a silent wrong parse.
   across emitters, keep it generic over `Ctx: ParseContext` and name the capabilities it needs
   (see [chapter 3](super::ch03_combinators)); the reference stays concrete for brevity.
 
-## The `_of` / `Lang` convention
+## The `Lang` convention
 
-Every trait, type, and function carries a language marker `Lang: ?Sized = ()`. Most atoms come in
-two spellings: a **base** form that fixes `Lang = ()`, and an **`_of`** form generic over `Lang`
-— [`expect`](crate::parser::expect)/[`expect_of`](crate::parser::expect_of),
-[`fail`](crate::parser::fail)/`fail_of`, [`Any::new`](crate::parser::Any::new)/`Any::of`,
-[`Parser::new`](crate::Parser::new)/`Parser::of`, `Comma::try_parse`/`try_parse_of`. The pair is
-otherwise identical; reach for the base form unless you are building a language-generic library.
-Repetition-count knobs (`at_least`, …) and the `separated_by_*` family have no `_of` twin — they
-inherit `Lang` from the parser they wrap.
+Every trait, type, and function carries a language marker `Lang: ?Sized = ()`. An atom has
+**one** spelling, generic over `Lang`, and reads the marker off the input it is handed —
+[`expect`](crate::parser::expect), [`try_expect`](crate::parser::try_expect),
+[`fail`](crate::parser::fail), `Comma::try_parse`, `Keyword::parse_exact`. An unbranded grammar
+writes the same call as a branded one, and neither needs a turbofish to say which `Lang` it meant.
+
+The `_of` suffix survives on exactly one shape: a **constructor with no input to read the marker
+from**, where `Lang` has to be named or left to its `()` default at the call site —
+[`Any::of`](crate::parser::Any::of), `ParserContext::of`, `Fatal::of`, and the error
+constructors (`UnexpectedEot::eot_of`, `Unclosed::paren_of`, …). Repetition-count knobs
+(`at_least`, …) and the `separated_by_*` family never had a twin — they inherit `Lang` from the
+parser they wrap. The [`Parser`](crate::Parser) constructors have no `_of` twin either: each
+either names `Lang` in its return type ([`Parser::new`](crate::Parser::new),
+[`with_parser`](crate::Parser::with_parser)) or reads it off the parsing function it is handed
+([`with_parser_and_context`](crate::Parser::with_parser_and_context),
+[`apply`](crate::Parser::apply)); [`with_context`](crate::Parser::with_context) names no
+language at all.
 
 ---
 
@@ -67,7 +76,7 @@ inherit `Lang` from the parser they wrap.
 | [`fail(f)`](crate::parser::fail) | `O` | always fail with `f()` |
 
 ```text
-Any::of() -> Any<L, Ctx, Lang>                       // also ::spanned_of/::sliced_of/::located_of
+Any::of() -> Any<L, Ctx, Lang>                       // also ::spanned/::sliced/::located
 expect(check) -> Expect<Classifier, Ctx>             // check: FnMut(&Token) -> Result<(), Expected<Kind>>
 Empty::new() -> Empty                                 // Todo::<O>::new() -> Todo<O>
 fail(f) -> Fail<F, L, O, Ctx>                         // f: FnMut() -> Error
@@ -100,6 +109,7 @@ that attach position/text to the token. [`expect`](crate::parser::expect) is pre
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -232,6 +242,7 @@ unwrap(self) -> Unwrapped<…>                          // where Self: ParseInpu
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -365,6 +376,7 @@ consumed. `spanned`/`sliced`/`located` are taught in [chapter 3](super::ch03_com
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -489,6 +501,7 @@ and_then<T, U>(self, f: T) -> AndThen<…>             // f: FnMut(O) -> Result<
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -622,6 +635,7 @@ the bridges between the two trait worlds.
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -764,6 +778,7 @@ fold<Init, Acc>(self, init: Init, acc: Acc) -> Fold<…> // Init: FnMut() -> O, 
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -887,6 +902,7 @@ separated_while<Sep, Cond, W>(self, cond: Cond) -> SeparatedWhile<…>  // eleme
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -1024,6 +1040,7 @@ bounded(self, min, max)         delimited::<Delim>(self) -> DelimitedBy<Self, De
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -1121,7 +1138,7 @@ you and collect into a `Vec`:
 | Atom | One-liner |
 |------|-----------|
 | [`separated1::<Sep, …>(item, peek)`](crate::parser::separated1) | one-or-more `item`s separated by `Sep`, optional leading separator |
-| [`list_of(item, until)`](crate::parser::list_of) | zero-or-more `item`s until `until` accepts the next token (left in place) |
+| [`list(item, until)`](crate::parser::list) | zero-or-more `item`s until `until` accepts the next token (left in place) |
 | [`try_ident_list::<Sep, …>()`](crate::parser::try_ident_list) | a separated list of identifiers into an [`IdentList`](crate::types::IdentList) (needs [`IdentifierToken`](crate::token::IdentifierToken)) |
 
 One convention governs the free atoms, here and in [*Delimited shapes*](#delimited-shapes)
@@ -1134,7 +1151,7 @@ which inspect a token and answer `bool` — are functions, not parsers, and stay
 
 ```text
 separated1<Sep, …>(item: P, peek: Peek) -> impl FnMut(&mut InputRef) -> Result<Vec<T>, Error>
-list_of<…>(item: P, until: Until) -> impl FnMut(&mut InputRef) -> Result<Vec<T>, Error>
+list<…>(item: P, until: Until) -> impl FnMut(&mut InputRef) -> Result<Vec<T>, Error>
 ```
 
 ```rust
@@ -1158,6 +1175,7 @@ list_of<…>(item: P, until: Until) -> impl FnMut(&mut InputRef) -> Result<Vec<T
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -1218,21 +1236,21 @@ list_of<…>(item: P, until: Until) -> impl FnMut(&mut InputRef) -> Result<Vec<T
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
-use tokora::{Parse, Parser, parser::{list_of, separated1}};
+use tokora::{Parse, Parser, parser::{list, separated1}};
 
 fn digit<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<u32, Error> {
     match inp.next()? { Some(sp) => match sp.into_data() { Tok::Digit(n) => Ok(n), _ => Err(Error) }, None => Err(Error) }
 }
 
 // `separated1`: one-or-more comma-separated digits (optional leading comma).
-fn list<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<u32>, Error> {
+fn sep_digits<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<u32>, Error> {
     separated1::<Comma, _, _, _, _, _, _>(digit, |t| matches!(t, Tok::Digit(_)))(inp)
 }
-assert_eq!(Parser::with_parser(list).parse_str(",1,2,3").unwrap(), vec![1, 2, 3]);
+assert_eq!(Parser::with_parser(sep_digits).parse_str(",1,2,3").unwrap(), vec![1, 2, 3]);
 
-// `list_of`: zero-or-more digits until the `]` (which is left in place).
+// `list`: zero-or-more digits until the `]` (which is left in place).
 fn run<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<u32>, Error> {
-    list_of(digit, |t| matches!(t, Tok::RBracket))(inp)
+    list(digit, |t| matches!(t, Tok::RBracket))(inp)
 }
 assert_eq!(Parser::with_parser(run).parse_str("123]").unwrap(), vec![1, 2, 3]);
 ```
@@ -1307,6 +1325,7 @@ try_delimited<D, …>(inner) / try_parens(inner) / … -> the same, wrapped in O
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -1456,6 +1475,7 @@ node_at(mark: EventMark, kind: u16, p: P) -> NodeAt<P>
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -1580,6 +1600,7 @@ no-op over a non-collecting emitter.
 # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
 # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
 # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+# impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # impl tokora::error::MaybeTerminal for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -1708,7 +1729,8 @@ Defaults to `std`. `docs.rs` builds `all-features`.
 Where a combinator needs a capability, its `where`-clause names it — e.g. the `many/` builder's
 count checks want [`TooFewEmitter`](crate::emitter::TooFewEmitter) /
 [`TooManyEmitter`](crate::emitter::TooManyEmitter) on the emitter. Over a
-[`ParseCtx`](crate::ParseCtx) (any context whose emitter is a
-[`ComposableEmitter`](crate::emitter::ComposableEmitter), including the built-in
-[`Fatal`](crate::emitter::Fatal)/[`Verbose`](crate::emitter::Verbose)/[`Silent`](crate::emitter::Silent))
-the whole family is available at once.
+[`ComposableParseContext`](crate::ComposableParseContext) (any context whose emitter is a
+[`ComposableEmitter`](crate::emitter::ComposableEmitter) *and* whose error absorbs the five
+token-level conversions — including the built-in
+[`Fatal`](crate::emitter::Fatal)/[`Verbose`](crate::emitter::Verbose)/[`Silent`](crate::emitter::Silent)
+over a sufficient error type) the whole family is available at once, and so are the conversions.

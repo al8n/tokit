@@ -33,13 +33,10 @@
 //! opener alone, never the whole shape — see [`try_delimited`] for why.
 
 use crate::{
-  Emitter, ErrorOf, Lexer, ParseCtx, ParseInput, Token,
+  ComposableParseContext, Emitter, ErrorOf, Lexer, ParseInput, Token,
   delimiter::TypedDelimiter,
   emitter::UnclosedEmitter,
-  error::{
-    Unclosed, UnexpectedEot,
-    token::{UnexpectedToken, UnexpectedTokenOf},
-  },
+  error::{Unclosed, UnexpectedEot, token::UnexpectedTokenOf},
   input::{CloseStatus, Cursor, InputRef, SurfaceIncomplete},
   punct::{
     Angle, Brace, Bracket, CloseAngle, CloseBrace, CloseBracket, CloseParen, OpenAngle, OpenBrace,
@@ -103,11 +100,11 @@ pub type DelimitedOf<'inp, D, L, Ctx, Lang, T> = Result<
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
-/// # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # #[derive(Debug, Clone, PartialEq)]
 /// # enum Tok { Digit(u32), LParen, RParen, LBracket, RBracket, LBrace, RBrace, LAngle, RAngle }
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -197,14 +194,10 @@ pub fn delimited<'inp, D, L, Ctx, Lang, P, T, Cmpl>(
 where
   D: TypedDelimiter<'inp, L, Lang>,
   L: Lexer<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<D, L::Span, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
@@ -227,7 +220,7 @@ where
 ///   with [`commit_probed`](InputRef::commit_probed), re-scanning nothing in any cache
 ///   capacity, and return its materialized value;
 /// - [`WrongToken`](CloseStatus::WrongToken): a non-closer sits where the closer belongs —
-///   `expect_close` turns it into the expected-close [`UnexpectedToken`], emitted through the
+///   `expect_close` turns it into the expected-close [`UnexpectedToken`](crate::error::token::UnexpectedToken), emitted through the
 ///   emitter (a fail-fast emitter turns it into `Err`, a recovering one records it), then the
 ///   shape recovers with a closer synthesized at the current cursor (the committed frontier /
 ///   the wrong token's start, per cache);
@@ -261,12 +254,9 @@ fn commit_delim_close<'inp, 'c, D, L, Ctx, Lang, Cmpl, CV>(
 ) -> Result<(CV, L::Span), ErrorOf<'inp, L, Ctx, Lang>>
 where
   L: Lexer<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>:
-    From<UnexpectedEot<L::Offset, Lang>> + From<Unclosed<D, L::Span, Lang>>,
 {
   match inp.probe_close(|t| is_close(t.data))? {
     // The closer is at hand: commit the probed token by value via `commit_probed` — no
@@ -328,14 +318,10 @@ fn finish_delimited<'inp, 'c, D, L, Ctx, Lang, P, T, Cmpl>(
 where
   D: TypedDelimiter<'inp, L, Lang>,
   L: Lexer<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<D, L::Span, Lang>>,
 {
   let data = inner.parse_input(inp)?;
   let (close, span) = commit_delim_close::<D, _, _, _, _, _>(
@@ -404,11 +390,11 @@ pub type TryDelimitedOf<'inp, D, L, Ctx, Lang, T> = Result<
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
-/// # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # #[derive(Debug, Clone, PartialEq)]
 /// # enum Tok { Ident(char), LAngle, RAngle }
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -484,14 +470,10 @@ pub fn try_delimited<'inp, D, L, Ctx, Lang, P, T, Cmpl>(
 where
   D: TypedDelimiter<'inp, L, Lang>,
   L: Lexer<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<D, L::Span, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
@@ -545,11 +527,11 @@ pub type ParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
-/// # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # #[derive(Debug, Clone, PartialEq)]
 /// # enum Tok { Digit(u32), LParen, RParen }
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -613,18 +595,14 @@ pub fn parens<'inp, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Paren, L::Span, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
-    let open = OpenParen::parse_of(inp)?;
+    let open = OpenParen::parse(inp)?;
     finish_parens(inp, &cursor, open, &mut inner)
   }
 }
@@ -642,14 +620,10 @@ fn finish_parens<'inp, 'c, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Paren, L::Span, Lang>>,
 {
   let data = inner.parse_input(inp)?;
   let (close, span) = commit_delim_close::<Paren, _, _, _, _, _>(
@@ -714,11 +688,11 @@ pub type TryParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
-/// # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # #[derive(Debug, Clone, PartialEq)]
 /// # enum Tok { Digit(u32), LParen, RParen }
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -785,18 +759,14 @@ pub fn try_parens<'inp, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Paren, L::Span, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
-    match OpenParen::try_parse_of(inp)? {
+    match OpenParen::try_parse(inp)? {
       ParseAttempt::Accept(open) => finish_parens(inp, &cursor, open, &mut inner).map(Some),
       ParseAttempt::Decline => Ok(None),
     }
@@ -845,11 +815,11 @@ pub type BracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
-/// # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # #[derive(Debug, Clone, PartialEq)]
 /// # enum Tok { Digit(u32), LBrace, RBrace }
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -913,18 +883,14 @@ pub fn braces<'inp, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Brace, L::Span, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
-    let open = OpenBrace::parse_of(inp)?;
+    let open = OpenBrace::parse(inp)?;
     finish_braces(inp, &cursor, open, &mut inner)
   }
 }
@@ -942,14 +908,10 @@ fn finish_braces<'inp, 'c, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Brace, L::Span, Lang>>,
 {
   let data = inner.parse_input(inp)?;
   let (close, span) = commit_delim_close::<Brace, _, _, _, _, _>(
@@ -1014,11 +976,11 @@ pub type TryBracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
-/// # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # #[derive(Debug, Clone, PartialEq)]
 /// # enum Tok { Digit(u32), LBrace, RBrace }
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1085,18 +1047,14 @@ pub fn try_braces<'inp, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Brace, L::Span, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
-    match OpenBrace::try_parse_of(inp)? {
+    match OpenBrace::try_parse(inp)? {
       ParseAttempt::Accept(open) => finish_braces(inp, &cursor, open, &mut inner).map(Some),
       ParseAttempt::Decline => Ok(None),
     }
@@ -1146,11 +1104,11 @@ pub type BracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
-/// # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # #[derive(Debug, Clone, PartialEq)]
 /// # enum Tok { Digit(u32), LBracket, RBracket }
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1214,18 +1172,14 @@ pub fn brackets<'inp, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Bracket, L::Span, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
-    let open = OpenBracket::parse_of(inp)?;
+    let open = OpenBracket::parse(inp)?;
     finish_brackets(inp, &cursor, open, &mut inner)
   }
 }
@@ -1243,14 +1197,10 @@ fn finish_brackets<'inp, 'c, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Bracket, L::Span, Lang>>,
 {
   let data = inner.parse_input(inp)?;
   let (close, span) = commit_delim_close::<Bracket, _, _, _, _, _>(
@@ -1315,11 +1265,11 @@ pub type TryBracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
-/// # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # #[derive(Debug, Clone, PartialEq)]
 /// # enum Tok { Digit(u32), LBracket, RBracket }
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1388,18 +1338,14 @@ pub fn try_brackets<'inp, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Bracket, L::Span, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
-    match OpenBracket::try_parse_of(inp)? {
+    match OpenBracket::try_parse(inp)? {
       ParseAttempt::Accept(open) => finish_brackets(inp, &cursor, open, &mut inner).map(Some),
       ParseAttempt::Decline => Ok(None),
     }
@@ -1448,11 +1394,11 @@ pub type AnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
-/// # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # #[derive(Debug, Clone, PartialEq)]
 /// # enum Tok { Digit(u32), LAngle, RAngle }
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1516,18 +1462,14 @@ pub fn angles<'inp, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Angle, L::Span, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
-    let open = OpenAngle::parse_of(inp)?;
+    let open = OpenAngle::parse(inp)?;
     finish_angles(inp, &cursor, open, &mut inner)
   }
 }
@@ -1545,14 +1487,10 @@ fn finish_angles<'inp, 'c, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Angle, L::Span, Lang>>,
 {
   let data = inner.parse_input(inp)?;
   let (close, span) = commit_delim_close::<Angle, _, _, _, _, _>(
@@ -1617,11 +1555,11 @@ pub type TryAnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
 /// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
-/// # impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for Error { fn from(_: UnexpectedEot<O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
 /// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
 /// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
-/// # impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Error { fn from(_: Unclosed<D, S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
 /// # #[derive(Debug, Clone, PartialEq)]
 /// # enum Tok { Digit(u32), LAngle, RAngle }
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1688,18 +1626,14 @@ pub fn try_angles<'inp, L, Ctx, Lang, P, T, Cmpl>(
 where
   L: Lexer<'inp>,
   L::Token: PunctuatorToken<'inp>,
-  Ctx: ParseCtx<'inp, L, Lang>,
+  Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
   Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
-  Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-  ErrorOf<'inp, L, Ctx, Lang>: From<UnexpectedEot<L::Offset, Lang>>
-    + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>>
-    + From<Unclosed<Angle, L::Span, Lang>>,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
     let cursor = inp.cursor().clone();
-    match OpenAngle::try_parse_of(inp)? {
+    match OpenAngle::try_parse(inp)? {
       ParseAttempt::Accept(open) => finish_angles(inp, &cursor, open, &mut inner).map(Some),
       ParseAttempt::Decline => Ok(None),
     }

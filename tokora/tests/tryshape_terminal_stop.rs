@@ -109,14 +109,23 @@ impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for TErr {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for TErr
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self {
+    TErr::Unclosed
+  }
+}
+
 impl From<ScanLimitExceeded> for TErr {
   fn from(_: ScanLimitExceeded) -> Self {
     TErr::Limit
   }
 }
 
-impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for TErr {
-  fn from(_: UnexpectedEot<O, Lang>) -> Self {
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for TErr {
+  fn from(_: UnexpectedEot<O, Lang, Set>) -> Self {
     TErr::Eot
   }
 }
@@ -713,9 +722,7 @@ fn committed_shape_trip_at_close_surfaces_eot_not_unclosed() {
 // a fresh trip at the would-be leaf surfaces the committed end-of-input error, a genuine decline
 // (wrong token or real end of input) still declines.
 
-use tokora::{
-  TryParseInput, parser::peek_kind, parser::try_expect_of, try_parse_input::ParseAttempt,
-};
+use tokora::{TryParseInput, parser::peek_kind, parser::try_expect, try_parse_input::ParseAttempt};
 
 #[test]
 fn expect_try_leaf_does_not_decline_on_trip() {
@@ -729,7 +736,7 @@ fn expect_try_leaf_does_not_decline_on_trip() {
       assert!(inp.next()?.is_some(), "first ident under the limit");
       assert!(inp.next()?.is_some(), "second ident under the limit");
       // The attempt at the would-be `(` opener trips on the third scan.
-      let attempt = try_expect_of::<_, TLexer<'_>, _, ()>(|t: &Tok| matches!(t, Tok::LParen))
+      let attempt = try_expect::<_, TLexer<'_>, _, ()>(|t: &Tok| matches!(t, Tok::LParen))
         .try_parse_input(inp)?;
       Ok(match attempt {
         tokora::try_parse_input::ParseAttempt::Accept(_) => Some(()),
@@ -749,7 +756,7 @@ fn expect_try_leaf_still_declines_on_wrong_token_and_eoi() {
     &mut verbose,
     ScanLimiter::with_limit(usize::MAX),
     |inp| {
-      let attempt = try_expect_of::<_, TLexer<'_>, _, ()>(|t: &Tok| matches!(t, Tok::LParen))
+      let attempt = try_expect::<_, TLexer<'_>, _, ()>(|t: &Tok| matches!(t, Tok::LParen))
         .try_parse_input(inp)?;
       Ok(matches!(
         attempt,
@@ -765,7 +772,7 @@ fn expect_try_leaf_still_declines_on_wrong_token_and_eoi() {
     &mut verbose,
     ScanLimiter::with_limit(usize::MAX),
     |inp| {
-      let attempt = try_expect_of::<_, TLexer<'_>, _, ()>(|t: &Tok| matches!(t, Tok::LParen))
+      let attempt = try_expect::<_, TLexer<'_>, _, ()>(|t: &Tok| matches!(t, Tok::LParen))
         .try_parse_input(inp)?;
       Ok(matches!(
         attempt,
@@ -834,13 +841,12 @@ where
   Em: Emitter<'inp, TLexer<'inp>, Error = TErr> + UnclosedEmitter<'inp, TLexer<'inp>>,
 {
   if let ParseAttempt::Accept(_) =
-    try_expect_of::<_, TLexer<'_>, _, ()>(|t: &Tok| matches!(t, Tok::Ident)).try_parse_input(inp)?
+    try_expect::<_, TLexer<'_>, _, ()>(|t: &Tok| matches!(t, Tok::Ident)).try_parse_input(inp)?
   {
     return Ok(Alt::Ident);
   }
   if let ParseAttempt::Accept(_) =
-    try_expect_of::<_, TLexer<'_>, _, ()>(|t: &Tok| matches!(t, Tok::LParen))
-      .try_parse_input(inp)?
+    try_expect::<_, TLexer<'_>, _, ()>(|t: &Tok| matches!(t, Tok::LParen)).try_parse_input(inp)?
   {
     return Ok(Alt::Paren);
   }
@@ -918,7 +924,7 @@ fn ident_try_leaf_does_not_decline_on_trip() {
     |inp| {
       assert!(inp.next()?.is_some(), "first ident under the limit");
       assert!(inp.next()?.is_some(), "second ident under the limit");
-      Ok(match Ident::try_parse_of(inp)? {
+      Ok(match Ident::try_parse(inp)? {
         ParseAttempt::Accept(_) => Some(()),
         ParseAttempt::Decline => None,
       })
@@ -939,7 +945,7 @@ fn keyword_try_leaf_does_not_decline_on_trip() {
     |inp| {
       assert!(inp.next()?.is_some(), "first ident under the limit");
       assert!(inp.next()?.is_some(), "second ident under the limit");
-      Ok(match Keyword::try_parse_of(inp)? {
+      Ok(match Keyword::try_parse(inp)? {
         ParseAttempt::Accept(_) => Some(()),
         ParseAttempt::Decline => None,
       })
@@ -956,7 +962,7 @@ fn ident_try_leaf_still_declines_on_genuine_eoi() {
     &mut verbose,
     ScanLimiter::with_limit(usize::MAX),
     |inp| {
-      Ok(match Ident::try_parse_of(inp)? {
+      Ok(match Ident::try_parse(inp)? {
         ParseAttempt::Accept(_) => Some(()),
         ParseAttempt::Decline => None,
       })

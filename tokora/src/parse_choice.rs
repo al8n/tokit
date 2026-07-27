@@ -111,7 +111,6 @@ pub trait ParseChoice<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
     Self: Sized,
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
-    <L::Token as Token<'inp>>::Kind: 'static,
   {
     DispatchOnKind::of(self, table)
   }
@@ -173,7 +172,6 @@ pub trait ParseTokenChoice<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> 
     Self: Sized,
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
-    <L::Token as Token<'inp>>::Kind: 'static,
   {
     FusedDispatchOnKind::of(self, table)
   }

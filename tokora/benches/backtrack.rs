@@ -140,6 +140,26 @@ impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> 
   }
 }
 
+// The token-level bundle's remaining members: one `Set`-generic end-of-input impl covers both
+// the default and the `Kind`-table spellings, and one generic `FromUnclosed` covers every
+// delimiter pair. Never constructed here — the sources are well-formed.
+impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEnd<H, O, Lang, Set>>
+  for BenchError
+{
+  fn from(_: tokora::error::UnexpectedEnd<H, O, Lang, Set>) -> Self {
+    BenchError
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for BenchError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
+    BenchError
+  }
+}
+
 // ── Tuning constants ──────────────────────────────────────────────────────────
 
 /// Target size of the shared per-token source. ~12 KiB keeps the fixed

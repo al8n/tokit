@@ -18,25 +18,10 @@ macro_rules! define_parsers {
           /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token does not match,
           /// and promises no valid token is consumed; a terminal scanner stop is an error, never a
           /// `Decline`.
-          pub fn try_parse<'inp, L, Ctx, Cmpl>(
-            inp: &mut InputRef<'inp, '_, L, Ctx, (), Cmpl>,
-          ) -> Result<ParseAttempt<$name<L::Span, ()>>, <Ctx::Emitter as Emitter<'inp, L>>::Error>
-          where
-            L: Lexer<'inp>,
-            L::Token: PunctuatorToken<'inp>,
-            Ctx: ParseContext<'inp, L>,
-            Cmpl: SurfaceIncomplete<'inp, L, Ctx, ()>,
-            <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>,
-          {
-            Self::try_parse_of(inp)
-          }
-
-          #[doc = "A parser that parses a token and returns a `" $name " ` instance if it matches for a specific language."]
           ///
-          /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token does not match,
-          /// and promises no valid token is consumed; a terminal scanner stop is an error, never a
-          /// `Decline`.
-          pub fn try_parse_of<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
+          /// `Lang` is read off the input, so an unbranded grammar writes the same call as a
+          /// branded one.
+          pub fn try_parse<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
             inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
           ) -> Result<ParseAttempt<$name<L::Span, (), Lang>>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
           where
@@ -50,22 +35,10 @@ macro_rules! define_parsers {
           }
 
           #[doc = "A parser that parses a token and returns a `" $name "` instance if it matches."]
-          pub fn parse<'inp, L, Ctx, Cmpl>(
-            inp: &mut InputRef<'inp, '_, L, Ctx, (), Cmpl>,
-          ) -> Result<$name<L::Span, ()>, <Ctx::Emitter as Emitter<'inp, L>>::Error>
-          where
-            L: Lexer<'inp>,
-            L::Token: PunctuatorToken<'inp>,
-            Ctx: ParseContext<'inp, L>,
-            Cmpl: SurfaceIncomplete<'inp, L, Ctx, ()>,
-            <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>
-            + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span>>,
-          {
-            Self::parse_of(inp)
-          }
-
-          #[doc = "A parser that parses a token and returns a `" $name " ` instance if it matches for a specific language."]
-          pub fn parse_of<'inp, L, Ctx, Lang, Cmpl>(
+          ///
+          /// `Lang` is read off the input, so an unbranded grammar writes the same call as a
+          /// branded one.
+          pub fn parse<'inp, L, Ctx, Lang, Cmpl>(
             inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>
           ) -> Result<$name<L::Span, (), Lang>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
           where
@@ -81,7 +54,8 @@ macro_rules! define_parsers {
           }
         }
 
-        impl<'inp, L, S, C, Lang: ?Sized> Punctuator<'inp, L, Lang> for $name<S, C, Lang>
+        impl<'inp, L, S, C, MarkerLang: ?Sized, Lang: ?Sized> Punctuator<'inp, L, Lang>
+          for $name<S, C, MarkerLang>
         where
           L: Lexer<'inp>,
           <L::Token as Token<'inp>>::Kind: From<$name<(), (), ()>>,

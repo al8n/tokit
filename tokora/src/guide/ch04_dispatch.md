@@ -107,6 +107,9 @@ compile to jump tables.
 # impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Set>> for CalcError {
 #   fn from(_: UnexpectedEnd<H, O, Lang, Set>) -> Self { CalcError::UnexpectedEnd }
 # }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CalcError {
+#   fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { CalcError::UnexpectedEnd }
+# }
 use tokora::{
   Emitter, InputRef, Parse, ParseChoice, ParseContext, ParseInput, ParseTokenChoice, Parser,
   SimpleSpan, span::Spanned,

@@ -2107,6 +2107,15 @@ impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for Err {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Err
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self {
+    Err::Any
+  }
+}
+
 impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, Lang>> for Err {
   fn from(_: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
     Err::Any
@@ -2365,7 +2374,7 @@ impl<'inp> UnclosedEmitter<'inp, TestLexer<'inp>> for TrackingEmitter {
   ) -> Result<(), Err>
   where
     TestLexer<'inp>: Lexer<'inp>,
-    Err: From<Unclosed<Delimiter, <TestLexer<'inp> as Lexer<'inp>>::Span>>,
+    Err: tokora::emitter::FromUnclosed<'inp, TestLexer<'inp>>,
   {
     self.calls += 1;
     Ok(())

@@ -129,6 +129,15 @@ impl<Delimiter, S, Lang: ?Sized> From<Unclosed<Delimiter, S, Lang>> for Diag {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Diag
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<Delimiter>(_: Unclosed<Delimiter, L::Span, Lang>) -> Self {
+    Diag::Unclosed
+  }
+}
+
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 type VCtx<'inp> = ParserContext<'inp, TestLexer<'inp>, Verbose<Diag>>;

@@ -22,7 +22,7 @@
 //! # Token-level pratt is CST-unsupported
 //!
 //! Only the typed driver ([`Pratt`](super::Pratt), via
-//! [`pratt`](fn@super::pratt)/[`pratt_of`](super::pratt_of)) carries this hook. The
+//! [`pratt`](fn@super::pratt)) carries this hook. The
 //! token-level API ([`InputRef::pratt`](crate::InputRef::pratt)) folds expressions into
 //! *synthetic tokens* — spans that cover already-folded regions with no kind seam to
 //! classify — and is documented CST-unsupported in this version.

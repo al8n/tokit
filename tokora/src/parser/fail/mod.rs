@@ -127,19 +127,7 @@ where
 /// Creates a new `Fail` parser.
 #[must_use]
 #[inline(always)]
-pub const fn fail<'inp, F, L, O, Ctx>(err: F) -> Fail<F, L, O, Ctx>
-where
-  F: FnMut() -> <Ctx::Emitter as Emitter<'inp, L>>::Error,
-  L: Lexer<'inp>,
-  Ctx: ParseContext<'inp, L>,
-{
-  fail_of(err)
-}
-
-/// Creates a new `Fail` parser for the specified language.
-#[must_use]
-#[inline(always)]
-pub const fn fail_of<'inp, F, L, O, Ctx, Lang: ?Sized>(err: F) -> Fail<F, L, O, Ctx, Lang>
+pub const fn fail<'inp, F, L, O, Ctx, Lang: ?Sized>(err: F) -> Fail<F, L, O, Ctx, Lang>
 where
   F: FnMut() -> <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
   L: Lexer<'inp>,
@@ -151,19 +139,7 @@ where
 /// Creates a new `FailWith` parser.
 #[must_use]
 #[inline(always)]
-pub const fn fail_with<'inp, F, L, O, Ctx>(err: F) -> FailWith<F, L, O, Ctx>
-where
-  F: FnMut(ParseState<'_, 'inp, '_, L, Ctx>) -> <Ctx::Emitter as Emitter<'inp, L>>::Error,
-  L: Lexer<'inp>,
-  Ctx: ParseContext<'inp, L>,
-{
-  fail_with_of(err)
-}
-
-/// Creates a new `FailWith` parser for the specified language.
-#[must_use]
-#[inline(always)]
-pub const fn fail_with_of<'inp, F, L, O, Ctx, Lang: ?Sized>(err: F) -> FailWith<F, L, O, Ctx, Lang>
+pub const fn fail_with<'inp, F, L, O, Ctx, Lang: ?Sized>(err: F) -> FailWith<F, L, O, Ctx, Lang>
 where
   F: FnMut(
     ParseState<'_, 'inp, '_, L, Ctx, Lang>,

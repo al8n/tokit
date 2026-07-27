@@ -24,7 +24,7 @@ types.
   combinator, the entry point is shown as a trimmed signature with a cross-link to a chapter that
   exercises it live, rather than repeating the parser scaffold here.
 - The AST node types (`Ident`, `Keyword`, every `Lit*`, `IdentList`) carry a language marker
-  `Lang: ?Sized = ()`, the same `_of`/`Lang` convention from the
+  `Lang: ?Sized = ()`, the same `Lang` convention from the
   [combinator reference](super::ref_combinators); the span/location wrappers (`Spanned`, `Sliced`,
   `Located`, `Recoverable`) do not. The examples below default `Lang` to `()` or fix it to one
   concrete marker type, whichever reads more clearly for that type.
@@ -174,11 +174,11 @@ implements both — `Ident::<(), ()>` and `Keyword::<(), ()>` host parsers that 
 and wrap it:
 
 ```text
-Ident::<(), ()>::parse(inp)       -> Result<Ident<Slice, L::Span>, Error>        // errors on mismatch/EOI
-Ident::<(), ()>::try_parse(inp)   -> Result<ParseAttempt<Ident<Slice, L::Span>>, Error>  // declines instead
-Keyword::<(), ()>::parse(inp)     -> Result<Keyword<L::Token, L::Span>, Error>   // captures the WHOLE token
-Keyword::<(), ()>::try_parse(inp) -> Result<ParseAttempt<Keyword<L::Token, L::Span>>, Error>
-// + parse_of / try_parse_of, the Lang-generic twins
+Ident::<(), ()>::parse(inp)       -> Result<Ident<Slice, L::Span, Lang>, Error>        // errors on mismatch/EOI
+Ident::<(), ()>::try_parse(inp)   -> Result<ParseAttempt<Ident<Slice, L::Span, Lang>>, Error>  // declines instead
+Keyword::<(), ()>::parse(inp)     -> Result<Keyword<L::Token, L::Span, Lang>, Error>   // captures the WHOLE token
+Keyword::<(), ()>::try_parse(inp) -> Result<ParseAttempt<Keyword<L::Token, L::Span, Lang>>, Error>
+// one spelling each: `Lang` is read off `inp`, so `()` and a brand look identical at the call
 ```
 
 [`IdentList<S, Span = SimpleSpan, Container = Vec<Ident<S, Span>>, Lang: ?Sized = ()>`](crate::types::IdentList)
@@ -198,7 +198,7 @@ assert!(!list.is_valid()); // false as soon as one element is
 assert!(list.is_error());
 ```
 
-Built by [`try_ident_list`/`try_ident_list_of`](crate::parser::try_ident_list) in the
+Built by [`try_ident_list`](crate::parser::try_ident_list) in the
 [combinator reference](super::ref_combinators) when every token is an `IdentifierToken`.
 
 ## Literals
@@ -412,7 +412,7 @@ are missing" depending on how many accumulated.
 
 ## See also
 
-- [Combinator & atom reference](super::ref_combinators): the `_of`/`Lang` convention these types
+- [Combinator & atom reference](super::ref_combinators): the `Lang` convention these types
   share, and `try_ident_list` — the one combinator that builds an `IdentList` for you.
 - [Errors, emitters & context reference](super::ref_errors_emitters_context): the error taxonomy
   and emitter capabilities that `ErrorNode` placeholders eventually flow into.

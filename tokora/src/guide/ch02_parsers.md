@@ -120,8 +120,15 @@ impl<'inp> From<UnexpectedTokenOf<'inp, CalcLexer<'inp>>> for CalcError {
     CalcError::Unexpected
   }
 }
-impl From<UnexpectedEot> for CalcError {
-  fn from(_: UnexpectedEot) -> Self {
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for CalcError {
+  fn from(_: UnexpectedEot<O, Lang, Set>) -> Self {
+    CalcError::UnexpectedEnd
+  }
+}
+impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang>
+  for CalcError
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     CalcError::UnexpectedEnd
   }
 }
@@ -264,8 +271,11 @@ concrete default are one and the same parser:
 # impl<'inp> From<UnexpectedTokenOf<'inp, CalcLexer<'inp>>> for CalcError {
 #   fn from(_: UnexpectedTokenOf<'inp, CalcLexer<'inp>>) -> Self { CalcError::Unexpected }
 # }
-# impl From<UnexpectedEot> for CalcError {
-#   fn from(_: UnexpectedEot) -> Self { CalcError::UnexpectedEnd }
+# impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for CalcError {
+#   fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { CalcError::UnexpectedEnd }
+# }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CalcError {
+#   fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { CalcError::UnexpectedEnd }
 # }
 use tokora::{Emitter, FatalContext, InputRef, Parse, ParseContext, Parser};
 
@@ -383,8 +393,11 @@ it emits [`UnexpectedEot`](crate::error::UnexpectedEot) instead:
 # impl<'inp> From<UnexpectedTokenOf<'inp, CalcLexer<'inp>>> for CalcError {
 #   fn from(_: UnexpectedTokenOf<'inp, CalcLexer<'inp>>) -> Self { CalcError::Unexpected }
 # }
-# impl From<UnexpectedEot> for CalcError {
-#   fn from(_: UnexpectedEot) -> Self { CalcError::UnexpectedEnd }
+# impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for CalcError {
+#   fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { CalcError::UnexpectedEnd }
+# }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CalcError {
+#   fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { CalcError::UnexpectedEnd }
 # }
 use tokora::{ParseInput, parser::expect, utils::Expected};
 

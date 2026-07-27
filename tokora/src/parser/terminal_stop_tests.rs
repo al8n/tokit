@@ -29,7 +29,7 @@ use crate::{
   error::{MaybeIncomplete, MaybeTerminal, Unclosed, UnexpectedEot, token::UnexpectedToken},
   input::Input,
   lexer::LogosLexer,
-  parser::{Any, Recover, RecoverInput, delimited, expect_of},
+  parser::{Any, Recover, RecoverInput, delimited, expect},
   punct::{CloseParen, OpenParen, Paren},
   state::State,
   types::{Ident, Keyword},
@@ -116,8 +116,11 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, L
   }
 }
 
-impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for TsErr {
-  fn from(_: Unclosed<D, S, Lang>) -> Self {
+impl<'inp, L, Lang: ?Sized> crate::emitter::FromUnclosed<'inp, L, Lang> for TsErr
+where
+  L: crate::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self {
     TsErr::Other
   }
 }
@@ -125,8 +128,8 @@ impl<D, S, Lang: ?Sized> From<Unclosed<D, S, Lang>> for TsErr {
 // The construct-and-detect pairing that makes the terminal split observable: a terminal-marked
 // end-of-input value (the way `next_or_stop` builds one on a trip) maps to `Terminal`, a genuine one
 // to `Eot`.
-impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for TsErr {
-  fn from(e: UnexpectedEot<O, Lang>) -> Self {
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for TsErr {
+  fn from(e: UnexpectedEot<O, Lang, Set>) -> Self {
     if e.is_terminal() {
       TsErr::Terminal
     } else {
@@ -248,7 +251,7 @@ impl crate::token::PunctuatorToken<'_> for LimTok {
 }
 
 // A local invocation of the `keyword!` macro itself — the regression below exercises the macro
-// TEMPLATE's own generated `parse`/`parse_of`, distinct from the hand-written `Keyword`
+// TEMPLATE's own generated `parse`, distinct from the hand-written `Keyword`
 // (any-keyword) leaf already covered above. The trip preempts the leaf's token-type check (see
 // the module doc), so the keyword text here is never actually matched against a lexed token.
 crate::keyword! {
@@ -346,17 +349,17 @@ committed_leaf_terminal_stop!(any_committed_consume_marks_terminal_on_trip, |inp
 )
 .parse_input(&mut inp));
 committed_leaf_terminal_stop!(expect_committed_consume_marks_terminal_on_trip, |inp| {
-  expect_of::<NumClass, LimLexer<'_>, TsCtx<'_>, ()>(NumClass).parse_input(&mut inp)
+  expect::<NumClass, LimLexer<'_>, TsCtx<'_>, ()>(NumClass).parse_input(&mut inp)
 });
 committed_leaf_terminal_stop!(ident_committed_consume_marks_terminal_on_trip, |inp| {
-  Ident::parse_of(&mut inp)
+  Ident::parse(&mut inp)
 });
 committed_leaf_terminal_stop!(keyword_committed_consume_marks_terminal_on_trip, |inp| {
-  Keyword::parse_of(&mut inp)
+  Keyword::parse(&mut inp)
 });
 committed_leaf_terminal_stop!(
   keyword_macro_generated_committed_consume_marks_terminal_on_trip,
-  |inp| { KwIf::parse_of(&mut inp) }
+  |inp| { KwIf::parse(&mut inp) }
 );
 committed_leaf_terminal_stop!(delimited_opener_marks_terminal_on_trip, |inp| delimited::<
   Paren,

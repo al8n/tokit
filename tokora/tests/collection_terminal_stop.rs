@@ -251,6 +251,15 @@ impl<Delimiter, S, Lang: ?Sized> From<Unclosed<Delimiter, S, Lang>> for CErr {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CErr
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<Delimiter>(_: Unclosed<Delimiter, L::Span, Lang>) -> Self {
+    CErr::Ordinary
+  }
+}
+
 // ── Harness ──────────────────────────────────────────────────────────────────
 
 type TLexer<'a> = LogosLexer<'a, Tok>;
@@ -424,7 +433,7 @@ fn r2_separator_slot_trip_surfaces_terminal() {
 fn r3_while_decision_trip_surfaces_terminal() {
   // `1 2 3` under a limit of 2: after `1 2`, the `repeated_while` decision peek scans `3`, which
   // trips. Its short window reads as `Action::Stop`; the driver must surface the terminal stop
-  // instead of ending the list cleanly. Driven through the public `list_of` constructor.
+  // instead of ending the list cleanly. Driven through the public `list` constructor.
   fn r3_parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>) -> Result<Vec<i64>, CErr>
   where
     Ctx: ParseContext<'inp, TLexer<'inp>>,

@@ -15,24 +15,9 @@ impl Keyword<(), ()> {
   ///
   /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token is not a keyword,
   /// and promises no valid token is consumed.
-  pub fn try_parse<'inp, L, Ctx, Cmpl>(
-    inp: &mut InputRef<'inp, '_, L, Ctx, (), Cmpl>,
-  ) -> Result<ParseAttempt<Keyword<L::Token, L::Span>>, <Ctx::Emitter as Emitter<'inp, L>>::Error>
-  where
-    L: Lexer<'inp>,
-    L::Token: KeywordToken<'inp>,
-    Ctx: ParseContext<'inp, L>,
-    Cmpl: SurfaceIncomplete<'inp, L, Ctx, ()>,
-    <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>,
-  {
-    Self::try_parse_of(inp)
-  }
-
-  /// A parser that parses a token and returns a `Keyword` instance if it matches for a specific language.
   ///
-  /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token is not a keyword,
-  /// and promises no valid token is consumed.
-  pub fn try_parse_of<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
+  /// `Lang` is read off the input, so an unbranded grammar writes the same call as a branded one.
+  pub fn try_parse<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   ) -> Result<
     ParseAttempt<Keyword<L::Token, L::Span, Lang>>,
@@ -60,30 +45,10 @@ impl Keyword<(), ()> {
   /// A parser that parses any keyword, erroring when the next token is not a
   /// keyword.
   ///
-  /// Unlike [`try_parse`](Self::try_parse), a non-keyword token is converted
-  /// into an [`UnexpectedToken`] error carrying the found token, and end of
-  /// input into an [`UnexpectedEot`] error.
-  pub fn parse<'inp, L, Ctx, Cmpl>(
-    inp: &mut InputRef<'inp, '_, L, Ctx, (), Cmpl>,
-  ) -> Result<Keyword<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L>>::Error>
-  where
-    L: Lexer<'inp>,
-    L::Token: KeywordToken<'inp>,
-    Ctx: ParseContext<'inp, L>,
-    Cmpl: SurfaceIncomplete<'inp, L, Ctx, ()>,
-    <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>
-      + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span>>,
-  {
-    Self::parse_of(inp)
-  }
-
-  /// A parser that parses any keyword for a specific language, erroring when the
-  /// next token is not a keyword.
-  ///
-  /// Unlike [`try_parse_of`](Self::try_parse_of), a non-keyword token is
+  /// Unlike [`try_parse`](Self::try_parse), a non-keyword token is
   /// converted into an [`UnexpectedToken`] error carrying the found token, and
   /// end of input into an [`UnexpectedEot`] error.
-  pub fn parse_of<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
+  pub fn parse<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   ) -> Result<Keyword<L::Token, L::Span, Lang>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
@@ -112,27 +77,7 @@ impl Keyword<(), ()> {
   ///
   /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token is not a keyword,
   /// and promises no valid token is consumed.
-  pub fn try_parse_sliced<'inp, L, Ctx, Cmpl>(
-    inp: &mut InputRef<'inp, '_, L, Ctx, (), Cmpl>,
-  ) -> Result<
-    ParseAttempt<Keyword<<L::Source as Source<L::Offset>>::Slice<'inp>, L::Span>>,
-    <Ctx::Emitter as Emitter<'inp, L>>::Error,
-  >
-  where
-    L: Lexer<'inp>,
-    L::Token: KeywordToken<'inp>,
-    Ctx: ParseContext<'inp, L>,
-    Cmpl: SurfaceIncomplete<'inp, L, Ctx, ()>,
-    <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>,
-  {
-    Self::try_parse_sliced_of(inp)
-  }
-
-  /// A parser that parses a token and returns a `Keyword` instance if it matches for a specific language.
-  ///
-  /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token is not a keyword,
-  /// and promises no valid token is consumed.
-  pub fn try_parse_sliced_of<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
+  pub fn try_parse_sliced<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   ) -> Result<
     ParseAttempt<Keyword<<L::Source as Source<L::Offset>>::Slice<'inp>, L::Span, Lang>>,
@@ -157,33 +102,10 @@ impl Keyword<(), ()> {
   /// A parser that parses any keyword and returns its source slice, erroring
   /// when the next token is not a keyword.
   ///
-  /// Unlike [`try_parse_sliced`](Self::try_parse_sliced), a non-keyword token is
-  /// converted into an [`UnexpectedToken`] error carrying the found token, and
-  /// end of input into an [`UnexpectedEot`] error.
-  pub fn parse_sliced<'inp, L, Ctx, Cmpl>(
-    inp: &mut InputRef<'inp, '_, L, Ctx, (), Cmpl>,
-  ) -> Result<
-    Keyword<<L::Source as Source<L::Offset>>::Slice<'inp>, L::Span>,
-    <Ctx::Emitter as Emitter<'inp, L>>::Error,
-  >
-  where
-    L: Lexer<'inp>,
-    L::Token: KeywordToken<'inp>,
-    Ctx: ParseContext<'inp, L>,
-    Cmpl: SurfaceIncomplete<'inp, L, Ctx, ()>,
-    <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>
-      + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span>>,
-  {
-    Self::parse_sliced_of(inp)
-  }
-
-  /// A parser that parses any keyword for a specific language and returns its
-  /// source slice, erroring when the next token is not a keyword.
-  ///
-  /// Unlike [`try_parse_sliced_of`](Self::try_parse_sliced_of), a non-keyword
+  /// Unlike [`try_parse_sliced`](Self::try_parse_sliced), a non-keyword
   /// token is converted into an [`UnexpectedToken`] error carrying the found
   /// token, and end of input into an [`UnexpectedEot`] error.
-  pub fn parse_sliced_of<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
+  pub fn parse_sliced<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   ) -> Result<
     Keyword<<L::Source as Source<L::Offset>>::Slice<'inp>, L::Span, Lang>,
@@ -215,26 +137,7 @@ impl Keyword<(), ()> {
   /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token is not the expected keyword,
   /// and promises no valid token is consumed.
   #[must_use]
-  pub fn try_parse_exact<'inp, L, Ctx, Exp, Cmpl>(
-    expected: &Exp,
-  ) -> impl TryParseInput<'inp, L, Keyword<L::Token, L::Span>, Ctx, (), Cmpl>
-  where
-    L: Lexer<'inp>,
-    L::Token: KeywordToken<'inp>,
-    Ctx: ParseContext<'inp, L>,
-    Cmpl: SurfaceIncomplete<'inp, L, Ctx, ()>,
-    <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>,
-    str: Equivalent<Exp>,
-  {
-    Self::try_parse_exact_of(expected)
-  }
-
-  /// A parser that parses a specific keyword and returns a `Keyword` instance if it matches for a specific language.
-  ///
-  /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token is not the expected keyword,
-  /// and promises no valid token is consumed.
-  #[must_use]
-  pub fn try_parse_exact_of<'inp, L, Ctx, Exp, Lang: ?Sized, Cmpl>(
+  pub fn try_parse_exact<'inp, L, Ctx, Exp, Lang: ?Sized, Cmpl>(
     expected: &Exp,
   ) -> impl TryParseInput<'inp, L, Keyword<L::Token, L::Span, Lang>, Ctx, Lang, Cmpl>
   where
@@ -266,33 +169,11 @@ impl Keyword<(), ()> {
   /// A parser that parses a specific keyword, erroring when the next token is
   /// not that keyword.
   ///
-  /// Unlike [`try_parse_exact`](Self::try_parse_exact), an unexpected token is
-  /// converted into an [`UnexpectedToken`] error carrying the found token, and
-  /// end of input into an [`UnexpectedEot`] error.
-  #[must_use]
-  pub fn parse_exact<'inp, L, Ctx, Exp, Cmpl>(
-    expected: &Exp,
-  ) -> impl ParseInput<'inp, L, Keyword<L::Token, L::Span>, Ctx, (), Cmpl>
-  where
-    L: Lexer<'inp>,
-    L::Token: KeywordToken<'inp>,
-    Ctx: ParseContext<'inp, L>,
-    Cmpl: SurfaceIncomplete<'inp, L, Ctx, ()>,
-    <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>
-      + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span>>,
-    str: Equivalent<Exp>,
-  {
-    Self::parse_exact_of(expected)
-  }
-
-  /// A parser that parses a specific keyword, erroring when the next token is
-  /// not that keyword, for a specific language.
-  ///
-  /// Unlike [`try_parse_exact_of`](Self::try_parse_exact_of), an unexpected
+  /// Unlike [`try_parse_exact`](Self::try_parse_exact), an unexpected
   /// token is converted into an [`UnexpectedToken`] error carrying the found
   /// token, and end of input into an [`UnexpectedEot`] error.
   #[must_use]
-  pub fn parse_exact_of<'inp, L, Ctx, Exp, Lang: ?Sized, Cmpl>(
+  pub fn parse_exact<'inp, L, Ctx, Exp, Lang: ?Sized, Cmpl>(
     expected: &Exp,
   ) -> impl ParseInput<'inp, L, Keyword<L::Token, L::Span, Lang>, Ctx, Lang, Cmpl>
   where
@@ -327,33 +208,7 @@ impl Keyword<(), ()> {
   /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token is not the expected keyword,
   /// and promises no valid token is consumed.
   #[must_use]
-  pub fn try_parse_exact_sliced<'inp, L, Ctx, Exp, Cmpl>(
-    expected: &Exp,
-  ) -> impl TryParseInput<
-    'inp,
-    L,
-    Keyword<<L::Source as Source<L::Offset>>::Slice<'inp>, L::Span>,
-    Ctx,
-    (),
-    Cmpl,
-  >
-  where
-    L: Lexer<'inp>,
-    L::Token: KeywordToken<'inp>,
-    Ctx: ParseContext<'inp, L>,
-    Cmpl: SurfaceIncomplete<'inp, L, Ctx, ()>,
-    <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>,
-    str: Equivalent<Exp>,
-  {
-    Self::try_parse_exact_sliced_of(expected)
-  }
-
-  /// A parser that parses a specific keyword and returns a `Keyword` instance if it matches for a specific language.
-  ///
-  /// If the function returns `Ok(ParseAttempt::Decline)`, it means the next token is not the expected keyword,
-  /// and promises no valid token is consumed.
-  #[must_use]
-  pub fn try_parse_exact_sliced_of<'inp, L, Ctx, Exp, Lang: ?Sized, Cmpl>(
+  pub fn try_parse_exact_sliced<'inp, L, Ctx, Exp, Lang: ?Sized, Cmpl>(
     expected: &Exp,
   ) -> impl TryParseInput<
     'inp,
@@ -393,36 +248,7 @@ impl Keyword<(), ()> {
   /// unexpected token is converted into an [`UnexpectedToken`] error carrying
   /// the found token, and end of input into an [`UnexpectedEot`] error.
   #[must_use]
-  pub fn parse_exact_sliced<'inp, L, Ctx, Exp, Cmpl>(
-    expected: &Exp,
-  ) -> impl ParseInput<
-    'inp,
-    L,
-    Keyword<<L::Source as Source<L::Offset>>::Slice<'inp>, L::Span>,
-    Ctx,
-    (),
-    Cmpl,
-  >
-  where
-    L: Lexer<'inp>,
-    L::Token: KeywordToken<'inp>,
-    Ctx: ParseContext<'inp, L>,
-    Cmpl: SurfaceIncomplete<'inp, L, Ctx, ()>,
-    <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>
-      + From<UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span>>,
-    str: Equivalent<Exp>,
-  {
-    Self::parse_exact_sliced_of(expected)
-  }
-
-  /// A parser that parses a specific keyword for a specific language and returns
-  /// its source slice, erroring when the next token is not that keyword.
-  ///
-  /// Unlike [`try_parse_exact_sliced_of`](Self::try_parse_exact_sliced_of), an
-  /// unexpected token is converted into an [`UnexpectedToken`] error carrying
-  /// the found token, and end of input into an [`UnexpectedEot`] error.
-  #[must_use]
-  pub fn parse_exact_sliced_of<'inp, L, Ctx, Exp, Lang: ?Sized, Cmpl>(
+  pub fn parse_exact_sliced<'inp, L, Ctx, Exp, Lang: ?Sized, Cmpl>(
     expected: &Exp,
   ) -> impl ParseInput<
     'inp,

@@ -16,40 +16,10 @@ use crate::{
 /// Returns a parser for a list of identifiers separated by the given separator.
 ///
 /// The parser will not consume any valid token if it is not a valid ident list.
-#[must_use]
-pub fn try_ident_list<'inp, Sep, L, Container, Ctx, Cmpl>() -> impl TryParseInput<
-  'inp,
-  L,
-  IdentList<<L::Source as Source<L::Offset>>::Slice<'inp>, L::Span, Container>,
-  Ctx,
-  (),
-  Cmpl,
-> + 'inp
-where
-  L: Lexer<'inp>,
-  L::Source: Source<L::Offset>,
-  L::Token: IdentifierToken<'inp>,
-  Sep: Punctuator<'inp, L>,
-  Ctx: ParseContext<'inp, L>,
-  Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, ()>,
-  Ctx::Emitter: SeparatedEmitter<'inp, L>
-    + FullContainerEmitter<'inp, L>
-    + UnexpectedLeadingSeparatorEmitter<'inp, L>
-    + UnexpectedTrailingSeparatorEmitter<'inp, L>,
-  <Ctx::Emitter as Emitter<'inp, L>>::Error: From<UnexpectedEot<L::Offset>>,
-  Container: Default
-    + crate::container::Container<Ident<<L::Source as Source<L::Offset>>::Slice<'inp>, L::Span>>
-    + SeparatorHandler<'inp, L>
-    + 'inp,
-{
-  try_ident_list_of::<Sep, _, _, _, _, _>()
-}
-
-/// Returns a parser for a list of identifiers separated by the given separator for the specified language.
 ///
-/// The parser will not consume any valid token if it is not a valid ident list.
+/// `Lang` is read off the input, so an unbranded grammar writes the same call as a branded one.
 #[must_use]
-pub fn try_ident_list_of<'inp, Sep, L, Container, Ctx, Lang, Cmpl>() -> impl TryParseInput<
+pub fn try_ident_list<'inp, Sep, L, Container, Ctx, Lang, Cmpl>() -> impl TryParseInput<
   'inp,
   L,
   IdentList<<L::Source as Source<L::Offset>>::Slice<'inp>, L::Span, Container, Lang>,
@@ -75,7 +45,7 @@ where
     + 'inp,
 {
   move |inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>| {
-    Ident::try_parse_of
+    Ident::try_parse
       .separated::<Sep>()
       .collect()
       .spanned()

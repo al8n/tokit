@@ -242,6 +242,15 @@ impl<Delimiter, S, Lang: ?Sized> From<Unclosed<Delimiter, S, Lang>> for PcErr {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for PcErr
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<Delimiter>(_: Unclosed<Delimiter, L::Span, Lang>) -> Self {
+    PcErr
+  }
+}
+
 // ── Contexts: blackhole `()` cache vs `DefaultCache` ─────────────────────────────
 
 fn no_cache_ctx() -> ParserContext<'static, PcLex<'static>, Fatal<PcErr>, ()> {

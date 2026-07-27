@@ -79,8 +79,17 @@ impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for SepError {
 
 // The separated driver's separator-slot decision gate surfaces a terminal scanner stop as this
 // end-of-input error (the bound the delimited variants already required).
-impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for SepError {
-  fn from(_: UnexpectedEot<O, Lang>) -> Self {
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for SepError {
+  fn from(_: UnexpectedEot<O, Lang, Set>) -> Self {
+    SepError
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for SepError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     SepError
   }
 }

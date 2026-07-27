@@ -238,6 +238,15 @@ impl<Delimiter, S, Lang: ?Sized> From<Unclosed<Delimiter, S, Lang>> for CErr {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CErr
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<Delimiter>(_: Unclosed<Delimiter, L::Span, Lang>) -> Self {
+    CErr::Ordinary
+  }
+}
+
 // ── Harness ──────────────────────────────────────────────────────────────────
 
 type TLexer<'a> = LogosLexer<'a, Tok>;
@@ -330,7 +339,7 @@ impl<'inp> UnclosedEmitter<'inp, TLexer<'inp>> for SeparatorFatal {
   ) -> Result<(), CErr>
   where
     TLexer<'inp>: Lexer<'inp>,
-    CErr: From<Unclosed<Delimiter, <TLexer<'inp> as Lexer<'inp>>::Span>>,
+    CErr: tokora::emitter::FromUnclosed<'inp, TLexer<'inp>>,
   {
     Ok(())
   }

@@ -114,6 +114,9 @@ diagnostic.
 # impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEnd<H, O, Lang, Set>> for JsonError {
 #   fn from(_: tokora::error::UnexpectedEnd<H, O, Lang, Set>) -> Self { Self::End }
 # }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for JsonError {
+#   fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Self::End }
+# }
 use tokora::{Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, parser::expect, utils::Expected};
 
 fn boolean<'inp, Ctx>(
@@ -228,8 +231,11 @@ siblings):
 # impl<'inp> From<UnexpectedTokenOf<'inp, JsonLexer<'inp>>> for JsonError {
 #   fn from(_: UnexpectedTokenOf<'inp, JsonLexer<'inp>>) -> Self { Self::Unexpected }
 # }
-# impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for JsonError {
-#   fn from(_: UnexpectedEot<O, Lang>) -> Self { Self::End }
+# impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for JsonError {
+#   fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Self::End }
+# }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for JsonError {
+#   fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Self::End }
 # }
 # impl<'inp> From<MissingTokenOf<'inp, JsonLexer<'inp>>> for JsonError {
 #   fn from(_: MissingTokenOf<'inp, JsonLexer<'inp>>) -> Self { Self::Missing }
@@ -266,9 +272,9 @@ siblings):
 #     + UnexpectedLeadingSeparatorEmitter<'inp, JsonLexer<'inp>>
 #     + UnexpectedTrailingSeparatorEmitter<'inp, JsonLexer<'inp>>,
 # {
-#   OpenBracket::parse_of
+#   OpenBracket::parse
 #     .ignore_then(try_number.separated_by_comma().collect())
-#     .then_ignore(CloseBracket::parse_of)
+#     .then_ignore(CloseBracket::parse)
 #     .parse_input(input)
 # }
 assert_eq!(Parser::new().apply(array).parse_str("[1,2]"), Ok(vec![1, 2]));
@@ -278,7 +284,7 @@ assert!(Parser::new().apply(array).parse_str("[1,]").is_err());
 
 ## Build fields and objects with `separated_by_comma_while`
 
-A field is `string.then_ignore(Colon::parse_of).then(json_value)`. `object` uses
+A field is `string.then_ignore(Colon::parse).then(json_value)`. `object` uses
 `separated_by_comma_while` with `JsonValue::decide`, an external continuation decision over a
 one-token [`cache::Peeked`](crate::cache::Peeked) window. The decision returns
 [`parser::Action`](crate::parser::Action) to stop before a closing brace or continue for another

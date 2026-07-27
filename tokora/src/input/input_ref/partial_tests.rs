@@ -1778,7 +1778,7 @@ where
 }
 
 /// The chain's leaf: a `Cmpl`-generic try-atom over the scan chokepoint (the same
-/// decline-channel shape as the crate's `Ident::try_parse_of` leaf).
+/// decline-channel shape as the crate's `Ident::try_parse` leaf).
 fn try_word<'inp, Ctx, Cmpl>(
   inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx, (), Cmpl>,
 ) -> Result<crate::try_parse_input::ParseAttempt<PTok>, PErr>

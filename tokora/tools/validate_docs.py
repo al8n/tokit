@@ -163,7 +163,7 @@ SECTIONS = {
         "Separation — comma-separated and friends", "Delimited shapes", "Feature matrix",
     ),
     "ref_errors_emitters_context.md": (
-        "The error model", "Emitters", "ParseContext / ParseCtx",
+        "The error model", "Emitters", "ParseContext / ComposableParseContext",
     ),
     "ref_pratt.md": (
         "Folds are fn items, not closures", "Token-level surface", "AST-level surface",

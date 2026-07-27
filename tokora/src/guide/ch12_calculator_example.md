@@ -397,7 +397,8 @@ assertions below are the maintained evaluator's behavior contract, now executabl
 # enum CalcError { Lex(LexError), UnexpectedToken, UnexpectedEot }
 # impl From<LexError> for CalcError { fn from(e: LexError) -> Self { Self::Lex(e) } }
 # impl<'inp> From<tokora::error::token::UnexpectedTokenOf<'inp, CalcLexer<'inp>>> for CalcError { fn from(_: tokora::error::token::UnexpectedTokenOf<'inp, CalcLexer<'inp>>) -> Self { Self::UnexpectedToken } }
-# impl From<tokora::error::UnexpectedEot> for CalcError { fn from(_: tokora::error::UnexpectedEot) -> Self { Self::UnexpectedEot } }
+# impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>> for CalcError { fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CalcError { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Self::UnexpectedEot } }
 # impl From<tokora::error::UnexpectedEoLhs> for CalcError { fn from(_: tokora::error::UnexpectedEoLhs) -> Self { Self::UnexpectedEot } }
 # impl From<tokora::error::UnexpectedEoRhs> for CalcError { fn from(_: tokora::error::UnexpectedEoRhs) -> Self { Self::UnexpectedEot } }
 # use tokora::parser::PrattPower;

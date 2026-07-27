@@ -1,6 +1,7 @@
 use crate::{
   Lexer,
   error::{
+    UnexpectedEot,
     syntax::{FullContainer, TooFew, TooMany},
     token::UnexpectedTokenOf,
   },
@@ -605,7 +606,7 @@ where
 /// sub-traits. The pre-built [`Fatal`], [`Verbose`], and [`Silent`] emitters all qualify
 /// whenever their error type absorbs the corresponding error families.
 ///
-/// The context-side twin is [`ParseCtx`](crate::ParseCtx), which rides this bound on a
+/// The context-side twin is [`ComposableParseContext`](crate::ComposableParseContext), which rides this bound on a
 /// [`ParseContext`](crate::ParseContext)'s emitter so a whole parsing context collapses
 /// to one bound as well.
 ///
@@ -667,5 +668,132 @@ where
     + UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>
     + TooFewEmitter<'inp, L, Lang>
     + UnclosedEmitter<'inp, L, Lang>,
+{
+}
+
+/// Every token-level failure a grammar can hit, as one conversion bound on the error type.
+///
+/// A leaf atom does not choose which of these it might raise — reading a token can fail
+/// four ways, and a delimited production a fifth — so an error type that absorbs some but
+/// not all of them is not usable as *an* error type, only as one for the subset of the
+/// grammar that happens to avoid the rest. `FromTokenErrors` is that whole set as a single
+/// name, blanket-implemented for every type satisfying all five members, so a signature
+/// states it once instead of restating the ladder at every generic parser.
+///
+/// The context-side twin is
+/// [`ComposableParseContext`](crate::ComposableParseContext), which rides this bound on a
+/// [`ParseContext`](crate::ParseContext)'s emitter error through
+/// [`ComposableEmitter`] — so one context bound supplies both the emitter surface and
+/// these conversions.
+///
+/// # The two end-of-input members
+///
+/// [`UnexpectedEnd`](crate::error::UnexpectedEnd) carries the *expected set* as a type
+/// parameter, and the library instantiates it two ways: the `_or_stop` family raises the
+/// default `Set = &'static str` set, while the committed dispatch drivers feed their
+/// caller-supplied `&'static [Kind]` classification table straight into the diagnostic. A
+/// grammar that uses both must absorb both, so both are named here. **One `Set`-generic
+/// `From` impl satisfies both** — that is the whole cost, and it is why an implementor
+/// should write the generic form rather than two pinned ones:
+///
+/// ```rust
+/// # use tokora::error::UnexpectedEot;
+/// # struct MyError;
+/// impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for MyError {
+///   fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { MyError }
+/// }
+/// ```
+///
+/// # Examples
+///
+/// The bundle elaborates back to the whole ladder — the one-bound function can call into
+/// code demanding the individual conversions:
+///
+/// ```rust
+/// use tokora::{Lexer, Token, emitter::{FromTokenErrors, FromUnclosed}};
+/// use tokora::error::{UnexpectedEot, token::UnexpectedTokenOf};
+///
+/// // The ladder a leaf atom would otherwise carry…
+/// fn ladder<'inp, L, E>()
+/// where
+///   L: Lexer<'inp>,
+///   E: From<UnexpectedEot<L::Offset, ()>>
+///     + From<UnexpectedEot<L::Offset, (), <L::Token as Token<'inp>>::Kind>>
+///     + From<UnexpectedTokenOf<'inp, L>>
+///     + From<<L::Token as Token<'inp>>::Error>
+///     + FromUnclosed<'inp, L>,
+/// {
+/// }
+///
+/// // …collapses to a single bound that still unlocks every rung.
+/// fn bundled<'inp, L, E>()
+/// where
+///   L: Lexer<'inp>,
+///   E: FromTokenErrors<'inp, L>,
+/// {
+///   ladder::<L, E>()
+/// }
+/// ```
+#[diagnostic::on_unimplemented(
+  message = "`{Self}` cannot yet be a tokora parse error for lexer `{L}`",
+  label = "this error type is missing one or more token-level conversions",
+  note = "an error type must absorb all five token-level failures: \
+          `From<UnexpectedEot<L::Offset, Lang>>`, \
+          `From<UnexpectedEot<L::Offset, Lang, <L::Token as Token>::Kind>>`, \
+          `From<UnexpectedTokenOf<'_, L, Lang>>`, \
+          `From<<L::Token as Token>::Error>`, and `FromUnclosed<'_, L, Lang>`",
+  note = "the two end-of-input members are one `Set`-generic impl: \
+          `impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for {Self} \
+          {{ fn from(e: UnexpectedEot<O, Lang, Set>) -> Self {{ /* … */ }} }}`",
+  note = "the delimiter half is one generic impl: \
+          `impl<'i, L: Lexer<'i>, Lang: ?Sized> FromUnclosed<'i, L, Lang> for {Self} \
+          {{ fn from_unclosed<D>(e: Unclosed<D, L::Span, Lang>) -> Self {{ /* … */ }} }}`"
+)]
+pub trait FromTokenErrors<'inp, L, Lang: ?Sized = ()>:
+  From<UnexpectedEot<<L as Lexer<'inp>>::Offset, Lang>>
+  + From<
+    UnexpectedEot<
+      <L as Lexer<'inp>>::Offset,
+      Lang,
+      <<L as Lexer<'inp>>::Token as Token<'inp>>::Kind,
+    >,
+  > + From<UnexpectedTokenOf<'inp, L, Lang>>
+  + From<<<L as Lexer<'inp>>::Token as Token<'inp>>::Error>
+  + FromUnclosed<'inp, L, Lang>
+where
+  L: Lexer<'inp>,
+{
+}
+
+// Deliberately **no** `#[diagnostic::do_not_recommend]` here. The claim that it is required
+// to make the curated `on_unimplemented` message above fire at all is false, and was measured
+// rather than reasoned: rustc walks up to the nearest annotated trait and attaches its message
+// whether or not this impl is marked. Both arms of the measurement, on an error type missing
+// only the two end-of-input members:
+//
+// * with the attribute — 3 errors; `help:` reads `the trait FromTokenErrors<…> is not
+//   implemented`, so the *identity of the missing member* is gone;
+// * without it — 4 errors; `help:` names `From<UnexpectedEnd<TokenHint>>` and
+//   `From<UnexpectedEnd<TokenHint, usize, (), TokenKind>>`, i.e. exactly what is missing.
+//
+// So its only real effect is to trade the missing member's identity for one error instead of
+// one per member. Naming the member is the actionable datum, the enumerating `note` above
+// already bounds the verbosity at five, and one fewer behaviour resting on rustc's obligation
+// walk is worth more than the deduplication. Do not add it back on the strength of the
+// original "the message will not fire without it" premise — that premise was tested and is
+// wrong.
+impl<'inp, L, Lang: ?Sized, T> FromTokenErrors<'inp, L, Lang> for T
+where
+  L: Lexer<'inp>,
+  T: From<UnexpectedEot<<L as Lexer<'inp>>::Offset, Lang>>
+    + From<
+      UnexpectedEot<
+        <L as Lexer<'inp>>::Offset,
+        Lang,
+        <<L as Lexer<'inp>>::Token as Token<'inp>>::Kind,
+      >,
+    > + From<UnexpectedTokenOf<'inp, L, Lang>>
+    + From<<<L as Lexer<'inp>>::Token as Token<'inp>>::Error>
+    + FromUnclosed<'inp, L, Lang>,
 {
 }

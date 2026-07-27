@@ -699,7 +699,7 @@ fn expect_try_parse_sliced_accept() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let expect_parser =
-      try_expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      try_expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let mut with_sliced: With<_, PhantomSliced> =
       With::new(expect_parser, PhantomSliced::phantom());
     with_sliced.try_parse_input(inp)
@@ -722,7 +722,7 @@ fn expect_try_parse_sliced_decline() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let expect_parser =
-      try_expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      try_expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let mut with_sliced: With<_, PhantomSliced> =
       With::new(expect_parser, PhantomSliced::phantom());
     with_sliced.try_parse_input(inp)
@@ -745,7 +745,7 @@ fn expect_try_parse_located_accept() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let expect_parser =
-      try_expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      try_expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let mut with_located: With<_, PhantomLocated> =
       With::new(expect_parser, PhantomLocated::phantom());
     with_located.try_parse_input(inp)
@@ -768,7 +768,7 @@ fn expect_try_parse_located_decline() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let expect_parser =
-      try_expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      try_expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let mut with_located: With<_, PhantomLocated> =
       With::new(expect_parser, PhantomLocated::phantom());
     with_located.try_parse_input(inp)
@@ -791,7 +791,7 @@ fn expect_try_parse_spanned_accept() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let expect_parser =
-      try_expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      try_expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let mut with_spanned: With<_, PhantomSpan> = With::new(expect_parser, PhantomSpan::phantom());
     with_spanned.try_parse_input(inp)
   }
@@ -811,7 +811,7 @@ fn expect_try_parse_spanned_decline() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let expect_parser =
-      try_expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      try_expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     let mut with_spanned: With<_, PhantomSpan> = With::new(expect_parser, PhantomSpan::phantom());
     with_spanned.try_parse_input(inp)
   }
@@ -1328,7 +1328,7 @@ fn expect_try_parse_accept() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let mut expect_parser =
-      try_expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      try_expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     expect_parser.try_parse_input(inp)
   }
   let r = Parser::with_context(recovering_ctx())
@@ -1347,7 +1347,7 @@ fn expect_try_parse_decline() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let mut expect_parser =
-      try_expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      try_expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     expect_parser.try_parse_input(inp)
   }
   let r = Parser::with_context(recovering_ctx())
@@ -1367,7 +1367,7 @@ fn expect_ref_try_parse_accept() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let expect_parser =
-      try_expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      try_expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     (&expect_parser).try_parse_input(inp)
   }
   let r = Parser::with_context(recovering_ctx())
@@ -1386,7 +1386,7 @@ fn expect_ref_try_parse_decline() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let expect_parser =
-      try_expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| matches!(t, Token::Num(_)));
+      try_expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| matches!(t, Token::Num(_)));
     (&expect_parser).try_parse_input(inp)
   }
   let r = Parser::with_context(recovering_ctx())

@@ -36,7 +36,7 @@ fn expect_parse_input_with_spanned_ok() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
-    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
       if matches!(t, Token::Num(_)) {
         Ok(())
       } else {
@@ -61,7 +61,7 @@ fn expect_parse_input_with_spanned_err() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
-    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
       if matches!(t, Token::Num(_)) {
         Ok(())
       } else {
@@ -86,7 +86,7 @@ fn expect_parse_input_with_sliced_ok() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
-    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
       if matches!(t, Token::Num(_)) {
         Ok(())
       } else {
@@ -111,7 +111,7 @@ fn expect_parse_input_with_sliced_err() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
-    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
       if matches!(t, Token::Num(_)) {
         Ok(())
       } else {
@@ -138,7 +138,7 @@ fn expect_with_sliced_slices_each_current_token() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let mut first: With<_, PhantomSliced> = With::new(
-      expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+      expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
         if matches!(t, Token::Num(_)) {
           Ok(())
         } else {
@@ -149,7 +149,7 @@ fn expect_with_sliced_slices_each_current_token() {
     );
     let a = first.parse_input(inp)?;
     let mut second: With<_, PhantomSliced> = With::new(
-      expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+      expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
         if matches!(t, Token::Num(_)) {
           Ok(())
         } else {
@@ -177,7 +177,7 @@ fn expect_with_located_reports_each_current_token() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
     let mut first: With<_, PhantomLocated> = With::new(
-      expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+      expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
         if matches!(t, Token::Num(_)) {
           Ok(())
         } else {
@@ -188,7 +188,7 @@ fn expect_with_located_reports_each_current_token() {
     );
     let _ = first.parse_input(inp)?;
     let mut second: With<_, PhantomLocated> = With::new(
-      expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+      expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
         if matches!(t, Token::Num(_)) {
           Ok(())
         } else {
@@ -215,7 +215,7 @@ fn expect_parse_input_with_located_ok() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
-    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
       if matches!(t, Token::Num(_)) {
         Ok(())
       } else {
@@ -241,7 +241,7 @@ fn expect_parse_input_with_located_err() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
-    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+    let expect_parser = expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
       if matches!(t, Token::Num(_)) {
         Ok(())
       } else {
@@ -267,7 +267,7 @@ fn parse_state_accessors_via_map() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = E>,
   {
-    expect::<'inp, _, TestLexer<'inp>, Ctx>(|t: &Token| {
+    expect::<'inp, _, TestLexer<'inp>, Ctx, _>(|t: &Token| {
       if matches!(t, Token::Num(_)) {
         Ok(())
       } else {

@@ -21,7 +21,7 @@ use tokora::{
   error::token::{UnexpectedToken, UnexpectedTokenOf},
   input::Cursor,
   parser::{
-    PrattFoldOp, PrattInfix, PrattLHS, PrattRHS, Precedenced, node, node_at, node_opt, pratt_of,
+    PrattFoldOp, PrattInfix, PrattLHS, PrattRHS, Precedenced, node, node_at, node_opt, pratt,
   },
   span::Spanned,
   try_parse_input::ParseAttempt,
@@ -151,6 +151,26 @@ impl From<LexErr> for TestErr {
 
 impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, Lang>> for TestErr {
   fn from(_: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
+    Self::Unexpected
+  }
+}
+
+// The two end-of-input members of `FromTokenErrors` as one `Set`-generic impl, plus the
+// delimiter half. This fixture's grammar delimits nothing, but an error type absorbs the
+// whole token-level set or it is not an error type.
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>>
+  for TestErr
+{
+  fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self {
+    Self::Unexpected
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for TestErr
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
     Self::Unexpected
   }
 }
@@ -513,7 +533,7 @@ fn bin_kinds(op: PrattFoldOp<'_, (), u8, u8, u8, ()>) -> Option<u16> {
 #[test]
 fn pratt_with_cst_kinds_materializes_nested_bin_exprs() {
   let mut s = sink();
-  let parser = pratt_of(
+  let parser = pratt(
     pratt_lhs,
     pratt_rhs,
     pratt_fold_prefix,
@@ -550,7 +570,7 @@ fn pratt_with_cst_kinds_materializes_nested_bin_exprs() {
 #[test]
 fn pratt_without_cst_kinds_records_no_nodes() {
   let mut s = sink();
-  let parser = pratt_of(
+  let parser = pratt(
     pratt_lhs,
     pratt_rhs,
     pratt_fold_prefix,

@@ -91,6 +91,8 @@
 use core::marker::PhantomData;
 
 use crate::{
+  Lexer,
+  emitter::FromUnclosed,
   punct::{Angle, Brace, Bracket, Paren},
   span::{SimpleSpan, Span},
   utils::CowStr,
@@ -506,7 +508,10 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   }
 }
 
-impl<Delimiter, S, Lang: ?Sized> From<Unclosed<Delimiter, S, Lang>> for () {
+impl<'inp, L, Lang: ?Sized> FromUnclosed<'inp, L, Lang> for ()
+where
+  L: Lexer<'inp>,
+{
   #[inline(always)]
-  fn from(_: Unclosed<Delimiter, S, Lang>) -> Self {}
+  fn from_unclosed<Delimiter>(_: Unclosed<Delimiter, L::Span, Lang>) -> Self {}
 }

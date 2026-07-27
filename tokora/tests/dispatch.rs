@@ -77,6 +77,17 @@ impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for DispatchError {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for DispatchError
+where
+  L: tokora::Lexer<'inp>,
+{
+  fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self {
+    DispatchError::Eot {
+      expected: Vec::new(),
+    }
+  }
+}
+
 // ── The parsers under test ─────────────────────────────────────────────────────
 
 /// A three-alternative dispatch: number → B0, `+` → B1, `(` → B2. Each branch

@@ -55,6 +55,18 @@ impl<D, Lang: ?Sized> From<Unclosed<D, SimpleSpan, Lang>> for SE {
   }
 }
 
+impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for SE
+where
+  L: tokora::Lexer<'inp, Span = SimpleSpan>,
+{
+  fn from_unclosed<D>(err: Unclosed<D, SimpleSpan, Lang>) -> Self {
+    SE::Unclosed {
+      name: err.name_ref().to_string(),
+      start: err.span().start(),
+    }
+  }
+}
+
 impl From<()> for SE {
   fn from(_: ()) -> Self {
     SE::Other
@@ -80,8 +92,8 @@ impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for SE {
     SE::Other
   }
 }
-impl From<UnexpectedEot> for SE {
-  fn from(_: UnexpectedEot) -> Self {
+impl<Set: Clone + 'static> From<UnexpectedEot<usize, (), Set>> for SE {
+  fn from(_: UnexpectedEot<usize, (), Set>) -> Self {
     SE::Other
   }
 }

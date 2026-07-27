@@ -6,7 +6,7 @@ This walkthrough builds the maintained
 [`c_expression.rs`](https://github.com/al8n/tokora/blob/main/tokora/examples/c_expression.rs)
 end to end, inline. Where [chapter 12](super::ch12_calculator_example) folded tokens straight to an
 `f64` with the *token-level* Pratt engine, this is the **AST-level** engine
-([`pratt_of`](crate::parser::pratt_of)): `parse_lhs` and `parse_rhs` are full parser *functions*
+([`pratt`](crate::parser::pratt)): `parse_lhs` and `parse_rhs` are full parser *functions*
 with the [`InputRef`](crate::InputRef) in hand, and the folds build a typed `Expr` tree over your
 own node type. Three things here are unique to this chapter, worth watching for as they appear
 below:
@@ -27,7 +27,7 @@ leaving the page.
 | --- | --- |
 | [`c_expression.rs`](https://github.com/al8n/tokora/blob/main/tokora/examples/c_expression.rs) | `parse_lhs`, `parse_rhs`, `fold_prefix`, `fold_infix`, `fold_postfix`, `parse_cexpr` |
 
-This chapter's public surface is [`parser::pratt_of`](crate::parser::pratt_of),
+This chapter's public surface is [`parser::pratt`](crate::parser::pratt),
 [`parser::PrattLHS`](crate::parser::PrattLHS), [`parser::PrattRHS`](crate::parser::PrattRHS),
 [`parser::PrattInfix`](crate::parser::PrattInfix),
 [`parser::Precedenced`](crate::parser::Precedenced),
@@ -335,7 +335,7 @@ losing it. This is the AST-level counterpart of a token-level `try_pratt_rhs` re
 `parse_rhs` must always return a *value*, so "not an operator" is spelled as a below-floor postfix.
 
 ```rust
-# use tokora::{Token as TokenT, ParseInput, error::token::UnexpectedTokenOf, logos::{self, Logos}, parser::{PrattPower, pratt_of}};
+# use tokora::{Token as TokenT, ParseInput, error::token::UnexpectedTokenOf, logos::{self, Logos}, parser::{PrattPower, pratt}};
 # #[derive(Clone, Debug, Default, PartialEq)] struct LexError;
 # impl From<()> for LexError { fn from(_: ()) -> Self { Self } }
 # #[derive(Clone, Debug, Logos)]
@@ -367,6 +367,8 @@ losing it. This is the AST-level counterpart of a token-level `try_pratt_rhs` re
 # type CExprLexer<'a> = tokora::lexer::LogosLexer<'a, Token>;
 # #[derive(Debug)] enum CExprError { Lex(LexError), UnexpectedToken, UnexpectedEot }
 # impl From<LexError> for CExprError { fn from(e: LexError) -> Self { Self::Lex(e) } }
+# impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CExprError { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Self::UnexpectedEot } }
 # impl<'inp> From<UnexpectedTokenOf<'inp, CExprLexer<'inp>>> for CExprError { fn from(_: UnexpectedTokenOf<'inp, CExprLexer<'inp>>) -> Self { Self::UnexpectedToken } }
 # #[derive(Clone, Copy, Debug)] enum UnaryOp { Neg, Pos, Not, BNot, PreInc, PreDec }
 # #[derive(Clone, Copy, Debug)] enum BinOp { Add, Sub, Mul, Div, Mod, Or, And, BOr, BXor, BAnd, Eq, Neq, Lt, Gt, Lte, Gte, Shl, Shr }
@@ -403,7 +405,7 @@ losing it. This is the AST-level counterpart of a token-level `try_pratt_rhs` re
 #     PostfixOp::Sentinel => unreachable!(),
 #   }
 # }
-# fn parse_cexpr<'inp, Ctx>(inp: &mut InputRef<'inp, '_, CExprLexer<'inp>, Ctx>) -> Result<Box<Expr>, CExprError> where Ctx: ParseContext<'inp, CExprLexer<'inp>>, Ctx::Emitter: Emitter<'inp, CExprLexer<'inp>, Error = CExprError> { pratt_of(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp) }
+# fn parse_cexpr<'inp, Ctx>(inp: &mut InputRef<'inp, '_, CExprLexer<'inp>, Ctx>) -> Result<Box<Expr>, CExprError> where Ctx: ParseContext<'inp, CExprLexer<'inp>>, Ctx::Emitter: Emitter<'inp, CExprLexer<'inp>, Error = CExprError> { pratt(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp) }
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, Parser,
   parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced},
@@ -518,7 +520,7 @@ stops before the delimiter this fold then consumes itself — the parser stays i
 delimiter.
 
 ```rust
-# use tokora::{Token as TokenT, ParseInput, error::token::UnexpectedTokenOf, logos::{self, Logos}, parser::{PrattLHS, PrattPower, PrattRHS, pratt_of}};
+# use tokora::{Token as TokenT, ParseInput, error::token::UnexpectedTokenOf, logos::{self, Logos}, parser::{PrattLHS, PrattPower, PrattRHS, pratt}};
 # #[derive(Clone, Debug, Default, PartialEq)] struct LexError;
 # impl From<()> for LexError { fn from(_: ()) -> Self { Self } }
 # #[derive(Clone, Debug, Logos)]
@@ -550,6 +552,8 @@ delimiter.
 # type CExprLexer<'a> = tokora::lexer::LogosLexer<'a, Token>;
 # #[derive(Debug)] enum CExprError { Lex(LexError), UnexpectedToken, UnexpectedEot }
 # impl From<LexError> for CExprError { fn from(e: LexError) -> Self { Self::Lex(e) } }
+# impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CExprError { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Self::UnexpectedEot } }
 # impl<'inp> From<UnexpectedTokenOf<'inp, CExprLexer<'inp>>> for CExprError { fn from(_: UnexpectedTokenOf<'inp, CExprLexer<'inp>>) -> Self { Self::UnexpectedToken } }
 # #[derive(Clone, Copy, Debug)] enum UnaryOp { Neg, Pos, Not, BNot, PreInc, PreDec }
 # #[derive(Clone, Copy, Debug)] enum BinOp { Add, Sub, Mul, Div, Mod, Or, And, BOr, BXor, BAnd, Eq, Neq, Lt, Gt, Lte, Gte, Shl, Shr }
@@ -623,7 +627,7 @@ delimiter.
 #     }),
 #   }
 # }
-# fn parse_cexpr<'inp, Ctx>(inp: &mut InputRef<'inp, '_, CExprLexer<'inp>, Ctx>) -> Result<Box<Expr>, CExprError> where Ctx: ParseContext<'inp, CExprLexer<'inp>>, Ctx::Emitter: Emitter<'inp, CExprLexer<'inp>, Error = CExprError> { pratt_of(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp) }
+# fn parse_cexpr<'inp, Ctx>(inp: &mut InputRef<'inp, '_, CExprLexer<'inp>, Ctx>) -> Result<Box<Expr>, CExprError> where Ctx: ParseContext<'inp, CExprLexer<'inp>>, Ctx::Emitter: Emitter<'inp, CExprLexer<'inp>, Error = CExprError> { pratt(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp) }
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, Parser,
   parser::{PrattInfix, Precedenced},
@@ -720,7 +724,7 @@ assert_eq!(parse("a ? b : c").unwrap(), "(a ? b : c)");           // ternary con
 
 ## Close the recursion in `parse_cexpr`
 
-`parse_cexpr` calls [`pratt_of`](crate::parser::pratt_of) with the two classifiers and three folds,
+`parse_cexpr` calls [`pratt`](crate::parser::pratt) with the two classifiers and three folds,
 then drives it with [`parse_input`](crate::ParseInput::parse_input). Note what is *absent* from its
 bounds: there is no [`PrattEmitter`](crate::emitter::PrattEmitter). The AST engine keeps
 error-reporting inside the folds and `parse_lhs`, so the ordinary [`Emitter`](crate::Emitter) bound
@@ -765,6 +769,8 @@ operators — now executable inline:
 # type CExprLexer<'a> = tokora::lexer::LogosLexer<'a, Token>;
 # #[derive(Debug)] enum CExprError { Lex(LexError), UnexpectedToken, UnexpectedEot }
 # impl From<LexError> for CExprError { fn from(e: LexError) -> Self { Self::Lex(e) } }
+# impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
+# impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CExprError { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Self::UnexpectedEot } }
 # impl<'inp> From<UnexpectedTokenOf<'inp, CExprLexer<'inp>>> for CExprError { fn from(_: UnexpectedTokenOf<'inp, CExprLexer<'inp>>) -> Self { Self::UnexpectedToken } }
 # #[derive(Clone, Copy, Debug)] enum UnaryOp { Neg, Pos, Not, BNot, PreInc, PreDec }
 # #[derive(Clone, Copy, Debug)] enum BinOp { Add, Sub, Mul, Div, Mod, Or, And, BOr, BXor, BAnd, Eq, Neq, Lt, Gt, Lte, Gte, Shl, Shr }
@@ -850,7 +856,7 @@ operators — now executable inline:
 #     PostfixOp::Sentinel => unreachable!(),
 #   }
 # }
-use tokora::{Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, parser::pratt_of};
+use tokora::{Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, parser::pratt};
 
 fn parse_cexpr<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, CExprLexer<'inp>, Ctx>,
@@ -859,7 +865,7 @@ where
   Ctx: ParseContext<'inp, CExprLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, CExprLexer<'inp>, Error = CExprError>,
 {
-  pratt_of(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp)
+  pratt(parse_lhs, parse_rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp)
 }
 
 // The maintained binary's assertion table — the parser's behavior contract — now inline. Each row

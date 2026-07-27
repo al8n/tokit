@@ -834,25 +834,25 @@ where
 }
 
 #[test]
-fn parser_of_construction() {
-  // Covers Parser::of()
-  let p: tokora::Parser<(), TestLexer<'_>, i64, _, ()> =
-    Parser::of::<'_, TestLexer<'_>, i64, (), ()>();
+fn parser_new_at_an_explicit_lang() {
+  // Covers Parser::new() at an explicit language
+  let p: tokora::Parser<(), TestLexer<'_>, i64, _> =
+    Parser::new::<'_, TestLexer<'_>, i64, (), ()>();
   let r = p.apply(parse_num).parse_str("42");
   assert_eq!(r.unwrap(), 42);
 }
 
 #[test]
-fn parser_with_parser_of_construction() {
-  // Covers Parser::with_parser_of()
-  let r = Parser::with_parser_of::<'_, TestLexer<'_>, i64, (), _, ()>(parse_num).parse_str("42");
+fn parser_with_parser_construction() {
+  // Covers Parser::with_parser()
+  let r = Parser::with_parser::<'_, TestLexer<'_>, i64, (), _, ()>(parse_num).parse_str("42");
   assert_eq!(r.unwrap(), 42);
 }
 
 #[test]
-fn parser_apply_of() {
-  // Covers Parser::apply_of()
-  let r: Result<i64, ()> = Parser::new().apply_of::<_, ()>(parse_num).parse_str("99");
+fn parser_apply_at_an_explicit_lang() {
+  // Covers Parser::apply() at an explicit language
+  let r: Result<i64, ()> = Parser::new().apply::<_, ()>(parse_num).parse_str("99");
   assert_eq!(r.unwrap(), 99);
 }
 
@@ -870,6 +870,38 @@ fn parse_trait_parse_str_with_state() {
     .apply(parse_num)
     .parse_str_with_state("100", ());
   assert_eq!(r.unwrap(), 100);
+}
+
+// ── The value-driven entry points ─────────────────────────────────────────────
+//
+// `parse_num` names neither a lexer instantiation nor an error type beyond `()`, so every
+// parameter of each free function is solved from the call: the source value carries `'inp`
+// and `S`, `L` follows from `Lexer<'inp, Source = S>`, and `O` / `E` from the annotation.
+
+#[test]
+fn free_parse() {
+  let r: Result<i64, ()> = tokora::parse(parse_num, "42");
+  assert_eq!(r.unwrap(), 42);
+}
+
+#[test]
+fn free_parse_with_state() {
+  let r: Result<i64, ()> = tokora::parse_with_state(parse_num, "100", ());
+  assert_eq!(r.unwrap(), 100);
+}
+
+#[test]
+fn free_parse_with_context() {
+  // The context's own emitter decides the error type, so there is nothing to annotate.
+  let ctx: IgnoredContext<'_> = IgnoredContext::new(Ignored::default());
+  let r = tokora::parse_with(parse_num, "7", ctx);
+  assert_eq!(r.unwrap(), 7);
+}
+
+#[test]
+fn free_parse_reports_the_error() {
+  let r: Result<i64, ()> = tokora::parse(parse_num, "");
+  assert!(r.is_err());
 }
 
 // ── Feature-gated IsAsciiChar impls ──────────────────────────────────────────
