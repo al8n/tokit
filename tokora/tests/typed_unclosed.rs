@@ -7,7 +7,7 @@ use generic_arraydeque::typenum::U1;
 use tokora::{
   Accumulator, FatalContext, InputRef, Parse, ParseContext, ParseInput, Parser, SimpleSpan,
   cache::Peeked,
-  delimiter::Delimiter,
+  delimiter::{Delimiter, DelimiterKind},
   emitter::FromUnclosed,
   error::{
     Unclosed, UnexpectedEot,
@@ -27,6 +27,8 @@ enum CustomLang {}
 struct CustomMarker;
 
 impl<'inp> Delimiter<'inp, TestLexer<'inp>, CustomLang> for CustomMarker {
+  const KIND: DelimiterKind = DelimiterKind::Custom("custom brackets");
+
   type Open = OpenBracket<(), (), CustomLang>;
   type Close = CloseBracket<(), (), CustomLang>;
 
@@ -68,18 +70,21 @@ impl From<Unclosed<CustomMarker, SimpleSpan, CustomLang>> for TypedError {
 }
 
 // The umbrella conversion the delimited drivers now demand. `from_unclosed` is generic over
-// the pair, so the typed arm is selected by the runtime name the `Unclosed` carries; the
-// catch-all is mandatory because no arm set over a generic `D` is exhaustive.
+// the pair, so the typed arm is selected by the runtime `DelimiterKind` the `Unclosed`
+// carries; the catch-all is mandatory because no arm set over a generic `D` is exhaustive.
 impl<'inp, L> tokora::emitter::FromUnclosed<'inp, L, CustomLang> for TypedError
 where
   L: tokora::Lexer<'inp, Span = SimpleSpan>,
 {
   fn from_unclosed<D>(err: Unclosed<D, SimpleSpan, CustomLang>) -> Self {
+    let kind = err.kind();
     let (span, name) = err.into_components();
-    match name.as_ref() {
-      "[]" => Self::Bracket(Unclosed::of(span, name)),
-      "{}" => Self::Brace(Unclosed::of(span, name)),
-      "custom brackets" => Self::CustomMarker(Unclosed::of(span, name)),
+    match kind {
+      DelimiterKind::Bracket { .. } => Self::Bracket(Unclosed::of(span, kind, name)),
+      DelimiterKind::Brace { .. } => Self::Brace(Unclosed::of(span, kind, name)),
+      DelimiterKind::Custom("custom brackets") => {
+        Self::CustomMarker(Unclosed::of(span, kind, name))
+      }
       _ => Self::Other,
     }
   }
@@ -281,24 +286,30 @@ fn map_parser_mut_preserves_non_clone_custom_marker_type() {
 fn per_pair_from_impls_coexist_with_the_umbrella() {
   let span = SimpleSpan::new(3, 4);
 
-  // Type-level: the pair is chosen by the `Unclosed`'s type parameter.
-  let typed: TypedError = Unclosed::<Bracket, _, CustomLang>::of(span, "[]".into()).into();
+  // Type-level: the pair is chosen by the `Unclosed`'s type parameter. The two built-ins go
+  // through their own constructors — `of` cannot take a directly spelled built-in variant
+  // outside tokora, and these produce exactly the kind/name pair it used to be handed by
+  // hand.
+  let typed: TypedError = Unclosed::<Bracket, _, CustomLang>::bracket_of(span).into();
   assert!(matches!(typed, TypedError::Bracket(_)));
-  let typed: TypedError = Unclosed::<Brace, _, CustomLang>::of(span, "{}".into()).into();
+  let typed: TypedError = Unclosed::<Brace, _, CustomLang>::brace_of(span).into();
   assert!(matches!(typed, TypedError::Brace(_)));
-  let typed: TypedError =
-    Unclosed::<CustomMarker, _, CustomLang>::of(span, "custom brackets".into()).into();
+  let typed: TypedError = Unclosed::<CustomMarker, _, CustomLang>::of(
+    span,
+    DelimiterKind::Custom("custom brackets"),
+    "custom brackets".into(),
+  )
+  .into();
   assert!(matches!(typed, TypedError::CustomMarker(_)));
 
-  // Umbrella: the same three pairs, chosen by the runtime name, plus the mandatory
+  // Umbrella: the same three pairs, chosen by the runtime `DelimiterKind`, plus the mandatory
   // catch-all for a pair the arm set does not name.
   let via = <TypedError as FromUnclosed<'_, TestLexer<'_>, CustomLang>>::from_unclosed(Unclosed::<
     Bracket,
     _,
     CustomLang,
-  >::of(
-    span,
-    "[]".into(),
+  >::bracket_of(
+    span
   ));
   assert!(matches!(via, TypedError::Bracket(_)));
   let via = <TypedError as FromUnclosed<'_, TestLexer<'_>, CustomLang>>::from_unclosed(Unclosed::<
@@ -307,6 +318,7 @@ fn per_pair_from_impls_coexist_with_the_umbrella() {
     CustomLang,
   >::of(
     span,
+    DelimiterKind::Custom("custom brackets"),
     "custom brackets".into(),
   ));
   assert!(matches!(via, TypedError::CustomMarker(_)));
@@ -316,6 +328,7 @@ fn per_pair_from_impls_coexist_with_the_umbrella() {
     CustomLang,
   >::of(
     span,
+    DelimiterKind::Custom("unnamed pair"),
     "unnamed pair".into(),
   ));
   assert!(matches!(via, TypedError::Other));

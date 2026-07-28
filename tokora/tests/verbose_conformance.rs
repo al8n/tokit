@@ -35,6 +35,7 @@ use std::collections::BTreeSet;
 
 use tokora::{
   Emitter, InputRef, Parse, Parser, ParserContext,
+  delimiter::DelimiterKind,
   emitter::{
     DiagnosticKind, FullContainerEmitter, MissingLeadingSeparatorEmitter,
     MissingTrailingSeparatorEmitter, PrattEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter,
@@ -786,7 +787,7 @@ verbose_channel_conformance! {
     invoke: |v: &mut Vb| {
       <Vb as UnclosedEmitter<'_, TestLexer<'_>>>::emit_unclosed(
         v,
-        Unclosed::<char>::new(SimpleSpan::new(0usize, 1usize), CowStr::from_static("brace")),
+        Unclosed::<char>::new(SimpleSpan::new(0usize, 1usize), DelimiterKind::Custom("probe"), CowStr::from_static("brace")),
       )
       .expect("Verbose collects rather than propagates");
     }

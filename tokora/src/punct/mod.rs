@@ -332,6 +332,81 @@ punctuator! {
 }
 
 /// A trait for any punctuator.
+///
+/// # The language brand is a fence
+///
+/// Every built-in marker carries its own brand (`Comma<S, C, Lang>`), and the blanket impls
+/// generated for them name that brand and the context language as the **same** parameter. A
+/// marker branded for one grammar is therefore not a punctuator of another: a separator
+/// copy-pasted out of a sibling dialect fails to compile instead of quietly type-checking.
+///
+/// This costs the fluent family nothing. `separated_by_comma`, `separated_by_comma_while` and
+/// their siblings stay reachable at a branded language because the macro that generates them
+/// instantiates the marker at the *caller's* `Lang` — `Comma<(), (), Lang>` — rather than at a
+/// bare `Comma<(), (), ()>` that a widened impl would have to accept.
+///
+/// The next two examples are the record. They differ in exactly one token, and only the one
+/// whose marker agrees with the grammar asking for it compiles.
+///
+/// A marker branded for another language — **does not compile**:
+///
+/// ```rust,compile_fail,E0277
+/// use tokora::{
+///   Lexer, Token,
+///   punct::{Comma, Punctuator},
+/// };
+///
+/// struct LangA;
+/// struct LangB;
+///
+/// fn assert_punct<'inp, L, P, Lang>()
+/// where
+///   L: Lexer<'inp>,
+///   P: Punctuator<'inp, L, Lang>,
+/// {
+/// }
+///
+/// fn probe<'inp, L>()
+/// where
+///   L: Lexer<'inp>,
+///   <L::Token as Token<'inp>>::Kind: From<Comma<(), (), ()>>,
+/// {
+///   assert_punct::<L, Comma<(), (), LangA>, LangA>();
+///   assert_punct::<L, Comma<(), (), LangA>, LangB>();
+/// }
+/// ```
+///
+/// The same probe with each marker branded for its own grammar — compiles:
+///
+/// ```rust
+/// use tokora::{
+///   Lexer, Token,
+///   punct::{Comma, Punctuator},
+/// };
+///
+/// struct LangA;
+/// struct LangB;
+///
+/// fn assert_punct<'inp, L, P, Lang>()
+/// where
+///   L: Lexer<'inp>,
+///   P: Punctuator<'inp, L, Lang>,
+/// {
+/// }
+///
+/// fn probe<'inp, L>()
+/// where
+///   L: Lexer<'inp>,
+///   <L::Token as Token<'inp>>::Kind: From<Comma<(), (), ()>>,
+/// {
+///   assert_punct::<L, Comma<(), (), LangA>, LangA>();
+///   assert_punct::<L, Comma<(), (), LangB>, LangB>();
+/// }
+/// ```
+///
+/// The pair is also the tripwire for the day the fence is reopened: widen the impl back to two
+/// independent language parameters and the first example starts compiling, failing its
+/// `compile_fail`.
 pub trait Punctuator<'inp, L, Lang: ?Sized = ()> {
   /// Returns the name of the punctuator.
   fn name() -> CowStr;

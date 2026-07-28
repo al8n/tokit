@@ -5,6 +5,7 @@ mod common;
 
 use common::TestLexer;
 use tokora::SimpleSpan;
+use tokora::delimiter::DelimiterKind;
 use tokora::emitter::FromUnclosed;
 use tokora::error::*;
 use tokora::utils::{CowStr, Expected, Lexeme, PositionedChar, knowledge::*};
@@ -209,7 +210,11 @@ fn unterminated_debug_clone_eq() {
 
 #[test]
 fn unclosed_new_and_accessors() {
-  let err = Unclosed::<char>::new(SimpleSpan::new(5, 6), "{".into());
+  let err = Unclosed::<char>::new(
+    SimpleSpan::new(5, 6),
+    DelimiterKind::Custom("probe"),
+    "{".into(),
+  );
   assert_eq!(err.span(), SimpleSpan::new(5, 6));
   assert_eq!(err.name_ref(), "{");
   assert_eq!(err.span_ref(), &SimpleSpan::new(5, 6));
@@ -217,7 +222,11 @@ fn unclosed_new_and_accessors() {
 
 #[test]
 fn unclosed_display() {
-  let err = Unclosed::<char>::new(SimpleSpan::new(0, 1), "(".into());
+  let err = Unclosed::<char>::new(
+    SimpleSpan::new(0, 1),
+    DelimiterKind::Custom("probe"),
+    "(".into(),
+  );
   assert_eq!(format!("{}", err), "unclosed delimiter '('");
 }
 
@@ -276,27 +285,43 @@ fn unclosed_angle_of() {
 
 #[test]
 fn unclosed_of() {
-  let err = Unclosed::<char>::of(SimpleSpan::new(5, 6), "{".into());
+  let err = Unclosed::<char>::of(
+    SimpleSpan::new(5, 6),
+    DelimiterKind::Custom("probe"),
+    "{".into(),
+  );
   assert_eq!(err.name_ref(), "{");
 }
 
 #[test]
 fn unclosed_span_mut() {
-  let mut err = Unclosed::<char>::new(SimpleSpan::new(5, 6), "{".into());
+  let mut err = Unclosed::<char>::new(
+    SimpleSpan::new(5, 6),
+    DelimiterKind::Custom("probe"),
+    "{".into(),
+  );
   *err.span_mut() = SimpleSpan::new(50, 60);
   assert_eq!(err.span(), SimpleSpan::new(50, 60));
 }
 
 #[test]
 fn unclosed_bump() {
-  let mut err = Unclosed::<char>::new(SimpleSpan::new(5, 6), "(".into());
+  let mut err = Unclosed::<char>::new(
+    SimpleSpan::new(5, 6),
+    DelimiterKind::Custom("probe"),
+    "(".into(),
+  );
   err.bump(&100);
   assert_eq!(err.span(), SimpleSpan::new(105, 106));
 }
 
 #[test]
 fn unclosed_into_components() {
-  let err = Unclosed::<char>::new(SimpleSpan::new(10, 11), "\"".into());
+  let err = Unclosed::<char>::new(
+    SimpleSpan::new(10, 11),
+    DelimiterKind::Custom("probe"),
+    "\"".into(),
+  );
   let (span, name) = err.into_components();
   assert_eq!(span, SimpleSpan::new(10, 11));
   assert_eq!(name, CowStr::from("\""));
@@ -307,20 +332,32 @@ fn unclosed_into_components() {
 // `From<Unclosed<D, …>> for ()` it replaced is gone.
 #[test]
 fn unclosed_from_into_unit() {
-  let err = Unclosed::<char, SimpleSpan>::new(SimpleSpan::new(5, 6), "{".into());
+  let err = Unclosed::<char, SimpleSpan>::new(
+    SimpleSpan::new(5, 6),
+    DelimiterKind::Custom("probe"),
+    "{".into(),
+  );
   let _: () = <() as FromUnclosed<'_, TestLexer<'_>>>::from_unclosed(err);
 }
 
 #[test]
 fn unclosed_error_trait() {
-  let err = Unclosed::<char>::new(SimpleSpan::new(5, 6), "{".into());
+  let err = Unclosed::<char>::new(
+    SimpleSpan::new(5, 6),
+    DelimiterKind::Custom("probe"),
+    "{".into(),
+  );
   let e: &dyn std::error::Error = &err;
   assert!(!e.to_string().is_empty());
 }
 
 #[test]
 fn unclosed_debug_clone_eq() {
-  let err = Unclosed::<char>::new(SimpleSpan::new(5, 6), "{".into());
+  let err = Unclosed::<char>::new(
+    SimpleSpan::new(5, 6),
+    DelimiterKind::Custom("probe"),
+    "{".into(),
+  );
   let cloned = err.clone();
   assert_eq!(err, cloned);
   assert!(!format!("{:?}", err).is_empty());

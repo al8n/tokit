@@ -130,7 +130,7 @@ macro_rules! define_separated_by {
         fn [< separated_by_ $name:snake _while>]<Condition, W>(
           self,
           condition: Condition,
-        ) -> SeparatedWhile<Self, $name, Condition, O, W, L, Ctx, Lang, Cmpl>
+        ) -> SeparatedWhile<Self, $name<(), (), Lang>, Condition, O, W, L, Ctx, Lang, Cmpl>
         where
           Self: Sized,
           L: Lexer<'inp>,
@@ -139,7 +139,7 @@ macro_rules! define_separated_by {
           Condition: Decision<'inp, L, Ctx::Emitter, W, Lang>,
           W: Window,
         {
-          SeparatedWhile::new::<$name>(self, condition)
+          SeparatedWhile::new::<$name<(), (), Lang>>(self, condition)
         }
       )*
     }

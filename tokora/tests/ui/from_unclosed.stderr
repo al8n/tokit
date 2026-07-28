@@ -7,7 +7,7 @@ error[E0277]: `MyError` cannot absorb an unclosed-delimiter diagnostic for lexer
    = help: the trait `FromUnclosed<'_, L>` is not implemented for `MyError`
    = note: one generic impl covers every delimiter pair, user-defined ones included: `impl<'i, L: Lexer<'i>, Lang: ?Sized> FromUnclosed<'i, L, Lang> for MyError { fn from_unclosed<D>(e: Unclosed<D, L::Span, Lang>) -> Self { /* … */ } }`
    = note: pin the span if your error stores it — an opaque `L::Span` has no route to a concrete span type: `L: Lexer<'i, Span = SimpleSpan>`
-   = note: match on `Unclosed::name_ref` to discriminate the pair — `"()"`, `"<>"`, `"[]"`, `"{}"` for the built-ins — and keep a catch-all arm: `D` is generic, so no arm set is exhaustive
+   = note: match on `Unclosed::kind` to discriminate the pair — `DelimiterKind::Paren { .. }` and its `Angle`/`Bracket`/`Brace` siblings for the built-ins, where the braces are required because those variants are `#[non_exhaustive]` and only tokora can write one, and `DelimiterKind::Custom("your-key")` for your own — and keep a catch-all arm: `D` is generic and `DelimiterKind` is non-exhaustive, so no arm set is exhaustive. Do not match on `Unclosed::name_ref`: it is a display string, and two pairs may share one
    = help: the trait `FromUnclosed<'inp, L, Lang>` is implemented for `()`
 note: required by a bound in `inner`
   --> tests/ui/from_unclosed.rs:10:37
