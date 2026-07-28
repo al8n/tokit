@@ -556,8 +556,14 @@ where
   ///   (youngest first) then the base — the same lineage-id hygiene as
   ///   [`commit`](Self::commit).
   ///
-  /// `P::ROLLBACK_ON_DROP` is a compile-time constant, so each policy monomorphizes to one
-  /// arm with the other eliminated. The rollback arm is silent (unchecked): `Drop` may run
+  /// An undecided guard dropped while the thread is **unwinding** takes the rollback arm
+  /// whatever its policy (std builds) — a panic aborts the region rather than completing it,
+  /// and the base and every savepoint settle through the same funnel either way. See
+  /// [`Commit`](super::Commit) for the posture and the `no_std` divergence.
+  ///
+  /// `P::ROLLBACK_ON_DROP` is a compile-time constant, so the `Rollback` policy monomorphizes
+  /// to one arm with the other eliminated; `Commit` reads the unwind fact once per undecided
+  /// drop. The rollback arm is silent (unchecked): `Drop` may run
   /// while already unwinding, where `no_std` has no `thread::panicking()` to guard a
   /// drop-bomb. Both arms first unpin the base (exception-safe). The pin check makes a raw
   /// restore below the base panic at that restore, so the base cannot go stale while the guard
@@ -565,7 +571,10 @@ where
   /// is a backstop (defense in depth, and the behavior for allocator-less builds).
   #[inline]
   fn drop(&mut self) {
-    if P::ROLLBACK_ON_DROP {
+    // The unwind fact overrides the policy, exactly as in the sibling guard: a panic aborts the
+    // region, so an undecided `Commit` stacked guard rolls back to its base instead of keeping
+    // half an iteration. `Rollback` const-folds to the same arm it always had.
+    if P::ROLLBACK_ON_DROP || crate::input::input_ref::drop_policy::unwinding() {
       // Settle every savepoint before the base's rewind, newest-first — the same per-entry
       // discipline the commit arm below applies, and required for the same reason
       // `rollback_to` spells out: the rewind forwards only the base's emitter mark and cannot

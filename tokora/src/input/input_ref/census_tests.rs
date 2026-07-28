@@ -209,50 +209,614 @@ fn settle_census_commit_token_routes_every_consume_settle() {
   );
 }
 
-/// SETTLE_CENSUS — the span funnel's callers are locked. `commit_token` is the only
-/// *settle* that writes it; the three non-token writers (`settle_fatal`, `commit_at`,
-/// `SyncTo::on_eof`) must never gain a settle hook, and no fourth caller may appear:
-/// a new consume path writing the funnel directly would bypass the settle primitive.
+/// SETTLE_CENSUS — **the sequence, not the remedy and not the type.**
+///
+/// The defect class this round kept re-finding at new addresses is a *sequence*:
+///
+/// > an **irreversible step** (a token leaves durable state, or half a position is installed),
+/// > then a **fallible step** (a `Clone`, a `Drop` of a replaced value, a `to_owned`, a clamp, an
+/// > emitter hook, a predicate), then the **settle** that makes it observable.
+///
+/// Interrupted in the middle, the irreversible step has happened and the settle has not: a token
+/// is gone from the stream with the position behind it, or progress is published that the
+/// observer was never told about.
+///
+/// Two earlier rails failed to see it, and both failures are instructive. One counted calls to
+/// the funnel — a remedy census cannot detect the hazard anywhere the remedy was not applied. The
+/// other scanned `InputRef`'s two fields — a type census cannot see the same shape at
+/// `AtFrontier`. This one is keyed on the **text between** the irreversible step and its settle,
+/// wherever that pair occurs.
+///
+/// The check: in every body that removes a token from the front of the stream, nothing between
+/// the removal and the `commit_token` that settles it may clone, drop or otherwise run caller
+/// code. Moves and destructuring are fine — they cannot unwind.
+/// Every two-space-indented `fn` in `src`, with its body — the derivation the check below runs
+/// over, so the set of inspected bodies comes from the source rather than from a hand-list.
+fn all_method_bodies(src: &str) -> std::vec::Vec<(std::string::String, std::string::String)> {
+  let mut out = std::vec::Vec::new();
+  let lines: std::vec::Vec<&str> = src.lines().collect();
+  for (i, line) in lines.iter().enumerate() {
+    let Some(rest) = line.strip_prefix("  ") else {
+      continue;
+    };
+    if rest.starts_with(' ') {
+      continue;
+    }
+    let rest = rest
+      .trim_start_matches("pub ")
+      .trim_start_matches("pub(crate) ")
+      .trim_start_matches("pub(super) ")
+      .trim_start_matches("const ")
+      .trim_start_matches("unsafe ");
+    let Some(after) = rest.strip_prefix("fn ") else {
+      continue;
+    };
+    let name: std::string::String = after
+      .chars()
+      .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+      .collect();
+    if name.is_empty() {
+      continue;
+    }
+    // Body: the lines strictly INSIDE the braces — the signature is excluded deliberately. A
+    // census marker naming a method (`replace_position(`, `live_pop_through(`) otherwise matches
+    // the declaration of the very method it names, and each self-match enters the roster as a
+    // body that holds no window at all. Three did, padding a count that is supposed to be exact.
+    let mut body = std::string::String::new();
+    let mut started = false;
+    for l in &lines[i..] {
+      if !started {
+        if let Some(brace) = l.find('{') {
+          started = true;
+          let tail = &l[brace + 1..];
+          if !tail.trim().is_empty() {
+            body.push_str(tail);
+            body.push('\n');
+          }
+        }
+        continue;
+      }
+      if *l == "  }" {
+        break;
+      }
+      body.push_str(l);
+      body.push('\n');
+    }
+    out.push((name, body));
+  }
+  out
+}
+
+/// The region of a body a settle rail is entitled to police.
+///
+/// Most bodies are policed whole. A body may instead declare a phase boundary — the token
+/// `CENSUS_PHASE_BOUNDARY` in a comment — and then only the text below it is censused. That is not an escape
+/// hatch: it is how `restore_unchecked` states, checkably, that everything running caller code
+/// happens while the input is still wholly on the branch being abandoned, and that nothing below
+/// the line does. Both group-C rails honour the same marker, so a body cannot be strict for one
+/// and lax for the other.
+fn censused_region(raw_body: &str) -> std::string::String {
+  // A token that cannot occur in prose ABOUT the boundary. Spelled `PHASE 2`, the first match
+  // landed in the paragraph explaining the split, which sits above phase 1 — so the "policed"
+  // region silently grew to include the phase the split exists to exclude.
+  match raw_body.find("CENSUS_PHASE_BOUNDARY") {
+    Some(at) => code_only(&raw_body[at..]),
+    None => code_only(raw_body),
+  }
+}
+
+/// SETTLE_CENSUS — the **second** window shape: a restore in progress.
+///
+/// The twelve-window census next door guards one shape — *a token leaves durable state, then it
+/// is settled* — and it is keyed on token-removal markers. It is easy to cite as "the settle
+/// window census", and doing so is a mistake: the enumeration named five groups and that check
+/// sees group A/B only. Group C is a different shape entirely:
+///
+/// > **a restore mutates lineage or position, then the rest of the restore completes.**
+///
+/// Interrupted in the middle, the checkpoint has been invalidated — session points settled, the
+/// lineage popped through it — while position, cache and emitter still sit on the abandoned
+/// branch. The mark is then stranded and every later rollback reasons from a lineage that
+/// disagrees with the input. That is a `[high]` this project shipped past two clean rounds,
+/// because group C's fixes were verified by individual cells and cells do not generalize: a new
+/// instance appeared at a site the enumeration had already named and marked fixed.
+///
+/// So: same discipline, second arm. Once a restore has begun mutating, nothing in the rest of the
+/// body may run caller code — no clone, no `to_owned`. The deliberate trailing `drop` of a
+/// replaced pair is not caller code *in* the window; it is what the window exists to defer.
 #[test]
-fn settle_census_span_funnel_callers_are_locked() {
-  // (file, expected `set_span_after_consume` call sites, who they are)
+fn settle_census_nothing_fallible_once_a_restore_has_begun() {
+  // A restore opens its window at the first step that cannot be taken back.
+  // The FACT writes — the steps that move the input onto the restored branch. Deliberately not
+  // "any mutation": clearing a cache or abandoning a superseded session point changes nothing an
+  // observer can see (a memo re-lexes; an abandoned point is being discarded anyway), so those
+  // are teardown, not facts, and a body may run them freely before it starts installing.
+  const MUTATIONS: &[&str] = &[
+    "live_pop_through(",
+    "replace_position(",
+    "install_position(",
+    "restore_cache_pushes(",
+    "emitter().rewind(",
+    "rekey_offset_facts(",
+    "install_rekey(",
+    "core::mem::replace(self.emitted_error_end",
+    "core::mem::replace(self.poison_boundary",
+    // The state replacement is a FACT WRITE, and leaving it off this list was the exact cost of
+    // sharpening the rule. While the rail said "no caller code after the first mutation" it did
+    // not matter what a mutation was; once it said "between the first and last FACT write", every
+    // omission from this list became a blind spot with no other symptom. `set_state` wrote the
+    // state and then ran an `L::Offset::clone`, and the rail read clean.
+    "core::mem::replace(self.state",
+  ];
+
+  // Two shapes of caller code, not one. The `.clone()` family is the obvious one. The second is
+  // an in-place field assignment: `*place = value` installs the new value and then drops the
+  // displaced one, and the displaced one here is an `L::Offset`, an `Option<L::Offset>` or a
+  // whole `CachedToken` — token, span AND `L::State`. Every restore in this crate wrote at least
+  // one fact that way, which is precisely how three of them ran caller `Drop` code mid-restore
+  // while a census keyed only on `.clone()` reported them clean.
+  const HAZARDS: &[&str] = &[
+    ".clone()",
+    ".to_owned()",
+    "*self.pending = ",
+    "*self.poison_boundary = ",
+    "*self.emitted_error_end = ",
+    "*self.state = ",
+    "*self.span = ",
+    // A clone nobody wrote. The position funnel takes `MaybeRef<L::Span>`, so passing `(&span)`
+    // infers `MaybeRef::Borrowed` and `clamped_span` then clones the span to own it — caller code
+    // appearing inside a restore purely from an inferred conversion, invisible to a rail that
+    // greps for `.clone()`. Round 13's `[high]` was exactly this, in a body the window rail had
+    // just passed twice. Pass the span BY MOVE; an owned `MaybeRef` clones nothing.
+    "((&",
+    // A drop nobody wrote. `pop_back()`, `pop_front()`, `take()` and `pop()` all RETURN an owned
+    // value; writing the call as a statement discards it, and discarding it IS the `Drop` call.
+    // `clear()` is the same thing N times over. The values here own `L::Span` and `L::State` —
+    // and, for a session point, a whole `Checkpoint` — so each is caller code, and none of it
+    // appears as `.clone()`, `drop(` or an assignment. Round 14's `[high]` was `pop_back();` in
+    // a body two rails had just passed. Stage the value, or hoist the eviction above the phase
+    // boundary.
+    ".pop_back();",
+    ".pop_front();",
+    ".take();",
+    ".pop();",
+    ".clear();",
+    // Evicting CALLEES. The markers above read the body's own text, so a body that hands the
+    // eviction to someone else is invisible to them — moving `reconcile_cache_geometry` below the
+    // boundary was not caught until these existed, because its `clear`/`pop_front` live in a free
+    // function this rail never reads. Calling one of these IS a drop site, wherever it appears.
+    // No trailing `(` — this one is called through a turbofish
+    // (`reconcile_cache_geometry::<L, ...>(`), so a marker ending in `(` never matches it. The
+    // teeth test is what found that; the rail read clean against a body that had moved the
+    // eviction below the boundary.
+    "reconcile_cache_geometry",
+    "abandon_points_above(",
+    "unwind_clear_stream(",
+    // A FALLIBLE callee: the combined re-key wrapper clones the committed offset. Calling it is
+    // safe only as the first fact a body writes — which is why it is both a fact write above and
+    // a hazard here. A body that writes something else first and then re-keys is running caller
+    // code with its own surgery half-done.
+    "rekey_offset_facts(",
+  ];
+
+  // Windows that are open and known, each with the reason and the disclosure it belongs to. An
+  // entry whose body no longer opens a window is itself a failure.
+  // EMPTY, and that is the round's result rather than its starting point. This carried one
+  // entry — `restore_entry`, whose post-restore cursor read was disclosed in the CHANGELOG as a
+  // known limitation — on the reasoning that removing it meant deriving the cursor from the
+  // entry, which is only sound while the store is drained. The value it needed turned out not to
+  // need deriving at all: the entry's own span end IS the resumed position once the stream is
+  // drained, both callers drain it, and a `debug_assert` at the site now states that where it can
+  // be checked. Hoisting the read above the first mutation removed the window outright.
+  const EXEMPT: &[(&str, &str, &str)] = &[];
+
+  let mut exempted = 0usize;
+  let mut roster = std::vec::Vec::new();
+
+  for (file, src) in SOURCES {
+    for (name, body) in all_method_bodies(src) {
+      let body = censused_region(&body);
+      let lines: std::vec::Vec<&str> = body.lines().collect();
+      let fact = |i: &usize| MUTATIONS.iter().any(|m| lines[*i].contains(m));
+      let Some(open) = (0..lines.len()).find(fact) else {
+        continue;
+      };
+      // The region is first fact write THROUGH last, not first-to-end-of-body. A body that
+      // finishes installing and then tears something down — `rekey_offset_facts` clears its cache
+      // last, on purpose — has nothing left to tear, and a rail that ran to the closing brace
+      // would call that a defect. The endpoints are included: a hazard sharing a line with a fact
+      // write is exactly the borrow-inference case.
+      let close = (0..lines.len()).rfind(fact).unwrap_or(open);
+      if let Some((_, _, why)) = EXEMPT
+        .iter()
+        .find(|(f, m, _)| f == file && *m == name.as_str())
+      {
+        let _ = why;
+        exempted += 1;
+        continue;
+      }
+      roster.push(std::format!("{file}::{name}"));
+      // Strictly BELOW the opening fact write. A marker that is both a fact write and a hazard —
+      // `rekey_offset_facts`, which is safe as a body's FIRST write and unsafe as a later one —
+      // would otherwise flag the body that uses it correctly. The two bodies where a hazard on
+      // the opening line matters (`restore_entry`, `restore_unchecked`) are both policed whole by
+      // the rail below, so nothing is lost by starting one line down.
+      let window = lines[open + 1..=close].join("\n");
+      for hazard in HAZARDS {
+        assert!(
+          !window.contains(hazard),
+          "SETTLE_CENSUS drift: `{file}::{name}` runs `{hazard}` after the restore has begun \
+           mutating. The checkpoint is already invalidated at that point, so a panic there \
+           strands its emitter mark and leaves the lineage disagreeing with the input. Hoist it \
+           above the first mutation, or take the value by reference as `restore_unchecked` does \
+           for the cursor (grep SETTLE_CENSUS)."
+        );
+      }
+    }
+  }
+
+  // ── Bodies whose window is the WHOLE body ────────────────────────────────────────────────
+  //
+  // The rail above opens each window at the first irreversible step, which is right for a body
+  // that starts clean. It is wrong for one that is ALREADY inside somebody else's window: by the
+  // time `restore_entry` is called, the scan has held an emitter mark since entry, and the rewind
+  // at the end of this body is what settles it. A fallible step anywhere in the body — before the
+  // first mutation as readily as after — skips that rewind and leaves `ScanScope::drop` to
+  // RELEASE the mark instead, which keeps the abandoned scan's diagnostics forever.
+  //
+  // This is not hypothetical and it is not a tightening for its own sake: the first fix attempted
+  // for `restore_entry` this round hoisted its clone to the top of the body, ABOVE the first
+  // mutation, and the window rail above was satisfied by it. The behaviour was still wrong —
+  // `r9_restore_entry_is_atomic_at_every_offset_clone` reported four diagnostics surviving — and
+  // the operation had to leave the body altogether. A rail that only measures from the first
+  // mutation cannot express that, so these bodies get the stricter one.
+  const WHOLE_BODY: &[(&str, &str)] = &[
+    ("mod.rs", "restore_entry"),
+    // A checkpoint rollback is all-or-nothing by definition, so its atomic unit is the whole
+    // function and not the stretch after its first mutation. Three consecutive rounds fixed an
+    // ordering in this body and each left a later operation exposed — the window rail was
+    // satisfied every time, because a tail is exactly what it cannot see.
+    ("mod.rs", "restore_unchecked"),
+  ];
+  for (file, method) in WHOLE_BODY {
+    let body = SOURCES
+      .iter()
+      .find(|(f, _)| f == file)
+      .and_then(|(_, src)| {
+        all_method_bodies(src)
+          .into_iter()
+          .find(|(n, _)| n == method)
+          .map(|(_, b)| b)
+      })
+      .unwrap_or_else(|| {
+        panic!(
+          "SETTLE_CENSUS drift: `{file}::{method}` is gone; if the body was \
+         renamed or inlined, move this entry with it (grep SETTLE_CENSUS)"
+        )
+      });
+    let body = censused_region(&body);
+    for hazard in HAZARDS {
+      assert!(
+        !body.contains(hazard),
+        "SETTLE_CENSUS drift: `{file}::{method}` runs `{hazard}`. This body settles an emitter \
+         mark that has been outstanding since scan entry, so EVERY fallible step in it — not \
+         just the ones after its first mutation — can skip the rewind and turn a release into \
+         permanent diagnostics from an abandoned branch. Move the operation to the capture, as \
+         `ThroughEntry::rewind_to` did (grep SETTLE_CENSUS)."
+      );
+    }
+  }
+
+  // The exact roster, not a count and not a floor: a total catches an arrival, but only names
+  // catch a swap — a window leaving the set while an unclassified one joins it holds the count
+  // still. Every name here has been read and carries no fallible step after its first mutation.
+  const EXPECTED: &[&str] = &[
+    "mod.rs::commit_position",
+    "mod.rs::commit_token",
+    // The two INFALLIBLE install halves, both lit up by classifying the state replacement as a
+    // fact write. Each is nothing but moves — `mem::replace`/`take` — so neither can run caller
+    // code before its last fact lands; `install_rekey`'s trailing cache clear is teardown after
+    // the writes, not between them. They belong on the roster because they are where the facts
+    // move, and they pass because that is all they do.
+    "mod.rs::install_position",
+    "mod.rs::install_rekey",
+    "mod.rs::rekey_offset_facts",
+    // The clamp-then-install wrapper. Its region is the single `install_position` line, which is
+    // the point: the fallible clamp above it is outside the region by construction.
+    "mod.rs::replace_position",
+    "mod.rs::restore_entry",
+    "mod.rs::restore_unchecked",
+    // The two public state-surgery entry points, inspected here for the first time. They were
+    // never exempted by this rail — they were INVISIBLE to it, because nothing they call was a
+    // marker. That is the more dangerous form of a blind spot: an exemption is at least written
+    // down and countable, while an unlisted marker leaves no trace at all.
+    "mod.rs::set_state",
+    "mod.rs::state_mut",
+    // `unwind_clear_stream` is deliberately ABSENT. It drops the parked entry and clears the
+    // cache and installs nothing at all, so there is no restored branch for an interrupted drop
+    // to half-land on — it is teardown end to end, and the rail's own rule (no caller code
+    // BETWEEN fact writes) has nothing to say about a body with no fact writes. It was on this
+    // roster while the rule was the looser "after the first mutation", and the implicit-drop
+    // marker promptly reported its `clear()` as a defect it is not.
+  ];
+  roster.sort_unstable();
+  assert!(
+    roster
+      .iter()
+      .map(std::string::String::as_str)
+      .eq(EXPECTED.iter().copied())
+      && exempted == EXEMPT.len(),
+    "SETTLE_CENSUS drift: restore windows are {roster:?} with {exempted} exempt; expected \
+     {EXPECTED:?} and {}. A restore path was added, removed, renamed or newly exempted — read \
+     it, confirm nothing fallible runs after its first mutation, and update this roster in the \
+     same commit (grep SETTLE_CENSUS).",
+    EXEMPT.len()
+  );
+}
+
+/// SETTLE_CENSUS — the settle window, over **every window**, not every body.
+///
+/// The set of windows is derived from the source. Two earlier revisions of this check failed in
+/// ways worth keeping written down, because both looked correct:
+///
+/// - it carried a hand-list of three bodies while the enumeration said eight call sites shared
+///   the window, so five consume paths were unguarded;
+/// - it then derived the bodies but exempted `skip_until` **whole**, for a real false positive in
+///   one of its three windows — silently dropping the other two, which are the scanner's own
+///   hand-over and skip rails and the highest-risk code in the round. Its guards did not catch
+///   that: the exemption count was still exactly one, and a *floor* on the inspected count cannot
+///   see a missing member. Only a total can.
+///
+/// So the unit here is the window — one removal paired with the settle that accounts for it —
+/// exemptions are keyed to a single removal marker inside a single body, and the counts are
+/// EXACT. An exact count fails both when a window disappears and when one appears unclassified,
+/// which is what the floor was meant to do and could not. If it needs updating because a consume
+/// path was added, that is the census working, and the update is a one-line diff under review.
+#[test]
+fn settle_census_nothing_fallible_between_a_removal_and_its_settle() {
+  // A window opens when a token comes out of durable state...
+  const REMOVALS: &[&str] = &[
+    "take_front()",
+    "take_front_if(",
+    "take_front_parked()",
+    ".hand_over()",
+    ".take_recorded()",
+  ];
+  // ...and closes when that token is accounted for: settled, put back, or placed in the scope
+  // slot that owns it across caller code.
+  const SETTLES: &[&str] = &[
+    "commit_token(",
+    "unconsume(",
+    "hold_front(",
+    "TokenSlot::Held(",
+    "settle_stop(",
+    "skip_one::",
+  ];
+  const HAZARDS: &[&str] = &[".clone()", "drop(", ".to_owned()"];
+
+  // The primitives DEFINE a removal; they do not open a window over one.
+  const PRIMITIVES: &[&str] = &[
+    "take_front",
+    "take_front_if",
+    "take_front_parked",
+    "take_front_if_parked",
+    "hand_over",
+    "take_recorded",
+  ];
+
+  // Exemptions are per WINDOW — (file, method, removal marker) — never per body. A body may hold
+  // both a false positive and a real window, which is exactly how the scanner's two rails went
+  // uninspected.
+  const EXEMPT: &[(&str, &str, &str, &str)] = &[
+    (
+      "scan.rs",
+      "skip_until",
+      "take_front_parked()",
+      "the parked fetch and the `TokenSlot::Held` placement are in different arms of one \
+       `if/else`; the arm carrying a state clone is the LEXING arm, reached only when both \
+       fetches returned nothing. A line-order rail reads the arms as a sequence",
+    ),
+    (
+      "scan.rs",
+      "skip_until",
+      "take_front()",
+      "the cache fetch, same `if/else` as above",
+    ),
+  ];
+
+  let mut inspected = 0usize;
+  let mut exempted = 0usize;
+
+  for (file, src) in SOURCES {
+    for (name, body) in all_method_bodies(src) {
+      if PRIMITIVES.contains(&name.as_str()) {
+        continue;
+      }
+      let body = code_only(&body);
+      let lines: std::vec::Vec<&str> = body.lines().collect();
+
+      // Every removal in this body, each its own window.
+      for (at, line) in lines.iter().enumerate() {
+        let Some(marker) = REMOVALS.iter().find(|m| line.contains(**m)) else {
+          continue;
+        };
+        if let Some((_, _, _, why)) = EXEMPT
+          .iter()
+          .find(|(f, m, k, _)| f == file && *m == name.as_str() && k == marker)
+        {
+          let _ = why;
+          exempted += 1;
+          continue;
+        }
+        // The settle that closes it: the nearest one at or after this line. Same-line is the
+        // common case for a nested call, and then the window is that single line.
+        let Some(close) = (at..lines.len()).find(|i| SETTLES.iter().any(|s| lines[*i].contains(s)))
+        else {
+          panic!(
+            "SETTLE_CENSUS drift: `{file}::{name}` takes a token out of the front of the stream \
+             at line {at} of its body and never accounts for it — no settle, no put-back, no \
+             scope slot (grep SETTLE_CENSUS)."
+          );
+        };
+        inspected += 1;
+        let window = lines[at..=close].join("\n");
+        for hazard in HAZARDS {
+          assert!(
+            !window.contains(hazard),
+            "SETTLE_CENSUS drift: `{file}::{name}` runs `{hazard}` between `{marker}` and the \
+             settle that accounts for the token. That is caller code in the window where the \
+             token has already left the stream and the position has not yet moved — a panic \
+             there loses the token silently. Hoist it above the removal, or hand the value back \
+             and run it after the settle (grep SETTLE_CENSUS)."
+          );
+        }
+      }
+    }
+  }
+
+  // EXACT, not a floor. A floor is satisfied by a derivation that omits a window, which is the
+  // defect this check itself shipped.
+  assert!(
+    inspected == 12 && exempted == EXEMPT.len(),
+    "SETTLE_CENSUS drift: {inspected} window(s) inspected and {exempted} exempt; expected 12 and \
+     {}. A consume path was added, removed, or newly exempted — classify it and update these \
+     numbers in the same commit. Do NOT relax this to a floor: a floor cannot tell a missing \
+     window from a smaller codebase, which is how the scanner's two rails went uninspected \
+     (grep SETTLE_CENSUS).",
+    EXEMPT.len()
+  );
+}
+
+/// SETTLE_CENSUS — **the hazard, not the remedy.** No code anywhere may write half of the
+/// committed position.
+///
+/// The span and the lexer state that produced it are one fact. Written separately they can tear:
+/// an unwind between the halves, or a caller that simply forgets the second line, leaves a
+/// committed span paired with the lexer state of somewhere else — and a host that resumes then
+/// lexes from the new offset under the old state. For a stateful lexer that is silent stream
+/// corruption.
+///
+/// This census counts **raw assignments to either half**, which is the pattern the pair funnel
+/// exists to prevent. Counting calls to the funnel instead would have been useless: a rail that
+/// counts the remedy cannot see the hazard anywhere the remedy was not applied, which is exactly
+/// how four consecutive review rounds each found another unrouted site. Two raw writes are
+/// legitimate and both are named:
+///
+/// - `replace_position`'s own two `core::mem::replace`s — the one body that writes the pair;
+/// - `set_state`'s single `*self.state =` — a deliberate position *surgery* on the state alone,
+///   which does not advance the span and so cannot tear the pair.
+///
+/// Anything else is a half-pair write and fails here. The span half has no legitimate raw writer
+/// at all: the span-only setters were deleted once the pair funnel existed, so "advance the span
+/// without supplying the state" is no longer expressible.
+#[test]
+fn settle_census_no_half_pair_position_write() {
+  for (name, src) in SOURCES {
+    let raw_span = count(src, "*self.span = ") + count(src, "*ir.span = ");
+    assert!(
+      raw_span == 0,
+      "SETTLE_CENSUS drift: `{name}` writes the committed span directly ({raw_span} site(s)). \
+       A span advance must carry the lexer state that produced it — route it through \
+       `commit_position`/`replace_position`, which take both halves (grep SETTLE_CENSUS)."
+    );
+    // No exemption. This used to allow `mod.rs` exactly one raw `*self.state = ` — `set_state`'s
+    // "deliberate surgery, moves no span". That reasoning was sound about the SPAN pair and was
+    // then honoured against every other hazard: the write it waved through drops the displaced
+    // `L::State`, which is caller code, and it sat after a re-key that had already cleared the
+    // cache, the parked slot and the poison latch. `set_state` now moves the state in with
+    // `mem::replace` before the re-key and drops the displaced one at the end, so the site the
+    // exemption existed for no longer needs it and the count is a flat zero everywhere.
+    let raw_state = count(src, "*self.state = ") + count(src, "*ir.state = ");
+    assert!(
+      raw_state == 0,
+      "SETTLE_CENSUS drift: `{name}` has {raw_state} raw `state` write(s), expected none. \
+       `*place = value` drops the displaced state in place — caller code — so a state write \
+       belongs in `replace_position`'s pair funnel, or in `set_state`'s `mem::replace` whose \
+       displaced value is dropped once the surgery is whole (grep SETTLE_CENSUS)."
+    );
+  }
+  // The span half stays singular: exactly one `mem::replace(self.span` in the crate, inside
+  // `replace_position`. The state half is allowed a second — `set_state`'s state-only surgery —
+  // and that is the whole of the narrowed exemption: it establishes "a state may move without a
+  // span" and nothing else. Any THIRD state move, or a second span move, is a pair being torn.
+  assert!(
+    count(source("mod.rs"), "core::mem::replace(self.span") == 1
+      && count(source("mod.rs"), "core::mem::replace(self.state") == 2,
+    "SETTLE_CENSUS drift: the span move must live in `replace_position` alone, and the state \
+     move in `replace_position` plus `set_state`'s state-only surgery — no third site"
+  );
+}
+
+/// SETTLE_CENSUS — the position **pair**. A span and the lexer state that produced it are one
+/// fact, and writing them separately can tear: an unwind between the halves leaves a position no
+/// execution reaches, and the committing modes have no snapshot that could restore it. Every site
+/// that writes both routes through `commit_position`, which computes both halves before writing
+/// either and drops the values it replaces last.
+#[test]
+fn settle_census_position_pair_writes_through_one_body() {
+  // (file, expected `commit_position` call sites, who they are)
   let expected: &[(&str, usize, &str)] = &[
     (
       "mod.rs",
-      3,
-      "`commit_token`'s body, `settle_fatal` (a rejected error's span — NOT a token), \
-       and `commit_at` (a scan's batch frontier write — its tokens settled via `adopt`)",
+      2,
+      "`commit_at` (a scan's batch frontier write) and `settle_fatal` (a rejected error's span \
+       with the lexer state that reached it). `commit_token` uses `replace_position` instead, \
+       because it must notify the committed-token observer before the replaced pair's drops run",
     ),
     (
       "scan.rs",
       1,
-      "`SyncTo::on_eof` (the lexer's span at exhaustion — NOT a token)",
+      "`SyncTo::on_eof` (the lexer's span and state at exhaustion)",
     ),
   ];
-
   for (name, want, who) in expected {
-    let got = calls(source(name), "set_span_after_consume");
+    let got = calls(source(name), "commit_position");
     assert!(
       got == *want,
-      "SETTLE_CENSUS drift: `{name}` has {got} `set_span_after_consume` call sites, \
-       expected {want} ({who}). A consume settle must route through `commit_token`; \
-       a position write that is not a token settle must be listed here, in the same \
-       commit (grep SETTLE_CENSUS)."
+      "SETTLE_CENSUS drift: `{name}` has {got} `commit_position` call sites, expected \
+       {want} ({who}). A new site that writes the span and the lexer state together must \
+       route through this body and be listed here, in the same commit — writing the halves \
+       separately is how the pair tears (grep SETTLE_CENSUS)."
     );
   }
-
   for (name, src) in SOURCES {
     if expected.iter().any(|(n, _, _)| n == name) {
       continue;
     }
-    let got = calls(src, "set_span_after_consume");
     assert!(
-      got == 0,
-      "SETTLE_CENSUS drift: `{name}` writes the span funnel directly ({got} site(s)). \
-       Token settles go through `InputRef::commit_token`; non-token position writes \
-       must be registered here (grep SETTLE_CENSUS)."
+      calls(src, "commit_position") == 0,
+      "SETTLE_CENSUS drift: `{name}` writes the committed position outside the two censused \
+       files (grep SETTLE_CENSUS)."
     );
   }
+  assert!(
+    count(source("mod.rs"), "fn commit_position(") == 1
+      && count(source("mod.rs"), "fn replace_position(") == 1,
+    "SETTLE_CENSUS drift: the pair's two bodies must each be defined exactly once, in `mod.rs`"
+  );
+  // The `#[must_use]` form, for callers doing more than a position write: they install the pair,
+  // finish the rest of the restore, and only then let the replaced values' drops run.
+  assert!(
+    calls(source("mod.rs"), "replace_position") == 3,
+    "SETTLE_CENSUS drift: `replace_position` has {} call sites, expected 3 — \
+     `commit_position` (the immediate-drop case), `commit_token` (which notifies the observer \
+     first) and `restore_entry` (which restores more and must drop the replaced pair last). \
+     `restore_unchecked` is deliberately NOT among them: it needs the fallible clamp and the \
+     infallible install in different phases, so it calls `clamped_span` and `install_position` \
+     separately (grep SETTLE_CENSUS).",
+    calls(source("mod.rs"), "replace_position")
+  );
+  // The pair's two moves stay in ONE body even though the funnel now has two entrances: the
+  // split put the `mem::replace`s in `install_position` and left `replace_position` as the
+  // clamp-then-install wrapper. Two callers, one place where the pair actually moves.
+  assert!(
+    count(source("mod.rs"), "fn install_position(") == 1
+      && calls(source("mod.rs"), "install_position") == 2,
+    "SETTLE_CENSUS drift: `install_position` must be defined once and called exactly twice — \
+     by `replace_position` (the clamp-then-install path) and by `restore_unchecked` (which \
+     clamps in its own earlier phase). A third caller is a position write that skipped the \
+     clamp (grep SETTLE_CENSUS)."
+  );
 }
 
 /// SETTLE_CENSUS — the committed-token side channel (`Emitter::commit_token`, the CST
@@ -373,6 +937,12 @@ fn release_census_every_checkpoint_capture_is_paired() {
     ("sync_through.rs", 2),
     // `sync_balanced`'s entry snapshot.
     ("sync_balanced.rs", 1),
+    // The scanner's own entry capture for the COMMITTING modes, taken only under
+    // `Cmpl::PARTIAL && !M::HOLDS_ENTRY` — their `Snapshot` is `()`, so the four facts their
+    // `Incomplete` exit restores have nowhere else to live. It never monomorphizes on the
+    // complete path, and it is settled by `on_incomplete` (abandon) or `keep_entry` (keep) on
+    // every exit including the unwind edge.
+    ("scan.rs", 1),
   ];
   for (name, want) in captures {
     let got =
@@ -397,26 +967,39 @@ fn release_census_every_checkpoint_capture_is_paired() {
     );
   }
 
-  // The two rewind spends.
+  // The two rewind spends, both in `mod.rs`: `restore_unchecked` for a `Checkpoint`, and
+  // `restore_entry` for a rewinding scan's entry snapshot — the one body behind `on_eof`, behind
+  // `on_incomplete`, and therefore behind the seventh return exit and the rewinding unwind edge
+  // alike, so none of the four can drift from the others. `scan.rs` holds none: it names the
+  // restore, it does not spell it.
   assert!(
-    count(source("mod.rs"), "emitter().rewind(") == 1
-      && count(source("scan.rs"), "emitter().rewind(") == 1,
-    "RELEASE_CENSUS drift: `Emitter::rewind` must have exactly two callers — \
-     `restore_unchecked` (mod.rs) and the sync family's no-match EOF arm (scan.rs). \
-     A third rewind site is a new abandon path; census it (grep RELEASE_CENSUS)."
+    count(source("mod.rs"), "emitter().rewind(") == 2
+      && count(source("scan.rs"), "emitter().rewind(") == 0,
+    "RELEASE_CENSUS drift: `Emitter::rewind` must have exactly two callers, both in `mod.rs` — \
+     `restore_unchecked` (a `Checkpoint`) and `restore_entry` (a scan's entry snapshot). A third \
+     rewind site is a new abandon path; census it (grep RELEASE_CENSUS)."
   );
 
   // The three release homes: the kept-checkpoint funnel, the scanner's kept-snapshot
   // hook, and the session cell's abandoning drop (assert-free by necessity — it may run
   // mid-unwind). `release` is never called raw anywhere else in the input layer.
+  // `scan.rs` holds three keep bodies. Two are per kind of scan capture: `ScanMode::on_commit`
+  // for a rewinding mode's entry snapshot, and `ScanScope::keep_entry` for the committing modes'
+  // Partial-only entry — used by the five keeping return exits and by the committing unwind edge,
+  // which keeps its diagnosed prefix and therefore its emissions. The third is the scope's
+  // last-resort settle: an exit takes the snapshot and then runs caller code to spend it, and if
+  // THAT unwinds nothing else knows a mark is outstanding, so the scope releases the copy it kept
+  // beside the snapshot. Release rather than rewind, because a half-run restore no longer
+  // describes a cursor to rewind to.
   assert!(
     count(source("mod.rs"), "emitter().release(") == 1
-      && count(source("scan.rs"), "emitter().release(") == 1
+      && count(source("scan.rs"), "emitter().release(") == 3
       && count(source("session.rs"), ".emitter.release(") == 1,
-    "RELEASE_CENSUS drift: `Emitter::release` must have exactly three input-layer homes — \
-     `forget_kept_checkpoint` (mod.rs), `ScanMode::on_commit` (scan.rs), and the \
-     session-abandon settle in `Session::release_abandoned_points` (session.rs). Route a \
-     new keep path through one of them (grep RELEASE_CENSUS)."
+    "RELEASE_CENSUS drift: `Emitter::release` must have exactly five input-layer homes — \
+     `forget_kept_checkpoint` (mod.rs), `ScanMode::on_commit`, `ScanScope::keep_entry` and the \
+     scope's stranded-mark settle (scan.rs), and the session-abandon settle in \
+     `Session::release_abandoned_points` (session.rs). Route a new keep path through one of them \
+     (grep RELEASE_CENSUS)."
   );
   for (name, src) in SOURCES {
     if *name == "mod.rs" || *name == "scan.rs" || *name == "session.rs" {
@@ -560,19 +1143,22 @@ fn release_census_every_savepoint_life_end_settles_through_the_funnel() {
   }
 }
 
-/// RELEASE_CENSUS — the scanner's kept snapshots: `skip_until` has six exits; five keep
-/// the scan's progress and settle the snapshot through `ScanMode::on_commit`, the sixth
-/// (`on_eof`) spends the mark by rewinding. A new exit must pick one, in the same
-/// commit.
+/// RELEASE_CENSUS — the scanner's kept snapshots. `skip_until` has seven return exits: five
+/// keep the scan's progress and settle the snapshot through `ScanMode::on_commit`, one
+/// (`on_eof`) spends the mark by rewinding, and one (`on_incomplete`) abandons. The
+/// **unwind edge** is the eighth, and its keeping arm settles through `on_commit` too — one
+/// per disposition, not one per mode, which is the distinction that made `SyncBalanced`'s
+/// interrupted stop take the wrong arm. A new exit must pick a disposition, in the same commit.
 #[test]
 fn release_census_scanner_snapshot_settles_on_every_exit() {
   let scan = source("scan.rs");
   assert!(
-    count(scan, "M::on_commit(") == 5,
+    count(scan, "M::on_commit(") == 6,
     "RELEASE_CENSUS drift: `skip_until` must settle the pre-call snapshot on each of \
-     its five committing exits (boundary drain, fatal lex propagation, trip, stop, \
-     fatal report propagation); a sixth committing exit needs its own `M::on_commit` \
-     call, and a rewinding exit belongs to `on_eof` (grep RELEASE_CENSUS)."
+     its five keeping return exits (boundary drain, fatal lex propagation, trip, stop, \
+     fatal report propagation) plus the unwind edge's keeping arm; a further keeping exit \
+     needs its own `M::on_commit` call, and an abandoning one belongs to `on_eof` / \
+     `on_incomplete` (grep RELEASE_CENSUS)."
   );
   assert!(
     count(scan, "M::on_eof(") == 1,
@@ -840,7 +1426,13 @@ fn capture_window_savepoint_reservation_precedes_its_save() {
 /// and the `ThroughEntry` that owns it.
 #[test]
 fn capture_window_sync_entry_snapshots_hoist_the_fallible_clone_first() {
-  let sites: &[(&str, usize)] = &[("sync_through.rs", 2), ("sync_balanced.rs", 1)];
+  // `scan.rs` carries the fourth: the scanner's Partial-only capture for a committing mode,
+  // which obeys the same hoist and is born directly into the `ScanScope` that owns it.
+  let sites: &[(&str, usize)] = &[
+    ("sync_through.rs", 2),
+    ("sync_balanced.rs", 1),
+    ("scan.rs", 1),
+  ];
   for (name, want) in sites {
     let code = code_only(source(name));
     let clone_positions: std::vec::Vec<usize> = code
@@ -1080,7 +1672,11 @@ fn front_census_one_front_surface() {
 
   // The parked slot itself: one count per file, so a bypass in a sibling fails here rather than
   // compiling quietly.
-  let pending: &[(&str, usize)] = &[("mod.rs", 16), ("peek/mod.rs", 4), ("scan.rs", 1)];
+  // `mod.rs` gained three readers with the scanner's unwind edge: `has_front_parked` (which is
+  // how `scan.rs` now asks, so its own count fell to zero), `unwind_clear_stream` (the rewinding
+  // arm's stream restore), and `settle_fatal`'s store-empty guard — the invariant the unwind
+  // settle leans on, asserted at the one site that could break it.
+  let pending: &[(&str, usize)] = &[("mod.rs", 19), ("peek/mod.rs", 4)];
   for (name, want) in pending {
     let got = count(source(name), "self.pending");
     assert!(

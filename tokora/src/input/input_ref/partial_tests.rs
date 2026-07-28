@@ -1606,9 +1606,11 @@ fn sync_to_partial_matrix() {
   });
   assert_eq!(r, Err(PErr::Incomplete(10)));
   assert_eq!(
-    emitted, 2,
-    "the mid-buffer skipped words are diagnosed as they settle (emit-as-you-go, exactly \
-     as complete mode); only the frontier item itself is withheld"
+    emitted, 0,
+    "an `Incomplete` exit leaves NO TRACE: the mid-buffer words this attempt skipped and \
+     diagnosed are rewound with the rest of the attempt, so refill-and-retry is idempotent. \
+     (Before 0.8.0 this arm pinned the opposite — emit-as-you-go — which was D35 stated as \
+     intent: the diagnostics accumulated once per retry.)"
   );
   // Final: syncs to the number, diagnosing the two skipped words — complete-identical.
   let (r, emitted) = with_partial!("foo bar 42", true, |inp| {
@@ -2157,6 +2159,78 @@ fn commit_probed_lexes_the_closer_once_under_every_cache() {
     1,
     "DefaultCache: the closer is lexed exactly once"
   );
+
+  // D17 — the law is "cache-independently, in any cache capacity", and the two cells above
+  // covered only 0 and the default (U3). The #75 regression this pins was CAPACITY-dependent,
+  // so the ends of the range are exactly where the evidence was missing: capacity 1, the
+  // smallest cache that retains anything, and a capacity above the default.
+  //
+  // Additive pins, stated plainly: the property is believed to hold today (`ClosePayload::
+  // Scanned` settles by value and `CacheFront` pops the front, neither of which reads the
+  // capacity). The defect is missing evidence, and these are the evidence. A red cell here
+  // would be a new finding.
+  let tracker = LimitTracker::with_limit(usize::MAX);
+  let scanned = tracker.counter();
+  let mut input = Input::<
+    LimLex<'_>,
+    (
+      Verbose<PErr>,
+      Option<crate::cache::CachedTokenOf<'_, LimLex<'_>>>,
+    ),
+    (),
+    Complete,
+  >::with_state_and_cache("b", tracker, None);
+  let mut emitter = Verbose::<PErr>::new();
+  {
+    let mut inp = input.as_ref(&mut emitter);
+    let carried = match inp.probe_close(|_| true) {
+      Ok(CloseStatus::Close(ct)) => ct,
+      _ => panic!("the front word must probe as `Close`"),
+    };
+    let _ = inp.commit_probed(carried);
+    assert!(
+      matches!(inp.next(), Ok(None)),
+      "commit_probed committed the closer: the input is exhausted"
+    );
+  }
+  assert_eq!(
+    scanned.get(),
+    1,
+    "capacity-1 `Option` cache: the closer is lexed exactly once"
+  );
+
+  let tracker = LimitTracker::with_limit(usize::MAX);
+  let scanned = tracker.counter();
+  let mut input = Input::<
+    LimLex<'_>,
+    (
+      Verbose<PErr>,
+      ::generic_arraydeque::GenericArrayDeque<
+        crate::cache::CachedTokenOf<'_, LimLex<'_>>,
+        ::generic_arraydeque::typenum::U8,
+      >,
+    ),
+    (),
+    Complete,
+  >::with_state_and_cache("b", tracker, Default::default());
+  let mut emitter = Verbose::<PErr>::new();
+  {
+    let mut inp = input.as_ref(&mut emitter);
+    let carried = match inp.probe_close(|_| true) {
+      Ok(CloseStatus::Close(ct)) => ct,
+      _ => panic!("the front word must probe as `Close`"),
+    };
+    let _ = inp.commit_probed(carried);
+    assert!(
+      matches!(inp.next(), Ok(None)),
+      "commit_probed committed the closer: the input is exhausted"
+    );
+  }
+  assert_eq!(
+    scanned.get(),
+    1,
+    "capacity-8 ring (above the default): the closer is lexed exactly once"
+  );
 }
 
 #[test]
@@ -2270,4 +2344,275 @@ fn probe_close_cache_front_is_cursor_neutral_and_recovery_safe() {
       "the closer committed exactly once; only the trailing token remains"
     );
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// D35 — a scanner's `Incomplete` exit must leave NO TRACE
+//
+// `skip_until`'s `Err` arm is written for fatals ("`settle_fatal` already committed the
+// position"), which is false for `Incomplete`: that exit commits nothing, yet every token the
+// scan already skipped has flowed to `commit_token` and (for the reporting modes) to
+// `emit_unexpected_token`, and a rewinding mode's entry mark has been RELEASED as kept
+// progress. Position at entry, effects standing: a refill-and-retry is not idempotent.
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+/// Records the three observables an aborted attempt must not move: the diagnostics it emitted,
+/// the tokens it settled through `commit_token`, and the emitter marks it left outstanding. The
+/// mark is table-keyed (a live row per capture, remembering both log lengths), so a rewind
+/// restores the logs and a leaked mark is visible — neither of which `Verbose` can show.
+#[derive(Debug, Default)]
+struct PartialJournal {
+  emitted: std::vec::Vec<crate::span::SimpleSpan>,
+  committed: std::vec::Vec<crate::span::SimpleSpan>,
+  next: Cell<u64>,
+  live: core::cell::RefCell<std::vec::Vec<(u64, usize, usize)>>,
+}
+
+impl PartialJournal {
+  fn live_rows(&self) -> usize {
+    self.live.borrow().len()
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> crate::Emitter<'inp, L, Lang> for PartialJournal
+where
+  L: crate::Lexer<'inp, Span = crate::span::SimpleSpan>,
+  <L::Token as Token<'inp>>::Error: Into<PErr>,
+{
+  type Error = PErr;
+
+  fn emit_lexer_error(
+    &mut self,
+    err: crate::span::Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
+  ) -> Result<(), PErr> {
+    self.emitted.push(*err.span_ref());
+    Ok(())
+  }
+
+  fn emit_unexpected_token(
+    &mut self,
+    err: crate::error::token::UnexpectedTokenOf<'inp, L, Lang>,
+  ) -> Result<(), PErr> {
+    self.emitted.push(*err.span_ref());
+    Ok(())
+  }
+
+  fn emit_error(&mut self, err: crate::span::Spanned<PErr, L::Span>) -> Result<(), PErr> {
+    self.emitted.push(*err.span_ref());
+    Ok(())
+  }
+
+  fn emit_skipped_region(&mut self, span: L::Span, _skipped: usize) -> Result<(), PErr> {
+    self.emitted.push(span);
+    Ok(())
+  }
+
+  fn commit_token(&mut self, _tok: &L::Token, span: &L::Span) {
+    self.committed.push(*span);
+  }
+
+  fn checkpoint(&self) -> u64 {
+    let id = self.next.get() + 1;
+    self.next.set(id);
+    self
+      .live
+      .borrow_mut()
+      .push((id, self.emitted.len(), self.committed.len()));
+    id
+  }
+
+  fn rewind(&mut self, _cursor: &crate::input::Cursor<'inp, '_, L>, checkpoint: u64) {
+    let at = {
+      let mut live = self.live.borrow_mut();
+      let at = live
+        .iter()
+        .find(|(id, _, _)| *id == checkpoint)
+        .map(|(_, e, c)| (*e, *c));
+      live.retain(|(id, _, _)| *id < checkpoint);
+      at
+    };
+    if let Some((e, c)) = at {
+      self.emitted.truncate(e);
+      self.committed.truncate(c);
+    }
+  }
+
+  fn release(&mut self, checkpoint: u64) {
+    let mut live = self.live.borrow_mut();
+    if let Some(pos) = live.iter().rposition(|(id, _, _)| *id == checkpoint) {
+      live.remove(pos);
+    }
+  }
+}
+
+type JournalCtx<'a> = (PartialJournal, DefaultCache<'a, Lex<'a>>);
+
+#[test]
+fn sync_to_incomplete_retry_is_trace_free() {
+  // Non-final "foo bar 42": the number touches the buffer end, so the sync is not decidable
+  // and the scan surfaces `Incomplete(10)`. Two aborted attempts must leave nothing behind;
+  // the sealed third call then diagnoses its two skipped words exactly once.
+  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_cache(
+    "foo bar 42",
+    (),
+    DefaultCache::<'_, Lex<'_>>::default(),
+  );
+  let mut emitter = Verbose::<PErr>::new();
+
+  let r1 = {
+    let mut inp = input.as_ref(&mut emitter);
+    inp
+      .sync_to(|t| matches!(t.data(), PTok::Num), || None)
+      .map(|s| s.is_some())
+  };
+  let after_first: usize = emitter.errors().values().map(|g| g.len()).sum();
+
+  let r2 = {
+    let mut inp = input.as_ref(&mut emitter);
+    inp
+      .sync_to(|t| matches!(t.data(), PTok::Num), || None)
+      .map(|s| s.is_some())
+  };
+  let after_two: usize = emitter.errors().values().map(|g| g.len()).sum();
+
+  input.seal();
+  let r3 = {
+    let mut inp = input.as_ref(&mut emitter);
+    inp
+      .sync_to(|t| matches!(t.data(), PTok::Num), || None)
+      .map(|s| s.is_some())
+  };
+  let after_success: usize = emitter.errors().values().map(|g| g.len()).sum();
+
+  assert_eq!(
+    r1,
+    Err(PErr::Incomplete(10)),
+    "the first attempt is undecided"
+  );
+  assert_eq!(r2, Err(PErr::Incomplete(10)), "so is the retry");
+  assert_eq!(
+    after_first, 0,
+    "an aborted attempt leaves no diagnostic — an `Incomplete` exit leaves no trace"
+  );
+  assert_eq!(
+    after_two, 0,
+    "and neither does the retry: re-driving is idempotent"
+  );
+  assert_eq!(r3, Ok(true), "the sealed call completes the sync");
+  assert_eq!(
+    after_success, 2,
+    "the completing sync keeps exactly its own two diagnoses, exactly once"
+  );
+}
+
+#[test]
+fn skip_while_incomplete_retry_settles_exactly_once() {
+  // The settle-timeline twin: `commit_token` fires once per token a scan skips, so an aborted
+  // attempt that keeps its settles breaks `Emitter::commit_token`'s exactly-once law across
+  // retries. The journal emitter records the settles and rewinds them with the mark.
+  let mut input = Input::<Lex<'_>, JournalCtx<'_>, (), Partial>::with_state_and_cache(
+    "foo bar 42",
+    (),
+    DefaultCache::<'_, Lex<'_>>::default(),
+  );
+  let mut emitter = PartialJournal::default();
+
+  let r1 = {
+    let mut inp = input.as_ref(&mut emitter);
+    inp.skip_while(|t| matches!(t.data(), PTok::Word))
+  };
+  let after_first = emitter.committed.clone();
+
+  let r2 = {
+    let mut inp = input.as_ref(&mut emitter);
+    inp.skip_while(|t| matches!(t.data(), PTok::Word))
+  };
+  let after_two = emitter.committed.clone();
+
+  input.seal();
+  let r3 = {
+    let mut inp = input.as_ref(&mut emitter);
+    inp.skip_while(|t| matches!(t.data(), PTok::Word))
+  };
+  let final_journal: std::vec::Vec<(usize, usize)> =
+    emitter.committed.iter().map(|s| (s.start, s.end)).collect();
+
+  assert_eq!(r1, Err(PErr::Incomplete(10)));
+  assert_eq!(r2, Err(PErr::Incomplete(10)));
+  assert!(
+    after_first.is_empty(),
+    "an aborted skip settles nothing: {after_first:?}"
+  );
+  assert!(
+    after_two.is_empty(),
+    "and the retry settles nothing either: {after_two:?}"
+  );
+  assert_eq!(r3, Ok(()));
+  assert_eq!(
+    final_journal,
+    std::vec![(0, 3), (4, 7)],
+    "the sealed completion settles each skipped token exactly once"
+  );
+  assert_eq!(
+    emitter.live_rows(),
+    0,
+    "no attempt left an emitter mark outstanding"
+  );
+}
+
+#[test]
+fn sync_through_incomplete_then_refill_then_eof_leaves_no_trace() {
+  // §11a(B) — the POLICY ARBITER. `sync_through`'s no-match end of input rewinds the full
+  // pre-call state, so a failed sync across a refill must leave the input exactly as it was.
+  // Under commit-on-incomplete the first attempt's skipped prefix is committed at the
+  // `Incomplete` exit, and the post-refill EOF rewind then restores only to the RESUMED
+  // position — so the first attempt's skips and diagnostics survive. This cell rejects that.
+  let mut input = Input::<Lex<'_>, JournalCtx<'_>, (), Partial>::with_state_and_cache(
+    "foo bar",
+    (),
+    DefaultCache::<'_, Lex<'_>>::default(),
+  );
+  let mut emitter = PartialJournal::default();
+
+  let r1 = {
+    let mut inp = input.as_ref(&mut emitter);
+    inp
+      .sync_through(|t| matches!(t.data(), PTok::Num), || None)
+      .map(|s| s.is_some())
+  };
+  assert_eq!(
+    r1,
+    Err(PErr::Incomplete(7)),
+    "the trailing word touches the buffer end: undecided"
+  );
+
+  input.seal();
+  let (r2, cursor) = {
+    let mut inp = input.as_ref(&mut emitter);
+    let r = inp
+      .sync_through(|t| matches!(t.data(), PTok::Num), || None)
+      .map(|s| s.is_some());
+    (r, *inp.cursor().as_inner())
+  };
+
+  assert_eq!(r2, Ok(false), "no number is ever found");
+  assert_eq!(
+    cursor, 0,
+    "the failed sync rewound to the pre-call position"
+  );
+  assert!(
+    emitter.emitted.is_empty(),
+    "no diagnostic survives a failed sync across a refill: {:?}",
+    emitter.emitted
+  );
+  assert!(
+    emitter.committed.is_empty(),
+    "no settle survives it either: {:?}",
+    emitter.committed
+  );
+  assert_eq!(
+    emitter.live_rows(),
+    0,
+    "both attempts settled their entry mark exactly once"
+  );
 }

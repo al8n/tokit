@@ -13,8 +13,7 @@ where
   pub fn consume_cached_one(&mut self) -> Option<Spanned<L::Token, L::Span>> {
     let tok = self.take_front()?;
     let (tok, extras): (Spanned<L::Token, L::Span>, _) = tok.into_components();
-    self.commit_token(tok.data(), tok.span_ref());
-    *self.state = extras;
+    self.commit_token(tok.data(), tok.span_ref(), extras);
     Some(tok)
   }
 
@@ -32,8 +31,7 @@ where
     // pop from cache if not matching
     while let Some(tok) = self.take_front_if(|t| !f(t)) {
       let (tok, state) = tok.into_components();
-      self.commit_token(tok.data(), tok.span_ref());
-      *self.state = state;
+      self.commit_token(tok.data(), tok.span_ref(), state);
       last = Some(tok);
     }
 

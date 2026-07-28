@@ -41,6 +41,17 @@ where
     ));
   }
 
+  /// Drops the depth by one **without emitting**, for a [`traced`](crate::traced) scope that is
+  /// leaving by an unwind rather than by one of its exit arms.
+  ///
+  /// The arms decrement and then emit; an unwound scope prints no exit line (trace events are
+  /// out of band, and there is no outcome to report), so its guard needs the decrement alone.
+  /// The field is `pub(super)` to `input_ref` and `crate::trace` is a sibling module, so the
+  /// guard reaches it through here.
+  pub(crate) fn trace_unwind_pop(&mut self) {
+    *self.depth = (*self.depth).saturating_sub(1);
+  }
+
   /// Emits an `enter` event, then bumps the depth so nested events indent beneath it.
   pub(crate) fn trace_enter(&mut self, name: &str) {
     crate::trace::write_line(std::format!(

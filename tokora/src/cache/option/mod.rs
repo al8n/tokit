@@ -3,9 +3,7 @@ use mayber::Maybe;
 
 use crate::lexer::Lexer;
 
-use super::{
-  Cache, CachedToken, CachedTokenOf, CachedTokenRefOf, Checkpoint, MaybeRefCachedTokenOf, Span,
-};
+use super::{Cache, CachedToken, CachedTokenOf, CachedTokenRefOf, MaybeRefCachedTokenOf};
 
 impl<'a, L, Lang: ?Sized> Cache<'a, L, Lang> for Option<CachedToken<L::Token, L::State, L::Span>>
 where
@@ -34,33 +32,6 @@ where
   #[inline(always)]
   fn remaining(&self) -> usize {
     if self.is_none() { 1 } else { 0 }
-  }
-
-  #[inline(always)]
-  fn rewind(&mut self, ckp: &Checkpoint<'a, '_, L>)
-  where
-    Self: Sized,
-  {
-    if self.is_none() {
-      return;
-    }
-
-    let cursor = ckp.cursor();
-    // if the rewind position is before the start of the cache, clear the cache
-    if let Some(span) = self.as_ref().map(|tok| tok.token().span()) {
-      let off = cursor.as_inner();
-      if off < span.start_ref() {
-        *self = None;
-        return;
-      }
-
-      // If the rewind position is exactly at the start of the cache, do nothing
-      if off == span.start_ref() {
-        return;
-      }
-    }
-
-    *self = None;
   }
 
   #[inline(always)]

@@ -6516,3 +6516,2744 @@ mod cst_event_oracles {
     );
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// R9 §4.1 — the scan's UNWIND edge
+//
+// `skip_until`'s loop pops the next token out of durable state (the parked slot, or the cache
+// front) into a local with no `Drop`, runs caller code — the predicate, the expected-tokens
+// closure, the frontier's `State: Clone`, the lexer — and only puts it back on a *return* exit.
+// A panic through any of those windows is an exit the put-back never sees: with a warm cache
+// the in-flight token and the whole skipped prefix leave the stream silently (R9-F2), and a
+// rewinding mode's entry mark is neither rewound nor released.
+//
+// Fixture note. The lexer state carries TWO tallies on purpose. `harvested` is BY VALUE, so it
+// advances only along the lineage whose state is actually kept — the in-tree `Rc`-shared
+// `LimitTracker` aliases across every clone and therefore reads the same whether or not the
+// frontier's state was harvested by `commit_at`, which makes a correct and an incorrect harvest
+// observationally identical. `odometer` is shared on purpose: it is the *work* meter (every
+// token any lexer ever scans), which is what a re-lex shows up on, and it backs the budget so a
+// re-lex genuinely re-burns it — the gate's measured trip.
+// ═══════════════════════════════════════════════════════════════════════════════════
+
+thread_local! {
+  /// `ScanTally::clone` calls since the last arm, and the call index that panics (0 = disarmed).
+  static STATE_CLONES: Cell<usize> = const { Cell::new(0) };
+  static STATE_CLONE_BOMB: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Arms the `L::State: Clone` window: the `at`-th clone from now on panics.
+fn arm_state_clone(at: usize) {
+  STATE_CLONES.with(|c| c.set(0));
+  STATE_CLONE_BOMB.with(|c| c.set(at));
+}
+
+fn disarm_state_clone() {
+  STATE_CLONE_BOMB.with(|c| c.set(0));
+}
+
+#[derive(Debug)]
+struct ScanTally {
+  /// By-value: the number of tokens scanned along the state that is actually committed.
+  harvested: usize,
+  /// Shared: total tokens scanned by any lexer, restore-proof — the re-lex meter and the budget.
+  odometer: Rc<Cell<usize>>,
+  limit: usize,
+}
+
+impl Clone for ScanTally {
+  fn clone(&self) -> Self {
+    let n = STATE_CLONES.with(|c| {
+      let v = c.get() + 1;
+      c.set(v);
+      v
+    });
+    assert!(
+      n != STATE_CLONE_BOMB.with(Cell::get),
+      "R9-F2: the armed `L::State` clone (#{n}) panics"
+    );
+    Self {
+      harvested: self.harvested,
+      odometer: self.odometer.clone(),
+      limit: self.limit,
+    }
+  }
+}
+
+impl Default for ScanTally {
+  fn default() -> Self {
+    Self::with_limit(usize::MAX)
+  }
+}
+
+impl ScanTally {
+  fn with_limit(limit: usize) -> Self {
+    Self {
+      harvested: 0,
+      odometer: Rc::new(Cell::new(0)),
+      limit,
+    }
+  }
+
+  fn odometer(&self) -> Rc<Cell<usize>> {
+    self.odometer.clone()
+  }
+
+  fn bump(&mut self) {
+    self.harvested += 1;
+    self.odometer.set(self.odometer.get() + 1);
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ScanLimitExceeded;
+
+impl State for ScanTally {
+  type Error = ScanLimitExceeded;
+
+  fn check(&self) -> Result<(), Self::Error> {
+    if self.odometer.get() > self.limit {
+      Err(ScanLimitExceeded)
+    } else {
+      Ok(())
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ScanErr {
+  Lex,
+  Limit,
+}
+
+impl From<()> for ScanErr {
+  fn from(_: ()) -> Self {
+    ScanErr::Lex
+  }
+}
+
+impl From<ScanLimitExceeded> for ScanErr {
+  fn from(_: ScanLimitExceeded) -> Self {
+    ScanErr::Limit
+  }
+}
+
+impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, Lang>> for ScanErr {
+  fn from(_: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
+    ScanErr::Lex
+  }
+}
+
+impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for ScanErr {
+  fn from(_: UnexpectedEot<O, Lang>) -> Self {
+    ScanErr::Lex
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+#[logos(crate = crate::logos, extras = ScanTally, skip r"[ \t\r\n]+")]
+enum ScanTok {
+  #[regex(r"[a-z0-9]+", |lex| { lex.extras.bump(); })]
+  Word,
+}
+
+impl core::fmt::Display for ScanTok {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("word")
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ScanKind {
+  Word,
+}
+
+impl core::fmt::Display for ScanKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("word")
+  }
+}
+
+impl Token<'_> for ScanTok {
+  type Kind = ScanKind;
+  type Error = ScanErr;
+
+  fn kind(&self) -> ScanKind {
+    ScanKind::Word
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+type ScanLexer<'a> = LogosLexer<'a, ScanTok>;
+
+/// A **mark-keyed** emitter with a rewindable emission log: one live row per outstanding
+/// capture, and each row remembers the log length at capture. `Verbose` cannot serve here — its
+/// mark is a log length, so a stranded mark is invisible; and a pure row ledger cannot show that
+/// a rewind restored the emissions. The unwind edge has to be judged on both at once.
+#[derive(Debug, Default)]
+struct ScanLedger {
+  log: std::vec::Vec<crate::span::SimpleSpan>,
+  next: Cell<u64>,
+  live: core::cell::RefCell<std::vec::Vec<(u64, usize)>>,
+}
+
+impl ScanLedger {
+  fn emissions(&self) -> usize {
+    self.log.len()
+  }
+
+  fn live_rows(&self) -> usize {
+    self.live.borrow().len()
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> crate::Emitter<'inp, L, Lang> for ScanLedger
+where
+  L: crate::Lexer<'inp, Span = crate::span::SimpleSpan>,
+  <L::Token as Token<'inp>>::Error: Into<ScanErr>,
+{
+  type Error = ScanErr;
+
+  fn emit_lexer_error(
+    &mut self,
+    err: crate::span::Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
+  ) -> Result<(), ScanErr> {
+    self.log.push(*err.span_ref());
+    Ok(())
+  }
+
+  fn emit_unexpected_token(
+    &mut self,
+    err: crate::error::token::UnexpectedTokenOf<'inp, L, Lang>,
+  ) -> Result<(), ScanErr> {
+    self.log.push(*err.span_ref());
+    Ok(())
+  }
+
+  fn emit_error(&mut self, err: crate::span::Spanned<ScanErr, L::Span>) -> Result<(), ScanErr> {
+    self.log.push(*err.span_ref());
+    Ok(())
+  }
+
+  fn emit_skipped_region(&mut self, span: L::Span, _skipped: usize) -> Result<(), ScanErr> {
+    self.log.push(span);
+    Ok(())
+  }
+
+  fn checkpoint(&self) -> u64 {
+    let id = self.next.get() + 1;
+    self.next.set(id);
+    self.live.borrow_mut().push((id, self.log.len()));
+    id
+  }
+
+  fn rewind(&mut self, _cursor: &crate::input::Cursor<'inp, '_, L>, checkpoint: u64) {
+    let at = {
+      let mut live = self.live.borrow_mut();
+      let at = live
+        .iter()
+        .find(|(id, _)| *id == checkpoint)
+        .map(|(_, len)| *len);
+      live.retain(|(id, _)| *id < checkpoint);
+      at
+    };
+    if let Some(len) = at {
+      self.log.truncate(len);
+    }
+  }
+
+  fn release(&mut self, checkpoint: u64) {
+    let mut live = self.live.borrow_mut();
+    if let Some(pos) = live.iter().rposition(|(id, _)| *id == checkpoint) {
+      live.remove(pos);
+    }
+  }
+}
+
+type ScanLedgerCtx<'a> = (ScanLedger, DefaultCache<'a, ScanLexer<'a>>);
+
+/// What a cell reads back after a caught panic: the resume cursor, the tokens still reachable,
+/// the total lexing work, the surviving emissions, and the emitter's outstanding marks.
+#[derive(Debug, PartialEq, Eq)]
+struct AfterUnwind {
+  cursor: usize,
+  drained: std::vec::Vec<(usize, usize)>,
+  scans: usize,
+  emissions: usize,
+  live_rows: usize,
+}
+
+/// One `to`-shaped run: warm the cache to `warm` tokens if asked, then `sync_to` with a
+/// predicate that panics on the `panic_on`-th token it is handed (1-based), and read the input
+/// back. `exp_panics_on` does the same for the expected-tokens closure instead.
+fn f2_sync_to_run(
+  src: &'static str,
+  warm: bool,
+  panic_on: Option<usize>,
+  exp_panics_on: Option<usize>,
+  limit: usize,
+) -> AfterUnwind {
+  use generic_arraydeque::typenum::U3;
+
+  let tally = ScanTally::with_limit(limit);
+  let odometer = tally.odometer();
+  let cache = DefaultCache::<'_, ScanLexer<'_>>::default();
+  let mut emitter = ScanLedger::default();
+  let mut input =
+    Input::<ScanLexer<'_>, ScanLedgerCtx<'_>, ()>::with_state_and_cache(src, tally, cache);
+  let mut inp = input.as_ref(&mut emitter);
+
+  if warm {
+    let _ = inp.peek::<U3>().unwrap();
+  }
+
+  let seen = Cell::new(0usize);
+  let exp_seen = Cell::new(0usize);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.sync_to(
+      |_| {
+        let n = seen.get() + 1;
+        seen.set(n);
+        assert!(
+          Some(n) != panic_on,
+          "R9-F2: the predicate panics on token #{n}"
+        );
+        false
+      },
+      || {
+        let n = exp_seen.get() + 1;
+        exp_seen.set(n);
+        assert!(
+          Some(n) != exp_panics_on,
+          "R9-F2: the expected-tokens closure panics on skip #{n}"
+        );
+        None
+      },
+    );
+  }));
+  assert!(caught.is_err(), "the scan must have panicked");
+
+  let cursor = *inp.cursor().as_inner();
+  let mut drained = std::vec::Vec::new();
+  while let Ok(Some(t)) = inp.next() {
+    let s = *t.span_ref();
+    drained.push((s.start, s.end));
+  }
+  AfterUnwind {
+    cursor,
+    drained,
+    scans: odometer.get(),
+    emissions: inp.emitter().emissions(),
+    live_rows: inp.emitter().live_rows(),
+  }
+}
+
+#[test]
+fn r9_f2_panicking_pred_does_not_lose_tokens() {
+  // "foo bar baz 42": foo (0,3), bar (4,7), baz (8,11), 42 (12,14). The cache is warmed to
+  // three tokens, then `sync_to`'s predicate panics on the second one it is handed.
+  //
+  // BEFORE: the in-flight `bar` is dropped with the unowned local and the already-skipped `foo`
+  // is gone behind an uncommitted frontier — two tokens vanish and the cursor jumps 0 → 8.
+  // AFTER (commit posture): the skipped `foo` stays committed WITH its report, `bar` goes back
+  // to the front of the stream, and nothing re-lexes.
+  let got = f2_sync_to_run("foo bar baz 42", true, Some(2), None, usize::MAX);
+  assert_eq!(
+    got,
+    AfterUnwind {
+      cursor: 4,
+      drained: std::vec![(4, 7), (8, 11), (12, 14)],
+      scans: 4,
+      emissions: 1,
+      live_rows: 0,
+    },
+    "a panicking predicate must not lose tokens: the committing unwind edge commits the \
+     diagnosed prefix and puts the in-flight token back"
+  );
+}
+
+#[test]
+fn r9_f2_panicking_pred_cold_cache_control() {
+  // The cold-cache twin: with nothing prefetched the loop lexes both tokens itself. Same law.
+  let got = f2_sync_to_run("foo bar baz 42", false, Some(2), None, usize::MAX);
+  assert_eq!(
+    got,
+    AfterUnwind {
+      cursor: 4,
+      drained: std::vec![(4, 7), (8, 11), (12, 14)],
+      scans: 4,
+      emissions: 1,
+      live_rows: 0,
+    },
+    "the unwind edge behaves identically whether the tokens were prefetched or freshly lexed"
+  );
+}
+
+#[test]
+fn r9_f2_warm_limit_no_reburn() {
+  // The budget payload. "ab cd ef gh" behind a shared limit of 5: the honest run scans four
+  // tokens and never trips. A restore posture that CLEARS the store on the unwind edge re-lexes
+  // the untouched suffix, re-burns the shared budget, trips the limiter and latches a poison
+  // boundary at a position the original lineage never reached — the exact harm §2.1 invokes to
+  // justify deleting `Cache::rewind`. This cell is the guard against that posture's return.
+  let got = f2_sync_to_run("ab cd ef gh", true, Some(2), None, 5);
+  assert_eq!(
+    got,
+    AfterUnwind {
+      cursor: 3,
+      drained: std::vec![(3, 5), (6, 8), (9, 11)],
+      scans: 4,
+      emissions: 1,
+      live_rows: 0,
+    },
+    "the committing unwind edge re-lexes nothing, so the shared budget is not re-burnt and the \
+     limiter does not trip"
+  );
+}
+
+#[test]
+fn r9_f2_panicking_exp_closes_the_same_window() {
+  // The expected-tokens closure is the SECOND caller-code window inside the skip, and the one
+  // that runs with the token already consumed out of the loop's local. It is covered by the
+  // same law only if the frontier adopts the token BEFORE the report is built.
+  //
+  // Cold cache, so the difference is on the stream rather than only on the committed span:
+  // BEFORE the whole region re-lexes from zero; AFTER the diagnosed prefix stays committed.
+  let got = f2_sync_to_run("ab cd ef gh", false, None, Some(2), usize::MAX);
+  assert_eq!(
+    got,
+    AfterUnwind {
+      // Nothing is cached on this path, so the resume cursor is the committed span's end —
+      // the second skipped token's end, not the third token's start.
+      cursor: 5,
+      drained: std::vec![(6, 8), (9, 11)],
+      scans: 4,
+      emissions: 1,
+      live_rows: 0,
+    },
+    "a panicking `exp` leaves the two skipped tokens committed behind the frontier — no re-lex, \
+     no lost token"
+  );
+}
+
+/// The rewinding twin of [`f2_sync_to_run`]: `sync_through` captures a `ThroughEntry` at the
+/// caller — an emitter mark included — so its unwind edge is on the hook for the mark as well as
+/// for the stream.
+fn f2_sync_through_run(
+  src: &'static str,
+  warm: bool,
+  panic_on: usize,
+  limit: usize,
+) -> AfterUnwind {
+  use generic_arraydeque::typenum::U3;
+
+  let tally = ScanTally::with_limit(limit);
+  let odometer = tally.odometer();
+  let cache = DefaultCache::<'_, ScanLexer<'_>>::default();
+  let mut emitter = ScanLedger::default();
+  let mut input =
+    Input::<ScanLexer<'_>, ScanLedgerCtx<'_>, ()>::with_state_and_cache(src, tally, cache);
+  let mut inp = input.as_ref(&mut emitter);
+
+  if warm {
+    let _ = inp.peek::<U3>().unwrap();
+  }
+
+  let seen = Cell::new(0usize);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.sync_through(
+      |_| {
+        let n = seen.get() + 1;
+        seen.set(n);
+        assert!(n != panic_on, "R9-F2: the predicate panics on token #{n}");
+        false
+      },
+      || None,
+    );
+  }));
+  assert!(caught.is_err(), "the scan must have panicked");
+
+  let cursor = *inp.cursor().as_inner();
+  let mut drained = std::vec::Vec::new();
+  while let Ok(Some(t)) = inp.next() {
+    let s = *t.span_ref();
+    drained.push((s.start, s.end));
+  }
+  AfterUnwind {
+    cursor,
+    drained,
+    scans: odometer.get(),
+    emissions: inp.emitter().emissions(),
+    live_rows: inp.emitter().live_rows(),
+  }
+}
+
+#[test]
+fn r9_f2_sync_through_unwind_restores_emissions() {
+  // A rewinding mode's unwind edge behaves like its own no-match end of input: restore-to-entry.
+  // Three things must hold TOGETHER — a `live_rows == 0` alone was a passing gate over the token
+  // loss: the stream is back (all four tokens still reachable, from the top), the emissions the
+  // aborted scan made are rewound (0), and the entry mark is settled exactly once.
+  let got = f2_sync_through_run("ab cd ef gh", false, 2, usize::MAX);
+  assert_eq!(
+    got,
+    AfterUnwind {
+      cursor: 0,
+      drained: std::vec![(0, 2), (3, 5), (6, 8), (9, 11)],
+      scans: 6,
+      emissions: 0,
+      live_rows: 0,
+    },
+    "a rewinding scan's unwind edge restores the stream, rewinds its emissions, and settles its \
+     entry mark"
+  );
+}
+
+#[test]
+fn r9_f2_sync_through_warm_unwind_prices_its_re_lex() {
+  // §4.1's PRICED RESIDUE, pinned with its number rather than left as prose.
+  //
+  // The restore posture is the ratified one for the rewinding modes — it is what their own
+  // `on_eof` already does — but at the panic edge, unlike at true end of input, the cache can
+  // still hold an untouched suffix. Restoring therefore re-lexes a region the committing modes
+  // would not: with three tokens prefetched, the four-token source is scanned SEVEN times.
+  //
+  // This cell is the price tag. The proposed ownership extension (unconsume + commit_at +
+  // release, i.e. giving the rewinding panic edge the committing arm's keep posture) would read
+  // `scans: 4` here and `emissions: 1`; adopting it must therefore rewrite this cell in the same
+  // commit, which is exactly the visibility the residue is meant to have.
+  let got = f2_sync_through_run("ab cd ef gh", true, 2, usize::MAX);
+  assert_eq!(
+    got,
+    AfterUnwind {
+      cursor: 0,
+      drained: std::vec![(0, 2), (3, 5), (6, 8), (9, 11)],
+      scans: 7,
+      emissions: 0,
+      live_rows: 0,
+    },
+    "the rewinding unwind edge re-lexes the warm untouched suffix — the documented, priced \
+     residue of restore-to-entry at the panic edge"
+  );
+}
+
+#[test]
+fn r9_f2_panicking_state_clone_settles_the_entry_mark() {
+  // The THIRD caller-code window, and the earliest one: the frontier's `L::State: Clone` at the
+  // top of `skip_until`. It runs after the caller has already captured the entry mark and moved
+  // the snapshot in, so nobody but the scan can settle it — and on the unwind edge nobody did.
+  //
+  // `sync_through`'s entry evaluates `span.clone()`, then `state.clone()`, then takes the mark;
+  // the SECOND state clone from here is therefore the one inside `skip_until`, on the far side
+  // of the capture.
+  let tally = ScanTally::with_limit(usize::MAX);
+  let cache = DefaultCache::<'_, ScanLexer<'_>>::default();
+  let mut emitter = ScanLedger::default();
+  let mut input =
+    Input::<ScanLexer<'_>, ScanLedgerCtx<'_>, ()>::with_state_and_cache("ab cd ef", tally, cache);
+  let mut inp = input.as_ref(&mut emitter);
+
+  arm_state_clone(2);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.sync_through(|_| false, || None);
+  }));
+  disarm_state_clone();
+  assert!(caught.is_err(), "the armed state clone must have panicked");
+
+  assert_eq!(
+    inp.emitter().live_rows(),
+    0,
+    "an unwind out of the frontier's state clone must still settle the entry mark the caller \
+     captured — nothing else can"
+  );
+  assert_eq!(
+    *inp.cursor().as_inner(),
+    0,
+    "and it must leave the position where it found it"
+  );
+}
+
+// ── D28: the cache-geometry parity matrix ────────────────────────────────────────
+//
+// `Cache::rewind` is gone and its cursor-keyed geometry now runs in the input layer through the
+// trait's own queue surface. This pins the four cursor relations × the caches that can express
+// them, against the exact behaviour the three deleted bodies had: below the window clears; at
+// the front keeps everything; at or past the back clears; mid-window keeps the suffix from an
+// exact token start and clears when the cursor falls between two starts (the old bodies'
+// binary-search `Err` arm, which the loop reaches by overshooting).
+
+/// Builds a cache holding one token per `(start, end)` pair.
+fn geometry_cache(spans: &[(usize, usize)]) -> DefaultCache<'static, ScanLexer<'static>> {
+  let mut cache = DefaultCache::<'_, ScanLexer<'_>>::default();
+  for (start, end) in spans {
+    let tok = crate::span::Spanned::new(crate::span::SimpleSpan::new(*start, *end), ScanTok::Word);
+    let _ = cache.push_back(crate::cache::CachedToken::new(tok, ScanTally::default()));
+  }
+  cache
+}
+
+/// The resident spans, read back without disturbing the cache.
+fn resident(cache: &DefaultCache<'static, ScanLexer<'static>>) -> std::vec::Vec<(usize, usize)> {
+  let mut out = std::vec::Vec::new();
+  let mut probe = cache.clone();
+  while let Some(tok) = probe.pop_front() {
+    let spanned = tok.token();
+    out.push((spanned.span_ref().start, spanned.span_ref().end));
+  }
+  out
+}
+
+#[test]
+fn cache_geometry_parity_matrix() {
+  // Resident window: [4,6) [8,10) [12,14).
+  let window: &[(usize, usize)] = &[(4, 6), (8, 10), (12, 14)];
+  let cases: &[(usize, &[(usize, usize)], &str)] = &[
+    (2, &[], "below the window: cleared"),
+    (4, window, "exactly at the front: the whole window is kept"),
+    (
+      8,
+      &[(8, 10), (12, 14)],
+      "mid-window at a token start: the suffix is kept",
+    ),
+    (
+      12,
+      &[(12, 14)],
+      "at the last token's start: that token alone",
+    ),
+    // Between two starts the old `binary_search_by_key` took its `Err` arm and cleared; the
+    // loop reaches the same fixpoint by popping the prefix and then overshooting into the
+    // "before the front" case. Clearing is the safe direction: the region re-lexes.
+    (
+      9,
+      &[],
+      "between two token starts: cleared, exactly as the Err arm did",
+    ),
+    (14, &[], "at the back's end: cleared"),
+    (20, &[], "past the back: cleared"),
+  ];
+  for (cursor, want, why) in cases {
+    let mut cache = geometry_cache(window);
+    super::reconcile_cache_geometry::<ScanLexer<'_>, _, ()>(&mut cache, cursor);
+    assert_eq!(
+      resident(&cache),
+      want.to_vec(),
+      "geometry drift at cursor {cursor} — {why}"
+    );
+  }
+
+  // The empty cache is a no-op at every cursor, and the capacity-1 cache is the degenerate case
+  // of the same loop: keep on an exact front match, clear otherwise.
+  let mut empty = geometry_cache(&[]);
+  super::reconcile_cache_geometry::<ScanLexer<'_>, _, ()>(&mut empty, &7);
+  assert!(resident(&empty).is_empty(), "an empty cache stays empty");
+
+  for (cursor, want) in [(2usize, false), (4, true), (5, false), (6, false)] {
+    let mut one = geometry_cache(&[(4, 6)]);
+    super::reconcile_cache_geometry::<ScanLexer<'_>, _, ()>(&mut one, &cursor);
+    assert_eq!(
+      !resident(&one).is_empty(),
+      want,
+      "capacity-1 geometry drift at cursor {cursor}"
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// The settle path's own fallible steps (Codex R9 F1/F2/F3)
+//
+// The unwind edge closed the six windows the loop runs caller code in. The SETTLE code is
+// itself caller code: `L::Span::clone` runs inside `skip_and_report`'s report build and inside
+// `set_span` on every restore, and the emitter's diagnostic path runs while a limit trip has
+// already latched a poison boundary. This fixture makes each of those steps armable.
+//
+// A hand-rolled lexer, because the bomb has to be in `L::Span::clone` and the Logos backend's
+// span is `SimpleSpan`.
+
+thread_local! {
+  /// `BombSpan::clone` calls since the last arm, and the call index that panics (0 = disarmed).
+  static SPAN_CLONES: Cell<usize> = const { Cell::new(0) };
+  static SPAN_BOMB: Cell<usize> = const { Cell::new(0) };
+  /// Every span cloned since the last arm, as `(index, start, end)` — the probe that says which
+  /// index to arm instead of guessing one.
+  static SPAN_LOG: std::cell::RefCell<std::vec::Vec<(usize, usize, usize)>> =
+    const { std::cell::RefCell::new(std::vec::Vec::new()) };
+}
+
+fn arm_span_clone(at: usize) {
+  SPAN_CLONES.with(|c| c.set(0));
+  SPAN_BOMB.with(|c| c.set(at));
+  SPAN_LOG.with(|l| l.borrow_mut().clear());
+}
+
+fn disarm_span_clone() {
+  SPAN_BOMB.with(|c| c.set(0));
+}
+
+thread_local! {
+  /// `BombTally::drop` calls since the last arm, and the index that panics (0 = disarmed).
+  ///
+  /// `commit_at` writes `*ir.state = frontier.state`, and that assignment **drops the state it
+  /// replaces** — caller code, inside the frontier commit, and the only step there that can be
+  /// aimed at. `L::Span::end_ref` is the other caller-code step on that path, but it returns a
+  /// reference and is called ubiquitously, so arming it by count cannot be pointed at one call:
+  /// that instrument was built, measured to pass identically at every index it could reach, and
+  /// retired rather than shipped as a cell that could not fail.
+  static STATE_DROPS: Cell<usize> = const { Cell::new(0) };
+  static STATE_DROP_BOMB: Cell<usize> = const { Cell::new(0) };
+}
+
+thread_local! {
+  /// `BombSpan::drop` calls since the last arm, and the index that panics (0 = disarmed).
+  ///
+  /// The span is the FIRST half written at every paired site, and an assignment installs its new
+  /// value and then drops the replaced one — so the replaced SPAN's drop is an unwind site that
+  /// sits *between* the two writes. Arming the state drop instead reaches only the second
+  /// assignment, which is past both writes and cannot tear. Every earlier cell in this family
+  /// armed the state; this is the half that discriminates.
+  static SPAN_DROPS: Cell<usize> = const { Cell::new(0) };
+  static SPAN_DROP_BOMB: Cell<usize> = const { Cell::new(0) };
+}
+
+fn arm_span_drop(at: usize) {
+  SPAN_DROPS.with(|c| c.set(0));
+  SPAN_DROP_BOMB.with(|c| c.set(at));
+}
+
+fn disarm_span_drop() {
+  SPAN_DROP_BOMB.with(|c| c.set(0));
+}
+
+fn arm_state_drop(at: usize) {
+  STATE_DROPS.with(|c| c.set(0));
+  STATE_DROP_BOMB.with(|c| c.set(at));
+}
+
+fn disarm_state_drop() {
+  STATE_DROP_BOMB.with(|c| c.set(0));
+}
+
+fn span_clone_log() -> std::vec::Vec<(usize, usize, usize)> {
+  SPAN_LOG.with(|l| l.borrow().clone())
+}
+
+thread_local! {
+  /// Arms [`BombLexer::into_state`], the one caller-code step inside the end-of-input settle.
+  static INTO_STATE_BOMB: Cell<bool> = const { Cell::new(false) };
+}
+
+fn arm_into_state(on: bool) {
+  INTO_STATE_BOMB.with(|c| c.set(on));
+}
+
+thread_local! {
+  /// Every `BombLexer::lex` call. A by-value tally is restored along with the state, so it
+  /// cannot see work that a rewind un-did and then re-did; this can. It is the meter for
+  /// "was the prefix re-scanned?".
+  static LEX_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn reset_lex_calls() {
+  LEX_CALLS.with(|c| c.set(0));
+}
+
+fn lex_calls() -> usize {
+  LEX_CALLS.with(Cell::get)
+}
+
+/// A span whose `Clone` is armable. Everything else is `SimpleSpan`'s behaviour.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct BombSpan {
+  start: usize,
+  end: usize,
+}
+
+impl Drop for BombSpan {
+  fn drop(&mut self) {
+    let n = SPAN_DROPS.with(|c| {
+      let v = c.get() + 1;
+      c.set(v);
+      v
+    });
+    assert!(
+      n != SPAN_DROP_BOMB.with(Cell::get),
+      "R9 settle-path: the armed `L::Span` drop (#{n}, {}..{}) panics",
+      self.start,
+      self.end
+    );
+  }
+}
+
+impl Clone for BombSpan {
+  fn clone(&self) -> Self {
+    let n = SPAN_CLONES.with(|c| {
+      let v = c.get() + 1;
+      c.set(v);
+      v
+    });
+    SPAN_LOG.with(|l| l.borrow_mut().push((n, self.start, self.end)));
+    assert!(
+      n != SPAN_BOMB.with(Cell::get),
+      "R9 settle-path: the armed `L::Span` clone (#{n}, {}..{}) panics",
+      self.start,
+      self.end
+    );
+    Self {
+      start: self.start,
+      end: self.end,
+    }
+  }
+}
+
+impl crate::Span for BombSpan {
+  type Offset = usize;
+
+  fn new(start: usize, end: usize) -> Self {
+    Self { start, end }
+  }
+
+  fn into_range(self) -> core::ops::Range<usize> {
+    self.start..self.end
+  }
+
+  fn start_ref(&self) -> &usize {
+    &self.start
+  }
+
+  fn start_mut(&mut self) -> &mut usize {
+    &mut self.start
+  }
+
+  fn into_start(self) -> usize {
+    self.start
+  }
+
+  fn end_ref(&self) -> &usize {
+    &self.end
+  }
+
+  fn end_mut(&mut self) -> &mut usize {
+    &mut self.end
+  }
+
+  fn into_end(self) -> usize {
+    self.end
+  }
+
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+/// A by-value scan tally that also trips: the limit is on the tally the committed lineage
+/// carries, so a restore restores the budget with it — which is what makes the poison boundary
+/// the only thing left over on the unwind edge.
+#[derive(Debug, Clone, PartialEq)]
+struct BombTally {
+  scanned: usize,
+  limit: usize,
+}
+
+impl Default for BombTally {
+  fn default() -> Self {
+    Self {
+      scanned: 0,
+      limit: usize::MAX,
+    }
+  }
+}
+
+impl Drop for BombTally {
+  fn drop(&mut self) {
+    let n = STATE_DROPS.with(|c| {
+      let v = c.get() + 1;
+      c.set(v);
+      v
+    });
+    assert!(
+      n != STATE_DROP_BOMB.with(Cell::get),
+      "R9 settle-path: the armed `L::State` drop (#{n}) panics"
+    );
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BombTripped;
+
+impl State for BombTally {
+  type Error = BombTripped;
+
+  fn check(&self) -> Result<(), BombTripped> {
+    if self.scanned > self.limit {
+      Err(BombTripped)
+    } else {
+      Ok(())
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum BombErr {
+  Lex,
+  Limit,
+  Incomplete,
+}
+
+impl From<()> for BombErr {
+  fn from(_: ()) -> Self {
+    BombErr::Lex
+  }
+}
+
+impl From<BombTripped> for BombErr {
+  fn from(_: BombTripped) -> Self {
+    BombErr::Limit
+  }
+}
+
+impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, Lang>> for BombErr {
+  fn from(_: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
+    BombErr::Lex
+  }
+}
+
+impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for BombErr {
+  fn from(_: UnexpectedEot<O, Lang>) -> Self {
+    BombErr::Lex
+  }
+}
+
+impl From<crate::error::Incomplete<usize>> for BombErr {
+  fn from(_: crate::error::Incomplete<usize>) -> Self {
+    BombErr::Incomplete
+  }
+}
+
+impl crate::error::MaybeIncomplete for BombErr {
+  fn is_incomplete(&self) -> bool {
+    matches!(self, BombErr::Incomplete)
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BombTok;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct BombKind;
+
+impl core::fmt::Display for BombKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("word")
+  }
+}
+
+impl Token<'_> for BombTok {
+  type Kind = BombKind;
+  type Error = BombErr;
+
+  fn kind(&self) -> BombKind {
+    BombKind
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// A space-separated word lexer over the armable span. A tripped tally surfaces exactly as the
+/// Logos backend surfaces one: the tripping token is replaced by a `Lexed::Error`.
+struct BombLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: BombTally,
+}
+
+impl<'a> crate::Lexer<'a> for BombLexer<'a> {
+  type State = BombTally;
+  type Source = str;
+  type Token = BombTok;
+  type Span = BombSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self::with_state(src, BombTally::default())
+  }
+
+  fn with_state(src: &'a str, state: BombTally) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+
+  fn check(&self) -> Result<(), BombErr> {
+    State::check(&self.state).map_err(BombErr::from)
+  }
+
+  fn state(&self) -> &BombTally {
+    &self.state
+  }
+
+  fn state_mut(&mut self) -> &mut BombTally {
+    &mut self.state
+  }
+
+  fn into_state(self) -> BombTally {
+    // Armable, and it needs no calibration: the input layer calls `into_state` exactly once per
+    // scan, inside `on_eof`. It is caller code and nothing in the contract forbids it panicking,
+    // which makes it the honest witness for a panic *inside* an exit settle.
+    assert!(
+      !INTO_STATE_BOMB.with(Cell::get),
+      "R9 settle-path: the armed `Lexer::into_state` inside the end-of-input settle panics"
+    );
+    self.state
+  }
+
+  fn source(&self) -> &'a str {
+    self.src
+  }
+
+  fn span(&self) -> BombSpan {
+    BombSpan {
+      start: self.start,
+      end: self.end,
+    }
+  }
+
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+
+  fn lex(&mut self) -> Option<Result<BombTok, BombErr>> {
+    LEX_CALLS.with(|c| c.set(c.get() + 1));
+    let bytes = self.src.as_bytes();
+    let mut i = self.end;
+    while i < bytes.len() && bytes[i] == b' ' {
+      i += 1;
+    }
+    if i >= bytes.len() {
+      self.start = i;
+      self.end = i;
+      return None;
+    }
+    self.start = i;
+    while i < bytes.len() && bytes[i] != b' ' {
+      i += 1;
+    }
+    self.end = i;
+    self.state.scanned += 1;
+    // A trip replaces the tripping token, exactly as the bundled backend does.
+    if State::check(&self.state).is_err() {
+      return Some(Err(BombErr::Limit));
+    }
+    Some(Ok(BombTok))
+  }
+
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+/// A mark-keyed emitter for the settle-path cells: it counts live rows, counts emissions, and can
+/// be told to panic inside its diagnostic path — the window a latched limit trip opens.
+#[derive(Debug, Default)]
+struct BombEmitter {
+  emissions: usize,
+  panic_on_emit: bool,
+  /// Arms the committed-token OBSERVER. It is foreign code that `commit_token` invokes, and on a
+  /// cache-hit consume the token has already left the front stream by the time it runs.
+  panic_on_commit_token: bool,
+  next: Cell<u64>,
+  live: core::cell::RefCell<std::vec::Vec<u64>>,
+  /// Settle CALLS, not surviving rows. A double release removes nothing the second time, so a
+  /// row count cannot see it; these can.
+  releases: usize,
+  rewinds: usize,
+  /// Every token the input layer settled, and — recorded against each mark — how many had been
+  /// settled when that mark was taken, so a rewind can truncate them with the emissions. This is
+  /// the observable for a mode that reports nothing per token: `SyncBalanced` emits one hole
+  /// diagnostic, so `commit_token` is where its per-token settles show.
+  commits: std::vec::Vec<(usize, usize)>,
+  marks: core::cell::RefCell<std::vec::Vec<(u64, usize, usize)>>,
+}
+
+#[allow(dead_code)]
+impl BombEmitter {
+  fn panicking() -> Self {
+    Self {
+      panic_on_emit: true,
+      ..Self::default()
+    }
+  }
+
+  fn live_rows(&self) -> usize {
+    self.live.borrow().len()
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> crate::Emitter<'inp, L, Lang> for BombEmitter
+where
+  L: crate::Lexer<'inp>,
+  <L::Token as Token<'inp>>::Error: Into<BombErr>,
+{
+  type Error = BombErr;
+
+  fn emit_lexer_error(
+    &mut self,
+    err: crate::span::Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
+  ) -> Result<(), BombErr> {
+    let _ = err;
+    assert!(
+      !self.panic_on_emit,
+      "R9 settle-path: the emitter's diagnostic path panics"
+    );
+    self.emissions += 1;
+    Ok(())
+  }
+
+  fn emit_unexpected_token(
+    &mut self,
+    err: crate::error::token::UnexpectedTokenOf<'inp, L, Lang>,
+  ) -> Result<(), BombErr> {
+    let _ = err;
+    self.emissions += 1;
+    Ok(())
+  }
+
+  fn emit_error(&mut self, err: crate::span::Spanned<BombErr, L::Span>) -> Result<(), BombErr> {
+    let _ = err;
+    self.emissions += 1;
+    Ok(())
+  }
+
+  fn commit_token(&mut self, _tok: &L::Token, span: &L::Span) {
+    let _ = span;
+    assert!(
+      !self.panic_on_commit_token,
+      "R9 settle-path: the committed-token observer panics"
+    );
+    let n = self.commits.len();
+    self.commits.push((n, n));
+  }
+
+  fn checkpoint(&self) -> u64 {
+    let id = self.next.get() + 1;
+    self.next.set(id);
+    self.live.borrow_mut().push(id);
+    self
+      .marks
+      .borrow_mut()
+      .push((id, self.emissions, self.commits.len()));
+    id
+  }
+
+  fn rewind(&mut self, _cursor: &crate::input::Cursor<'inp, '_, L>, checkpoint: u64) {
+    self.rewinds += 1;
+    let at = {
+      let mut marks = self.marks.borrow_mut();
+      let at = marks
+        .iter()
+        .find(|(id, _, _)| *id == checkpoint)
+        .map(|(_, e, c)| (*e, *c));
+      marks.retain(|(id, _, _)| *id < checkpoint);
+      at
+    };
+    if let Some((e, c)) = at {
+      self.emissions = e;
+      self.commits.truncate(c);
+    }
+    self.live.borrow_mut().retain(|m| *m < checkpoint);
+  }
+
+  fn release(&mut self, checkpoint: u64) {
+    self.releases += 1;
+    let mut live = self.live.borrow_mut();
+    if let Some(pos) = live.iter().rposition(|m| *m == checkpoint) {
+      live.remove(pos);
+    }
+  }
+}
+
+type BombCtx<'a> = (BombEmitter, DefaultCache<'a, BombLexer<'a>>);
+
+#[test]
+fn r9_settle_path_span_clone_inventory() {
+  // The inventory of every `L::Span::clone` the scan path performs, pinned rather than printed.
+  //
+  // Two jobs. It is the calibration the cells below arm against, so they name an index that was
+  // measured. And it is a rail with teeth on the discipline itself: a clone that appears in the
+  // settle path — or one that moves — changes this list, so the diff that introduces it has to
+  // look at the windows the cells cover instead of discovering them later.
+  //
+  // READ THIS BEFORE ASSUMING IT ONLY GUARDS ADDITION. The rail is **two-directional**: the
+  // second assertion below pins an ABSENCE. There is no seventh clone on the
+  // `sync_through`-to-end-of-input path, and there must not be one, because the restore MOVES the
+  // snapshot's span instead of borrowing it — that is what deleted a caller-code step from inside
+  // an exit settle rather than defending it. A count rail that only fired on growth would let
+  // that regress silently the day someone reintroduces `(&snapshot.span).into()`.
+  use generic_arraydeque::typenum::U3;
+
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut emitter = BombEmitter::default();
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+  let _ = inp.peek::<U3>().unwrap();
+
+  arm_span_clone(0);
+  let _ = inp.sync_to(|_| false, || None);
+  disarm_span_clone();
+  assert_eq!(
+    span_clone_log(),
+    std::vec![(1, 0, 0), (2, 0, 2), (3, 3, 5), (4, 6, 8), (5, 9, 11)],
+    "warm `sync_to` span-clone inventory moved: #1 is `skip_until`'s entry frontier and each of \
+     #2..#5 is one skipped token's report clone, taken AFTER the adopt. If a clone appears \
+     before an adopt again, the token it belongs to is in neither the scope nor the frontier for \
+     the length of it — re-read `skip_and_report` and re-arm \
+     `r9_f3_panicking_report_span_clone_does_not_lose_a_token`."
+  );
+
+  let mut emitter2 = BombEmitter::default();
+  let mut input2 = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  );
+  let mut inp2 = input2.as_ref(&mut emitter2);
+  arm_span_clone(0);
+  let _ = inp2.sync_through(|_| false, || None);
+  disarm_span_clone();
+  assert_eq!(
+    span_clone_log(),
+    std::vec![
+      (1, 0, 0),
+      (2, 0, 0),
+      (3, 0, 2),
+      (4, 3, 5),
+      (5, 6, 8),
+      (6, 9, 11)
+    ],
+    "cold `sync_through`-to-end-of-input span-clone inventory moved: #1 is the entry \
+     `ThroughEntry`, #2 `skip_until`'s frontier, #3..#6 the four report clones. This assertion \
+     PINS AN ABSENCE as much as a count: there is deliberately no seventh clone, because the \
+     end-of-input restore MOVES the snapshot's span rather than borrowing it and so clones no \
+     span at all. A seventh entry means the restore is cloning again — a caller-code step back \
+     inside an exit settle, which is the window this round deleted rather than defended."
+  );
+}
+
+/// What the settle-path cells read back: the committed span, the tokens still reachable, the
+/// total lexing work, the surviving emissions, the outstanding marks, and the poison latch.
+#[derive(Debug, PartialEq, Eq)]
+struct AfterSettle {
+  committed: (usize, usize),
+  drained: std::vec::Vec<(usize, usize)>,
+  scans: usize,
+  emissions: usize,
+  live_rows: usize,
+  poisoned: bool,
+}
+
+#[test]
+fn r9_f3_panicking_report_span_clone_does_not_lose_a_token() {
+  // F3 — the round's own defect one window deeper. `skip_and_report` clones the span for the
+  // report BEFORE adopting the token into the frontier, and `L::Span::clone` is caller code. In
+  // a warm-cache `sync_to` the token has already been popped out of the cache and out of the
+  // scope's `in_flight`, so an unwind there leaves it in neither: the committing drop can only
+  // commit the PREVIOUS frontier, and the token is gone from the stream with the committed
+  // position standing behind it — unaccounted for.
+  //
+  // The armed clone is #3, which the probe above identifies as the report clone of the SECOND
+  // skipped token: #1 is `skip_until`'s entry frontier and #2 the first token's report.
+  use generic_arraydeque::typenum::U3;
+
+  let tally = BombTally::default();
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut emitter = BombEmitter::default();
+  let mut input =
+    Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache("ab cd ef gh", tally, cache);
+  let mut inp = input.as_ref(&mut emitter);
+  let _ = inp.peek::<U3>().unwrap();
+
+  arm_span_clone(3);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.sync_to(|_| false, || None);
+  }));
+  disarm_span_clone();
+  assert!(caught.is_err(), "the armed span clone must have panicked");
+
+  let committed = {
+    let s = inp.span();
+    (s.start, s.end)
+  };
+  let mut drained = std::vec::Vec::new();
+  while let Ok(Some(t)) = inp.next() {
+    let s = t.span_ref();
+    drained.push((s.start, s.end));
+  }
+
+  assert_eq!(
+    AfterSettle {
+      committed,
+      drained,
+      scans: inp.state().scanned,
+      emissions: inp.emitter().emissions,
+      live_rows: inp.emitter().live_rows(),
+      poisoned: false,
+    },
+    AfterSettle {
+      // The token whose report clone panicked is behind the committed position: it was skipped,
+      // not lost. Before the adopt was hoisted this read (0, 2) — the frontier one token back,
+      // with `cd` gone from the stream and accounted for nowhere.
+      committed: (3, 5),
+      drained: std::vec![(6, 8), (9, 11)],
+      scans: 4,
+      emissions: 1,
+      live_rows: 0,
+      poisoned: false,
+    },
+    "a panicking report-span clone must leave the token behind the frontier the committing \
+     unwind edge commits at — no fallible caller code between taking the token and recording it"
+  );
+}
+
+#[test]
+fn r9_f1_rewinding_unwind_restores_the_poison_boundary() {
+  // F1 — a limit trip latches the poison boundary inside `classify`, BEFORE its diagnostic is
+  // emitted. If the diagnostic path then panics, the rewinding scan restores span, state, the
+  // dedup watermark and the emitter mark — and leaves the freshly latched boundary standing, so
+  // the input is poisoned at a position the rewound lineage never reached, with no diagnostic to
+  // show for it. `ThroughEntry` snapshots four facts; the boundary was the fifth.
+  let tally = BombTally {
+    scanned: 0,
+    limit: 1,
+  };
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut emitter = BombEmitter::panicking();
+  let mut input =
+    Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache("ab cd ef gh", tally, cache);
+  let mut inp = input.as_ref(&mut emitter);
+
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.sync_through(|_| false, || None);
+  }));
+  assert!(
+    caught.is_err(),
+    "the emitter's diagnostic path must have panicked"
+  );
+
+  assert!(
+    !inp.is_poisoned(),
+    "the rewinding unwind edge left the poison boundary latched: the scan was rewound to entry, \
+     so the trip that latched it is un-made and the boundary describes a position no committed \
+     lineage ever reached"
+  );
+  assert_eq!(
+    inp.emitter().live_rows(),
+    0,
+    "and the entry mark was still settled exactly once"
+  );
+}
+
+#[test]
+fn r9_f2_panicking_eof_settle_still_settles_the_mark() {
+  // F2 — the end-of-input arm takes the snapshot out of the scope BEFORE `M::on_eof`, and
+  // `on_eof` runs caller code. A panic there found the scope already disarmed, so `Drop` had
+  // nothing left to settle with and the mark was stranded.
+  //
+  // The armed step is `Lexer::into_state`, which `on_eof` calls exactly once per scan — no
+  // calibration, and nothing in the contract forbids it panicking. The mark at risk is the
+  // Partial entry a COMMITTING mode captures: `skip_while` over a sealed partial input reaches
+  // end of input holding one.
+  //
+  // (The rewinding modes' own end-of-input settle no longer clones anything at all: its last
+  // caller-code step, the emitter cursor's `L::Offset::clone`, moved out to the entry capture.
+  // This note used to say that step could not be armed because every in-tree `Offset` is
+  // `usize` — `BombOffset` is that missing witness, and
+  // `r9_restore_entry_is_atomic_at_every_offset_clone` is the measurement it made possible.)
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut emitter = BombEmitter::default();
+  let mut input =
+    Input::<BombLexer<'_>, BombCtx<'_>, (), crate::input::Partial>::with_state_and_cache(
+      "ab cd ef gh",
+      BombTally::default(),
+      cache,
+    );
+  input.seal();
+  let mut inp = input.as_ref(&mut emitter);
+
+  arm_into_state(true);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.skip_while(|_| true);
+  }));
+  arm_into_state(false);
+  assert!(
+    caught.is_err(),
+    "the armed step inside the end-of-input settle must have panicked"
+  );
+
+  assert_eq!(
+    inp.emitter().live_rows(),
+    0,
+    "a panic inside the end-of-input settle must still settle the mark the scan captured — the \
+     scope keeps a copy of it beside the snapshot precisely so a settle that unwinds part-way \
+     leaves nothing outstanding"
+  );
+}
+
+// ── The stop exit's own handover window (Codex, second pass) ────────────────────
+//
+// `ScanMode::on_stop` fuses TWO handovers: it settles the stopping token (for a `to`-shaped mode,
+// back into the stream through the public `Cache::push_front`) and then commits the frontier. Both
+// were handed to it before the scope was disarmed, so a panic in the first one took the second
+// down with it: the diagnosed prefix was never committed, the position stayed at entry, and a
+// catching host that retried re-lexed and re-diagnosed the whole prefix.
+
+thread_local! {
+  /// Arms the cache's `push_front`, which is what `unconsume` — and therefore a `to`-shaped
+  /// stop — reaches. It is public trait code and nothing makes it infallible.
+  static PUSH_FRONT_BOMB: Cell<bool> = const { Cell::new(false) };
+}
+
+fn arm_push_front(on: bool) {
+  PUSH_FRONT_BOMB.with(|c| c.set(on));
+}
+
+/// A capacity-3 ring with an armable `push_front`, standing in for `DefaultCache`.
+struct BombCache<'a, L>
+where
+  L: crate::Lexer<'a>,
+{
+  items: std::collections::VecDeque<crate::cache::CachedTokenOf<'a, L>>,
+}
+
+impl<'a, L, Lang: ?Sized> crate::cache::Cache<'a, L, Lang> for BombCache<'a, L>
+where
+  L: crate::Lexer<'a>,
+{
+  type Options = ();
+
+  const RETAINS_FRONT: bool = true;
+
+  fn new() -> Self {
+    Self {
+      items: std::collections::VecDeque::with_capacity(3),
+    }
+  }
+
+  fn with_options((): ()) -> Self {
+    <Self as crate::cache::Cache<'a, L, Lang>>::new()
+  }
+
+  fn len(&self) -> usize {
+    self.items.len()
+  }
+
+  fn remaining(&self) -> usize {
+    3 - self.items.len()
+  }
+
+  fn push_front(
+    &mut self,
+    tok: crate::cache::CachedTokenOf<'a, L>,
+  ) -> Result<crate::cache::CachedTokenRefOf<'_, 'a, L>, crate::cache::CachedTokenOf<'a, L>> {
+    assert!(
+      !PUSH_FRONT_BOMB.with(Cell::get),
+      "R9 stop-exit: the armed `Cache::push_front` panics"
+    );
+    if self.items.len() == 3 {
+      return Err(tok);
+    }
+    self.items.push_front(tok);
+    Ok(self.items.front().expect("just pushed").as_ref())
+  }
+
+  fn push_back(
+    &mut self,
+    tok: crate::cache::CachedTokenOf<'a, L>,
+  ) -> Result<crate::cache::CachedTokenRefOf<'_, 'a, L>, crate::cache::CachedTokenOf<'a, L>> {
+    if self.items.len() == 3 {
+      return Err(tok);
+    }
+    self.items.push_back(tok);
+    Ok(self.items.back().expect("just pushed").as_ref())
+  }
+
+  fn pop_front(&mut self) -> Option<crate::cache::CachedTokenOf<'a, L>> {
+    self.items.pop_front()
+  }
+
+  fn pop_back(&mut self) -> Option<crate::cache::CachedTokenOf<'a, L>> {
+    self.items.pop_back()
+  }
+
+  fn clear(&mut self) {
+    self.items.clear();
+  }
+
+  fn peek<'p, W>(
+    &'p self,
+    buf: &mut generic_arraydeque::GenericArrayDeque<
+      crate::cache::MaybeRefCachedTokenOf<'p, 'a, L>,
+      W::CAPACITY,
+    >,
+  ) where
+    W: crate::Window,
+  {
+    let fill = buf.remaining_capacity().min(self.items.len());
+    for tok in self.items.iter().take(fill) {
+      buf.push_back(mayber::Maybe::Ref(tok.as_ref()));
+    }
+  }
+
+  fn front(&self) -> Option<crate::cache::CachedTokenRefOf<'_, 'a, L>> {
+    self.items.front().map(crate::cache::CachedToken::as_ref)
+  }
+
+  fn back(&self) -> Option<crate::cache::CachedTokenRefOf<'_, 'a, L>> {
+    self.items.back().map(crate::cache::CachedToken::as_ref)
+  }
+}
+
+type BombCacheCtx<'a> = (BombEmitter, BombCache<'a, BombLexer<'a>>);
+
+#[test]
+fn r9_stop_exit_panic_still_commits_the_diagnosed_prefix() {
+  // A warm `sync_to` that skips two tokens (diagnosing each) and then STOPS on the third, with
+  // the `push_front` its stop settle reaches armed to panic. The host catches and retries — which
+  // is the whole point: what a retry sees is what this defect costs.
+  //
+  // The stopping token is swallowed by the panicking `push_front` and nothing can un-swallow it.
+  // What must survive is everything else: the two diagnosed skips stay committed, so the retry
+  // resumes AFTER them, re-lexes the stopper, and adds no second copy of their diagnostics.
+  use generic_arraydeque::typenum::U3;
+
+  let cache = <BombCache<'_, BombLexer<'_>> as crate::cache::Cache<'_, BombLexer<'_>, ()>>::new();
+  let mut emitter = BombEmitter::default();
+  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+  let _ = inp.peek::<U3>().unwrap();
+
+  arm_push_front(true);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.sync_to(|t| t.span_ref().start >= 6, || None);
+  }));
+  arm_push_front(false);
+  assert!(
+    caught.is_err(),
+    "the armed `push_front` inside the stop settle must have panicked"
+  );
+
+  let committed_after_panic = {
+    let s = inp.span();
+    (s.start, s.end)
+  };
+  let emissions_after_panic = inp.emitter().emissions;
+
+  // The retry a catching host performs.
+  let retry = inp.sync_to(|t| t.span_ref().start >= 6, || None);
+  assert!(retry.is_ok(), "the retry itself must not error");
+
+  assert_eq!(
+    (
+      committed_after_panic,
+      emissions_after_panic,
+      inp.emitter().emissions,
+      inp.emitter().live_rows(),
+    ),
+    ((3, 5), 2, 2, 0),
+    "a panic inside the stop settle must leave the diagnosed prefix COMMITTED: the position \
+     stands at the last skipped token, the two skip diagnostics stay at two, and the retry \
+     resumes past them instead of re-lexing and re-diagnosing the whole prefix"
+  );
+}
+
+/// Drives one rewinding mode to a stop and returns `(releases, rewinds, live_rows)`.
+///
+/// Both members, not one: naming a cell for the CLASS and instantiating a single member is how
+/// the mode-versus-exit defect survived a round. `SyncThrough` and `SyncBalanced` are the class,
+/// and they are exactly the two whose stop dispositions differ from their end-of-input ones.
+fn rewinding_stop_settles(balanced: bool) -> (usize, usize, usize) {
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut emitter = BombEmitter::default();
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+
+  if balanced {
+    use crate::input::Balance;
+    let hole = inp
+      .sync_balanced(
+        |_k: &BombKind| Balance::<char>::Neutral,
+        |t| t.span_ref().start >= 6,
+      )
+      .expect("the sync itself must not error");
+    assert!(hole.is_some(), "the balanced scan found its target");
+  } else {
+    let found = inp
+      .sync_through(|t| t.span_ref().start >= 6, || None)
+      .expect("the sync itself must not error");
+    assert!(found.is_some(), "the scan found its target");
+  }
+  (
+    inp.emitter().releases,
+    inp.emitter().rewinds,
+    inp.emitter().live_rows(),
+  )
+}
+
+/// The same over a scan that matches nothing and reaches end of input.
+fn rewinding_no_match_settles(balanced: bool) -> (usize, usize, usize) {
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut emitter = BombEmitter::default();
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+
+  if balanced {
+    use crate::input::Balance;
+    let hole = inp
+      .sync_balanced(|_k: &BombKind| Balance::<char>::Neutral, |_| false)
+      .expect("the sync itself must not error");
+    assert!(hole.is_none(), "nothing matched");
+  } else {
+    let found = inp
+      .sync_through(|_| false, || None)
+      .expect("the sync itself must not error");
+    assert!(found.is_none(), "nothing matched");
+  }
+  (
+    inp.emitter().releases,
+    inp.emitter().rewinds,
+    inp.emitter().live_rows(),
+  )
+}
+
+#[test]
+fn r9_rewinding_stop_settles_its_entry_mark_exactly_once() {
+  // On the stop path, is a rewinding mode's entry mark settled EXACTLY once? A live-row count
+  // cannot answer it — a second release removes nothing and reads clean — so the emitter counts
+  // settle CALLS instead. Run over BOTH rewinding modes.
+  //
+  // One capture, one settle, and the settle is a release (the stop kept its progress), with the
+  // scope's stranded-mark fallback contributing nothing because the exit finished.
+  for balanced in [false, true] {
+    assert_eq!(
+      rewinding_stop_settles(balanced),
+      (1, 0, 0),
+      "a rewinding stop settles its entry mark exactly once, by release — not twice, and not by \
+       rewind (the stop kept its progress). balanced = {balanced}"
+    );
+  }
+}
+
+#[test]
+fn r9_rewinding_no_match_settles_its_entry_mark_exactly_once() {
+  // The dual: the no-match end-of-input exit spends the same mark by rewinding to it, once —
+  // and again over both members, since this is the exit where their dispositions AGREE and the
+  // pair is what shows that the stop exit's disagreement is real rather than an artefact.
+  for balanced in [false, true] {
+    assert_eq!(
+      rewinding_no_match_settles(balanced),
+      (0, 1, 0),
+      "a rewinding no-match exit settles its entry mark exactly once, by rewind. \
+       balanced = {balanced}"
+    );
+  }
+}
+
+#[test]
+fn r9_balanced_stop_exit_panic_keeps_the_prefix_like_its_own_stop_does() {
+  // The two axes cross at exactly one mode. `SyncBalanced` REWINDS at end of input
+  // (`HOLDS_ENTRY`) and COMMITS the frontier on a stop (`COMMITS_FRONTIER_ON_STOP`) — so a guard
+  // that branches on the mode alone gives its stop exit the wrong disposition: the normal stop
+  // keeps the diagnosed prefix and the interrupted stop throws it away, and a catching host
+  // re-scans work the stop decision had already classified as kept.
+  //
+  // Disposition belongs to the EXIT, not the mode, and this is the mode that proves it.
+  use crate::input::Balance;
+  use generic_arraydeque::typenum::U3;
+
+  let cache = <BombCache<'_, BombLexer<'_>> as crate::cache::Cache<'_, BombLexer<'_>, ()>>::new();
+  let mut emitter = BombEmitter::default();
+  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+  reset_lex_calls();
+  let _ = inp.peek::<U3>().unwrap();
+
+  arm_push_front(true);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.sync_balanced(
+      |_k: &BombKind| Balance::<char>::Neutral,
+      |t| t.span_ref().start >= 6,
+    );
+  }));
+  arm_push_front(false);
+  assert!(
+    caught.is_err(),
+    "the armed `push_front` inside the balanced stop settle must have panicked"
+  );
+
+  let committed_after_panic = {
+    let s = inp.span();
+    (s.start, s.end)
+  };
+
+  // The retry a catching host performs.
+  let retry = inp.sync_balanced(
+    |_k: &BombKind| Balance::<char>::Neutral,
+    |t| t.span_ref().start >= 6,
+  );
+  assert!(retry.is_ok(), "the retry itself must not error");
+
+  assert_eq!(
+    (
+      committed_after_panic,
+      lex_calls(),
+      inp.emitter().live_rows()
+    ),
+    ((3, 5), 4, 0),
+    "a balanced stop interrupted mid-settle must keep the prefix its own stop exit keeps: the \
+     position stands at the last skipped token and the retry re-lexes only the swallowed \
+     stopper. Rewinding to entry instead throws away work the stop had already classified as \
+     kept, and the retry re-scans the whole prefix."
+  );
+}
+
+/// Drives a stop on the **second** of three prefilled cache entries with `push_front` armed, then
+/// drains. Returns `(committed span after the catch, the tokens the retry can still reach)`.
+///
+/// The cache position is the whole point. When the stopper is the LAST resident entry, losing it
+/// self-heals: nothing younger is retained, so `cursor()` falls back to the committed position and
+/// re-lexing meets the token again. When something younger IS retained, the committed position and
+/// the cache front are no longer adjacent — the retry reads the younger entry and the swallowed
+/// token is skipped with no signal at all. The earlier cells stopped on the last entry, which is
+/// exactly the position where the hole cannot manifest.
+fn stop_mid_cache_then_drain(balanced: bool) -> ((usize, usize), std::vec::Vec<(usize, usize)>) {
+  use generic_arraydeque::typenum::U3;
+
+  let cache = <BombCache<'_, BombLexer<'_>> as crate::cache::Cache<'_, BombLexer<'_>, ()>>::new();
+  let mut emitter = BombEmitter::default();
+  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+  // Three resident: (0,2) (3,5) (6,8). The scan skips the first and stops on the second, so (6,8)
+  // is still retained when the stop settle panics.
+  let _ = inp.peek::<U3>().unwrap();
+
+  arm_push_front(true);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    if balanced {
+      use crate::input::Balance;
+      let _ = inp.sync_balanced(
+        |_k: &BombKind| Balance::<char>::Neutral,
+        |t| t.span_ref().start >= 3,
+      );
+    } else {
+      let _ = inp.sync_to(|t| t.span_ref().start >= 3, || None);
+    }
+  }));
+  arm_push_front(false);
+  assert!(
+    caught.is_err(),
+    "the armed `push_front` inside the stop settle must have panicked"
+  );
+
+  let committed = {
+    let s = inp.span();
+    (s.start, s.end)
+  };
+  let mut drained = std::vec::Vec::new();
+  while let Ok(Some(t)) = inp.next() {
+    let s = t.span_ref();
+    drained.push((s.start, s.end));
+  }
+  (committed, drained)
+}
+
+#[test]
+fn r9_stop_mid_cache_panic_does_not_skip_the_swallowed_token() {
+  // The reachable half of the same class: a stop settle that panics with a younger cache suffix
+  // still resident. The token the settle swallowed is not lost from the STREAM — the committed
+  // position is still behind it, so re-lexing reproduces it — but only if nothing stale sits in
+  // front of that position. The retained suffix is exactly that stale thing.
+  for balanced in [false, true] {
+    assert_eq!(
+      stop_mid_cache_then_drain(balanced),
+      ((0, 2), std::vec![(3, 5), (6, 8), (9, 11)]),
+      "a stop settle interrupted mid-handover must leave the stream contiguous with the \
+       committed position, so the retry meets the swallowed token again instead of resuming at \
+       the younger cache entry and skipping it silently. balanced = {balanced}"
+    );
+  }
+}
+
+/// Interrupts the **frontier commit** at the stop exit of a rewinding mode. `commit_at` writes
+/// `*ir.state = frontier.state`, and that assignment drops the state it replaces — caller code,
+/// inside the commit, and aimable by count.
+///
+/// Returns `(committed span, surviving emissions, surviving per-token settles, live marks)`.
+fn frontier_commit_interrupted(at: usize) -> ((usize, usize), usize, usize, usize) {
+  frontier_commit_interrupted_in(at, true).0
+}
+
+/// The same over either family, and additionally reporting the committed **lexer state** — the
+/// half of the position pair a torn `commit_at` leaves behind.
+fn frontier_commit_interrupted_in(
+  at: usize,
+  balanced: bool,
+) -> (((usize, usize), usize, usize, usize), usize) {
+  use generic_arraydeque::typenum::U3;
+
+  let cache = <BombCache<'_, BombLexer<'_>> as crate::cache::Cache<'_, BombLexer<'_>, ()>>::new();
+  let mut emitter = BombEmitter::default();
+  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+  let _ = inp.peek::<U3>().unwrap();
+
+  arm_state_drop(at);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    if balanced {
+      let _ = inp.sync_balanced(
+        |_k: &BombKind| crate::input::Balance::<char>::Neutral,
+        |t| t.span_ref().start >= 3,
+      );
+    } else {
+      let _ = inp.sync_to(|t| t.span_ref().start >= 3, || None);
+    }
+  }));
+  disarm_state_drop();
+  assert!(caught.is_err(), "the armed state drop must have panicked");
+
+  let s = inp.span();
+  (
+    (
+      (s.start, s.end),
+      inp.emitter().emissions,
+      inp.emitter().commits.len(),
+      inp.emitter().live_rows(),
+    ),
+    inp.state().scanned,
+  )
+}
+
+#[test]
+fn r9_frontier_commit_interrupted_abandons_rather_than_half_keeping() {
+  // The other half of the class, and the half a sticky flag cannot express. At the stop exit the
+  // frontier leaves the scope one statement before `commit_at` records it, so the scope's ability
+  // to complete the keep changes *during* the exit.
+  //
+  // NOTE ON WHAT THIS ARMS, corrected after the pair-tearing class was stated properly: the
+  // armed step is the drop of the STATE the commit replaced, which happens after `commit_position`
+  // has installed both halves. So the position it leaves is WHOLE, not torn — this cell is about
+  // the DISPOSITION, not about atomicity, and it cannot observe a tear. (The cell that can is
+  // `r9_adopt_pair_is_never_published_half_written`, which arms the replaced SPAN's drop: the span
+  // is the first half written, so its drop is the unwind site that sits between the two.)
+  //
+  // What an interrupted commit leaves here is a frontier already handed over: the scope can no
+  // longer perform the keep the stop's disposition asked for, and keeping anyway leaves a
+  // rewinding mode's per-token settles describing a prefix the position does not cover, which a
+  // retry duplicates. Abandoning rewinds them, which is what a rewinding mode's posture is for.
+  //
+  // Measured both ways: with the frontier clause the reading is the restore below; without it the
+  // scope keeps the torn state and reads ((0, 2), 0, 1, 0).
+  assert_eq!(
+    frontier_commit_interrupted(2),
+    ((0, 0), 0, 0, 0),
+    "an interrupted frontier commit must abandon: position restored, the scan's emissions and \
+     per-token settles rewound with the mark, nothing outstanding"
+  );
+}
+
+#[test]
+fn r9_state_drop_inventory() {
+  // Calibration for the cell above, pinned rather than printed. Drop #2 is the one `commit_at`
+  // performs; #1 is earlier in the exit and #3 later, and both read as an untorn outcome. If the
+  // sequence moves, the cell is arming a different window and this says so instead of letting it
+  // pass on the wrong one.
+  assert_eq!(
+    (
+      frontier_commit_interrupted(1),
+      frontier_commit_interrupted(3)
+    ),
+    (((0, 0), 0, 0, 0), ((0, 2), 0, 1, 0)),
+    "the stop exit's `L::State` drop sequence moved; re-aim \
+     `r9_frontier_commit_interrupted_abandons_rather_than_half_keeping`"
+  );
+}
+
+/// Drives a committing scan to end of input with `Lexer::into_state` armed — the caller code
+/// that `SyncTo::on_eof` used to run BETWEEN the two halves of the position write — and reports
+/// `(committed span, committed state's tally)`.
+fn eof_commit_interrupted() -> ((usize, usize), usize) {
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut emitter = BombEmitter::default();
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+
+  arm_into_state(true);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.skip_while(|_| true);
+  }));
+  arm_into_state(false);
+  assert!(caught.is_err(), "the armed `into_state` must have panicked");
+
+  let sp = inp.span();
+  ((sp.start, sp.end), inp.state().scanned)
+}
+
+#[test]
+fn r9_committing_eof_commit_is_atomic_in_span_and_state() {
+  // The committing modes have no snapshot, so nothing can restore them — which makes the ATOMICITY
+  // of the position write their only protection. `SyncTo::on_eof` wrote the span from
+  // `lexer.span()` and then ran `lexer.into_state()`, and both are caller code with one of them
+  // BETWEEN the two halves of the pair.
+  //
+  // Interrupted there it left `span = (11, 11)` — the lexer's end — paired with the ENTRY state,
+  // tally 0. A host that catches and resumes then lexes from offset 11 under a state that has seen
+  // nothing: silent stream corruption, and only for stateful lexers, which is the population least
+  // able to notice. The span and the state must move together or not at all.
+  assert_eq!(
+    eof_commit_interrupted(),
+    ((0, 0), 0),
+    "an interrupted end-of-input commit must leave the position pair WHOLE: both halves are \
+     computed before either is written, so an unwind in the caller code that produces them lands \
+     with nothing written at all"
+  );
+}
+
+/// A consume whose committed-token **observer** panics, on a warm cache. `driver` picks which
+/// consume surface. Returns the tokens the input can still reach afterwards.
+fn observer_panic_then_drain(driver: u8) -> (std::vec::Vec<(usize, usize)>, (usize, usize)) {
+  use generic_arraydeque::typenum::U3;
+
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut emitter = BombEmitter {
+    panic_on_commit_token: true,
+    ..BombEmitter::default()
+  };
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+  // Three resident, so the token the consume takes has a younger suffix behind it.
+  let _ = inp.peek::<U3>().unwrap();
+
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match driver {
+    0 => {
+      let _ = inp.next();
+    }
+    1 => {
+      let _ = inp.try_expect(|_| true);
+    }
+    _ => {
+      let _ = inp.consume_cached_one();
+    }
+  }));
+  assert!(caught.is_err(), "the armed observer must have panicked");
+  inp.emitter().panic_on_commit_token = false;
+
+  let committed = {
+    let s = inp.span();
+    (s.start, s.end)
+  };
+  let mut drained = std::vec::Vec::new();
+  while let Ok(Some(t)) = inp.next() {
+    let s = t.span_ref();
+    drained.push((s.start, s.end));
+  }
+  (drained, committed)
+}
+
+#[test]
+fn r9_observer_panic_on_a_cache_hit_does_not_skip_the_token() {
+  // `commit_token` invokes the observer and then publishes the position. On a CACHE-HIT consume
+  // that order is wrong in the one way that matters: the token has already been popped off the
+  // front stream before `commit_token` is called, so a panicking observer leaves the position
+  // behind a token the stream no longer holds, with younger entries still resident in front of
+  // it. `cursor()` then reads the younger entry and the token is skipped in silence.
+  //
+  // Note this is the OPPOSITE ordering from the one that is right when nothing has been removed
+  // yet: there, notifying first means a panicking observer publishes nothing. On the consume
+  // surface the removal has already happened, so publishing the position is what accounts for it —
+  // and a missing observer notification is a documented contract violation rather than a lost
+  // token.
+  for driver in 0u8..=2 {
+    assert_eq!(
+      observer_panic_then_drain(driver),
+      (std::vec![(3, 5), (6, 8), (9, 11)], (0, 2)),
+      "a panicking committed-token observer must leave the position ACCOUNTING for the token \
+       the consume had already taken off the front stream. The drain reads the same either way \
+       — the token is gone from the cache regardless — so the committed span is the \
+       discriminator: at (0, 0) it names a position the stream no longer starts at, and the \
+       token has vanished into the gap (driver {driver})"
+    );
+  }
+}
+
+/// Interrupts `AtFrontier::adopt` by arming the drop of the span it REPLACES — the unwind site
+/// that sits between adopt's two assignments. Returns `(committed span, committed tally)`.
+fn adopt_span_drop_interrupted(at: usize) -> ((usize, usize), usize, usize) {
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut emitter = BombEmitter::default();
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+
+  arm_span_drop(at);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.skip_while(|_| true);
+  }));
+  disarm_span_drop();
+  assert!(caught.is_err(), "the armed span drop must have panicked");
+
+  let s = inp.span();
+  (
+    (s.start, s.end),
+    inp.state().scanned,
+    inp.emitter().commits.len(),
+  )
+}
+
+#[test]
+fn r9_adopt_pair_is_never_published_half_written() {
+  // `AtFrontier::adopt` writes the scan's OWN span/state pair, and a committing mode's unwind
+  // edge commits that frontier — so a tear there reaches the input as one token's span beside the
+  // previous token's lexer state.
+  //
+  // The payload has to arm the drop of the span being REPLACED. An assignment installs its new
+  // value and then drops the old one, so the replaced span's `Drop` is an unwind site sitting
+  // between adopt's two writes; if it unwinds, the state assignment never runs. Arming the STATE
+  // drop instead reaches only the second assignment, which is past both writes — that is a cell
+  // that cannot fail, and it is exactly what an earlier revision of this cell did.
+  //
+  // The assertion is the INVARIANT, not an index: whatever span is committed, the tally beside it
+  // must be the one the lexer had after producing that span. Indices shift when the drop order
+  // changes — which is precisely what the fix does — so pinning them would re-break this cell for
+  // the wrong reason. Before the fix these read span-of-token-N beside the tally after token N-1.
+  for at in 1usize..=6 {
+    let Ok((span, tally, _)) = std::panic::catch_unwind(|| adopt_span_drop_interrupted(at)) else {
+      continue; // that index is not a reachable span drop in this run
+    };
+    let want = match span {
+      (0, 0) => 0,
+      (0, 2) => 1,
+      (3, 5) => 2,
+      (6, 8) => 3,
+      (9, 11) | (11, 11) => 4,
+      other => panic!("unexpected committed span {other:?}"),
+    };
+    assert_eq!(
+      tally, want,
+      "the frontier published a half-written pair when the replaced span's drop at index {at} \
+       panicked: span {span:?} beside tally {tally}, but that span was produced with tally \
+       {want}. Install both halves before letting either replaced value drop."
+    );
+  }
+}
+
+/// A warm-cache consume with the drop of the span it REPLACES armed. Returns
+/// `(committed span, tokens the observer saw)`.
+fn consume_replaced_span_drop(at: usize) -> ((usize, usize), usize) {
+  use generic_arraydeque::typenum::U3;
+
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut emitter = BombEmitter::default();
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+    "ab cd ef gh",
+    BombTally::default(),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+  let _ = inp.peek::<U3>().unwrap();
+
+  arm_span_drop(at);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.next();
+  }));
+  disarm_span_drop();
+  assert!(caught.is_err(), "the armed span drop must have panicked");
+
+  let s = inp.span();
+  ((s.start, s.end), inp.emitter().commits.len())
+}
+
+#[test]
+fn r9_consume_notifies_the_observer_before_the_replaced_pair_drops() {
+  // The other door into the missing-notification hole. `commit_token` publishes the position and
+  // then notifies the committed-token observer — but if it publishes through a helper that drops
+  // the replaced pair before returning, those drops are caller code sitting between the publish
+  // and the notify. A panicking `L::Span::Drop` there leaves the token consumed and the position
+  // advanced with the observer never told: a CST sink or event log silently misses a token that
+  // the input has moved past.
+  //
+  // So the consume holds the replaced pair, notifies, and only then lets it go. Asserted on both
+  // halves at once — the position advanced AND the observer saw it — because either alone passes
+  // for the wrong reason.
+  for at in 1usize..=2 {
+    assert_eq!(
+      consume_replaced_span_drop(at),
+      ((0, 2), 1),
+      "a panicking drop of the replaced span at index {at} must not swallow the observer's \
+       notification: the position advanced past the token, so the observer has to have seen it"
+    );
+  }
+}
+
+#[test]
+fn r9_skip_notifies_the_observer_before_the_adopted_pair_drops() {
+  // The skip path's copy of the notify-before-drop discipline. `skip_and_report` adopts the token
+  // into the frontier and then calls the committed-token observer — but `adopt` drops the pair it
+  // replaced before returning, and those drops are caller code. A panicking replaced-SPAN drop
+  // therefore skips the observer call, while a committing mode's unwind edge still keeps and
+  // commits that frontier: progress published, observer never told.
+  //
+  // Asserted on both halves, because either alone passes for the wrong reason: the frontier must
+  // have advanced to the token AND the observer must have seen it.
+  for at in 1usize..=4 {
+    let Ok((span, tally, seen)) = std::panic::catch_unwind(|| adopt_span_drop_interrupted(at))
+    else {
+      continue;
+    };
+    let want_tally = match span {
+      (0, 0) => 0,
+      (0, 2) => 1,
+      (3, 5) => 2,
+      (6, 8) => 3,
+      (9, 11) | (11, 11) => 4,
+      other => panic!("unexpected committed span {other:?}"),
+    };
+    assert_eq!(
+      (tally, seen),
+      (want_tally, want_tally),
+      "at index {at} the committed span {span:?} was published with tally {tally} and {seen} \\
+       observed settle(s); both must equal {want_tally} — the frontier advanced past tokens the \\
+       observer was never told about"
+    );
+  }
+}
+
+// ── State surgery's own window (Codex, round 12) ────────────────────────────
+
+/// `set_state` re-keys every offset-dependent fact and installs a new `L::State`. Both halves run
+/// caller `Drop` code, and more of it than the site looks like it does: a `CachedToken` carries
+/// `state: L::State`, so the re-key's cache clear and parked-slot clear each drop caller states,
+/// and the state write drops the one it displaced.
+///
+/// So this does not arm one drop and call the site covered — the first ordinal is a *cached*
+/// state, not the replaced one, and arming only it would have passed against a torn body. It
+/// sweeps every ordinal a `set_state` reaches and demands the same five facts at each: state
+/// surgery is all-or-nothing no matter which caller `Drop` fails.
+#[test]
+fn r9_set_state_is_atomic_at_every_caller_drop() {
+  use generic_arraydeque::typenum::U2;
+
+  // One scenario, replayed. `run(None)` counts the caller drops a whole `set_state` performs;
+  // `run(Some(n))` detonates the n-th and returns what a host that caught it can observe.
+  fn run(bomb_at: Option<usize>) -> (usize, usize, usize, usize, bool, bool) {
+    let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+    let mut emitter = BombEmitter::default();
+    let mut input =
+      Input::<BombLexer<'_>, BombCtx<'_>, (), crate::input::Complete>::with_state_and_cache(
+        "ab cd ef gh",
+        BombTally::default(),
+        cache,
+      );
+    let mut inp = input.as_ref(&mut emitter);
+
+    // Give the re-key something to tear down: cached entries, each carrying an `L::State`.
+    let _ = inp.peek::<U2>();
+    assert!(
+      !inp.cache().is_empty(),
+      "the cache must be non-empty or the re-key drops nothing and the sweep proves nothing"
+    );
+
+    arm_state_drop(bomb_at.unwrap_or(0));
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      inp.set_state(BombTally {
+        scanned: 7,
+        limit: 99,
+      });
+    }));
+    disarm_state_drop();
+    let drops = STATE_DROPS.with(Cell::get);
+    assert_eq!(
+      caught.is_err(),
+      bomb_at.is_some(),
+      "the armed drop must panic and the unarmed run must not"
+    );
+    (
+      drops,
+      inp.state().scanned,
+      inp.state().limit,
+      inp.cache().len(),
+      inp.has_front_parked(),
+      inp.is_poisoned(),
+    )
+  }
+
+  let (total, ..) = run(None);
+  assert!(
+    total >= 2,
+    "the sweep needs at least a cached state and the displaced one to be meaningful, saw {total}"
+  );
+
+  for n in 1..=total {
+    let (_, scanned, limit, cached, parked, poisoned) = run(Some(n));
+    assert!(
+      scanned == 7 && limit == 99,
+      "caller drop #{n} of {total}: the new state must be installed whole — `mem::replace` puts \
+       it in before any caller code runs, so no `Drop` failure can leave the old one, or half of \
+       the new one, behind (saw scanned={scanned}, limit={limit})"
+    );
+    assert!(
+      !parked && !poisoned,
+      "caller drop #{n} of {total}: the parked slot and the poison latch are settled by `take()` \
+       before anything can panic, so they are cleared however the re-key ends (parked={parked}, \
+       poisoned={poisoned})"
+    );
+    let _ = cached;
+  }
+}
+
+// ── An armable `L::Offset` (Codex, round 12) ────────────────────────────────
+
+thread_local! {
+  /// `BombOffset::clone` calls since the last arm, and the index that panics (0 = disarmed).
+  static OFFSET_CLONES: Cell<usize> = const { Cell::new(0) };
+  static OFFSET_BOMB: Cell<usize> = const { Cell::new(0) };
+}
+
+fn arm_offset_clone(at: usize) {
+  OFFSET_CLONES.with(|c| c.set(0));
+  OFFSET_BOMB.with(|c| c.set(at));
+}
+
+fn disarm_offset_clone() -> usize {
+  OFFSET_BOMB.with(|c| c.set(0));
+  OFFSET_CLONES.with(Cell::get)
+}
+
+/// An `L::Offset` whose `Clone` can be armed, and the source and lexer needed to reach one.
+///
+/// Every offset the crate ships in-tree is `usize`, so `L::Offset::clone` — caller code that the
+/// settle and restore paths both run — had no witness at all, and the note in
+/// `r9_f2_panicking_eof_settle_still_settles_the_mark` said exactly that. Two rounds of findings
+/// against `restore_entry` were argued on contract grounds for want of this type.
+///
+/// It brings its own `Source` and `Lexer` rather than re-keying `BombLexer`: `str` has a single
+/// `Source<usize>` impl and the crate leans on that being unique for inference, so adding a second
+/// one breaks type resolution in `source` and `completeness` — 44 errors, in production modules,
+/// to buy a test instrument. A private wrapper costs nothing outside this file.
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct BombOffset(usize);
+
+impl Clone for BombOffset {
+  fn clone(&self) -> Self {
+    let n = OFFSET_CLONES.with(|c| {
+      let v = c.get() + 1;
+      c.set(v);
+      v
+    });
+    assert!(
+      n != OFFSET_BOMB.with(Cell::get),
+      "R9 settle-path: the armed `L::Offset` clone (#{n}, at {}) panics",
+      self.0
+    );
+    Self(self.0)
+  }
+}
+
+#[derive(Debug)]
+struct BombSrc<'a>(&'a str);
+
+impl crate::Source<BombOffset> for BombSrc<'_> {
+  type Slice<'source>
+    = &'source str
+  where
+    Self: 'source;
+
+  fn is_empty(&self) -> bool {
+    self.0.is_empty()
+  }
+
+  fn len(&self) -> BombOffset {
+    BombOffset(self.0.len())
+  }
+
+  fn as_slice(&self) -> Self::Slice<'_> {
+    self.0
+  }
+
+  fn slice<R>(&self, range: R) -> Option<Self::Slice<'_>>
+  where
+    R: core::ops::RangeBounds<BombOffset>,
+  {
+    self.0.get((
+      range.start_bound().map(|s| s.0),
+      range.end_bound().map(|s| s.0),
+    ))
+  }
+
+  fn find_boundary(&self, index: BombOffset) -> BombOffset {
+    if index.0 >= self.0.len() {
+      return index;
+    }
+    let mut i = index.0;
+    while !self.0.is_char_boundary(i) {
+      i -= 1;
+    }
+    BombOffset(i)
+  }
+
+  fn is_boundary(&self, index: BombOffset) -> bool {
+    self.0.is_char_boundary(index.0)
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct OffsetSpan {
+  start: BombOffset,
+  end: BombOffset,
+}
+
+impl crate::Span for OffsetSpan {
+  type Offset = BombOffset;
+
+  fn new(start: BombOffset, end: BombOffset) -> Self {
+    Self { start, end }
+  }
+
+  fn into_range(self) -> core::ops::Range<BombOffset> {
+    self.start..self.end
+  }
+
+  fn start_ref(&self) -> &BombOffset {
+    &self.start
+  }
+
+  fn start_mut(&mut self) -> &mut BombOffset {
+    &mut self.start
+  }
+
+  fn into_start(self) -> BombOffset {
+    self.start
+  }
+
+  fn end_ref(&self) -> &BombOffset {
+    &self.end
+  }
+
+  fn end_mut(&mut self) -> &mut BombOffset {
+    &mut self.end
+  }
+
+  fn into_end(self) -> BombOffset {
+    self.end
+  }
+
+  fn bump(&mut self, n: &BombOffset) {
+    self.end.0 += n.0;
+  }
+}
+
+struct OffsetLexer<'a> {
+  src: &'a BombSrc<'a>,
+  start: usize,
+  end: usize,
+  state: BombTally,
+}
+
+impl<'a> crate::Lexer<'a> for OffsetLexer<'a> {
+  type State = BombTally;
+  type Source = BombSrc<'a>;
+  type Token = BombTok;
+  type Span = OffsetSpan;
+  type Offset = BombOffset;
+
+  fn new(src: &'a BombSrc<'a>) -> Self {
+    Self::with_state(src, BombTally::default())
+  }
+
+  fn with_state(src: &'a BombSrc<'a>, state: BombTally) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+
+  fn check(&self) -> Result<(), BombErr> {
+    State::check(&self.state).map_err(BombErr::from)
+  }
+
+  fn state(&self) -> &BombTally {
+    &self.state
+  }
+
+  fn state_mut(&mut self) -> &mut BombTally {
+    &mut self.state
+  }
+
+  fn into_state(self) -> BombTally {
+    self.state
+  }
+
+  fn source(&self) -> &'a BombSrc<'a> {
+    self.src
+  }
+
+  fn span(&self) -> OffsetSpan {
+    OffsetSpan {
+      start: BombOffset(self.start),
+      end: BombOffset(self.end),
+    }
+  }
+
+  fn slice(&self) -> &'a str {
+    &self.src.0[self.start..self.end]
+  }
+
+  fn lex(&mut self) -> Option<Result<BombTok, BombErr>> {
+    let bytes = self.src.0.as_bytes();
+    let mut i = self.end;
+    while i < bytes.len() && bytes[i] == b' ' {
+      i += 1;
+    }
+    if i >= bytes.len() {
+      self.start = i;
+      self.end = i;
+      return None;
+    }
+    self.start = i;
+    while i < bytes.len() && bytes[i] != b' ' {
+      i += 1;
+    }
+    self.end = i;
+    self.state.scanned += 1;
+    if State::check(&self.state).is_err() {
+      return Some(Err(BombErr::Limit));
+    }
+    Some(Ok(BombTok))
+  }
+
+  fn bump(&mut self, n: &BombOffset) {
+    self.end += n.0;
+  }
+}
+
+type OffsetCtx<'a> = (BombEmitter, DefaultCache<'a, OffsetLexer<'a>>);
+
+/// `restore_entry` — the site carried as a disclosed limitation for two rounds, now measured.
+///
+/// A rewinding scan that reaches end of input without matching restores its full entry state and
+/// rewinds the emitter to it. The rewind cursor used to be read back off the input AFTER the
+/// position was written (`self.cursor().clone()`), putting an `L::Offset::clone` between the
+/// position write and the rewind that completes it. A panic there left the input restored with
+/// the mark un-rewound, and `ScanScope::drop` then RELEASED it — so an abandoned scan's
+/// diagnostics became permanent while the parser retried from the restored position.
+///
+/// The read now comes off the entry's own span end, hoisted above every mutation. This sweeps
+/// every offset clone the call performs and demands the same outcome at each: no stranded mark,
+/// and a position that is either fully restored or never moved — never one with the other's half.
+#[test]
+fn r9_restore_entry_is_atomic_at_every_offset_clone() {
+  fn run(bomb_at: Option<usize>) -> (usize, usize, usize, usize) {
+    let src = BombSrc("ab cd ef gh");
+    let cache = DefaultCache::<'_, OffsetLexer<'_>>::default();
+    let mut emitter = BombEmitter::default();
+    let mut input =
+      Input::<OffsetLexer<'_>, OffsetCtx<'_>, (), crate::input::Complete>::with_state_and_cache(
+        &src,
+        BombTally::default(),
+        cache,
+      );
+    let mut inp = input.as_ref(&mut emitter);
+
+    arm_offset_clone(bomb_at.unwrap_or(0));
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      // Never matches, so the scan skips (and diagnoses) every token and leaves through the
+      // end-of-input arm — the one exit that reaches `restore_entry`.
+      let _ = inp.sync_through(|_| false, || None);
+    }));
+    let clones = disarm_offset_clone();
+    assert_eq!(
+      caught.is_err(),
+      bomb_at.is_some(),
+      "the armed clone must panic and the unarmed run must not"
+    );
+    let resumed = inp.cursor().as_inner().0;
+    let em = inp.emitter();
+    (clones, resumed, em.live_rows(), em.emissions)
+  }
+
+  let (total, resumed, live, emissions) = run(None);
+  assert!(
+    total >= 2,
+    "the sweep needs several offset clones to be meaningful, saw {total}"
+  );
+  assert!(
+    resumed == 0 && live == 0 && emissions == 0,
+    "the clean run must restore to the entry position, strand nothing, and rewind away every \
+     diagnostic the abandoned scan made (at {resumed}, {live} live, {emissions} emissions)"
+  );
+
+  for n in 1..=total {
+    let (_, resumed, live, emissions) = run(Some(n));
+    assert!(
+      live == 0,
+      "offset clone #{n} of {total}: the entry mark must be settled exactly once however the \
+       call unwinds — a stranded mark is the emitter holding a branch nobody will ever rewind \
+       or release ({live} left live)"
+    );
+    assert!(
+      resumed == 0,
+      "offset clone #{n} of {total}: the scan committed nothing, so a caught panic must leave \
+       the position at entry (resumed at {resumed})"
+    );
+    // The one that matters, and the one a position check alone cannot see. A mark settled by
+    // RELEASE instead of by REWIND leaves the input correctly rewound and the emitter still
+    // holding the abandoned scan's diagnostics — same position, same live-row count, permanently
+    // wrong log. Only the emission count separates them.
+    assert!(
+      emissions == 0,
+      "offset clone #{n} of {total}: the abandoned scan's diagnostics must be REWOUND away, not \
+       released — {emissions} survived. The rewind cursor must be captured with the entry, \
+       before the mark exists; any fallible step inside `restore_entry` skips the rewind and \
+       `ScanScope::drop` then releases the mark, making an abandoned branch's output permanent"
+    );
+  }
+}
+
+// ── The whole restore, not its tail (Codex, round 13) ───────────────────────
+
+/// `restore_unchecked` is the body four consecutive rounds each found something in. This is the
+/// measurement for its phase-separated form.
+///
+/// A checkpoint rollback is all-or-nothing, so the assertion is exactly that: for every armed
+/// caller `Drop`, the input must end up **either fully restored or fully unchanged**, never
+/// between. That is stronger than the split check this cell used to make, which only looked at
+/// one pairing (emitter rewound, position not) and so read clean against the eviction hazard.
+///
+/// The fixture leaves **resident post-save cache entries** — the previous one drained to end of
+/// input, which left the tail prune with nothing to pop and the round-14 hazard unexercised.
+/// Each resident entry is a `CachedToken` owning an `L::State`, so pruning it runs caller code.
+///
+/// What this cell does and does not guard, plainly:
+///
+/// - **Armed and asserted**: every `L::State::drop` the rollback performs (three of them here,
+///   from the evicted entries and the replaced pair) must leave the input all-or-nothing, and the
+///   body must perform zero `L::Span` clones. Both hold.
+/// - **NOT demonstrated**: that this cell catches an eviction moved BELOW the phase boundary. I
+///   relocated the tail prune and `reconcile_cache_geometry` in turn and no observable moved —
+///   the two evictors are interchangeable here (whichever runs first drains the cache, and the
+///   other then finds `survivors == 0`), and I could not build a fixture that separates them. So
+///   the phase ordering is guarded by the RAIL, whose teeth are demonstrated on all three
+///   eviction shapes, and not by this cell. It is a regression guard on the property, not on the
+///   ordering that produces it.
+/// - **Held by construction, not measured**: the parked slot's drop, unreachable because
+///   `DefaultCache` accepts a front push so nothing ever parks; and the abandoned session points'
+///   `Checkpoint` drops, which need a nested point stack this fixture does not build.
+#[test]
+fn r9_restore_unchecked_is_all_or_nothing_at_every_caller_drop() {
+  use generic_arraydeque::typenum::U2;
+
+  /// `(state_ops, span_ops, cursor, rewinds, poisoned)` — the cache length is deliberately NOT
+  /// observed: a cache is a pure memo, so a partly-evicted one is indistinguishable from a full
+  /// one to any consumer, and demanding it be all-or-nothing would be demanding the wrong thing.
+  fn run(state_bomb: usize, span_bomb: usize, restore: bool) -> (usize, usize, usize, usize, bool) {
+    let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+    let mut emitter = BombEmitter::default();
+    let mut input =
+      Input::<BombLexer<'_>, BombCtx<'_>, (), crate::input::Complete>::with_state_and_cache(
+        "ab cd ef gh ij kl",
+        BombTally::default(),
+        cache,
+      );
+    let mut inp = input.as_ref(&mut emitter);
+
+    // Save with the cache EMPTY, so the checkpoint's cursor equals the position the post-save
+    // entries will start at. `reconcile_cache_geometry` then finds `cursor == front_start` and
+    // returns without popping, which leaves the tail prune as the ONLY evictor — and therefore
+    // the only owner of the armed drops. With both evictors able to do the work they are
+    // interchangeable, whichever runs first drains the cache, and moving either one across the
+    // phase boundary changes nothing observable: the fixture reads clean against the very defect
+    // it exists to catch.
+    let _ = inp.next();
+    let ckp = inp.save();
+    // Post-save pushes, still resident at restore time. Each is a `CachedToken` owning an
+    // `L::State`, so pruning it runs caller code.
+    let _ = inp.peek::<U2>();
+
+    arm_state_drop(state_bomb);
+    arm_span_clone(span_bomb);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      if restore {
+        inp.restore(ckp);
+      }
+    }));
+    disarm_state_drop();
+    disarm_span_clone();
+    let state_ops = STATE_DROPS.with(Cell::get);
+    let span_ops = SPAN_CLONES.with(Cell::get);
+    let _ = caught;
+
+    // The COMMITTED span end, not `cursor()`. `cursor()` reports the cache front when there is
+    // one and `span.end` when there is not, so evicting a cache entry moves it — and eviction is
+    // exactly the thing this body is allowed to do before the rollback begins. Reading the
+    // committed position instead asks the semantic question: has the input moved branches?
+    let committed = *crate::Span::end_ref(&*inp.span);
+    let poisoned = inp.is_poisoned();
+    let em = inp.emitter();
+    (state_ops, span_ops, committed, em.rewinds, poisoned)
+  }
+
+  let (state_total, span_total, c_done, r_done, p_done) = run(0, 0, true);
+  assert!(
+    state_total >= 1,
+    "the fixture must leave resident post-save entries for the prune to evict — each carries the \
+     `L::State` whose drop this sweeps — saw {state_total}"
+  );
+  assert!(
+    span_total == 0,
+    "a restore ran {span_total} `L::Span` clone(s); the body must move its span in, not borrow it"
+  );
+
+  // The two admissible outcomes. `restored` is what a clean rollback produces; `untouched` is
+  // what the input looks like if the rollback never began.
+  let restored = (c_done, r_done, p_done);
+  // The genuine pre-restore state, taken by NOT restoring. Arming an ordinal that never fires
+  // reproduces the restored state instead, which would make the two references identical and the
+  // assertion vacuous — it silently did, until this cell reported a legitimate outcome as a
+  // violation.
+  let untouched = {
+    let (_, _, c, r, p) = run(0, 0, false);
+    (c, r, p)
+  };
+  assert!(
+    restored != untouched,
+    "the fixture must actually move the input, or the all-or-nothing check proves nothing \
+     (both states are {restored:?})"
+  );
+
+  for n in 1..=state_total {
+    let (_, _, c, r, p) = run(n, 0, true);
+    assert!(
+      (c, r, p) == restored || (c, r, p) == untouched,
+      "evicted-entry state drop #{n} of {state_total}: the rollback landed between its two \
+       admissible outcomes — got (committed {c}, rewinds {r}, poisoned {p}), which is neither \
+       fully restored {restored:?} nor fully unchanged {untouched:?}. Every eviction must sit \
+       above the phase boundary, where a panic leaves the input on the branch it was already on. \
+       (The cache's residency is deliberately not part of this comparison — a memo may be partly \
+       evicted without the input having moved.)"
+    );
+  }
+}
+
+/// `set_state` — state surgery's own fallible step, measured with the armable `L::Offset`.
+///
+/// The re-key clones the committed position, and `L::Offset::clone` is caller code. While that
+/// clone sat below the state write, an unwind in it left the input carrying the NEW lexer state
+/// beside a cache, poison latch and dedup watermark still keyed to the OLD regime — a state
+/// surgery half-applied, and the halves disagreeing about which regime the input is in.
+///
+/// The violation is stated as exactly that pairing: the new state may only be observed together
+/// with re-keyed facts. Either both moved or neither did.
+#[test]
+fn r9_set_state_is_atomic_at_every_offset_clone() {
+  use generic_arraydeque::typenum::U2;
+
+  /// `(clones, scanned, cache_len)`
+  fn run(bomb_at: usize) -> (usize, usize, usize) {
+    let src = BombSrc("ab cd ef gh");
+    let cache = DefaultCache::<'_, OffsetLexer<'_>>::default();
+    let mut emitter = BombEmitter::default();
+    let mut input =
+      Input::<OffsetLexer<'_>, OffsetCtx<'_>, (), crate::input::Complete>::with_state_and_cache(
+        &src,
+        BombTally::default(),
+        cache,
+      );
+    let mut inp = input.as_ref(&mut emitter);
+
+    // Old-regime facts the re-key is supposed to clear, so "not re-keyed" is observable.
+    let _ = inp.peek::<U2>();
+    assert!(
+      !inp.cache().is_empty(),
+      "the fixture needs a populated cache or the re-key clears nothing observable"
+    );
+
+    arm_offset_clone(bomb_at);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      inp.set_state(BombTally {
+        scanned: 7,
+        limit: 99,
+      });
+    }));
+    let clones = disarm_offset_clone();
+    (clones, inp.state().scanned, inp.cache().len())
+  }
+
+  let (total, scanned, cached) = run(0);
+  assert!(
+    total >= 1,
+    "the sweep needs `set_state` to perform at least one offset clone, saw {total}"
+  );
+  assert!(
+    scanned == 7 && cached == 0,
+    "the clean run must install the new state AND re-key the facts (scanned={scanned}, \
+     cache={cached})"
+  );
+
+  for n in 1..=total {
+    let (_, scanned, cached) = run(n);
+    let installed = scanned == 7;
+    let rekeyed = cached == 0;
+    assert!(
+      installed == rekeyed,
+      "offset clone #{n} of {total}: the input carries state scanned={scanned} beside a cache of \
+       {cached} — the new lexer state and the re-keyed facts came apart. Every fallible step of a \
+       re-key must run ABOVE the state write, so an unwind leaves the whole surgery undone \
+       rather than half of it applied"
+    );
+  }
+}

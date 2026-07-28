@@ -176,9 +176,17 @@ Three methods make the emitter's log rewindable in step with the cursor, and tog
 
 - [`checkpoint`](crate::Emitter::checkpoint)`(&self) -> u64` returns a *reading*: a monotone mark
   that names how much has been emitted so far. It borrows `&self` and allocates nothing — it is a
-  measurement, not a save.
+  measurement, not a save. It is also **fail-atomic**: if it unwinds, nothing may have changed. The
+  `&self` receiver is the tell — an emitter that registers per-mark state needs interior mutability
+  to do it, and owning that atomicity is the price: *reserve before you publish*. That is why there
+  is no `reserve_checkpoint` hook to pair with it; reserve-then-publish is already expressible
+  inside the body, and the input layer orders its own capture so nothing crate-side is pending when
+  the call is made.
 - [`rewind`](crate::Emitter::rewind)`(cursor, mark)` restores the emission state *to that reading*,
-  dropping exactly what was recorded after it.
+  dropping exactly what was recorded after it. Like `release`, it can be called **from a drop that
+  is already unwinding** — a rolling-back guard settles in its `Drop` — so it must not panic there;
+  a panic mid-unwind aborts. The same rider is on
+  [`exit_label`](crate::Emitter::exit_label), whose pop `labelled` performs from a drop guard.
 - [`release`](crate::Emitter::release)`(mark)` is the eviction dual: it tells the emitter a mark was
   **kept** rather than rewound, so any per-mark bookkeeping can be reclaimed.
 

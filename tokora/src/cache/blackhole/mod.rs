@@ -1,6 +1,5 @@
 use super::{
-  Cache, CachedTokenOf, CachedTokenRefOf, Checkpoint, GenericArrayDeque, Lexer,
-  MaybeRefCachedTokenOf,
+  Cache, CachedTokenOf, CachedTokenRefOf, GenericArrayDeque, Lexer, MaybeRefCachedTokenOf,
 };
 
 macro_rules! blackhole {
@@ -36,9 +35,6 @@ macro_rules! blackhole {
       fn remaining(&self) -> usize {
         0
       }
-
-      #[inline(always)]
-      fn rewind(&mut self, _: &Checkpoint<'a, '_, L>) {}
 
       #[inline(always)]
       fn push_front(

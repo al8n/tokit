@@ -181,8 +181,10 @@ supported surface upholds the contract by construction:
   the work or [`rollback`](crate::Transaction::rollback) to discard it. Say nothing and the drop
   decides; the default is rollback, so every early exit — a `break`, a `?`, a return — rewinds on
   the way out. The drop policy is a zero-sized [typestate](crate::DropPolicy): `begin_with::<Commit>`
-  flips it to keep-on-drop for operator loops whose common path is success. Deciding is one branch
-  over an `Option<Checkpoint>`; there is no journaling to unwind.
+  flips it to keep-on-drop for operator loops whose common path is success — except on a panic
+  unwind, which takes the rollback arm whatever the policy says (std builds), because an unwind
+  aborts the region rather than completing it. Deciding is one branch over an `Option<Checkpoint>`;
+  there is no journaling to unwind.
 
 - [`StackedTransaction`](crate::StackedTransaction) — the guard from
   [`begin_stacked`](crate::InputRef::begin_stacked), for several live fallback points at once.

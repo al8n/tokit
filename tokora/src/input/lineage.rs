@@ -62,16 +62,40 @@
 //! advisory: it destructures both structs exhaustively — no `..` — so a new field is a **compile
 //! error, right here, in the guardian**, at the table that asks what class it is in.
 //!
+//! **What that tripwire does and does not guard.** It guards the *rows*: a new cell cannot appear
+//! without one. It cannot guard the *action column*, which is prose — a mechanism can be deleted
+//! and leave the table confidently describing it, with every gate green. That happened: 0.8.0
+//! removed `Cache::rewind` and this column went on naming it as the live action until a reader
+//! traced it. The `taxonomy_census` test closes the cheap half of the gap by requiring every
+//! `Type::method` path named in the action column to still exist in the crate; the rest of the
+//! column is English and is reviewed by hand, so **a change that deletes or relocates a restore
+//! mechanism must come here and re-read this column**, not merely keep the rows correct.
+//!
+//! # Why the push count is rewound, rather than left to run forward
+//!
+//! The count is the one memo whose purpose reads like bookkeeping, so the reason lives here and
+//! not only at the restore site. A restore drops the cache entries pushed after the save,
+//! computed as `cache_pushes - checkpoint.cache_pushes`. Rewinding the count on every restore is
+//! what makes that subtraction describe *the current lineage only*, so nested, last-in-first-out
+//! restores compose: an inner restore rewinds the count, and the outer one then computes zero
+//! post-save pushes and correctly retains a token prefilled before either save.
+//!
+//! A never-rewound count reads stale-high there and over-drops that token — forcing a **re-lex
+//! whose scan side effects belong to the abandoned lineage**: shared lexer and limit state advance
+//! a second time, and a poison boundary can latch at a position the checkpoint predates. That is
+//! the same harm that ruled out clearing the cache wholesale, measured on the committing path,
+//! and it is why this design beats a clear.
+//!
 //! | Cell | Owner | Class | What restore does |
 //! |---|---|---|---|
 //! | `input` (the source slice) | `Input` | — (immutable borrow, fixed for the input's life) | nothing |
 //! | `state` (the lexer regime) | `Input` | ground truth | overwrite from the checkpoint |
 //! | `span` (last-consumed) | `Input` | ground truth | overwrite from the checkpoint |
-//! | `cache` (the token cache) | `Input` | ground truth | `Cache::rewind`, then drop the post-save tail |
+//! | `cache` (the token cache) | `Input` | ground truth | the input layer rewinds the front against the restored cursor through `Cache::pop_front`/`Cache::clear`, then drops the post-save tail through `Cache::pop_back`, sized by the count below |
 //! | `emitter` (the emission log) | `InputRef` (borrowed) | ground truth | truncate to the saved mark |
 //! | `emitted_error_end` (dedup watermark) | `Input` | lineage memo | pure-copy the saved value |
 //! | `poison_boundary` (sticky terminal frontier) | `Input` | lineage memo | pure-copy the saved value |
-//! | [`cache_pushes`](Lineage::cache_pushes) | `Lineage` | lineage memo | pure-copy the saved value |
+//! | [`cache_pushes`](Lineage::cache_pushes) | `Lineage` | lineage memo | pure-copy the saved value — the copy is what makes nested restores compose; see below |
 //! | [`live_ckpts`](Lineage) | `Lineage` | lineage memo | pop through the restored id |
 //! | [`pinned`](Lineage) | `Lineage` | lineage memo | nothing (a restore does not change which guards are live) |
 //! | `points` (open session points) | `Session` | lineage memo | settle the suffix below the restored id (the *checked* rewind is refused by the pin first) |
@@ -369,18 +393,44 @@ impl Lineage {
   /// Returns whether `id` is still live on the lineage stack. Backs both the
   /// [`StackedTransaction`](super::StackedTransaction) savepoint-staleness check (every allocator
   /// build) and, in debug + ptr builds, [`restore`](super::InputRef::restore)'s non-LIFO panic.
+  ///
+  /// `O(1)` on the LIFO path — which is every guard settle — and `O(log d)` otherwise: ids are
+  /// minted strictly increasing and every writer preserves order, so the stack is sorted and a
+  /// binary search is licensed here, at the definition site where that invariant lives.
   #[inline(always)]
   pub(crate) fn contains(&self, id: u64) -> bool {
-    self.live_ckpts.contains(&id)
+    if self.live_ckpts.last() == Some(&id) {
+      scan_tick();
+      return true;
+    }
+    self
+      .live_ckpts
+      .binary_search_by(|probe| {
+        scan_tick();
+        probe.cmp(&id)
+      })
+      .is_ok()
   }
 
   /// Pops the lineage stack down through `id` inclusive, invalidating it and every checkpoint
   /// saved after it. A no-op if `id` is already gone — a raw restore to a checkpoint an earlier
   /// restore already invalidated (release's unspecified-but-bounded posture; debug + ptr asserts
   /// presence in [`restore`](super::InputRef::restore) first).
+  ///
+  /// `O(1)` when `id` is the stack top — the LIFO common case, and every drop-rollback — and
+  /// `O(log d)` otherwise, over the same sorted-stack invariant [`contains`](Self::contains)
+  /// uses. An absent id still pops nothing.
   #[inline(always)]
   pub(crate) fn pop_through(&mut self, id: u64) {
-    if let Some(pos) = self.live_ckpts.iter().position(|&x| x == id) {
+    if self.live_ckpts.last() == Some(&id) {
+      scan_tick();
+      self.live_ckpts.truncate(self.live_ckpts.len() - 1);
+      return;
+    }
+    if let Ok(pos) = self.live_ckpts.binary_search_by(|probe| {
+      scan_tick();
+      probe.cmp(&id)
+    }) {
       self.live_ckpts.truncate(pos);
     }
   }
@@ -392,9 +442,10 @@ impl Lineage {
   /// *committed* one never reaches a restore, so without this its id would linger and grow the
   /// stack across commit-heavy loops. Removing it keeps the stack exact and bounded. `O(1)` when
   /// `id` is the stack top (the common case for a committed checkpoint); a linear removal
-  /// otherwise (e.g. a raw checkpoint saved above it was dropped without restoring). Removing a
-  /// non-top id keeps the rest of the stack in order, so an older restore still pops cleanly
-  /// through it. Committing an already-invalidated id is a harmless no-op: it is simply absent.
+  /// otherwise (e.g. a raw checkpoint saved above it was dropped without restoring) — the
+  /// removal itself has to shift, so the search's order buys nothing here. Removing a non-top id
+  /// keeps the rest of the stack in order, so an older restore still pops cleanly through it.
+  /// Committing an already-invalidated id is a harmless no-op: it is simply absent.
   #[inline(always)]
   pub(crate) fn forget(&mut self, id: u64) {
     if self.live_ckpts.last() == Some(&id) {
@@ -465,18 +516,32 @@ impl Lineage {
   /// begin point finds that begin point still pinned above the target. A stacked-transaction
   /// savepoint `rollback_to` restores a checkpoint *above* the base, so it can never reach the
   /// pinned base. A target that is not live pops nothing, so it cannot invalidate anything pinned.
+  ///
+  /// The search is ordered rather than nested-linear: both stacks are sorted ascending, so the
+  /// target is found by binary search, and the suffix `live_ckpts[pos..]` is exactly "every live
+  /// id `>= target_id`" — so only the pins at or above the target can be in it, and each is
+  /// looked up in that suffix by binary search. `O(|pins >= target| · log d)` with `|pins|` tiny
+  /// (live guards, attempts and session points).
+  ///
+  /// Deliberately **not** the `O(1)` `pinned.last() >= target_id` watermark: that form is exact
+  /// only under "pinned is a subset of live", which is an invariant statement rather than a
+  /// checked fact, and a false positive here is a release-active panic on a legal restore.
   #[inline(always)]
   pub(crate) fn assert_restore_preserves_pins(&self, target_id: u64) {
-    let Some(pos) = self.live_ckpts.iter().position(|&x| x == target_id) else {
+    let Ok(pos) = self.live_ckpts.binary_search(&target_id) else {
       // The target is already gone: the restore will pop nothing, so nothing pinned can be
       // invalidated (release's unspecified-but-bounded posture for an already-dead target).
       return;
     };
     // The restore truncates `live_ckpts` at `pos`, popping the target and every younger
     // checkpoint. If any of those is pinned, the restore would invalidate a live guard/attempt.
-    if self.live_ckpts[pos..]
+    let doomed = &self.live_ckpts[pos..];
+    if self
+      .pinned
       .iter()
-      .any(|id| self.pinned.contains(id))
+      .rev()
+      .take_while(|p| **p >= target_id)
+      .any(|p| doomed.binary_search(p).is_ok())
     {
       panic!(
         "restore would invalidate a live transaction guard or attempt (the target predates its begin point)"
@@ -521,4 +586,129 @@ impl Lineage {
   pub(crate) fn pinned_len(&self) -> usize {
     self.pinned.len()
   }
+}
+
+/// D41 — the settle path's **scan odometer**, test-only.
+///
+/// [`contains`](Lineage::contains) and [`pop_through`](Lineage::pop_through) run on every guard
+/// settle, so their cost as a function of nesting depth is the property worth pinning — and it is
+/// invisible to a value-level assertion. Each element a search inspects ticks the odometer once,
+/// which lets a cell assert the *law* (linear in depth) rather than a constant. Outside a
+/// `std` test build this is an empty `#[inline(always)]` body and the odometer does not exist.
+#[cfg(all(test, feature = "logos", feature = "std"))]
+#[inline(always)]
+fn scan_tick() {
+  scan_probe::tick();
+}
+
+/// The no-op form: every build that is not a `std` test, **and** has a `Lineage` to tick for.
+///
+/// The second half of that gate is not decoration. `Lineage` — and with it `contains` and
+/// `pop_through`, the only callers this has — is `#[cfg(any(feature = "std", feature = "alloc"))]`,
+/// so at an allocator-free feature point the callers do not exist and an unconditional no-op is
+/// `dead_code`, which is `-D warnings` under this crate's lint posture. It must be gated to
+/// exactly the set its callers are compiled for; the odometer form above needs no such clause
+/// because `feature = "std"` already implies it.
+#[cfg(all(
+  any(feature = "std", feature = "alloc"),
+  not(all(test, feature = "logos", feature = "std"))
+))]
+#[inline(always)]
+fn scan_tick() {}
+
+/// The odometer itself — see [`scan_tick`].
+///
+/// Gated to the exact feature set of the cells that read it — the `transaction` suite, which is
+/// `#[cfg(all(test, feature = "logos", feature = "std"))]`. Gated any wider (it was `all(test,
+/// std)`) its `reset`/`scanned` are `dead_code` at a point like `--no-default-features --features
+/// conformance`, where `conformance` pulls in `std` but nothing pulls in `logos`.
+#[cfg(all(test, feature = "logos", feature = "std"))]
+pub(crate) mod scan_probe {
+  use core::cell::Cell;
+
+  thread_local! {
+    static SCANNED: Cell<usize> = const { Cell::new(0) };
+  }
+
+  /// Zeroes the odometer and opens a fresh reading window.
+  pub(crate) fn reset() {
+    SCANNED.with(|c| c.set(0));
+  }
+
+  /// Elements inspected since the last [`reset`].
+  pub(crate) fn scanned() -> usize {
+    SCANNED.with(Cell::get)
+  }
+
+  #[inline(always)]
+  pub(crate) fn tick() {
+    SCANNED.with(|c| c.set(c.get() + 1));
+  }
+}
+
+/// CELL_CENSUS — the falsifiable half of the taxonomy's **action** column.
+///
+/// The exhaustive destructure in [`census`] guards the table's rows; nothing guarded the column
+/// that says what a restore *does*, because it is prose. 0.8.0 deleted `Cache::rewind` and that
+/// column kept naming it, with every gate green, until a reader traced the mechanism by hand.
+///
+/// This is the cheap half of the fix: every `Type::method` path the action column names must
+/// still exist as a function in the crate. It cannot check that the English is *true* — that
+/// stays a human review, and the preamble says so — but it does catch the specific failure that
+/// occurred, which is a named mechanism outliving its deletion.
+#[cfg(all(test, any(feature = "std", feature = "alloc")))]
+#[test]
+fn taxonomy_census_action_column_names_only_live_mechanisms() {
+  const LINEAGE: &str = include_str!("lineage.rs");
+  const CACHE: &str = include_str!("../cache/mod.rs");
+  const INPUT_REF: &str = include_str!("input_ref/mod.rs");
+  const SESSION: &str = include_str!("input_ref/session.rs");
+
+  let defined = std::format!("{LINEAGE}{CACHE}{INPUT_REF}{SESSION}");
+  let mut checked = 0usize;
+
+  for line in LINEAGE.lines() {
+    let line = line.trim_start_matches("//!").trim();
+    // Table rows only, and only the last column — the one that says what restore does.
+    if !line.starts_with('|') || line.starts_with("|---") || line.starts_with("| Cell") {
+      continue;
+    }
+    let Some(action) = line.trim_end_matches('|').rsplit('|').next() else {
+      continue;
+    };
+    // `Type::method` paths, wherever they appear in that column.
+    let mut rest = action;
+    while let Some(at) = rest.find("::") {
+      let before = &rest[..at];
+      let after = &rest[at + 2..];
+      let method: std::string::String = after
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+      let is_type = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+      if is_type && !method.is_empty() && method.starts_with(|c: char| c.is_ascii_lowercase()) {
+        checked += 1;
+        assert!(
+          defined.contains(&std::format!("fn {method}(")),
+          "CELL_CENSUS drift: the restore taxonomy's action column names `::{method}`, which no \
+           longer exists. A deleted or renamed restore mechanism must be removed from that \
+           column in the same commit — the exhaustive destructure guards the table's ROWS, not \
+           this column (grep CELL_CENSUS)."
+        );
+      }
+      rest = &after[method.len()..];
+    }
+  }
+
+  assert!(
+    checked > 0,
+    "CELL_CENSUS drift: the action column names no `Type::method` path at all, so this check \
+     selected nothing. Either the table was rewritten or this parser stopped matching it — a \
+     census that checks nothing is worse than none (grep CELL_CENSUS)."
+  );
 }

@@ -35,11 +35,12 @@ use core::cell::Cell;
 use std::rc::Rc;
 use std::vec::Vec;
 
-use generic_arraydeque::typenum::U1;
+use generic_arraydeque::GenericArrayDeque;
+use generic_arraydeque::typenum::{U1, U8};
 use tokora::{
   Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext, State,
   Token as TokenTrait, TryParseInput,
-  cache::Peeked,
+  cache::{CachedTokenOf, Peeked},
   emitter::{
     Fatal, FullContainerEmitter, MissingLeadingSeparatorEmitter, MissingTrailingSeparatorEmitter,
     SeparatedEmitter, TooFewEmitter, TooManyEmitter, UnclosedEmitter,
@@ -258,6 +259,31 @@ fn no_cache_ctx() -> ParserContext<'static, PcLex<'static>, Fatal<PcErr>, ()> {
 }
 
 fn default_cache_ctx() -> ParserContext<'static, PcLex<'static>, Fatal<PcErr>> {
+  ParserContext::new(Fatal::new())
+}
+
+// D17 — the two ends of the capacity range the law claims and the suite did not cover. The
+// #75 regression this file exists for was capacity-dependent, so `()` and the default (U3)
+// are the wrong two points to stop at: capacity 1 is the smallest cache that retains
+// anything, and U8 is above the default.
+
+/// The capacity-1 `Option` cache.
+fn one_slot_ctx() -> ParserContext<
+  'static,
+  PcLex<'static>,
+  Fatal<PcErr>,
+  Option<CachedTokenOf<'static, PcLex<'static>>>,
+> {
+  ParserContext::new(Fatal::new())
+}
+
+/// A ring above the default capacity.
+fn wide_cache_ctx() -> ParserContext<
+  'static,
+  PcLex<'static>,
+  Fatal<PcErr>,
+  GenericArrayDeque<CachedTokenOf<'static, PcLex<'static>>, U8>,
+> {
   ParserContext::new(Fatal::new())
 }
 
@@ -491,6 +517,39 @@ fn separated_no_cache_lexes_the_closer_once_via_the_epilogue() {
     counter.get(),
     1,
     "no-cache: the epilogue commits the probed closer by value — lexed once, pre-fix reads 2"
+  );
+}
+
+#[test]
+fn separated_one_slot_cache_lexes_the_closer_once_via_the_epilogue() {
+  // D17's capacity-1 cell at the driver level: the same Shape-B epilogue site, reached with
+  // the smallest cache that retains anything.
+  let state = CloserScans::default();
+  let counter = state.handle();
+  let r: Result<Vec<()>, PcErr> = Parser::with_context(one_slot_ctx())
+    .apply(parse_separated)
+    .parse_str_with_state("(a)", state);
+  assert!(r.is_ok(), "a valid `(a)` parses under the capacity-1 cache");
+  assert_eq!(
+    counter.get(),
+    1,
+    "capacity-1: the epilogue commits the probed closer by value — lexed once"
+  );
+}
+
+#[test]
+fn separated_wide_cache_lexes_the_closer_once_via_the_epilogue() {
+  // D17's above-the-default cell: capacity independence in the other direction.
+  let state = CloserScans::default();
+  let counter = state.handle();
+  let r: Result<Vec<()>, PcErr> = Parser::with_context(wide_cache_ctx())
+    .apply(parse_separated)
+    .parse_str_with_state("(a)", state);
+  assert!(r.is_ok(), "a valid `(a)` parses under the capacity-8 ring");
+  assert_eq!(
+    counter.get(),
+    1,
+    "capacity-8: the epilogue commits the probed closer by value — lexed once"
   );
 }
 

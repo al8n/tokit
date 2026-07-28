@@ -8,9 +8,8 @@ use super::{Cursor, Lexer};
 ///
 /// # Unstable: obtainable only under `unstable-raw`
 ///
-/// This type is public so it can be named (the [`Cache`](crate::Cache) trait's
-/// [`rewind`](crate::Cache::rewind) hook takes `&Checkpoint`, and the guards, savepoints, and
-/// session points hold it internally), but its lifecycle is **sealed** to the `unstable-raw`
+/// This type is public so it can be named (the guards, savepoints and session points hold one
+/// internally), but its lifecycle is **sealed** to the `unstable-raw`
 /// feature: [`save`](crate::InputRef::save) (the only way to obtain one),
 /// [`restore`](crate::InputRef::restore), and [`commit`](crate::InputRef::commit) (the only ways
 /// to consume one) are public only with that feature. Without it, a `Checkpoint` cannot be
@@ -63,7 +62,10 @@ use super::{Cursor, Lexer};
 /// [`try_attempt`](crate::InputRef::try_attempt)), which manage the save/restore pair
 /// structurally and cannot violate the discipline.
 pub struct Checkpoint<'a, 'closure, L: Lexer<'a>> {
-  cursor: Cursor<'a, 'closure, L>,
+  /// `pub(crate)` like every other field here so a restore can take the whole checkpoint apart
+  /// into owned locals before it starts mutating. Reaching through `&checkpoint.span` as it went
+  /// inferred a borrowed `MaybeRef` and bought an `L::Span::clone` mid-restore.
+  pub(crate) cursor: Cursor<'a, 'closure, L>,
   /// The actual `InputRef::span` at save time.
   ///
   /// This is the span of the last consumed token, which may differ from the

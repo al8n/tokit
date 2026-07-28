@@ -225,6 +225,79 @@ where
     self.pending.take()
   }
 
+  /// FRONT_CENSUS — whether a token is parked in the front slot. The scanner asks through this
+  /// rather than reading the slot, so `scan.rs` keeps no direct reader of its own.
+  #[inline(always)]
+  pub(super) fn has_front_parked(&self) -> bool {
+    self.pending.is_some()
+  }
+
+  /// Restores the five facts a rewinding scan's entry snapshot holds, then settles its mark by
+  /// rewinding to it — the one body behind both `ScanMode::on_eof` and `ScanMode::on_incomplete`,
+  /// so the normal no-match exit and the abandoning exits cannot drift.
+  ///
+  /// The span is **moved**, not borrowed: `set_span` clones a borrowed span, and cloning here is
+  /// caller code inside a settle. The remaining fallible step is the emitter cursor's offset
+  /// clone, which is why `ScanScope` keeps the mark beside the snapshot and releases it if this
+  /// body unwinds part-way.
+  #[inline]
+  fn restore_entry(&mut self, entry: scan::ThroughEntry<L::Span, L::State, L::Offset>) {
+    let (span, state, mark, error_end, rewind_to, poison_boundary) = entry.into_components();
+    // The position goes in first and the values it replaced come back out, so their drops — caller
+    // code — happen after the REST of the restore rather than in the middle of it. Interrupted
+    // there, this function would otherwise return a restored position paired with a stale dedup
+    // watermark, a stale poison latch and an un-rewound emitter.
+    // SETTLE_CENSUS: this body runs NO caller code before its rewind — not a clone, not an
+    // in-place assignment. `Emitter::rewind` needs the position the parse resumes from, and that
+    // offset was cloned at capture (`ThroughEntry::rewind_to`), before the mark it settles even
+    // existed. Reading it back off the input here instead — as this did — put an
+    // `L::Offset::clone` between the position write and the rewind that completes it, and a panic
+    // there skipped the rewind so `ScanScope::drop` RELEASED the mark: the abandoned scan's
+    // diagnostics stayed in the log while the parser retried from the restored position.
+    //
+    // Hoisting that clone to the top of the body did NOT fix it, which is worth stating because
+    // it looked like it should. Wherever in the body the clone sits, failing it still skips the
+    // rewind — the measurement is `r9_restore_entry_is_atomic_at_every_offset_clone`, which stayed
+    // green against the hoisted version and only went red once the operation left the body.
+    let replaced = self.replace_position(span.into(), state);
+    // `mem::replace`, not assignment, for the same reason as everywhere else in this family: a
+    // plain write drops the value it displaced, and `L::Offset::drop` is caller code that would
+    // land between two facts of one restore.
+    let displaced = (
+      core::mem::replace(self.emitted_error_end, error_end),
+      // The fifth fact. A limit trip latches the boundary before its diagnostic is emitted, so an
+      // exit that abandons the scan must un-latch what the scan latched — otherwise the input stays
+      // poisoned at a position no committed lineage ever reached. On the normal no-match exit this
+      // is a no-op by construction (a trip leaves through the trip exit, which keeps its progress),
+      // which is exactly why one body can serve both.
+      core::mem::replace(self.poison_boundary, poison_boundary),
+    );
+    debug_assert!(
+      !self.has_front_parked() && self.cache().is_empty(),
+      "restore_entry reads the rewind cursor off the entry span, which is only the resumed \
+       position while the stream is drained; a caller that reaches here holding tokens would \
+       rewind the emitter to the wrong place",
+    );
+    self.emitter().rewind(Cursor::from_ref(&rewind_to), mark);
+    // Last, with every fact restored: a `Drop` that unwinds here leaves a whole restore behind it
+    // rather than a position without its watermark, latch and emitter rewind.
+    drop((replaced, displaced));
+  }
+
+  /// Clears the whole retained stream — the parked slot and every cache entry — against a
+  /// committed position that has not moved, so the region re-lexes deterministically from there.
+  ///
+  /// This exists for exactly one caller: the scanner's unwind edge under a **rewinding** mode,
+  /// which restores the pre-call position and must not leave tokens in front of it that were
+  /// popped out of a stream the restore is about to rewind past. The committing modes do not
+  /// clear — their unwind edge keeps the diagnosed prefix, and clearing there was measured
+  /// re-burning a shared limit budget and tripping a limiter that the honest run never trips.
+  #[inline]
+  pub(super) fn unwind_clear_stream(&mut self) {
+    *self.pending = None;
+    self.cache_mut().clear();
+  }
+
   /// FRONT_CENSUS — takes the front token only if `pred` accepts it; a decline leaves it exactly
   /// where it was (parked slot or cache front), which is what makes a decline "definite absence"
   /// in every cache capacity.
@@ -440,8 +513,24 @@ where
   /// across it cleanly.
   #[inline(always)]
   pub fn set_state(&mut self, state: L::State) {
-    self.rekey_offset_facts();
-    *self.state = state;
+    // SETTLE_CENSUS: the state goes in by `mem::replace` and BEFORE the re-key, so the displaced
+    // state's `Drop` — caller code — runs with the surgery already whole. Assigning after the
+    // re-key, as this did, put that `Drop` between the re-key and the return: a host that caught
+    // it found every offset-dependent fact re-keyed for a state that was, at that instant, still
+    // being installed. The re-key itself reads only `self.span`, so it does not care which state
+    // is in place when it runs.
+    // SETTLE_CENSUS: the re-key's one fallible step runs FIRST, above the state write.
+    //
+    // Round 12 moved the state write ahead of the re-key so the displaced state's `Drop` could
+    // not land mid-surgery. That was right and it is still here — but it left the re-key's own
+    // `L::Offset::clone` below the state write, so an unwind there carried the NEW lexer state
+    // beside a cache, poison boundary and dedup watermark still keyed to the OLD regime. Hoisting
+    // the clone costs nothing: it reads `self.span`, which neither the state write nor the
+    // install touches.
+    let committed = self.rekey_committed();
+    let displaced = core::mem::replace(self.state, state);
+    let settled = self.install_rekey(committed);
+    drop((displaced, settled));
   }
 
   /// Re-keys every offset-dependent fact to the current committed cursor — the shared body
@@ -490,14 +579,47 @@ where
   /// lineage-consistent by construction and never routes through here.
   #[inline]
   fn rekey_offset_facts(&mut self) {
+    let committed = self.rekey_committed();
+    drop(self.install_rekey(committed));
+  }
+
+  /// The **fallible half** of a re-key: the committed position, cloned.
+  ///
+  /// `L::Offset::clone` is caller code, and it is the only step of a re-key that can fail. Split
+  /// out so a caller that has its own fact to write — `set_state` replaces `L::State` — can run
+  /// it BEFORE writing anything, instead of inheriting a fallible step in the middle of its own
+  /// surgery. Same shape as `clamped_span` ahead of `install_position`; the crate has one pattern
+  /// for this and this is it.
+  ///
+  /// Read straight off `self.span` rather than through `cursor()`: the two are the same value at
+  /// a re-key, because the clears in `install_rekey` empty the parked slot and the cache that
+  /// `cursor()` would otherwise report from.
+  #[inline(always)]
+  fn rekey_committed(&self) -> L::Offset {
+    self.span.end_ref().clone()
+  }
+
+  /// The **infallible half**: every offset-dependent fact, moved into place.
+  ///
+  /// Nothing here can fail before the last fact lands. The three writes are `mem::replace`/`take`
+  /// so no displaced value is dropped in place, and they are handed back for the caller to drop
+  /// once its whole surgery is done. The cache clear trails them deliberately — a cache is a pure
+  /// memo, so dropping any subset of it is unobservable, and it is the only caller code in the
+  /// body precisely because it is the one thing that cannot tear anything.
+  #[must_use]
+  #[inline(always)]
+  #[allow(clippy::type_complexity)]
+  fn install_rekey(
+    &mut self,
+    committed: L::Offset,
+  ) -> (L::Offset, Option<L::Offset>, Option<CachedTokenOf<'inp, L>>) {
+    let settled = (
+      core::mem::replace(self.emitted_error_end, committed),
+      self.poison_boundary.take(),
+      self.pending.take(),
+    );
     self.cache_mut().clear();
-    // The parked front token goes with the cache: it was lexed under the dead regime too. Cleared
-    // BEFORE the cursor read below, so the watermark re-anchors at the committed position rather
-    // than at the dropped token's start — which would suppress re-emission across the gap.
-    *self.pending = None;
-    *self.poison_boundary = None;
-    let committed = self.cursor().as_inner().clone();
-    *self.emitted_error_end = committed;
+    settled
   }
 
   /// Returns a mutable reference to the emitter (borrowed through the session cell — see
@@ -825,33 +947,88 @@ where
     }
   }
 
-  /// Sets the cursor to the specified position, clamped to the input length.
+  /// The span a write would store, clamped to the source — **computed, not stored**.
   ///
-  /// This ensures the cursor never exceeds the bounds of the input source.
+  /// Split out because it is the fallible half: the comparison and, on the clamping branch, the
+  /// offset clone and the `L::Span` construction are all caller code. Separating it lets a caller
+  /// that must write span and state *together* get every fallible step out of the way before
+  /// either half is written. See [`commit_position`](Self::commit_position).
   #[inline(always)]
-  fn set_span(&mut self, new: MaybeRef<'_, L::Span>) {
+  fn clamped_span(&self, new: MaybeRef<'_, L::Span>) -> (L::Span, Option<L::Offset>) {
     let end = self.input.len();
-    *self.span = if new.end_ref().le(&end) {
-      to_owned(new)
+    if new.end_ref().le(&end) {
+      // The common branch does not consume `end`, and dropping it HERE would put an
+      // `L::Offset::drop` — caller code — inside the settle window, between the token leaving the
+      // stream and the position being installed. So it is handed back and dies with the rest,
+      // after the settle. The clamping branch below moves it into the new span, so there is
+      // nothing left to return and no second clone is introduced to make the shapes match.
+      (to_owned(new), Some(end))
     } else {
-      L::Span::new(new.start_ref().clone(), end)
-    };
+      (L::Span::new(new.start_ref().clone(), end), None)
+    }
   }
 
-  /// Records the span of the just-consumed token as the current input span.
+  /// SETTLE_CENSUS — writes the committed position: the span **and** the lexer state that
+  /// produced it, as one step.
   ///
-  /// `span()`/`slice()` therefore report the most recently consumed token even
-  /// when the cache still holds later peeked tokens. The span is clamped to the
-  /// input length.
+  /// They are a pair, and a torn pair is worse than either half being stale. A span advanced past
+  /// a state that has not moved describes a position no execution reaches: a host that catches a
+  /// panic and resumes lexes from the new offset under the old state, which for a stateful lexer —
+  /// a limiter, an indentation stack, a mode stack — is silent stream corruption, and silent
+  /// exactly for the population least able to notice. The committing modes have no snapshot, so
+  /// nothing can restore them afterwards; atomicity here is their only protection.
   ///
-  /// This is a **position write**, not a token settle: [`commit_token`](Self::commit_token) is
-  /// the settle, and the only consume path allowed to write here. The remaining callers write
-  /// positions that are *not* committed tokens — `settle_fatal` (a rejected lexer error's
-  /// span), `SyncTo::on_eof` (the lexer's span at exhaustion), and `commit_at` (a scan's batch
-  /// frontier write) — and the census (`grep SETTLE_CENSUS`) locks that list.
+  /// So: **both halves arrive already computed**, the one fallible step (the clamp) runs before
+  /// anything is written, the two writes are infallible moves, and the values they replace are
+  /// dropped LAST. That last part is not tidiness — `Drop` is caller code, and assigning in place
+  /// would run it between the two writes, which is the tear this exists to prevent.
+  ///
+  /// Callers therefore evaluate their own caller-code operands first. `SyncTo::on_eof` is the site
+  /// that proves why: it reads `lexer.span()` and `lexer.into_state()`, and running the second
+  /// between the writes left `span = (11, 11)` paired with the entry state.
   #[inline(always)]
-  fn set_span_after_consume(&mut self, new: MaybeRef<'_, L::Span>) {
-    self.set_span(new);
+  fn commit_position(&mut self, span: MaybeRef<'_, L::Span>, state: L::State) {
+    drop(self.replace_position(span, state));
+  }
+
+  /// SETTLE_CENSUS — the position write itself, handing back the pair it replaced.
+  ///
+  /// Returning the old values rather than dropping them is what lets a caller that is doing MORE
+  /// than a position write put the drops last. A `Drop` is caller code, so dropping in place makes
+  /// the position write an unwind site in the middle of whatever else the caller is restoring —
+  /// which is how `restore_entry` could install a position and then never reach the dedup
+  /// watermark, the poison latch or the emitter rewind. `#[must_use]` is the enforcement: with
+  /// `#![deny(warnings)]` a caller that forgets the returned pair does not compile.
+  #[must_use = "drop the replaced position AFTER the rest of the restore: dropping it here puts                 caller code in the middle of a write that must not be interrupted part-way"]
+  #[inline(always)]
+  fn replace_position(
+    &mut self,
+    span: MaybeRef<'_, L::Span>,
+    state: L::State,
+  ) -> (L::Span, L::State, Option<L::Offset>) {
+    let (span, spare) = self.clamped_span(span);
+    self.install_position(span, spare, state)
+  }
+
+  /// The **infallible half** of a position write: the two moves, and nothing else.
+  ///
+  /// `replace_position` is a fallible step (`clamped_span` runs `Source::len`, and its clamping
+  /// branch an `Offset::clone`) followed by two `mem::replace`s that cannot fail. A restore needs
+  /// those halves apart: it clamps up front, while the input is still wholly on the branch it is
+  /// abandoning, and installs down here, where a panic would tear the rollback instead. Splitting
+  /// the body rather than duplicating it keeps the pair funnel singular — the two `mem::replace`s
+  /// that move the committed span and state still live in exactly one place (SETTLE_CENSUS).
+  #[inline(always)]
+  fn install_position(
+    &mut self,
+    span: L::Span,
+    spare: Option<L::Offset>,
+    state: L::State,
+  ) -> (L::Span, L::State, Option<L::Offset>) {
+    // ── commit point: two infallible moves, nothing between them ──
+    let replaced_span = core::mem::replace(self.span, span);
+    let replaced_state = core::mem::replace(self.state, state);
+    (replaced_span, replaced_state, spare)
   }
 
   /// SETTLE_CENSUS — **the** primitive that settles a committed token: one call per token, at
@@ -881,11 +1058,36 @@ where
   /// (exhaustion, not a token), `commit_at` (its tokens already settled behind the frontier
   /// via `adopt`), and the position surgeries (`set_state`, the restore paths).
   #[inline(always)]
-  fn commit_token(&mut self, tok: &L::Token, span: &L::Span) {
+  fn commit_token(&mut self, tok: &L::Token, span: &L::Span, state: L::State) {
+    // PUBLISH FIRST, THEN NOTIFY — and the order is the opposite of what it looks like it should
+    // be, so the reason is written down.
+    //
+    // Every caller of this reaches it having ALREADY taken the token off the front stream: a
+    // cache hit popped it, a lexed one was never put there. So by the time the observer runs, the
+    // token is gone from the stream whatever happens next. Notifying first therefore does not
+    // mean "a panicking observer publishes nothing" — it means the position is left behind a
+    // token the stream no longer holds, with the younger cache entries still resident in front of
+    // it, and `cursor()` reads straight past the gap. Measured: committed span (0, 0) against a
+    // stream starting at 3, with the token vanished.
+    //
+    // Publishing first closes it. A panicking observer then leaves a consistent input — the token
+    // consumed, the position accounting for it — and only the side-channel notification missing,
+    // which is a documented observer-contract violation rather than a lost token.
+    //
+    // The state travels WITH the span. It used to be the caller's job to write it on the next
+    // line, at sixteen call sites, and a caller that forgot published half a position: a
+    // committed span paired with the lexer state of somewhere else. Taking it here makes that
+    // unrepresentable rather than censused.
+    // `replace_position` rather than `commit_position`: the latter drops the replaced pair before
+    // it returns, and those drops are caller code. A panicking `L::Span`/`L::State` drop would
+    // then leave the token consumed and the position advanced with the observer never notified —
+    // the same missing-notification hole this ordering exists to close, entered through the other
+    // door. Hold the replaced pair, notify, and only then let it go.
+    let replaced = self.replace_position(span.into(), state);
     // The settle observed: the one home of the committed-token side channel on the
     // consume surface (SETTLE_CENSUS locks the emitter-hook sites too).
     self.session.emitter.commit_token(tok, span);
-    self.set_span_after_consume(span.into());
+    drop(replaced);
   }
 
   /// Commits a scan at its [`AtFrontier`] frontier — the end of the last token it settled there,
@@ -897,8 +1099,8 @@ where
   /// the position a scan leaves behind is a function of the tokens it skipped and nothing else.
   #[inline(always)]
   fn commit_at(&mut self, frontier: AtFrontier<L::Span, L::State>) {
-    self.set_span_after_consume(frontier.span.into());
-    *self.state = frontier.state;
+    let AtFrontier { span, state } = frontier;
+    self.commit_position(span.into(), state);
   }
 }
 
@@ -2233,84 +2435,86 @@ where
 
   #[inline(always)]
   pub(crate) fn restore_unchecked(&mut self, checkpoint: Checkpoint<'inp, '_, L>) {
-    // Reconcile the session-point suffix FIRST: a rewind below an open point tears that point's
-    // foundation out, so the points it invalidates must be settled rather than left describing a
-    // lineage that no longer exists. Session points are deliberately non-lexical, so — unlike
-    // nested guards, which borrowck serializes — one can still be live when an enclosing scope
-    // rewinds below it. Doing it here rather than at each guard's drop site covers every route
-    // into a rewind, the raw one included, and puts the mark releases ahead of the rewind that
-    // spends the target's own mark (each family newest-first).
+    // SETTLE_CENSUS — the rollback in two phases, because staging every dying value is not
+    // available here and ordering is.
+    //
+    // Four rounds of findings in this body all had one shape: some owned value died while the
+    // rollback was half-done. Round 13 staged the values the body DISPLACES (the parked entry,
+    // the watermark, the latch, the replaced pair) into one drop site. Round 14 showed there is a
+    // second source it cannot reach — the values the body EVICTS: `reconcile_cache_geometry`
+    // drops cache entries through `clear`/`pop_front`, the tail prune through `pop_back`, and
+    // `abandon_points_above` drops whole `Checkpoint`s (each owning `L::Span` AND `L::State`)
+    // through `forget_kept_checkpoint`. None of those are values this body holds, so no drop site
+    // can collect them, and a staging buffer is not an option: checkpoints work in
+    // allocator-less builds, where there is nowhere to put an unbounded number of evicted
+    // entries.
+    //
+    // So the fix is the order, not the buffer. Everything that runs caller code happens in
+    // PHASE 1, while the input is still wholly on the branch being abandoned — a panic there
+    // leaves it there, which is precisely the "unchanged" half of all-or-nothing. PHASE 2 then
+    // installs every fact with no caller code among them at all. The cache evictions are safe to
+    // hoist because a cache is a pure memo: dropping any subset of it is unobservable, entries
+    // simply re-lex. The point abandonment was already first for its own reasons.
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    let ckp_id = checkpoint.ckp_id;
+    let Checkpoint {
+      cursor,
+      span,
+      state,
+      emitter_checkpoint,
+      emitted_error_end,
+      poison_boundary,
+      cache_pushes,
+      ..
+    } = checkpoint;
+
+    // ── PHASE 1 — caller code runs here, and only here. Nothing is restored yet. ──
+
+    // Clamping is the fallible half of the position write (`Source::len`, and an `Offset::clone`
+    // on the clamping branch). Done up front, its failure costs nothing; done at the install, it
+    // would leave the emitter and the facts rewound past a position that never moved.
+    let (clamped, spare) = self.clamped_span(span.into());
+
+    // Session points above the target: each pop hands a whole `Checkpoint` to
+    // `forget_kept_checkpoint` BY VALUE, so its `L::Span` and `L::State` drop inside that call.
     #[cfg(any(feature = "std", feature = "alloc"))]
     {
       if !self.session.points.is_empty() {
-        self.abandon_points_above(checkpoint.ckp_id);
+        self.abandon_points_above(ckp_id);
       }
     }
 
-    // Maintain the lineage stack in every allocator build: pop it down through the restored
-    // id (invalidating it and every younger checkpoint). An absent id is a no-op — a raw
-    // restore to a checkpoint an earlier restore already invalidated (release's
-    // unspecified-but-bounded posture; `restore` asserts presence in debug + ptr).
-    #[cfg(any(feature = "std", feature = "alloc"))]
-    self.live_pop_through(checkpoint.ckp_id);
+    // Taken, not dropped: the parked slot is a value this body owns, so it can be staged.
+    let displaced_park = self.pending.take();
 
-    // The parked front token is not a cache entry and is not counted, so a restore drops it
-    // outright rather than replaying it. Sound for the same reason the tail-drop below is: the
-    // restored span/state land at or before its start, so the region re-lexes and — by the `Lexer`
-    // determinism contract — reproduces it. Only a cache that retains nothing can park anything,
-    // and re-lexing everything is that cache's baseline behaviour.
-    *self.pending = None;
-    self.cache_mut().rewind(&checkpoint);
-    // Drop the cache entries pushed after the save. They were lexed on the continuation
-    // this restore abandons, and the cache memoizes only their token *values*, not the
-    // scan side effects of the region they came from (a lexer error emitted while lexing
-    // across it). Leaving them would let a later drain jump over a rewound error instead
-    // of re-lexing — and re-emitting — its region, so drop them here on every restore path.
-    //
-    // The push count is per-lineage state the copy-back below rewinds to its saved value on
-    // every restore, exactly like the dedup watermark and the poison boundary. So the count
-    // always describes the CURRENT lineage, and `cache_pushes - saved` counts the pushes
-    // since this checkpoint within that lineage only. Pushes only ever append to the back and
-    // evictions only ever pop the front or clear the whole cache, so the live cache is a
-    // contiguous run of the push sequence in push order and the post-save entries are its
-    // tail. `min(len, ..)` discounts post-save entries a front eviction or a consume already
-    // removed — those lower the survivor count below `cache_pushes - saved` — so dropping
-    // that many from the back removes exactly the ones still resident.
-    //
-    // Rewinding the count is what makes nested last-in, first-out restores compose. Take the
-    // sequence: prefill one cached token, save outer, save inner, peek more, restore inner,
-    // restore outer. The inner restore drops its post-save tail and rewinds the count to the
-    // inner save's value; nothing was pushed between the two saves, so that equals the outer
-    // save's value. The outer restore's cursor equals the cache front, so the rewind above
-    // no-ops, and `cache_pushes - saved` is now zero: it drops nothing and retains the
-    // prefilled pre-save token. A never-rewound count would still read stale-high here and
-    // over-drop that token, forcing a re-lex whose scan side effects belong to the abandoned
-    // lineage (advancing shared lexer/limit state, latching a poison the checkpoint predates).
+    // Cache geometry and the post-save prune. Both discard owned `CachedToken`s — `clear`,
+    // `pop_front` and a `pop_back()` whose result is thrown away are each a `Drop` call written
+    // as a statement. Hoisted here, they run against the abandoned branch's own cache.
+    reconcile_cache_geometry::<L, Ctx::Cache, Lang>(self.cache_mut(), cursor.as_inner());
     let post_save = self
       .session
       .lineage
       .cache_pushes()
-      .saturating_sub(checkpoint.cache_pushes);
+      .saturating_sub(cache_pushes);
     let survivors = (self.cache.len() as u64).min(post_save);
     for _ in 0..survivors {
       self.cache.pop_back();
     }
-    let cur = checkpoint.cursor();
-    self.emitter().rewind(cur, checkpoint.emitter_checkpoint);
-    // The push count, the dedup watermark, and the poison boundary are facts about the saved
-    // lineage. Under the last-in, first-out contract the restore returns to that lineage
-    // exactly, so all three copy back verbatim: the count is restored to the push history of
-    // the lineage now live (the tail-drop above already consumed its pre-rewind value), and a
-    // saved boundary's diagnostic predates the saved emitter mark and therefore survives the
-    // rewind above, keeping poison and its diagnostic paired.
-    self
-      .session
-      .lineage
-      .restore_cache_pushes(checkpoint.cache_pushes);
-    *self.emitted_error_end = checkpoint.emitted_error_end;
-    *self.poison_boundary = checkpoint.poison_boundary;
-    self.set_span((&checkpoint.span).into());
-    *self.state = checkpoint.state;
+
+    // ── CENSUS_PHASE_BOUNDARY — the restore. No caller code below this line except
+    // `Emitter::rewind`, which the crate contracts as non-panicking on exactly this path. ──
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    self.live_pop_through(ckp_id);
+    self.emitter().rewind(&cursor, emitter_checkpoint);
+    self.session.lineage.restore_cache_pushes(cache_pushes);
+    let displaced_facts = (
+      core::mem::replace(self.emitted_error_end, emitted_error_end),
+      core::mem::replace(self.poison_boundary, poison_boundary),
+    );
+    let replaced = self.install_position(clamped, spare, state);
+
+    // ── PHASE 3 — the one drop site, with the rollback whole. ──
+    drop((displaced_park, displaced_facts, replaced));
   }
 
   /// Drop-path rewind that never resurrects a dead base. Used by the transaction guards'
@@ -2388,8 +2592,7 @@ where
     if let Some(cached_token) = self.take_front() {
       let (spanned_lexed, extras) = cached_token.into_components();
       let (span, lexed) = spanned_lexed.into_components();
-      self.commit_token(&lexed, &span);
-      *self.state = extras;
+      self.commit_token(&lexed, &span, extras);
       return Ok(Some(Spanned::new(span, lexed)));
     }
 
@@ -2406,8 +2609,7 @@ where
     let mut resume = self.resume();
     match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
-        self.commit_token(tok.data(), tok.span_ref());
-        *self.state = resume.into_lexer().into_state();
+        self.commit_token(tok.data(), tok.span_ref(), resume.into_lexer().into_state());
         Ok(Some(tok))
       }
       Scan::Tripped | Scan::Eof => Ok(None),
@@ -2459,8 +2661,7 @@ where
       // the identical fast path `next` takes.
       let (spanned_lexed, extras) = cached_token.into_components();
       let (span, lexed) = spanned_lexed.into_components();
-      self.commit_token(&lexed, &span);
-      *self.state = extras;
+      self.commit_token(&lexed, &span, extras);
       return Ok(Some(Spanned::new(span, lexed)));
     }
 
@@ -2480,8 +2681,7 @@ where
     let mut resume = self.resume();
     match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
-        self.commit_token(tok.data(), tok.span_ref());
-        *self.state = resume.into_lexer().into_state();
+        self.commit_token(tok.data(), tok.span_ref(), resume.into_lexer().into_state());
         Ok(Some(tok))
       }
       // A fresh trip whose diagnostic a recovering emitter accepted (a fatal emitter's rejection
@@ -2540,8 +2740,19 @@ where
     lexer: &L,
     e: <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
   ) -> <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error {
-    self.set_span_after_consume(lexer.span().into());
-    *self.state = lexer.state().clone();
+    // The scanner's unwind edge leans on one invariant: the committed position moves inside the
+    // loop only here, and here the token store is provably empty — this arm is reachable only
+    // from the lexing branch, which runs only with the parked slot and the cache both drained.
+    // A store-empty commit leaves the unwind settle nothing to reconcile. Guarded at the site
+    // that could break it rather than asserted where it is read.
+    debug_assert!(
+      self.cache().is_empty() && self.pending.is_none(),
+      "a mid-loop fatal commit requires an empty token store",
+    );
+    // Both halves computed before either is written, as everywhere else on this surface.
+    let span = lexer.span();
+    let state = lexer.state().clone();
+    self.commit_position(span.into(), state);
     e
   }
 
@@ -2733,11 +2944,13 @@ where
         // it stands at 3. `SyncTo::on_eof` already treats `lexer.span()` as the lexer's end for
         // exactly this reason (it commits there).
         //
-        // Floored by the lex position and clamped to the buffer, because `Lexer::span()` after
-        // exhaustion is the one point the trait leaves to the implementation: the floor keeps a
-        // lexer that reports a stale span from *retracting* the frontier below the items it
-        // actually yielded, and the clamp keeps one that over-reports from handing a refill driver
-        // an offset past its own buffer (the same clamp `set_span` applies).
+        // The trait now SPECIFIES the post-exhaustion span — well-formed, ending at the lexer's
+        // final position, within `[last item end, source len]` — and the conformance kit checks
+        // it. The floor and the clamp stay as DEFENCE IN DEPTH against a non-conforming lexer,
+        // not as the specification: the floor keeps one that reports a stale span from
+        // *retracting* the frontier below the items it actually yielded, and the clamp keeps one
+        // that over-reports from handing a refill driver an offset past its own buffer (the same
+        // clamp `set_span` applies).
         let frontier = lexer.span().end().max(lex_at.clone()).min(self.input.len());
         break 'scan Err(Cmpl::surface_incomplete(frontier));
       }
@@ -2864,9 +3077,25 @@ impl<S, St> AtFrontier<S, St> {
   /// thing and the position a scan commits cannot depend on which fed it. See the type's docs for
   /// why a crossed lexer error is not among them.
   #[inline(always)]
-  fn adopt(&mut self, span: S, state: St) {
-    self.span = span;
-    self.state = state;
+  #[must_use = "drop the replaced pair AFTER the settle's notification: dropping it here puts                 caller code between adopting the token and telling the observer about it"]
+  fn adopt(&mut self, span: S, state: St) -> (S, St) {
+    // `self.span = span; self.state = state;` is a TEARING pair, and the reason is not obvious
+    // enough to leave implicit: an assignment installs its new value and *then* drops the value it
+    // replaced, so the replaced SPAN's `Drop` — caller code — runs between the two writes. If it
+    // unwinds, the second assignment never executes and the frontier is published carrying one
+    // token's span beside the previous token's state. A committing mode's unwind edge commits
+    // that frontier, so the tear reaches the input. Measured: span (3, 5) paired with the tally
+    // after token (0, 2).
+    //
+    // Same discipline as `InputRef::commit_position`: install both halves with no drop between
+    // them, and let the replaced values go only once the pair is whole.
+    // The replaced pair is HANDED BACK rather than dropped here, for the same reason
+    // `InputRef::replace_position` hands its own back: these drops are caller code, and the
+    // caller has a notification to make between adopting the token and letting them go.
+    (
+      core::mem::replace(&mut self.span, span),
+      core::mem::replace(&mut self.state, state),
+    )
   }
 }
 
@@ -2874,6 +3103,51 @@ impl<'inp, L: Lexer<'inp>> Frontier<'inp, L> for AtFrontier<L::Span, L::State> {
   #[inline(always)]
   fn boundary(&self, _cursor: &L::Offset) -> L::Offset {
     self.span.end_ref().clone()
+  }
+}
+
+/// The **cursor-keyed geometry** half of a restore: drop every resident cache entry that the
+/// restored position has moved back past, keeping the suffix that still lies ahead of it.
+///
+/// This used to be `Cache::rewind`, and it could not be implemented correctly from the inputs a
+/// cache was given. The method received only a `&Checkpoint`, whose public surface is the cursor
+/// and the state — while the datum that distinguishes a pre-save entry from a post-save one, the
+/// push generation, is crate-private. The documented sentence ("clear any tokens that were added
+/// after the checkpoint was created") was therefore unimplementable by a third party, and an
+/// implementation that tried over-dropped pre-save lookahead: the region re-lexes, so limit
+/// budgets are re-burnt, instrumentation doubles, and poison can latch at a position the original
+/// lineage never reached.
+///
+/// So the protocol has one owner. The input layer does the geometry here, through the trait's
+/// own queue surface, and then does the generation-keyed tail-drop it always did — the half only
+/// it can do. A cache implements a queue and nothing else.
+///
+/// The loop is exactly the fixpoint of the three built-in bodies it replaces: a cursor before the
+/// resident window clears (first iteration); a cursor exactly at the front keeps the whole
+/// suffix; a cursor at or past the back pops everything, which is the clear; and a mid-window
+/// cursor pops the prefix and then either lands on an exact start (keep the suffix) or overshoots
+/// into the "before the front" case (clear). The capacity-1 and capacity-0 caches are the
+/// degenerate cases of the same loop.
+#[inline]
+fn reconcile_cache_geometry<'inp, L, C, Lang>(cache: &mut C, cursor: &L::Offset)
+where
+  L: Lexer<'inp> + 'inp,
+  Lang: ?Sized,
+  C: Cache<'inp, L, Lang> + ?Sized,
+{
+  while let Some(front_start) = cache.front_span().map(|span| span.start_ref()) {
+    if cursor == front_start {
+      // Exact front match: every resident entry lies at or after the restored position.
+      return;
+    }
+    if cursor < front_start {
+      // The restored position predates the resident window entirely.
+      cache.clear();
+      return;
+    }
+    // The cursor is past this token's start, so the restore has moved back past it: drop it and
+    // re-examine the new front.
+    cache.pop_front();
   }
 }
 

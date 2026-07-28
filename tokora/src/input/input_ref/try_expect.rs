@@ -264,8 +264,7 @@ where
     Ok(self.take_front_if(|t| pred(t.token)).map(|tok| {
       let (lexed, state) = tok.into_components();
       let (span, tok) = lexed.into_components();
-      self.commit_token(&tok, &span);
-      *self.state = state;
+      self.commit_token(&tok, &span, state);
 
       Spanned::new(span, tok)
     }))
@@ -301,8 +300,7 @@ where
       return Ok(self.take_front_if(|t| pred(t.token)).map(|tok| {
         let (lexed, state) = tok.into_components();
         let (span, tok) = lexed.into_components();
-        self.commit_token(&tok, &span);
-        *self.state = state;
+        self.commit_token(&tok, &span, state);
         Spanned::new(span, tok)
       }));
     }
@@ -320,8 +318,7 @@ where
     match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
         if pred(tok.as_ref()) {
-          self.commit_token(tok.data(), tok.span_ref());
-          *self.state = resume.into_lexer().into_state();
+          self.commit_token(tok.data(), tok.span_ref(), resume.into_lexer().into_state());
           Ok(Some(tok))
         } else {
           let (span, tok) = tok.into_components();
@@ -477,8 +474,7 @@ where
     };
     let (lexed, state) = carried.into_components();
     let (span, tok) = lexed.into_components();
-    self.commit_token(&tok, &span);
-    *self.state = state;
+    self.commit_token(&tok, &span, state);
     Spanned::new(span, tok)
   }
 
@@ -520,8 +516,7 @@ where
         .map(|tok| {
           let (lexed, state) = tok.into_components();
           let (span, tok) = lexed.into_components();
-          self.commit_token(&tok, &span);
-          *self.state = state;
+          self.commit_token(&tok, &span, state);
           (output.unwrap(), Spanned::new(span, tok))
         }),
     )
@@ -570,8 +565,7 @@ where
         .map(|tok| {
           let (lexed, state) = tok.into_components();
           let (span, tok) = lexed.into_components();
-          self.commit_token(&tok, &span);
-          *self.state = state;
+          self.commit_token(&tok, &span, state);
           (output.unwrap(), Spanned::new(span, tok))
         }),
     )
@@ -614,8 +608,7 @@ where
     }) {
       let (lexed, state) = tok.into_components();
       let (span, tok) = lexed.into_components();
-      self.commit_token(&tok, &span);
-      *self.state = state;
+      self.commit_token(&tok, &span, state);
 
       return match output {
         Some(res) => res.map(|o| Some((o, Spanned::new(span, tok)))),
@@ -652,8 +645,7 @@ where
     match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => match pred(tok.as_ref()) {
         Some(output) => {
-          self.commit_token(tok.data(), tok.span_ref());
-          *self.state = resume.into_lexer().into_state();
+          self.commit_token(tok.data(), tok.span_ref(), resume.into_lexer().into_state());
           output.map(|o| Some((o, tok)))
         }
         None => {
@@ -689,8 +681,7 @@ where
     match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
         if pred(tok.as_ref()) {
-          self.commit_token(tok.data(), tok.span_ref());
-          *self.state = resume.into_lexer().into_state();
+          self.commit_token(tok.data(), tok.span_ref(), resume.into_lexer().into_state());
           Ok(Some(tok))
         } else {
           let (span, tok) = tok.into_components();
@@ -728,8 +719,7 @@ where
     match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => {
         if let Some(out) = pred(tok.as_ref()) {
-          self.commit_token(tok.data(), tok.span_ref());
-          *self.state = resume.into_lexer().into_state();
+          self.commit_token(tok.data(), tok.span_ref(), resume.into_lexer().into_state());
           Ok(Some((out, tok)))
         } else {
           let (span, tok) = tok.into_components();
@@ -769,8 +759,7 @@ where
     match self.scan_with(resume.parts_mut(), &AtCursor)? {
       Scan::Token(tok) => match pred(tok.as_ref()) {
         Some(output) => {
-          self.commit_token(tok.data(), tok.span_ref());
-          *self.state = resume.into_lexer().into_state();
+          self.commit_token(tok.data(), tok.span_ref(), resume.into_lexer().into_state());
           Ok(Some((output, tok)))
         }
         None => {

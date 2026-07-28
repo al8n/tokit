@@ -513,7 +513,7 @@ currently-supported versioned feature (`bytes_1`), which pulls the optional depe
 | Feature | Enables | Implies (per `Cargo.toml`) | no_std posture |
 |---------|---------|----------------------------|----------------|
 | `std` *(default)* | the `std` library and the `default` features of every active dependency | `generic-arraydeque/default`, `thiserror/default`, `mayber/default`, and `<dep>?/default` for each active backend/logos version | requires `std` |
-| `alloc` | `Vec`/`String`-backed drivers and unbounded lookahead without `std` | `generic-arraydeque/alloc`, `mayber/alloc`, `tinyvec_1?/alloc` | no_std **+ allocator** |
+| `alloc` | `Vec`/`String`-backed containers and drivers without `std` — **not** a dynamic cache: every cache is compile-time bounded and `Window` is sealed at U1–U32, so lookahead past 32 is a transaction's job, not a buffer's | `generic-arraydeque/alloc`, `mayber/alloc`, `tinyvec_1?/alloc` | no_std **+ allocator** |
 | *(neither)* | core-only parsing with bounded (array) caches/containers | — | no_std, **no alloc** |
 
 ### Lexer adapter

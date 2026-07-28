@@ -2,9 +2,7 @@ use mayber::Maybe;
 
 use crate::lexer::Lexer;
 
-use super::{
-  Cache, CachedToken, CachedTokenOf, CachedTokenRefOf, Checkpoint, MaybeRefCachedTokenOf, Span,
-};
+use super::{Cache, CachedToken, CachedTokenOf, CachedTokenRefOf, MaybeRefCachedTokenOf};
 
 use generic_arraydeque::{ArrayLength, GenericArrayDeque};
 
@@ -37,48 +35,6 @@ where
   #[inline(always)]
   fn remaining(&self) -> usize {
     self.remaining_capacity()
-  }
-
-  #[inline(always)]
-  fn rewind(&mut self, ckp: &Checkpoint<'a, '_, L>)
-  where
-    Self: Sized,
-  {
-    if self.is_empty() {
-      return;
-    }
-
-    let cursor = ckp.cursor();
-    // if the rewind position is before the start of the cache, clear the cache
-    if let Some(span) = self.front().map(|tok| tok.token().span()) {
-      if cursor.as_inner() < span.start_ref() {
-        self.clear();
-        return;
-      }
-
-      // If the rewind position is exactly at the start of the cache, do nothing
-      if cursor.as_inner() == span.start_ref() {
-        return;
-      }
-    }
-
-    // if the rewind position is after the end of the cache, clear the cache
-    if let Some(span) = self.back().map(|tok| tok.token().span()) {
-      if cursor.as_inner() >= span.end_ref() {
-        self.clear();
-        return;
-      }
-    }
-
-    let off = cursor.as_inner();
-    match self.binary_search_by_key(off, |tok| tok.token().span_ref().start()) {
-      Ok(_) => {
-        self.retain(|tok| tok.token().span_ref().start().ge(off));
-      }
-      Err(_) => {
-        self.clear();
-      }
-    }
   }
 
   #[inline(always)]
