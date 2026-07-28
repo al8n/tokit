@@ -162,6 +162,12 @@ harness = false
 required-features = ["logos", "std"]
 
 [[bench]]
+name = "cst"
+path = "benches/cst.rs"
+harness = false
+required-features = ["logos", "std", "rowan"]
+
+[[bench]]
 name = "backtrack"
 path = "benches/backtrack.rs"
 harness = false

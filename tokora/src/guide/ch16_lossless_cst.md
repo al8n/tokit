@@ -107,6 +107,7 @@ unified kind space maps it like this:
 #   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }
 # }
 use rowan::Language;
+use tokora::cst::{CstProfile, KindValidator};
 
 /// The dialect's whole u16 space: token images first, node kinds after, plus the three
 /// bookkeeping kinds. One enum means one place to look and no way to collide. (One value
@@ -140,6 +141,18 @@ fn map_token(tok: &Tok) -> u16 {
     Tok::RBrace => K::RBrace, Tok::LParen => K::LParen, Tok::RParen => K::RParen,
     Tok::Colon => K::Colon,
   }) as u16
+}
+
+/// The dialect's CST profile: the mapper, the predicate that says which raw u16s this
+/// language can name, and the two bookkeeping kinds. Stated once, reused at every
+/// construction.
+fn query_profile() -> CstProfile<Tok> {
+  CstProfile::new(
+    map_token,
+    KindValidator::new(|kind| kind <= K::Root.raw()),
+    K::Error.raw(),
+    K::Gap.raw(),
+  )
 }
 
 /// Rowan's side of the bargain: raw ↔ typed kind conversion.
@@ -253,6 +266,14 @@ structure*. Helpers that merely consume keep the plain emitter bound.
 #     Tok::Colon => K::Colon,
 #   }) as u16
 # }
+# fn query_profile() -> CstProfile<Tok> {
+#   CstProfile::new(
+#     map_token,
+#     KindValidator::new(|kind| kind <= K::Root.raw()),
+#     K::Error.raw(),
+#     K::Gap.raw(),
+#   )
+# }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 # enum QueryLang {}
 # impl rowan::Language for QueryLang {
@@ -270,7 +291,7 @@ structure*. Helpers that merely consume keep the plain emitter bound.
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
   cache::DefaultCache,
-  cst::Sink,
+  cst::{CstProfile, KindValidator, Sink},
   emitter::{CstEmitter, Fatal},
   parser::{node, node_at},
   try_parse_input::ParseAttempt,
@@ -448,7 +469,7 @@ let src = "{ user(id: 4) { name } }";
 // corner: the mapper and the two bookkeeping kinds. It stays OUTSIDE the parse — `&mut`
 // in the context seat — because materialization needs it back afterwards.
 let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(Fatal::<QueryError>::new(), map_token, K::Error.raw(), K::Gap.raw());
+  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
 
 let fields = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
   .apply(selection_set)
@@ -466,7 +487,7 @@ assert_eq!(user.children[0].name, "name");
 
 // Materialize once. The sink is consumed; the inner emitter comes back with the tree,
 // so collected diagnostics (chapter 7) survive materialization.
-let (green, _emitter) = sink.finish(K::Root.raw(), src);
+let (green, _emitter) = sink.finish(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 
 // The round-trip law — the reason to build a CST at all:
@@ -585,6 +606,14 @@ the mark, including tokens committed before the wrap was conceivable.
 #     Tok::Colon => K::Colon,
 #   }) as u16
 # }
+# fn query_profile() -> CstProfile<Tok> {
+#   CstProfile::new(
+#     map_token,
+#     KindValidator::new(|kind| kind <= K::Root.raw()),
+#     K::Error.raw(),
+#     K::Gap.raw(),
+#   )
+# }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 # enum QueryLang {}
 # impl rowan::Language for QueryLang {
@@ -602,7 +631,7 @@ the mark, including tokens committed before the wrap was conceivable.
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
 #   cache::DefaultCache,
-#   cst::Sink,
+#   cst::{CstProfile, KindValidator, Sink},
 #   emitter::{CstEmitter, Fatal},
 #   parser::{node, node_at},
 #   try_parse_input::ParseAttempt,
@@ -759,7 +788,7 @@ where
 
 let src = "{ author: user(id: 4) { name } }";
 let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(Fatal::<QueryError>::new(), map_token, K::Error.raw(), K::Gap.raw());
+  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
 let fields = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
   .apply(selection_set)
   .parse_str(src)
@@ -768,7 +797,7 @@ let fields = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::de
 assert_eq!(fields[0].alias.as_deref(), Some("author"));
 assert_eq!(fields[0].name, "user");
 
-let (green, _emitter) = sink.finish(K::Root.raw(), src);
+let (green, _emitter) = sink.finish(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 assert_eq!(tree.text().to_string(), src);
 
@@ -867,6 +896,14 @@ formatting data *without* a tree in the dependency closure; under a sink they ar
 #     Tok::Colon => K::Colon,
 #   }) as u16
 # }
+# fn query_profile() -> CstProfile<Tok> {
+#   CstProfile::new(
+#     map_token,
+#     KindValidator::new(|kind| kind <= K::Root.raw()),
+#     K::Error.raw(),
+#     K::Gap.raw(),
+#   )
+# }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 # enum QueryLang {}
 # impl rowan::Language for QueryLang {
@@ -884,7 +921,7 @@ formatting data *without* a tree in the dependency closure; under a sink they ar
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
 #   cache::DefaultCache,
-#   cst::Sink,
+#   cst::{CstProfile, KindValidator, Sink},
 #   emitter::{CstEmitter, Fatal},
 #   parser::{node, node_at},
 #   try_parse_input::ParseAttempt,
@@ -1034,12 +1071,12 @@ formatting data *without* a tree in the dependency closure; under a sink they ar
 // Comments, newlines, commas: no grammar rule mentions them, all of them survive.
 let src = "{ # every byte survives\n  a, b }";
 let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(Fatal::<QueryError>::new(), map_token, K::Error.raw(), K::Gap.raw());
+  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
 Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
   .apply(selection_set)
   .parse_str(src)
   .unwrap();
-let (green, _emitter) = sink.finish(K::Root.raw(), src);
+let (green, _emitter) = sink.finish(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 assert_eq!(tree.text().to_string(), src);
 
@@ -1060,13 +1097,13 @@ assert!(tokens.iter().all(|(kind, _)| *kind != SyntaxKind::Gap));
 // an aborted parse still round-trips its text.
 let src = "{ a % b }";
 let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(Fatal::<QueryError>::new(), map_token, K::Error.raw(), K::Gap.raw());
+  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
 let res = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
   .apply(selection_set)
   .parse_str(src);
 assert_eq!(res, Err(QueryError::Lex));
 
-let (green, _emitter) = sink.finish_partial(K::Root.raw(), src);
+let (green, _emitter) = sink.finish_partial(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 assert_eq!(tree.text().to_string(), src, "aborted parse, intact text");
 assert!(
@@ -1382,10 +1419,18 @@ branch is abandoned, its events are truncated as if they never happened.
 #     Tok::Colon => K::Colon,
 #   }) as u16
 # }
+# fn query_profile() -> CstProfile<Tok> {
+#   CstProfile::new(
+#     map_token,
+#     KindValidator::new(|kind| kind <= K::Root.raw()),
+#     K::Error.raw(),
+#     K::Gap.raw(),
+#   )
+# }
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
 #   cache::DefaultCache,
-#   cst::Sink,
+#   cst::{CstProfile, KindValidator, Sink},
 #   emitter::{CstEmitter, Fatal},
 #   parser::{node, node_at},
 #   try_parse_input::ParseAttempt,
@@ -1555,20 +1600,20 @@ where
 let src = "{ user(id: 4) { name } }";
 
 let mut straight: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(Fatal::<QueryError>::new(), map_token, K::Error.raw(), K::Gap.raw());
+  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
 Parser::with_context((&mut straight, DefaultCache::<QueryLexer<'_>>::default()))
   .apply(selection_set)
   .parse_str(src)
   .unwrap();
-let (green_straight, _) = straight.finish(K::Root.raw(), src);
+let (green_straight, _) = straight.finish(K::Root.raw());
 
 let mut backtracked: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(Fatal::<QueryError>::new(), map_token, K::Error.raw(), K::Gap.raw());
+  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
 Parser::with_context((&mut backtracked, DefaultCache::<QueryLexer<'_>>::default()))
   .apply(decline_then_parse)
   .parse_str(src)
   .unwrap();
-let (green_backtracked, _) = backtracked.finish(K::Root.raw(), src);
+let (green_backtracked, _) = backtracked.finish(K::Root.raw());
 
 // One timeline survived — the trees are byte-identical.
 assert_eq!(green_straight.unwrap(), green_backtracked.unwrap());
@@ -1650,6 +1695,14 @@ scan — no sync point found — rewinds its speculative events entirely.)
 #     Tok::Colon => K::Colon,
 #   }) as u16
 # }
+# fn query_profile() -> CstProfile<Tok> {
+#   CstProfile::new(
+#     map_token,
+#     KindValidator::new(|kind| kind <= K::Root.raw()),
+#     K::Error.raw(),
+#     K::Gap.raw(),
+#   )
+# }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 # enum QueryLang {}
 # impl rowan::Language for QueryLang {
@@ -1667,7 +1720,7 @@ scan — no sync point found — rewinds its speculative events entirely.)
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
 #   cache::DefaultCache,
-#   cst::Sink,
+#   cst::{CstProfile, KindValidator, Sink},
 #   emitter::CstEmitter,
 #   parser::{node, node_at},
 #   try_parse_input::ParseAttempt,
@@ -1869,14 +1922,14 @@ where
 // The garbage between the two fields is not valid Query syntax.
 let src = "{ user(id: 4) 4 5 name }";
 let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(Verbose::<QueryError>::new(), map_token, K::Error.raw(), K::Gap.raw());
+  Sink::new(src, Verbose::<QueryError>::new(), query_profile());
 let salvaged = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
   .apply(selection_set_recovering)
   .parse_str(src)
   .unwrap();
 assert_eq!(salvaged, 2, "`user` and `name` both survive the garbage between them");
 
-let (green, emitter) = sink.finish(K::Root.raw(), src);
+let (green, emitter) = sink.finish(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 assert_eq!(tree.text().to_string(), src, "recovery does not break the round trip");
 
@@ -1973,6 +2026,14 @@ the wall that keeps a hand-rolled mistake loud:
 #     Tok::Colon => K::Colon,
 #   }) as u16
 # }
+# fn query_profile() -> CstProfile<Tok> {
+#   CstProfile::new(
+#     map_token,
+#     KindValidator::new(|kind| kind <= K::Root.raw()),
+#     K::Error.raw(),
+#     K::Gap.raw(),
+#   )
+# }
 # #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 # enum QueryLang {}
 # impl rowan::Language for QueryLang {
@@ -1990,7 +2051,7 @@ the wall that keeps a hand-rolled mistake loud:
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, Parser,
 #   cache::DefaultCache,
-#   cst::Sink,
+#   cst::{CstProfile, KindValidator, Sink},
 #   emitter::{CstEmitter, Fatal},
 # };
 # type QueryIn<'inp, 'x, Ctx> = InputRef<'inp, 'x, QueryLexer<'inp>, Ctx>;
@@ -2022,23 +2083,23 @@ where
 
 let src = "{ user }";
 let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(Fatal::<QueryError>::new(), map_token, K::Error.raw(), K::Gap.raw());
+  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
 let _ = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
   .apply(unfinished)
   .parse_str(src);
 
 // `finish` refuses to guess what the dangling node meant:
-let (green, _emitter) = sink.finish(K::Root.raw(), src);
+let (green, _emitter) = sink.finish(K::Root.raw());
 assert!(matches!(green, Err(FinishError::UnclosedNodes { open: 1 })));
 
 // `finish_partial` is the explicit tooling opt-in: close whatever the abort left open
 // and hand back an inspectable partial tree — the round-trip law holds on it too.
 let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(Fatal::<QueryError>::new(), map_token, K::Error.raw(), K::Gap.raw());
+  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
 let _ = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
   .apply(unfinished)
   .parse_str(src);
-let (green, _emitter) = sink.finish_partial(K::Root.raw(), src);
+let (green, _emitter) = sink.finish_partial(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 assert_eq!(tree.text().to_string(), src);
 assert_eq!(tree.first_child().unwrap().kind(), SyntaxKind::SelectionSet);

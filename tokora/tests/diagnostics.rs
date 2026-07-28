@@ -72,7 +72,24 @@ fn on_unimplemented_messages_match_their_committed_stderr() {
   for (case, _, _) in CASES {
     t.compile_fail(case);
   }
+  for case in BOUND_CASES {
+    t.compile_fail(case);
+  }
 }
+
+/// Cases that pin a **bound** rather than a curated message.
+///
+/// No `on_unimplemented` attribute is involved, so these are compiled by the trybuild half
+/// above and are deliberately **not** in [`CASES`] — the curated-headline check below asks a
+/// question about attributes that does not apply to them.
+///
+/// `session_sink` pins the fact `PartialSession::parse`'s emitter bound leans on: a recording
+/// `Sink` is not a `ValueKeyedEmitter`. Scope worth stating, because it is narrower than it
+/// looks: this fails if somebody makes `Sink` value-keyed, which would silently re-open the
+/// session-plus-sink pairing. It does **not** fail if somebody deletes the bound from `parse`
+/// itself — pinning that needs a case that drives the method through its whole where-clause,
+/// whose failure would name a pile of unsatisfied obligations rather than this one.
+const BOUND_CASES: &[&str] = &["tests/ui/session_sink.rs"];
 
 /// Per case: the ui file, the curated headline its trait's attribute must produce, and
 /// rustc's default phrasing for the same obligation — the text that appears the moment

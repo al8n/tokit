@@ -26,7 +26,9 @@
 //!    [`EventMark`](crate::cst::event::EventMark), and the
 //!    [`Marker`](crate::cst::event::Marker) retro-wrap typestate
 //! 2. **`Sink`** (`rowan`): The recording emitter — buffers events under the one
-//!    checkpoint/rewind mark and materializes once into a green tree
+//!    checkpoint/rewind mark and materializes once into a green tree, configured by a
+//!    `CstProfile` (the dialect's kind space: mapper, `KindValidator`, error and gap kinds)
+//!    and reading its text through `CstText`
 //! 3. **`SyntaxTreeBuilder`** (`rowan`): The low-level append-only builder over rowan's
 //!    green tree builder (no rollback of its own — that is what the event buffer is for)
 //! 4. **`Element`** / **`Node`** / **`Token`** (`rowan`): Typed views over the finished
@@ -59,11 +61,25 @@ use crate::syntax::Syntax;
 pub mod event;
 
 #[cfg(feature = "rowan")]
+mod profile;
+
+#[cfg(feature = "rowan")]
 mod sink;
+
+#[cfg(feature = "rowan")]
+mod text;
+
+#[cfg(feature = "rowan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
+pub use profile::{CstProfile, KindValidator};
 
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
 pub use sink::{FinishError, Sink, TriviaPolicy};
+
+#[cfg(feature = "rowan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
+pub use text::CstText;
 
 /// A builder for constructing concrete syntax trees.
 ///

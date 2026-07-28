@@ -7,6 +7,204 @@ versioning; before 1.0, a minor bump (0.x → 0.(x+1)) signals a breaking change
 
 ### Changed (breaking)
 
+A CST sink is bound to its source when it is built, not when it is finished, and the
+materialization walk no longer rescans.
+
+1. **`Sink::new` takes the source and a `CstProfile`; `finish` and `finish_partial` no
+   longer take a source.** The source is bound once, at construction, and the three loose
+   `u16` parameters (`mapper`, `error_kind`, `gap_kind`) move into `CstProfile` alongside
+   the new `KindValidator`.
+
+   **What this buys, stated exactly.** There were two chances to hand the sink the wrong
+   buffer: at construction and again at `finish`. The second is gone — you can no longer
+   materialize against a source the sink was not built with. The first remains open, and it
+   is one witness of the limitation below.
+
+   ```rust
+   // before
+   let sink = Sink::new(emitter, map_kind, ERROR, GAP);
+   let (green, emitter) = sink.finish(ROOT, source);
+
+   // after
+   let sink = Sink::new(source, emitter, CstProfile::new(map_kind, ERROR, GAP));
+   let (green, emitter) = sink.finish(ROOT);
+   ```
+
+2. **An out-of-language kind now panics at the door, in every build.** A dialect mapper that
+   returns a kind outside its own kind space — or the reserved tombstone `u16::MAX` — is
+   refused by an `assert!` at the emit site (`cst_start`, `cst_start_at`, and the shared
+   `record_token` body behind both token doors, plus `CstProfile::new` for the two
+   synthesized kinds). Previously the same input reached `finish` and came back as
+   `Err(FinishError::InvalidDialectKind)`.
+
+   **This is a behaviour change for a caller that relied on the error.** It is a panic
+   because the condition is a dialect bug, not an input condition: the mapper is the
+   dialect's own code, no parse input can provoke it, and refusing at the cause reports it
+   one materialization earlier than the error did.
+
+   The honest limit, which is also stated at the site: the *per-event* validator inside
+   `finish` is `cfg!(debug_assertions)`-gated, because keeping it in every build cost a
+   measured **+8.3%** on ordinary materialization — an unpredictable indirect call per event
+   inside a tight builder loop. Every route reachable from outside this crate goes through a
+   door that validates in every build, so for external callers the wall is absolute. The one
+   route with no door is `push_raw_event_for_tests`, which is `pub(crate)`. So: a **release**
+   build whose event log was assembled by raw in-crate injection can materialize an
+   out-of-language kind. Every test run and every CI build refuses it. `ReservedKind` is not
+   gated — the tombstone band is a plain comparison and was a release wall before this round.
+
+3. **`FinishError` gains `InvalidDiagnosticSpan`, `MismatchedFinish`, `NonUtf8Source` and
+   `InvalidDialectKind`.** The sink now names the node it closed, so a mismatched
+   finish reports which frame it failed against instead of producing a misparented tree.
+
+### Fixed
+
+- **A session's budget guard now holds in release builds.** `PartialSession` refuses an
+  attempt that would exceed its budget or that follows a terminal latch, and it relies on the
+  downstream `From<SessionRefusal>` conversion preserving terminal status. That requirement
+  was enforced by a `debug_assert!`, so a **release** build could surface `BudgetExhausted` or
+  `TerminalLatched` as an error whose `is_incomplete()` returned true — and a caller would
+  then refill and retry forever against a session that refuses before doing any work. A
+  zero-work infinite refill loop is precisely the denial-of-service shape the budget exists to
+  prevent, and it was absent from the builds that matter. The check is now unconditional.
+
+  **Behaviour change:** a `From<SessionRefusal>` implementation that drops terminal status now
+  fails in release as it always did in debug. The cost is one `is_terminal()` call per
+  *refused* attempt — never on the success path, and nothing per token or per event.
+
+### Streaming CST is not in this release
+
+`PartialSession::parse` now requires `Ctx::Emitter: ValueKeyedEmitter`, which makes pairing a
+session with a recording `Sink` **uncompilable**. This is a deliberate scope decision with a
+return path, not an omission.
+
+The reason is that the *sound* way to use the pairing was never enforceable. A session redrives
+each attempt from the base, so a threaded sink accumulates the replayed prefix; the correct
+usage is a fresh sink per attempt, and **no type can observe freshness.** The choice was
+therefore between shipping a combination documented as unsound and shipping a bound that makes
+it unrepresentable. The bound also states something the crate already believed: `Sink`
+deliberately does not implement `ValueKeyedEmitter`, on the stated ground that a sink cannot
+wrap a sink.
+
+**Diagnostics-only streaming is unaffected** — `Fatal`, `Verbose`, `Silent`, `Ignored` and
+`&mut` of each all satisfy the bound, and a compile-time control pins that so a future
+tightening cannot take streaming diagnostics with it unnoticed. Everything else in the
+streaming lifecycle ships: the budget, the committed frontier, the terminal latch, the
+refusal-coherence law.
+
+**What returns with the witness:** the chunked-session-equals-one-shot guarantee, and the
+supported fresh-sink-per-attempt story.
+
+**The bound closes the session route only.** A hand-rolled refill loop that calls
+`parse_partial` directly with a shared recording sink produces the same duplication — measured,
+not inferred. `parse_partial` is unchanged: it predates this release, and a *single* call with
+a sink is perfectly sound, so bounding it would forbid working code rather than only broken
+code. If you hand-roll a redrive loop, build a fresh sink per attempt.
+
+### Known limitation — a parse and the emitter serving it share no identity
+
+Nothing in the `Emitter` or `ParseContext` contract lets an emitter learn which parse it is
+serving: `Cursor` carries an offset and a `PhantomData`, and `commit_token` carries a token and
+a span. More precisely: **CST emission carries no witness of the parse it belongs to.**
+`CstEmitter`'s contract names no completeness parameter, no attempt and no input, so any holder
+of the emitter may append events at any moment, and the event log cannot distinguish events
+from the live attempt, from an abandoned one, or from no parse at all.
+
+**One witness remains open in this release**, pinned by a test that asserts **today's wrong
+answer** so that closing the contract gap flips it:
+
+- **A sink can be bound to a foreign source.** A `Sink` built over `"XY"` and driven over a
+  same-length `"ab"` yields a tree whose text is `"XY"` and whose structure came from `"ab"`.
+  The lifetime proves both borrows outlive the sink, not that they are the same buffer. —
+  `sink_bound_to_a_foreign_source_is_not_yet_detected` (the two sources are deliberately equal
+  length, so a length check cannot satisfy it cheaply).
+
+The stale-structure witness — an abandoned attempt's node surviving into a later attempt's tree
+— is closed for the session route by the bound above, and its test was deleted rather than
+weakened, because the shape it exercised no longer compiles.
+
+**The fix is one contract with two additions, and neither is a `CstEmitter`-only change.** A
+*completeness* witness on the emission contract leaves automatic emission untouched, because
+`commit_token` lives on `Emitter`, not `CstEmitter` — and that same fact means a *source*
+identity cannot live on `CstEmitter` either, since it would miss `Sink::commit_token`, the path
+every ordinary parse uses. It has to sit where both paths cross: the point an emitter is
+attached to an input. Minting the sink from the input or session does both at once, and is the
+mechanism that restores streaming CST.
+
+Refusing any of this at materialization is not merely expensive, it is **impossible**: the bad
+event logs are byte-identical to logs a legal single parse could produce, so `finish` has
+nothing to discriminate on.
+
+**The shape of the gap, stated as an invariant rather than a list of doors.** *CST emission
+carries no witness of the parse it belongs to.* `CstEmitter`'s contract names no completeness
+parameter, no attempt and no input, so any holder of the emitter may append events at any
+moment, and the event log cannot distinguish events from the live attempt, from an abandoned
+one, or from no parse at all.
+
+Every route is an instance of that: the `InputRef` and `ParseState` accessors that stay
+generic over completeness — deliberately, because `Partial` legitimately needs them for
+**diagnostic** emission — and every combinator that hands either to a user callback. The
+sink's own owner needs no route at all. Pinning individual combinators to `Complete` walls an
+instance; it cannot wall the class, which is why this is deferred as contract work rather than
+patched door by door.
+
+**The fix is one contract with two additions.** A *completeness* witness on the emission
+contract closes witness 2 while leaving automatic emission untouched — `commit_token` lives on
+`Emitter`, not `CstEmitter` — so the supported streaming shape survives it. A *source
+identity* on the same contract closes witness 1.
+
+### Known limitation — `finish` does not refuse duplicate zero-width token spans
+
+Separate and smaller, listed apart because it is **not** the identity gap: the monotone-span
+wall never fires when duplicated spans are both `[0,0)`, so such a log materializes. A
+conforming lexer cannot produce one — a token is a span of consumed bytes, and a lexer
+returning zero-width tokens without advancing does not terminate — so this is reachable only
+through the raw event surface or a third-party `Lexer` that ignores the contract, which is
+what the sink's release walls exist for. It pins a property of *materialization*, not of the
+parse-to-emitter contract, and it flips when `finish` starts refusing these spans. —
+`duplicate_zero_width_tokens_are_not_yet_detected`
+
+### Added
+
+- **Streaming sessions.** `PartialSession`, `Budget`, `SessionRefusal`, `RedriveFromBase` and
+  the sealed `ReplayMode` give `parse_partial` a lifecycle: a partial parse survives its
+  refills instead of restarting, under a budget that a caller sets and can observe. See the
+  known limitation above before pairing a session with a recording `Sink`.
+- **`CstText`** — the source-to-`&str` bridge, so a byte-like source materializes a tree when
+  it is valid UTF-8 and returns `FinishError::NonUtf8Source` with the offending offset when it
+  is not, rather than being unusable.
+
+### Performance
+
+The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,
+which is Θ(n²) in the number of diagnosed gaps. It is now two passes that are linear in
+events — a gather, then the walk against a shared monotone cursor — **plus one `k log k`
+ordering of the `k` recorded diagnostic spans.** With one lexer error per token `k` is
+Θ(events), so materialization is **O(n log n)**, not linear; the quadratic term is what this
+round removes.
+
+A distribution sort that would make it genuinely linear was implemented and **rejected on
+measurement**: a fixed four-pass radix costs 15n against a 9n budget at every size, an
+adaptive one steps between one and two passes across the probe range and reports growth
+indistinguishable from real nonlinearity, and both pay ~1024 fixed operations per `finish` in
+the common case where a parse records a handful of diagnostics. It remains a candidate with
+its own measurement.
+
+- `finish_error_dense` — **15.9× faster** (4 096 alternating error/token pairs). A growth
+  probe pins the shape rather than the constant: 799 / 3 199 / 12 799 units of replay work
+  against bounds of 900 / 3 600 / 14 400, growth **4.00×** for a 4× input.
+- `finish_wrap_heavy` — **3.62× faster** (2 048 retro-wrap targets).
+- `finish_clean` — **18% slower, and this ships.** It is the harness's designated
+  no-regression control, so it is disclosed rather than folded into an average: ~19 → ~22 ns
+  per token over 4 096 tokens, measured on `finish` alone. It reproduces at all nine
+  alignment residues of a padding sweep (min +12.4%, max +22.8%), so it is a real cost and
+  not the layout artifact its bimodal raw readings first suggested. Two candidate causes are
+  eliminated — the event footprint is unchanged (`size_of::<Event<SimpleSpan>>()` is 32 on
+  both sides) and the new reachability bitset never allocates on clean input — and the
+  residual is not yet attributed. `finish`'s internals are private, so an attribution can
+  land in a patch release without breaking anyone.
+
+### Changed (breaking)
+
 The Pratt driver ends an expression when the RHS channel says so, not when the input
 position looks finished — and a report that consumes nothing can no longer be folded.
 

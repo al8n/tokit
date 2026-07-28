@@ -19,7 +19,7 @@ use rowan::{Language, NodeOrToken, SyntaxNode};
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, Token as TokenT,
   cache::DefaultCache,
-  cst::Sink,
+  cst::{CstProfile, KindValidator, Sink},
   emitter::{CstEmitter, Fatal},
   error::token::UnexpectedTokenOf,
   logos::{self, Logos},
@@ -422,12 +422,16 @@ fn main() {
   // The sink wraps a fail-fast `Fatal` emitter and takes the dialect corner: the token
   // mapper plus the error/gap bookkeeping kinds. It stays outside the parse in the context
   // seat, because materialization needs it back afterwards.
-  let mut sink: Sink<'_, SExprLexer<'_>, _> = Sink::new(
-    Fatal::<SExprError>::new(),
+  // The dialect's kind space, stated once: the mapper, the predicate that decides which raw
+  // u16s this language can name (every discriminant up to and including `Root`), and the two
+  // kinds the sink synthesizes on its own behalf.
+  let profile = CstProfile::new(
     map_token,
+    KindValidator::new(|kind| kind <= K::Root.raw()),
     K::Error.raw(),
     K::Gap.raw(),
   );
+  let mut sink: Sink<'_, SExprLexer<'_>, _> = Sink::new(src, Fatal::<SExprError>::new(), profile);
 
   Parser::with_context((&mut sink, DefaultCache::<SExprLexer<'_>>::default()))
     .apply(program)
@@ -435,7 +439,7 @@ fn main() {
     .expect("parse succeeds");
 
   // Materialize once. The sink is consumed; the inner emitter comes back with the tree.
-  let (green, _emitter) = sink.finish(K::Root.raw(), src);
+  let (green, _emitter) = sink.finish(K::Root.raw());
   let tree = SyntaxNode::<SExprLang>::new_root(green.expect("well-formed tree"));
 
   // The round-trip law — the whole reason to build a CST.

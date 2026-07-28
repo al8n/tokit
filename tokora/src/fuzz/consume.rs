@@ -823,7 +823,7 @@ fn run_leaf(
         let mark = marks.pop().expect("guarded by the length check");
         let emitter = ir.emitter();
         CstEmitter::<ScriptLexer<'_>>::cst_start_at(emitter, mark, K_WRAP_KIND);
-        CstEmitter::<ScriptLexer<'_>>::cst_finish(emitter);
+        CstEmitter::<ScriptLexer<'_>>::cst_finish(emitter, K_WRAP_KIND);
       }
       assert_cursor(ir, model.o, "a retro-wrap moved the committed cursor");
     }

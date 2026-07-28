@@ -411,7 +411,7 @@ use rowan::Language;
 use tokora::{
   Emitter, InputRef as In, Parse, ParseContext, ParseInput, Parser,
   cache::DefaultCache,
-  cst::Sink,
+  cst::{CstProfile, KindValidator, Sink},
   emitter::{CstEmitter, Fatal},
   parser::node,
 };
@@ -424,6 +424,17 @@ enum K { Num, Plus, Expr, Error, Gap, Root }
 // The sink-side mapper: committed tokens enter the tree through this one match.
 fn map_token(t: &Tok) -> u16 {
   (match t { Tok::Num => K::Num, Tok::Plus => K::Plus }) as u16
+}
+
+// The dialect's CST profile: the mapper, the predicate that names the whole kind space
+// (every discriminant up to `Root`), and the two bookkeeping kinds.
+fn profile() -> CstProfile<Tok> {
+  CstProfile::new(
+    map_token,
+    KindValidator::new(|k| k <= K::Root as u16),
+    K::Error as u16,
+    K::Gap as u16,
+  )
 }
 
 // Rowan's raw <-> typed bargain.
@@ -476,21 +487,21 @@ let src = "1+2";
 
 // Straight drive.
 let mut straight: Sink<'_, Ln<'_>, _> =
-  Sink::new(Fatal::<Error>::new(), map_token, K::Error as u16, K::Gap as u16);
+  Sink::new(src, Fatal::<Error>::new(), profile());
 Parser::with_context((&mut straight, DefaultCache::<Ln<'_>>::default()))
   .apply(expr)
   .parse_str(src)
   .unwrap();
-let (green_straight, _) = straight.finish(K::Root as u16, src);
+let (green_straight, _) = straight.finish(K::Root as u16);
 
 // Same source, through the declined speculation.
 let mut backtracked: Sink<'_, Ln<'_>, _> =
-  Sink::new(Fatal::<Error>::new(), map_token, K::Error as u16, K::Gap as u16);
+  Sink::new(src, Fatal::<Error>::new(), profile());
 Parser::with_context((&mut backtracked, DefaultCache::<Ln<'_>>::default()))
   .apply(decline_then_parse)
   .parse_str(src)
   .unwrap();
-let (green_backtracked, _) = backtracked.finish(K::Root as u16, src);
+let (green_backtracked, _) = backtracked.finish(K::Root as u16);
 
 // The declined branch left NO phantom: the two green trees are byte-identical.
 let green = green_straight.unwrap();

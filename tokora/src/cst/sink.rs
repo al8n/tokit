@@ -15,7 +15,7 @@
 //! | E4 | [`Sink::rows`] | **release stack + per-checkpoint depth ledger + inner reading** | push at `checkpoint()` (freezing the depth and the inner emitter's own checkpoint reading), pop at `release()` (kept) and `rewind()` (spent, the popped row's inner reading is the inner's rewind target); depth entries are frozen facts about prefixes, never live counters |
 //! | — | [`Sink::floor`] | derived memo (the newest released row) | reset to the surviving top row when a rewind drops below it |
 //! | — | [`Sink::base_inner`] | derived memo (the inner's construction-time reading) | primed at the first advancing touch (provably the construction reading), never restored (the exact no-row target at the origin only) |
-//! | — | `inner`, `mapper`, `error_kind`, `gap_kind`, `trivia` | configuration / the wrapped emitter | never touched by rewind (the inner rewinds through its own contract) |
+//! | — | `inner`, `source`, `profile`, `trivia` | configuration / the wrapped emitter | never touched by rewind (the inner rewinds through its own contract) |
 //! | — | `witness` | sink identity (validated at every mark spend, every build) | never restored |
 //!
 //! Open-node **depth is derived, never cached**: there is no live depth counter anywhere —
@@ -45,7 +45,10 @@ use crate::{
   utils::CowStr,
 };
 
-use super::event::{Event, EventMark, TOMBSTONE, TruncationLedger};
+use super::{
+  event::{Event, EventMark, TOMBSTONE, TruncationLedger},
+  profile::CstProfile,
+};
 
 pub use finish::FinishError;
 
@@ -237,14 +240,39 @@ fn bump_witness(next: &core::sync::atomic::AtomicUsize) -> usize {
 ///
 /// # Construction
 ///
-/// [`new`](Self::new) takes the wrapped emitter, the dialect's token mapper
-/// (`fn(&L::Token) -> u16` into the dialect's unified kind space — no kind bound leaks into
-/// core), the `error_kind` used to wrap recovery holes, and the `gap_kind` used to tile
-/// uncovered source bytes at materialization (what makes `tree.text() == source` structural
-/// for every input, lexer errors included). Construction is **compile-time restricted to
-/// trivia-surfacing lexers** ([`Lexer::SURFACES_TRIVIA`]): a syntactic lexer that skips
-/// trivia cannot take the lossless door, because a skipped-whitespace gap is
+/// The source is bound **here**, and `finish` has no source parameter, so a materialization
+/// can no longer be handed a buffer different from the one construction named. What that
+/// removes is the *late* half of the wrong-source class. It does not establish that the
+/// buffer named here is the one the parser will read: `'inp` proves both borrows outlive the
+/// sink, not that they are the same bytes, and nothing here compares them. A sink built over
+/// one buffer and driven while parsing another of the same length still materializes a tree
+/// whose text is this buffer and whose structure is the parser's — pinned, as an open hole,
+/// by `sink_bound_to_a_foreign_source_is_not_yet_detected`. Closing it needs an identity the
+/// sink can check, and no [`Emitter`] hook hands the sink the parser's buffer.
+///
+/// [`new`](Self::new) takes the source buffer the parse runs over, the wrapped emitter, and
+/// the dialect's [`CstProfile`] — the token mapper (`fn(&L::Token) -> u16` into the dialect's
+/// unified kind space — no kind bound leaks into core), the [`KindValidator`] every recorded
+/// kind is checked against, the `error_kind` used to wrap recovery holes, and the `gap_kind`
+/// used to tile uncovered source bytes at materialization (what makes `tree.text() == source`
+/// structural for every input, lexer errors included). Binding the source here rather than at
+/// [`finish`](Self::finish) removes the one way a caller could hand materialization a
+/// different buffer than the spans were measured against. Construction is **compile-time
+/// restricted to trivia-surfacing lexers** ([`Lexer::SURFACES_TRIVIA`]): a syntactic lexer
+/// that skips trivia cannot take the lossless door, because a skipped-whitespace gap is
 /// indistinguishable from a dropped committed token.
+///
+/// ## Why the kind validator is data, not a type parameter
+///
+/// The validator rides in the profile as a plain predicate instead of being hung on the
+/// dialect's brand or on `rowan::Language`, and that is forced rather than chosen:
+/// [`Dialect::Lang`](crate::Dialect::Lang) is a **grammar brand** (`type Lang: ?Sized`, a
+/// marker that keeps two grammars' vocabularies apart), while a kind authority would have to
+/// be a `rowan::Language`; and `rowan`'s `kind_from_raw` has no fallible form, so even a
+/// `Lang: rowan::Language` bound could not yield a *typed* rejection — only a panic at query
+/// time. See [`KindValidator`] for the full statement.
+///
+/// [`KindValidator`]: super::KindValidator
 pub struct Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
@@ -276,12 +304,13 @@ where
   /// (The capture is lazy only to keep the constructor free of emitter bounds: `Emitter` is
   /// `Lang`-parameterized and the built-in emitters implement it for exactly one `Lang`.)
   base_inner: Option<u64>,
-  /// The dialect's token mapper into the unified u16 kind space.
-  mapper: fn(&L::Token) -> u16,
-  /// The node kind that wraps a recovery hole's skipped tokens.
-  error_kind: u16,
-  /// The token kind that tiles source bytes no committed token covers.
-  gap_kind: u16,
+  /// The buffer this parse runs over, bound at construction: materialization slices every
+  /// token's text out of it, so the sink and the tree can never disagree about which source
+  /// the spans belong to.
+  source: &'inp L::Source,
+  /// The dialect's kind space: token mapper, kind validator, and the two kinds the sink
+  /// synthesizes on its own behalf (recovery-hole wrap, gap tile).
+  profile: CstProfile<L::Token>,
   /// The materialization-time trivia placement policy.
   trivia: TriviaPolicy,
   /// The sink's identity, stamped into every mark it mints and validated at every spend —
@@ -300,8 +329,8 @@ where
       .field("inner", &self.inner)
       .field("events", &self.events.len())
       .field("live_marks", &self.rows.borrow().len())
-      .field("error_kind", &self.error_kind)
-      .field("gap_kind", &self.gap_kind)
+      .field("error_kind", &self.profile.error_kind())
+      .field("gap_kind", &self.profile.gap_kind())
       .field("trivia", &self.trivia)
       .finish_non_exhaustive()
   }
@@ -333,10 +362,11 @@ where
     // — derived memo: the inner's construction-time reading, primed at first advancing touch,
     // never restored.
     base_inner: _,
+    // — configuration: the construction-bound source buffer, fixed for the sink's life.
+    source: _,
+    // — configuration: the dialect's kind space, fixed for the sink's life.
+    profile: _,
     // — configuration: fixed for the sink's life.
-    mapper: _,
-    error_kind: _,
-    gap_kind: _,
     trivia: _,
     // — witness: sink identity (every build), never restored.
     witness: _,
@@ -348,14 +378,17 @@ impl<'inp, L, E> Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
 {
-  /// Creates a recording sink around `inner`.
+  /// Creates a recording sink over `source`, around `inner`, configured by `profile`.
   ///
-  /// - `mapper` maps each committed token into the dialect's unified u16 kind space (the
-  ///   [`TOMBSTONE`] value is reserved; emission debug-asserts it, materialization rejects
-  ///   it);
-  /// - `error_kind` is the node kind wrapped around a recovery hole's skipped tokens;
-  /// - `gap_kind` is the token kind tiled over source bytes no committed token covers at
-  ///   materialization, making `tree.text() == source` structural for every input.
+  /// - `source` is the buffer the parse runs over; every token's text is sliced out of it at
+  ///   materialization, so [`finish`](Self::finish) takes no source argument of its own;
+  /// - `profile` is the dialect's kind space
+  ///   ([`CstProfile`](super::CstProfile)): the token mapper into the unified u16 kind space,
+  ///   the [`KindValidator`](super::KindValidator) every recorded kind is checked against, the
+  ///   `error_kind` wrapped around a recovery hole's skipped tokens, and the `gap_kind` tiled
+  ///   over source bytes no committed token covers (what makes `tree.text() == source`
+  ///   structural for every input). The [`TOMBSTONE`] value is reserved throughout: no
+  ///   validator admits it, emission debug-asserts against it, and materialization rejects it.
   ///
   /// Construction is restricted at **compile time** to trivia-surfacing lexers
   /// ([`Lexer::SURFACES_TRIVIA`] `== true`): a syntactic lexer that skips trivia cannot take
@@ -370,7 +403,11 @@ where
   /// constructs a sink:
   ///
   /// ```rust
-  /// use tokora::{Lexer, SimpleSpan, Token, cst::Sink, emitter::Verbose};
+  /// use tokora::{
+  ///   Lexer, SimpleSpan, Token,
+  ///   cst::{CstProfile, KindValidator, Sink},
+  ///   emitter::Verbose,
+  /// };
   ///
   /// #[derive(Debug, Clone, Copy)]
   /// struct STok;
@@ -397,8 +434,8 @@ where
   /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
   /// #   fn bump(&mut self, _: &usize) {}
   /// # }
-  /// let _sink: Sink<'_, Lossless<'_>, Verbose<()>> =
-  ///   Sink::new(Verbose::new(), |_| 0, 90, 91);
+  /// let profile = CstProfile::new(|_| 0, KindValidator::new(|k| k <= 91), 90, 91);
+  /// let _sink: Sink<'_, Lossless<'_>, Verbose<()>> = Sink::new("", Verbose::new(), profile);
   /// ```
   ///
   /// The same lexer without the declaration (the default, i.e. a syntactic lexer that
@@ -406,7 +443,11 @@ where
   /// above is the missing `SURFACES_TRIVIA` line:
   ///
   /// ```compile_fail
-  /// use tokora::{Lexer, SimpleSpan, Token, cst::Sink, emitter::Verbose};
+  /// use tokora::{
+  ///   Lexer, SimpleSpan, Token,
+  ///   cst::{CstProfile, KindValidator, Sink},
+  ///   emitter::Verbose,
+  /// };
   ///
   /// #[derive(Debug, Clone, Copy)]
   /// struct STok;
@@ -433,8 +474,8 @@ where
   /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
   /// #   fn bump(&mut self, _: &usize) {}
   /// # }
-  /// let _sink: Sink<'_, Syntactic<'_>, Verbose<()>> =
-  ///   Sink::new(Verbose::new(), |_| 0, 90, 91);
+  /// let profile = CstProfile::new(|_| 0, KindValidator::new(|k| k <= 91), 90, 91);
+  /// let _sink: Sink<'_, Syntactic<'_>, Verbose<()>> = Sink::new("", Verbose::new(), profile);
   /// ```
   ///
   /// # Compile-time wall: value-keyed inners only
@@ -448,7 +489,11 @@ where
   /// ```compile_fail
   /// use core::cell::RefCell;
   /// use tokora::{
-  ///   Lexer, SimpleSpan, Token, cst::Sink, emitter::Emitter, input::Cursor, span::Spanned,
+  ///   Lexer, SimpleSpan, Token,
+  ///   cst::{CstProfile, KindValidator, Sink},
+  ///   emitter::Emitter,
+  ///   input::Cursor,
+  ///   span::Spanned,
   /// };
   ///
   /// /// A table-keyed emitter: `checkpoint` allocates a row and hands back its index.
@@ -502,11 +547,12 @@ where
   /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
   /// #   fn bump(&mut self, _: &usize) {}
   /// # }
+  /// let profile = CstProfile::new(|_| 0, KindValidator::new(|k| k <= 91), 90, 91);
   /// let _sink: Sink<'_, Lossless<'_>, TableKeyed> =
-  ///   Sink::new(TableKeyed::default(), |_| 0, 90, 91);
+  ///   Sink::new("", TableKeyed::default(), profile);
   /// ```
   #[inline]
-  pub fn new(inner: E, mapper: fn(&L::Token) -> u16, error_kind: u16, gap_kind: u16) -> Self
+  pub fn new(source: &'inp L::Source, inner: E, profile: CstProfile<L::Token>) -> Self
   where
     E: ValueKeyedEmitter,
   {
@@ -528,9 +574,8 @@ where
       floor: MarkRow::ZERO,
       ledger: TruncationLedger::new(),
       base_inner: None,
-      mapper,
-      error_kind,
-      gap_kind,
+      source,
+      profile,
       trivia: TriviaPolicy::AsEmitted,
       witness: next_sink_witness(),
       _lexer: PhantomData,
@@ -559,13 +604,13 @@ where
   /// The configured recovery-hole node kind.
   #[inline(always)]
   pub const fn error_kind(&self) -> u16 {
-    self.error_kind
+    self.profile.error_kind()
   }
 
   /// The configured gap-tile token kind.
   #[inline(always)]
   pub const fn gap_kind(&self) -> u16 {
-    self.gap_kind
+    self.profile.gap_kind()
   }
 
   /// The configured trivia policy.
@@ -629,14 +674,15 @@ where
   /// the auto-emission hook ([`Emitter::commit_token`], fed by the input layer's settle
   /// primitive) and the raw transport ([`CstEmitter::cst_token`]).
   fn record_token(&mut self, tok: &L::Token, span: &L::Span) {
-    let kind = (self.mapper)(tok);
+    let kind = (self.profile.mapper())(tok);
     // Emission-time mapper validity (detect-at-cause): rowan would defer a bad kind to a
     // query-time panic arbitrarily far from the parse; materialization keeps the release
-    // backstop.
-    debug_assert!(
-      kind != TOMBSTONE,
-      "the dialect mapper produced the reserved tombstone kind (u16::MAX) for a committed \
-       token"
+    // backstop. The predicate is the dialect's own — the reserved tombstone is the floor no
+    // validator can lift, and a kind outside the dialect's space is just as wrong.
+    assert!(
+      self.profile.validator().admits(kind),
+      "the dialect mapper produced a kind outside the dialect's own kind space for a \
+       committed token (the reserved tombstone kind, u16::MAX, is never admitted)"
     );
     self.events.push(Event::Token {
       kind,
@@ -683,14 +729,15 @@ where
        guarantees the hole's tokens postdate every live capture"
     );
 
+    let error_kind = self.profile.error_kind();
     self.events.insert(
       at,
       Event::StartNode {
-        kind: self.error_kind,
+        kind: error_kind,
         forward_parent: None,
       },
     );
-    self.events.push(Event::FinishNode);
+    self.events.push(Event::FinishNode { kind: error_kind });
 
     // Keep the undo journal exact across the splice: positions at or above the insert point
     // shift by one. (Journal entries cannot reference the spliced region — marks and their
@@ -1048,9 +1095,10 @@ where
   where
     L: Lexer<'inp>,
   {
-    debug_assert!(
-      kind != TOMBSTONE,
-      "the tombstone kind (u16::MAX) is reserved; a dialect kind must never map to it"
+    assert!(
+      self.profile.validator().admits(kind),
+      "node kind outside the dialect's own kind space (the tombstone kind, u16::MAX, is \
+       reserved and no validator admits it)"
     );
     self.events.push(Event::StartNode {
       kind,
@@ -1068,7 +1116,7 @@ where
     self.record_token(tok, span);
   }
 
-  fn cst_finish(&mut self)
+  fn cst_finish(&mut self, kind: u16)
   where
     L: Lexer<'inp>,
   {
@@ -1078,25 +1126,33 @@ where
     // because depth cannot separate the two histories that reach this call with a node
     // still open:
     //
-    //   - LEGAL cross-checkpoint close — `cst_start(A); checkpoint m; cst_token; cst_finish`:
-    //     A was opened, never rolled back, and this finish closes it. Under commit/release
-    //     both events survive balanced; under a rewind of `m` the finish truncates and A
-    //     reopens (the truncate-and-reopen semantics the CstEmitter contract blesses, see
-    //     `emitter/cst.rs`). The OLD assert compared depth against the innermost live
-    //     capture's *frozen* baseline and panicked on this legal history — the defect
+    //   - LEGAL cross-checkpoint close — `cst_start(A); checkpoint m; cst_token;
+    //     cst_finish(A)`: A was opened, never rolled back, and this finish closes it. Under
+    //     commit/release both events survive balanced; under a rewind of `m` the finish
+    //     truncates and A reopens (the truncate-and-reopen semantics the CstEmitter contract
+    //     blesses, see `emitter/cst.rs`). The OLD assert compared depth against the innermost
+    //     live capture's *frozen* baseline and panicked on this legal history — the defect
     //     this narrowing fixes (see issue #98).
     //
     //   - LEAKED-FINISH misuse — `cst_start(A); checkpoint m; cst_start(B); rewind(m);
-    //     cst_token; cst_finish`: the finish was meant for B, but B's start died with the
-    //     rewind, so it silently closes ancestor A instead. After the rewind this leaves an
-    //     event buffer IDENTICAL to the legal case above — nothing, not depth and not the
-    //     whole buffer, can tell them apart; only the opener's identity on `cst_finish`
-    //     could. Materialization therefore does NOT wall it: it builds a balanced
-    //     (wrong-node) tree with no error. `FinishError::OrphanFinish` fires only on TRUE
-    //     underflow (a finish arriving with the stack already empty), NEVER on this
-    //     balanced-wrong-node shape. Catching the misuse at cause would require adding the
-    //     intended opener's identity as an argument to `cst_finish` (a raw-emitter API
-    //     change); recorded as a known, deferred limitation.
+    //     cst_token; cst_finish(B)`: the finish was meant for B, but B's start died with the
+    //     rewind, so it would silently close ancestor A instead. After the rewind the event
+    //     buffer is IDENTICAL to the legal case above — depth cannot tell them apart, and
+    //     neither can the whole buffer. The `kind` argument is what separates them: it
+    //     travels into the `FinishNode` event and materialization compares it against the
+    //     frame it would close (`FinishError::MismatchedFinish`).
+    //
+    // The kind comparison is NOT also made here, at the emit site, and the reason is
+    // measured rather than conceded. An at-cause answer would have to name the frame
+    // *materialization* would close, and materialization hoists every retro-wrap to its
+    // target: same-target wraps open newest-first, so the first finish closes the
+    // FIRST-declared wrap, and a wrap declared after a still-open direct start nests OUTSIDE
+    // it. Both orders are inverted relative to the emission-order suffix a depth recount
+    // sees, so a recount-derived assert would fire on correct code. Reproducing the true
+    // order needs a live shadow stack keyed by materialization position — a middle-insert
+    // structure with its own undo journal across rewinds, i.e. another censused cell and an
+    // allocation on the hot emit path. The typed error at materialization is the wall; a rail
+    // that fails on correct code would be worse than none.
     //
     // Debug-only — the raw surface is sharp by contract.
     debug_assert!(
@@ -1105,7 +1161,7 @@ where
        matching start was rolled back (or never emitted), and no enclosing node is open \
        to close instead"
     );
-    self.events.push(Event::FinishNode);
+    self.events.push(Event::FinishNode { kind });
   }
 
   fn cst_mark(&mut self) -> EventMark
@@ -1125,28 +1181,40 @@ where
     L: Lexer<'inp>,
   {
     self.validate_mark(&mark);
-    debug_assert!(
-      kind != TOMBSTONE,
-      "the tombstone kind (u16::MAX) is reserved; a dialect kind must never map to it"
+    assert!(
+      self.profile.validator().admits(kind),
+      "retro-wrap kind outside the dialect's own kind space (the tombstone kind, u16::MAX, \
+       is reserved and no validator admits it)"
     );
     let target = mark.index();
     let new_index = self.events.len() as u64;
-    self.events.push(Event::StartAt { kind, target });
+    let relative = u32::try_from(new_index - target)
+      .ok()
+      .and_then(NonZeroU32::new);
 
-    // The one journaled in-place write: point the tombstone's forward_parent at the
-    // newest wrap. Materialization recovers every wrap from the StartAt events; the
-    // pointer is an acceleration and an integrity canary (finish validates that a set
-    // pointer names a live StartAt of this target). The journal is what keeps it honest
-    // across rewinds — restoring the overwritten value is the pure-copy discipline.
-    let relative = new_index - target;
-    if let Ok(relative) = u32::try_from(relative) {
+    // The chain link, read BEFORE the append that displaces it: this wrap's `prev` is the
+    // value it is about to overwrite on the target — the previous newest wrap of the same
+    // tombstone. Written once, at this event's own append (the append-only law), from the
+    // exact reading the journal below records.
+    let prev = match self.events.get(target as usize) {
+      Some(Event::StartNode { forward_parent, .. }) if relative.is_some() => *forward_parent,
+      _ => None,
+    };
+    self.events.push(Event::StartAt { kind, target, prev });
+
+    // The one journaled in-place write: point the tombstone's forward_parent at the newest
+    // wrap, making it the head of the chain materialization walks (`prev` carries the
+    // rest) and the integrity canary finish validates in both directions. The journal is
+    // what keeps it honest across rewinds — restoring the overwritten value is the
+    // pure-copy discipline, and it restores the chain head together with it.
+    if let Some(relative) = relative {
       if let Some(Event::StartNode { forward_parent, .. }) = self.events.get_mut(target as usize) {
         self.journal.push(JournalEntry {
           at_len: new_index + 1,
           index: target,
           old_forward_parent: *forward_parent,
         });
-        *forward_parent = NonZeroU32::new(relative);
+        *forward_parent = Some(relative);
       }
     }
   }

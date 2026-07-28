@@ -84,13 +84,30 @@
 //! slice for its whole life, which is what makes zero-copy slices, checkpoints, and rollback a
 //! snapshot-copy rather than a journalled edit. Resumption therefore lives with the caller: it owns
 //! the byte buffer, and on an incomplete result it appends the next chunk to *its own* buffer and
-//! rebuilds the input over the larger slice. Re-lexing the whole prefix each round is cheap and
-//! keeps the frontier rules a pure function of the current slice.
+//! rebuilds the input over the larger slice.
+//!
+//! Re-lexing the whole prefix each round keeps the frontier rules a pure function of the current
+//! slice, and it is **not free**: cumulative lexer work over a session is **Θ(Σ attempt lengths)**
+//! — under one-token refills, the triangular figure. That is the honest cost of a continuation-free
+//! design, and it is why the arrival schedule must not be the only thing bounding it. Chunking is
+//! chosen by the *peer*, so an adversarial chunker can drive Θ(L²) work over an L-byte document
+//! while every per-attempt limit stays nominally satisfied. The wall is a **cross-attempt budget**,
+//! which cannot live in `L::State` (a fresh per-attempt limiter admits the whole triangle; a shared
+//! cumulative one counts replay as input and trips on valid documents) and therefore lives one
+//! level up, in [`PartialSession`](crate::input::PartialSession) — whose
+//! [`Budget`](crate::input::Budget) is a required constructor argument for
+//! exactly this reason. A resuming mode that lexes only the new bytes, giving O(total bytes) for
+//! parsers that commit incrementally, is designed and prototype-verified and ships in a later
+//! wave; [`ReplayMode`](crate::input::ReplayMode) is sealed and additive so its arrival breaks nothing.
 //!
 //! ## The Sans-I/O resumption loop
 //!
 //! Each attempt parses under a rollback-on-drop [`Transaction`], so an incomplete attempt unwinds
-//! its emissions and cursor before the retry; [`parse_partial`] wires this up and drives any
+//! its emissions and cursor before the retry. **The parser opens that transaction, not the
+//! driver**: [`parse_partial`] deliberately does *not* wrap `f` — the caller owns transaction
+//! discipline, and that ownership is precisely what makes a commit-and-carry
+//! [`PartialSession`](crate::input::PartialSession) possible, because a driver-owned transaction would roll back the very
+//! progress a session exists to keep. What [`parse_partial`] does is drive any
 //! [`ParseInput`](crate::ParseInput)`<…, `[`Partial`]`>` — a typed fn item like the one below, a
 //! named combinator, or a parser written generic over its completeness. The only requirements
 //! partial mode adds are that the emitter error implement `From<Incomplete<L::Offset>>` (the
@@ -212,6 +229,7 @@ pub use input_ref::{
   Balance, Commit, DelimClass, DropPolicy, Hole, InputRef, Rollback, Transaction,
 };
 pub(crate) use lineage::Lineage;
+pub use session::{Budget, PartialSession, RedriveFromBase, ReplayMode, SessionRefusal};
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use input_ref::{SavepointId, SessionPointId, StackedTransaction};
@@ -221,6 +239,7 @@ mod completeness;
 mod cursor;
 mod input_ref;
 mod lineage;
+mod session;
 
 /// Storage for [`Input`]'s live-checkpoint lineage stack: inline for 8 ids so the common
 /// many-small-parses workload backtracks with no per-parse heap allocation (live-checkpoint
@@ -808,8 +827,17 @@ where
 /// there is **no growable source inside tokora**: on an incomplete result the caller appends the
 /// next chunk to *its own* buffer and calls this again over the larger slice. Inside `f`, parsing
 /// under a rollback-on-drop [`Transaction`] means an incomplete attempt unwinds its emissions and
-/// cursor cleanly before the retry. See the [`input`] module docs for the full
-/// runnable loop and the one-token frontier-latency guarantee.
+/// cursor cleanly before the retry — a transaction `f` opens, because this driver deliberately
+/// wraps nothing. See the [`input`] module docs for the full runnable loop and the one-token
+/// frontier-latency guarantee.
+///
+/// # Cost
+///
+/// Every attempt re-lexes the whole prefix, so cumulative lexer work across a refill loop is
+/// **Θ(Σ attempt lengths)** — the triangular figure under one-token refills. This function returns
+/// nothing that could carry a committed frontier or a cross-attempt budget, so a caller facing
+/// untrusted arrival fragmentation should drive [`PartialSession`] instead, whose [`Budget`] bounds
+/// exactly that sum.
 #[inline]
 pub fn parse_partial<'inp, L, Ctx, Lang, O, P>(
   ctx: Ctx,

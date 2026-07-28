@@ -1,0 +1,18 @@
+error[E0277]: the trait bound `tokora::cst::Sink<'inp, L, Verbose<()>>: ValueKeyedEmitter` is not satisfied
+  --> tests/ui/session_sink.rs:16:11
+   |
+16 |   inner::<Sink<'inp, L, Verbose<()>>>();
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `ValueKeyedEmitter` is not implemented for `tokora::cst::Sink<'inp, L, Verbose<()>>`
+   |
+   = help: the following other types implement trait `ValueKeyedEmitter`:
+             &mut U
+             Fatal<T, Lang>
+             Ignored<T>
+             Silent<T, Lang>
+             Verbose<Error, S, Lang>
+             fuzz::fixtures::CountEmitter
+note: required by a bound in `inner`
+  --> tests/ui/session_sink.rs:15:15
+   |
+15 |   fn inner<E: ValueKeyedEmitter>() {}
+   |               ^^^^^^^^^^^^^^^^^ required by this bound in `inner`

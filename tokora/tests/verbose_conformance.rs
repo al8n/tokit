@@ -1004,7 +1004,13 @@ mod sink_leg {
   /// now has a reading to move. The sink's own event truncation is pinned elsewhere.
   #[test]
   fn sink_verbose_inner_agrees_after_rollback() {
-    let mut sink: ConfSink<'_> = tokora::cst::Sink::new(Verbose::new(), map_tok, K_ERR, K_GAP);
+    let profile = tokora::cst::CstProfile::new(
+      map_tok,
+      tokora::cst::KindValidator::new(|kind| matches!(kind, K_ROOT | K_ERR | K_GAP) || kind >= 100),
+      K_ERR,
+      K_GAP,
+    );
+    let mut sink: ConfSink<'_> = tokora::cst::Sink::new("ab", Verbose::new(), profile);
     let span = SimpleSpan::new(0usize, 1usize);
 
     let res: Result<(), ConfError> = Parser::with_parser_and_context(
@@ -1037,7 +1043,7 @@ mod sink_leg {
     .parse_str("ab");
     res.expect("the sink leg never propagates");
 
-    let (_green, emitter) = sink.finish(K_ROOT, "ab");
+    let (_green, emitter) = sink.finish(K_ROOT);
     assert!(
       emitter.errors().is_empty(),
       "nothing survives the rolled-back branch"

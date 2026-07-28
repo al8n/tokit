@@ -75,20 +75,24 @@ pub(crate) enum Event<S> {
   /// unless `kind` is [`TOMBSTONE`], in which case the slot is an inert mark (see
   /// [`cst_mark`](crate::emitter::CstEmitter::cst_mark)) that pairs with no finish.
   ///
-  /// `forward_parent` is a journaled acceleration written by
+  /// `forward_parent` is a journaled link written by
   /// [`cst_start_at`](crate::emitter::CstEmitter::cst_start_at) onto its **target**
   /// tombstone: the relative forward offset of the newest [`StartAt`](Event::StartAt)
-  /// naming this slot. It is never required for correctness — materialization recovers
-  /// every wrap from the `StartAt` events themselves — but it must stay *consistent*: the
-  /// sink's undo journal restores overwritten values on rewind, and `finish` validates
-  /// that a set pointer still names a live `StartAt` of this target (the dangling
-  /// `forward_parent` of an abandoned branch is the exact silent corruption the journal
-  /// exists to kill).
+  /// naming this slot, and the **head of that target's wrap chain** —
+  /// [`StartAt::prev`](Event::StartAt) carries the rest. Materialization follows the chain
+  /// instead of rebuilding a keyed index of every wrap, so the pointer is load-bearing and
+  /// must stay *consistent*: the sink's undo journal restores overwritten values on
+  /// rewind, and `finish` validates both directions — a set pointer must still name a live
+  /// `StartAt` of this target, and every `StartAt` must be reachable from its target's
+  /// chain (the dangling `forward_parent` of an abandoned branch, and the unreachable wrap
+  /// that would otherwise be structurally dropped, are the two silent corruptions the
+  /// journal and the reachability check exist to kill).
   StartNode {
     /// The node kind, or [`TOMBSTONE`] while the slot is an inert mark.
     kind: u16,
     /// Relative forward offset to the newest [`StartAt`](Event::StartAt) targeting this
-    /// tombstone, if any. Maintained under the sink's undo journal.
+    /// tombstone, if any — the head of its wrap chain. Maintained under the sink's undo
+    /// journal.
     forward_parent: Option<NonZeroU32>,
   },
   /// One committed token: its mapped kind and its source span. Appended exactly once per
@@ -100,8 +104,20 @@ pub(crate) enum Event<S> {
     /// The token's source span; materialization slices text from the source by it.
     span: S,
   },
-  /// Closes the innermost open node (stack discipline).
-  FinishNode,
+  /// Closes the innermost open node (stack discipline), carrying the kind of the node the
+  /// emitter *intended* to close.
+  ///
+  /// The kind is the leaked-finish detector: materialization compares it against the frame
+  /// the finish actually lands on and refuses a mismatch
+  /// ([`FinishError::MismatchedFinish`]), which is the one signal that separates a legal
+  /// cross-checkpoint close from a finish whose start was rolled back out from under it —
+  /// two histories that leave byte-identical event buffers.
+  ///
+  /// [`FinishError::MismatchedFinish`]: crate::cst::FinishError::MismatchedFinish
+  FinishNode {
+    /// The kind of the node this finish intends to close.
+    kind: u16,
+  },
   /// Retro-opens a node of `kind` at the buffer position of the tombstone at `target` —
   /// the **append-only** form of retro-parenting. Same-target `StartAt`s open in reverse
   /// buffer order at materialization (the later wrap is the outer node, because its
@@ -114,6 +130,26 @@ pub(crate) enum Event<S> {
     /// The absolute buffer index of the target tombstone; always `<` this event's own
     /// index, validated at emission (era-checked) and again at materialization.
     target: u64,
+    /// The chain link: the `forward_parent` value this `StartAt` displaced on its target
+    /// — i.e. the relative forward offset of the **previous newest** `StartAt` naming the
+    /// same tombstone, or `None` when this is the target's first wrap.
+    ///
+    /// Written once, at this event's own append, from the value
+    /// [`cst_start_at`](crate::emitter::CstEmitter::cst_start_at) already reads to journal
+    /// (the append-only law holds: the field is never revisited). Materialization walks
+    /// `tombstone.forward_parent → newest StartAt → prev → …` to recover a target's wrap
+    /// list newest-first, which is the order the wraps open in — so the chain replaces the
+    /// per-materialization keyed index that used to be rebuilt from scratch.
+    ///
+    /// Offsets are strictly decreasing along a chain (an older `StartAt` sits at a smaller
+    /// index), which is what makes the walk terminating and fork-free. A wrap whose
+    /// relative offset does not fit `u32` cannot be linked — the same limit the
+    /// `forward_parent` acceleration has always carried — and materialization then
+    /// *refuses* the stream ([`FinishError::DanglingForwardParent`]) rather than dropping
+    /// the node; the buffer size that requires is far past any reachable event log.
+    ///
+    /// [`FinishError::DanglingForwardParent`]: crate::cst::FinishError::DanglingForwardParent
+    prev: Option<NonZeroU32>,
   },
   /// A forwarded-diagnostic slot: a marker in the event log for one diagnostic forwarded to
   /// the wrapped emitter (on `Ok` and `Err` alike). Skipped at materialization — except that
@@ -153,7 +189,7 @@ impl<S> Event<S> {
         }
       }
       Self::StartAt { .. } => 1,
-      Self::FinishNode => -1,
+      Self::FinishNode { .. } => -1,
       Self::Token { .. } | Self::Diag { .. } => 0,
     }
   }
@@ -425,7 +461,7 @@ impl Marker {
     E: CstEmitter<'a, L, Lang> + ?Sized,
   {
     emitter.cst_start_at(self.mark, kind);
-    emitter.cst_finish();
+    emitter.cst_finish(kind);
     CompletedMarker { mark: self.mark }
   }
 
@@ -545,8 +581,12 @@ mod tests {
       kind: TOMBSTONE,
       forward_parent: None,
     };
-    let wrap: Event<()> = Event::StartAt { kind: 7, target: 0 };
-    let fin: Event<()> = Event::FinishNode;
+    let wrap: Event<()> = Event::StartAt {
+      kind: 7,
+      target: 0,
+      prev: None,
+    };
+    let fin: Event<()> = Event::FinishNode { kind: 7 };
     let tok: Event<()> = Event::Token { kind: 7, span: () };
     let diag: Event<()> = Event::Diag { error_span: None };
 
