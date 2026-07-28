@@ -1,5 +1,27 @@
+/// The `delimited*` surface every many-builder carries.
+///
+/// A built-in pair marker is branded — `Paren<S, C, Lang>` — and its `Delimiter` impl names
+/// that brand and the driving context's language as the *same* parameter, so the fluent
+/// `delimited_by_*` family has to instantiate the pair at the caller's language rather than at
+/// a bare `Paren<(), (), ()>` that only an unbranded grammar can drive.
+///
+/// Which language that is depends on the builder:
+///
+/// - `$lang:ident` — the builder's own type carries the parameter (`Repeated<…, Lang, …>` and
+///   the three other repetition drivers), so the pair is pinned to it right here.
+/// - no argument — the option builders are `AtLeast<P>` and friends, generic only over the
+///   parser they wrap, so there is no language to name at the impl block. The pair's brand
+///   becomes a method parameter instead and the `Delim: Delimiter<'inp, L, Lang>` obligation on
+///   the driving impl unifies it with the context language. Same fence, resolved one frame
+///   later; a builder stored without ever being driven has to name the brand itself.
 macro_rules! define_many_delimited_methods {
+  ($lang:ident) => {
+    define_many_delimited_methods!(@emit [] [$lang]);
+  };
   () => {
+    define_many_delimited_methods!(@emit [<Lang: ?Sized>] [Lang]);
+  };
+  (@emit [$($generics:tt)*] [$lang:ident]) => {
     /// Delimits the parser with the given delimiter.
     #[inline(always)]
     pub const fn delimited<Delim>(self) -> $crate::parser::DelimitedBy<Self, Delim> {
@@ -8,34 +30,34 @@ macro_rules! define_many_delimited_methods {
 
     /// Delimits the parser with parentheses.
     #[inline(always)]
-    pub const fn delimited_by_parens(
+    pub const fn delimited_by_parens $($generics)* (
       self,
-    ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Paren> {
-      self.delimited::<$crate::punct::Paren>()
+    ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Paren<(), (), $lang>> {
+      self.delimited::<$crate::punct::Paren<(), (), $lang>>()
     }
 
     /// Delimits the parser with braces.
     #[inline(always)]
-    pub const fn delimited_by_braces(
+    pub const fn delimited_by_braces $($generics)* (
       self,
-    ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Brace> {
-      self.delimited::<$crate::punct::Brace>()
+    ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Brace<(), (), $lang>> {
+      self.delimited::<$crate::punct::Brace<(), (), $lang>>()
     }
 
     /// Delimits the parser with brackets.
     #[inline(always)]
-    pub const fn delimited_by_brackets(
+    pub const fn delimited_by_brackets $($generics)* (
       self,
-    ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Bracket> {
-      self.delimited::<$crate::punct::Bracket>()
+    ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Bracket<(), (), $lang>> {
+      self.delimited::<$crate::punct::Bracket<(), (), $lang>>()
     }
 
     /// Delimits the parser with angle brackets.
     #[inline(always)]
-    pub const fn delimited_by_angles(
+    pub const fn delimited_by_angles $($generics)* (
       self,
-    ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Angle> {
-      self.delimited::<$crate::punct::Angle>()
+    ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Angle<(), (), $lang>> {
+      self.delimited::<$crate::punct::Angle<(), (), $lang>>()
     }
   };
 }

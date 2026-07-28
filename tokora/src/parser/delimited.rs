@@ -653,7 +653,7 @@ where
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
 {
   let data = inner.parse_input(inp)?;
-  let (close, span) = commit_delim_close::<Paren, _, _, _, _, _>(
+  let (close, span) = commit_delim_close::<Paren<(), (), Lang>, _, _, _, _, _>(
     inp,
     cursor,
     open.span(),
@@ -941,7 +941,7 @@ where
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
 {
   let data = inner.parse_input(inp)?;
-  let (close, span) = commit_delim_close::<Brace, _, _, _, _, _>(
+  let (close, span) = commit_delim_close::<Brace<(), (), Lang>, _, _, _, _, _>(
     inp,
     cursor,
     open.span(),
@@ -1230,7 +1230,7 @@ where
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
 {
   let data = inner.parse_input(inp)?;
-  let (close, span) = commit_delim_close::<Bracket, _, _, _, _, _>(
+  let (close, span) = commit_delim_close::<Bracket<(), (), Lang>, _, _, _, _, _>(
     inp,
     cursor,
     open.span(),
@@ -1520,7 +1520,7 @@ where
   P: ParseInput<'inp, L, T, Ctx, Lang, Cmpl>,
 {
   let data = inner.parse_input(inp)?;
-  let (close, span) = commit_delim_close::<Angle, _, _, _, _, _>(
+  let (close, span) = commit_delim_close::<Angle<(), (), Lang>, _, _, _, _, _>(
     inp,
     cursor,
     open.span(),

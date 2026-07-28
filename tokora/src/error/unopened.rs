@@ -101,13 +101,13 @@ use crate::{
 use core::marker::PhantomData;
 
 /// An unopened bracket error (closing `]` without opening `[`)
-pub type UnopenedBracket<S = SimpleSpan, Lang = ()> = Unopened<Bracket, S, Lang>;
+pub type UnopenedBracket<S = SimpleSpan, Lang = ()> = Unopened<Bracket<(), (), Lang>, S, Lang>;
 /// An unopened parenthesis error (closing `)` without opening `(`)
-pub type UnopenedParen<S = SimpleSpan, Lang = ()> = Unopened<Paren, S, Lang>;
+pub type UnopenedParen<S = SimpleSpan, Lang = ()> = Unopened<Paren<(), (), Lang>, S, Lang>;
 /// An unopened brace error (closing `}` without opening `{`)
-pub type UnopenedBrace<S = SimpleSpan, Lang = ()> = Unopened<Brace, S, Lang>;
+pub type UnopenedBrace<S = SimpleSpan, Lang = ()> = Unopened<Brace<(), (), Lang>, S, Lang>;
 /// An unopened angle bracket error (closing `>` without opening `<`)
-pub type UnopenedAngle<S = SimpleSpan, Lang = ()> = Unopened<Angle, S, Lang>;
+pub type UnopenedAngle<S = SimpleSpan, Lang = ()> = Unopened<Angle<(), (), Lang>, S, Lang>;
 
 /// A zero-copy error type representing an unopened delimiter.
 ///
@@ -219,7 +219,7 @@ impl<S> Unopened<Paren, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Unopened<Paren, S, Lang> {
+impl<S, Lang: ?Sized> Unopened<Paren<(), (), Lang>, S, Lang> {
   /// Creates a new unopened parenthesis error.
   ///
   /// The span should point to the position of the closing parenthesis that was never opened.
@@ -261,7 +261,7 @@ impl<S> Unopened<Bracket, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Unopened<Bracket, S, Lang> {
+impl<S, Lang: ?Sized> Unopened<Bracket<(), (), Lang>, S, Lang> {
   /// Creates a new unopened bracket error.
   ///
   /// The span should point to the position of the closing bracket that was never opened.
@@ -303,7 +303,7 @@ impl<S> Unopened<Brace, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Unopened<Brace, S, Lang> {
+impl<S, Lang: ?Sized> Unopened<Brace<(), (), Lang>, S, Lang> {
   /// Creates a new unopened brace error.
   ///
   /// The span should point to the position of the closing brace that was never opened.
@@ -345,7 +345,7 @@ impl<S> Unopened<Angle, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Unopened<Angle, S, Lang> {
+impl<S, Lang: ?Sized> Unopened<Angle<(), (), Lang>, S, Lang> {
   /// Creates a new unopened angle bracket error.
   ///
   /// The span should point to the position of the closing angle bracket that was never opened.

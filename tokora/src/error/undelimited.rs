@@ -107,13 +107,14 @@ use crate::{
 use core::marker::PhantomData;
 
 /// Content missing both opening `[` and closing `]`
-pub type UndelimitedBracket<S = SimpleSpan, Lang = ()> = Undelimited<Bracket, S, Lang>;
+pub type UndelimitedBracket<S = SimpleSpan, Lang = ()> =
+  Undelimited<Bracket<(), (), Lang>, S, Lang>;
 /// Content missing both opening `(` and closing `)`
-pub type UndelimitedParen<S = SimpleSpan, Lang = ()> = Undelimited<Paren, S, Lang>;
+pub type UndelimitedParen<S = SimpleSpan, Lang = ()> = Undelimited<Paren<(), (), Lang>, S, Lang>;
 /// Content missing both opening `{` and closing `}`
-pub type UndelimitedBrace<S = SimpleSpan, Lang = ()> = Undelimited<Brace, S, Lang>;
+pub type UndelimitedBrace<S = SimpleSpan, Lang = ()> = Undelimited<Brace<(), (), Lang>, S, Lang>;
 /// Content missing both opening `<` and closing `>`
-pub type UndelimitedAngle<S = SimpleSpan, Lang = ()> = Undelimited<Angle, S, Lang>;
+pub type UndelimitedAngle<S = SimpleSpan, Lang = ()> = Undelimited<Angle<(), (), Lang>, S, Lang>;
 
 /// A zero-copy error type representing undelimited content.
 ///
@@ -226,7 +227,7 @@ impl<S> Undelimited<Paren, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Undelimited<Paren, S, Lang> {
+impl<S, Lang: ?Sized> Undelimited<Paren<(), (), Lang>, S, Lang> {
   /// Creates a new undelimited content error for missing parentheses.
   ///
   /// The span should point to the position of the content that should have been
@@ -270,7 +271,7 @@ impl<S> Undelimited<Bracket, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Undelimited<Bracket, S, Lang> {
+impl<S, Lang: ?Sized> Undelimited<Bracket<(), (), Lang>, S, Lang> {
   /// Creates a new undelimited content error for missing brackets.
   ///
   /// The span should point to the position of the content that should have been
@@ -314,7 +315,7 @@ impl<S> Undelimited<Brace, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Undelimited<Brace, S, Lang> {
+impl<S, Lang: ?Sized> Undelimited<Brace<(), (), Lang>, S, Lang> {
   /// Creates a new undelimited content error for missing braces.
   ///
   /// The span should point to the position of the content that should have been
@@ -358,7 +359,7 @@ impl<S> Undelimited<Angle, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Undelimited<Angle, S, Lang> {
+impl<S, Lang: ?Sized> Undelimited<Angle<(), (), Lang>, S, Lang> {
   /// Creates a new undelimited content error for missing angle brackets.
   ///
   /// The span should point to the position of the content that should have been

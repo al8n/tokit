@@ -225,6 +225,127 @@ pub enum DelimiterKind {
 }
 
 /// A trait for any delimiter consisting of an opening and a closing punctuator.
+///
+/// # The language brand is a fence
+///
+/// Every built-in pair marker carries its own brand — `Bracket<S, C, Lang>` — and the blanket
+/// impls generated for the four of them name that brand and the context language as the
+/// **same** parameter. A pair branded for one grammar is therefore not a delimiter of another:
+/// a production copy-pasted out of a sibling dialect fails to compile instead of quietly
+/// type-checking and then driving to completion on the wrong dialect's marker.
+///
+/// This costs the fluent families nothing. `delimited_by_brackets`,
+/// `try_delimited_by_brackets` and their siblings — on [`ParseInput`](crate::ParseInput) and on
+/// every many-builder — stay reachable at a branded language because the macros that generate
+/// them instantiate the pair at the *caller's* `Lang`, not at a bare `Bracket<(), (), ()>` that
+/// a widened impl would have to accept. What a branded grammar does spell out is a bound it
+/// forwards through a **generic** lexer: `Bracket<(), (), Lang>: TypedDelimiter<'inp, L, Lang>`
+/// rather than `Bracket: …`. At a concrete lexer the impl resolves and nothing is written.
+///
+/// The next three examples are the record. Each of the two that do not compile differs from
+/// the one that does in exactly one token.
+///
+/// A pair branded for another language is not a `Delimiter` of this one — **does not compile**:
+///
+/// ```rust,compile_fail,E0277
+/// use tokora::{
+///   Lexer, Token,
+///   delimiter::Delimiter,
+///   punct::{Bracket, CloseBracket, OpenBracket},
+/// };
+///
+/// struct LangA;
+/// struct LangB;
+///
+/// fn assert_delim<'inp, L, D, Lang>()
+/// where
+///   L: Lexer<'inp>,
+///   D: Delimiter<'inp, L, Lang>,
+/// {
+/// }
+///
+/// fn probe<'inp, L>()
+/// where
+///   L: Lexer<'inp>,
+///   <L::Token as Token<'inp>>::Kind: From<OpenBracket<(), (), ()>> + From<CloseBracket<(), (), ()>>,
+/// {
+///   assert_delim::<L, Bracket<(), (), LangA>, LangA>();
+///   assert_delim::<L, Bracket<(), (), LangA>, LangB>();
+/// }
+/// ```
+///
+/// Nor a [`TypedDelimiter`] of it — **does not compile**:
+///
+/// ```rust,compile_fail,E0277
+/// use tokora::{
+///   Lexer, Token,
+///   delimiter::TypedDelimiter,
+///   punct::{Bracket, CloseBracket, OpenBracket},
+/// };
+///
+/// struct LangA;
+/// struct LangB;
+///
+/// fn assert_typed<'inp, L, D, Lang>()
+/// where
+///   L: Lexer<'inp>,
+///   D: TypedDelimiter<'inp, L, Lang>,
+/// {
+/// }
+///
+/// fn probe<'inp, L>()
+/// where
+///   L: Lexer<'inp>,
+///   <L::Token as Token<'inp>>::Kind: From<OpenBracket<(), (), ()>> + From<CloseBracket<(), (), ()>>,
+/// {
+///   assert_typed::<L, Bracket<(), (), LangA>, LangA>();
+///   assert_typed::<L, Bracket<(), (), LangA>, LangB>();
+/// }
+/// ```
+///
+/// The same two probes with each pair branded for the grammar asking for it — compiles:
+///
+/// ```rust
+/// use tokora::{
+///   Lexer, Token,
+///   delimiter::{Delimiter, TypedDelimiter},
+///   punct::{Bracket, CloseBracket, OpenBracket},
+/// };
+///
+/// struct LangA;
+/// struct LangB;
+///
+/// fn assert_delim<'inp, L, D, Lang>()
+/// where
+///   L: Lexer<'inp>,
+///   D: Delimiter<'inp, L, Lang>,
+/// {
+/// }
+///
+/// fn assert_typed<'inp, L, D, Lang>()
+/// where
+///   L: Lexer<'inp>,
+///   D: TypedDelimiter<'inp, L, Lang>,
+/// {
+/// }
+///
+/// fn probe<'inp, L>()
+/// where
+///   L: Lexer<'inp>,
+///   <L::Token as Token<'inp>>::Kind: From<OpenBracket<(), (), ()>> + From<CloseBracket<(), (), ()>>,
+/// {
+///   assert_delim::<L, Bracket<(), (), LangA>, LangA>();
+///   assert_delim::<L, Bracket<(), (), LangB>, LangB>();
+///   assert_typed::<L, Bracket<(), (), LangA>, LangA>();
+///   assert_typed::<L, Bracket<(), (), LangB>, LangB>();
+/// }
+/// ```
+///
+/// The trio is also the tripwire for the day the fence is reopened: widen either impl back to
+/// an independent marker-language parameter and the matching example starts compiling, failing
+/// its `compile_fail`. Widening `TypedDelimiter` alone cannot reopen anything — its
+/// [`Delimiter`] supertrait still fences it — so the first example is the one with teeth on
+/// the reachable defect and the second records that the subtrait moved with it.
 pub trait Delimiter<'inp, L, Lang: ?Sized = ()> {
   /// The opening punctuator.
   type Open: Punctuator<'inp, L, Lang>;
@@ -317,6 +438,13 @@ pub trait Delimiter<'inp, L, Lang: ?Sized = ()> {
 /// (or define them with [`punctuator!`](crate::punctuator)), then implement [`Delimiter`]
 /// and `TypedDelimiter` for the pair. It then drops straight into
 /// [`delimited::<MyPair, …>`](crate::parser::delimited) — see that function's example.
+///
+/// # The language brand is a fence
+///
+/// The four built-in pairs' `TypedDelimiter` impls name the marker's brand and the context
+/// language as the same parameter, exactly as their [`Delimiter`] impls do — a pair branded
+/// for one grammar is not a typed delimiter of another. [`Delimiter`] carries the compiling
+/// and non-compiling record for both.
 pub trait TypedDelimiter<'inp, L, Lang: ?Sized = ()>: Delimiter<'inp, L, Lang>
 where
   L: Lexer<'inp>,
@@ -336,8 +464,13 @@ where
 macro_rules! impl_builtin_delimiter {
   ($($name:ident { description: $description:literal, open: $open:ident, close: $close:ident $(,)? }),+$(,)?) => {
     $(
-      impl<'inp, S, C, MarkerLang: ?Sized, L, Lang: ?Sized> Delimiter<'inp, L, Lang>
-        for $name<S, C, MarkerLang>
+      // The pair marker's own brand and the context language are the *same* parameter: a pair
+      // branded for one grammar is not a delimiter of another. The fluent `delimited_by_*`
+      // family reaches a branded grammar by instantiating the pair at the caller's `Lang`, not
+      // by widening this impl. The fence is pinned by the `compile_fail` doctest on the
+      // `Delimiter` trait.
+      impl<'inp, S, C, L, Lang: ?Sized> Delimiter<'inp, L, Lang>
+        for $name<S, C, Lang>
       where
         L: Lexer<'inp>,
         $open<S, C, Lang>: Punctuator<'inp, L, Lang>,
@@ -355,8 +488,8 @@ macro_rules! impl_builtin_delimiter {
         }
       }
 
-      impl<'inp, S, C, MarkerLang: ?Sized, L, Lang: ?Sized> TypedDelimiter<'inp, L, Lang>
-        for $name<S, C, MarkerLang>
+      impl<'inp, S, C, L, Lang: ?Sized> TypedDelimiter<'inp, L, Lang>
+        for $name<S, C, Lang>
       where
         L: Lexer<'inp>,
         $open<S, C, Lang>: Punctuator<'inp, L, Lang>,

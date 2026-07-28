@@ -103,15 +103,20 @@ where
   Ident::try_parse(inp)
 }
 
+/// The braced identifier the delimited production yields. The pair is named at the caller's
+/// language: a `Brace` branded for a sibling grammar is not this grammar's pair.
+type BracedIdentOf<'inp, L, Ctx, Lang> =
+  tokora::parser::DelimitedOf<'inp, Brace<(), (), Lang>, L, Ctx, Lang, IdentOf<'inp, L, Lang>>;
+
 /// The delimited family adds the fifth member: `FromUnclosed`, quantified over the pair.
 /// This signature names neither `Brace` in a conversion nor `FromUnclosed` at all.
 fn bundled_braced_ident<'inp, L, Ctx, Lang>(
   inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
-) -> tokora::parser::DelimitedOf<'inp, Brace, L, Ctx, Lang, IdentOf<'inp, L, Lang>>
+) -> BracedIdentOf<'inp, L, Ctx, Lang>
 where
   L: Lexer<'inp>,
   L::Token: IdentifierToken<'inp>,
-  Brace: tokora::delimiter::TypedDelimiter<'inp, L, Lang>,
+  Brace<(), (), Lang>: tokora::delimiter::TypedDelimiter<'inp, L, Lang>,
   Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
 {
@@ -125,7 +130,7 @@ fn bundled_production<'inp, L, Ctx, Lang>(
 where
   L: Lexer<'inp>,
   L::Token: IdentifierToken<'inp>,
-  Brace: tokora::delimiter::TypedDelimiter<'inp, L, Lang>,
+  Brace<(), (), Lang>: tokora::delimiter::TypedDelimiter<'inp, L, Lang>,
   Ctx: ComposableParseContext<'inp, L, Lang>,
   Lang: ?Sized,
 {

@@ -101,13 +101,13 @@ use crate::{
 };
 
 /// An unclosed bracket error
-pub type UnclosedBracket<S = SimpleSpan, Lang = ()> = Unclosed<Bracket, S, Lang>;
+pub type UnclosedBracket<S = SimpleSpan, Lang = ()> = Unclosed<Bracket<(), (), Lang>, S, Lang>;
 /// An unclosed parenthesis error
-pub type UnclosedParen<S = SimpleSpan, Lang = ()> = Unclosed<Paren, S, Lang>;
+pub type UnclosedParen<S = SimpleSpan, Lang = ()> = Unclosed<Paren<(), (), Lang>, S, Lang>;
 /// An unclosed brace error
-pub type UnclosedBrace<S = SimpleSpan, Lang = ()> = Unclosed<Brace, S, Lang>;
+pub type UnclosedBrace<S = SimpleSpan, Lang = ()> = Unclosed<Brace<(), (), Lang>, S, Lang>;
 /// An unclosed angle bracket error
-pub type UnclosedAngle<S = SimpleSpan, Lang = ()> = Unclosed<Angle, S, Lang>;
+pub type UnclosedAngle<S = SimpleSpan, Lang = ()> = Unclosed<Angle<(), (), Lang>, S, Lang>;
 
 /// A zero-copy error type representing an unclosed delimiter.
 ///
@@ -211,7 +211,7 @@ impl<S> Unclosed<Paren, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Unclosed<Paren, S, Lang> {
+impl<S, Lang: ?Sized> Unclosed<Paren<(), (), Lang>, S, Lang> {
   /// Creates a new unclosed parenthesis error.
   ///
   /// The span should cover the opening parenthesis to the end of the syntax element.
@@ -253,7 +253,7 @@ impl<S> Unclosed<Bracket, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Unclosed<Bracket, S, Lang> {
+impl<S, Lang: ?Sized> Unclosed<Bracket<(), (), Lang>, S, Lang> {
   /// Creates a new unclosed bracket error.
   ///
   /// The span should point to the position of the opening bracket.
@@ -295,7 +295,7 @@ impl<S> Unclosed<Brace, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Unclosed<Brace, S, Lang> {
+impl<S, Lang: ?Sized> Unclosed<Brace<(), (), Lang>, S, Lang> {
   /// Creates a new unclosed brace error.
   ///
   /// The span should point to the position of the opening brace.
@@ -337,7 +337,7 @@ impl<S> Unclosed<Angle, S> {
   }
 }
 
-impl<S, Lang: ?Sized> Unclosed<Angle, S, Lang> {
+impl<S, Lang: ?Sized> Unclosed<Angle<(), (), Lang>, S, Lang> {
   /// Creates a new unclosed angle bracket error.
   ///
   /// The span should point to the position of the opening angle bracket.

@@ -255,7 +255,7 @@ impl<F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<F, Sep, O, L, Ctx, Lang, C
     RequireLeading::new(self)
   }
 
-  define_many_delimited_methods!();
+  define_many_delimited_methods!(Lang);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IsVariant)]

@@ -79,7 +79,7 @@ impl<'inp> TypedDelimiter<'inp, TestLexer<'inp>, PLang> for CollidingMarker {
 /// `Copy` `DelimiterKind`. The line compiling at all is the residue
 /// [`DelimiterKind`](tokora::delimiter::DelimiterKind) documents under *Not guaranteed*.
 const PROJECTED_BRACKET: DelimiterKind =
-  <Bracket as Delimiter<'static, TestLexer<'static>, PLang>>::KIND;
+  <Bracket<(), (), PLang> as Delimiter<'static, TestLexer<'static>, PLang>>::KIND;
 
 /// A pair over `<` `>` that claims tokora's bracket identity by projection.
 ///
@@ -239,10 +239,10 @@ macro_rules! pair_parser {
   };
 }
 
-pair_parser!(paren_pair, Paren);
-pair_parser!(angle_pair, Angle);
-pair_parser!(bracket_pair, Bracket);
-pair_parser!(brace_pair, Brace);
+pair_parser!(paren_pair, Paren<(), (), PLang>);
+pair_parser!(angle_pair, Angle<(), (), PLang>);
+pair_parser!(bracket_pair, Bracket<(), (), PLang>);
+pair_parser!(brace_pair, Brace<(), (), PLang>);
 pair_parser!(colliding_pair, CollidingMarker);
 pair_parser!(forgotten_pair, ForgottenMarker);
 pair_parser!(projecting_pair, ProjectingMarker);
@@ -352,11 +352,16 @@ fn the_kind_decides_and_the_display_name_does_not() {
   // `Unclosed` tokora itself built. That copy is the residue `DelimiterKind`'s docs name:
   // unwritable is not uncopyable. Should a later change close it too, this line stops
   // compiling and the trade-off is re-decided rather than quietly lost.
-  let from_tokoras_own_pair = Unclosed::<Bracket, _, PLang>::bracket_of(span).kind();
-  let via =
-    <PErr as FromUnclosed<'_, TestLexer<'_>, PLang>>::from_unclosed(
-      Unclosed::<Bracket, _, PLang>::of(span, from_tokoras_own_pair, "renamed".into()),
-    );
+  let from_tokoras_own_pair = Unclosed::<Bracket<(), (), PLang>, _, PLang>::bracket_of(span).kind();
+  let via = <PErr as FromUnclosed<'_, TestLexer<'_>, PLang>>::from_unclosed(Unclosed::<
+    Bracket<(), (), PLang>,
+    _,
+    PLang,
+  >::of(
+    span,
+    from_tokoras_own_pair,
+    "renamed".into(),
+  ));
   assert_eq!(
     via,
     PErr::UnclosedBracket(span),
@@ -384,7 +389,7 @@ fn the_kind_decides_and_the_display_name_does_not() {
 ///
 /// A pair defined outside tokora, over `<` `>`, with the honest name `"<>"`, reports as
 /// tokora's built-in bracket — because its `KIND` was projected off
-/// `<tokora::punct::Bracket as Delimiter<…>>::KIND` rather than spelled. The
+/// `<tokora::punct::Bracket<…> as Delimiter<…>>::KIND` rather than spelled. The
 /// `#[non_exhaustive]` fence stops the *spelling*; it does not make the value unreachable, and
 /// this test is the standing record of that.
 ///
@@ -423,7 +428,7 @@ fn a_projected_builtin_kind_reaches_the_builtin_arm() {
 fn a_builtin_kind_is_mintable_outside_tokora_in_one_call() {
   let span = SimpleSpan::new(7, 8);
 
-  let minted = Unclosed::<Bracket, _, PLang>::bracket_of(span);
+  let minted = Unclosed::<Bracket<(), (), PLang>, _, PLang>::bracket_of(span);
   assert_eq!(
     minted.kind(),
     PROJECTED_BRACKET,
