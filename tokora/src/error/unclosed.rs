@@ -34,10 +34,10 @@
 //! ## Basic Usage with Character Delimiters
 //!
 //! ```rust
-//! use tokora::{error::Unclosed, SimpleSpan};
+//! use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
 //!
 //! // Opening parenthesis at position 10, never closed
-//! let error = Unclosed::<char>::new(SimpleSpan::new(10, 11), "(".into());
+//! let error = Unclosed::<char>::new(SimpleSpan::new(10, 11), DelimiterKind::Custom("probe"), "(".into());
 //!
 //! assert_eq!(error.span(), SimpleSpan::new(10, 11));
 //! assert_eq!(error.name_ref(), "(");
@@ -47,7 +47,7 @@
 //! ## Custom Delimiter Enum
 //!
 //! ```rust
-//! use tokora::{error::Unclosed, SimpleSpan};
+//! use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
 //!
 //! #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 //! enum Delimiter {
@@ -58,18 +58,19 @@
 //!     BlockComment, // /**/
 //! }
 //!
-//! let error: Unclosed<Delimiter> = Unclosed::new(SimpleSpan::new(5, 6), "/*".into());
+//! let error: Unclosed<Delimiter> =
+//!   Unclosed::new(SimpleSpan::new(5, 6), DelimiterKind::Custom("block comment"), "/*".into());
 //! assert_eq!(error.name_ref(), "/*");
 //! ```
 //!
 //! ## Tracking Nested Delimiters
 //!
 //! ```rust
-//! use tokora::{error::Unclosed, SimpleSpan};
+//! use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
 //!
 //! // When parsing: "{ foo: [ bar, baz }"
 //! // The '[' at position 7 is never closed
-//! let error = Unclosed::<char>::new(SimpleSpan::new(7, 8), "[".into());
+//! let error = Unclosed::<char>::new(SimpleSpan::new(7, 8), DelimiterKind::Custom("probe"), "[".into());
 //!
 //! // Error reporting can show:
 //! // "error at 7..8: unclosed delimiter '['"
@@ -78,10 +79,10 @@
 //! ## Position Adjustment
 //!
 //! ```rust
-//! use tokora::{error::Unclosed, SimpleSpan};
+//! use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
 //!
 //! // Error from a nested parsing context
-//! let mut error = Unclosed::<char>::new(SimpleSpan::new(5, 6), "{".into());
+//! let mut error = Unclosed::<char>::new(SimpleSpan::new(5, 6), DelimiterKind::Custom("probe"), "{".into());
 //!
 //! // Adjust to absolute position in the larger document
 //! error.bump(&100);
@@ -92,6 +93,7 @@ use core::marker::PhantomData;
 
 use crate::{
   Lexer,
+  delimiter::DelimiterKind,
   emitter::FromUnclosed,
   punct::{Angle, Brace, Bracket, Paren},
   span::{SimpleSpan, Span},
@@ -136,11 +138,11 @@ pub type UnclosedAngle<S = SimpleSpan, Lang = ()> = Unclosed<Angle, S, Lang>;
 /// ## Detecting Unclosed Parentheses
 ///
 /// ```rust
-/// use tokora::{error::Unclosed, SimpleSpan};
+/// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
 ///
 /// // Parse error: (1 + 2
 /// //              ^--- unclosed
-/// let error = Unclosed::<char>::new(SimpleSpan::new(0, 1), "(".into());
+/// let error = Unclosed::<char>::new(SimpleSpan::new(0, 1), DelimiterKind::Custom("probe"), "(".into());
 ///
 /// println!("Error: {} at position {}", error, error.span().start());
 /// // Output: "Error: unclosed delimiter '(' at position 0"
@@ -149,12 +151,12 @@ pub type UnclosedAngle<S = SimpleSpan, Lang = ()> = Unclosed<Angle, S, Lang>;
 /// ## Tracking Multiple Unclosed Delimiters
 ///
 /// ```rust
-/// use tokora::{error::Unclosed, SimpleSpan};
+/// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
 ///
 /// let errors = vec![
-///     Unclosed::<char>::new(SimpleSpan::new(5, 6), "{".into()),
-///     Unclosed::<char>::new(SimpleSpan::new(10, 11), "[".into()),
-///     Unclosed::<char>::new(SimpleSpan::new(15, 16), "(".into()),
+///     Unclosed::<char>::new(SimpleSpan::new(5, 6), DelimiterKind::Custom("probe"), "{".into()),
+///     Unclosed::<char>::new(SimpleSpan::new(10, 11), DelimiterKind::Custom("probe"), "[".into()),
+///     Unclosed::<char>::new(SimpleSpan::new(15, 16), DelimiterKind::Custom("probe"), "(".into()),
 /// ];
 ///
 /// for error in errors {
@@ -164,6 +166,7 @@ pub type UnclosedAngle<S = SimpleSpan, Lang = ()> = Unclosed<Angle, S, Lang>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Unclosed<Delimiter, S = SimpleSpan, Lang: ?Sized = ()> {
   span: S,
+  kind: DelimiterKind,
   name: CowStr,
   _delimiter: PhantomData<Delimiter>,
   _lang: PhantomData<Lang>,
@@ -195,7 +198,7 @@ impl<S> Unclosed<Paren, S> {
   /// ## Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
   /// // Opening parenthesis at position 3
   /// let error = Unclosed::paren(SimpleSpan::new(3, 4));
@@ -216,7 +219,7 @@ impl<S, Lang: ?Sized> Unclosed<Paren, S, Lang> {
   /// ## Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
   /// // Opening parenthesis at position 3
   /// let error = Unclosed::paren(SimpleSpan::new(3, 4));
@@ -225,7 +228,7 @@ impl<S, Lang: ?Sized> Unclosed<Paren, S, Lang> {
   /// ```
   #[inline(always)]
   pub const fn paren_of(span: S) -> Self {
-    Self::of(span, CowStr::from_static("()"))
+    Self::of(span, DelimiterKind::Paren, CowStr::from_static("()"))
   }
 }
 
@@ -237,7 +240,7 @@ impl<S> Unclosed<Bracket, S> {
   /// ## Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
   /// // Opening bracket at position 8
   /// let error = Unclosed::bracket(SimpleSpan::new(8, 9));
@@ -258,7 +261,7 @@ impl<S, Lang: ?Sized> Unclosed<Bracket, S, Lang> {
   /// ## Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
   /// // Opening bracket at position 8
   /// let error = Unclosed::bracket(SimpleSpan::new(8, 9));
@@ -267,7 +270,7 @@ impl<S, Lang: ?Sized> Unclosed<Bracket, S, Lang> {
   /// ```
   #[inline(always)]
   pub const fn bracket_of(span: S) -> Self {
-    Self::of(span, CowStr::from_static("[]"))
+    Self::of(span, DelimiterKind::Bracket, CowStr::from_static("[]"))
   }
 }
 
@@ -279,7 +282,7 @@ impl<S> Unclosed<Brace, S> {
   /// ## Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
   /// // Opening brace at position 12
   /// let error = Unclosed::brace(SimpleSpan::new(12, 13));
@@ -300,7 +303,7 @@ impl<S, Lang: ?Sized> Unclosed<Brace, S, Lang> {
   /// ## Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
   /// // Opening brace at position 12
   /// let error = Unclosed::brace(SimpleSpan::new(12, 13));
@@ -309,7 +312,7 @@ impl<S, Lang: ?Sized> Unclosed<Brace, S, Lang> {
   /// ```
   #[inline(always)]
   pub const fn brace_of(span: S) -> Self {
-    Self::of(span, CowStr::from_static("{}"))
+    Self::of(span, DelimiterKind::Brace, CowStr::from_static("{}"))
   }
 }
 
@@ -321,7 +324,7 @@ impl<S> Unclosed<Angle, S> {
   /// ## Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
   /// // Opening angle bracket at position 20
   /// let error = Unclosed::angle(SimpleSpan::new(20, 21));
@@ -342,7 +345,7 @@ impl<S, Lang: ?Sized> Unclosed<Angle, S, Lang> {
   /// ## Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
   /// // Opening angle bracket at position 20
   /// let error = Unclosed::angle(SimpleSpan::new(20, 21));
@@ -351,7 +354,7 @@ impl<S, Lang: ?Sized> Unclosed<Angle, S, Lang> {
   /// ```
   #[inline(always)]
   pub const fn angle_of(span: S) -> Self {
-    Self::of(span, CowStr::from_static("<>"))
+    Self::of(span, DelimiterKind::Angle, CowStr::from_static("<>"))
   }
 }
 
@@ -360,19 +363,29 @@ impl<Delimiter, S> Unclosed<Delimiter, S> {
   ///
   /// The span should point to the position of the opening delimiter.
   ///
+  /// Outside tokora, `kind` cannot be *written* as a built-in: the four built-in variants are
+  /// `#[non_exhaustive]`, so `DelimiterKind::Bracket` here is `E0603`. Reach a built-in pair
+  /// through its own constructor — [`paren`](Self::paren), [`bracket`](Self::bracket),
+  /// [`brace`](Self::brace) or [`angle`](Self::angle) — which pairs the kind with tokora's
+  /// name for it.
+  ///
+  /// Those constructors are public, so this argument is not a provenance fence: a built-in
+  /// kind obtained from one of them, or from [`kind`](Self::kind), can be passed straight back
+  /// in here. See [`DelimiterKind`] for the routes and why they are open.
+  ///
   /// # Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
   /// // Opening brace at position 5
-  /// let error = Unclosed::<char>::new(SimpleSpan::new(5, 6), "{".into());
+  /// let error = Unclosed::<char>::new(SimpleSpan::new(5, 6), DelimiterKind::Custom("probe"), "{".into());
   /// assert_eq!(error.span(), SimpleSpan::new(5, 6));
   /// assert_eq!(error.name_ref(), "{");
   /// ```
   #[inline(always)]
-  pub const fn new(span: S, name: CowStr) -> Self {
-    Self::of(span, name)
+  pub const fn new(span: S, kind: DelimiterKind, name: CowStr) -> Self {
+    Self::of(span, kind, name)
   }
 }
 
@@ -381,24 +394,65 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   ///
   /// The span should point to the position of the opening delimiter.
   ///
+  /// Outside tokora, `kind` cannot be *written* as a built-in: the four built-in variants are
+  /// `#[non_exhaustive]`, so `DelimiterKind::Bracket` here is `E0603`. Reach a built-in pair
+  /// through its own constructor — [`paren_of`](Self::paren_of),
+  /// [`bracket_of`](Self::bracket_of), [`brace_of`](Self::brace_of) or
+  /// [`angle_of`](Self::angle_of) — which pairs the kind with tokora's name for it.
+  ///
+  /// Those constructors are public, so this argument is not a provenance fence: a built-in
+  /// kind obtained from one of them, or from [`kind`](Self::kind), can be passed straight back
+  /// in here. See [`DelimiterKind`] for the routes and why they are open.
+  ///
   /// # Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
   /// // Opening brace at position 5
-  /// let error = Unclosed::<char>::of(SimpleSpan::new(5, 6), "{".into());
+  /// let error = Unclosed::<char>::of(SimpleSpan::new(5, 6), DelimiterKind::Custom("probe"), "{".into());
   /// assert_eq!(error.span(), SimpleSpan::new(5, 6));
   /// assert_eq!(error.name_ref(), "{");
   /// ```
   #[inline(always)]
-  pub const fn of(span: S, name: CowStr) -> Self {
+  pub const fn of(span: S, kind: DelimiterKind, name: CowStr) -> Self {
     Self {
       span,
+      kind,
       name,
       _delimiter: PhantomData,
       _lang: PhantomData,
     }
+  }
+
+  /// Returns the pair's machine identity — the discriminator an unclosed-delimiter
+  /// conversion must match on.
+  ///
+  /// Unlike [`name_ref`](Self::name_ref), which is a display string carrying no uniqueness
+  /// contract, a built-in kind cannot be *written* by another crate: the four built-in
+  /// variants are `#[non_exhaustive]`, so neither a
+  /// [`Delimiter::KIND`](crate::delimiter::Delimiter::KIND) declaration nor the `kind`
+  /// argument to [`new`](Self::new)/[`of`](Self::of) can spell one. An outside pair should
+  /// declare [`Custom`](DelimiterKind::Custom) for an identity it owns; it cannot spell a
+  /// built-in in `Custom`'s place. That fence stops at spelling, though: a built-in kind
+  /// obtained through the routes below can still be reported here.
+  ///
+  /// It is **not** a provenance check. A built-in kind can still be obtained without naming a
+  /// variant — by projecting `Delimiter::KIND` off one of tokora's own pairs, by copying this
+  /// method's return value, or from the public [`bracket`](Self::bracket) family of
+  /// constructors. The first and third name tokora's own pair; the second need not, since a
+  /// generic adapter forwarding an error copies whatever kind it was handed. So a built-in arm
+  /// firing means dispatch was not keyed on a display string — not that the caller chose the
+  /// kind, and not that the diagnostic came from tokora. See [`DelimiterKind`] for those three routes, for why
+  /// they are left open, and for what the kind does *not* promise between two custom pairs.
+  ///
+  /// This is what [`FromUnclosed`](crate::emitter::FromUnclosed) should discriminate on;
+  /// outside tokora a built-in arm is written `DelimiterKind::Paren { .. }`, the pattern form
+  /// `#[non_exhaustive]` leaves open. `name_ref` remains available and remains correct for
+  /// rendering.
+  #[inline(always)]
+  pub const fn kind(&self) -> DelimiterKind {
+    self.kind
   }
 
   /// Returns the span of the opening delimiter.
@@ -408,9 +462,9 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// # Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
-  /// let error = Unclosed::<char>::new(SimpleSpan::new(10, 11), "(".into());
+  /// let error = Unclosed::<char>::new(SimpleSpan::new(10, 11), DelimiterKind::Custom("probe"), "(".into());
   /// assert_eq!(error.span(), SimpleSpan::new(10, 11));
   /// ```
   #[inline(always)]
@@ -438,9 +492,9 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// # Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
-  /// let error = Unclosed::<char>::new(SimpleSpan::new(5, 6), "{".into());
+  /// let error = Unclosed::<char>::new(SimpleSpan::new(5, 6), DelimiterKind::Custom("probe"), "{".into());
   /// assert_eq!(error.name_ref(), "{");
   /// ```
   #[inline(always)]
@@ -455,9 +509,10 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// # Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, utils::CowStr, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, utils::CowStr, SimpleSpan};
   ///
-  /// let error = Unclosed::<char>::new(SimpleSpan::new(5, 6), "[".into());
+  /// let error =
+  ///   Unclosed::<char>::new(SimpleSpan::new(5, 6), DelimiterKind::Custom("probe"), "[".into());
   /// assert_eq!(error.name(), CowStr::from_static("["));
   /// ```
   #[inline(always)]
@@ -475,9 +530,9 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// # Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, SimpleSpan};
   ///
-  /// let mut error = Unclosed::<char>::new(SimpleSpan::new(5, 6), "(".into());
+  /// let mut error = Unclosed::<char>::new(SimpleSpan::new(5, 6), DelimiterKind::Custom("probe"), "(".into());
   /// error.bump(&100);
   /// assert_eq!(error.span(), SimpleSpan::new(105, 106));
   /// ```
@@ -495,9 +550,10 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// # Examples
   ///
   /// ```rust
-  /// use tokora::{error::Unclosed, utils::CowStr, SimpleSpan};
+  /// use tokora::{delimiter::DelimiterKind, error::Unclosed, utils::CowStr, SimpleSpan};
   ///
-  /// let error = Unclosed::<char>::new(SimpleSpan::new(10, 11), "\"".into());
+  /// let error =
+  ///   Unclosed::<char>::new(SimpleSpan::new(10, 11), DelimiterKind::Custom("quote"), "\"".into());
   /// let (span, delimiter) = error.into_components();
   /// assert_eq!(span, SimpleSpan::new(10, 11));
   /// assert_eq!(delimiter, CowStr::from_static("\""));

@@ -2,10 +2,16 @@
 
 //! The built-in punctuator markers are usable as separators under a branded language.
 //!
-//! `define_separated_by!` hard-codes the bare marker — `Comma<(), (), ()>` — into every
-//! generated `separated_by_*` method, so the whole fluent family is reachable only if the
-//! marker's own language parameter is independent of the context language. These tests pin
-//! that independence at `Lang = TestLang`; they do not compile if the two are tied together.
+//! The marker's own brand and the context language are the **same** parameter: `Comma<(), (),
+//! LangA>` is a punctuator of `LangA` and of nothing else. The fluent family is still reachable
+//! at a branded grammar because `define_separated_by!` instantiates the separator at the
+//! caller's language — `Comma<(), (), Lang>` — not because the impl is widened.
+//!
+//! These tests pin the positive half of that: equality at a branded language, equality at the
+//! unbranded one, and the two fluent methods running end to end at `Lang = TestLang`. The
+//! negative half — a marker branded for one grammar must not satisfy another — cannot be
+//! written as a passing test, so it lives as the `compile_fail,E0277` doctest on
+//! `tokora::punct::Punctuator`, paired there with a positive control differing in one token.
 //!
 //! The fixture error is local rather than `common::E` because `E`'s end-of-input conversion
 //! is pinned to `Lang = ()`; every other fixture is shared.
@@ -118,10 +124,12 @@ where
 {
 }
 
-/// The bare marker `define_separated_by!` emits, asked for at a branded language.
+/// The marker `define_separated_by!` emits, asked for at the language it is branded with.
+///
+/// The bare `Comma` — i.e. `Comma<(), (), ()>` — is deliberately absent at `TestLang`: it is a
+/// punctuator of `()` only. See the `compile_fail` doctest on `Punctuator` for that half.
 #[test]
-fn bare_marker_is_a_punctuator_at_a_branded_lang() {
-  assert_punct::<TestLexer<'_>, Comma, TestLang>();
+fn a_marker_is_a_punctuator_at_its_own_lang() {
   assert_punct::<TestLexer<'_>, Comma<(), (), TestLang>, TestLang>();
   assert_punct::<TestLexer<'_>, Comma, ()>();
 }

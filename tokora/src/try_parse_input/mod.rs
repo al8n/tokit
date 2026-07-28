@@ -118,7 +118,7 @@ macro_rules! define_separated_by {
         #[inline(always)]
         fn [< separated_by_ $name:snake>](
           self,
-        ) -> Separated<Self, $name, O, L, Ctx, Lang, Cmpl>
+        ) -> Separated<Self, $name<(), (), Lang>, O, L, Ctx, Lang, Cmpl>
         where
           Self: Sized,
           L: Lexer<'inp>,

@@ -54,8 +54,13 @@ macro_rules! define_parsers {
           }
         }
 
-        impl<'inp, L, S, C, MarkerLang: ?Sized, Lang: ?Sized> Punctuator<'inp, L, Lang>
-          for $name<S, C, MarkerLang>
+        // The marker's own brand and the context language are the *same* parameter: a marker
+        // branded for one grammar is not a punctuator of another. The fluent `separated_by_*`
+        // family reaches a branded grammar by instantiating the marker at the caller's `Lang`,
+        // not by widening this impl. The fence is pinned by the `compile_fail` doctest on the
+        // `Punctuator` trait.
+        impl<'inp, L, S, C, Lang: ?Sized> Punctuator<'inp, L, Lang>
+          for $name<S, C, Lang>
         where
           L: Lexer<'inp>,
           <L::Token as Token<'inp>>::Kind: From<$name<(), (), ()>>,

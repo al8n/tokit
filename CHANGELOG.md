@@ -71,14 +71,74 @@ compiler elaborates the rest.
    nothing.
 
 2. **`FromUnclosed` replaces the per-delimiter `From<Unclosed<D, …>>` family.** One bound
-   covers every delimiter pair, discriminated at runtime by `Unclosed::name_ref` (`"()"`,
-   `"<>"`, `"[]"`, `"{}"`) with a mandatory catch-all arm. `UnclosedEmitter::emit_unclosed`'s
-   method bound moves with it. Type-level per-pair `From` impls still work alongside the
-   umbrella, and remain the documented way to discriminate at the type level.
+   covers every delimiter pair, discriminated at runtime with a mandatory catch-all arm.
+   `UnclosedEmitter::emit_unclosed`'s method bound moves with it. Type-level per-pair `From`
+   impls still work alongside the umbrella, and remain the documented way to discriminate at
+   the type level.
 
    **Migration:** delete the per-delimiter `From<Unclosed<…>>` bounds from your where-clauses
    — a residual one now fails as a bare `E0277` with no note, because `From` is a foreign
    trait we cannot annotate.
+
+   **The discriminator is `Unclosed::kind`, not the display name.** Two further breaking
+   changes carry it:
+
+   - **`Delimiter` gains a required `const KIND: DelimiterKind`** (new, exported from
+     `tokora::delimiter`). No default: a defaulted identity is one the author never chose.
+   - **`Unclosed::new` and `Unclosed::of` take the kind** between the span and the name, and
+     `Unclosed::kind()` reads it back. The four typed constructors (`Unclosed::paren` and
+     siblings) are unchanged.
+
+   Routing on `Unclosed::name_ref` was unsound as a dispatch key and is no longer documented
+   as one. `name` is a display string with no uniqueness contract — `"[]"` is the correct name
+   for *any* bracket-shaped pair — so a consumer who defined a custom pair and named it
+   correctly had it silently absorbed by the built-in `Bracket` arm, reporting a character the
+   source never contained. A pair tokora does not define should declare `DelimiterKind::Custom`,
+   a variant that can never equal a built-in.
+
+   **The accident is unrepresentable: `DelimiterKind`'s four built-in variants are themselves
+   `#[non_exhaustive]`.** Only tokora can *write* one. `DelimiterKind::Bracket` in another
+   crate is a privacy error (`E0603`) — as a `Delimiter::KIND` declaration, as the `kind`
+   argument to `Unclosed::new`/`of`, anywhere — so the author who reaches for `Bracket`
+   because `"[]"` was the right name for their pair no longer compiles. Matching is untouched
+   at a cost of one token: **an arm outside tokora is written `DelimiterKind::Bracket { .. }`**,
+   the pattern form `#[non_exhaustive]` on a variant leaves open. A `compile_fail,E0603`
+   doctest on `DelimiterKind` pins it, paired with a positive control differing in one token.
+
+   **That fences the spelling, not the value, and it is not a provenance check.** A built-in
+   kind is still obtainable by a crate that is not tokora, three ways: by projecting
+   `<tokora::punct::Bracket<…> as Delimiter<…>>::KIND`, since the const is public and its type
+   unconstrained; by reading `Unclosed::kind` and passing it back to `Unclosed::new`/`of`; or
+   from `Unclosed::bracket`/`bracket_of` and their `paren`/`brace`/`angle` siblings, which mint
+   a built-in-kinded error in one public call and need no `Delimiter` impl at all. The first
+   and third name tokora's own pair; the second does not — a generic adapter forwarding an
+   error copies whatever kind it was handed. So a `DelimiterKind::Bracket { .. }` arm firing
+   means dispatch was not keyed on a display string — not that the caller chose the kind, and
+   not that the diagnostic came from tokora. All three routes are pinned
+   green in `tests/unclosed_kind_dispatch.rs`, asserting the forgery succeeds, so closing one
+   later breaks a line rather than making this entry quietly wrong.
+
+   The residue is accepted deliberately. Closing the projection alone is possible — a
+   `#[doc(hidden)]` provided method with a parameter type unnameable outside tokora does it,
+   while a sealed supertrait plus a blanket impl over a public key trait does not compile at
+   all (`E0119` against the `&D` forwarding impl) — but it leaves the other two routes open and
+   buys no stronger claim. Closing all three means making the eight typed constructors
+   crate-private and reshaping `new`/`of` so they cannot take a kind, which makes
+   `Unclosed<char>` unconstructible outside tokora. That is refused; `DelimiterKind`'s docs
+   carry the full reasoning.
+
+   What this does **not** fix, also stated at the type: two custom pairs in one crate can still
+   both declare `Custom("mine")`; and a pair the arm set forgot still lands in the catch-all —
+   over a generic `D` the compile-time obligation is gone for good, and `#[non_exhaustive]`
+   keeps the catch-all mandatory.
+
+   **Migration:** replace `match err.name_ref()` with `match err.kind()` and the string
+   literals with `DelimiterKind::` variants — `DelimiterKind::Bracket { .. }` for a built-in,
+   braces included; add `const KIND` to any custom `Delimiter` impl —
+   `DelimiterKind::Custom("your-key")`, the only variant your crate can name; add the kind
+   argument to any direct `Unclosed::new`/`of` call, or reach for
+   `Unclosed::bracket`/`bracket_of` and their siblings where the pair is one of tokora's.
+   `name_ref` is unchanged and remains correct for rendering.
 
 3. **The `_of` language twins are gone — 167 public items removed.** Every `X::parse_of` is
    now `X::parse`, inferring `Lang` from the input. This covers 148 punctuator methods
@@ -95,10 +155,18 @@ compiler elaborates the rest.
    **Migration:** drop the `_of` suffix. A call site that already spelled its generics gains
    one type argument, `Lang`, in last position; `_` is almost always sufficient.
 
-4. **`Punctuator`'s marker language is decoupled from the context language.** The impl's
-   language parameter is now unconstrained, so the fluent `separated_by_*` family works for
-   branded grammars, where it previously failed on `.collect()` with an error pointing frames
-   away from its cause.
+4. **The fluent `separated_by_*` family works for branded grammars.** It previously failed on
+   `.collect()` with an error pointing frames away from its cause, because the generated
+   methods hard-coded the bare marker `Comma<(), (), ()>`. They now instantiate the separator
+   at the caller's language — `Comma<(), (), Lang>` — so the return type of every
+   `separated_by_*` method gains that argument.
+
+   The marker's own brand and the context language remain the **same** parameter on the
+   `Punctuator` impls: a marker branded for one grammar is not a punctuator of another.
+   Widening the impl is a second route to the same fix and is deliberately not taken — it
+   would let a separator copy-pasted out of a sibling dialect type-check silently. The fence
+   is pinned by a `compile_fail,E0277` doctest on `Punctuator`, paired with a positive
+   control differing in one token.
 
 5. **`Token::Kind: 'static` is hoisted to the trait**, deleting five projection restatements.
    Four superficially similar bounds remain: they constrain the dispatch structs' own free

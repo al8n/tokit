@@ -159,6 +159,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
                   .emitter()
                   .emit_unclosed(Unclosed::<Delim, L::Span, Lang>::of(
                     open_span,
+                    Delim::KIND,
                     Delim::name(),
                   ))?;
               }
@@ -232,6 +233,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
             .emitter()
             .emit_unclosed(Unclosed::<Delim, L::Span, Lang>::of(
               open_span,
+              Delim::KIND,
               Delim::name(),
             ))?;
         }

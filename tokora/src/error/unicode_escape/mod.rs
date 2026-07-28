@@ -1168,7 +1168,11 @@ impl<Char, O> VariableUnicodeEscapeError<Char, O> {
   /// ```
   #[inline]
   pub const fn unclosed(span: SimpleSpan<O>) -> Self {
-    Self::Unclosed(Unclosed::new(span, CowStr::from_static("{}")))
+    Self::Unclosed(Unclosed::new(
+      span,
+      crate::delimiter::DelimiterKind::Brace,
+      CowStr::from_static("{}"),
+    ))
   }
 
   /// Creates an overflow error.

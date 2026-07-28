@@ -15,6 +15,7 @@ use tokora::{
   Accumulator, Branch, Emitter, InputRef, Parse, ParseChoice, ParseContext, ParseInput, Parser,
   Token as TokenT, TryParseInput,
   cache::Peeked,
+  delimiter::DelimiterKind,
   emitter::{
     FromUnclosed, FullContainerEmitter, SeparatedEmitter, UnclosedEmitter,
     UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
@@ -99,17 +100,30 @@ impl From<()> for JsonError<'_> {
 }
 
 // One umbrella conversion covers every delimiter pair. `from_unclosed` is generic over the
-// pair, so the typed arm is chosen by the runtime name the `Unclosed` carries; the catch-all
-// is mandatory — over a generic `D` no arm set is exhaustive — and must diagnose, not panic.
+// pair, so the typed arm is chosen by the `DelimiterKind` the `Unclosed` carries — a machine
+// identity, not the display name, so a custom pair that calls itself "[]" does not land in the
+// `Bracket` arm by accident: it cannot spell the built-in kind. The braces on the built-in
+// arms are that fence showing through: those variants are `#[non_exhaustive]`, so a crate
+// other than tokora can match one but never write one.
+//
+// Never *write* one. A built-in value is still obtainable, and the `Unclosed::of`
+// calls below are one of the routes — this file is a separate crate, and it rebuilds an
+// `Unclosed` around a built-in kind it read out rather than wrote. That use is legitimate
+// (the diagnostic is tokora's, only re-spelled), which is precisely why the route cannot be
+// closed without cost. `DelimiterKind`'s docs list all three routes and why they stay open.
+//
+// The catch-all is mandatory — `DelimiterKind` is `#[non_exhaustive]` and no arm set is
+// exhaustive over a generic `D` — and must diagnose, not panic.
 impl<'inp, L> FromUnclosed<'inp, L> for JsonError<'_>
 where
   L: tokora::Lexer<'inp, Span = tokora::SimpleSpan>,
 {
   fn from_unclosed<D>(err: Unclosed<D, tokora::SimpleSpan>) -> Self {
+    let kind = err.kind();
     let (span, name) = err.into_components();
-    match name.as_ref() {
-      "[]" => JsonError::UnclosedBracket(Unclosed::of(span, name)),
-      "{}" => JsonError::UnclosedBrace(Unclosed::of(span, name)),
+    match kind {
+      DelimiterKind::Bracket { .. } => JsonError::UnclosedBracket(Unclosed::of(span, kind, name)),
+      DelimiterKind::Brace { .. } => JsonError::UnclosedBrace(Unclosed::of(span, kind, name)),
       _ => JsonError::Other("unclosed delimiter"),
     }
   }

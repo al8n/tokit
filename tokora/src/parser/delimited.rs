@@ -34,7 +34,7 @@
 
 use crate::{
   ComposableParseContext, Emitter, ErrorOf, Lexer, ParseInput, Token,
-  delimiter::TypedDelimiter,
+  delimiter::{DelimiterKind, TypedDelimiter},
   emitter::UnclosedEmitter,
   error::{Unclosed, UnexpectedEot, token::UnexpectedTokenOf},
   input::{CloseStatus, Cursor, InputRef, SurfaceIncomplete},
@@ -210,6 +210,29 @@ where
   }
 }
 
+/// The two halves of a pair's identity an [`Unclosed`] carries: the machine kind a conversion
+/// routes on, and the display name it renders.
+///
+/// They cross as one argument because they always travel together and always come from the
+/// same place. For the four built-in shapes that is load-bearing rather than tidy: the
+/// associated constants below are the only spelling those call sites use, so a shape parser
+/// cannot pass one pair's kind next to another pair's name.
+struct PairIdentity {
+  kind: DelimiterKind,
+  name: CowStr,
+}
+
+impl PairIdentity {
+  const PAREN: Self = Self::new(DelimiterKind::Paren, CowStr::from_static("()"));
+  const BRACE: Self = Self::new(DelimiterKind::Brace, CowStr::from_static("{}"));
+  const BRACKET: Self = Self::new(DelimiterKind::Bracket, CowStr::from_static("[]"));
+  const ANGLE: Self = Self::new(DelimiterKind::Angle, CowStr::from_static("<>"));
+
+  const fn new(kind: DelimiterKind, name: CowStr) -> Self {
+    Self { kind, name }
+  }
+}
+
 /// The one close-miss law every delimited shape shares — the shape-family twin of the
 /// delimited many-builder's [`probe_close`](InputRef::probe_close) mapping (see
 /// `parser::many::delim`). With the inner sub-parser already run, classify the close
@@ -245,7 +268,7 @@ fn commit_delim_close<'inp, 'c, D, L, Ctx, Lang, Cmpl, CV>(
   inp: &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
   cursor: &Cursor<'inp, 'c, L>,
   open_span: &L::Span,
-  name: CowStr,
+  pair: PairIdentity,
   is_close: impl Fn(&L::Token) -> bool,
   expect_close: impl FnOnce(
     Spanned<L::Token, L::Span>,
@@ -288,7 +311,11 @@ where
     CloseStatus::Eof => {
       inp
         .emitter()
-        .emit_unclosed(Unclosed::<D, L::Span, Lang>::of(open_span.clone(), name))?;
+        .emit_unclosed(Unclosed::<D, L::Span, Lang>::of(
+          open_span.clone(),
+          pair.kind,
+          pair.name,
+        ))?;
       Ok((
         make_close(inp.span_since(inp.cursor())),
         inp.span_since(cursor),
@@ -328,7 +355,7 @@ where
     inp,
     cursor,
     &open_span,
-    D::name(),
+    PairIdentity::new(D::KIND, D::name()),
     |t| D::is_close(&t.kind()),
     |tok| Err(D::unexpected_close_token(tok)),
     D::close_value,
@@ -630,7 +657,7 @@ where
     inp,
     cursor,
     open.span(),
-    CowStr::from_static("()"),
+    PairIdentity::PAREN,
     |t| t.is_close_paren(),
     |tok| SpannedPunctuatorToken::<'inp, L, Lang>::expect_close_paren(tok),
     |s| CloseParen::new(s).change_language::<Lang>(),
@@ -918,7 +945,7 @@ where
     inp,
     cursor,
     open.span(),
-    CowStr::from_static("{}"),
+    PairIdentity::BRACE,
     |t| t.is_close_brace(),
     |tok| SpannedPunctuatorToken::<'inp, L, Lang>::expect_close_brace(tok),
     |s| CloseBrace::new(s).change_language::<Lang>(),
@@ -1207,7 +1234,7 @@ where
     inp,
     cursor,
     open.span(),
-    CowStr::from_static("[]"),
+    PairIdentity::BRACKET,
     |t| t.is_close_bracket(),
     |tok| SpannedPunctuatorToken::<'inp, L, Lang>::expect_close_bracket(tok),
     |s| CloseBracket::new(s).change_language::<Lang>(),
@@ -1497,7 +1524,7 @@ where
     inp,
     cursor,
     open.span(),
-    CowStr::from_static("<>"),
+    PairIdentity::ANGLE,
     |t| t.is_close_angle(),
     |tok| SpannedPunctuatorToken::<'inp, L, Lang>::expect_close_angle(tok),
     |s| CloseAngle::new(s).change_language::<Lang>(),
