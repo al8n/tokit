@@ -175,6 +175,38 @@ compiler elaborates the rest.
 6. **`Parser` loses its `Error` phantom parameter** and gains value-driven entry points
    (`parse`, `parse_with`, `parse_with_state`); its constructors collapse from eight to four.
 
+7. **The delimiter side gets item 4's fix.** `Delimiter` and `TypedDelimiter`'s blanket impls
+   for `Paren`, `Brace`, `Bracket` and `Angle` carried a marker-language parameter independent
+   of the context language, so `Paren<(), (), LangA>` satisfied `Delimiter<'_, L, LangB>` and a
+   production copy-pasted out of a sibling dialect type-checked silently. The two are now the
+   **same** parameter.
+
+   As with the separators, the widening was never what made the fluent family work. Every
+   `delimited_by_*` and `try_delimited_by_*` — on `ParseInput` and on all eleven many-builder
+   surfaces — now instantiates the pair at the caller's language, so their return types gain
+   that argument. The seven option builders (`AtLeast`, `AtMost`, `Bounded`, and the four
+   leading/trailing options) are generic only over the parser they wrap and have no language
+   to name, so their four `delimited_by_*` methods take the brand as a **method** type
+   parameter instead; the driving impl's `Delim: Delimiter<'inp, L, Lang>` obligation unifies
+   it with the context language. A builder stored in a `let` and never driven has to name the
+   brand itself.
+
+   The pair-typed error vocabulary moves with it, or two routes to one shape would disagree on
+   the error type. `parens`, `braces`, `brackets`, `angles` and their attempt twins type the
+   `Unclosed` they emit on the pair at their own language, and the twelve
+   `Unclosed*`/`Unopened*`/`Undelimited*` aliases plus their twelve `Lang`-generic constructor
+   blocks name it the same way — `UnclosedParen<S, Lang>` is now
+   `Unclosed<Paren<(), (), Lang>, S, Lang>`.
+
+   **Migration:** at `Lang = ()` every spelling is unchanged, since `Paren` already means
+   `Paren<(), (), ()>`. A branded grammar spells the pair's brand in two places: a
+   `TypedDelimiter` bound forwarded through a **generic** lexer (`Bracket<(), (), Lang>:
+   TypedDelimiter<'inp, L, Lang>`), and a turbofish that names the pair
+   (`delimited::<Bracket<(), (), MyLang>, …>`). At a concrete lexer the impl resolves and
+   neither is written. The fluent methods need nothing. The fence is pinned by two
+   `compile_fail,E0277` doctests on `Delimiter`, paired with a positive control differing from
+   each in one token.
+
 ### Added
 
 - **`Dialect`** — a two-item anchor (`Lang`, `Lexer`) with the projection aliases `LexerOf`,

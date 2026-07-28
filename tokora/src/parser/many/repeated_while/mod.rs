@@ -182,7 +182,7 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl>
 impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl>
   RepeatedWhile<F, Condition, O, W, L, Ctx, Lang, Cmpl>
 {
-  define_many_delimited_methods!();
+  define_many_delimited_methods!(Lang);
 }
 
 impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl>

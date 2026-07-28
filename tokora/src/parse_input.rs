@@ -159,15 +159,15 @@ macro_rules! define_delimited_by {
         self,
       ) -> impl for<'c> FnMut(
         &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
-      ) -> crate::parser::DelimitedOf<'inp, $delimiter, L, Ctx, Lang, O>
+      ) -> crate::parser::DelimitedOf<'inp, $delimiter<(), (), Lang>, L, Ctx, Lang, O>
       where
         Self: Sized,
-        $delimiter: crate::delimiter::TypedDelimiter<'inp, L, Lang>,
+        $delimiter<(), (), Lang>: crate::delimiter::TypedDelimiter<'inp, L, Lang>,
         L: Lexer<'inp>,
         Ctx: ComposableParseContext<'inp, L, Lang>,
         Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
       {
-        self.delimited::<$delimiter>()
+        self.delimited::<$delimiter<(), (), Lang>>()
       }
     )+
   };
@@ -190,15 +190,15 @@ macro_rules! define_try_delimited_by {
         self,
       ) -> impl for<'c> FnMut(
         &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
-      ) -> crate::parser::TryDelimitedOf<'inp, $delimiter, L, Ctx, Lang, O>
+      ) -> crate::parser::TryDelimitedOf<'inp, $delimiter<(), (), Lang>, L, Ctx, Lang, O>
       where
         Self: Sized,
-        $delimiter: crate::delimiter::TypedDelimiter<'inp, L, Lang>,
+        $delimiter<(), (), Lang>: crate::delimiter::TypedDelimiter<'inp, L, Lang>,
         L: Lexer<'inp>,
         Ctx: ComposableParseContext<'inp, L, Lang>,
         Cmpl: SurfaceIncomplete<'inp, L, Ctx, Lang>,
       {
-        self.try_delimited::<$delimiter>()
+        self.try_delimited::<$delimiter<(), (), Lang>>()
       }
     )+
   };

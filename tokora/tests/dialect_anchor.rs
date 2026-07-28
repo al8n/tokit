@@ -25,7 +25,7 @@
 //! **`PunctuatorToken` is deliberately *not* pinned here, and the reason is a finding.** A real
 //! dialect pins it — the consumer's does, alongside `IdentifierToken` and `KeywordToken` — but
 //! in *this* file it would not be load-bearing: the only production that needs a punctuator
-//! classification is the delimited one, and it already carries `Brace: TypedDelimiter<…>`, which
+//! classification is the delimited one, and it already carries `Brace<…>: TypedDelimiter<…>`, which
 //! supplies the obligation on its own. Removing the pin was measured and the target still
 //! compiled. Pinning it anyway would put a line in the table that cannot fail, which is the
 //! defect class this file exists to avoid.
@@ -118,16 +118,21 @@ where
 }
 
 /// The three-line shape, stated honestly. A delimiter pair is not a fact about a dialect — the
-/// grammar chooses it per production — so `Brace: TypedDelimiter<…>` is a genuine third line
+/// grammar chooses it per production — so `Brace<…>: TypedDelimiter<…>` is a genuine third line
 /// rather than something the anchor failed to carry. Everything else still rides the anchor,
 /// including the `FromUnclosed` conversion the unclosed path needs.
+///
+/// The pair is named at the dialect's own language — `Brace<(), (), TestLang>` — because the
+/// brand is not decoration: a `Brace` branded for a sibling dialect is not this one's pair.
+/// Only the generic lexer forces the line to be written at all; at a concrete lexer the impl
+/// resolves and the bound is inferred.
 fn braced_ident<'inp, D, Ctx>(
   inp: &mut DialectInput<'inp, '_, D, Ctx>,
 ) -> Result<DialectIdent<'inp, D>, DialectErrorOf<'inp, D, Ctx>>
 where
   D: PinnedDialect<'inp>,
   Ctx: ComposableParseContext<'inp, LexerOf<'inp, D>, TestLang>,
-  Brace: TypedDelimiter<'inp, LexerOf<'inp, D>, TestLang>,
+  Brace<(), (), TestLang>: TypedDelimiter<'inp, LexerOf<'inp, D>, TestLang>,
 {
   Ident::parse.delimited_by_braces()(inp).map(|delimited| delimited.into_data())
 }

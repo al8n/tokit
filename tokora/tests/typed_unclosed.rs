@@ -39,8 +39,8 @@ impl<'inp> Delimiter<'inp, TestLexer<'inp>, CustomLang> for CustomMarker {
 
 #[derive(Debug)]
 enum TypedError {
-  Bracket(Unclosed<Bracket, SimpleSpan, CustomLang>),
-  Brace(Unclosed<Brace, SimpleSpan, CustomLang>),
+  Bracket(Unclosed<Bracket<(), (), CustomLang>, SimpleSpan, CustomLang>),
+  Brace(Unclosed<Brace<(), (), CustomLang>, SimpleSpan, CustomLang>),
   CustomMarker(Unclosed<CustomMarker, SimpleSpan, CustomLang>),
   Other,
 }
@@ -51,14 +51,14 @@ impl From<()> for TypedError {
   }
 }
 
-impl From<Unclosed<Bracket, SimpleSpan, CustomLang>> for TypedError {
-  fn from(err: Unclosed<Bracket, SimpleSpan, CustomLang>) -> Self {
+impl From<Unclosed<Bracket<(), (), CustomLang>, SimpleSpan, CustomLang>> for TypedError {
+  fn from(err: Unclosed<Bracket<(), (), CustomLang>, SimpleSpan, CustomLang>) -> Self {
     Self::Bracket(err)
   }
 }
 
-impl From<Unclosed<Brace, SimpleSpan, CustomLang>> for TypedError {
-  fn from(err: Unclosed<Brace, SimpleSpan, CustomLang>) -> Self {
+impl From<Unclosed<Brace<(), (), CustomLang>, SimpleSpan, CustomLang>> for TypedError {
+  fn from(err: Unclosed<Brace<(), (), CustomLang>, SimpleSpan, CustomLang>) -> Self {
     Self::Brace(err)
   }
 }
@@ -190,12 +190,12 @@ fn decide_number<'inp>(
   })
 }
 
-fn bare_bracket_many<'inp>(
+fn branded_bracket_many<'inp>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx<'inp>, CustomLang>,
 ) -> Result<Vec<i64>, TypedError> {
   number
     .repeated_while::<_, U1>(decide_number)
-    .delimited::<Bracket>()
+    .delimited::<Bracket<(), (), CustomLang>>()
     .collect()
     .parse_input(inp)
 }
@@ -210,48 +210,57 @@ fn custom_marker_many<'inp>(
     .parse_input(inp)
 }
 
-fn bare_bracket<'inp>(
+fn branded_bracket<'inp>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx<'inp>, CustomLang>,
 ) -> Result<i64, TypedError> {
-  delimited::<Bracket, _, _, CustomLang, _, _, _>(number)(inp).map(|group| *group.data())
+  delimited::<Bracket<(), (), CustomLang>, _, _, CustomLang, _, _, _>(number)(inp)
+    .map(|group| *group.data())
 }
 
-fn bare_brace<'inp>(
+fn branded_brace<'inp>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx<'inp>, CustomLang>,
 ) -> Result<i64, TypedError> {
-  delimited::<Brace, _, _, CustomLang, _, _, _>(number)(inp).map(|group| *group.data())
+  delimited::<Brace<(), (), CustomLang>, _, _, CustomLang, _, _, _>(number)(inp)
+    .map(|group| *group.data())
 }
 
 #[test]
-fn bare_builtin_markers_preserve_typed_unclosed_conversions_under_custom_language() {
+fn branded_builtin_markers_preserve_typed_unclosed_conversions_under_custom_language() {
   let bracket =
-    Parser::with_parser::<'_, TestLexer<'_>, i64, TypedError, _, CustomLang>(bare_bracket)
+    Parser::with_parser::<'_, TestLexer<'_>, i64, TypedError, _, CustomLang>(branded_bracket)
       .parse_str("[1");
   match bracket {
     Err(TypedError::Bracket(err)) => assert_eq!(err.name_ref(), "[]"),
-    Err(other) => panic!("expected Unclosed<Bracket, _, CustomLang>, got {other:?}"),
+    Err(other) => {
+      panic!("expected Unclosed<Bracket<(), (), CustomLang>, _, CustomLang>, got {other:?}")
+    }
     Ok(value) => panic!("expected unclosed bracket, parsed {value}"),
   }
 
-  let brace = Parser::with_parser::<'_, TestLexer<'_>, i64, TypedError, _, CustomLang>(bare_brace)
-    .parse_str("{1");
+  let brace =
+    Parser::with_parser::<'_, TestLexer<'_>, i64, TypedError, _, CustomLang>(branded_brace)
+      .parse_str("{1");
   match brace {
     Err(TypedError::Brace(err)) => assert_eq!(err.name_ref(), "{}"),
-    Err(other) => panic!("expected Unclosed<Brace, _, CustomLang>, got {other:?}"),
+    Err(other) => {
+      panic!("expected Unclosed<Brace<(), (), CustomLang>, _, CustomLang>, got {other:?}")
+    }
     Ok(value) => panic!("expected unclosed brace, parsed {value}"),
   }
 }
 
 #[test]
-fn bare_bracket_many_builder_preserves_typed_unclosed_under_custom_language() {
+fn branded_bracket_many_builder_preserves_typed_unclosed_under_custom_language() {
   let result = Parser::with_parser::<'_, TestLexer<'_>, Vec<i64>, TypedError, _, CustomLang>(
-    bare_bracket_many,
+    branded_bracket_many,
   )
   .parse_str("[1 2");
 
   match result {
     Err(TypedError::Bracket(err)) => assert_eq!(err.name_ref(), "[]"),
-    Err(other) => panic!("expected Unclosed<Bracket, _, CustomLang>, got {other:?}"),
+    Err(other) => {
+      panic!("expected Unclosed<Bracket<(), (), CustomLang>, _, CustomLang>, got {other:?}")
+    }
     Ok(value) => panic!("expected unclosed bracket, parsed {value:?}"),
   }
 }
@@ -290,9 +299,11 @@ fn per_pair_from_impls_coexist_with_the_umbrella() {
   // through their own constructors — `of` cannot take a directly spelled built-in variant
   // outside tokora, and these produce exactly the kind/name pair it used to be handed by
   // hand.
-  let typed: TypedError = Unclosed::<Bracket, _, CustomLang>::bracket_of(span).into();
+  let typed: TypedError =
+    Unclosed::<Bracket<(), (), CustomLang>, _, CustomLang>::bracket_of(span).into();
   assert!(matches!(typed, TypedError::Bracket(_)));
-  let typed: TypedError = Unclosed::<Brace, _, CustomLang>::brace_of(span).into();
+  let typed: TypedError =
+    Unclosed::<Brace<(), (), CustomLang>, _, CustomLang>::brace_of(span).into();
   assert!(matches!(typed, TypedError::Brace(_)));
   let typed: TypedError = Unclosed::<CustomMarker, _, CustomLang>::of(
     span,
@@ -305,7 +316,7 @@ fn per_pair_from_impls_coexist_with_the_umbrella() {
   // Umbrella: the same three pairs, chosen by the runtime `DelimiterKind`, plus the mandatory
   // catch-all for a pair the arm set does not name.
   let via = <TypedError as FromUnclosed<'_, TestLexer<'_>, CustomLang>>::from_unclosed(Unclosed::<
-    Bracket,
+    Bracket<(), (), CustomLang>,
     _,
     CustomLang,
   >::bracket_of(
@@ -323,7 +334,7 @@ fn per_pair_from_impls_coexist_with_the_umbrella() {
   ));
   assert!(matches!(via, TypedError::CustomMarker(_)));
   let via = <TypedError as FromUnclosed<'_, TestLexer<'_>, CustomLang>>::from_unclosed(Unclosed::<
-    Bracket,
+    Bracket<(), (), CustomLang>,
     _,
     CustomLang,
   >::of(
