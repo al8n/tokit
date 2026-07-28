@@ -19,7 +19,7 @@ use rowan::{Language, NodeOrToken, SyntaxNode};
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, Token as TokenT,
   cache::DefaultCache,
-  cst::Sink,
+  cst::{CstProfile, KindValidator, Sink},
   emitter::{CstEmitter, Fatal},
   error::token::UnexpectedTokenOf,
   logos::{self, Logos},
@@ -372,19 +372,23 @@ fn dump(node: &SyntaxNode<JsonLang>, depth: usize, out: &mut String) {
 fn main() {
   let src = r#"{"name": "tokit", "nums": [1, 2], "meta": {"ok": true, "note": null}}"#;
 
-  let mut sink: Sink<'_, JsonLexer<'_>, _> = Sink::new(
-    Fatal::<JsonError>::new(),
+  // The dialect's kind space, stated once: the mapper, the predicate that decides which raw
+  // u16s this language can name (every discriminant up to and including `Root`), and the two
+  // kinds the sink synthesizes on its own behalf.
+  let profile = CstProfile::new(
     map_token,
+    KindValidator::new(|kind| kind <= K::Root.raw()),
     K::Error.raw(),
     K::Gap.raw(),
   );
+  let mut sink: Sink<'_, JsonLexer<'_>, _> = Sink::new(src, Fatal::<JsonError>::new(), profile);
 
   Parser::with_context((&mut sink, DefaultCache::<JsonLexer<'_>>::default()))
     .apply(document)
     .parse_str(src)
     .expect("parse succeeds");
 
-  let (green, _emitter) = sink.finish(K::Root.raw(), src);
+  let (green, _emitter) = sink.finish(K::Root.raw());
   let tree = SyntaxNode::<JsonLang>::new_root(green.expect("well-formed tree"));
 
   assert_eq!(tree.text().to_string(), src, "lossless round trip");

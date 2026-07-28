@@ -2900,7 +2900,7 @@ impl<'inp> CstEmitter<'inp, TestLexer<'inp>> for TrackingEmitter {
     self.cst_events += 1;
   }
 
-  fn cst_finish(&mut self) {
+  fn cst_finish(&mut self, _: u16) {
     self.cst_events += 1;
   }
 
@@ -2944,7 +2944,7 @@ fn cst_emitter_mut_ref_token() {
 fn cst_emitter_mut_ref_finish() {
   let mut emitter = TrackingEmitter::new();
   let mut r: &mut TrackingEmitter = &mut emitter;
-  <&mut TrackingEmitter as CstEmitter<'_, TestLexer<'_>>>::cst_finish(&mut r);
+  <&mut TrackingEmitter as CstEmitter<'_, TestLexer<'_>>>::cst_finish(&mut r, 1);
   assert_eq!(emitter.cst_events, 1);
   assert_eq!(emitter.calls, 0);
 }

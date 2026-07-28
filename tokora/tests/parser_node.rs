@@ -213,8 +213,19 @@ type Sink<'inp> = tokora::cst::Sink<'inp, ByteLexer<'inp>, Verbose<TestErr>>;
 type Ctx<'inp, 's> = (&'s mut Sink<'inp>, DefaultCache<'inp, ByteLexer<'inp>>);
 type Ir<'inp, 's, 'c> = InputRef<'inp, 'c, ByteLexer<'inp>, Ctx<'inp, 's>, ()>;
 
-fn sink<'inp>() -> Sink<'inp> {
-  tokora::cst::Sink::new(Verbose::new(), map_tok, K_ERR, K_GAP)
+/// The fixture's kind space: the structural kinds above plus the `100 + byte` token images.
+fn in_kind_space(kind: u16) -> bool {
+  matches!(kind, K_ROOT..=K_BIN | K_ERR | K_GAP) || kind >= 100
+}
+
+fn sink(src: &str) -> Sink<'_> {
+  let profile = tokora::cst::CstProfile::new(
+    map_tok,
+    tokora::cst::KindValidator::new(in_kind_space),
+    K_ERR,
+    K_GAP,
+  );
+  tokora::cst::Sink::new(src, Verbose::new(), profile)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -244,11 +255,11 @@ fn run<O>(
   Result<O, TestErr>,
   Result<rowan::GreenNode, tokora::cst::FinishError>,
 ) {
-  let mut s = sink();
+  let mut s = sink(src);
   let res =
     Parser::with_parser_and_context(parser, (&mut s, DefaultCache::<ByteLexer<'_>>::default()))
       .parse_str(src);
-  let (green, _emitter) = s.finish(K_ROOT, src);
+  let (green, _emitter) = s.finish(K_ROOT);
   (res, green)
 }
 
@@ -340,14 +351,14 @@ fn node_error_unwind_leaves_no_dangling_start() {
 
   // The aborted parse's tree: `finish_partial` tiles the unconsumed `b`, closing nothing
   // (the buffer was already balanced), so the round trip holds with no node.
-  let mut s = sink();
+  let mut s = sink("ab");
   let res = Parser::with_parser_and_context(
     |inp: &mut Ir<'_, '_, '_>| node(K_NODE, boom_after_one).parse_input(inp),
     (&mut s, DefaultCache::<ByteLexer<'_>>::default()),
   )
   .parse_str("ab");
   assert_eq!(res, Err(TestErr::Boom));
-  let (green, _emitter) = s.finish_partial(K_ROOT, "ab");
+  let (green, _emitter) = s.finish_partial(K_ROOT);
   let root = tree(green.expect("finish_partial tiles the tail"));
   assert_eq!(
     root.text().to_string(),
@@ -546,7 +557,7 @@ fn bin_kinds(op: PrattFoldOp<'_, (), u8, u8, u8, ()>) -> Option<u16> {
 /// compute the same `i64` they always did).
 #[test]
 fn pratt_with_cst_kinds_materializes_nested_bin_exprs() {
-  let mut s = sink();
+  let mut s = sink("1+2*3");
   let parser = pratt(
     pratt_lhs,
     pratt_rhs,
@@ -560,7 +571,7 @@ fn pratt_with_cst_kinds_materializes_nested_bin_exprs() {
       .parse_str("1+2*3");
   assert_eq!(res, Ok(7), "the folds still fold");
 
-  let (green, _emitter) = s.finish(K_ROOT, "1+2*3");
+  let (green, _emitter) = s.finish(K_ROOT);
   let root = tree(green.expect("driver-held marks balance"));
   assert_eq!(root.text().to_string(), "1+2*3");
 
@@ -583,7 +594,7 @@ fn pratt_with_cst_kinds_materializes_nested_bin_exprs() {
 /// nodes at all).
 #[test]
 fn pratt_without_cst_kinds_records_no_nodes() {
-  let mut s = sink();
+  let mut s = sink("1+2*3");
   let parser = pratt(
     pratt_lhs,
     pratt_rhs,
@@ -596,7 +607,7 @@ fn pratt_without_cst_kinds_records_no_nodes() {
       .parse_str("1+2*3");
   assert_eq!(res, Ok(7));
 
-  let (green, _emitter) = s.finish(K_ROOT, "1+2*3");
+  let (green, _emitter) = s.finish(K_ROOT);
   let root = tree(green.expect("token-only timelines balance trivially"));
   assert_eq!(root.text().to_string(), "1+2*3");
   assert_eq!(root.children().count(), 0, "no nodes without the hook");
@@ -719,11 +730,11 @@ where
     self.inner.cst_token(tok, span)
   }
 
-  fn cst_finish(&mut self)
+  fn cst_finish(&mut self, kind: u16)
   where
     L: Lexer<'a>,
   {
-    self.inner.cst_finish()
+    self.inner.cst_finish(kind)
   }
 
   fn cst_mark(&mut self) -> tokora::cst::event::EventMark
@@ -765,7 +776,7 @@ fn hf_take_two(inp: &mut HfIr<'_, '_, '_>) -> Result<(), TestErr> {
 /// refuses with a typed error instead of returning a gap-tiled tree with empty nodes.
 #[test]
 fn half_forwarding_wrapper_is_refused_at_finish() {
-  let mut s = sink();
+  let mut s = sink("ab");
   let res = Parser::with_parser_and_context(
     |inp: &mut HfIr<'_, '_, '_>| node(K_NODE, hf_take_two).parse_input(inp),
     (
@@ -776,7 +787,7 @@ fn half_forwarding_wrapper_is_refused_at_finish() {
   .parse_str("ab");
   assert_eq!(res, Ok(()), "the parse itself succeeds — that is the trap");
 
-  let (green, _emitter) = s.finish(K_ROOT, "ab");
+  let (green, _emitter) = s.finish(K_ROOT);
   let err = match green {
     Err(err) => err,
     Ok(tree_ok) => panic!(
@@ -882,11 +893,11 @@ where
     self.inner.cst_token(tok, span)
   }
 
-  fn cst_finish(&mut self)
+  fn cst_finish(&mut self, kind: u16)
   where
     L: Lexer<'a>,
   {
-    self.inner.cst_finish()
+    self.inner.cst_finish(kind)
   }
 
   fn cst_mark(&mut self) -> tokora::cst::event::EventMark
@@ -928,7 +939,7 @@ fn hfp_take_two(inp: &mut HfpIr<'_, '_, '_>) -> Result<(), TestErr> {
 /// `UncoveredGap` over exactly the dropped token's bytes, not a plausible gap-tiled tree.
 #[test]
 fn partial_forwarding_wrapper_is_refused_at_finish() {
-  let mut s = sink();
+  let mut s = sink("ab");
   let res = Parser::with_parser_and_context(
     |inp: &mut HfpIr<'_, '_, '_>| node(K_NODE, hfp_take_two).parse_input(inp),
     (
@@ -942,7 +953,7 @@ fn partial_forwarding_wrapper_is_refused_at_finish() {
   .parse_str("ab");
   assert_eq!(res, Ok(()), "the parse itself succeeds — that is the trap");
 
-  let (green, _emitter) = s.finish(K_ROOT, "ab");
+  let (green, _emitter) = s.finish(K_ROOT);
   let err = match green {
     Err(err) => err,
     Ok(tree_ok) => panic!(

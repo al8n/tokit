@@ -42,6 +42,23 @@ const K_WRAP: u16 = 3;
 const K_ERR: u16 = 90;
 const K_GAP: u16 = 91;
 
+/// The fixture's whole kind space: the structural kinds above, plus the token images
+/// `map_tok` produces. A real range predicate, not `accept_all` — the fuzzer's trees have to
+/// pass the same wall a dialect's do.
+fn in_fixture_kind_space(kind: u16) -> bool {
+  matches!(kind, K_ROOT..=K_WRAP | 20..=23 | K_ERR | K_GAP)
+}
+
+/// The fixture dialect's CST profile.
+fn profile() -> crate::cst::CstProfile<FuzzTok> {
+  crate::cst::CstProfile::new(
+    map_tok,
+    crate::cst::KindValidator::new(in_fixture_kind_space),
+    K_ERR,
+    K_GAP,
+  )
+}
+
 fn map_tok(t: &FuzzTok) -> u16 {
   match t.kind() {
     FuzzKind::Open => 20,
@@ -190,7 +207,7 @@ fn exec(
           let mark = marks.pop().expect("guarded by the length check");
           let emitter = ir.emitter();
           CstEmitter::<ScriptLexer<'_>>::cst_start_at(emitter, mark, K_WRAP);
-          CstEmitter::<ScriptLexer<'_>>::cst_finish(emitter);
+          CstEmitter::<ScriptLexer<'_>>::cst_finish(emitter, K_WRAP);
         }
       }
       CStep::RollbackAcrossMark => {
@@ -279,7 +296,7 @@ fn drive(
   script: &[CStep],
   cov: &mut Coverage,
 ) -> (Result<rowan::GreenNode, FinishError>, usize) {
-  let mut sink: Sink<'_> = crate::cst::Sink::new(CountEmitter::new(), map_tok, K_ERR, K_GAP);
+  let mut sink: Sink<'_> = crate::cst::Sink::new(src.as_bytes(), CountEmitter::new(), profile());
   let cache = DefaultCache::<'_, ScriptLexer<'_>>::default();
   let state = initial_state(src.as_bytes());
   let mut input =
@@ -297,7 +314,7 @@ fn drive(
     0,
     "release no-growth: every capture must be settled once the script ends"
   );
-  let (green, _emitter) = sink.finish(K_ROOT, src);
+  let (green, _emitter) = sink.finish(K_ROOT);
   (green, consumed)
 }
 

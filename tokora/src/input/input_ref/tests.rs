@@ -6136,8 +6136,20 @@ mod cst_event_oracles {
   type EvtCtx<'a> = (EvtSink<'a>, DefaultCache<'a, LosslessBalLexer<'a>>);
   type EvtRef<'inp, 'c> = InputRef<'inp, 'c, LosslessBalLexer<'inp>, EvtCtx<'inp>, ()>;
 
-  fn evt_sink<'a>(fatal_at: Option<SimpleSpan>) -> EvtSink<'a> {
-    Sink::new(MatrixEmitter::new(fatal_at), map_ll, K_ERR, K_GAP)
+  /// The fixture's kind space: the synthetic root, `map_ll`'s six token images, and the two
+  /// kinds the sink synthesizes.
+  fn in_ll_kind_space(kind: u16) -> bool {
+    matches!(kind, K_ROOT | 10..=15 | K_ERR | K_GAP)
+  }
+
+  fn evt_sink(src: &str, fatal_at: Option<SimpleSpan>) -> EvtSink<'_> {
+    let profile = crate::cst::CstProfile::new(
+      map_ll,
+      crate::cst::KindValidator::new(in_ll_kind_space),
+      K_ERR,
+      K_GAP,
+    );
+    Sink::new(src, MatrixEmitter::new(fatal_at), profile)
   }
 
   /// The committed spans of the buffered `Token` events, in order.
@@ -6213,7 +6225,7 @@ mod cst_event_oracles {
   /// One cell run under the recording sink: setup consume, prefill, the entry, the
   /// retry drain, then materialization.
   fn run_cell_cst(cell: &MatrixCell, entry: Entry, prefill: usize) -> rowan::GreenNode {
-    let mut sink = evt_sink(cell.fatal_at);
+    let mut sink = evt_sink(cell.src, cell.fatal_at);
     let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
       cell.src,
       TokenLimiter::with_limitation(cell.limit),
@@ -6262,9 +6274,9 @@ mod cst_event_oracles {
     // Everything else may leave an un-lexed tail — the finish_partial domain — for at least
     // one entry, and finish_partial is a byte-identical superset for the entries that do drain.
     let (green, _emitter) = if cell.limit == usize::MAX && cell.fatal_at.is_none() {
-      sink.finish(K_ROOT, cell.src)
+      sink.finish(K_ROOT)
     } else {
-      sink.finish_partial(K_ROOT, cell.src)
+      sink.finish_partial(K_ROOT)
     };
     green.unwrap_or_else(|e| {
       panic!(
@@ -6304,7 +6316,7 @@ mod cst_event_oracles {
   /// failure — the no-trace law's event column.
   #[test]
   fn t1_failed_sync_over_drained_cache_leaves_zero_events() {
-    let mut sink = evt_sink(None);
+    let mut sink = evt_sink("1 2 3", None);
     let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
       "1 2 3",
       TokenLimiter::with_limitation(usize::MAX),
@@ -6348,7 +6360,7 @@ mod cst_event_oracles {
     let drain = |inp: &mut EvtRef<'_, '_>| while let Ok(Some(_)) = inp.next() {};
 
     // The straight drive.
-    let mut straight = evt_sink(None);
+    let mut straight = evt_sink(src, None);
     let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
       src,
       TokenLimiter::with_limitation(usize::MAX),
@@ -6358,10 +6370,10 @@ mod cst_event_oracles {
     drain(&mut inp);
     drop(inp);
     drop(input);
-    let (straight_green, straight_emitter) = straight.finish(K_ROOT, src);
+    let (straight_green, straight_emitter) = straight.finish(K_ROOT);
 
     // The decline-then-reparse drive of the same final timeline.
-    let mut sink = evt_sink(None);
+    let mut sink = evt_sink(src, None);
     let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
       src,
       TokenLimiter::with_limitation(usize::MAX),
@@ -6399,7 +6411,7 @@ mod cst_event_oracles {
     );
     drop(inp);
     drop(input);
-    let (green, emitter) = sink.finish(K_ROOT, src);
+    let (green, emitter) = sink.finish(K_ROOT);
 
     assert_eq!(
       green.expect("balanced"),
@@ -6416,7 +6428,7 @@ mod cst_event_oracles {
   /// the whole event buffer (token events AND diagnostic slots) is untouched.
   #[test]
   fn t4_zero_skip_sync_emits_nothing() {
-    let mut sink = evt_sink(None);
+    let mut sink = evt_sink("1; 2", None);
     let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
       "1; 2",
       TokenLimiter::with_limitation(usize::MAX),
@@ -6455,7 +6467,7 @@ mod cst_event_oracles {
   #[test]
   fn trip_and_fatal_sync_arms_keep_settled_events() {
     // A sticky limit trip mid-skip: the two durable skipped tokens' events persist.
-    let mut sink = evt_sink(None);
+    let mut sink = evt_sink("1 2 3 4 5 ;", None);
     let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
       "1 2 3 4 5 ;",
       TokenLimiter::with_limitation(2),
@@ -6484,7 +6496,7 @@ mod cst_event_oracles {
 
     // A fatal rejection of a skipped token's diagnostic: the token settled BEFORE the
     // verdict, so its event rides out with the committed position.
-    let mut sink = evt_sink(Some(SimpleSpan { start: 2, end: 3 }));
+    let mut sink = evt_sink("1 2 3 ; 4", Some(SimpleSpan { start: 2, end: 3 }));
     let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
       "1 2 3 ; 4",
       TokenLimiter::with_limitation(usize::MAX),

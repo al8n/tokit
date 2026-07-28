@@ -153,7 +153,7 @@ fn wrap<'inp, L, Ctx, Lang>(
 {
   let emitter = input.emitter();
   emitter.cst_start_at(mark, kind);
-  emitter.cst_finish();
+  emitter.cst_finish(kind);
 }
 
 // STAYS COMPLETE-ONLY (0.3.0 — the CST seam): Partial event semantics — what a `Sink`

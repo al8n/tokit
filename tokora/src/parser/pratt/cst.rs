@@ -203,7 +203,7 @@ where
     if let (Some(mark), Some(kind)) = (mark, kind) {
       let emitter = inp.emitter();
       emitter.cst_start_at(mark, kind);
-      emitter.cst_finish();
+      emitter.cst_finish(kind);
     }
   }
 }

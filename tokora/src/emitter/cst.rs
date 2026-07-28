@@ -56,6 +56,24 @@ use super::*;
 /// - a **session point rolled back across a finished node** truncates the finish but not the
 ///   start — legal, and reported by materialization as a leftover open, per the
 ///   `begin_point` settle-your-points clause.
+///
+/// # Identity by kind: what [`cst_finish`](Self::cst_finish)'s argument catches
+///
+/// [`cst_finish`](Self::cst_finish) takes the kind of the node it means to close, and a
+/// recording sink checks that kind against the frame the finish actually lands on
+/// (`cst::FinishError::MismatchedFinish`). The shape this exists for is the **leaked finish**:
+/// `cst_start(A); checkpoint m; cst_start(B); rewind(m); cst_token; cst_finish(B)`. B's start
+/// died with the rewind, so the finish would otherwise close ancestor A silently, and the
+/// resulting event buffer is byte-identical to the legal cross-checkpoint close
+/// `cst_start(A); checkpoint m; cst_token; cst_finish(A)` — no property of the buffer, depth
+/// included, separates them. The kind argument does.
+///
+/// The residue is honest: identity **by kind** is weak. A leaked finish that closes a
+/// same-kind ancestor still passes the check, and is then caught only if the stream ends
+/// imbalanced (`cst::FinishError::UnclosedNodes`, or an
+/// `OrphanFinish` further along). Closing that gap needs a *branded* per-open token — a value
+/// minted at each node open and consumed at its finish — which costs a mark-like allocation
+/// per node open on the hot emit path. The kind is the cheap 90%; the brand is not paid for.
 pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// Opens a node of `kind`; the matching [`cst_finish`](Self::cst_finish) closes it.
   ///
@@ -87,11 +105,18 @@ pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
 
   /// Closes the innermost open node (stack discipline; see the module docs of
   /// [`cst::event`](crate::cst::event) for the derived depth model).
+  ///
+  /// `kind` is the kind of the node this call *intends* to close — the same value passed to
+  /// the matching [`cst_start`](Self::cst_start) or [`cst_start_at`](Self::cst_start_at). A
+  /// recording sink carries it into the event log and compares it against the frame the
+  /// finish actually lands on; see the *identity by kind* section on the trait for what that
+  /// catches and what it does not.
   #[inline(always)]
-  fn cst_finish(&mut self)
+  fn cst_finish(&mut self, kind: u16)
   where
     L: Lexer<'a>,
   {
+    let _ = kind;
   }
 
   /// Appends an inert tombstone and returns the [`EventMark`] naming it — the anchor for a
@@ -153,11 +178,11 @@ where
   }
 
   #[inline(always)]
-  fn cst_finish(&mut self)
+  fn cst_finish(&mut self, kind: u16)
   where
     L: Lexer<'a>,
   {
-    (**self).cst_finish()
+    (**self).cst_finish(kind)
   }
 
   #[inline(always)]

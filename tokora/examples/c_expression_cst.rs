@@ -19,7 +19,7 @@ use rowan::{Language, NodeOrToken, SyntaxNode};
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, Token as TokenT,
   cache::DefaultCache,
-  cst::Sink,
+  cst::{CstProfile, KindValidator, Sink},
   emitter::{CstEmitter, Fatal},
   error::token::UnexpectedTokenOf,
   logos::{self, Logos},
@@ -623,17 +623,21 @@ where
 // ── Tree building + dump ────────────────────────────────────────────────────────
 
 fn parse_to_tree(src: &str) -> SyntaxNode<CExprLang> {
-  let mut sink: Sink<'_, CExprLexer<'_>, _> = Sink::new(
-    Fatal::<CExprError>::new(),
+  // The dialect's kind space, stated once: the mapper, the predicate that decides which raw
+  // u16s this language can name (every discriminant up to and including `Root`), and the two
+  // kinds the sink synthesizes on its own behalf.
+  let profile = CstProfile::new(
     map_token,
+    KindValidator::new(|kind| kind <= K::Root.raw()),
     K::Error.raw(),
     K::Gap.raw(),
   );
+  let mut sink: Sink<'_, CExprLexer<'_>, _> = Sink::new(src, Fatal::<CExprError>::new(), profile);
   Parser::with_context((&mut sink, DefaultCache::<CExprLexer<'_>>::default()))
     .apply(program)
     .parse_str(src)
     .expect("parse succeeds");
-  let (green, _emitter) = sink.finish(K::Root.raw(), src);
+  let (green, _emitter) = sink.finish(K::Root.raw());
   SyntaxNode::<CExprLang>::new_root(green.expect("well-formed tree"))
 }
 
