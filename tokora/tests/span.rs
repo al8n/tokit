@@ -568,3 +568,215 @@ fn spanned_hash() {
   set.insert(sp);
   assert!(set.contains(&sp));
 }
+
+// ── The span invariant, enforced on every surface the crate owns ─────────────
+//
+// `SimpleSpan`'s ordering invariant used to be enforced on one of its four mutator surfaces.
+// The const twins assigned and added without checking, so `with_end_const(2)` on `(5, 15)`
+// silently produced `(5, 2)` — a corrupt span the program then carried — and
+// `bump_start_const` at `(MAX - 1, MAX)` wrapped to `(0, usize::MAX)` in release with the one
+// existing assert passing over the corruption.
+//
+// The cell roster below is split by **what can actually fail**, because "one cell per ported
+// assert" would have produced cells whose payloads are unreachable.
+
+// ── Ordering flips: inversion reachable with no arithmetic at all ─────────────
+
+#[test]
+#[should_panic(expected = "end must be greater than or equal to start")]
+fn set_start_const_refuses_inversion() {
+  let mut span = SimpleSpan::new(5usize, 15usize);
+  span.set_start_const(20);
+}
+
+#[test]
+#[should_panic(expected = "end must be greater than or equal to start")]
+fn set_end_const_refuses_inversion() {
+  let mut span = SimpleSpan::new(5usize, 15usize);
+  span.set_end_const(2);
+}
+
+#[test]
+#[should_panic(expected = "end must be greater than or equal to start")]
+fn with_start_const_refuses_inversion() {
+  let _ = SimpleSpan::new(5usize, 15usize).with_start_const(20);
+}
+
+/// The payload the audit recorded: `with_end_const(2)` on `(5, 15)` yielded `(5, 2)`, silently.
+#[test]
+#[should_panic(expected = "end must be greater than or equal to start")]
+fn with_end_const_refuses_inversion() {
+  let _ = SimpleSpan::new(5usize, 15usize).with_end_const(2);
+}
+
+// ── Overflow flips: concrete arithmetic, every build ─────────────────────────
+//
+// The release run is the one that means anything. In debug, rustc's own overflow check would
+// fire on a bare `+=` and green a cell that tests rustc rather than tokora — so these assert
+// on the **message**, which only tokora's `checked_add` produces.
+
+#[test]
+#[should_panic(expected = "span bump overflows usize")]
+fn bump_start_const_refuses_overflow() {
+  let mut span = SimpleSpan::new(usize::MAX - 1, usize::MAX);
+  span.bump_start_const(5);
+}
+
+#[test]
+#[should_panic(expected = "span bump overflows usize")]
+fn bump_end_const_refuses_overflow() {
+  let mut span = SimpleSpan::new(0usize, usize::MAX);
+  span.bump_end_const(1);
+}
+
+#[test]
+#[should_panic(expected = "span bump overflows usize")]
+fn bump_const_refuses_overflow() {
+  let mut span = SimpleSpan::new(0usize, usize::MAX);
+  span.bump_const(1);
+}
+
+#[test]
+#[should_panic(expected = "span bump overflows usize")]
+fn range_span_bump_refuses_overflow() {
+  let mut r: core::ops::Range<usize> = 0..usize::MAX;
+  Span::bump(&mut r, &1);
+}
+
+// ── The two-axis law, pinned ─────────────────────────────────────────────────
+
+/// The documented divergence between the crate's two `Span` impls, on the **construction**
+/// axis: `SimpleSpan` is strict, `Range<usize>` is lenient. The C2 resolution preserves both.
+#[test]
+fn construction_axis_diverges_by_design() {
+  assert!(std::panic::catch_unwind(|| <SimpleSpan as Span>::new(10usize, 5usize)).is_err());
+
+  // Compared field-wise rather than against a `10..5` literal: an inverted range literal is a
+  // clippy denial, and the point of this cell is that the *constructor* produces one.
+  let lenient = <core::ops::Range<usize> as Span>::new(10, 5);
+  assert_eq!((lenient.start, lenient.end), (10, 5));
+}
+
+/// **The other half of the C2 law, and the cell that makes it a decision rather than a
+/// sentence.** `Range<usize>` documents lenient construction, so `10..5` is a value the trait
+/// says you may create — and relocating it must therefore keep working. An ordering assert on
+/// `Range<usize>::bump` would hand out a value you are then not allowed to use.
+///
+/// Falsifying output: a panic. That would mean the ordering assert leaked onto the lenient
+/// impl.
+#[test]
+fn range_span_relocates_an_inverted_range_without_complaint() {
+  let mut r = <core::ops::Range<usize> as Span>::new(10, 5);
+  Span::bump(&mut r, &1);
+  assert_eq!(
+    (r.start, r.end),
+    (11, 6),
+    "a lenient impl relocates the value its leniency produced"
+  );
+}
+
+// ── Keep-greens: the asserts must not fire on well-formed input ──────────────
+
+#[test]
+fn every_const_mutator_leaves_legal_input_alone() {
+  let mut a = SimpleSpan::new(5usize, 15usize);
+  assert_eq!(*a.set_start_const(10), SimpleSpan::new(10, 15));
+  let mut b = SimpleSpan::new(5usize, 15usize);
+  assert_eq!(*b.set_end_const(20), SimpleSpan::new(5, 20));
+  assert_eq!(
+    SimpleSpan::new(5usize, 15usize).with_start_const(10),
+    SimpleSpan::new(10, 15)
+  );
+  assert_eq!(
+    SimpleSpan::new(5usize, 15usize).with_end_const(20),
+    SimpleSpan::new(5, 20)
+  );
+  let mut c = SimpleSpan::new(5usize, 15usize);
+  assert_eq!(*c.bump_start_const(3), SimpleSpan::new(8, 15));
+  let mut d = SimpleSpan::new(5usize, 15usize);
+  assert_eq!(*d.bump_end_const(5), SimpleSpan::new(5, 20));
+  let mut e = SimpleSpan::new(5usize, 15usize);
+  assert_eq!(*e.bump_const(10), SimpleSpan::new(15, 25));
+
+  // The generic surface the relocation belt actually calls.
+  let mut f = SimpleSpan::new(5usize, 15usize);
+  Span::bump(&mut f, &10);
+  assert_eq!(f, SimpleSpan::new(15, 25));
+
+  let mut g: core::ops::Range<usize> = 5..15;
+  Span::bump(&mut g, &10);
+  assert_eq!(g, 15..25);
+}
+
+// ── The generic-offset overflow residue, pinned in the profile where it exists ──
+//
+// The expressibility split was "ordering everywhere the crate owns, overflow where the type is
+// concrete". `bump_start` / `bump_end` are **generic** over `O` — `checked_add` is `E0599` on a
+// type parameter — so they fall on the residue side. These cells pin that residue where it is
+// observable, which is release only: in debug rustc's own overflow check fires first, so a
+// debug-only cell would be testing rustc.
+//
+// They are the combination the ordering cells cannot see: a wrap that still satisfies
+// `start <= end`, so no assert fires and a corrupt span is published. Falsified by a panic,
+// which would mean the residue closed and these become the flip.
+
+/// `bump_start` at `usize::MAX`: the start wraps to a small value that is still `<= end`, so the
+/// ordering assert passes over the corruption. Release only.
+#[test]
+#[cfg(not(debug_assertions))]
+fn release_bump_start_wraps_past_its_own_ordering_assert() {
+  let mut span = SimpleSpan::new(usize::MAX - 1, usize::MAX);
+  span.bump_start(3usize);
+  assert_eq!(
+    (*span.start_ref(), *span.end_ref()),
+    (1, usize::MAX),
+    "release: the start wrapped to 1, which is <= end, so the ordering assert never fired. \
+     This is the stated generic-offset residue — `bump_start_const` is the checked surface."
+  );
+}
+
+/// `bump_end` has the **same** hole, and finding it needs the right `start`. With a high start
+/// the wrapped end lands under it and the ordering assert fires; with a low start the wrapped
+/// end is still `>= start`, nothing fires, and a span of length `MAX` silently becomes one of
+/// length 2. Both branches are pinned, because a cell that only exercised the caught one would
+/// read as proof the surface is walled.
+#[test]
+#[cfg(not(debug_assertions))]
+fn release_bump_end_wrap_escapes_when_start_is_low() {
+  let mut span = SimpleSpan::new(0usize, usize::MAX);
+  span.bump_end(3usize);
+  assert_eq!(
+    (*span.start_ref(), *span.end_ref()),
+    (0, 2),
+    "release: the end wrapped to 2, still >= start, so nothing fired — the same residue as      `bump_start`, reachable whenever the wrapped value lands back inside the span"
+  );
+}
+
+/// The other branch: a high `start` puts the wrapped end on the wrong side, and the ordering
+/// assert does catch it. This is what "caught only when it lands on the wrong side" means.
+#[test]
+#[cfg(not(debug_assertions))]
+#[should_panic(expected = "end must be greater than or equal to start")]
+fn release_bump_end_wrap_is_caught_when_start_is_high() {
+  let mut span = SimpleSpan::new(5usize, usize::MAX);
+  span.bump_end(3usize);
+}
+
+/// The concrete surface that *is* guaranteed, named in both methods' docs so a reader who hits
+/// the residue has somewhere to go. Runs in both profiles: `checked_add` is unconditional.
+#[test]
+fn the_const_twins_are_the_checked_surface_for_usize() {
+  let overflow = std::panic::catch_unwind(|| {
+    let mut span = SimpleSpan::new(usize::MAX - 1, usize::MAX);
+    span.bump_start_const(3);
+  });
+  assert!(
+    overflow.is_err(),
+    "bump_start_const is the checked twin and must refuse the overflow the generic method \
+     publishes"
+  );
+
+  // And it is callable at run time despite being a `const fn`.
+  let mut ok = SimpleSpan::new(5usize, 15usize);
+  assert_eq!(*ok.bump_start_const(3), SimpleSpan::new(8, 15));
+}

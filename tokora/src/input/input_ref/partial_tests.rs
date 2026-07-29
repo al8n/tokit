@@ -2271,7 +2271,7 @@ fn probe_close_cache_front_is_cursor_neutral_and_recovery_safe() {
       _ => panic!("a cached front closer must probe as `Close`"),
     };
     assert!(
-      matches!(payload, ClosePayload::AtFront),
+      matches!(payload, ClosePayload::AtFront { .. }),
       "the cache path classifies the closer by PEEK (AtFront), never popping it at probe time"
     );
     assert_eq!(
@@ -2614,5 +2614,70 @@ fn sync_through_incomplete_then_refill_then_eof_leaves_no_trace() {
     emitter.live_rows(),
     0,
     "both attempts settled their entry mark exactly once"
+  );
+}
+
+/// **`commit_probed`'s temporal tripwire, and it is one cell with two payloads.**
+///
+/// A `ClosePayload` is valid only while the committed cursor sits where `probe_close` left it.
+/// That contract lived in prose, and prose cannot fail: a future edit that consumed or rewound
+/// between the probe and the commit would settle the wrong token, silently. The stamp makes it
+/// checkable in debug.
+///
+/// Gated with the repo's own idiom rather than `#[cfg_attr(not(debug_assertions), ignore)]`: an
+/// ignored cell is a release run with nothing executing, which is the vacuous shape this crate
+/// refuses. Here the **same body** runs in both profiles and asserts the debug outcome (the
+/// panic) or the release outcome (the misuse proceeds, and the state assertions say what
+/// "proceeds" means).
+///
+/// Reachable test-side only because `ClosePayload` is crate-internal — this is an author-side
+/// wiring contract, not an input condition, so there is no public route to it.
+#[test]
+#[cfg_attr(
+  debug_assertions,
+  should_panic(expected = "the committed cursor moved between `probe_close` and the commit")
+)]
+fn commit_probed_rejects_a_rewound_payload() {
+  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+    "a b",
+    (),
+    DefaultCache::<'_, Lex<'_>>::default(),
+  );
+  let mut emitter = Verbose::<PErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+
+  use generic_arraydeque::typenum::U2;
+
+  assert_eq!(
+    inp
+      .peek::<U2>()
+      .expect("a peek never surfaces Incomplete here")
+      .len(),
+    2
+  );
+
+  let payload = match inp.probe_close(|_| true) {
+    Ok(CloseStatus::Close(p)) => p,
+    _ => panic!("a cached front closer must probe as `Close`"),
+  };
+
+  // The misuse: consume in the gap the payload's contract says must be cursor-neutral. The
+  // committed cursor moves, so the payload now names a token that is no longer at the front.
+  let _ = inp.next().expect("a token is available");
+
+  let settled = inp.commit_probed(payload);
+
+  // Release limb: no assert exists, so the misuse proceeds. Pin what it actually does, so the
+  // release run carries a real payload rather than an absence. Both tokens lex as `Word`, so
+  // the SPAN is what says which one was settled — the probed closer is `a` at 0..1.
+  assert_eq!(
+    (
+      *settled.span_ref().start_ref(),
+      *settled.span_ref().end_ref()
+    ),
+    (2, 3),
+    "release: with the tripwire compiled out, the rewound payload settles whatever is at the \
+     front NOW — `b` at 2..3, not the probed `a` at 0..1. That is the corruption the debug \
+     assert exists to name."
   );
 }

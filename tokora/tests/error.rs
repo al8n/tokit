@@ -8,7 +8,7 @@ extern crate std;
 use std::string::{String, ToString};
 
 use tokora::SimpleSpan;
-use tokora::error::token::{MissingToken, UnexpectedToken};
+use tokora::error::token::{MissingToken, SeparatedError, SeparatorPosition, UnexpectedToken};
 /// Tests for all error types in the tokora error module.
 /// Exercises constructors, methods, Display/Debug impls, and transformations.
 use tokora::error::*;
@@ -1894,14 +1894,14 @@ fn missing_token_display_fmt_names_the_stamped_token() {
     MissingToken::of(5).with_name(CowStr::from_static("comma"));
   assert_eq!(format!("{}", Show(bare)), "missing token 'comma' at 5");
 
-  // `Expected`'s own `Display` already opens with the word "expected", so the composed
-  // rendering doubles it. That is this renderer's long-standing output and is pinned, not
-  // introduced, here.
+  // `Expected`'s own `Display` opens with the word "expected" in every variant, so the
+  // composing site supplies only the separator. These four pins used to record the doubled
+  // "expected expected" as this renderer's long-standing output; they are the flip.
   let expected: MissingToken<'_, &str, usize> =
     MissingToken::expected_one(5, "}").with_name(CowStr::from_static("comma"));
   assert_eq!(
     format!("{}", Show(expected)),
-    "missing token 'comma' at 5, expected expected '}'"
+    "missing token 'comma' at 5, expected '}'"
   );
 
   let both: MissingToken<'_, &str, usize> = MissingToken::expected_one(5, "}")
@@ -1909,7 +1909,7 @@ fn missing_token_display_fmt_names_the_stamped_token() {
     .with_message(CowStr::from_static("needed"));
   assert_eq!(
     format!("{}", Show(both)),
-    "missing token 'comma' at 5, expected expected '}', message: needed"
+    "missing token 'comma' at 5, expected '}', message: needed"
   );
 }
 
@@ -1932,7 +1932,7 @@ fn missing_token_display_fmt_unnamed_is_unchanged() {
   let expected: MissingToken<'_, &str, usize> = MissingToken::expected_one(5, "}");
   assert_eq!(
     format!("{}", Show(expected)),
-    "missing token at 5, expected expected '}'"
+    "missing token at 5, expected '}'"
   );
 
   let message: MissingToken<'_, &str, usize> =
@@ -1946,7 +1946,7 @@ fn missing_token_display_fmt_unnamed_is_unchanged() {
     MissingToken::expected_one(5, "}").with_message(CowStr::from_static("needed"));
   assert_eq!(
     format!("{}", Show(both)),
-    "missing token at 5, expected expected '}', message: needed"
+    "missing token at 5, expected '}', message: needed"
   );
 }
 
@@ -1990,4 +1990,95 @@ fn missing_token_debug_fmt_shows_the_stamped_name() {
 fn missing_token_into_unit() {
   let e: MissingToken<'_, &str, usize> = MissingToken::new(5);
   let _unit: () = e.into();
+}
+
+// ── One composition rule, three carriers ─────────────────────────────────────
+//
+// `Expected`'s `Display` opens with the word "expected" in EVERY variant, so any site that
+// composes one must not write the word itself. Two carriers did, and only one of them was
+// pinned — which is exactly why the unpinned one's stutter outlived the repair of the pinned
+// one. The third carrier is new here and is born under the rule.
+
+/// `UnexpectedToken`'s renders were never pinned at all. Before this commit these read
+/// `unexpected token, expected expected '}'` and nothing in the suite said so.
+#[test]
+fn unexpected_token_render_says_expected_once() {
+  struct Show<'a>(UnexpectedToken<'a, &'a str, &'a str, SimpleSpan>);
+  impl core::fmt::Display for Show<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+      self.0.display_fmt(f)
+    }
+  }
+
+  let no_found = UnexpectedToken::expected_one(SimpleSpan::new(5usize, 10usize), "}");
+  assert_eq!(
+    format!("{}", Show(no_found)),
+    "unexpected token, expected '}'"
+  );
+
+  let with_found =
+    UnexpectedToken::expected_one_with_found(SimpleSpan::new(5usize, 10usize), ":", ";");
+  assert_eq!(
+    format!("{}", Show(with_found)),
+    "unexpected token ':', expected ';'"
+  );
+
+  let one_of = UnexpectedToken::expected_one_of(SimpleSpan::new(5usize, 10usize), &["+", "-"]);
+  assert_eq!(
+    format!("{}", Show(one_of)),
+    "unexpected token, expected one of: '+', '-'"
+  );
+
+  // The no-`Expected` arms never composed and must not move.
+  let bare: UnexpectedToken<'_, &str, &str, SimpleSpan> =
+    UnexpectedToken::new(SimpleSpan::new(5usize, 10usize));
+  assert_eq!(format!("{}", Show(bare)), "unexpected token");
+}
+
+/// `SeparatedError` had no `Display` at all: its name channel was readable only by
+/// destructuring through `into_components`, so a diagnostic that knew *which* separator was
+/// involved could not say so. Byte-exact, and born with a single "expected".
+#[test]
+fn separated_error_renders_its_name_channel() {
+  let inner = UnexpectedToken::expected_one_with_found(SimpleSpan::new(5usize, 10usize), ":", ";");
+  let named: SeparatedError<'_, &str, &str, SimpleSpan> =
+    SeparatedError::leading(inner.clone()).with_name(CowStr::from_static("comma"));
+  assert_eq!(
+    format!("{named}"),
+    "separator 'comma' at the leading position: unexpected token ':', expected ';'"
+  );
+
+  let unnamed: SeparatedError<'_, &str, &str, SimpleSpan> = SeparatedError::trailing(inner);
+  assert_eq!(
+    format!("{unnamed}"),
+    "separator at the trailing position: unexpected token ':', expected ';'"
+  );
+
+  let element: SeparatedError<'_, &str, &str, SimpleSpan> = SeparatedError::element(
+    UnexpectedToken::expected_one_of(SimpleSpan::new(0usize, 1usize), &["+", "-"]),
+  );
+  assert_eq!(
+    format!("{element}"),
+    "separator at the element position: unexpected token, expected one of: '+', '-'"
+  );
+}
+
+/// The two readers of the name channel must agree. A `Display` that rendered a name
+/// `into_components` did not hand back — or vice versa — would be two answers to one question.
+#[test]
+fn separated_error_display_and_into_components_agree_on_the_name() {
+  let inner = UnexpectedToken::expected_one_with_found(SimpleSpan::new(5usize, 10usize), ":", ";");
+  let named: SeparatedError<'_, &str, &str, SimpleSpan> =
+    SeparatedError::leading(inner).with_name(CowStr::from_static("comma"));
+
+  let rendered = format!("{named}");
+  let (position, name, _inner) = named.into_components();
+
+  assert_eq!(position, SeparatorPosition::Leading);
+  let name = name.expect("the stamped name survives destructuring");
+  assert!(
+    rendered.contains(&format!("'{name}'")),
+    "Display must quote the same name `into_components` returns; rendered {rendered:?}, \
+     name {name:?}"
+  );
 }

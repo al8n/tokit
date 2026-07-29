@@ -126,7 +126,10 @@ pub trait ComposableEmitter<'inp, L, Lang: ?Sized = ()>:
 ```
 
 It is blanket-implemented for every emitter that satisfies the whole family, so a bound of
-`E: ComposableEmitter` is interchangeable with spelling out the six sub-traits — and its
+`E: ComposableEmitter` is interchangeable with spelling out the six sub-traits — that is the
+**default-policy** surface, and
+[`PolicyComposableEmitter`](crate::emitter::PolicyComposableEmitter) is the same bundle widened
+by the three a count or separator policy needs — and its
 context-side twin, [`ComposableParseContext`](crate::ComposableParseContext), collapses a whole parse context to one bound in
 the same way — and goes one rung further, riding
 [`FromTokenErrors`](crate::emitter::FromTokenErrors) on the emitter's `Error` so the leaf `From`

@@ -9,7 +9,7 @@ use core::marker::PhantomData;
 use crate::{
   Cache, Emitter, Lexer,
   cache::DefaultCache,
-  emitter::{ComposableEmitter, Fatal, FromTokenErrors},
+  emitter::{ComposableEmitter, Fatal, FromTokenErrors, PolicyComposableEmitter},
   input::InputContext,
   lexer::SliceOf,
 };
@@ -179,7 +179,15 @@ where
 pub type ErrorOf<'inp, L, Ctx, Lang> =
   <<Ctx as ParseContext<'inp, L, Lang>>::Emitter as Emitter<'inp, L, Lang>>::Error;
 
-/// The one bound a generic parser atom needs.
+/// The one bound a generic parser atom needs, at the **default policy**.
+///
+/// It carries [`ComposableEmitter`](crate::emitter::ComposableEmitter), which is the
+/// collecting combinators' unpolicied surface. A production that attaches a count or
+/// separator policy — `at_most`, `bounded`, `require_leading`, `require_trailing` — needs
+/// [`PolicyParseContext`] instead, which is this bound plus the three policy emitters. Both
+/// tiers are one bound; the wider one is not the default because it would push
+/// `From<TooMany>` and `From<MissingToken>` onto every consumer's error type whether or not a
+/// policy is ever used.
 ///
 /// A grammar function has two orthogonal requirements of its context: that the emitter can
 /// *route* every diagnostic, and that the error type can *absorb* one. `ComposableParseContext`
@@ -273,6 +281,48 @@ where
       L,
       Lang,
       Emitter: ComposableEmitter<'inp, L, Lang, Error: FromTokenErrors<'inp, L, Lang>>,
+    >,
+{
+}
+
+/// [`ComposableParseContext`] widened to the count- and separator-**policy** builders.
+///
+/// Where the default bundle covers `separated_by_*` / `delimited` / `repeated` with no policy
+/// attached, this one additionally elaborates [`TooManyEmitter`](crate::emitter::TooManyEmitter),
+/// [`MissingLeadingSeparatorEmitter`](crate::emitter::MissingLeadingSeparatorEmitter) and
+/// [`MissingTrailingSeparatorEmitter`](crate::emitter::MissingTrailingSeparatorEmitter), so
+/// `.at_most(n)`, `.bounded(a, b)`, `.require_leading()` and `.require_trailing()` drive under
+/// one bound.
+///
+/// The name says what the delta *is*. "Full" would be falsified the day someone reads it: the
+/// pratt engine is in neither bundle, and names its own emitter and conversions.
+///
+/// Same mechanism as its narrower sibling — a nested associated-type bound on the
+/// [`ParseContext`] supertrait, so both halves elaborate to callers — and the same
+/// nothing-to-write story for implementors: it is blanket-implemented.
+pub trait PolicyParseContext<'inp, L, Lang: ?Sized = ()>:
+  ComposableParseContext<'inp, L, Lang>
+  + ParseContext<
+    'inp,
+    L,
+    Lang,
+    Emitter: PolicyComposableEmitter<'inp, L, Lang, Error: FromTokenErrors<'inp, L, Lang>>,
+  >
+where
+  L: Lexer<'inp>,
+{
+}
+
+impl<'inp, L, Lang: ?Sized, T> PolicyParseContext<'inp, L, Lang> for T
+where
+  L: Lexer<'inp>,
+  SliceOf<'inp, L>: Clone,
+  T: ComposableParseContext<'inp, L, Lang>
+    + ParseContext<
+      'inp,
+      L,
+      Lang,
+      Emitter: PolicyComposableEmitter<'inp, L, Lang, Error: FromTokenErrors<'inp, L, Lang>>,
     >,
 {
 }

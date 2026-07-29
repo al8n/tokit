@@ -62,3 +62,37 @@ fn silent_with_lang_type() {
   let _s2: Silent<(), MyLang> = Silent::default();
   assert_eq!(format!("{:?}", _s), "Silent");
 }
+
+/// **The flip, bound to the crate's own declaration rather than to a payload.**
+///
+/// `Silent`'s `PrattEmitter` impl used to demand four conversions on the error type that its
+/// bodies never perform — `FromEmitterError`, `From<UnexpectedEoLhs>`, `From<UnexpectedEoRhs>`
+/// and, through `FromEmitterError`, `From<UnexpectedToken>` and `From<()>`. `Opaque` implements
+/// none of them, which is the whole point: it is the *representation-independent* error a
+/// dropping emitter should be usable with, exactly as `Ignored`'s bound-free twin already
+/// allowed.
+///
+/// Before the deletion this function does not compile — `E0277` x4, naming
+/// `Opaque: From<UnexpectedEnd<PrattLhsHint>>`, `From<UnexpectedEnd<PrattRhsHint>>`,
+/// `From<()>` and `From<UnexpectedToken<'_, Tok, Kind>>`. After it, it does.
+///
+/// Falsifying output: a compile error here means a body secretly used a conversion. It does
+/// not — but this cell is what says so.
+#[test]
+fn silent_pratt_accepts_a_representation_independent_error() {
+  /// An error type that implements *no* conversions at all.
+  #[derive(Debug)]
+  struct Opaque;
+
+  const fn takes_pratt<E>()
+  where
+    E: crate::emitter::PrattEmitter<'static, DummyLexer>,
+  {
+  }
+
+  // The positive control differs in exactly one token — the error type — and compiled both
+  // before and after: `()` satisfies every conversion the deleted bounds demanded, which is
+  // why the defect was invisible to the existing suite.
+  takes_pratt::<Silent<()>>();
+  takes_pratt::<Silent<Opaque>>();
+}

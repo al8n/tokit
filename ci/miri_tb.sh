@@ -44,6 +44,25 @@ cargo miri setup
 export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbolic-alignment-check -Zmiri-tree-borrows"
 export RUSTFLAGS="--cfg test_$CONFIG_FLAGS"
 
-cargo miri test --tests --target $TARGET --lib --features logos 
+cargo miri test --tests --target $TARGET --lib --features logos
 cargo miri test --target $TARGET --doc --features logos
+
+# A second config covering `unstable-raw`.
+#
+# The existing run passes no `--no-default-features`, so `std` is already on and the only
+# surface miri never saw is the raw/unstable twins — the ones reordered around capture windows, which is precisely the unsafe-adjacent shape miri exists
+# to see.
+#
+# Scope is `--lib` ONLY, deliberately and with the reason recorded rather than left to be
+# rediscovered: the tree carries **94** integration targets, and interpreting them a second time
+# under miri is hours, not minutes. The raw twins are unit-level, so `--lib` is where their
+# coverage actually is; a doubled full run would buy almost nothing for most of the job's wall
+# clock. If the raw surface ever grows integration-level tests, this line is where that decision
+# gets revisited.
+#
+# Honest justification, in the same register the rest of this file uses: this would have caught
+# nothing in this campaign. No finding in 52 was UB. Miri is kept because it is the only gate
+# that can see the class at all, and widened because the already-paid spend should cover the
+# surfaces the campaign actually moved.
+cargo miri test --tests --target $TARGET --lib --features logos,unstable-raw
 

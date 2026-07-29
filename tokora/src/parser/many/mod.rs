@@ -93,6 +93,10 @@ mod gate_census {
   //! ungated or without the terminal dual (extend the list, then gate it both ways).
 
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
   fn every_resilient_swallow_site_is_gated() {
     let sites = [
       ("many/repeated/mod.rs", include_str!("repeated/mod.rs")),
@@ -131,6 +135,10 @@ mod gate_census {
   /// short window a mid-window trip would hide) and surfaces the stop with `into_terminal`, so a
   /// resource-limit trip during the decision peek is never read as a clean end of list.
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
   fn every_while_decision_gate_is_terminal_aware() {
     let sites = [
       (
@@ -189,6 +197,10 @@ mod gate_census {
   /// route their separator-slot `None` through `probe_close`, whose `Tripped` arm surfaces the stop
   /// instead — so they are exempt here and covered by that path.
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
   fn every_nondelim_separator_slot_surfaces_terminal() {
     let sites = [
       ("many/sep/parse/mod.rs", include_str!("sep/parse/mod.rs")),
@@ -469,6 +481,10 @@ mod end_state_census {
   /// The per-line conjunction assumes the site fits on one line, which all eight do at the
   /// current rustfmt width; a future wrap would need the needle re-cut rather than dropped.
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
   fn every_too_many_payload_exceeds_its_limit() {
     let sites: [(&str, &str); 7] = [
       ("parser/with.rs", include_str!("../with.rs")),
@@ -559,6 +575,10 @@ mod end_state_census {
   /// duplicate, and (via the state it leaves behind) trailing. A driver calling `on_separator`
   /// directly would bypass the guard and clone a token for a container that ignores it.
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
   fn every_separator_arm_delivers_through_the_guard() {
     let sites = [
       ("many/sep/parse/mod.rs", include_str!("sep/parse/mod.rs")),

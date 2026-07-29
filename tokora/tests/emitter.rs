@@ -1840,3 +1840,27 @@ fn diagnostics_bridge_interleaves_both_channels_in_emission_order() {
     .parse_str("12 34 56");
   r.unwrap();
 }
+
+// ── `Fatal`'s `Default` and `Debug` are Lang-generic ─────────────────────────
+
+/// `Fatal`'s `Clone`/`Copy` were `Lang`-generic and its `Default`/`Debug` were not — they were
+/// written `impl<T: ?Sized> ... for Fatal<T>`, i.e. `Fatal<T, ()>` only. So a branded
+/// `Fatal::<E, MyLang>::default()` did not resolve and a branded `Fatal` could not be printed,
+/// while its `Silent` sibling could do both. Nothing in either body depends on the brand.
+///
+/// Before: this function does not compile. After: it does, and the render is unchanged at `()`.
+#[test]
+fn fatal_is_lang_generic_for_default_and_debug() {
+  struct MyLang;
+
+  let branded: Fatal<(), MyLang> = Fatal::default();
+  assert_eq!(std::format!("{branded:?}"), "Fatal");
+
+  // The unbranded render must not move — this widens impl coverage, it does not change output.
+  let plain: Fatal<()> = Fatal::default();
+  assert_eq!(std::format!("{plain:?}"), "Fatal");
+
+  // The sibling this brings `Fatal` level with.
+  let silent: Silent<(), MyLang> = Silent::default();
+  assert_eq!(std::format!("{silent:?}"), "Silent");
+}

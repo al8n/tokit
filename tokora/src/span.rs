@@ -58,6 +58,34 @@ pub trait Span {
   /// This is a whole-span move, not an end extension. To grow the span by moving
   /// only its end, use an end-specific operation such as
   /// [`SimpleSpan::bump_end`].
+  ///
+  /// ## The law, and its two axes
+  ///
+  /// A span type answers two independent questions, and this trait's implementations are
+  /// allowed to answer them differently:
+  ///
+  /// - **Construction / ordering.** May an inverted span exist at all? [`SimpleSpan`] says no
+  ///   — [`new`](Self::new) panics on `end < start`. `Range<usize>` says yes: `Span::new(10, 5)`
+  ///   yields `10..5`, and that leniency is documented rather than accidental.
+  /// - **Relocation / overflow.** `bump` shifts both ends equally, so on a well-formed span it
+  ///   cannot invert; it can only wrap. Where the arithmetic is concrete, an implementation
+  ///   should refuse the wrap rather than publish a corrupt span.
+  ///
+  /// **An ordering assert on `bump` is licensed by the impl's construction-axis strictness.**
+  /// A strict impl can only reach an inverted result through wrap, so asserting ordering there
+  /// catches a genuine corruption. A **lenient** impl must not assert: an inverted span is a
+  /// value its own documentation says you may create, and refusing to relocate it would hand
+  /// out a value you are then not allowed to use. That is why `SimpleSpan`'s `bump` asserts and
+  /// `Range<usize>`'s does not, while both refuse the overflow.
+  ///
+  /// ## What this crate can and cannot enforce
+  ///
+  /// `bump` is **required**, so a third-party implementation's body is its own; this law is
+  /// written, not checked. Two further doors stay open by construction:
+  /// [`start_mut`](Self::start_mut) and [`end_mut`](Self::end_mut) hand out
+  /// `&mut Self::Offset`, and an inversion written through them is unobservable to any assert
+  /// on any mutator. Closing that means removing the accessors, which is a different change in
+  /// a different release.
   fn bump(&mut self, n: &Self::Offset);
 }
 
@@ -104,12 +132,25 @@ impl Span for core::ops::Range<usize> {
     self.end
   }
 
+  /// ## Panics
+  ///
+  /// Panics if either end overflows `usize` — every build, not only debug.
+  ///
+  /// It does **not** assert ordering, and that is the two-axis law above applied to this impl:
+  /// `Range<usize>` is the documented-**lenient** constructor, so `10..5` is a value this trait
+  /// says you may create. Refusing to relocate it would make a documented-legal value
+  /// unusable.
   #[inline(always)]
   fn bump(&mut self, n: &Self::Offset) {
-    self.start += *n;
-    self.end += *n;
+    self.start = self.start.checked_add(*n).expect(OVERFLOW_MSG);
+    self.end = self.end.checked_add(*n).expect(OVERFLOW_MSG);
   }
 }
+
+/// The every-build overflow message, shared by every surface whose arithmetic is concrete
+/// `usize`. Named once so the `#[should_panic(expected = ...)]` cells and the `## Panics`
+/// sections cannot drift apart from the code.
+const OVERFLOW_MSG: &str = "span bump overflows usize";
 
 impl<O> Span for SimpleSpan<O>
 where
@@ -157,9 +198,34 @@ where
     self.end
   }
 
+  /// ## Panics
+  ///
+  /// Panics if the relocation leaves `end < start`, which on a well-formed span can only
+  /// happen through wrap.
+  ///
+  /// This is the surface the crate's own error and carrier types relocate through
+  /// (`self.span.bump(by)` on a generic `L::Span`), so it is where the check earns its keep.
+  /// The assert lives **here**, in the trait impl, rather than on the inherent
+  /// [`SimpleSpan::bump`] — this impl's where-clause already carries `O: Ord`, so it is free,
+  /// whereas adding `Ord` to the inherent method would be a real narrowing:
+  /// `SimpleSpan` derives `Default`, so `SimpleSpan<NonOrd>` is constructible and
+  /// `.bump()` runs on it today.
+  ///
+  /// **Stated residue:** `SimpleSpan::bump` called *inherently*, on a concrete `SimpleSpan<O>`,
+  /// stays unguarded. That is the price of not taking the bound, and it is priced at exactly
+  /// what it costs — an in-crate caller that bypasses the trait.
+  ///
+  /// Overflow on a generic `O` is rustc's own check: it panics in debug and **wraps in
+  /// release**, where this assert then catches every wrap except a start that wraps under and
+  /// lands at or below `end`. Closing that needs an arithmetic bound on
+  /// [`Span::Offset`], which core cannot express.
   #[inline(always)]
   fn bump(&mut self, n: &Self::Offset) {
     self.bump(n);
+    assert!(
+      self.end >= self.start,
+      "end must be greater than or equal to start"
+    );
   }
 }
 
@@ -392,7 +458,12 @@ impl SimpleSpan {
   ///
   /// ## Panics
   ///
-  /// Panics if `self.start + n > self.end`.
+  /// - if the start overflows `usize` — in **every** build, not only debug;
+  /// - if the result would leave `start > end`.
+  ///
+  /// The overflow arm is not decoration. `+=` wraps in release, so this function used to
+  /// return `(0, usize::MAX)` from `(MAX - 1, MAX)` with the ordering assert passing over the
+  /// corruption — this section promised a panic the code did not perform.
   ///
   /// ## Example
   ///
@@ -400,12 +471,15 @@ impl SimpleSpan {
   /// use tokora::SimpleSpan;
   ///
   /// let mut span = SimpleSpan::new(5, 15);
-  /// span.bump_start(3);
+  /// span.bump_start_const(3);
   /// assert_eq!(span, SimpleSpan::new(8, 15));
   /// ```
   #[inline(always)]
   pub const fn bump_start_const(&mut self, n: usize) -> &mut Self {
-    self.start += n;
+    self.start = match self.start.checked_add(n) {
+      Some(v) => v,
+      None => panic!("span bump overflows usize"),
+    };
     assert!(
       self.start <= self.end,
       "start must be less than or equal to end"
@@ -415,57 +489,108 @@ impl SimpleSpan {
 
   /// Bump the end of the span by `n`.
   ///
+  /// ## Panics
+  ///
+  /// - if the end overflows `usize` — in **every** build;
+  /// - if the result would leave `end < start`. Growing the end cannot invert a well-formed
+  ///   span, so this arm is reachable only through the wrap the arm above already refuses; it
+  ///   is defence in depth against a future edit, and it carries the non-const twin's exact
+  ///   message.
+  ///
   /// ## Example
   ///
   /// ```rust
   /// use tokora::SimpleSpan;
   ///
   /// let mut span = SimpleSpan::new(5, 15);
-  /// span.bump_end(5);
+  /// span.bump_end_const(5);
   /// assert_eq!(span, SimpleSpan::new(5, 20));
   /// ```
   #[inline(always)]
   pub const fn bump_end_const(&mut self, n: usize) -> &mut Self {
-    self.end += n;
+    self.end = match self.end.checked_add(n) {
+      Some(v) => v,
+      None => panic!("span bump overflows usize"),
+    };
+    assert!(
+      self.end >= self.start,
+      "end must be greater than or equal to start"
+    );
     self
   }
 
   /// Bump the start and the end of the span by `n`.
   ///
+  /// ## Panics
+  ///
+  /// - if either end overflows `usize` — in **every** build;
+  /// - if the result would leave `end < start`. A whole-span move preserves ordering, so this
+  ///   arm is unreachable while the overflow arm above holds: the `checked_add` dominates it.
+  ///   It is defence in depth against a future edit and is deliberately **not** pinned by a
+  ///   test — a cell written against it could never fail for the reason it names.
+  ///
   /// ## Example
   ///
   /// ```rust
   /// use tokora::SimpleSpan;
   ///
   /// let mut span = SimpleSpan::new(5, 15);
-  /// span.bump(&10);
+  /// span.bump_const(10);
   /// assert_eq!(span, SimpleSpan::new(15, 25));
   /// ```
   #[inline(always)]
   pub const fn bump_const(&mut self, n: usize) -> &mut Self {
-    self.start += n;
-    self.end += n;
+    self.start = match self.start.checked_add(n) {
+      Some(v) => v,
+      None => panic!("span bump overflows usize"),
+    };
+    self.end = match self.end.checked_add(n) {
+      Some(v) => v,
+      None => panic!("span bump overflows usize"),
+    };
+    assert!(
+      self.end >= self.start,
+      "end must be greater than or equal to start"
+    );
     self
   }
 
   /// Set the start of the span, returning a mutable reference to self.
   ///
+  /// ## Panics
+  ///
+  /// Panics if the assignment would leave `end < start` — in **every** build. This is an
+  /// assignment, not arithmetic, so there is no overflow arm; inversion is reachable with no
+  /// arithmetic at all, which is what made the silent version a real corruption rather than a
+  /// theoretical one.
+  ///
   /// ## Example
   ///
   /// ```rust
   /// use tokora::SimpleSpan;
   ///
   /// let mut span = SimpleSpan::new(5, 15);
-  /// span.set_start(10);
+  /// span.set_start_const(10);
   /// assert_eq!(span, SimpleSpan::new(10, 15));
   /// ```
   #[inline(always)]
   pub const fn set_start_const(&mut self, start: usize) -> &mut Self {
     self.start = start;
+    assert!(
+      self.end >= self.start,
+      "end must be greater than or equal to start"
+    );
     self
   }
 
   /// Set the end of the span, returning a mutable reference to self.
+  ///
+  /// ## Panics
+  ///
+  /// Panics if the assignment would leave `end < start` — in **every** build. This is an
+  /// assignment, not arithmetic, so there is no overflow arm; inversion is reachable with no
+  /// arithmetic at all, which is what made the silent version a real corruption rather than a
+  /// theoretical one.
   ///
   /// ## Example
   ///
@@ -473,44 +598,66 @@ impl SimpleSpan {
   /// use tokora::SimpleSpan;
   ///
   /// let mut span = SimpleSpan::new(5, 15);
-  /// span.set_end(20);
+  /// span.set_end_const(20);
   /// assert_eq!(span, SimpleSpan::new(5, 20));
   /// ```
   #[inline(always)]
   pub const fn set_end_const(&mut self, end: usize) -> &mut Self {
     self.end = end;
+    assert!(
+      self.end >= self.start,
+      "end must be greater than or equal to start"
+    );
     self
   }
 
   /// Set the start of the span, returning self.
   ///
+  /// ## Panics
+  ///
+  /// Panics if the assignment would leave `end < start` — in **every** build. An assignment,
+  /// not arithmetic, so there is no overflow arm.
+  ///
   /// ## Example
   ///
   /// ```rust
   /// use tokora::SimpleSpan;
   ///
-  /// let span = SimpleSpan::new(5, 15).with_start(10);
+  /// let span = SimpleSpan::new(5, 15).with_start_const(10);
   /// assert_eq!(span, SimpleSpan::new(10, 15));
   /// ```
   #[inline(always)]
   pub const fn with_start_const(mut self, start: usize) -> Self {
     self.start = start;
+    assert!(
+      self.end >= self.start,
+      "end must be greater than or equal to start"
+    );
     self
   }
 
   /// Set the end of the span, returning self.
+  ///
+  /// ## Panics
+  ///
+  /// Panics if the assignment would leave `end < start` — in **every** build. An assignment,
+  /// not arithmetic, so there is no overflow arm.
   ///
   /// ## Example
   ///
   /// ```rust
   /// use tokora::SimpleSpan;
   ///
-  /// let span = SimpleSpan::new(5, 15).with_end(20);
+  /// let span = SimpleSpan::new(5, 15).with_end_const(20);
   /// assert_eq!(span, SimpleSpan::new(5, 20));
   /// ```
   #[inline(always)]
   pub const fn with_end_const(mut self, end: usize) -> Self {
     self.end = end;
+    assert!(
+      self.end >= self.start,
+      "end must be greater than or equal to start"
+    );
     self
   }
 }
@@ -590,7 +737,23 @@ impl<O> SimpleSpan<O> {
   ///
   /// ## Panics
   ///
-  /// Panics if `self.start + n > self.end`.
+  /// Panics if the result would leave `start > end` — in every build.
+  ///
+  /// **It does NOT panic on overflow, and that is a stated residue rather than an oversight.**
+  /// `O` is generic here, so `checked_add` is not expressible: [`Span::Offset`] declares no
+  /// arithmetic bound, core has no `CheckedAdd`, and asking for one on a type parameter is
+  /// `E0599`. In **debug**, rustc's own overflow check fires. In **release** the `+=` wraps,
+  /// and the ordering assert below catches that wrap only when the wrapped value lands on the
+  /// wrong side of `end` — a wrap that lands back inside the span is published silently.
+  ///
+  /// **If your offsets are `usize`, use [`bump_start_const`](Self::bump_start_const) instead.** It is the same
+  /// operation on the concrete type, and being concrete it carries a real `checked_add` that
+  /// panics with `"span bump overflows usize"` in every profile. It is a `const fn`, which is
+  /// callable at run time like any other function.
+  ///
+  /// Closing it *here* needs an arithmetic bound on the offset — a trait definition or a new
+  /// dependency, plus a breaking narrowing of this method — which is design work rather than a
+  /// line in a publishing release.
   ///
   /// ## Example
   ///
@@ -618,7 +781,23 @@ impl<O> SimpleSpan<O> {
   ///
   /// ## Panics
   ///
-  /// Panics if the resulting `end` would be less than `start`.
+  /// Panics if the result would leave `end < start` — in every build.
+  ///
+  /// **It does NOT panic on overflow, and that is a stated residue rather than an oversight.**
+  /// `O` is generic here, so `checked_add` is not expressible: [`Span::Offset`] declares no
+  /// arithmetic bound, core has no `CheckedAdd`, and asking for one on a type parameter is
+  /// `E0599`. In **debug**, rustc's own overflow check fires. In **release** the `+=` wraps,
+  /// and the ordering assert below catches that wrap only when the wrapped value lands on the
+  /// wrong side of `start` — a wrap that lands back inside the span is published silently.
+  ///
+  /// **If your offsets are `usize`, use [`bump_end_const`](Self::bump_end_const) instead.** It is the same
+  /// operation on the concrete type, and being concrete it carries a real `checked_add` that
+  /// panics with `"span bump overflows usize"` in every profile. It is a `const fn`, which is
+  /// callable at run time like any other function.
+  ///
+  /// Closing it *here* needs an arithmetic bound on the offset — a trait definition or a new
+  /// dependency, plus a breaking narrowing of this method — which is design work rather than a
+  /// line in a publishing release.
   ///
   /// ## Example
   ///
@@ -643,6 +822,23 @@ impl<O> SimpleSpan<O> {
   }
 
   /// Bump the start and the end of the span by `n`.
+  ///
+  /// ## Panics
+  ///
+  /// **Nothing here — deliberately, and this is a stated residue rather than an oversight.**
+  ///
+  /// Guarding this method would mean adding `O: Ord` to its where-clause, and that is a real
+  /// narrowing with a reachable inhabitant: `SimpleSpan` derives [`Default`], so
+  /// `SimpleSpan::<NonOrd>::default().bump(&n)` compiles and runs today for an `O` that is
+  /// `Default + AddAssign<&Self> + Clone` and not `Ord`. Taking the bound would break that
+  /// code to catch a corruption on a path that already has a guard elsewhere.
+  ///
+  /// The guard lives on [`<SimpleSpan<O> as Span>::bump`](Span::bump) instead — that impl's
+  /// where-clause already carries `O: Ord`, so the assert is free there — and that is the
+  /// surface this crate's own error and carrier types relocate through. What stays unguarded
+  /// is this method called **inherently**, on a concrete `SimpleSpan<O>`, bypassing the trait.
+  ///
+  /// Overflow is rustc's: a panic in debug, a wrap in release.
   ///
   /// ## Example
   ///

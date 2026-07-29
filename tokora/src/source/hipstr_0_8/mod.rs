@@ -36,9 +36,17 @@ impl<'h> Source<usize> for HipStr<'h> {
       .ok()
   }
 
-  /// Rounds `index` DOWN to the nearest UTF-8 code point boundary so the result
-  /// is always a valid slice position. Indices at or beyond the end are returned
-  /// unchanged, matching the byte sources.
+  /// Rounds `index` **down** to the nearest UTF-8 code point boundary.
+  ///
+  /// For an index **inside** the source the result is a valid slice position.
+  /// Indices at or beyond the end are returned unchanged, matching the byte
+  /// sources — and such a result is a valid slice position only when it is exactly `len`. The
+  /// previous wording claimed the result is "always a valid slice position" *and* that
+  /// out-of-range indices come back unchanged, which cannot both be true: `len + 1` comes back
+  /// unchanged and is not a slice position.
+  ///
+  /// Callers that may hold an out-of-range index check it (`is_boundary`, or a bound against
+  /// `len`) rather than relying on this to clamp.
   #[inline(always)]
   fn find_boundary(&self, index: usize) -> usize {
     if index >= <HipStr<'h>>::len(self) {

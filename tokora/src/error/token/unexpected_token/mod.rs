@@ -682,13 +682,16 @@ where
     T: core::fmt::Display,
     Kind: core::fmt::Display,
   {
+    // Same composition rule as `MissingToken::display_fmt`: `Expected`'s `Display` opens with
+    // the word "expected" in every variant, so these sites supply only the separator. This
+    // carrier's renders were never pinned, which is why its stutter outlived the one that was.
     match &self.found {
       Some(found) => match &self.expected {
-        Some(expected) => write!(f, "unexpected token '{}', expected {}", found, expected),
+        Some(expected) => write!(f, "unexpected token '{}', {}", found, expected),
         None => write!(f, "unexpected token '{}'", found),
       },
       None => match &self.expected {
-        Some(expected) => write!(f, "unexpected token, expected {}", expected),
+        Some(expected) => write!(f, "unexpected token, {}", expected),
         None => write!(f, "unexpected token"),
       },
     }

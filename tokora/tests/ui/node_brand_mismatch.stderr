@@ -1,0 +1,16 @@
+error[E0271]: type mismatch resolving `<Crossed as Syntax>::Lang == A`
+  --> tests/ui/node_brand_mismatch.rs:92:18
+   |
+92 | impl Node<A> for Crossed {
+   |                  ^^^^^^^ type mismatch resolving `<Crossed as Syntax>::Lang == A`
+   |
+note: expected this to be `A`
+  --> tests/ui/node_brand_mismatch.rs:69:15
+   |
+69 |   type Lang = B;
+   |               ^
+note: required by a bound in `tokora::cst::Node`
+  --> src/cst/mod.rs
+   |
+   | pub trait Node<Lang: Language>: Element<Lang> + Syntax<Lang = Lang> {
+   |                                                        ^^^^^^^^^^^ required by this bound in `Node`

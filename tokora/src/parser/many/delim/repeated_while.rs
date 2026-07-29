@@ -93,7 +93,7 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
 
     loop {
       // Probe the close position WITHOUT consuming, so a terminal scanner stop is not
-      // misread as EOF (finding 1). `Close` short-circuits before the stop condition is
+      // misread as EOF. `Close` short-circuits before the stop condition is
       // consulted, exactly as the consuming `try_expect` did.
       match inp.probe_close(|tok| Delim::is_close(&tok.data.kind()))? {
         CloseStatus::Close(ct) => {
@@ -166,7 +166,7 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                   }
                 }
               }
-              // SECONDARY (finding 2) — the delimited driver used to return here WITHOUT
+              // SECONDARY — the delimited driver used to return here WITHOUT
               // running the repeated end handler, silently dropping the `TooFew`/bounds
               // diagnostic under a recovering emitter (the plain `Repeated` driver runs
               // it). Run it after the primary, matching the primary-then-secondary order

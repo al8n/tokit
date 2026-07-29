@@ -146,7 +146,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
               drop(peeked);
 
               // Front is empty: reclassify the close position with the four-way probe so
-              // a terminal scanner stop is not misread as EOF (finding 1). A real
+              // a terminal scanner stop is not misread as EOF. A real
               // non-sep/non-close token would have entered the cache and made `front()`
               // non-empty, so only genuine EOF or a terminal stop reaches here.
               //

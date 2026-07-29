@@ -46,3 +46,9 @@ export RUSTFLAGS="--cfg test_$CONFIG_FLAGS"
 cargo miri test --lib --tests --target "$TARGET" --features logos
 
 cargo miri test --doc --target "$TARGET" --features logos
+
+# A second config covering `unstable-raw` — see the note in `miri_tb.sh` for the
+# scope reasoning. `--lib` only: the tree carries 94 integration targets and interpreting them
+# a second time under miri is hours; the raw twins are unit-level, which is where their
+# coverage is.
+cargo miri test --lib --tests --target "$TARGET" --features logos,unstable-raw

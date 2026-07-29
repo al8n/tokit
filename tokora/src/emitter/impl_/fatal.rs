@@ -44,14 +44,18 @@ impl<T: ?Sized, Lang: ?Sized> Clone for Fatal<T, Lang> {
 
 impl<T: ?Sized, Lang: ?Sized> Copy for Fatal<T, Lang> {}
 
-impl<T: ?Sized> Default for Fatal<T> {
+// `Lang`-generic, like `Clone`/`Copy` above and like `Silent`'s twins. These two were written
+// `impl<T: ?Sized> ... for Fatal<T>`, which is `Fatal<T, ()>` only — so a branded
+// `Fatal::<E, MyLang>::default()` did not resolve, and a branded `Fatal` could not be printed
+// at all. Nothing about either body depends on the brand.
+impl<T: ?Sized, Lang: ?Sized> Default for Fatal<T, Lang> {
   #[inline(always)]
   fn default() -> Self {
-    Self::new()
+    Self::of()
   }
 }
 
-impl<T: ?Sized> core::fmt::Debug for Fatal<T> {
+impl<T: ?Sized, Lang: ?Sized> core::fmt::Debug for Fatal<T, Lang> {
   #[inline(always)]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "Fatal")
@@ -83,6 +87,11 @@ where
 {
   type Error = E;
 
+  /// Every method here converts and returns `Err`, which for this emitter is not a refusal to
+  /// report — it **is** the report. The input layer advances its lexer-error dedup watermark
+  /// before calling, so the diagnostic this `Err` carries is the only time it is offered; a
+  /// re-lex of the same region will not produce it again. See
+  /// [`Emitter::emit_lexer_error`](crate::Emitter::emit_lexer_error).
   #[inline(always)]
   fn emit_lexer_error(
     &mut self,

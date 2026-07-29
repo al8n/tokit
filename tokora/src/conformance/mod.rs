@@ -56,6 +56,7 @@
 //! observes and asserts.
 
 pub mod cache;
+pub mod emitter;
 
 #[cfg(all(test, feature = "logos", feature = "std"))]
 mod cache_tests;

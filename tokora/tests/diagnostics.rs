@@ -1,4 +1,11 @@
 #![cfg(feature = "std")]
+// Excluded from miri entirely, and not by three `ignore`s: every test in this target reads
+// `tests/ui/` off disk or spawns a compiler, and miri can do neither — `read_dir`/`open` are
+// refused by its isolation and a process spawn aborts on `posix_spawnattr_init`. That abort is
+// not a test failure; it takes the whole `cargo miri test --tests` run down before any other
+// target is reached, which is how six miri jobs were failing while producing no result about
+// the crate at all. Nothing here has a UB surface for miri to have an opinion about.
+#![cfg(not(miri))]
 
 //! R8 — the bundle's failure messages stay useful.
 //!
@@ -54,11 +61,22 @@ fn rustc_version() -> Option<String> {
     .map(str::to_owned)
 }
 
+/// The line CI greps for. A skip must be **loud where it runs**, not merely printed: without
+/// this the msrv job is green whether the harness compiled four cases or none, and a toolchain
+/// bump would silently retire every compile-time rail routed through here.
+///
+/// Format is deliberately machine-shaped and deliberately not a doc-test: the CI step asserts
+/// on the count, not on exit 0.
+const LIVENESS_MARKER: &str = "TOKORA_TRYBUILD_EXECUTED_CASES";
+
 #[test]
 fn on_unimplemented_messages_match_their_committed_stderr() {
   match rustc_version() {
     Some(version) if version == PINNED_RUSTC => {}
     other => {
+      // Report ZERO explicitly. The marker is always emitted, so "the job never printed it"
+      // and "the job printed 0" are different observations, and CI can tell them apart.
+      println!("{LIVENESS_MARKER}=0");
       eprintln!(
         "R8 skipped: the committed .stderr is pinned to rustc {PINNED_RUSTC}, this is {}. \
          Run `cargo +1.87 test -p tokora --all-features --test diagnostics`.",
@@ -69,12 +87,56 @@ fn on_unimplemented_messages_match_their_committed_stderr() {
   }
 
   let t = trybuild::TestCases::new();
+  let mut executed = 0usize;
   for (case, _, _) in CASES {
     t.compile_fail(case);
+    executed += 1;
   }
   for case in BOUND_CASES {
     t.compile_fail(case);
+    executed += 1;
   }
+
+  println!("{LIVENESS_MARKER}={executed}");
+  assert!(
+    executed > 0,
+    "the trybuild harness handed zero cases to trybuild on the pinned toolchain — every \
+     compile-time rail routed through this file is inert, and the test would otherwise have \
+     passed by doing nothing"
+  );
+}
+
+/// The harness's own census: the number of `.rs` cases in `tests/ui/` must equal the number
+/// this file hands to trybuild.
+///
+/// A floor cannot detect a missing member — only an exact total can. A case file added to
+/// `tests/ui/` and never registered in [`CASES`] or [`BOUND_CASES`] compiles nothing, proves
+/// nothing, and is invisible to a `>= 1` check. This runs on **every** toolchain, because it
+/// reads a directory rather than compiling anything.
+#[test]
+fn every_ui_case_file_is_registered() {
+  let mut on_disk: std::vec::Vec<String> = std::fs::read_dir("tests/ui")
+    .expect("tests/ui is readable")
+    .filter_map(|e| {
+      let name = e.ok()?.file_name().into_string().ok()?;
+      name.ends_with(".rs").then_some(name)
+    })
+    .collect();
+  on_disk.sort();
+
+  let mut registered: std::vec::Vec<String> = CASES
+    .iter()
+    .map(|(c, _, _)| *c)
+    .chain(BOUND_CASES.iter().copied())
+    .map(|c| c.trim_start_matches("tests/ui/").to_owned())
+    .collect();
+  registered.sort();
+
+  assert_eq!(
+    on_disk, registered,
+    "tests/ui/ and the harness's case lists disagree. A file on disk but not registered is a \
+     rail that compiles nothing; a registered file not on disk is a rail that cannot run."
+  );
 }
 
 /// Cases that pin a **bound** rather than a curated message.
@@ -89,7 +151,15 @@ fn on_unimplemented_messages_match_their_committed_stderr() {
 /// session-plus-sink pairing. It does **not** fail if somebody deletes the bound from `parse`
 /// itself — pinning that needs a case that drives the method through its whole where-clause,
 /// whose failure would name a pile of unsatisfied obligations rather than this one.
-const BOUND_CASES: &[&str] = &["tests/ui/session_sink.rs"];
+/// `bundle1_policy` pins the lattice between the two emitter bundles: `ComposableEmitter` is
+/// the default-policy surface and does NOT reach `TooManyEmitter`. Its teeth are inverted from
+/// the usual shape — if someone widens bundle-1, the snippet starts compiling and the case
+/// FAILS, which is precisely when the two-tier documentation must be revisited.
+const BOUND_CASES: &[&str] = &[
+  "tests/ui/session_sink.rs",
+  "tests/ui/bundle1_policy.rs",
+  "tests/ui/node_brand_mismatch.rs",
+];
 
 /// Per case: the ui file, the curated headline its trait's attribute must produce, and
 /// rustc's default phrasing for the same obligation — the text that appears the moment

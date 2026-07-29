@@ -1509,6 +1509,31 @@ where
   /// its own points — the deliberate opposite of a guard's drop policy — so the end is left explicit
   /// to surface that bug instead.
   ///
+  /// # It is not merely the chosen policy — it is the only buildable one
+  ///
+  /// The deferral that carried this to the end of the campaign was framed as a *policy
+  /// decision* between commit, rollback and a hybrid. Two of those three are not available from
+  /// this drop site, which turns the decision into a structural fact plus a naming duty.
+  ///
+  /// `Session::drop` holds the lineage and the emitter, so it can release marks and pins. It
+  /// does **not** hold the input itself: it cannot restore the span, the
+  /// lexer state or the cursor. So "rollback on abandon" is not a posture this crate declined
+  /// to take — it is unwritable from here. The one thing that *is* buildable, rewinding the
+  /// emitter while keeping the position, is the **hybrid restore** the crate already refuses
+  /// elsewhere, because a position without its matching emissions is the torn state the whole
+  /// settle discipline exists to prevent.
+  ///
+  /// A `debug_assert!(points.is_empty())` on drop is also rejected, and for a reason worth
+  /// stating rather than leaving as taste: abandonment via `?` through an enclosing rollback is
+  /// a **legal** history, and an assert that fires on legal histories is exactly the class this
+  /// crate has spent the campaign narrowing.
+  ///
+  /// So: an abandoned session point commits. Handle death keeps committed progress and releases
+  /// the point's mark; a point you need rolled back must be settled by
+  /// [`rollback_point`](Self::rollback_point) **before** the handle dies, because the drop site
+  /// cannot reach the input to restore it. (Same argument family as "`Checkpoint` deliberately
+  /// has no `Drop`".)
+  ///
   /// What the drop *does* do is **release the bookkeeping**: each remaining point's pin and its
   /// live-checkpoint lineage entry are dropped from the input's lineage memos, and its emitter
   /// mark is [`release`](crate::emitter::Emitter::release)d (see the session cell's `Drop` in

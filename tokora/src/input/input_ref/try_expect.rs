@@ -57,13 +57,31 @@ where
   /// never advanced the committed cursor, so the token is already out of the input and neutral;
   /// [`commit_probed`](InputRef::commit_probed) settles it by value with no re-lex — the
   /// cache-independent path a blackhole `()` needs (a pushed-back closer would be dropped).
-  Scanned(CachedTokenOf<'inp, L>),
+  Scanned {
+    /// The probed closer, carried out of the scan by value.
+    carried: CachedTokenOf<'inp, L>,
+    /// The committed offset at probe time.
+    ///
+    /// The payload's contract is **temporal**: it is valid only while the committed cursor
+    /// sits where `probe_close` left it. That lived in prose, and prose cannot fail. This
+    /// stamp lets [`commit_probed`](InputRef::commit_probed) check it.
+    ///
+    /// Debug-only: the enum is `pub(crate)` so this moves no public surface, and the
+    /// contract is an in-crate wiring obligation rather than an input condition — the
+    /// same posture as the sink's emission-time asserts.
+    #[cfg(debug_assertions)]
+    probed_at: L::Offset,
+  },
   /// Left at the **front of the stream** — the cache front, or the parked slot when the cache
   /// refuses to hold it — classified by peek, *not* popped, so `cursor` stays put and the closer
   /// survives an intervening error for recovery. [`commit_probed`](InputRef::commit_probed) takes
   /// it and settles it at the commit point — the same front-take-commit `try_expect` uses, which
   /// never re-lexes.
-  AtFront,
+  AtFront {
+    /// The committed offset at probe time; see [`Scanned`](Self::Scanned).
+    #[cfg(debug_assertions)]
+    probed_at: L::Offset,
+  },
 }
 
 macro_rules! try_expect_punct {
@@ -393,7 +411,10 @@ where
       // owned clone read the same peeked reference.
       let peeked = self.front().expect("a front token is present").token;
       return Ok(if pred(peeked) {
-        CloseStatus::Close(ClosePayload::AtFront)
+        CloseStatus::Close(ClosePayload::AtFront {
+          #[cfg(debug_assertions)]
+          probed_at: self.span.end_ref().clone(),
+        })
       } else {
         CloseStatus::WrongToken(peeked.cloned())
       });
@@ -412,10 +433,15 @@ where
           // advanced the committed cursor, so this is already neutral; `commit_probed` settles
           // it by value with no second scan, in every cache capacity.
           let (span, token) = tok.into_components();
-          Ok(CloseStatus::Close(ClosePayload::Scanned(CachedToken::new(
-            Spanned::new(span, token),
-            resume.into_lexer().into_state(),
-          ))))
+          // Stamped BEFORE the resume is consumed: the scan never advanced the committed
+          // cursor, so this reads the same offset the caller must still be at when it commits.
+          #[cfg(debug_assertions)]
+          let probed_at = self.span.end_ref().clone();
+          Ok(CloseStatus::Close(ClosePayload::Scanned {
+            carried: CachedToken::new(Spanned::new(span, token), resume.into_lexer().into_state()),
+            #[cfg(debug_assertions)]
+            probed_at,
+          }))
         } else {
           // WrongToken: unchanged — best-effort push-back, owned clone for the
           // diagnostic. (The push-back is still a no-op under `()`; that is the
@@ -459,18 +485,58 @@ where
   ///
   /// The caller runs this immediately (immediate-commit drivers) or deferred past the
   /// end-of-list pass (`separated`/`separated_while`).
+  /// The temporal half of [`ClosePayload`]'s contract, made checkable.
+  ///
+  /// A `ClosePayload` is valid only while the committed cursor sits where `probe_close` left
+  /// it. Everything between the probe and the commit — the end-state pass the deferred drivers
+  /// run there — must be cursor-neutral. Nothing enforced that; the contract was prose, and a
+  /// future edit that consumed or rewound in the gap would commit the wrong token silently.
+  ///
+  /// It keys on the **committed** position — `span().end()` — and on nothing else, deliberately.
+  /// `offset()` is the newest lexed token's end and `cursor()` is the cache-front position;
+  /// both move under ordinary lookahead, which is legal in the gap. Asserting on either would
+  /// fire on legal histories, which is the defect class this check exists to avoid becoming.
+  /// Measured, not assumed: the first version of this check keyed on `offset()` and the misuse
+  /// cell did not fire, because a peek had already moved it before the probe ran.
+  #[cfg(debug_assertions)]
+  #[inline]
+  fn assert_probe_still_current(&self, probed_at: &L::Offset) {
+    debug_assert!(
+      self.span.end_ref() == probed_at,
+      "commit_probed: the committed cursor moved between `probe_close` and the commit. A \
+       `ClosePayload` is only valid while the cursor sits where the probe left it, so the \
+       token about to be settled is not the one that was probed. Something in the gap \
+       consumed or rewound — the end-state pass must be cursor-neutral."
+    );
+  }
+
   #[inline]
   pub(crate) fn commit_probed(
     &mut self,
     payload: ClosePayload<'inp, L>,
   ) -> Spanned<L::Token, L::Span> {
     let carried = match payload {
-      ClosePayload::Scanned(carried) => carried,
+      ClosePayload::Scanned {
+        carried,
+        #[cfg(debug_assertions)]
+        probed_at,
+      } => {
+        #[cfg(debug_assertions)]
+        self.assert_probe_still_current(&probed_at);
+        carried
+      }
       // The probe left the closer at the front of the stream; take it at the commit point (never
       // a re-lex — a retained token is a fully lexed token).
-      ClosePayload::AtFront => self
-        .take_front()
-        .expect("commit_probed(AtFront): the probed closer is still at the front"),
+      ClosePayload::AtFront {
+        #[cfg(debug_assertions)]
+        probed_at,
+      } => {
+        #[cfg(debug_assertions)]
+        self.assert_probe_still_current(&probed_at);
+        self
+          .take_front()
+          .expect("commit_probed(AtFront): the probed closer is still at the front")
+      }
     };
     let (lexed, state) = carried.into_components();
     let (span, tok) = lexed.into_components();

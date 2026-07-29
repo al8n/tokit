@@ -30,7 +30,7 @@ pub use logos_0_16 as logos;
 pub use cache::{Cache, DefaultCache};
 pub use check::Check;
 pub use dialect::{Dialect, DialectErrorOf, DialectInput, DialectSlice, LangOf, LexerOf};
-pub use emitter::{ComposableEmitter, CstEmitter, Emitter};
+pub use emitter::{ComposableEmitter, CstEmitter, Emitter, PolicyComposableEmitter};
 pub use input::{
   Balance, Commit, Complete, Completeness, DelimClass, DropPolicy, Hole, InputRef, Partial,
   Rollback, SurfaceIncomplete, Transaction, parse_partial,
@@ -42,7 +42,7 @@ pub use lexer::{Lexed, Lexer, SliceOf};
 pub use located::*;
 pub use parse_choice::*;
 pub use parse_context::{
-  ComposableParseContext, ErrorOf, FatalContext, ParseContext, ParserContext,
+  ComposableParseContext, ErrorOf, FatalContext, ParseContext, ParserContext, PolicyParseContext,
 };
 pub use parse_input::*;
 pub use parse_state::ParseState;
