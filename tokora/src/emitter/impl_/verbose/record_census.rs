@@ -194,6 +194,10 @@ const CHANNELS: &[(&str, &str, &str)] = &[
 /// RECORD_CENSUS — every emit channel routes through the chokepoint, once, on the right
 /// channel. Per method body, so two defects in one file cannot cancel.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn record_census_every_emit_channel_routes_through_the_chokepoint() {
   for (file, method, route) in CHANNELS {
     let body = method_body(source(file), method);
@@ -216,6 +220,10 @@ fn record_census_every_emit_channel_routes_through_the_chokepoint() {
 /// routes must both be 17 and must move together. A new `fn emit_` anywhere in the censused
 /// files fails this until it is routed and registered in [`CHANNELS`] above.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn record_census_channel_count_matches_route_count() {
   let declared: usize = SOURCES.iter().map(|(_, src)| count(src, "fn emit_")).sum();
   let routed: usize = SOURCES
@@ -242,6 +250,10 @@ fn record_census_channel_count_matches_route_count() {
 /// twin of the privacy wall, and the one that also rejects the correctly-routing but
 /// count-drifting `self.store.record(…)` spelling.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn record_census_channel_files_never_name_the_store() {
   const BLACKOUT: &[&str] = &[
     ".errs",
@@ -272,6 +284,10 @@ fn record_census_channel_files_never_name_the_store() {
 /// `mod.rs`, and nowhere else. `store.rs` is likewise the only file that pushes to the log or
 /// opens a payload group.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn record_census_chokepoint_is_singular() {
   // (needle, expected in store.rs)
   let in_store: &[(&str, usize)] = &[
@@ -340,6 +356,10 @@ fn record_census_chokepoint_is_singular() {
 /// twelfth channel in a brand-new file would leave every per-file count untouched and both
 /// totals intact, and ship unrouted and uncovered through both nets.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn record_census_module_list_is_registered() {
   let got = count(source("mod.rs"), "mod ");
   assert!(
@@ -354,6 +374,10 @@ fn record_census_module_list_is_registered() {
 /// RECORD_CENSUS — the scope statement, as a test: the one `impl … for Verbose` outside this
 /// directory carries no emit channel, so nothing the census cannot see can record.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn record_census_scope_excludes_only_a_channelless_impl() {
   let got = count(CST_MOD, "fn emit_");
   assert!(

@@ -92,6 +92,10 @@ fn method_body(hay: &str, name: &str) -> std::string::String {
 /// NAME_CENSUS — the discard binding is gone and cannot return. `_name:` is the defect's exact
 /// signature: a parameter the signature names and the body never reads.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn name_census_no_conversion_discards_its_name() {
   for (file, src) in SOURCES {
     let got = count(src, "_name:");
@@ -108,6 +112,10 @@ fn name_census_no_conversion_discards_its_name() {
 /// NAME_CENSUS — every conversion that is handed a name stamps it, exactly once, in its own
 /// blanket body.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn name_census_every_named_conversion_stamps_the_name() {
   // (file, conversion handed a separator name)
   let stamped: &[(&str, &str)] = &[
@@ -148,6 +156,10 @@ fn name_census_every_named_conversion_stamps_the_name() {
 /// NAME_CENSUS — the scope, from the other side: `from_missing_element` is handed no name, so
 /// it must not invent one. This pins the boundary a future "stamp everything" edit would blur.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn name_census_the_nameless_conversion_stamps_nothing() {
   let body = method_body(&blanket(source("mod.rs")), "from_missing_element");
   assert!(

@@ -3,6 +3,10 @@ use bstr_1::BStr;
 use super::Source;
 
 impl Source<usize> for BStr {
+  // Unsized: `&BStr` addresses the bytes, so an unequal reference proves an unequal source.
+  // The `&'data BStr` impl below is Sized and deliberately keeps the conservative default.
+  const REFERENT_IS_BYTES: bool = true;
+
   type Slice<'a>
     = &'a BStr
   where

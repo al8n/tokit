@@ -279,6 +279,28 @@ pub(crate) struct Lineage {
   pinned: LineageStack,
 }
 
+/// The three monotone counters below are **witnesses**, not bookkeeping, and a wrap would be
+/// silent. `next_ckp_id`'s ids are what make `live_ckpts` sorted-ascending, and the
+/// `contains` / `pop_through` fast paths are binary searches *licensed by* that sortedness — a
+/// wrapped id violates it without any observable error, so a shipped optimization would start
+/// answering wrong. `savepoint_seq`'s uniqueness is what makes a stale savepoint panic
+/// deterministically rather than collide with a live one. So each increment is checked and
+/// loud at the wrap point, in every profile, following the sink's own witness counter.
+///
+/// 2^64 increments is not a practical horizon. The point is not that the panic will fire; it
+/// is that the invariant a search relies on cannot break in silence.
+#[cfg(any(feature = "std", feature = "alloc"))]
+const CKP_ID_EXHAUSTED: &str = "checkpoint id space exhausted: 2^64 checkpoints were opened on \
+                               one input. Ids are never reused, and a wrap would break the \
+                               ascending order the live-checkpoint search depends on.";
+
+#[cfg(any(feature = "std", feature = "alloc"))]
+const SAVEPOINT_SEQ_EXHAUSTED: &str = "savepoint sequence exhausted: 2^64 savepoints were taken on one input. A wrap would let a \
+   stale savepoint id collide with a live one instead of panicking.";
+
+const CACHE_PUSHES_EXHAUSTED: &str = "cache-push counter exhausted: 2^64 cache pushes on one input. The count is a monotone \
+   witness; a wrap would make it read as a smaller history than actually occurred.";
+
 impl Lineage {
   /// A fresh set of memos for a new input: an unadvanced cache-push counter and — in allocator
   /// builds — an empty live-checkpoint stack, an empty pin set, and zeroed counters.
@@ -335,9 +357,27 @@ impl Lineage {
   /// fill and the `try_expect` put-backs — so the count tracks exactly the tokens the cache
   /// accepted: a full cache that hands the token back leaves the count unchanged, and a blackhole
   /// cache — which accepts no push — keeps it at 0.
+  /// Seeds the three witness counters near `u64::MAX` so their exhaustion panics are
+  /// reachable from a test. Without it the `checked_add`s would be a structural argument with
+  /// no cell behind them — an assert nobody has shown can fire.
+  #[cfg(test)]
+  pub(crate) fn seed_counters_at_max_for_tests(&mut self) {
+    // `cache_pushes` is correctness state in every build; the id sources exist only where an
+    // allocator does, which is the same gate the fields themselves carry.
+    self.cache_pushes = u64::MAX;
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    {
+      self.next_ckp_id = u64::MAX;
+      self.savepoint_seq = u64::MAX;
+    }
+  }
+
   #[inline(always)]
   pub(crate) fn record_cache_push(&mut self) {
-    self.cache_pushes += 1;
+    self.cache_pushes = self
+      .cache_pushes
+      .checked_add(1)
+      .expect(CACHE_PUSHES_EXHAUSTED);
   }
 
   /// Rewinds the cache-push counter to a checkpoint's saved value on restore.
@@ -366,7 +406,7 @@ impl Lineage {
   #[inline(always)]
   pub(crate) fn open(&mut self) -> u64 {
     let id = self.next_ckp_id;
-    self.next_ckp_id += 1;
+    self.next_ckp_id = id.checked_add(1).expect(CKP_ID_EXHAUSTED);
     self.live_ckpts.push(id);
     id
   }
@@ -558,7 +598,7 @@ impl Lineage {
   #[inline(always)]
   pub(crate) fn next_savepoint_seq(&mut self) -> u64 {
     let seq = self.savepoint_seq;
-    self.savepoint_seq += 1;
+    self.savepoint_seq = seq.checked_add(1).expect(SAVEPOINT_SEQ_EXHAUSTED);
     seq
   }
 
@@ -621,7 +661,10 @@ fn scan_tick() {}
 /// Gated to the exact feature set of the cells that read it — the `transaction` suite, which is
 /// `#[cfg(all(test, feature = "logos", feature = "std"))]`. Gated any wider (it was `all(test,
 /// std)`) its `reset`/`scanned` are `dead_code` at a point like `--no-default-features --features
-/// conformance`, where `conformance` pulls in `std` but nothing pulls in `logos`.
+/// conformance`, where `conformance` pulls in `std` but nothing pulls in `logos`. The
+/// per-version logos CI cells added in the same release reach it the other way, through
+/// `--no-default-features --features std,logos_0_14` — no job compiled a test target in
+/// either configuration before, which is why this went unseen.
 #[cfg(all(test, feature = "logos", feature = "std"))]
 pub(crate) mod scan_probe {
   use core::cell::Cell;
@@ -631,11 +674,13 @@ pub(crate) mod scan_probe {
   }
 
   /// Zeroes the odometer and opens a fresh reading window.
+  #[cfg(feature = "logos")]
   pub(crate) fn reset() {
     SCANNED.with(|c| c.set(0));
   }
 
   /// Elements inspected since the last [`reset`].
+  #[cfg(feature = "logos")]
   pub(crate) fn scanned() -> usize {
     SCANNED.with(Cell::get)
   }
@@ -658,6 +703,10 @@ pub(crate) mod scan_probe {
 /// occurred, which is a named mechanism outliving its deletion.
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn taxonomy_census_action_column_names_only_live_mechanisms() {
   const LINEAGE: &str = include_str!("lineage.rs");
   const CACHE: &str = include_str!("../cache/mod.rs");
@@ -711,4 +760,54 @@ fn taxonomy_census_action_column_names_only_live_mechanisms() {
      selected nothing. Either the table was rewritten or this parser stopped matching it — a \
      census that checks nothing is worse than none (grep CELL_CENSUS)."
   );
+}
+
+#[cfg(test)]
+mod exhaustion_tests {
+  use super::Lineage;
+
+  /// The three witness counters are load-bearing for a **shipped optimization**, not just
+  /// bookkeeping: the `contains` / `pop_through` fast paths are binary searches licensed by
+  /// "ids monotone, `live_ckpts` sorted ascending", and a wrapped id violates that in silence.
+  /// So each increment panics at the wrap point rather than rolling over.
+  ///
+  /// Falsifying output: no panic — the counter wrapped, and the search's precondition is now
+  /// false with nothing to say so.
+  #[test]
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[should_panic(expected = "checkpoint id space exhausted")]
+  fn checkpoint_id_exhaustion_panics() {
+    let mut lineage = Lineage::new();
+    lineage.seed_counters_at_max_for_tests();
+    let _ = lineage.open();
+  }
+
+  #[test]
+  #[cfg(any(feature = "std", feature = "alloc"))]
+  #[should_panic(expected = "savepoint sequence exhausted")]
+  fn savepoint_seq_exhaustion_panics() {
+    let mut lineage = Lineage::new();
+    lineage.seed_counters_at_max_for_tests();
+    let _ = lineage.next_savepoint_seq();
+  }
+
+  #[test]
+  #[should_panic(expected = "cache-push counter exhausted")]
+  fn cache_push_exhaustion_panics() {
+    let mut lineage = Lineage::new();
+    lineage.seed_counters_at_max_for_tests();
+    lineage.record_cache_push();
+  }
+
+  /// The keep-green direction: none of the three fires on an ordinary history.
+  #[test]
+  fn ordinary_use_never_trips_a_witness() {
+    let mut lineage = Lineage::new();
+    for _ in 0..1_000 {
+      lineage.record_cache_push();
+      #[cfg(any(feature = "std", feature = "alloc"))]
+      let _ = lineage.next_savepoint_seq();
+    }
+    assert_eq!(lineage.cache_pushes(), 1_000);
+  }
 }

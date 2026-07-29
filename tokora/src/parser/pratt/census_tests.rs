@@ -70,6 +70,10 @@ fn count(hay: &str, needle: &str) -> usize {
 /// carried by the progress guard (typed) and by one committed token per accepted report
 /// (token).
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn pratt_census_no_driver_gates_on_a_position_predicate() {
   for (name, src) in DRIVERS {
     for predicate in ["is_eoi", "is_exhausted"] {
@@ -90,6 +94,10 @@ fn pratt_census_no_driver_gates_on_a_position_predicate() {
 /// ones that exist. Renaming `is_eoi`/`is_exhausted` would silence the rail without changing
 /// anything it guards against, so both keep exactly one definition, in the input layer.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn pratt_census_the_censused_predicates_still_exist() {
   for predicate in ["fn is_eoi(", "fn is_exhausted("] {
     let got = count(INPUT_REF_MOD, predicate);
@@ -144,6 +152,10 @@ const SENTINEL_FREE_GRAMMARS: &[(&str, &str)] = &[
 /// compiler cannot reach this — `PrattRHS::End` breaks matches, and the idiom is built from
 /// constructions — so the census is the enforcement.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn pratt_census_the_sentinel_idiom_stays_retired() {
   for (name, src) in SENTINEL_FREE_GRAMMARS {
     let got = src.to_lowercase().matches("sentinel").count();
@@ -161,6 +173,10 @@ fn pratt_census_the_sentinel_idiom_stays_retired() {
 /// PRATT_CENSUS — the census above is only meaningful while the files it reads are the pratt
 /// grammars. A file that stops using `PrattRHS` at all would satisfy it for the wrong reason.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn pratt_census_the_censused_grammars_are_still_pratt_grammars() {
   for (name, src) in SENTINEL_FREE_GRAMMARS {
     assert!(

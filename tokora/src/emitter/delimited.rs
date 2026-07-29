@@ -135,6 +135,15 @@ pub trait UnclosedEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// [`Unclosed`]; the diagnostic's span is the opener's span, its kind is the pair's
   /// [`DelimiterKind`](crate::delimiter::DelimiterKind) and its name is the pair's display
   /// name.
+  ///
+  /// # Why the `FromUnclosed` bound sits on the method, not on the trait
+  ///
+  /// This placement is **chosen**, not a leftover, and is recorded here so a later cleanup does
+  /// not "fix" it. Method-level means pay-when-you-call: an emitter that drops diagnostics and
+  /// never routes an unclosed pair costs nothing for this capability. Hoisting it to the trait
+  /// would force **every** `UnclosedEmitter` implementor's error type to carry `FromUnclosed`
+  /// unconditionally — a bound derived from trait surface rather than from behaviour, which is
+  /// the same defect this release removed from `Silent`'s pratt impl.
   fn emit_unclosed<Delimiter>(
     &mut self,
     err: Unclosed<Delimiter, L::Span, Lang>,

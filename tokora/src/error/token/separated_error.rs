@@ -172,6 +172,59 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, Kind, S, La
   fn from(_: SeparatedError<'a, T, Kind, S, Lang>) -> Self {}
 }
 
+impl<T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'_, T, Kind, S, Lang>
+where
+  S: crate::span::Span,
+{
+  /// Formats the error using the provided formatter in display style.
+  ///
+  /// Half of the [`name`](Self::name) channel's user-visible point had nothing to render
+  /// through: the name was readable only by destructuring through
+  /// [`into_components`](Self::into_components). A diagnostic that knows *which* separator was
+  /// involved and cannot say so is a channel that exists for its author, not its reader.
+  ///
+  /// The name is quoted into the opening clause, matching how the rest of the crate renders a
+  /// token's own name (`missing token 'comma' at 12`, `unclosed delimiter '('`). The wrapped
+  /// [`UnexpectedToken`]'s own rendering follows, so the two carriers speak with one voice.
+  ///
+  /// ```text
+  /// separator 'comma' at the leading position: unexpected token ':', expected ';'
+  /// separator at the trailing position: unexpected token ':', expected ';'
+  /// ```
+  ///
+  /// Note the single "expected". This renderer is **born** under the composition rule the two
+  /// older carriers were repaired to: [`Expected`](crate::utils::Expected)'s `Display` opens
+  /// with the word in every variant, so a composing site never writes it itself.
+  #[inline(always)]
+  pub fn display_fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+  where
+    T: core::fmt::Display,
+    Kind: core::fmt::Display,
+  {
+    match &self.name {
+      Some(name) => write!(
+        f,
+        "separator '{}' at the {} position: ",
+        name, self.position
+      )?,
+      None => write!(f, "separator at the {} position: ", self.position)?,
+    }
+    self.inner.display_fmt(f)
+  }
+}
+
+impl<T, Kind: Clone, S, Lang: ?Sized> core::fmt::Display for SeparatedError<'_, T, Kind, S, Lang>
+where
+  T: core::fmt::Display,
+  Kind: core::fmt::Display,
+  S: crate::span::Span,
+{
+  #[inline(always)]
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    self.display_fmt(f)
+  }
+}
+
 impl<T, Kind: Clone, S, Lang: ?Sized> core::fmt::Debug for SeparatedError<'_, T, Kind, S, Lang>
 where
   T: core::fmt::Debug,

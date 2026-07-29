@@ -266,13 +266,37 @@ macro_rules! fused_tuple_choice {
 // `(F0, .., F32)`, each arm an `FnMut(head, inp) -> Result<O, E>`.
 fused_tuple_choice!(32);
 
+/// The array choice's branch ids are **1-based**, and that is what makes an out-of-bounds id
+/// unrepresentable rather than merely undocumented.
+///
+/// `RangedUsize<0, N>`'s bounds are *inclusive*, so it admitted `N` — one past the last index —
+/// and dispatching it panicked. `[P; 0]` was worse: `RangedUsize<0, 0>` admits `0`, so **every**
+/// id for an empty array panicked. The whole point of a ranged id is that an out-of-range value
+/// cannot be built, and an inclusive-upper range over `0..N` cannot deliver that.
+///
+/// `RangedUsize<1, N>` is the bijection: exactly `N` representable values, `1..=N`, mapping onto
+/// the indices `0..N`. Every id that exists is a valid index, so the dispatch's subtraction
+/// cannot go out of bounds.
+///
+/// The audit's own suggestion — `RangedUsize<0, { N - 1 }>` — is not writable on stable: a
+/// generic `N` in a const operation is `error: generic parameters may not be used in const
+/// operations`, and `generic_const_exprs` is unstable on every toolchain this crate supports.
+///
+/// ## `[P; 0]`
+///
+/// `RangedUsize<1, 0>` is an **empty** range. Declaring the type is fine and an unused `[P; 0]`
+/// choice still compiles; *constructing* an id for one is a post-monomorphization const-eval
+/// error (`E0080`, from `deranged`'s own range assertion). So an empty array choice moves from
+/// "every dispatch panics at runtime" to "no id exists, and building one is a compile error" —
+/// unrepresentable-invalid in the strongest form stable Rust offers. The error comes from
+/// `deranged`, not from here, which is why it is documented rather than wrapped.
 impl<'inp, L, O, Ctx, Lang: ?Sized, P, const N: usize> ParseChoice<'inp, L, O, Ctx, Lang> for [P; N]
 where
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
   P: ParseInput<'inp, L, O, Ctx, Lang>,
 {
-  type Id = deranged::RangedUsize<0, N>;
+  type Id = deranged::RangedUsize<1, N>;
 
   #[inline(always)]
   fn parse_choice(
@@ -280,10 +304,23 @@ where
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
     id: &Self::Id,
   ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-    self[id.get()].parse_input(inp)
+    // `id.get()` is in `1..=N` by construction, so the subtraction lands in `0..N` and the
+    // index cannot be out of bounds. This is the bijection doing the work the type promised.
+    self[id.get() - 1].parse_input(inp)
   }
 }
 
+/// `Id = usize` because a slice's length is a runtime fact — there is no compile-time repair
+/// available here, unlike the array impl above.
+///
+/// What there is instead is a **named** refusal. An out-of-range id used to reach the raw slice
+/// index and panic with `index out of bounds`, which says nothing about the contract that was
+/// broken. The check below panics with the contract in the message. The bounds are also now
+/// documented, which the audit assumed they already were.
+///
+/// ## Panics
+///
+/// If `id` is not a valid index into this slice.
 impl<'inp, L, O, Ctx, Lang: ?Sized, P> ParseChoice<'inp, L, O, Ctx, Lang> for [P]
 where
   L: Lexer<'inp>,
@@ -298,10 +335,23 @@ where
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
     id: &Self::Id,
   ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
+    let len = self.len();
+    assert!(*id < len, "choice id {id} out of bounds for {len} branches");
     self[*id].parse_input(inp)
   }
 }
 
+/// `Id = usize` because a slice's length is a runtime fact — there is no compile-time repair
+/// available here, unlike the array impl above.
+///
+/// What there is instead is a **named** refusal. An out-of-range id used to reach the raw slice
+/// index and panic with `index out of bounds`, which says nothing about the contract that was
+/// broken. The check below panics with the contract in the message. The bounds are also now
+/// documented, which the audit assumed they already were.
+///
+/// ## Panics
+///
+/// If `id` is not a valid index into this slice.
 impl<'inp, L, O, Ctx, Lang: ?Sized, P> ParseChoice<'inp, L, O, Ctx, Lang> for &mut [P]
 where
   L: Lexer<'inp>,
@@ -316,6 +366,8 @@ where
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
     id: &Self::Id,
   ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
+    let len = self.len();
+    assert!(*id < len, "choice id {id} out of bounds for {len} branches");
     self[*id].parse_input(inp)
   }
 }

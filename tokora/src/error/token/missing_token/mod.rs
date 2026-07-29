@@ -494,7 +494,11 @@ impl<Kind: Clone, O, Lang: ?Sized> MissingToken<'_, Kind, O, Lang> {
       None => write!(f, "missing token at {}", self.offset)?,
     }
     if let Some(expected) = &self.expected {
-      write!(f, ", expected {}", expected)?;
+      // NOT `", expected {}"`: `Expected`'s own `Display` opens with the word in *every*
+      // variant (`expected '}'`, `expected one of: …`), so composing one here rendered
+      // "expected expected '}'". The inner Display always supplies the word, so the composing
+      // site supplies only the separator.
+      write!(f, ", {}", expected)?;
     }
     if let Some(message) = &self.message {
       write!(f, ", message: {}", message)?;

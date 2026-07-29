@@ -764,11 +764,73 @@ where
   }
 
   /// Creates a zero-copy reference adapter for this input.
+  ///
+  /// # Panics
+  ///
+  /// Twice, for the two ways a pairing can be wrong — see
+  /// [`SourceIdentity::covers`](crate::source::SourceIdentity::covers):
+  ///
+  /// - if `emitter` is bound to a **provably different** source value than this input reads;
+  /// - if it is bound to a **strictly shorter extent** of that source than this input reads.
+  ///   The parse can peek past the sink's end without committing anything there and still let
+  ///   those bytes shape the tree, and the result carries no out-of-bounds span and no
+  ///   uncovered gap for a later check to find. A **longer** bound extent is the fixed-arena
+  ///   streaming shape and is not refused.
+  ///
+  /// This is the one point at which both halves are in hand, which is why the check lives here:
+  /// the event log a wrongly-paired sink produces is byte-identical to a legal one — and for
+  /// the prefix case it is not merely indistinguishable but *valid* — so nothing downstream can
+  /// tell.
+  ///
+  /// Both refusals are deliberately conservative: they fire only where
+  /// [`Source::REFERENT_IS_BYTES`](crate::Source::REFERENT_IS_BYTES) says the reference *is*
+  /// the data, so that an inequality is proof and the extent is a byte length rather than a
+  /// handle size. For a sized backing (every owned handle, and the `&str` / `&[u8]` reference
+  /// forms) neither projection means anything, so nothing is refused. No program that produces
+  /// a correct tree today reaches either panic.
+  ///
+  /// It is **not** `const`, and could not be: the address projection is not const-callable at
+  /// the MSRV (`E0015` on `<*const u8>::addr`). `Input` is `pub(crate)`, so this is not a
+  /// consumer-visible change.
   #[inline(always)]
-  pub const fn as_ref<'closure>(
+  pub fn as_ref<'closure>(
     &'closure mut self,
     emitter: &'closure mut Ctx::Emitter,
   ) -> InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl> {
+    // The source-identity handshake. See `Emitter::bound_source`.
+    //
+    // `bound_source()` is `None` for every emitter that binds no source — 30 of the 31 core
+    // `Emitter` impls in this tree — so this folds to nothing for them. Once per `InputRef`,
+    // never per token.
+    // Spelled without a let-chain on purpose: let-chains are unstable at the MSRV (1.87),
+    // and this crate has now shipped that mistake twice.
+    if <L::Source as crate::Source<L::Offset>>::REFERENT_IS_BYTES {
+      if let Some(bound) = crate::Emitter::<'inp, L, Lang>::bound_source(&*emitter) {
+        let current = crate::source::SourceIdentity::of(self.input);
+        // Two questions, two answers. Origin is an equality; extent is an ordering, and only
+        // in one direction. Collapsing them into a single `==` would refuse the streaming
+        // shape; collapsing them into origin alone is what let a prefix through.
+        assert!(
+          bound.addr() == current.addr(),
+          "the emitter is bound to a different source value than this parse reads \
+           (emitter: {bound}, parse: {current}) — bind the sink to the same `&source` you \
+           hand the parser. A same-length foreign source produces a tree whose text is the \
+           sink's and whose structure is the parse's, and no later check can see it."
+        );
+        assert!(
+          bound.extent() >= current.extent(),
+          "the emitter is bound to a shorter extent of this source than the parse reads \
+           (emitter: {bound}, parse: {current}) — bind the sink to a slice at least as long \
+           as the one you hand the parser. The parse can peek past the sink's end, commit \
+           nothing there, and still let those bytes choose the tree's shape; the result \
+           materializes with no out-of-bounds span and no uncovered gap, so nothing later \
+           sees it. The opposite pairing — a sink bound to a LONGER extent — is the \
+           fixed-arena streaming shape and is accepted here; its unparsed tail is `finish`'s \
+           business, reported as `UncoveredGap` or tiled by `finish_partial`."
+        );
+      }
+    }
+
     InputRef {
       input: &self.input,
       state: &mut self.state,

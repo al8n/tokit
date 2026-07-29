@@ -7,6 +7,11 @@ name: CI
 # smoke check. Every job mirrors a command that is run by hand before pushing. The
 # orthogonal `cross`, `miri-*` and `coverage` jobs are preserved from the prior workflow.
 
+# `paths-ignore` deliberately does NOT carry a blanket `**.md`. The guide chapters under
+# `tokora/src/guide/` are Markdown compiled as doctests through `include_str!`, so a
+# guide-only change is a *code* change here; ignoring `**.md` meant such a PR landed with
+# zero CI. `CHANGELOG.md` is likewise gated — by the `changelog` job below. Only the root
+# prose files are ignored.
 on:
   push:
     branches:
@@ -15,15 +20,13 @@ on:
       - "README"
       - "COPYRIGHT"
       - "LICENSE-*"
-      - "**.md"
-      - "**.txt"
+      - "*.txt"
   pull_request:
     paths-ignore:
       - "README"
       - "COPYRIGHT"
       - "LICENSE-*"
-      - "**.md"
-      - "**.txt"
+      - "*.txt"
   workflow_dispatch:
   schedule:
     - cron: "0 1 1 * *"
@@ -36,6 +39,20 @@ env:
   stable: stable
 
 jobs:
+  # ── Gate: changelog structure ───────────────────────────────────────────────
+  # The one load-bearing release artifact with no compiler. A rebase once resolved
+  # `CHANGELOG.md` as a verbatim union — textually correct, no conflict markers — and
+  # silently ate a `### Changed (breaking)` heading, filing six breaking changes under
+  # `### Performance`. Every job below passed, because nothing reads a changelog.
+  # Seconds, no toolchain, deterministic: this one is a merge-blocker, not advisory.
+  changelog:
+    name: changelog structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: ci/changelog_structure.sh CHANGELOG.md
+        run: bash ci/changelog_structure.sh CHANGELOG.md
+
   # ── Gate: formatting ────────────────────────────────────────────────────────
   fmt:
     name: fmt
@@ -93,8 +110,30 @@ jobs:
       # R8 (tests/diagnostics.rs): the committed `.stderr` files are pinned to this
       # toolchain and the test skips itself on any other rustc, so this job is the only
       # place the trybuild half runs. The file-only half runs in every `test` job.
-      - name: cargo +1.87 test -p tokora --all-features --test diagnostics
-        run: cargo +1.87 test -p tokora --all-features --test diagnostics
+      #
+      # exit 0 is NOT the pass condition here. The harness returns early on any rustc
+      # that is not 1.87 and the test then passes having compiled nothing — a skip is
+      # indistinguishable from a pass, and every compile-time rail routed through this file
+      # would retire silently the first time this job's toolchain drifts. The harness prints
+      # its executed-case count; this step asserts on the count.
+      - name: cargo +1.87 test --test diagnostics (asserting a nonzero executed-case count)
+        run: |
+          set -euo pipefail
+          cargo +1.87 test -p tokora --all-features --test diagnostics -- --nocapture \
+            | tee /tmp/diagnostics.out
+          count=$(sed -n 's/^TOKORA_TRYBUILD_EXECUTED_CASES=\([0-9][0-9]*\)$/\1/p' \
+            /tmp/diagnostics.out | head -1)
+          if [ -z "${count}" ]; then
+            echo "::error::the diagnostics harness printed no executed-case marker — it did" \
+                 "not run, or the marker was renamed without updating this step"
+            exit 1
+          fi
+          if [ "${count}" -eq 0 ]; then
+            echo "::error::the diagnostics harness skipped itself (0 cases executed): this" \
+                 "job's rustc is not the pinned 1.87, so every trybuild rail is inert here"
+            exit 1
+          fi
+          echo "diagnostics: ${count} trybuild case(s) executed on the pinned toolchain"
 
   # ── Gate: full test suite ───────────────────────────────────────────────────
   test:
@@ -163,8 +202,194 @@ jobs:
         run: rustup update stable --no-self-update && rustup default stable
       - name: cargo test --release -p tokora --all-features --lib
         run: cargo test --release -p tokora --all-features --lib
-      - name: cargo test --release (guard/sync/recover integration suites)
-        run: cargo test --release -p tokora --all-features --test input_ref --test sync --test parser_recover --test state_machine --test tracker
+      # This job's release coverage was once a curated five-suite list. The debug/release
+      # divergences this crate has had to fix live substantially in integration suites that list
+      # did NOT name — the terminal-stop families, the delimiter suites, the probe-close cell —
+      # so a release-only regression in any of them passed CI. Release suites were run locally
+      # instead; this makes that coverage infrastructure rather than habit.
+      #
+      # Cost, measured before pinning rather than argued: a COLD build plus run of all 94
+      # integration targets is **89s wall / 364s CPU** locally. It parallelises well, so a
+      # slower runner scales on wall clock roughly with core count; even at 5x this is minutes,
+      # against the ~20min fallback threshold that would have justified keeping a curated list.
+      # No fallback is needed and none is configured.
+      - name: cargo test --release -p tokora --all-features --tests
+        run: cargo test --release -p tokora --all-features --tests
+      # The deep fuzz sweep, seeds 0..50_000. It is `#[ignore]`d and had never run
+      # anywhere — not in CI, not in the normal suite.
+      #
+      # The plan was a cron-only job on the assumption it is throughput-bound. **Measured, it is
+      # not**: 0.10s in release and 0.85s in debug for all 50 000 seeds (the 8.5x ratio is what
+      # says it is doing the work rather than short-circuiting). The whole cost is the build,
+      # which this job has already paid two steps above.
+      #
+      # So it runs per-PR rather than monthly, which is strictly more coverage for ~0.1s. A
+      # measurement that overturns the plan in the cheap direction is still a measurement.
+      - name: cargo test --release --all-features -- --ignored fuzz_deep_run
+        run: cargo test --release -p tokora --all-features --lib -- --ignored --exact fuzz::tests::fuzz_deep_run
+
+  # ── Gate: per-version logos parity ──────────────────────────────────────────
+  # The crate advertises three logos majors and RUNTIME parity across them had never once been
+  # executed: the `hack --each-feature` matrix clippy-checks each version but runs no tests, and
+  # every test job pins the newest. Compile parity held by shared macro body, which is exactly
+  # the kind of "it must be fine" that keeps turning out not to be.
+  #
+  # It is not fine. The first run of these cells was RED on a pre-existing dead-code failure:
+  # `scan_probe`'s readers are `logos`-gated while the module was only `std`-gated,
+  # so a `std, logos_0_N` test build had two unused functions and `#![deny(warnings)]` refused
+  # it. No job compiles that configuration, so nothing had ever said so — the second
+  # never-executed configuration found broken on arrival.
+  #
+  # Cost: ~11s and ~13s locally, the shape of the existing valve-off job.
+  logos-versions:
+    name: logos parity (0.14, 0.15)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        logos: [logos_0_14, logos_0_15]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-logos-${{ matrix.logos }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-logos-${{ matrix.logos }}-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: cargo test --no-default-features --features std,${{ matrix.logos }}
+        run: cargo test -p tokora --no-default-features --features std,${{ matrix.logos }}
+
+  # ── Gate: mechanical public-API diff against the last published version ─────
+  # ADVISORY-RED, deliberately, and the reason is stated because "advisory" usually means
+  # "ignored": both tools ride rustdoc-JSON on a pinned nightly, so a toolchain bump can redden
+  # this job without the crate changing. It blocks nothing until it has a quiet week on main.
+  #
+  # It earns its place regardless. The recall-shaped sources a changelog is normally
+  # reconstructed from — PR bodies, commit messages, surface greps — are structurally blind to
+  # bound additions and to derived-`Debug` movement. In this release two of those three sources
+  # turned out not to EXIST for the earliest rounds (empty PR bodies, bare subject lines), and
+  # this diff found two breaking changes that would otherwise have shipped undisclosed:
+  # `CstEmitter::cst_finish` gaining a parameter, and `fuzz::Op` gaining a variant mid-list.
+  semver-checks:
+    name: semver-checks (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Install cargo-semver-checks (pinned)
+        run: cargo install cargo-semver-checks --locked --version 0.49.0
+      - name: cargo semver-checks against the published baseline
+        run: cargo semver-checks check-release -p tokora --all-features
+
+  # ── Gate: the reference consumer, at a pinned ref ───────────────────────────
+  # This was human discipline rather than infrastructure. Unautomated per-change habits stop
+  # happening, so it becomes a job.
+  #
+  # The ref is PINNED and bumping it is a reviewed one-line change: smear's own churn must not
+  # redden tokora's CI, or the job gets ignored and then deleted. It runs on schedule and on
+  # demand rather than per-PR for the same reason.
+  #
+  # Scope worth stating, because a green result here means less than it looks: measured against
+  # this release, the consumer converts tokora's error carriers structurally through `From` and
+  # calls `display_fmt` zero times, so it does NOT witness render changes; its choice sites are
+  # all tuple choices, so it does not witness the array-choice id change; and it implements
+  # `Emitter` nowhere. What it does witness is the compile surface — the context bundles, the
+  # trait members, the bound loosenings — and that is a real thing to witness.
+  #
+  # Requires the smear repository to be readable from this workflow. It is `workflow_dispatch`
+  # + cron only until that access is granted; with a private repo it needs a token.
+  smear-consumer:
+    name: consumer gate (smear, pinned)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    continue-on-error: true
+    env:
+      # Reviewed one-line bump. Last verified green against this ref.
+      SMEAR_REF: 4a81ab6
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: tokit
+      - name: Check out the reference consumer at its pinned ref
+        run: |
+          set -euo pipefail
+          git clone https://github.com/al8n/smear.git smear
+          cd smear && git checkout "${SMEAR_REF}"
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Point the consumer at this checkout
+        run: |
+          set -euo pipefail
+          cd smear
+          python3 - <<'PATCH'
+          import re, pathlib
+          p = pathlib.Path("Cargo.toml")
+          s = p.read_text()
+          new = 'tokora = { path = "../tokit/tokora" }'
+          if "[patch.crates-io]" in s:
+              s = re.sub(r'(?m)^tokora = \{ path = .*$', new, s)
+          else:
+              s += f"\n[patch.crates-io]\n{new}\n"
+          p.write_text(s)
+          PATCH
+          grep -A2 'patch.crates-io' Cargo.toml
+      - name: cargo test (three-crate scope)
+        run: |
+          cd smear
+          cargo test -p smear-lexer -p smear-scaffold -p smear-parser-next --no-fail-fast
+
+  # ── Gate: sanitizers ────────────────────────────────────────────────────────
+  # `ci/sanitizer.sh` existed and had **no caller**: no job in this file referenced it, so it
+  # had never run on any branch of this campaign. That is the same class as a configuration CI
+  # compiles and never executes — one level up. Not a gate that covers nothing; a gate nothing
+  # invokes.
+  #
+  # It does work: ASan and TSan both come back clean across the full test surface. That is the
+  # argument for wiring it — a script that exists, works, and has never been invoked is the
+  # cheapest coverage in the repo.
+  #
+  # One leg per job so an unsupported sanitizer reports as one red cell rather than aborting the
+  # run. `leak` and `memory` are deliberately not in the matrix: they are unsupported on some
+  # targets, and an expected-failure cell inverts silently the day support lands.
+  #
+  # If a leg fails at BUILD time with an ABI or interceptor mismatch, read `ci/sanitizer.sh`'s
+  # header before filing it: the thread leg needs `-Zbuild-std` for an instrumented `std`, and
+  # its absence produces a failure that reads like a sanitizer report.
+  sanitizer:
+    name: sanitizer (${{ matrix.san }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        san: [address, thread]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-san-${{ matrix.san }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-san-${{ matrix.san }}-
+      - name: Install Rust (nightly + rust-src for -Zbuild-std)
+        run: |
+          rustup toolchain install nightly --no-self-update --component rust-src
+          rustup default nightly
+      - name: ci/sanitizer.sh
+        run: bash ci/sanitizer.sh x86_64-unknown-linux-gnu ${{ matrix.san }}
 
   # ── Gate: the cargo-hack per-feature clippy matrix (its own job) ────────────
   hack-clippy:
@@ -215,6 +440,23 @@ jobs:
         run: cargo check --target thumbv6m-none-eabi --no-default-features
       - name: cargo check --target thumbv6m-none-eabi --no-default-features --features alloc
         run: cargo check --target thumbv6m-none-eabi --no-default-features --features alloc
+      # From compile-only to RUNTIME. `cargo build --no-default-features` above gates a
+      # production-code no_std violation, but it does not compile test targets at all, so a
+      # `Vec`/`vec!` violation in a test — which is where one has actually been found — slips
+      # past it, and nothing no_std-shaped had ever *executed*. These two host runs execute the
+      # no_std tiers of the crate's own code (the harness links std; the crate paths under test
+      # do not). The first run of the first of these was red on a dead-code warning nobody could
+      # have seen, which is the whole argument for the cell.
+      - name: cargo test -p tokora --no-default-features
+        run: cargo test -p tokora --no-default-features
+      - name: cargo test -p tokora --no-default-features --features alloc
+        run: cargo test -p tokora --no-default-features --features alloc
+      # The positive cell for CAS-less targets: `bstr` is the CAS-less-safe backing, pinned on the real CAS-less
+      # target. The three CAS-needing backings (`bytes`, `hipstr`, `smol_bytes`) are documented
+      # on their guide rows rather than pinned as expected-failures — an expected-fail cell
+      # inverts silently the day upstream fixes it.
+      - name: cargo check --target thumbv6m-none-eabi --no-default-features --features alloc,bstr_1
+        run: cargo check --target thumbv6m-none-eabi --no-default-features --features alloc,bstr_1
 
   # ── Gate: docs build with deny-warnings ─────────────────────────────────────
   doc:

@@ -668,6 +668,19 @@ where
 {
   type Error = E::Error;
 
+  /// Forwarded deliberately, so this fixture models a wrapper that drops *tokens* and nothing
+  /// else. One fixture, one defect.
+  ///
+  /// Omitting it would additionally make this a wrapper that hides its inner sink's bound
+  /// source — a **separate, and currently open, residue**: the parse-entry seam check can only
+  /// compare an answer it receives, so a hidden binding reads as "this emitter binds no
+  /// source" and the pairing is accepted. Nothing downstream refuses it, which is exactly why
+  /// a fixture must not carry that defect by accident while claiming to test another. See the
+  /// four pinned residues in `cst::sink::tests`.
+  fn bound_source(&self) -> Option<tokora::source::SourceIdentity> {
+    self.inner.bound_source()
+  }
+
   fn emit_lexer_error(
     &mut self,
     err: Spanned<<L::Token as Token<'a>>::Error, L::Span>,
@@ -821,6 +834,19 @@ where
   E: Emitter<'a, L>,
 {
   type Error = E::Error;
+
+  /// Forwarded deliberately, so this fixture models a wrapper that drops *tokens* and nothing
+  /// else. One fixture, one defect.
+  ///
+  /// Omitting it would additionally make this a wrapper that hides its inner sink's bound
+  /// source — a **separate, and currently open, residue**: the parse-entry seam check can only
+  /// compare an answer it receives, so a hidden binding reads as "this emitter binds no
+  /// source" and the pairing is accepted. Nothing downstream refuses it, which is exactly why
+  /// a fixture must not carry that defect by accident while claiming to test another. See the
+  /// four pinned residues in `cst::sink::tests`.
+  fn bound_source(&self) -> Option<tokora::source::SourceIdentity> {
+    self.inner.bound_source()
+  }
 
   fn emit_lexer_error(
     &mut self,

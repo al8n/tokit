@@ -107,7 +107,7 @@ pub struct CstProfile<T> {
 
 impl<T> core::fmt::Debug for CstProfile<T> {
   /// Renders the two kind values only. The mapper and the validator are function pointers
-  /// whose derived render is a code address — the same reason [`Sink`](super::Sink)'s own
+  /// whose derived render is a code address — the same reason the CST `Sink`'s own
   /// `Debug` omits its mapper.
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     f.debug_struct("CstProfile")

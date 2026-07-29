@@ -25,7 +25,7 @@ mod common;
 use common::{E, TestLexer, Token, TokenKind};
 
 use tokora::{
-  ComposableParseContext, FatalContext, InputRef, Lexer, Parse, ParseInput, Parser,
+  Accumulator, ComposableParseContext, FatalContext, InputRef, Lexer, Parse, ParseInput, Parser,
   error::{
     Unclosed, UnexpectedEot,
     syntax::{FullContainer, MissingSyntax, TooFew, TooMany},
@@ -35,7 +35,7 @@ use tokora::{
   parser::peek_kind,
   punct::Brace,
   token::IdentifierToken,
-  try_parse_input::ParseAttempt,
+  try_parse_input::{ParseAttempt, TryParseInput},
   types::Ident,
 };
 
@@ -298,4 +298,80 @@ where
 fn bundle_holds_for_the_builtin_contexts() {
   assert_bundle::<TestLexer<'_>, FatalContext<'_, TestLexer<'_>, E>, ()>();
   assert_bundle::<TestLexer<'_>, FatalContext<'_, TestLexer<'_>, BrandedErr, TestLang>, TestLang>();
+}
+
+// ── The SECOND tier: `PolicyParseContext` and the policy builders ──────────────
+//
+// Bundle-1 covers the collecting combinators at their *default* policy, which is what its
+// re-scoped documentation now says. Attach `at_most` / `bounded` / `require_*` and the driver
+// additionally needs `TooManyEmitter`, `MissingLeadingSeparatorEmitter` and
+// `MissingTrailingSeparatorEmitter`. There was no bundle that carried those, so a
+// production using a policy builder fell back to spelling the ladder — the exact restatement
+// the bundle exists to remove, reappearing one tier up.
+//
+// Widening bundle-1 instead was refused: it would push `From<TooMany>` and
+// `From<MissingToken>` onto the *concrete instantiation* of every bundle consumer — for the
+// emitters whose impls carry those bounds, i.e. `Fatal` and `Verbose` — whether or not any
+// policy builder is used. A bound derived from trait surface rather than behaviour is the
+// defect this release removed from `Silent`'s pratt impl; reintroducing it wholesale to fix a
+// doc claim would be a poor trade.
+
+/// A production under **one** bound that attaches a count policy. It does not compile if
+/// `PolicyParseContext` stops naming the three policy emitters, and it did not compile at all
+/// before the bundle existed — `.at_most()` demands `TooManyEmitter`, which bundle-1 does not
+/// carry.
+///
+/// `Ctx` is the generic here, which is what the cell is about: the lexer and language are
+/// concrete because the separator fluent methods need their pair to resolve, and that is
+/// orthogonal to the bundle.
+fn policy_bundled_production<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<usize, tokora::ErrorOf<'inp, TestLexer<'inp>, Ctx, ()>>
+where
+  Ctx: tokora::PolicyParseContext<'inp, TestLexer<'inp>>,
+{
+  let items: std::vec::Vec<IdentOf<'inp, TestLexer<'inp>, ()>> = Ident::try_parse
+    .separated_by_comma()
+    .at_most(2)
+    .collect()
+    .parse_input(inp)?;
+  Ok(items.len())
+}
+
+#[test]
+fn policy_bundle_drives_at_most() {
+  type Ctx<'inp> = FatalContext<'inp, TestLexer<'inp>, E>;
+
+  fn drive<'inp>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx<'inp>>) -> Result<usize, E> {
+    policy_bundled_production(inp)
+  }
+
+  // Two elements: within `at_most(2)`, so the policy never fires.
+  let ok = Parser::with_parser::<'_, TestLexer<'_>, usize, E, _, ()>(drive).parse_str("a, b");
+  assert_eq!(ok.unwrap(), 2, "two elements are within at_most(2)");
+
+  // Three: `TooMany` routes through the bundle's `TooManyEmitter`, and `Fatal` turns it into
+  // an `Err`. Falsified by an `Ok` here — that would mean the policy is dead code under the
+  // bundle, which is the shape of the defect this item repairs one tier down.
+  let refused =
+    Parser::with_parser::<'_, TestLexer<'_>, usize, E, _, ()>(drive).parse_str("a, b, c");
+  assert!(refused.is_err(), "three elements exceed at_most(2)");
+}
+
+/// The lattice, as a compile-time assertion: bundle-2 implies bundle-1, and the built-in
+/// contexts satisfy both. Falsified by a build error, which is what a broken supertrait path
+/// or a missing blanket impl produces.
+fn assert_policy_bundle<'inp, L, Ctx, Lang>()
+where
+  L: Lexer<'inp>,
+  Ctx: tokora::PolicyParseContext<'inp, L, Lang>,
+  Lang: ?Sized,
+{
+  // Bundle-2 is a strict widening: anything satisfying it satisfies bundle-1.
+  assert_bundle::<L, Ctx, Lang>();
+}
+
+#[test]
+fn policy_bundle_holds_for_the_builtin_contexts() {
+  assert_policy_bundle::<TestLexer<'_>, FatalContext<'_, TestLexer<'_>, E>, ()>();
 }

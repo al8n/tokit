@@ -18,10 +18,19 @@ use super::{
 /// everything its children committed.
 ///
 /// [`commit`](Self::commit) and [`rollback`](Self::rollback) both consume the
-/// transaction and are available whatever the policy. Zero-cost:
-/// [`begin`](InputRef::begin) performs exactly one [`save`](InputRef::save), the guard
-/// is two words, and deciding is one branch — there is no journaling, because the input
-/// source is immutable and rewinding is a snapshot copy.
+/// transaction and are available whatever the policy.
+///
+/// **What it actually costs, since "the guard is two words" was never true.**
+/// [`begin`](InputRef::begin) performs exactly one [`save`](InputRef::save), deciding is one
+/// branch, and there is no journaling — the input source is immutable and rewinding is a
+/// snapshot copy. Those op-count claims hold. The *size* claim did not: the guard embeds a
+/// whole [`Checkpoint`](crate::input::Checkpoint), which is a cursor, the span, `L::State`,
+/// two `u64` marks and the poison boundary — 88 bytes with a near-stateless test lexer, and
+/// `O(size_of::<L::State>())` in general. A lexer with a large state pays for it here.
+///
+/// The distinction matters because the two claims support different decisions: the op counts
+/// are why a speculative parse is cheap to *run*, and the size is what a caller holding many
+/// nested guards is actually paying.
 ///
 /// # Drop policy
 ///

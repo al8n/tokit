@@ -60,7 +60,12 @@ use crate::syntax::Syntax;
 
 pub mod event;
 
-#[cfg(feature = "rowan")]
+// UN-GATED from `rowan` deliberately (T12). `CstProfile` and `KindValidator` are fn-pointer and
+// data only — `profile.rs`'s single import is `event::TOMBSTONE`, which is itself unconditional
+// — so the gate was placement, not design. A `macro_rules!` expansion cannot cfg on tokora's
+// features, so a `syntax_kinds!`-style macro that names `KindValidator` in one arm was forcing
+// `rowan` onto every consumer of the macro. Strictly more configurations compile; the sink half
+// keeps its gate.
 mod profile;
 
 #[cfg(feature = "rowan")]
@@ -69,8 +74,6 @@ mod sink;
 #[cfg(feature = "rowan")]
 mod text;
 
-#[cfg(feature = "rowan")]
-#[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
 pub use profile::{CstProfile, KindValidator};
 
 #[cfg(feature = "rowan")]
@@ -506,9 +509,19 @@ pub trait Token<Lang: Language>: Element<Lang> {
 /// # Type Parameters
 ///
 /// - `Lang`: The rowan [`Language`] type defining syntax kinds
+///
+/// # One language, named once
+///
+/// The [`Syntax`] supertrait is bound at `Lang = Lang` rather than left free, and that
+/// equality is load-bearing. [`Element<Lang>`](Element) says which tree this node lives in;
+/// [`Syntax`] carries the `KIND` constant that says which node it *is* — and `Syntax::KIND` is
+/// typed `<Self::Lang as Language>::SyntaxKind`. With `Syntax::Lang` unconstrained, a type
+/// could be `Element<A> + Syntax<Lang = B>` and still satisfy `Node<A>`: a node claiming
+/// membership in one language while its kind authority answers for another. Nothing would
+/// reject it, and the mismatch would surface as a cast that never matches.
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
-pub trait Node<Lang: Language>: Element<Lang> + Syntax {
+pub trait Node<Lang: Language>: Element<Lang> + Syntax<Lang = Lang> {
   /// Attempts to cast the given syntax node to this CST node.
   ///
   /// Returns an error if the node's kind doesn't match this type.

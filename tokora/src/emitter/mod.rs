@@ -128,6 +128,18 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   ///
   /// - `Ok(())` if the error should be treated as non-fatal (processing continues)
   /// - `Err(Self::Error)` if the error is fatal (processing stops immediately)
+  ///
+  /// # Under a rejecting emitter, the `Err` return *is* the delivery
+  ///
+  /// Worth stating because the natural reading is the opposite one — that returning `Err`
+  /// declines to report and hands the diagnostic to the caller instead.
+  ///
+  /// The input layer dedups lexer errors against a watermark, and it advances that watermark
+  /// **before** calling this method, not after. So by the time an implementation decides to
+  /// return `Err`, the region is already marked as reported: a later scan over the same bytes
+  /// will not offer the diagnostic again. There is exactly one delivery, and for a rejecting
+  /// emitter it is the `Err` itself. An implementation that returns `Err` *and* expects to see
+  /// the same error again on a re-lex will not.
   fn emit_lexer_error(
     &mut self,
     err: Spanned<<L::Token as Token<'a>>::Error, L::Span>,
@@ -449,6 +461,53 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// [`release`](Self::release) and [`rewind`](Self::rewind).
   #[inline(always)]
   fn exit_label(&mut self) {}
+
+  /// The source this emitter is **bound to**, if it is bound to one.
+  ///
+  /// `None` — the default — means *"I bind no source"*, which is the true answer for every
+  /// emitter that only carries diagnostics. It is not a placeholder for a missing answer: a
+  /// trait member may be defaulted exactly when its default is a true statement about the
+  /// majority implementor, and this one is true for every emitter in this crate except the
+  /// CST `Sink` (the `rowan` feature).
+  ///
+  /// # The law
+  ///
+  /// **The emitter and the parse must observe the same source *value*, not equal bytes, and the
+  /// emitter's extent must cover the parse's.** An emitter that stores a `&'inp L::Source` and
+  /// slices it later — a recording CST sink is the only one in this crate — answers
+  /// `Some(SourceIdentity::of(that_source))`. The point at which an emitter is attached to an
+  /// input then compares the two, and **panics** if they disagree *and* the backing can prove
+  /// they disagree ([`Source::REFERENT_IS_BYTES`](crate::Source::REFERENT_IS_BYTES)).
+  ///
+  /// Two relations, because there are two failures and they are not symmetric — see
+  /// [`SourceIdentity::covers`](crate::source::SourceIdentity::covers). Same origin is an
+  /// equality. Extent is an ordering: a sink bound to a **longer** slice than the parse reads
+  /// is the fixed-arena streaming shape and is fine, while one bound to a **shorter** slice
+  /// lets peeked bytes past its end shape a tree that will not contain them.
+  ///
+  /// The check has to sit there, and not at materialization: a sink built over `"XY"` and
+  /// driven over a same-length `"ab"` produces an event log **byte-identical** to one a legal
+  /// single parse could produce, so nothing downstream has anything to discriminate on. The
+  /// prefix case is worse still — the log is not merely indistinguishable, it is *valid*: fully
+  /// covered, no span out of bounds, and round-tripping against the sink's own buffer.
+  ///
+  /// # If you are wrapping an emitter, forward this
+  ///
+  /// A wrapper that forwards every emission but inherits the `None` default silently disables
+  /// the check for whatever it wraps. The `&mut U` blanket forwards it; a hand-written wrapper
+  /// must too. This is not detectable from inside the crate — it is the same forwarding
+  /// obligation `checkpoint`/`rewind`/`release` carry, and it is pinned green by
+  /// `forwarder_preserves_bound_source`.
+  ///
+  /// # If you are writing a source-binding emitter
+  ///
+  /// Override this, and assert you did — `conformance::emitter::assert_binds_source` is one
+  /// line and exists for exactly that. A source-binding emitter that inherits the default
+  /// compiles, runs, and quietly gives up the guarantee.
+  #[inline(always)]
+  fn bound_source(&self) -> Option<crate::source::SourceIdentity> {
+    None
+  }
 }
 
 impl<'a, L, U, Lang: ?Sized> Emitter<'a, L, Lang> for &mut U
@@ -456,6 +515,13 @@ where
   U: Emitter<'a, L, Lang>,
 {
   type Error = U::Error;
+
+  /// Forwarded, and load-bearing: a wrapper that answered `None` here would silently disable
+  /// the source-identity check for the emitter it wraps.
+  #[inline(always)]
+  fn bound_source(&self) -> Option<crate::source::SourceIdentity> {
+    (**self).bound_source()
+  }
 
   #[inline(always)]
   fn emit_lexer_error(
@@ -634,7 +700,21 @@ where
   }
 }
 
-/// Everything the collecting combinators require from an emitter, as one bound.
+/// The collecting combinators' **default-policy** emitter surface, as one bound.
+///
+/// This is the ladder a separated / repeated / delimited driver needs when no count or
+/// separator *policy* is attached. Attach one — `at_most`, `bounded`, `require_leading`,
+/// `require_trailing` — and the driver additionally needs [`TooManyEmitter`],
+/// [`MissingLeadingSeparatorEmitter`] and [`MissingTrailingSeparatorEmitter`]; that wider
+/// bundle is [`PolicyComposableEmitter`], and it has this one as a supertrait. The pratt
+/// engine is outside both: it is not a collecting combinator, and the typed driver names
+/// [`PrattEmitter`] and its two conversions itself.
+///
+/// The two tiers exist rather than one because widening this bundle would make every
+/// consumer's *concrete instantiation* demand `From<TooMany>` and `From<MissingToken>` on its
+/// error type — for `Fatal` and `Verbose`, whose impls carry those bounds — whether or not any
+/// policy builder is ever used. That is a bound derived from trait surface rather than from
+/// behaviour, which is the same defect this crate removed from `Silent`'s pratt impl.
 ///
 /// The atomic emitter design splits diagnostics across a family of focused traits, and a
 /// parser that drives the separated/repeated machinery ends up needing most of them at
@@ -707,6 +787,43 @@ where
     + UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>
     + TooFewEmitter<'inp, L, Lang>
     + UnclosedEmitter<'inp, L, Lang>,
+{
+}
+
+/// [`ComposableEmitter`] plus the three emitters a **count or separator policy** needs.
+///
+/// `at_most` / `bounded` add [`TooManyEmitter`]; `require_leading` and `require_trailing` add
+/// [`MissingLeadingSeparatorEmitter`] and [`MissingTrailingSeparatorEmitter`]. A production
+/// that attaches any of those to a collecting combinator needs this bundle where an
+/// unpolicied one needs [`ComposableEmitter`].
+///
+/// The lattice is strict — `ComposableEmitter` is a supertrait of this one — and each tier is
+/// true to its own documentation, which is the point: a bundle that covered neither path
+/// honestly is what the two-tier split replaces. Pratt stays outside both (see
+/// [`ComposableEmitter`]).
+///
+/// All four in-crate emitters ([`Fatal`], [`Verbose`], [`Silent`],
+/// [`Ignored`](crate::utils::marker::Ignored)) implement the three added sub-traits already,
+/// so the blanket impl covers them with no new impls.
+///
+/// The context-side twin is [`PolicyParseContext`](crate::PolicyParseContext).
+pub trait PolicyComposableEmitter<'inp, L, Lang: ?Sized = ()>:
+  ComposableEmitter<'inp, L, Lang>
+  + TooManyEmitter<'inp, L, Lang>
+  + MissingLeadingSeparatorEmitter<'inp, L, Lang>
+  + MissingTrailingSeparatorEmitter<'inp, L, Lang>
+where
+  L: Lexer<'inp>,
+{
+}
+
+impl<'inp, L, Lang: ?Sized, T> PolicyComposableEmitter<'inp, L, Lang> for T
+where
+  L: Lexer<'inp>,
+  T: ComposableEmitter<'inp, L, Lang>
+    + TooManyEmitter<'inp, L, Lang>
+    + MissingLeadingSeparatorEmitter<'inp, L, Lang>
+    + MissingTrailingSeparatorEmitter<'inp, L, Lang>,
 {
 }
 

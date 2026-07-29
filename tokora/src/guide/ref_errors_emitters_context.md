@@ -257,20 +257,34 @@ nodes) need more than the base surface, so tokora splits each scenario into a fo
 | Sub-trait | Emits | Unlocked by | In [`ComposableEmitter`](crate::emitter::ComposableEmitter)? |
 |-----------|-------|-------------|:--:|
 | [`TooFewEmitter`](crate::emitter::TooFewEmitter) | [`TooFew`](crate::error::syntax::TooFew) | `From<TooFew>` | ✅ |
-| [`TooManyEmitter`](crate::emitter::TooManyEmitter) | [`TooMany`](crate::error::syntax::TooMany) | `From<TooMany>` | — |
+| [`TooManyEmitter`](crate::emitter::TooManyEmitter) | [`TooMany`](crate::error::syntax::TooMany) | `From<TooMany>` | — (in [`PolicyComposableEmitter`](crate::emitter::PolicyComposableEmitter)) |
 | [`FullContainerEmitter`](crate::emitter::FullContainerEmitter) | [`FullContainer`](crate::error::syntax::FullContainer) | `From<FullContainer>` | ✅ |
 | [`SeparatedEmitter`](crate::emitter::SeparatedEmitter) | missing separator / element | `From<MissingTokenOf>` + `From<MissingSyntaxOf>` | ✅ |
 | [`UnexpectedLeadingSeparatorEmitter`](crate::emitter::UnexpectedLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::UnexpectedTrailingSeparatorEmitter) | a stray separator | `From<SeparatedErrorOf>` | ✅ |
-| [`MissingLeadingSeparatorEmitter`](crate::emitter::MissingLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::MissingTrailingSeparatorEmitter) | a required separator | `From<MissingTokenOf>` | — |
+| [`MissingLeadingSeparatorEmitter`](crate::emitter::MissingLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::MissingTrailingSeparatorEmitter) | a required separator | `From<MissingTokenOf>` | — (in [`PolicyComposableEmitter`](crate::emitter::PolicyComposableEmitter)) |
 | [`PrattEmitter`](crate::emitter::PrattEmitter) | end-of-LHS / end-of-RHS ([chapter 5](super::ch05_pratt)) | `From<UnexpectedEoLhs>` + `From<UnexpectedEoRhs>` | — |
 | [`CstEmitter`](crate::emitter::CstEmitter) | tree events (no error) | — (defaulted no-ops; the recording sink) | — |
 
-[`ComposableEmitter`](crate::emitter::ComposableEmitter) is the six-trait bundle the
-separated/repeated machinery needs, as one bound — blanket-implemented for every emitter that
-satisfies the whole family, so `E: ComposableEmitter` stands in for the ladder. The four
-capabilities outside it (`TooManyEmitter`, the missing-separator pair, `PrattEmitter`,
-`CstEmitter`) are named on demand by the parsers that use them; the pre-built emitters implement
-all of them anyway.
+[`ComposableEmitter`](crate::emitter::ComposableEmitter) is the bundle the separated/repeated
+machinery needs **at its default policy**, as one bound — blanket-implemented for every emitter
+that satisfies the family, so `E: ComposableEmitter` stands in for the ladder.
+
+Attach a count or separator **policy** and you need three more: `at_most` / `bounded` add
+[`TooManyEmitter`](crate::emitter::TooManyEmitter), and `require_leading` / `require_trailing`
+add the missing-separator pair.
+[`PolicyComposableEmitter`](crate::emitter::PolicyComposableEmitter) is that wider bundle, with
+`ComposableEmitter` as its supertrait — so the two tiers are a lattice, and each is true to its
+own documentation.
+
+The tiers are two rather than one on purpose. Widening the default bundle would make every
+consumer's *concrete instantiation* demand `From<TooMany>` and `From<MissingToken>` on its error
+type — for `Fatal` and `Verbose`, whose impls carry those bounds — whether or not any policy
+builder is ever used. That is a bound derived from trait surface rather than from behaviour.
+
+[`PrattEmitter`](crate::emitter::PrattEmitter) and [`CstEmitter`](crate::emitter::CstEmitter)
+are outside **both**: pratt is not a collecting combinator and its typed driver names its own
+emitter and conversions, and `CstEmitter` binds rather than bundles (below). The pre-built
+emitters implement all of them anyway.
 
 ```text
 trait ComposableEmitter<'inp, L, Lang = ()>:
@@ -508,7 +522,8 @@ rather than hundreds of frames deep at the first leaf atom that raises one.
 |-------|-----------------|----------|
 | **Concrete** | `InputRef<'a, '_, MyLexer<'a>, FatalContext<'a, MyLexer<'a>, MyError>>` | one fixed emitter (the error-model example above) |
 | **Generic context** | `where Ctx: ParseContext<'inp, L>, Ctx::Emitter: Emitter<'inp, L, Error = MyError>` | reusable across emitters (the emitter example above; [chapter 7](super::ch07_diagnostics)) |
-| **+ the whole leaf surface** | add `Ctx: ComposableParseContext<'inp, L>` | you drive `separated` / `repeated` / the `many/` builder, a delimited shape, or any leaf atom — it supplies the emitter family *and* the five error conversions, so nothing is restated |
+| **+ the leaf surface** | add `Ctx: ComposableParseContext<'inp, L>` | you drive `separated` / `repeated` / the `many/` builder, a delimited shape, or any leaf atom at its **default policy** — it supplies the emitter family *and* the five error conversions, so nothing is restated |
+| **+ the policy builders** | add `Ctx: PolicyParseContext<'inp, L>` | you also attach `at_most` / `bounded` / `require_leading` / `require_trailing` — the same one-bound story, widened by the three policy emitters |
 
 The two aliases and the `ComposableParseContext` elaboration, on their own — no lexer scaffold needed:
 

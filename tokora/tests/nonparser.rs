@@ -588,7 +588,8 @@ fn parse_choice_array() {
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
   {
     let mut choices = [Any::new(), Any::new()];
-    let id = deranged::RangedUsize::<0, 2>::new(0).unwrap();
+    // 1-based: the old 0-based `new(0)` is now `new(1)`.
+    let id = deranged::RangedUsize::<1, 2>::new(1).unwrap();
     choices.parse_choice(inp, &id)
   }
 
@@ -860,4 +861,100 @@ fn branch_id() {
   assert_eq!(b.id(), 0);
   let b1: Branch<2> = Branch::B1;
   assert_eq!(b1.id(), 1);
+}
+
+// ── The array choice's id space is a bijection onto its indices ──────────────
+
+/// **Bound to tokora's own declaration, not to `deranged`'s.** Spelling the bound directly
+/// (`RangedUsize::<1, 2>::new(3)`) would test a dependency's property and would keep passing
+/// if this crate reverted `Id` — so the id type is projected off the very `ParseChoice` impl
+/// the dispatch below uses, through a helper that takes the array by reference and never names
+/// `RangedUsize` at all.
+///
+/// Before: `Id = RangedUsize<0, 2>`, so `new(0)` was `Some` (a legal id) and `new(2)` was
+/// `Some` — the over-admission, one past the last index, and a panic on dispatch.
+/// After: `Id = RangedUsize<1, 2>`, so `new(0)` and `new(3)` are both `None` and every value
+/// that exists is a valid index.
+#[test]
+fn array_choice_id_rejects_the_boundary() {
+  /// Projects the array impl's `Id` and reports which of the four boundary values construct.
+  fn id_admits<'inp, L, O, Ctx, Lang, P, const N: usize>(_witness: &[P; N]) -> [bool; 4]
+  where
+    L: Lexer<'inp>,
+    Ctx: ParseContext<'inp, L, Lang>,
+    Lang: ?Sized,
+    P: ParseInput<'inp, L, O, Ctx, Lang>,
+  {
+    type Id<'inp, L, O, Ctx, Lang, P, const N: usize> =
+      <[P; N] as ParseChoice<'inp, L, O, Ctx, Lang>>::Id;
+    [
+      Id::<'inp, L, O, Ctx, Lang, P, N>::new(0).is_some(),
+      Id::<'inp, L, O, Ctx, Lang, P, N>::new(1).is_some(),
+      Id::<'inp, L, O, Ctx, Lang, P, N>::new(2).is_some(),
+      Id::<'inp, L, O, Ctx, Lang, P, N>::new(3).is_some(),
+    ]
+  }
+
+  fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<Token, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    // Deliberately no `RangedUsize` literal anywhere in this cell: naming one would make the
+    // RED a type error rather than the boundary payload. The only thing asserted is which of
+    // the four values the *declared* `Id` admits.
+    let choices = [Any::new(), Any::new()];
+    let admits = id_admits::<TestLexer<'inp>, Token, Ctx, (), _, 2>(&choices);
+    assert_eq!(
+      admits,
+      [false, true, true, false],
+      "array-choice ids are 1-based and bijective: 0 and 3 must not construct, 1 and 2 must"
+    );
+    let _ = inp;
+    Ok(Token::Plus)
+  }
+
+  assert_eq!(
+    Parser::new().apply(parse).parse_str("+").unwrap(),
+    Token::Plus
+  );
+}
+
+/// The boundary id used to panic on dispatch; it now selects the last element through the
+/// public surface.
+#[test]
+fn array_choice_dispatch_reaches_the_last_element() {
+  fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<Token, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    let mut choices = [Any::new(), Any::new()];
+    let last = deranged::RangedUsize::<1, 2>::new(2).unwrap();
+    choices.parse_choice(inp, &last)
+  }
+
+  assert_eq!(
+    Parser::new().apply(parse).parse_str("+").unwrap(),
+    Token::Plus
+  );
+}
+
+/// The slice siblings have no compile-time repair — length is a runtime fact — so the repair
+/// is a **named** refusal. Before: the raw `index out of bounds` message, which says nothing
+/// about the contract. After: a message that names it.
+#[test]
+#[should_panic(expected = "choice id")]
+fn slice_choice_out_of_range_id_names_the_contract() {
+  fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<Token, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    let mut choices = [Any::new(), Any::new()];
+    let slice: &mut [_] = &mut choices;
+    ParseChoice::parse_choice(&mut { slice }, inp, &7usize)
+  }
+
+  let _ = Parser::new().apply(parse).parse_str("+");
 }

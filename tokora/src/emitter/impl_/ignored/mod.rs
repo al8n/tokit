@@ -56,20 +56,33 @@ impl<'a, L, Lang: ?Sized> Emitter<'a, L, Lang> for Ignored {
   }
 }
 
+// `SeparatedEmitter` is `<'inp, L, Lang>`. This assert used to instantiate it as
+// `SeparatedEmitter<'a, Sep, L>` — the *separator* in the lexer slot and the *lexer* in the
+// language slot — and it compiled anyway, because `Ignored` implements the trait for any
+// parameters at all. A transposed assert over an unconstrained type pins nothing: it type-checks
+// whatever you hand it, which is the shape of a cell whose payload cannot fail.
+//
+// Written at the real signature it does pin something: that `Ignored` really is a no-op
+// `SeparatedEmitter` for a concrete lexer at both an unbranded and a branded language. Its
+// teeth are recorded by mutation rather than asserted — narrowing `Ignored`'s impl fails this
+// block, and transposing the parameters back fails it too, now that the slots carry types that
+// cannot stand in for each other.
 #[cfg(test)]
 const _: () = {
   use crate::lexer::DummyLexer;
 
-  struct DummySep;
+  struct DummyLang;
 
-  const fn assert_noop_separated_by_emitter<'a, L, Sep, Error, E>()
+  const fn assert_noop_separated_emitter<'a, L, Lang, Error, E>()
   where
     L: Lexer<'a>,
-    E: SeparatedEmitter<'a, Sep, L, Error = Error>,
+    Lang: ?Sized,
+    E: SeparatedEmitter<'a, L, Lang, Error = Error>,
   {
   }
 
-  assert_noop_separated_by_emitter::<'_, DummyLexer, DummySep, (), Ignored>();
+  assert_noop_separated_emitter::<'_, DummyLexer, (), (), Ignored>();
+  assert_noop_separated_emitter::<'_, DummyLexer, DummyLang, (), Ignored>();
 };
 
 #[cfg(test)]

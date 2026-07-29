@@ -34,3 +34,63 @@ fn parse_bstr_available_under_bstr_1() {
   let b = bstr_1::BStr::new(b"abc");
   assert_eq!(b.len(), 3);
 }
+
+// ── BStr joins the Equivalent family ─────────────────────────────────────────
+
+/// The P08 flip. Before: `E0277: the trait Equivalent<str> is not implemented for BStr` — the
+/// module doc *advertised* `BStr` in its backing list while the impls were absent from both
+/// files of the two-file family. After: it compiles, and agrees with byte equality.
+///
+/// `&str` is the positive control that always compiled, and is what made the gap invisible.
+#[test]
+fn bstr_is_equivalent_in_left_position() {
+  use tokora::utils::cmp::Equivalent;
+
+  fn needs_left<S>(s: &S, probe: &str) -> bool
+  where
+    S: Equivalent<str> + ?Sized,
+  {
+    s.equivalent(probe)
+  }
+
+  let b = bstr_1::BStr::new(b"hello");
+  assert!(needs_left(b, "hello"), "BStr agrees with equal bytes");
+  assert!(!needs_left(b, "hellp"), "and disagrees with unequal bytes");
+
+  // The control, differing in exactly the backing.
+  assert!(needs_left("hello", "hello"));
+}
+
+/// The other two directions of the triple, plus the reverse rows the blanket supplies.
+#[test]
+fn bstr_equivalence_covers_the_triple() {
+  use tokora::utils::cmp::Equivalent;
+
+  let b = bstr_1::BStr::new(b"hello");
+  assert!(Equivalent::<[u8]>::equivalent(b, b"hello".as_slice()));
+  assert!(Equivalent::<bstr_1::BStr>::equivalent(
+    b,
+    bstr_1::BStr::new(b"hello")
+  ));
+  // Reverse directions, through the `AsRef<[u8]>` blanket.
+  assert!(Equivalent::<bstr_1::BStr>::equivalent("hello", b));
+  assert!(Equivalent::<bstr_1::BStr>::equivalent(
+    b"hello".as_slice(),
+    b
+  ));
+}
+
+/// The second file of the family. The memory this repair exists to honour is that the family
+/// is TWO files and a backing needs impls in both — `utils/cmp.rs` had none and
+/// `utils/to_equivalent` had none, and the module doc listed `BStr` anyway.
+#[test]
+fn bstr_joins_the_to_equivalent_half() {
+  use tokora::utils::{IntoEquivalent, ToEquivalent};
+
+  let raw: &[u8] = b"hello";
+  let viewed: &bstr_1::BStr = ToEquivalent::to_equivalent(&raw);
+  assert_eq!(viewed, bstr_1::BStr::new(b"hello"));
+
+  let consumed: &bstr_1::BStr = IntoEquivalent::into_equivalent(raw);
+  assert_eq!(consumed, bstr_1::BStr::new(b"hello"));
+}

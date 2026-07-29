@@ -879,15 +879,21 @@ fn count(hay: &str, needle: &str) -> usize {
 /// exists to prevent: its diagnostics would reach the inner emitter without occupying a
 /// log position, skewing every later rewind recovery.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn cst_forward_census_one_helper_carries_every_channel() {
   let src = include_str!("../sink.rs");
 
   // The forwarded channels: 5 core Emitter + TooFew/TooMany/FullContainer +
-  // SeparatedEmitter (2) + the 4 leading/trailing refinements + PrattEmitter (2).
+  // SeparatedEmitter (2) + the 4 leading/trailing refinements + PrattEmitter (2)
+  // + UnclosedEmitter (1 — the delimiter door, once absent from the sink and therefore
+  // absent from this count too; the two omissions hid each other).
   let calls = count(src, "self.forward_diag::<");
   assert!(
-    calls == 16,
-    "CST_FORWARD_CENSUS drift: {calls} forward_diag call sites, expected 16. A new \
+    calls == 17,
+    "CST_FORWARD_CENSUS drift: {calls} forward_diag call sites, expected 17. A new \
      forwarded channel must route through the one helper AND bump this census in the \
      same commit (grep CST_FORWARD_CENSUS)."
   );
@@ -952,13 +958,20 @@ fn cst_forward_census_one_helper_carries_every_channel() {
 /// GREEN at 123f840 — the audit's proof that beyond Findings 1 and 2 no third per-method gap
 /// exists — and it stays as the permanent tripwire.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source, by `include_str!` and by `std::fs`: forced to run under miri \
+            the walk aborts with 'unsupported operation: `opendir` not available when \
+            isolation is enabled', and there is no UB surface here to be worth interpreting \
+            every byte of what remains"
+)]
 fn cst_composition_census_every_family_method_is_overridden() {
   let src = include_str!("../sink.rs");
 
-  // (a) The 27-method inventory: 11 core Emitter + 5 CstEmitter + 11 capability emit_*.
+  // (a) The 29-method inventory: 12 core Emitter + 5 CstEmitter + 12 capability emit_*.
   // Each must appear as an `fn <name>` impl in the sink; a missing one is a severed channel.
   let overridden = [
-    // 11 core Emitter
+    // 12 core Emitter
     "emit_lexer_error",
     "emit_unexpected_token",
     "emit_error",
@@ -970,13 +983,16 @@ fn cst_composition_census_every_family_method_is_overridden() {
     "commit_token",
     "enter_label",
     "exit_label",
+    // The sink is the one emitter in the crate that binds a source, so it is the one that
+    // must answer this rather than inherit the `None` default.
+    "bound_source",
     // 5 CstEmitter
     "cst_start",
     "cst_token",
     "cst_finish",
     "cst_mark",
     "cst_start_at",
-    // 11 capability emit_*
+    // 12 capability emit_*
     "emit_too_few",
     "emit_too_many",
     "emit_full_container",
@@ -988,12 +1004,44 @@ fn cst_composition_census_every_family_method_is_overridden() {
     "emit_unexpected_trailing_separator",
     "emit_unexpected_end_of_lhs",
     "emit_unexpected_end_of_rhs",
+    // `UnclosedEmitter` — the delimiter door. It was ABSENT from this list and absent from the
+    // sink, and the two absences hid each other: a hard-coded inventory cannot report a
+    // capability nobody wrote down. Its cost was not cosmetic — `UnclosedEmitter` is a member
+    // of `ComposableEmitter`, so a `Sink` could not satisfy the one-bound collecting surface at
+    // all.
+    "emit_unclosed",
   ];
   assert_eq!(
     overridden.len(),
-    27,
-    "the family inventory is 11 core + 5 CstEmitter + 11 capability = 27"
+    29,
+    "the family inventory is 12 core + 5 CstEmitter + 12 capability = 29"
   );
+
+  // DERIVED, and at the TYPE level rather than by string matching — the half a hand-written
+  // inventory cannot do for itself. A list can only omit; it cannot notice an omission, which
+  // is exactly how `UnclosedEmitter` went missing from BOTH the sink and this census at once.
+  //
+  // The first attempt swept `emitter/mod.rs` for `pub use` names and matched **nothing** — the
+  // capability traits live across twelve files and are re-exported by glob. Its own positive
+  // control caught that, which is why a text census was abandoned here: "does `Sink` serve this
+  // capability" is a type question and answers itself at compile time.
+  //
+  // Scope, stated: the *family* question — does `Sink` serve every trait the public bundles
+  // name — is answered by `sink_satisfies_the_public_emitter_bundles`, bound on the bundles
+  // themselves. What this block adds is a second error type: `UnclosedEmitter`'s conversion
+  // sits on the *method* rather than the trait, so a deliberately-thin error type must still be
+  // able to satisfy it. The other capability traits require conversions `SesErr` does not
+  // carry, so asserting them here would test the fixture rather than the sink.
+  {
+    const fn serves_unclosed<'a, L, E>()
+    where
+      L: Lexer<'a>,
+      E: crate::emitter::UnclosedEmitter<'a, L>,
+    {
+    }
+    serves_unclosed::<MiniLexer<'_>, SesSink<'_>>();
+  }
+
   for name in overridden {
     assert!(
       count(src, &std::format!("fn {name}")) >= 1,
@@ -1009,7 +1057,7 @@ fn cst_composition_census_every_family_method_is_overridden() {
     ..core.find("impl<'a, L, U, Lang: ?Sized> Emitter").unwrap()];
   assert_eq!(
     count(trait_body, "  fn "),
-    11,
+    12,
     "core Emitter method count drifted: classify the new method (override + forward, or a \
      documented inherit) and update this census"
   );
@@ -1020,62 +1068,326 @@ fn cst_composition_census_every_family_method_is_overridden() {
     5,
     "CstEmitter method count drifted"
   );
-  let cap_total: usize = [
-    include_str!("../../emitter/pratt.rs"),
-    include_str!("../../emitter/repeated/too_few.rs"),
-    include_str!("../../emitter/repeated/too_many.rs"),
-    include_str!("../../emitter/repeated/full_container.rs"),
-    include_str!("../../emitter/separated/mod.rs"),
-    include_str!("../../emitter/separated/missing_leading.rs"),
-    include_str!("../../emitter/separated/missing_trailing.rs"),
-    include_str!("../../emitter/separated/unexpected_leading.rs"),
-    include_str!("../../emitter/separated/unexpected_trailing.rs"),
-  ]
-  .iter()
-  .map(|src| count(src, "fn emit_"))
-  .sum();
-  assert_eq!(
-    cap_total, 22,
-    "capability trait surface drifted (11 methods x trait def + &mut blanket): classify the \
-     new channel in Sink and update this census"
+  // The capability surface, DERIVED on both sides — no constant, because a hard-coded total is
+  // the shape that let `UnclosedEmitter` through. Its file was missing from this list *and* its
+  // method was missing from the inventory above, so the count still agreed with itself while
+  // `Sink` failed to serve the trait at all. A number cannot notice its own omission.
+  //
+  // What this half covers, exactly: a **method added to a trait**. A new *defaulted* channel on
+  // any capability trait keeps every bundle bound satisfiable — the default supplies it — so
+  // `sink_satisfies_the_public_emitter_bundles` stays green while `Sink` silently inherits a
+  // non-forwarding body. Only reading the trait sources catches that. The two mechanisms are
+  // near-disjoint, not redundant: the bundle bounds catch a *trait* joining a bundle, which no
+  // amount of string matching can see, and this catches a *method* joining a trait, which no
+  // bound can see. The file list below is policed by its own completeness check, so neither
+  // half rests on a list that is free to forget a member.
+  let capability_sources = [
+    ("delimited.rs", include_str!("../../emitter/delimited.rs")),
+    ("pratt.rs", include_str!("../../emitter/pratt.rs")),
+    (
+      "repeated/too_few.rs",
+      include_str!("../../emitter/repeated/too_few.rs"),
+    ),
+    (
+      "repeated/too_many.rs",
+      include_str!("../../emitter/repeated/too_many.rs"),
+    ),
+    (
+      "repeated/full_container.rs",
+      include_str!("../../emitter/repeated/full_container.rs"),
+    ),
+    (
+      "separated/mod.rs",
+      include_str!("../../emitter/separated/mod.rs"),
+    ),
+    (
+      "separated/missing_leading.rs",
+      include_str!("../../emitter/separated/missing_leading.rs"),
+    ),
+    (
+      "separated/missing_trailing.rs",
+      include_str!("../../emitter/separated/missing_trailing.rs"),
+    ),
+    (
+      "separated/unexpected_leading.rs",
+      include_str!("../../emitter/separated/unexpected_leading.rs"),
+    ),
+    (
+      "separated/unexpected_trailing.rs",
+      include_str!("../../emitter/separated/unexpected_trailing.rs"),
+    ),
+  ];
+
+  // Is that list COMPLETE? It is hand-written, which is the same shape as the hand-written
+  // method inventory that hid `UnclosedEmitter`, so it does not get to be trusted on its own
+  // word. Every **trait** declared under `src/emitter` whose name ends in `Emitter` must live in
+  // a file the list names, or be exempted **at its path, with the mechanism that covers it
+  // instead**.
+  //
+  // Keyed on (path, trait) rather than on files, or on bare trait names, on purpose. The unit of
+  // hazard is one trait at one path, so that is the unit of exemption:
+  //
+  //   - exempting `mod.rs` wholesale — the first spelling — excused a *third* trait added to
+  //     `mod.rs` beside the core one;
+  //   - exempting the bare name `Emitter` — the second spelling — excused a trait *named*
+  //     `Emitter` declared anywhere at all, including an unlisted new file. An exemption that
+  //     does not name where its subject lives is a wildcard wearing a specific name.
+  //
+  // Each exemption is also asserted **observed exactly once at its stated path**, so an
+  // exemption whose subject moved, was renamed, or was deleted fails rather than quietly going
+  // on excusing something that is no longer there.
+  //
+  // LIMITS, stated rather than implied — this is a text scanner and it is not going to become
+  // anything else. It sees a declaration whose line begins, after any leading whitespace, with
+  // `pub trait ` followed by the name; nesting depth no longer matters, but *form* does. It
+  // misses a trait emitted by a macro, and one whose name sits on a line below its `pub trait `
+  // (legal, though rustfmt does not produce it).
+  //
+  // A trait declared in a form this does not match is caught by the bundle bounds in
+  // `sink_satisfies_the_public_emitter_bundles` if it joins a bundle, and by nothing if it does
+  // not. Escaping therefore needs a conjunction: a new `*Emitter`, spelled in one of those
+  // forms, joining no bundle, unimplemented by `Sink`, and unnoticed at the call site. That
+  // residue is narrower than the surface it guards, and it is where this rail stops — past this
+  // point the instrument costs more than the thing it measures.
+  //
+  // The reverse direction needs no check: a file that is listed and then deleted or renamed
+  // fails `include_str!` at compile time.
+  {
+    /// Traits deliberately outside `capability_sources`, as `(path, trait, what covers it
+    /// instead)`. A new entry here is a claim that has to be true, at that path.
+    const EXEMPT: &[(&str, &str, &str)] = &[
+      (
+        "mod.rs",
+        "Emitter",
+        "the core trait: its own `  fn ` count tripwire above forces every new method to be \
+         classified here",
+      ),
+      (
+        "cst.rs",
+        "CstEmitter",
+        "its own `  fn ` count tripwire above, and one of the two explicit extras in \
+         `sink_satisfies_the_public_emitter_bundles`",
+      ),
+      (
+        "mod.rs",
+        "ComposableEmitter",
+        "a bundle, not a member — it declares no methods of its own, and `Sink`'s conformance \
+         to it is asserted at the type level by `sink_satisfies_the_public_emitter_bundles`",
+      ),
+      (
+        "mod.rs",
+        "PolicyComposableEmitter",
+        "likewise a bundle, asserted at the type level by \
+         `sink_satisfies_the_public_emitter_bundles`",
+      ),
+      (
+        "mod.rs",
+        "ValueKeyedEmitter",
+        "a method-less marker trait — it carries no channel that could be severed by a \
+         non-forwarding default",
+      ),
+    ];
+
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/emitter"));
+
+    fn rs_files(dir: &std::path::Path, out: &mut std::vec::Vec<std::path::PathBuf>) {
+      for entry in std::fs::read_dir(dir).expect("src/emitter is readable from the crate root") {
+        let path = entry.expect("a readable directory entry").path();
+        if path.is_dir() {
+          rs_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+          out.push(path);
+        }
+      }
+    }
+
+    /// Names of the traits a source declares whose name ends in `Emitter` — the capability
+    /// shape. Deliberately loose in the safe direction: over-matching forces a trait to be
+    /// listed or exempted, and can never excuse one.
+    ///
+    /// `trim_start` is load-bearing: matching a line that begins *exactly* `pub trait ` misses
+    /// every declaration nested inside an indented `mod` block. This crate has now been bitten
+    /// by that same "the pattern assumed column zero" shape three times.
+    fn declared_emitter_traits(src: &str) -> std::vec::Vec<&str> {
+      src
+        .lines()
+        .filter_map(|line| {
+          let name = line
+            .trim_start()
+            .strip_prefix("pub trait ")?
+            .split(['<', ' ', ':'])
+            .next()?;
+          name.ends_with("Emitter").then_some(name)
+        })
+        .collect()
+    }
+
+    let mut files = std::vec::Vec::new();
+    rs_files(root, &mut files);
+
+    let mut declared_traits = std::vec::Vec::new();
+    for path in &files {
+      let src = std::fs::read_to_string(path).expect("an emitter source is readable");
+      let rel = path
+        .strip_prefix(root)
+        .expect("every walked path sits under src/emitter")
+        .to_string_lossy()
+        .replace('\\', "/");
+      for name in declared_emitter_traits(&src) {
+        declared_traits.push((rel.clone(), std::string::String::from(name)));
+      }
+    }
+
+    // Liveness floor, and ONLY that. A floor cannot distinguish "the walk missed a trait" from
+    // "there is no such trait", because the traits it does find already satisfy it — so it is
+    // not asked to. It catches the wholesale case: a walk that found nothing, or a predicate
+    // that matched nothing, would assert nothing below and report that as coverage.
+    //
+    // The detectors are the two exact assertions that follow: every exemption observed exactly
+    // once at its stated path, and every discovered trait listed or exempted.
+    assert!(
+      declared_traits.len() >= 15,
+      "the emitter-trait sweep found only {} trait(s) across {} scanned file(s) — it is \
+       measuring a broken walk or a broken predicate, not a complete surface",
+      declared_traits.len(),
+      files.len()
+    );
+
+    // An exemption is a claim about a specific trait at a specific path. Check the claim, both
+    // ways: exactly once means it is still there, and that nothing else answers to it.
+    for (file, name, mechanism) in EXEMPT {
+      let seen = declared_traits
+        .iter()
+        .filter(|(rel, trait_name)| rel == file && trait_name == name)
+        .count();
+      assert_eq!(
+        seen, 1,
+        "CST_COMPOSITION_CENSUS: the exemption for `{name}` at `src/emitter/{file}` was \
+         observed {seen} time(s), not once. It is excused on the grounds that {mechanism} — if \
+         the trait moved, was renamed, or was deleted, that claim no longer describes anything \
+         and the exemption must move or go with it"
+      );
+    }
+
+    for (rel, name) in &declared_traits {
+      let listed = capability_sources.iter().any(|(file, _)| file == rel);
+      let exempt = EXEMPT
+        .iter()
+        .any(|(file, trait_name, _)| file == rel && trait_name == name);
+      assert!(
+        listed || exempt,
+        "CST_COMPOSITION_CENSUS: `{name}` (src/emitter/{rel}) is an emitter trait that is \
+         neither declared in a file `capability_sources` names nor exempted at this path. Add \
+         its file to the list so its methods are censused, or add `(\"{rel}\", \"{name}\", …)` \
+         to EXEMPT with the mechanism that covers it instead — a trait outside every bundle is \
+         invisible to the type-level half, which is exactly how `UnclosedEmitter` was missed"
+      );
+    }
+  }
+
+  /// Every `emit_*` method name declared in a source, in order, deduplicated by the caller.
+  fn emit_method_names(src: &str) -> std::vec::Vec<&str> {
+    src
+      .match_indices("fn emit_")
+      .map(|(i, _)| {
+        let rest = &src[i + "fn ".len()..];
+        let end = rest
+          .find(|c: char| !c.is_alphanumeric() && c != '_')
+          .unwrap_or(rest.len());
+        &rest[..end]
+      })
+      .collect()
+  }
+
+  let mut declared: std::vec::Vec<&str> = capability_sources
+    .iter()
+    .flat_map(|(_, src)| emit_method_names(src))
+    .collect();
+  declared.sort_unstable();
+  declared.dedup();
+
+  // Positive control: a sweep that matched nothing would assert nothing, which is how a green
+  // census can mean "the pattern is broken" instead of "the surface is covered".
+  assert!(
+    declared.len() >= 12,
+    "the capability `emit_*` sweep found only {} method(s) — it is measuring a broken pattern, \
+     not an absent channel",
+    declared.len()
   );
+
+  for method in &declared {
+    assert!(
+      count(src, &std::format!("fn {method}")) >= 1,
+      "CST_COMPOSITION_CENSUS: a capability trait declares `{method}` and `Sink` does not \
+       override it — the channel silently inherits a non-forwarding default, which is a \
+       recorded diagnostic that never reaches the inner emitter"
+    );
+    assert!(
+      overridden.contains(method),
+      "CST_COMPOSITION_CENSUS: `{method}` is declared by a capability trait but missing from \
+       the inventory above — add it there too, or the inventory drifts out from under the \
+       surface it claims to enumerate"
+    );
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // The forwarding matrix — Sink satisfies every bound its inner emitter does
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The `ComposableEmitter`-shaped conformance: a context bound naming the
-/// full emitter trait family — core + the six atomic capability traits + the separated
-/// refinements + pratt — accepts `Sink<E>` (and `&mut Sink<E>`, the parse_partial
-/// threading shape) wherever it accepts `E`.
+/// Conformance stated against the **public bundles themselves**, not against a copy of their
+/// membership: `Sink<E>` — and `&mut Sink<E>`, the `parse_partial` threading shape — satisfies
+/// [`ComposableEmitter`](crate::emitter::ComposableEmitter) and
+/// [`PolicyComposableEmitter`](crate::emitter::PolicyComposableEmitter) wherever `E` does.
+///
+/// The previous spelling named eleven traits by hand, and it had already gone stale:
+/// `UnclosedEmitter` was missing from it, missing from the composition census below, and
+/// missing from `Sink`. Three hand-written lists agreed with one another about a capability
+/// none of them carried, which is how a `Sink` that could not satisfy `ComposableEmitter` at
+/// all passed a test named for the full family. A bundle cannot drift from itself: a trait
+/// added to either bundle fails **here, at compile time, naming the unsatisfied trait**, on the
+/// day it joins — no census to update, no count to keep.
+///
+/// `CstEmitter` and `PrattEmitter` are spelled out because they sit outside both bundles by
+/// design (see [`ComposableEmitter`](crate::emitter::ComposableEmitter)'s own docs — pratt's
+/// bound is not part of the collecting surface, and the CST channel is orthogonal to all of
+/// it). They are the residue a bundle bound cannot derive, so they are enumerated with a
+/// reason rather than counted.
 #[test]
-fn sink_satisfies_the_full_emitter_family() {
-  use crate::emitter::{
-    FullContainerEmitter, MissingLeadingSeparatorEmitter, MissingTrailingSeparatorEmitter,
-    PrattEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter,
-    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
-  };
+fn sink_satisfies_the_public_emitter_bundles() {
+  use crate::emitter::{ComposableEmitter, PolicyComposableEmitter, PrattEmitter};
 
+  /// The one-bound collecting surface. `PolicyComposableEmitter` has it as a supertrait, so
+  /// this bound is implied by the next one — it is kept separate so a break reports which
+  /// tier broke rather than only the wider one.
   fn composable<'inp, T>(_: &T)
   where
-    T: Emitter<'inp, MiniLexer<'inp>>
-      + CstEmitter<'inp, MiniLexer<'inp>>
-      + TooFewEmitter<'inp, MiniLexer<'inp>>
-      + TooManyEmitter<'inp, MiniLexer<'inp>>
-      + FullContainerEmitter<'inp, MiniLexer<'inp>>
-      + SeparatedEmitter<'inp, MiniLexer<'inp>>
-      + MissingLeadingSeparatorEmitter<'inp, MiniLexer<'inp>>
-      + MissingTrailingSeparatorEmitter<'inp, MiniLexer<'inp>>
-      + UnexpectedLeadingSeparatorEmitter<'inp, MiniLexer<'inp>>
-      + UnexpectedTrailingSeparatorEmitter<'inp, MiniLexer<'inp>>
-      + PrattEmitter<'inp, MiniLexer<'inp>>,
+    T: ComposableEmitter<'inp, MiniLexer<'inp>>,
+  {
+  }
+
+  /// The collecting surface plus the three emitters a count or separator policy needs.
+  fn policy_composable<'inp, T>(_: &T)
+  where
+    T: PolicyComposableEmitter<'inp, MiniLexer<'inp>>,
+  {
+  }
+
+  /// Outside both bundles by design, and therefore the only part of this that must be
+  /// written down.
+  fn outside_the_bundles<'inp, T>(_: &T)
+  where
+    T: CstEmitter<'inp, MiniLexer<'inp>> + PrattEmitter<'inp, MiniLexer<'inp>>,
   {
   }
 
   let mut sink = verbose_sink("");
   composable(&sink);
+  policy_composable(&sink);
+  outside_the_bundles(&sink);
   composable(&&mut sink);
+  policy_composable(&&mut sink);
+  outside_the_bundles(&&mut sink);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3439,45 +3751,592 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, L
 type SesSink<'inp> = Sink<'inp, MiniLexer<'inp>, Verbose<SesErr>>;
 type SesCtx<'inp, 'e> = (&'e mut SesSink<'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
 
-// ── Two unchecked identities ───────────────────────────────────────────────────
+/// A deliberately **incomplete** forwarder: every emission goes through, `bound_source` does
+/// not. It exists to pin the residue, not to be imitated — a real wrapper forwards
+/// `bound_source` exactly as the `&mut U` blanket does.
+struct NonForwardingWrapper<'a, 'inp>(&'a mut SesSink<'inp>);
 
-/// **A PIN OF A KNOWN-OPEN DEFECT, not of correct behaviour.** It asserts today's wrong
-/// answer so that closing the hole flips it, and so the hole cannot be quietly forgotten.
+type NonFwdCtx<'inp, 'e> = (
+  NonForwardingWrapper<'e, 'inp>,
+  DefaultCache<'inp, MiniLexer<'inp>>,
+);
+
+type MiniSpan<'inp> = <MiniLexer<'inp> as Lexer<'inp>>::Span;
+type MiniToken<'inp> = <MiniLexer<'inp> as Lexer<'inp>>::Token;
+type MiniLexErr<'inp> = <MiniToken<'inp> as crate::Token<'inp>>::Error;
+
+impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'inp> {
+  type Error = SesErr;
+
+  fn emit_lexer_error(
+    &mut self,
+    err: Spanned<MiniLexErr<'inp>, MiniSpan<'inp>>,
+  ) -> Result<(), Self::Error> {
+    self.0.emit_lexer_error(err)
+  }
+
+  fn emit_unexpected_token(
+    &mut self,
+    err: crate::error::token::UnexpectedTokenOf<'inp, MiniLexer<'inp>, ()>,
+  ) -> Result<(), Self::Error> {
+    self.0.emit_unexpected_token(err)
+  }
+
+  fn emit_error(&mut self, err: Spanned<Self::Error, MiniSpan<'inp>>) -> Result<(), Self::Error> {
+    self.0.emit_error(err)
+  }
+
+  fn emit_warning(&mut self, w: Spanned<Self::Error, MiniSpan<'inp>>) -> Result<(), Self::Error> {
+    self.0.emit_warning(w)
+  }
+
+  fn emit_skipped_region(
+    &mut self,
+    span: MiniSpan<'inp>,
+    skipped: usize,
+  ) -> Result<(), Self::Error> {
+    self.0.emit_skipped_region(span, skipped)
+  }
+
+  fn checkpoint(&self) -> u64 {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::checkpoint(&*self.0)
+  }
+
+  fn rewind(&mut self, cursor: &crate::input::Cursor<'inp, '_, MiniLexer<'inp>>, ckp: u64) {
+    self.0.rewind(cursor, ckp)
+  }
+
+  fn release(&mut self, ckp: u64) {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::release(&mut *self.0, ckp)
+  }
+
+  fn commit_token(&mut self, tok: &MiniToken<'inp>, span: &MiniSpan<'inp>) {
+    self.0.commit_token(tok, span)
+  }
+
+  // `bound_source` is DELIBERATELY not forwarded — that omission is the whole point of the
+  // type, and `a_non_forwarding_wrapper_disables_the_check_and_that_is_pinned` asserts what
+  // it costs.
+}
+
+// ── The source-identity handshake ──────────────────────────────────────────────
+
+/// **The matching-source control, and it comes first deliberately.**
 ///
-/// `Sink::new` binds a source, and `'inp` proves that borrow and the parser's borrow both
-/// outlive the sink — **not that they are the same buffer**. Nothing ties them: no pointer
-/// comparison, no length comparison, no identity. So a sink bound to one buffer and used
-/// while parsing another of the same length materializes a tree whose *text* is the sink's
-/// buffer and whose *structure* came from the parser's, and every existing wall passes it.
+/// `SourceIdentity`'s projection is proven separately (it compiles at the MSRV and `str`,
+/// `[u8]` and `BStr` views of one buffer agree). What that does *not* prove is the **wiring**:
+/// that `Input`'s `input` field and `Sink`'s `source` field really do observe the same
+/// referent when both are reached through the crate's own construction paths. If they did not,
+/// the refusal cell below would pass for the wrong reason — it would be catching the crate
+/// disagreeing with itself rather than catching a foreign source.
 ///
-/// Equal length is the point: a length check alone would not catch this, so a future fix
-/// cannot satisfy this cell cheaply.
-///
-/// What binding at construction actually bought is the removal of the **late** half of this
-/// class — `finish` no longer takes a source, so it can no longer be handed a different one.
-/// The **early** half, choosing the wrong buffer at construction, is still open. Closing it
-/// needs an identity the sink can check, and the sink observes no handle on the parser's
-/// buffer through any `Emitter` hook, so it belongs with the emitter/context contract rather
-/// than here.
-///
-/// Flips when that lands: this cell should then refuse, and its `expect` becomes an
-/// `expect_err`.
+/// Falsifying output: a panic. That means the two sides' projections diverge on a pairing that
+/// is correct, and the check is unusable as written.
 #[test]
-fn sink_bound_to_a_foreign_source_is_not_yet_detected() {
-  let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
+fn sink_and_parse_over_one_buffer_agree_on_identity() {
+  let buf = std::string::String::from("ab");
+  let src: &str = &buf;
+
+  let mut sink: SesSink<'_> = Sink::new(src, Verbose::new(), profile());
   {
     let mut borrowed = &mut sink;
-    let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new("ab");
+    let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new(src);
     let mut inp = input.as_ref(&mut borrowed);
     while let Ok(Some(_)) = inp.next() {}
   }
   let (green, _emitter) = sink.finish(K_ROOT);
-  let green = green.expect("equal length hides the mismatch from every existing wall");
+  let green = green.expect("a matching pairing must materialize");
+  assert_eq!(
+    text(green),
+    "ab",
+    "the tree's text is the one buffer both sides hold"
+  );
+}
+
+/// **The flip.** This cell used to be named `sink_bound_to_a_foreign_source_is_not_yet_detected`
+/// and asserted today's *wrong* answer — a tree whose text was `"XY"` and whose structure came
+/// from `"ab"` — so that closing the hole would flip it. Closing it did.
+///
+/// `Sink::new` binds a source, and `'inp` proves that borrow and the parser's borrow both
+/// outlive the sink — **not that they are the same buffer**. Equal length is the point: a
+/// length check alone never caught this, and `finish` never could, because the event log a
+/// wrongly-paired sink produces is byte-identical to one a legal single parse could produce.
+/// The identity handshake at the point the emitter is attached to the input is the only place
+/// with both halves in hand.
+///
+/// `MiniLexer::Source = str`, which is unsized, so `REFERENT_IS_BYTES` is `true` and an
+/// unequal reference here is *proof* of an unequal source. The companion cell below pins what
+/// happens where it is not proof.
+///
+/// Falsifying output: no panic. That means the check did not fire at the seam.
+#[test]
+#[should_panic(expected = "bound to a different source value")]
+fn sink_bound_to_a_foreign_source_is_refused() {
+  let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
+  let mut borrowed = &mut sink;
+  let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new("ab");
+  let mut inp = input.as_ref(&mut borrowed);
+  while let Ok(Some(_)) = inp.next() {}
+}
+
+/// **The cell that guards the conservative posture. Without it the posture is a paragraph.**
+///
+/// The refusal fires only where an unequal reference *proves* an unequal source. Here the two
+/// sides hold the same buffer through two different `&str` **locals** — a shape a caller
+/// writes without thinking — and the projection of a `&str` would measure where the pointer is
+/// stored, not where the bytes are. `L::Source` is `str`, so the projection reads through to
+/// the bytes and this is accepted for the right reason; the sized-backing case is pinned by
+/// the `REFERENT_IS_BYTES` unit below, which is where an inequality genuinely proves nothing.
+///
+/// Falsifying output: a panic. That would mean the conservative posture leaked and the check
+/// is refusing correct code after all.
+#[test]
+fn a_second_reference_to_one_buffer_is_not_refused() {
+  let buf = std::string::String::from("ab");
+  let sink_view: &str = &buf;
+  let parse_view: &str = &buf[..];
+
+  let mut sink: SesSink<'_> = Sink::new(sink_view, Verbose::new(), profile());
+  {
+    let mut borrowed = &mut sink;
+    let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new(parse_view);
+    let mut inp = input.as_ref(&mut borrowed);
+    while let Ok(Some(_)) = inp.next() {}
+  }
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    text(green.expect("two views of one buffer are one source")),
+    "ab"
+  );
+}
+
+/// The `REFERENT_IS_BYTES` census, as **compile-time** assertions, because the whole
+/// conservative posture rests on exactly three backings answering `true` and that is a fact
+/// about types rather than about a run.
+///
+/// Falsifying output: a build failure. Either a `?Sized` backing lost its override — the check
+/// goes inert on the crate's own lexers — or a **sized** one gained one, which is the direction
+/// that matters: the check would start refusing correct code.
+const _: () = {
+  use crate::Source;
+
+  assert!(
+    <str as Source<usize>>::REFERENT_IS_BYTES,
+    "str is unsized: the reference is the data"
+  );
+  assert!(
+    <[u8] as Source<usize>>::REFERENT_IS_BYTES,
+    "[u8] is unsized: the reference is the data"
+  );
+  assert!(
+    !<&str as Source<usize>>::REFERENT_IS_BYTES,
+    "&str is Sized: the reference addresses the pointer variable, not the bytes"
+  );
+  assert!(
+    !<&[u8] as Source<usize>>::REFERENT_IS_BYTES,
+    "&[u8] is Sized: the reference addresses the pointer variable, not the bytes"
+  );
+};
+
+#[cfg(feature = "bstr_1")]
+const _: () = {
+  use crate::Source;
+
+  assert!(
+    <bstr_1::BStr as Source<usize>>::REFERENT_IS_BYTES,
+    "BStr is unsized"
+  );
+  assert!(
+    !<&bstr_1::BStr as Source<usize>>::REFERENT_IS_BYTES,
+    "&BStr is Sized"
+  );
+};
+
+#[cfg(feature = "bytes_1")]
+const _: () = {
+  use crate::Source;
+
+  assert!(
+    !<bytes_1::Bytes as Source<usize>>::REFERENT_IS_BYTES,
+    "an owned handle addresses a variable; two clones of one Arc are the same source at two \
+     addresses, and refusing them would panic correct code"
+  );
+};
+
+/// **The forwarder cell, and it is load-bearing.** A wrapper that forwards every emission but
+/// inherits `bound_source`'s `None` default silently disables the check for whatever it wraps
+/// — the same forwarding obligation `checkpoint`/`rewind`/`release` carry.
+///
+/// Falsifying output: `None` from the `&mut` blanket, which is the silently-disabled state.
+#[test]
+fn forwarder_preserves_bound_source() {
+  use crate::Emitter;
+
+  let buf = std::string::String::from("ab");
+  let src: &str = &buf;
+  let mut sink: SesSink<'_> = Sink::new(src, Verbose::new(), profile());
+
+  let direct = Emitter::<'_, MiniLexer<'_>, ()>::bound_source(&sink);
+  assert!(direct.is_some(), "a sink binds a source");
+
+  let borrowed = &mut sink;
+  let through_blanket = Emitter::<'_, MiniLexer<'_>, ()>::bound_source(&borrowed);
+  assert_eq!(
+    through_blanket, direct,
+    "the `&mut U` blanket must forward `bound_source`; answering `None` here would disable \
+     the identity check for every sink reached through a mutable borrow — which is how every \
+     parse reaches one"
+  );
+}
+
+/// **The prefix cell.** Two slices of ONE buffer share an origin, so an origin-only identity
+/// accepts a sink bound to `&buf[..2]` while the parse reads `&buf[..3]`.
+///
+/// The attack needs no out-of-bounds span, which is why `FinishError::SpanOutOfBounds` cannot
+/// see it: the parser reads byte 2 and lets it choose **structure**, then commits only spans
+/// inside `0..2`. `finish` materializes a tree over the sink's shorter text with no
+/// out-of-bounds event anywhere, and the round-trip law still holds — `tree.text()` is exactly
+/// the sink's buffer. What escaped is structure shaped by a byte absent from the materialized
+/// source: the original wrong-source class, surviving for same-allocation prefixes.
+///
+/// Falsifying output: no panic. That means the seam compared origins and ignored extent.
+#[test]
+#[should_panic(expected = "shorter extent")]
+fn sink_bound_to_a_prefix_of_the_parsed_source_is_refused() {
+  let buf = std::string::String::from("abc");
+  let sink_src: &str = &buf[..2];
+  let parse_src: &str = &buf[..3];
+
+  // Same origin — an origin-only identity cannot tell these apart.
+  assert_eq!(
+    crate::source::SourceIdentity::of(sink_src).addr(),
+    crate::source::SourceIdentity::of(parse_src).addr(),
+    "the premise of this cell: two prefixes of one buffer share an offset origin"
+  );
+
+  let mut sink: SesSink<'_> = Sink::new(sink_src, Verbose::new(), profile());
+  let mut borrowed = &mut sink;
+  let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new(parse_src);
+  // The seam. Everything below is what accepting this pairing costs.
+  let mut inp = input.as_ref(&mut borrowed);
+
+  // Consume exactly the two bytes the sink's buffer holds. Both commit, both are in bounds,
+  // and together they cover `0..2` completely — so neither `SpanOutOfBounds` nor
+  // `UncoveredGap` has anything to report.
+  inp.next().expect("lexes").expect("byte 0");
+  inp.next().expect("lexes").expect("byte 1");
+
+  // Now PEEK byte 2. `peek_one` does not advance the cursor and commits nothing, so this byte
+  // enters no span and no event — it only informs a decision.
+  let saw_a_byte_the_sink_does_not_have = inp.peek_one().expect("peeks").is_some();
+  drop(inp);
+
+  // …and the decision picks the tree's shape.
+  let root_kind = if saw_a_byte_the_sink_does_not_have {
+    K_LIST
+  } else {
+    K_NODE
+  };
+  let (green, _emitter) = sink.finish(root_kind);
+  let green = green.expect("every committed span is in bounds and `0..2` is fully covered");
+  assert_eq!(text(green.clone()), "ab", "the text is the sink's buffer");
+  assert_eq!(
+    tree(green).kind(),
+    K_LIST,
+    "and the shape came from byte 2, which is not in that text — with no out-of-bounds span \
+     and no uncovered gap anywhere for a later check to catch"
+  );
+}
+
+/// The other direction, and it must stay **accepted at the seam**: a sink bound to a *longer*
+/// extent than the parse reads is the fixed-arena streaming shape, not a defect. Every span the
+/// parse produces lies inside the parse extent, which is a subset of the sink's, so every text
+/// slice is correct. The trailing bytes are merely uncovered — and that is a question `finish`
+/// already owns and answers, by name.
+///
+/// This is why the extent conjunct is an **ordering and not an equality**: one representation
+/// must not stand for two cases, and these two cases have opposite answers. The cell asserts
+/// both halves — the seam lets it through, and the tail is then reported rather than ignored.
+///
+/// Falsifying output: a panic at `as_ref`. That would mean the conjunct went in the wrong
+/// direction and the streaming case is now refused at the door.
+#[test]
+fn sink_bound_to_a_longer_extent_than_the_parse_is_accepted_at_the_seam() {
+  let buf = std::string::String::from("abc");
+  let sink_src: &str = &buf[..3];
+  let parse_src: &str = &buf[..2];
+
+  let mut sink: SesSink<'_> = Sink::new(sink_src, Verbose::new(), profile());
+  {
+    let mut borrowed = &mut sink;
+    let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new(parse_src);
+    // The seam accepts: a longer-bound sink is a capability, not a leak.
+    let mut inp = input.as_ref(&mut borrowed);
+    while let Ok(Some(_)) = inp.next() {}
+  }
+
+  // The uncovered tail is then `finish`'s business, and it names it rather than materializing a
+  // tree whose text quietly exceeds what the parse saw. (`finish_partial` is the opt-in that
+  // tiles it instead — the streaming caller's choice to make, not the seam's.)
+  let (strict, _emitter) = sink.finish(K_ROOT);
+  assert!(
+    matches!(strict, Err(FinishError::UncoveredGap { start: 2, end: 3 })),
+    "the unparsed tail is reported by name, not silently accepted: {strict:?}"
+  );
+}
+
+/// The policy as a **table**, so it is one artifact rather than two assertions a reader has to
+/// reassemble. `SourceIdentity::covers` is the named relation; the seam enforces it as two
+/// separate asserts only so a failure says which half broke.
+///
+/// The asymmetry is the whole content: origin is an equality, extent is an ordering, and the
+/// ordering runs one way. This has been got backwards once — the first ruling was
+/// `sink_len <= parse_len` — so it is pinned in every direction rather than described.
+///
+/// Falsifying output: any row disagreeing. That means `covers` and the seam have drifted apart,
+/// and the seam is then enforcing something the type does not document.
+#[test]
+fn source_identity_covers_is_the_stated_policy_in_every_direction() {
+  use crate::source::SourceIdentity;
+
+  let buf = std::string::String::from("abcd");
+  let other = std::string::String::from("wxyz");
+
+  let full = SourceIdentity::of(&buf[..4]);
+  let prefix = SourceIdentity::of(&buf[..2]);
+  let shifted = SourceIdentity::of(&buf[1..]);
+  let foreign = SourceIdentity::of(&other[..4]);
+
+  // Same origin, equal extent — the ordinary pairing.
+  assert!(full.covers(full), "a source covers itself");
+
+  // Same origin, sink LONGER than the parse — the fixed-arena streaming shape. Accepted.
+  assert!(
+    full.covers(prefix),
+    "a sink bound to the whole buffer may serve a parse over a prefix: every span the parse \
+     emits lies inside the sink's extent, and the unparsed tail is `finish`'s business"
+  );
+
+  // Same origin, sink SHORTER than the parse. Refused.
+  assert!(
+    !prefix.covers(full),
+    "a sink bound to a prefix must NOT serve a longer parse: peeked bytes past its end can \
+     shape a tree that will not contain them, with nothing downstream able to see it"
+  );
+
+  // A shifted view is a different origin, not a shorter extent — every offset means something
+  // else there, so no extent relation can rescue it.
+  assert!(
+    !full.covers(shifted),
+    "a shifted view is a different origin"
+  );
+  assert!(!shifted.covers(full), "…in both directions");
+
+  // Different allocation entirely.
+  assert!(!full.covers(foreign), "a foreign buffer is never covered");
+  assert!(!foreign.covers(full), "…in both directions");
+
+  // And the two halves really are the two halves.
+  assert_eq!(full.addr(), prefix.addr(), "prefixes share an origin");
+  assert_ne!(full.extent(), prefix.extent(), "…and differ in extent");
+  assert_ne!(full.addr(), shifted.addr(), "a shifted view does not");
+}
+
+/// The extent projection on the **third** `REFERENT_IS_BYTES` backing. `str` and `[u8]` are
+/// exercised by every cell above; `BStr` is not, and the extent half rests on it being
+/// `#[repr(transparent)]` over `[u8]` so that `size_of_val` reads a byte length rather than a
+/// struct size. That is a fact about someone else's type, so it is checked rather than assumed.
+///
+/// Falsifying output: a wrong extent. That would mean the seam compares a struct size against a
+/// byte length for `BStr` sources, refusing or accepting on nonsense.
+#[cfg(feature = "bstr_1")]
+#[test]
+fn bstr_projects_a_byte_extent_like_the_other_unsized_backings() {
+  use crate::source::SourceIdentity;
+  use bstr_1::ByteSlice;
+
+  let buf = b"abcd";
+  let full: &bstr_1::BStr = buf[..].as_bstr();
+  let prefix: &bstr_1::BStr = buf[..2].as_bstr();
+
+  assert_eq!(
+    SourceIdentity::of(full).extent(),
+    4,
+    "BStr is repr(transparent) over [u8], so its extent is a byte length"
+  );
+  assert_eq!(SourceIdentity::of(prefix).extent(), 2);
+  assert_eq!(
+    SourceIdentity::of(full).addr(),
+    SourceIdentity::of(prefix).addr(),
+    "…and two BStr prefixes of one buffer still share an origin"
+  );
+  assert!(SourceIdentity::of(full).covers(SourceIdentity::of(prefix)));
+  assert!(!SourceIdentity::of(prefix).covers(SourceIdentity::of(full)));
+}
+
+/// The `conformance::emitter` kit is the mitigation for the one residual the defaulted
+/// `bound_source` leaves — a source-binding emitter whose author forgets to override it. Here
+/// the kit is exercised in both directions on the crate's own types, so it is a tool that has
+/// been shown to work rather than a tool that has been shipped.
+#[test]
+#[cfg(feature = "conformance")]
+fn conformance_emitter_kit_accepts_the_sink_and_its_forwarder() {
+  use crate::conformance::emitter::{assert_binds_source, assert_forwards_bound_source};
+
+  let buf = std::string::String::from("ab");
+  let src: &str = &buf;
+  let mut sink: SesSink<'_> = Sink::new(src, Verbose::new(), profile());
+
+  assert_binds_source::<MiniLexer<'_>, (), _>(&sink, src);
+
+  let mut probe: SesSink<'_> = Sink::new(src, Verbose::new(), profile());
+  let borrowed = &mut sink;
+  assert_forwards_bound_source::<MiniLexer<'_>, (), _, _>(&borrowed, &probe);
+  // Silence the unused-mut path: `probe` exists only as an independent `Some` to compare
+  // against, and both sinks bind the same buffer.
+  let _ = &mut probe;
+}
+
+/// The kit's own RED: an emitter that binds **no** source fails `assert_binds_source`, which
+/// is precisely the state a source-binding author who forgot the override would be in.
+#[test]
+#[cfg(feature = "conformance")]
+#[should_panic(expected = "inherits `Emitter::bound_source`'s `None` default")]
+fn conformance_emitter_kit_refuses_an_emitter_that_binds_nothing() {
+  use crate::conformance::emitter::assert_binds_source;
+
+  let src: &str = "ab";
+  let em: Verbose<SesErr> = Verbose::new();
+  assert_binds_source::<MiniLexer<'_>, (), _>(&em, src);
+}
+
+/// The kit's second RED: a wrapper that does not forward is caught.
+#[test]
+#[cfg(feature = "conformance")]
+#[should_panic(expected = "does not forward `bound_source`")]
+fn conformance_emitter_kit_refuses_a_non_forwarding_wrapper() {
+  use crate::conformance::emitter::assert_forwards_bound_source;
+
+  let buf = std::string::String::from("ab");
+  let src: &str = &buf;
+  let mut sink: SesSink<'_> = Sink::new(src, Verbose::new(), profile());
+  let inner_probe: SesSink<'_> = Sink::new(src, Verbose::new(), profile());
+  let wrapper = NonForwardingWrapper(&mut sink);
+  assert_forwards_bound_source::<MiniLexer<'_>, (), _, _>(&wrapper, &inner_probe);
+}
+
+/// **A PIN OF A KNOWN-OPEN RESIDUE (1 of 4).** A wrapper that forwards every emission but hides
+/// `Emitter::bound_source` reports `None`, so the seam concludes "this emitter binds no source"
+/// and accepts a pairing it would otherwise refuse.
+///
+/// A finish-time wall against this was built and **removed**: it caught this shape and three
+/// separate bypasses were then found for it — pre-arming through the public `bound_source()`
+/// accessor, a parse whose events are all diagnostics, and hand-emitted `cst_token` spans.
+/// Each fix relocated the hole rather than closing it, because the witness was flags on the
+/// sink and the sink cannot tell who set them. A typed `FinishError` implying a protection with
+/// three published bypasses is the `## Panics` fiction this release deleted nine of, in a
+/// different medium.
+///
+/// Flips when the sink is minted from the input, which makes the binding neither hideable nor
+/// forgeable.
+#[test]
+fn a_non_forwarding_wrapper_is_not_caught() {
+  let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
+  {
+    let mut wrapper = NonForwardingWrapper(&mut sink);
+    let mut input = crate::input::Input::<MiniLexer<'_>, NonFwdCtx<'_, '_>, ()>::new("ab");
+    let mut inp = input.as_ref(&mut wrapper);
+    while let Ok(Some(_)) = inp.next() {}
+  }
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    text(green.expect("the wrapper hid the binding, so nothing refused the pairing")),
+    "XY",
+    "the residue: an emitter wrapper that does not forward `bound_source` gives up the \
+     guarantee for whatever it wraps, and no bound can see the omission — a wrapper writing \
+     `impl CstEmitter for W {{}}` satisfies every CST bound while inheriting every default"
+  );
+}
+
+/// **A PIN OF A KNOWN-OPEN RESIDUE (2 of 4): a parse whose events are all diagnostics.**
+///
+/// No token is committed, so nothing token-shaped exists for a downstream check to key on —
+/// while the lexer diagnostics' spans still license gap tokens at materialization. A
+/// same-length foreign source therefore yields a fully covered tree over the sink's buffer,
+/// from a parse that read a different one, with no token for the zero-token wall and no
+/// uncovered byte for the gap wall.
+///
+/// This is the shape the other fixtures structurally could not produce: every one of them
+/// commits at least one token.
+///
+/// Flips when the sink is minted from the input.
+#[test]
+fn an_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_caught() {
+  let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
+  {
+    let mut wrapper = NonForwardingWrapper(&mut sink);
+    // Every byte of "!!" lexes as an error, so not one token is committed.
+    let mut input = crate::input::Input::<MiniLexer<'_>, NonFwdCtx<'_, '_>, ()>::new("!!");
+    let mut inp = input.as_ref(&mut wrapper);
+    while let Ok(Some(_)) = inp.next() {}
+  }
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect(
+    "today: a diagnostics-only parse arms no parse witness, so the wall stays silent and the \
+     gap-licensed tree materializes over the sink's own buffer",
+  );
   assert_eq!(
     text(green),
     "XY",
-    "the parse consumed \"ab\"; the tree's text is the sink's own buffer — the wrong-tree \
-     class this binding was supposed to close, still open on its early half"
+    "the residue, stated exactly: the parse read \"!!\" and the tree's text is the sink's \
+     \"XY\" — equal length, fully gap-tiled, and nothing downstream can see it"
+  );
+}
+
+/// **A PIN OF A KNOWN-OPEN RESIDUE (3 of 4): the binding can be *pre-armed*.**
+/// `Emitter::bound_source` is a public trait method and `InputRef::emitter()` hands parser code
+/// `&mut Ctx::Emitter`, so anything holding the sink — or the emitter through a parse — can
+/// query it. Any state a sink recorded from "I was asked" is therefore settable by a caller who
+/// is not the parse entry, which is why a sink-side witness cannot encode *who* asked.
+///
+/// This cell records the reachability rather than a tree: the accessor answers for anyone.
+#[test]
+fn bound_source_is_publicly_queryable_so_no_sink_side_witness_can_encode_provenance() {
+  use crate::Emitter;
+
+  let buf = std::string::String::from("ab");
+  let src: &str = &buf;
+  let sink: SesSink<'_> = Sink::new(src, Verbose::new(), profile());
+
+  // Anybody. No parse, no attachment, no seam.
+  let answered = Emitter::<'_, MiniLexer<'_>, ()>::bound_source(&sink);
+  assert!(
+    answered.is_some(),
+    "the binding is readable by any holder — so 'this sink was asked' is a fact about callers \
+     in general, never about the parse entry in particular"
+  );
+}
+
+/// **A PIN OF A KNOWN-OPEN RESIDUE (4 of 4): hand-emitted `cst_token` spans.**
+/// `InputRef::emitter()` exposes the emitter to parser code, so a grammar can push token events
+/// with spans of its own choosing while consuming nothing through the auto-emission door. The
+/// log then carries source-indexing spans that no committed token accounts for, and the tree
+/// materializes over the sink's buffer.
+///
+/// Pinned at the sink for what it is — a span in the log that arrived without a settle — since
+/// that is the shape any future check has to key on.
+#[test]
+fn hand_emitted_cst_token_spans_reach_materialization_without_a_settle() {
+  let mut sink = verbose_sink("ab");
+  // No parse, no `commit_token`: just spans, chosen by the caller.
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    text(green.expect("hand-emitted spans materialize like any other")),
+    "ab",
+    "the residue: `cst_token` is the manual emission door and carries a span, so a caller \
+     chooses which source bytes the tree shows without any settle having happened"
   );
 }
 

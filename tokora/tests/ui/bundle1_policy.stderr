@@ -1,0 +1,18 @@
+error[E0277]: the trait bound `E: TooManyEmitter<'_, L>` is not satisfied
+  --> tests/ui/bundle1_policy.rs:28:30
+   |
+28 |   needs_the_policy_tier::<L, E>();
+   |                              ^ the trait `TooManyEmitter<'_, L>` is not implemented for `E`
+   |
+note: required by a bound in `needs_the_policy_tier`
+  --> tests/ui/bundle1_policy.rs:20:6
+   |
+18 | fn needs_the_policy_tier<'inp, L: Lexer<'inp>, E>()
+   |    --------------------- required by a bound in this function
+19 | where
+20 |   E: TooManyEmitter<'inp, L>,
+   |      ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `needs_the_policy_tier`
+help: consider further restricting type parameter `E` with trait `TooManyEmitter`
+   |
+26 |   E: ComposableEmitter<'inp, L> + tokora::emitter::TooManyEmitter<'_, L>,
+   |                                 ++++++++++++++++++++++++++++++++++++++++

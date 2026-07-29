@@ -32,7 +32,8 @@ use crate::{
   emitter::{
     CstEmitter, Emitter, FullContainerEmitter, MissingLeadingSeparatorEmitter,
     MissingTrailingSeparatorEmitter, PrattEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter,
-    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter, ValueKeyedEmitter,
+    UnclosedEmitter, UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
+    ValueKeyedEmitter,
   },
   error::{
     UnexpectedEoLhs, UnexpectedEoRhs,
@@ -241,14 +242,27 @@ fn bump_witness(next: &core::sync::atomic::AtomicUsize) -> usize {
 /// # Construction
 ///
 /// The source is bound **here**, and `finish` has no source parameter, so a materialization
-/// can no longer be handed a buffer different from the one construction named. What that
-/// removes is the *late* half of the wrong-source class. It does not establish that the
-/// buffer named here is the one the parser will read: `'inp` proves both borrows outlive the
-/// sink, not that they are the same bytes, and nothing here compares them. A sink built over
-/// one buffer and driven while parsing another of the same length still materializes a tree
-/// whose text is this buffer and whose structure is the parser's — pinned, as an open hole,
-/// by `sink_bound_to_a_foreign_source_is_not_yet_detected`. Closing it needs an identity the
-/// sink can check, and no [`Emitter`] hook hands the sink the parser's buffer.
+/// can no longer be handed a buffer different from the one construction named. That removes
+/// the *late* half of the wrong-source class. The **early** half — that the buffer named here
+/// is the one the parser will read — is not established by the type system either: `'inp`
+/// proves both borrows outlive the sink, not that they are the same bytes.
+///
+/// It is established at runtime instead. The sink overrides
+/// [`Emitter::bound_source`](crate::Emitter::bound_source) to report this buffer's offset
+/// origin, and the point at which an emitter is attached to an input compares that against the
+/// source the parse reads, **panicking** on a provable mismatch. A sink built over one buffer
+/// and driven while parsing another of the same length is refused there — pinned by
+/// `sink_bound_to_a_foreign_source_is_refused`. It cannot be refused any later: the event log
+/// such a pairing produces is byte-identical to one a legal single parse could produce.
+///
+/// **The refusal is conservative, and the residue is real.** It fires only where
+/// [`Source::REFERENT_IS_BYTES`](crate::Source::REFERENT_IS_BYTES) says an unequal reference
+/// *proves* an unequal source — the `?Sized` backings (`str`, `[u8]`, `BStr`), which every
+/// lexer in this crate declares. For an **owned-handle** backing (`bytes::Bytes`, `HipStr`,
+/// the `smol_bytes` family) the reference addresses a variable rather than the bytes, so two
+/// clones of one buffer are two addresses and an inequality proves nothing; refusing them
+/// would turn a correct program into a panic. Those backings keep the door open, unchanged
+/// from before, and a third party closes it for their own by overriding one `const`.
 ///
 /// [`new`](Self::new) takes the source buffer the parse runs over, the wrapped emitter, and
 /// the dialect's [`CstProfile`] — the token mapper (`fn(&L::Token) -> u16` into the dialect's
@@ -868,6 +882,17 @@ where
     self.forward_diag::<Lang, _>(None, |inner| inner.emit_warning(warning))
   }
 
+  /// The construction-bound source — the sink is the one emitter in this crate that has one.
+  ///
+  /// `finish` slices every token's text out of this buffer, so a parse driven over a
+  /// *different* buffer produces a tree whose structure came from one source and whose text
+  /// came from another. Answering here is what lets the parse entry refuse that pairing; see
+  /// [`Emitter::bound_source`] for the law and for what an inequality is allowed to prove.
+  #[inline(always)]
+  fn bound_source(&self) -> Option<crate::source::SourceIdentity> {
+    Some(crate::source::SourceIdentity::of(self.source))
+  }
+
   /// Wraps the hole's already-buffered token events in an `error_kind` node at the
   /// recovery site (empty holes and token-less holes produce no node), then forwards the
   /// one-per-hole diagnostic to the inner emitter through the census helper.
@@ -1226,6 +1251,33 @@ where
 // `Sink<E>` satisfies every context bound `E` satisfies (the `ComposableEmitter`-shaped
 // bundles downstream) and every forwarded diagnostic occupies a Diag slot in the unified
 // log. CST_FORWARD_CENSUS locks the set.
+
+/// The delimiter capability, routed like every other diagnostic: the event log records a
+/// `Diag` slot and the inner emitter receives the payload.
+///
+/// It was **missing**, and its absence was not cosmetic: [`UnclosedEmitter`] is a member of
+/// [`ComposableEmitter`](crate::emitter::ComposableEmitter), so without it a `Sink` could not
+/// satisfy the one-bound collecting surface at all — a delimited CST parse could not name the
+/// bundle its diagnostics-only sibling names. The forwarding census could not see the gap
+/// either, because it hard-coded a capability list that omitted this door.
+impl<'inp, L, E, Lang> UnclosedEmitter<'inp, L, Lang> for Sink<'inp, L, E>
+where
+  L: Lexer<'inp>,
+  E: UnclosedEmitter<'inp, L, Lang> + ValueKeyedEmitter,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn emit_unclosed<Delimiter>(
+    &mut self,
+    err: crate::error::Unclosed<Delimiter, L::Span, Lang>,
+  ) -> Result<(), Self::Error>
+  where
+    L: Lexer<'inp>,
+    Self::Error: crate::emitter::FromUnclosed<'inp, L, Lang>,
+  {
+    self.forward_diag::<Lang, _>(None, |inner| inner.emit_unclosed(err))
+  }
+}
 
 impl<'inp, L, E, Lang> TooFewEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where

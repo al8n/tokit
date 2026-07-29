@@ -1733,4 +1733,8 @@ count checks want [`TooFewEmitter`](crate::emitter::TooFewEmitter) /
 [`ComposableEmitter`](crate::emitter::ComposableEmitter) *and* whose error absorbs the five
 token-level conversions — including the built-in
 [`Fatal`](crate::emitter::Fatal)/[`Verbose`](crate::emitter::Verbose)/[`Silent`](crate::emitter::Silent)
-over a sufficient error type) the whole family is available at once, and so are the conversions.
+over a sufficient error type) the default-policy family is available at once, and so are the
+conversions. A count or separator policy (`at_most` / `bounded` / `require_leading` /
+`require_trailing`) needs the wider tier,
+[`PolicyParseContext`](crate::PolicyParseContext), which carries the same bound plus
+`TooManyEmitter` and the missing-separator pair.

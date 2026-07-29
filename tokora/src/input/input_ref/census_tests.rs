@@ -159,6 +159,10 @@ fn calls(hay: &str, name: &str) -> usize {
 /// call anywhere else. A new consume path must route through the primitive **and** bump
 /// its file's expected count here, in the same commit.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn settle_census_commit_token_routes_every_consume_settle() {
   // (file, expected `commit_token` call sites)
   let expected: &[(&str, usize)] = &[
@@ -325,6 +329,10 @@ fn censused_region(raw_body: &str) -> std::string::String {
 /// body may run caller code — no clone, no `to_owned`. The deliberate trailing `drop` of a
 /// replaced pair is not caller code *in* the window; it is what the window exists to defer.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn settle_census_nothing_fallible_once_a_restore_has_begun() {
   // A restore opens its window at the first step that cannot be taken back.
   // The FACT writes — the steps that move the input onto the restored branch. Deliberately not
@@ -573,6 +581,10 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
 /// which is what the floor was meant to do and could not. If it needs updating because a consume
 /// path was added, that is the census working, and the update is a one-line diff under review.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn settle_census_nothing_fallible_between_a_removal_and_its_settle() {
   // A window opens when a token comes out of durable state...
   const REMOVALS: &[&str] = &[
@@ -710,6 +722,10 @@ fn settle_census_nothing_fallible_between_a_removal_and_its_settle() {
 /// at all: the span-only setters were deleted once the pair funnel existed, so "advance the span
 /// without supplying the state" is no longer expressible.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn settle_census_no_half_pair_position_write() {
   for (name, src) in SOURCES {
     let raw_span = count(src, "*self.span = ") + count(src, "*ir.span = ");
@@ -753,6 +769,10 @@ fn settle_census_no_half_pair_position_write() {
 /// that writes both routes through `commit_position`, which computes both halves before writing
 /// either and drops the values it replaces last.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn settle_census_position_pair_writes_through_one_body() {
   // (file, expected `commit_position` call sites, who they are)
   let expected: &[(&str, usize, &str)] = &[
@@ -827,6 +847,10 @@ fn settle_census_position_pair_writes_through_one_body() {
 /// emitter's token channel — a hook appearing anywhere else double-emits or
 /// phantom-emits, the silent wrong-tree class.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn settle_census_emitter_hook_rides_only_the_settles() {
   // The consume-settle home: the field-receiver form inside `InputRef::commit_token`.
   assert!(
@@ -868,6 +892,10 @@ fn settle_census_emitter_hook_rides_only_the_settles() {
 /// cached or freshly lexed — settles behind the frontier through this single call, so a
 /// side channel that hooks skipped tokens has exactly one home too.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn settle_census_adopt_is_the_single_skip_settle() {
   assert!(
     count(source("scan.rs"), ".adopt(") == 1,
@@ -928,6 +956,10 @@ const EMITTER_MOD: &str = include_str!("../../emitter/mod.rs");
 /// file. A new `Emitter::checkpoint()` caller must pair every exit path with a `rewind`
 /// or a `release` and register itself here in the same commit.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn release_census_every_checkpoint_capture_is_paired() {
   // The four captures of an emitter mark.
   let captures: &[(&str, usize)] = &[
@@ -1019,6 +1051,10 @@ fn release_census_every_checkpoint_capture_is_paired() {
 /// so its lineage forget and its emitter release cannot come apart. `forget_checkpoint`
 /// (lineage only) keeps exactly one caller: the funnel's own body.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn release_census_kept_checkpoints_funnel_through_one_body() {
   // (file, expected `forget_kept_checkpoint` mentions, who they are)
   let expected: &[(&str, usize, &str)] = &[
@@ -1102,6 +1138,10 @@ fn release_census_kept_checkpoints_funnel_through_one_body() {
 /// the stack itself. Counted per method body, because the law is per exit path rather than per
 /// file.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn release_census_every_savepoint_life_end_settles_through_the_funnel() {
   let stacked = source("stacked/mod.rs");
 
@@ -1150,6 +1190,10 @@ fn release_census_every_savepoint_life_end_settles_through_the_funnel() {
 /// per disposition, not one per mode, which is the distinction that made `SyncBalanced`'s
 /// interrupted stop take the wrong arm. A new exit must pick a disposition, in the same commit.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn release_census_scanner_snapshot_settles_on_every_exit() {
   let scan = source("scan.rs");
   assert!(
@@ -1179,6 +1223,10 @@ fn release_census_scanner_snapshot_settles_on_every_exit() {
 /// forwarded once (the `&mut U` blanket impl — the W3 forwarding-gap class; the
 /// conformance test in `tests/handler_coverage.rs` drives it).
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn release_census_trait_declares_and_blanket_forwards() {
   assert!(
     count(EMITTER_MOD, "fn release(") == 2,
@@ -1250,6 +1298,10 @@ fn code_only(hay: &str) -> std::string::String {
 /// in already-reserved capacity. `begin_point` reserves a second, distinct container the same
 /// way: the session's own point stack.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn capture_window_pin_stack_reservations_precede_their_save() {
   let mod_src = source("mod.rs");
 
@@ -1329,6 +1381,10 @@ fn capture_window_pin_stack_reservations_precede_their_save() {
 /// registrations: the emitter mark it takes, then the lineage entry `open` records into the
 /// slot just reserved.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn capture_window_save_checkpoint_reserves_before_either_registration() {
   let body = code_only(&method_body(source("mod.rs"), "save_checkpoint"));
 
@@ -1363,6 +1419,10 @@ fn capture_window_save_checkpoint_reserves_before_either_registration() {
 /// immediately above it already free the slot its push lands in, so it needs — and must not
 /// grow — a reservation of its own.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn capture_window_savepoint_reservation_precedes_its_save() {
   let stacked_src = source("stacked/mod.rs");
 
@@ -1425,6 +1485,10 @@ fn capture_window_savepoint_reservation_precedes_its_save() {
 /// dedup-watermark clone above the mark instead, so nothing fallible is left between the mark
 /// and the `ThroughEntry` that owns it.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn capture_window_sync_entry_snapshots_hoist_the_fallible_clone_first() {
   // `scan.rs` carries the fourth: the scanner's Partial-only capture for a committing mode,
   // which obeys the same hoist and is born directly into the `ScanScope` that owns it.
@@ -1468,6 +1532,10 @@ fn capture_window_sync_entry_snapshots_hoist_the_fallible_clone_first() {
 /// `Lineage::reserve_pin` are each defined exactly once, so every call above names the one
 /// reservation body this census locks the order against.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn capture_window_reservation_primitives_are_defined_once() {
   assert!(
     count(LINEAGE_MOD, "fn reserve_open(") == 1,
@@ -1494,6 +1562,10 @@ fn capture_window_reservation_primitives_are_defined_once() {
 /// lexer with `L::with_state` + `bump`; it reads both facts from one captured item and lives
 /// outside this module tree by design, so it is reviewed-and-exempt rather than counted here.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn resume_census_one_pairing_site() {
   let m = source("mod.rs");
   assert!(
@@ -1651,6 +1723,10 @@ fn resume_census_one_pairing_site() {
 /// lives at the front" promise was false under `()` for every put-back in the crate. The counts
 /// below are the checklist; the module docs carry the per-file breakdown.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn front_census_one_front_surface() {
   let m = source("mod.rs");
   // (needle, expected count in `mod.rs`, the primitive that owns it)
@@ -1749,6 +1825,10 @@ fn front_census_one_front_surface() {
 /// that never park; an ungated probe hands every cache the zero-capacity cache's cost. Counted
 /// beside the slot counts above so a new reader has to decide its gating in the same commit.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
 fn front_census_every_probe_is_const_gated() {
   // The gate reads the const in one body and the contract-violation message names it in the other;
   // a third mention means a second place decides what the declaration implies.
