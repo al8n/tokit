@@ -948,9 +948,9 @@ fn cst_forward_census_one_helper_carries_every_channel() {
   );
 }
 
-/// CST_COMPOSITION_CENSUS — the R3-class tripwire: every method of the emitter trait family
-/// must be OVERRIDDEN by `Sink`, never left to a trait default. A defaulted inherit
-/// silently severs that channel for wrapped inners (exactly how the `commit_token` R3 gap
+/// CST_COMPOSITION_CENSUS — the tripwire for a whole class: every method of the emitter trait
+/// family must be OVERRIDDEN by `Sink`, never left to a trait default. A defaulted inherit
+/// silently severs that channel for wrapped inners (exactly how the `commit_token` gap
 /// happened). Two halves: (a) every one of the 27 inventory names appears as an impl in
 /// sink.rs; (b) drift tripwires on the trait definitions, so any NEW family method forces a
 /// classification (override + forward, or a documented inherit) in the same commit.
@@ -1462,6 +1462,49 @@ fn round_trip_with_a_lexer_error_is_structural() {
   let kinds: std::vec::Vec<u16> = root.children_with_tokens().map(|el| el.kind()).collect();
   assert_eq!(kinds, std::vec![K_TOK, K_GAP, K_TOK]);
   assert_eq!(emitter.errors().len(), 1);
+}
+
+/// Where a **trailing** gap lands when `finish_partial` is called with a node still open.
+///
+/// The tiling `builder.token(gap)` runs before the loop that closes the open frames, and
+/// rowan appends a token to whatever node is currently open — so the gap becomes a child of
+/// the **innermost open node**, not of the root. The construct had no pin, which is how the
+/// comment at the tiling site came to say "tile into the root" and stay unchallenged: that is
+/// true only when nothing is open, which is exactly the case `finish` (not `finish_partial`)
+/// enforces.
+///
+/// This is a placement pin, not a behaviour proposal — the placement is consistent with
+/// as-emitted ordering and is left as it is. What changes is that it is now stated.
+#[test]
+fn finish_partial_trailing_gap_tiles_into_the_innermost_open_node() {
+  let mut sink = verbose_sink("ab");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  // `K_NODE` is deliberately never finished, and `b` at [1,2) is an uncovered trailing gap.
+  let (green, _emitter) = sink.finish_partial(K_ROOT);
+  let root = tree(green.expect("finish_partial tolerates the open node and tiles the tail"));
+
+  // The root's only child is the open node — the gap did NOT tile beside it.
+  let top: std::vec::Vec<u16> = root.children_with_tokens().map(|el| el.kind()).collect();
+  assert_eq!(
+    top,
+    std::vec![K_NODE],
+    "the trailing gap must not be a child of the root while a node is open",
+  );
+
+  // It tiled inside the innermost open node, after that node's own token.
+  let inner = root
+    .first_child()
+    .expect("the open node survives as a node");
+  let kinds: std::vec::Vec<u16> = inner.children_with_tokens().map(|el| el.kind()).collect();
+  assert_eq!(
+    kinds,
+    std::vec![K_TOK, K_GAP],
+    "the trailing gap tiles into the innermost OPEN node, not the root",
+  );
+
+  // Losslessness holds either way — which is why placement needed its own pin.
+  assert_eq!(root.text().to_string(), "ab");
 }
 
 /// The gap-coverage law at the mechanism level (the partial-drop signature the zero-token
@@ -2864,7 +2907,7 @@ fn a_borrowed_value_keyed_inner_composes_like_an_owned_one() {
   );
 }
 
-// ── The replay-work law W (§10a) and the Diag-arm pins ─────────────────────────
+// ── The replay-work law W and the Diag-arm pins ────────────────────────────────
 //
 // `W` ticks once at the top of every loop body inside `replay` and its helpers, so it is
 // ONE quantity measured identically before and after the walk rewrite — not a needle
@@ -2972,7 +3015,7 @@ fn replay_work_matches_its_stated_shape_on_error_dense_input() {
   }
 }
 
-/// The exact-composition pin's second cell (§10a): a wrap-bearing payload, where `W` must
+/// The exact-composition pin's second cell: a wrap-bearing payload, where `W` must
 /// equal `2 × events + chain_hops` — both passes over every event, plus one hop per
 /// retro-wrap link followed. `m` single-wrap targets: 4 events each (mark, token, `StartAt`,
 /// finish) and one chain hop each; with no diagnostics, the sort charge, the merge loop and

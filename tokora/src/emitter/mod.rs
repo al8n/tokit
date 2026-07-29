@@ -47,10 +47,24 @@ mod severity;
 /// This atomic design provides:
 /// - ✅ **Fine-grained control**: Implement only the traits you need for your use case
 /// - ✅ **Composability**: Mix and match traits to build custom error handling strategies
-/// - ✅ **Pre-built bundles**: [`Fatal`], [`Verbose`], and [`Silent`] implement all traits with consistent behavior
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " - ✅ **Pre-built bundles**: [`Fatal`], [`Verbose`], and [`Silent`] implement all traits with consistent behavior"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " - ✅ **Pre-built bundles**: [`Fatal`], `Verbose`, and [`Silent`] implement all traits with consistent behavior"
+)]
 /// - ✅ **Extensibility**: Create specialized emitters by implementing a subset of traits
 ///
-/// Tokora provides several complete implementations: [`Fatal`], [`Verbose`],
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " Tokora provides several complete implementations: [`Fatal`], [`Verbose`],"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " Tokora provides several complete implementations: [`Fatal`], `Verbose`,"
+)]
 /// [`Silent`], and [`Ignored`](crate::utils::marker::Ignored). However, the atomic trait system
 /// encourages you to create custom emitters tailored to your specific needs by implementing only the
 /// traits relevant to your parser.
@@ -189,7 +203,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// Like the diagnostic-label capabilities, this is a method with a **blanket no-op default**:
   /// stateless emitters ([`Fatal`], [`Silent`], [`Ignored`](crate::utils::marker::Ignored))
   /// inherit the empty body — a fail-fast parse has no warning sink, so the warning is dropped
-  /// and parsing continues (`Ok(())`). A collecting emitter like [`Verbose`] overrides this to
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " and parsing continues (`Ok(())`). A collecting emitter like [`Verbose`] overrides this to"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " and parsing continues (`Ok(())`). A collecting emitter like `Verbose` overrides this to"
+  )]
   /// record the warning into a channel parallel to its errors. The `Result` return is what lets
   /// a bespoke emitter escalate a warning to fatal if it wishes; the built-in emitters never do.
   ///
@@ -202,7 +223,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// [`Transaction`](crate::Transaction) rollback) unwinds *everything* it emitted, and a
   /// warning recorded outside the checkpointed state would survive the rollback as a phantom —
   /// attributed to a branch the parse abandoned. Nothing in the crate can detect that
-  /// violation; it surfaces as wrong diagnostics, not as a panic. [`Verbose`] is the reference
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " violation; it surfaces as wrong diagnostics, not as a panic. [`Verbose`] is the reference"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " violation; it surfaces as wrong diagnostics, not as a panic. `Verbose` is the reference"
+  )]
   /// implementation (a shared, channel-tagged log; see its
   /// `fatal_ignores_warnings_but_errors_still_stop` and
   /// `verbose_warnings_collect_with_labels_parallel_to_errors` tests in `tests/emitter.rs`).
@@ -223,7 +251,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// an additive capability with a **blanket no-op default**: stateless emitters ([`Fatal`],
   /// [`Silent`], [`Ignored`](crate::utils::marker::Ignored)) inherit the empty body — a
   /// fail-fast parse keeps no record of recovery skips, so the note is dropped and parsing
-  /// continues (`Ok(())`). A collecting emitter like [`Verbose`] overrides this to record the
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " continues (`Ok(())`). A collecting emitter like [`Verbose`] overrides this to record the"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " continues (`Ok(())`). A collecting emitter like `Verbose` overrides this to record the"
+  )]
   /// hole on its shared emission log, so a checkpoint rewind unwinds it together with the
   /// other diagnostics of the abandoned branch. The `Result` return lets a bespoke emitter
   /// reject a skip as fatal (e.g. a hole budget); the built-in emitters never do.
@@ -255,7 +290,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// Captures the emitter's current emission checkpoint for a later [`rewind`](Self::rewind).
   ///
   /// A checkpoint is a monotonically increasing emission mark: emitters that
-  /// retain per-emission state (e.g. [`Verbose`]) return a value that grows with
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " retain per-emission state (e.g. [`Verbose`]) return a value that grows with"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " retain per-emission state (e.g. `Verbose`) return a value that grows with"
+  )]
   /// every recorded error, so a subsequent `rewind` can drop *exactly* the
   /// emissions made after this point. Stateless emitters ([`Fatal`], [`Silent`],
   /// [`Ignored`](crate::utils::marker::Ignored)) keep nothing to rewind and use
@@ -291,7 +333,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   ///
   /// `checkpoint` is the mark returned by [`checkpoint`](Self::checkpoint) at the
   /// save point; `cursor` is the restore offset. Emission-aware emitters
-  /// ([`Verbose`]) drop every diagnostic recorded after `checkpoint` — precisely
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " ([`Verbose`]) drop every diagnostic recorded after `checkpoint` — precisely"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " (`Verbose`) drop every diagnostic recorded after `checkpoint` — precisely"
+  )]
   /// the emissions of the abandoned branch, regardless of their span — and ignore
   /// `cursor`. `cursor` is retained for emitters that key their own rollback on
   /// the source offset. Stateless emitters ignore both.
@@ -313,7 +362,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   ///   recorded, so an older mark always names a prefix of a younger one and nested rewinds
   ///   unwind cleanly (`rewind` to the current mark is a no-op);
   /// - **rewind-only-backwards** — the input layer never hands in a mark from the future; a
-  ///   defensive implementation may clamp (as [`Verbose`] does) rather than panic.
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = "   defensive implementation may clamp (as [`Verbose`] does) rather than panic."
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = "   defensive implementation may clamp (as `Verbose` does) rather than panic."
+  )]
   ///
   /// Violations are not detectable by the crate — they surface as missing or phantom
   /// diagnostics after backtracking, not as panics. The enforcing tests for the reference
@@ -342,7 +398,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// a transaction guard's commit (explicit or on drop), an
   /// [`attempt`](crate::InputRef::attempt)/[`try_attempt`](crate::InputRef::try_attempt)
   /// success, a stacked guard's savepoint release, a session
-  /// [`commit_point`](crate::InputRef::commit_point), a sync scan that found its target or
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " [`commit_point`](crate::InputRef::commit_point), a sync scan that found its target or"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " `commit_point`, a sync scan that found its target or"
+  )]
   /// otherwise kept its progress — hands it here. `release(m)` tells the emitter that `m`
   /// will **never** be rewound to by that settle, so any bookkeeping keyed on the mark can be
   /// reclaimed instead of stranding one dead row per committed guard — commit-heavy loops (a
@@ -361,7 +424,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// releasing must never change the observable emission state — no diagnostic appears,
   /// disappears, or reorders because a mark was released. Correctness must not depend on it
   /// being called: emitters that key their rollback state on emission *values* rather than
-  /// on a per-mark table — [`Verbose`], whose mark is just its log length and whose rewind
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " on a per-mark table — [`Verbose`], whose mark is just its log length and whose rewind"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " on a per-mark table — `Verbose`, whose mark is just its log length and whose rewind"
+  )]
   /// pops entries by value — legitimately inherit the no-op default, and stateless emitters
   /// ([`Fatal`], [`Silent`], [`Ignored`](crate::utils::marker::Ignored)) have nothing to
   /// reclaim in the first place. One mark is released at most once, and marks arrive
@@ -424,7 +494,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// This is an additive capability with a **blanket no-op default**: stateless
   /// emitters ([`Fatal`], [`Silent`], [`Ignored`](crate::utils::marker::Ignored))
   /// inherit the empty body, so a label pair around them costs nothing — the two
-  /// calls inline away. A collecting emitter like [`Verbose`] overrides this to
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " calls inline away. A collecting emitter like [`Verbose`] overrides this to"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " calls inline away. A collecting emitter like `Verbose` overrides this to"
+  )]
   /// maintain the stack and snapshot it into every diagnostic it records.
   ///
   /// Labels are `&'static str` (parser names are static), so a push never allocates.
@@ -440,7 +517,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// a rewound emission takes its captured snapshot with it (the rewind story; see
   /// `labelled_guard_rollback_drops_labels_then_reemission_rederives` in `tests/emitter.rs`
   /// and `verbose_nested_labels_snapshot_outer_then_outer_and_inner_then_outer` in the
-  /// [`Verbose`] tests). A hand-rolled, unbalanced call — an exit without its enter, or an
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " [`Verbose`] tests). A hand-rolled, unbalanced call — an exit without its enter, or an"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " `Verbose` tests). A hand-rolled, unbalanced call — an exit without its enter, or an"
+  )]
   /// enter never exited — is not detected: nothing panics, but every later snapshot carries
   /// the drifted context, so diagnostics are attributed to the wrong *"while parsing X"*
   /// scope. Route labels through [`labelled`](crate::labelled) rather than calling this pair
@@ -453,7 +537,14 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// Pops the most recently [`enter_label`](Self::enter_label)ed label as its
   /// [`labelled`](crate::labelled) scope closes.
   ///
-  /// No-op by default (see [`enter_label`](Self::enter_label)); [`Verbose`] overrides
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " No-op by default (see [`enter_label`](Self::enter_label)); [`Verbose`] overrides"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " No-op by default (see [`enter_label`](Self::enter_label)); `Verbose` overrides"
+  )]
   /// it to pop its open-label stack. The stack therefore follows the call structure of
   /// the `labelled` wrappers exactly, so a checkpoint restore needs no label handling —
   /// no label state lives outside the wrapper scopes and the recorded log entries.
@@ -617,7 +708,14 @@ where
 /// that signature:
 ///
 /// - **value-keyed** — the reading *is* a fact about the emission state and nothing else exists:
-///   [`Verbose`]'s mark is its log length, a token tracker's is its count, a stateless emitter's
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = "   [`Verbose`]'s mark is its log length, a token tracker's is its count, a stateless emitter's"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = "   `Verbose`'s mark is its log length, a token tracker's is its count, a stateless emitter's"
+)]
 ///   is the constant `0`. [`rewind`](Emitter::rewind) restores by value — reclaiming everything
 ///   above the mark as a range — and [`release`](Emitter::release) has nothing to reclaim.
 /// - **table-keyed** — the reading is a *key* into per-capture bookkeeping the emitter allocated
@@ -646,7 +744,14 @@ where
 ///
 /// # Implementors
 ///
-/// Every emitter this crate offers: [`Verbose`], [`Fatal`], [`Silent`],
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " Every emitter this crate offers: [`Verbose`], [`Fatal`], [`Silent`],"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " Every emitter this crate offers: `Verbose`, [`Fatal`], [`Silent`],"
+)]
 /// [`Ignored`](crate::utils::marker::Ignored), and `&mut U` for value-keyed `U`, so a borrowed
 /// emitter composes exactly like an owned one. Implement it for your own emitter if — and only
 /// if — it keeps the promise above.
@@ -727,7 +832,14 @@ where
 /// writes. `ComposableEmitter` is that ladder as a single name: it is
 /// blanket-implemented for every emitter satisfying the whole family, so a bound of
 /// `E: ComposableEmitter<'inp, L, Lang>` is interchangeable with spelling out all seven
-/// sub-traits. The pre-built [`Fatal`], [`Verbose`], and [`Silent`] emitters all qualify
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " sub-traits. The pre-built [`Fatal`], [`Verbose`], and [`Silent`] emitters all qualify"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " sub-traits. The pre-built [`Fatal`], `Verbose`, and [`Silent`] emitters all qualify"
+)]
 /// whenever their error type absorbs the corresponding error families.
 ///
 /// The context-side twin is [`ComposableParseContext`](crate::ComposableParseContext), which rides this bound on a
@@ -812,7 +924,14 @@ where
 /// honestly is what the two-tier split replaces. Pratt stays outside both (see
 /// [`ComposableEmitter`]).
 ///
-/// All four in-crate emitters ([`Fatal`], [`Verbose`], [`Silent`],
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " All four in-crate emitters ([`Fatal`], [`Verbose`], [`Silent`],"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " All four in-crate emitters ([`Fatal`], `Verbose`, [`Silent`],"
+)]
 /// [`Ignored`](crate::utils::marker::Ignored)) implement the three added sub-traits already,
 /// so the blanket impl covers them with no new impls.
 ///

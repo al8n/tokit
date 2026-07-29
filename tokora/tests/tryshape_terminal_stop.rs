@@ -1,6 +1,9 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
-//! The try-shape terminal-stop law (Codex R1 [high]): an attempt shape declines —
+//! The try-shape terminal-stop law: an attempt shape declines —
 //! `Ok(None)`, zero consumption — **iff the opener is definitely absent** (wrong next
 //! token, or genuine end of input). A **terminal scanner stop** at the would-be opener —
 //! a fresh resource-limit trip whose diagnostic a recovering emitter accepted, or an

@@ -1330,7 +1330,7 @@ fn the_seal_is_monotone() {
   );
 }
 
-// ── Write once, run in both modes (0.3.0 §8.1/§8.2) ─────────────────────────────────
+// ── Write once, run in both modes ───────────────────────────────────────────────────
 //
 // ONE parser fn, generic over the completeness typestate, drives green under BOTH the
 // complete combinator driver (`Parser…parse_str`, `Cmpl = Complete`) and the Sans-I/O
@@ -1382,7 +1382,7 @@ fn drive_partial_chunked(chunks: &[&str]) -> (std::vec::Vec<PKind>, usize) {
 
 #[test]
 fn write_once_runs_both_modes() {
-  // The probe's exact §10.3 shape: ["foo b", "ar ", "baz"] — the first two non-final
+  // The probe's exact shape: ["foo b", "ar ", "baz"] — the first two non-final
   // rounds each cut a token at the frontier, the sealed round parses the whole sentence.
   let complete = drive_complete("foo bar baz");
   let (partial, incompletes) = drive_partial_chunked(&["foo b", "ar ", "baz"]);
@@ -1396,7 +1396,7 @@ fn write_once_runs_both_modes() {
 
 #[test]
 fn write_once_chunk_sweep_equivalence() {
-  // §8.2 as a deterministic sweep (the fuzz oracle's "chunked prefixes" shape): for EVERY
+  // Write-once as a deterministic sweep (the fuzz oracle's "chunked prefixes" shape): for EVERY
   // cut point of the corpus, the two-chunk partial drive must (1) surface Incomplete on
   // the non-final round — this parser drains to end of input, and rule 3 makes a
   // non-final end Incomplete — and (2) end with output identical to the complete drive.
@@ -1434,7 +1434,7 @@ fn typed_local_fn_at_parse_partial() {
   assert_eq!(parse_partial(ctx, "foo bar", (), true, local), Ok(2));
 }
 
-// ── The §4 gate mechanism: `SurfaceIncomplete::is_incomplete_error` ──────────────────
+// ── The gate mechanism: `SurfaceIncomplete::is_incomplete_error` ─────────────────────
 
 #[test]
 fn is_incomplete_error_constant_false_at_complete() {
@@ -1480,7 +1480,7 @@ fn is_incomplete_error_routes_through_maybe_incomplete_at_partial() {
   >>::is_incomplete_error(&PErr::Limit));
 }
 
-// ── §8.5: the generalized scanner drivers under Partial ─────────────────────────────
+// ── The generalized scanner drivers under Partial ───────────────────────────────────
 //
 // Each G-class driver (0.3.0: `try_expect`, `skip_while`, `sync_to`, `sync_through`,
 // `sync_balanced`, `fold`/`foldn`, `consume_cached_*`) runs under `Partial` through its
@@ -1751,7 +1751,7 @@ fn try_expect_poison_at_frontier_beats_incomplete() {
   );
 }
 
-// ── §8.3: the combinator Lego under both modes (the T6 chain oracle) ─────────────────
+// ── The combinator Lego under both modes (the chain oracle) ──────────────────────────
 //
 // ONE `Cmpl`-generic CHAIN — free leaf atom → adapter → try-driven collection — assembled
 // once and driven under Complete AND Partial-chunked to equivalence. This is the test the
@@ -1877,7 +1877,7 @@ fn lego_chain_shape_at_a_partial_drive_is_annotation_free() {
   assert_eq!(kinds, std::vec![PKind::Word; 2]);
 }
 
-// ── §8.4: the never-recoverable gate through the resilient collections ───────────────
+// ── The never-recoverable gate through the resilient collections ─────────────────────
 
 /// An element that CONSUMES a word and then requires a number: a missing number is a
 /// plain `Lex` error (the resilient arm's food), while a frontier-cut word surfaces
@@ -2100,7 +2100,7 @@ fn probe_close_carries_the_closer_out_and_commit_probed_advances() {
 
 #[test]
 fn commit_probed_lexes_the_closer_once_under_every_cache() {
-  // The `separated_while` fallback (spec §6): its delimited driver commits the closer via
+  // The `separated_while` fallback: its delimited driver commits the closer via
   // the in-loop `try_expect` whenever it is at the cursor, so the `probe_close` Close arm —
   // the Shape-B site this fix changes — is not reachable through the driver on a valid list.
   // Pin the arm's *mechanism* directly instead, with a shared scan counter: `probe_close`
@@ -2160,7 +2160,7 @@ fn commit_probed_lexes_the_closer_once_under_every_cache() {
     "DefaultCache: the closer is lexed exactly once"
   );
 
-  // D17 — the law is "cache-independently, in any cache capacity", and the two cells above
+  // The law is "cache-independently, in any cache capacity", and the two cells above
   // covered only 0 and the default (U3). The #75 regression this pins was CAPACITY-dependent,
   // so the ends of the range are exactly where the evidence was missing: capacity 1, the
   // smallest cache that retains anything, and a capacity above the default.
@@ -2235,7 +2235,7 @@ fn commit_probed_lexes_the_closer_once_under_every_cache() {
 
 #[test]
 fn probe_close_cache_front_is_cursor_neutral_and_recovery_safe() {
-  // Codex R1 regression: the cache holds the closer PLUS a trailing lookahead token. On the
+  // Regression: the cache holds the closer PLUS a trailing lookahead token. On the
   // cache path `probe_close` must classify the closer at the FRONT by peek — NOT pop it — so
   // the probe stays cursor-neutral until the caller's real commit point. This matters for the
   // deferred (`separated`/`separated_while`) drivers, whose `handle_end` runs BETWEEN the probe
@@ -2347,7 +2347,7 @@ fn probe_close_cache_front_is_cursor_neutral_and_recovery_safe() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════
-// D35 — a scanner's `Incomplete` exit must leave NO TRACE
+// A scanner's `Incomplete` exit must leave NO TRACE
 //
 // `skip_until`'s `Err` arm is written for fatals ("`settle_fatal` already committed the
 // position"), which is false for `Incomplete`: that exit commits nothing, yet every token the
@@ -2562,7 +2562,7 @@ fn skip_while_incomplete_retry_settles_exactly_once() {
 
 #[test]
 fn sync_through_incomplete_then_refill_then_eof_leaves_no_trace() {
-  // §11a(B) — the POLICY ARBITER. `sync_through`'s no-match end of input rewinds the full
+  // The POLICY ARBITER. `sync_through`'s no-match end of input rewinds the full
   // pre-call state, so a failed sync across a refill must leave the input exactly as it was.
   // Under commit-on-incomplete the first attempt's skipped prefix is committed at the
   // `Incomplete` exit, and the post-refill EOF rewind then restores only to the RESUMED

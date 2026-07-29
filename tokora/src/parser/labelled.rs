@@ -31,12 +31,26 @@ use crate::{
 /// `catch_unwind`.)
 ///
 /// With a non-collecting emitter the push/pop pair are no-ops that inline away, so this wrapper is
-/// zero-cost there; a collecting emitter such as [`Verbose`](crate::emitter::Verbose) snapshots the
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " zero-cost there; a collecting emitter such as [`Verbose`](crate::emitter::Verbose) snapshots the"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " zero-cost there; a collecting emitter such as `Verbose` snapshots the"
+)]
 /// open labels into each diagnostic and exposes them per-diagnostic via
-/// [`Verbose::labels`](crate::emitter::Verbose::labels).
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " [`Verbose::labels`](crate::emitter::Verbose::labels)."
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " `Verbose::labels`."
+)]
 ///
 /// ```
-/// # #[cfg(all(feature = "logos", feature = "std"))]
+/// # #[cfg(all(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"), feature = "std"))]
 /// # fn demo<P>(inner: P) -> tokora::Labelled<P> {
 /// // Diagnostics emitted inside `inner` are stamped "while parsing a list".
 /// tokora::labelled("while parsing a list", inner)
@@ -135,7 +149,12 @@ where
   }
 }
 
-#[cfg(all(test, feature = "trace", feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  feature = "trace",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 mod trace_tests {
   use crate::{
     InputRef, ParseInput, Token, cache::DefaultCache, emitter::Silent,
@@ -218,11 +237,15 @@ mod trace_tests {
   }
 }
 
-// D26 — the label must be popped on EVERY exit of the scope, unwind included. The error path
+// The label must be popped on EVERY exit of the scope, unwind included. The error path
 // is already bracketed (`res` is produced, then `exit_label` runs); the unguarded path is
 // exactly panic unwind, where the pop is skipped and the label stack — plain emitter state
 // that survives `catch_unwind` — keeps the stale context for the emitter's whole life.
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 mod unwind_tests {
   use crate::{
     InputRef, ParseInput, Token,

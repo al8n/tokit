@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! Integration tests for `separated_by_comma_while` combined with
 //! `.delimited::<Bracket<(), (), ()>>()` across all 8 separator policies

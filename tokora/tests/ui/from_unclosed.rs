@@ -1,4 +1,4 @@
-// R8: `FromUnclosed` is named directly by `emit_unclosed` and by hand-written emitter
+// `FromUnclosed` is named directly by `emit_unclosed` and by hand-written emitter
 // where-clauses, so it is a root obligation there. Its own curated message must fire.
 #![allow(dead_code)]
 

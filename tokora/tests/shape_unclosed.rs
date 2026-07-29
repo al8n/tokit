@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 #![allow(clippy::type_complexity)]
 //! Regression suite for the delimited-SHAPE unclosed fix.
 //!
@@ -405,7 +408,7 @@ fn generic_delimited_no_cache_wrong_close_span_invariant() {
   assert_eq!(close_span, SimpleSpan::new(3, 3));
 }
 
-// Eof arm cache-independence (Codex R2 asked to confirm): `(1` at EOF under the blackhole cache
+// Eof arm cache-independence: `(1` at EOF under the blackhole cache
 // recovers with a zero-width closer at the committed frontier (offset 2), same as any cache —
 // nothing is cached at EOF, so there is no cursor staleness.
 #[test]
@@ -444,7 +447,7 @@ fn try_parens_no_cache_committed_wrong_close_span_invariant() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Enclosing-parent containment (Codex R3): a recovered shape parsed INSIDE an enclosing parser
+// Enclosing-parent containment: a recovered shape parsed INSIDE an enclosing parser
 // under the blackhole cache `()` must never outrun the enclosing cursor. Both the child and the
 // parent span via `span_since(cursor)`, so parent ⊇ child and close.end() == shape.end() == cursor
 // for the generic, named, and try_ forms alike — and the cursor is the wrong token's start in

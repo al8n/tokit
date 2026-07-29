@@ -527,10 +527,22 @@ currently-supported versioned feature (`bytes_1`), which pulls the optional depe
 
 | Feature | Enables | Implies | no_std posture |
 |---------|---------|---------|----------------|
-| `bytes` | `&[u8]` / `Bytes` source | `bytes_1` → `dep:bytes_1` | as the dep allows |
-| `bstr` | `BStr` byte-string source | `bstr_1` → `dep:bstr_1` | as the dep allows |
-| `hipstr` | `HipStr` / `HipByt` source | `hipstr_0_8` → `dep:hipstr_0_8` | as the dep allows |
-| `smol_bytes` | the smol-bytes source | `smol_bytes_0_1` → `dep:smol_bytes_0_1` (with the dep's `alloc` feature; smol-bytes ≥ 0.1.2) | as the dep allows |
+| `bytes` | `&[u8]` / `Bytes` source | `bytes_1` → `dep:bytes_1` | needs atomic CAS |
+| `bstr` | `BStr` byte-string source | `bstr_1` → `dep:bstr_1` | no_std **+ allocator**, CAS-free |
+| `hipstr` | `HipStr` / `HipByt` source | `hipstr_0_8` → `dep:hipstr_0_8` | needs atomic CAS |
+| `smol_bytes` | the smol-bytes source | `smol_bytes_0_1` → `dep:smol_bytes_0_1` (with the dep's `alloc` feature; smol-bytes ≥ 0.1.2) | needs atomic CAS |
+
+"Needs atomic CAS" is a property of the dependency, not of tokora: `bytes`, `hipstr` and
+`smol_bytes` all reach a refcounted buffer through `Arc`-shaped sharing whose `fetch_add` /
+compare-and-swap has no lowering on targets without atomic CAS. They therefore fail to build
+on a target like `thumbv6m-none-eabi`, whatever tokora does.
+
+`bstr` is the CAS-free choice: it is a byte-string *view*, so it adds no shared ownership on
+top of the allocator. That is pinned rather than asserted — CI compiles
+`--target thumbv6m-none-eabi --no-default-features --features alloc,bstr_1` on every run. The
+CAS-needing three are documented here rather than pinned as expected-failures, because an
+expected-failure cell would go green for the wrong reason the day an upstream crate gained a
+CAS-free fallback.
 
 ### Container backends ([`Container`](crate::container::Container))
 

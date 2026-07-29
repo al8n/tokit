@@ -67,7 +67,14 @@ where
   ///
   /// The maximum number of tokens folded is determined by the capacity of the specified `W`.
   ///
-  /// See also [`foldrn`](Self::foldrn).
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " See also [`foldrn`](Self::foldrn)."
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " See also `foldrn`."
+  )]
   pub fn foldr_within<O, W, Pred, Init, Op>(
     &mut self,
     mut pred: Pred,

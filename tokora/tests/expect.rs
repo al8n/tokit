@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! Tests for `ParseInput` impls on `With<Expect, PhantomSpan/PhantomSliced/PhantomLocated>`.
 //! These cover lines 142-216 in parser/expect.rs and parse_state.rs accessors.

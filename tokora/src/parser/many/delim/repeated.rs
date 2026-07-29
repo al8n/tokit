@@ -65,6 +65,26 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     // The opener's span, captured iff an opener is actually committed. It is the anchor of
     // the `Unclosed` diagnostic below: no opener, no unclosed.
     let mut open_span: Option<L::Span> = None;
+    // The committed-consumption watermark at the moment a wrong opener is flagged, iff one is.
+    // It is the suppression witness for the close-miss arms below — see the law comment there.
+    // FRONT_REPORTED — the close-miss suppression asks *is the report naming this front token
+    // still live?*. That is a transactional fact about the emitter's log, so it is not kept here.
+    //
+    // Three driver-local witnesses were tried — committed position; then position paired with a
+    // re-key count; then that pair with its record published before the front is destroyed — and
+    // each leaked, for one reason: a stack frame has no rollback semantics. A restore is precisely
+    // the operation that erases frame-visible traces. It rewinds the emitter, destroys the front,
+    // and returns position to a value no frame-local flag can tell apart from "nothing happened".
+    //
+    // So the witness lives on the `Input`, is captured into every `Checkpoint`, and is restored in
+    // the same block as the emitter mark it describes: a rollback below the flag disarms the
+    // watermark and truncates the report as one state, and a rollback above it keeps both, because
+    // the report predates the mark. See `InputRef::front_report_live` for the read side and
+    // `Input::front_reported_end` for the invariant.
+    //
+    // The predicate is frame-independent, which is why all eight close-miss arms read it with one
+    // identical line: uniformity here is a property of the mechanism rather than a claim about
+    // each driver's control flow.
     // Discriminate on the captured evidence, NOT on `is_eoi`: the opener predicate lexes the
     // candidate token, so a wrong FINAL token leaves the lexer at EOI even though a real token
     // sat at the opener position (issue #85). `first_kind` records that observation.
@@ -77,7 +97,10 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       // A wrong opener was observed: emit the captured unexpected-open-token regardless of the
       // lexer's EOI state. The token stays cached/unconsumed, exactly like the non-EOI path.
       (None, Some(wrong)) => {
-        inp.emitter().emit_unexpected_token(wrong)?;
+        // The watermark is published by the same body that appends the report, and only if the
+        // append succeeded — which is what keeps "watermark implies a live report" inductive.
+        let front_end = wrong.span_ref().end_ref().clone();
+        inp.emit_unexpected_front(wrong, front_end)?;
       }
       // Nothing was observed at the opener position: a genuinely empty opener slot — the one
       // genuine EOI path. A terminal scanner stop no longer lands here — `try_expect_or_stop`
@@ -138,9 +161,13 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
                     .into(),
                 );
               }
-              inp
-                .emitter()
-                .emit_unexpected_token(Delim::unexpected_close_token(tok))?
+              // One junk token, one report: emit unless the emitter already holds a live report
+              // naming this very front token. See FRONT_REPORTED at the top of this body.
+              if !inp.front_report_live(tok.span_ref().end_ref()) {
+                inp
+                  .emitter()
+                  .emit_unexpected_token(Delim::unexpected_close_token(tok))?
+              }
             }
             // EOI — no close delimiter found: the opener was never closed.
             CloseStatus::Eof => {
@@ -212,9 +239,13 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
               .into(),
           );
         }
-        inp
-          .emitter()
-          .emit_unexpected_token(Delim::unexpected_close_token(tok))?
+        // One junk token, one report: emit unless the emitter already holds a live report naming
+        // this very front token. See FRONT_REPORTED at the top of this body.
+        if !inp.front_report_live(tok.span_ref().end_ref()) {
+          inp
+            .emitter()
+            .emit_unexpected_token(Delim::unexpected_close_token(tok))?
+        }
       }
       CloseStatus::Eof => {
         // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate

@@ -14,8 +14,22 @@ use super::{input::Cursor, *};
 ///
 /// Speculation lives on the input handle, not here. Reach for the transaction guards
 /// ([`InputRef::begin`](crate::InputRef::begin),
-/// [`begin_stacked`](crate::InputRef::begin_stacked)) for lexical speculation and the
-/// [session points](crate::InputRef::begin_point) for the non-lexical kind a driver steps across
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " [`begin_stacked`](crate::InputRef::begin_stacked)) for lexical speculation and the"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " `begin_stacked`) for lexical speculation and the"
+)]
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " [session points](crate::InputRef::begin_point) for the non-lexical kind a driver steps across"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " session points for the non-lexical kind a driver steps across"
+)]
 /// separate calls.
 pub struct ParseState<'a, 'inp, 'closure, L, Ctx, Lang: ?Sized = (), Cmpl = Complete>
 where

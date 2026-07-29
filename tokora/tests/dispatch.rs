@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! Behavioral tests for `ParseChoice::dispatch_on_kind` — the kind-keyed dispatch
 //! combinator whose committed failure carries the full static expected set.

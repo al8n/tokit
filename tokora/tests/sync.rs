@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 #![allow(warnings)]
 
 //! Additional coverage tests for sync_through.rs, sync_to.rs, and try_expect.rs.

@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 #![allow(warnings)]
 
 //! Integration tests for:
@@ -42,7 +45,13 @@ pub enum TToken {
   Semi,
   #[regex(r"[ \t\r\n]+")]
   Ws,
-  #[regex(r"//[^\n]*", allow_greedy = true)]
+  // `allow_greedy` is a 0.16-only nested attribute (0.14/0.15 reject it as unknown), so the
+  // pattern is split per version rather than dropped. The two arms are equivalent for this
+  // fixture: `//[^\n]*` is already maximal-munch to end of line, and `allow_greedy` only
+  // silences 0.16's "this regex could match greedily" analysis. No fixture here observes a
+  // difference — the comment token is always terminated by the newline or end of input.
+  #[cfg_attr(feature = "logos_0_16", regex(r"//[^\n]*", allow_greedy = true))]
+  #[cfg_attr(not(feature = "logos_0_16"), regex(r"//[^\n]*"))]
   Comment,
 }
 

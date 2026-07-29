@@ -241,5 +241,5 @@ pub mod logos_0_14 {
 #[cfg(test)]
 #[allow(warnings)]
 #[cfg(any(feature = "std", feature = "alloc"))]
-#[cfg(feature = "logos_0_16")]
+#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
 mod tests;

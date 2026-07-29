@@ -118,7 +118,14 @@ where
 /// reported *through the emitter* rather than silently accepted. Following the house emit
 /// discipline, a fail-fast emitter ([`Fatal`](crate::emitter::Fatal)) turns the emission into
 /// `Err` via the [`FromUnclosed`] conversion; a recovering emitter
-/// ([`Verbose`](crate::emitter::Verbose)) records it and lets the parse return the elements
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " ([`Verbose`](crate::emitter::Verbose)) records it and lets the parse return the elements"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " (`Verbose`) records it and lets the parse return the elements"
+)]
 /// collected so far; a dropping emitter ([`Silent`](crate::emitter::Silent),
 /// [`Ignored`](crate::utils::marker::Ignored)) discards it.
 ///

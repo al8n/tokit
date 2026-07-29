@@ -30,7 +30,14 @@ use super::*;
 /// # Defaulted no-ops: diagnostics-only emitters opt in trivially
 ///
 /// Every method has an empty (or inert-value) default, so an emitter with no event channel
-/// opts in with an empty `impl` — the crate does exactly that for [`Fatal`], [`Verbose`],
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " opts in with an empty `impl` — the crate does exactly that for [`Fatal`], [`Verbose`],"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " opts in with an empty `impl` — the crate does exactly that for [`Fatal`], `Verbose`,"
+)]
 /// [`Silent`], and [`Ignored`](crate::utils::marker::Ignored). That is what makes *one*
 /// parser assembly serve both configurations: over a plain diagnostics emitter the event
 /// calls compile to nothing (reference-taking signatures, empty inlined bodies — the

@@ -368,6 +368,16 @@ where
   /// the zero-token severance is corruption too) is enforced identically. The exemptions are
   /// the two ways an incomplete parse differs from a complete one; refusing them would defeat
   /// the door.
+  ///
+  /// # Where a trailing gap lands
+  ///
+  /// The two exemptions interact, and the result is worth stating: when the stream ends with
+  /// a node still open, the tail is tiled **before** the open frames are closed, so the gap
+  /// becomes a child of the **innermost open node** rather than of the root. Under
+  /// [`finish`](Self::finish) the question cannot arise — an unbalanced stream is refused —
+  /// so "the tail tiles into the root" holds only for balanced streams. `tree.text() ==
+  /// source` holds either way; it is the *placement* that differs, and tooling that walks by
+  /// node rather than by text will see it.
   pub fn finish_partial(self, root_kind: u16) -> (Result<GreenNode, FinishError>, E)
   where
     L::Offset: TryInto<u32>,
@@ -440,7 +450,7 @@ where
 /// the first sub-range of `[lo, hi)` no interval spans, or `None` when `[lo, hi)` is fully
 /// covered (or empty).
 ///
-/// The cursor is the whole of D9's repair. Gaps reach this function in source order, so an
+/// The cursor is the whole of the repair. Gaps reach this function in source order, so an
 /// interval the walk has already passed can never be needed again; carrying `at` across calls
 /// makes total coverage work `O(cover.len() + gaps)` instead of `O(gaps × cover.len())`. The
 /// old shape restarted from index 0 on every gap — exact `n(n+1)/2` on error-dense input.
@@ -552,7 +562,7 @@ where
   // out-of-language kind. Every test run and every CI build refuses it.
   //
   // `ReservedKind` is NOT gated — the tombstone band is a plain comparison, it costs nothing,
-  // and it was a release wall before this round.
+  // and it was a release wall.
   // One predicate for every kind in the stream, root included. `admits` ANDs in the tombstone
   // floor, so the reserved band is refused whatever the dialect's own predicate says — but the
   // reserved band keeps its own error identity, because "you used the reserved value" and
@@ -838,7 +848,11 @@ where
   }
 
   // The trailing gap: bytes after the last covered token (an undrained tail, a poisoned
-  // truncation) tile into the root.
+  // truncation) tile into whatever node is open here — the ROOT under `finish`, which
+  // refuses unbalanced streams outright, but the INNERMOST OPEN node under `finish_partial`,
+  // which tolerates them. This append deliberately precedes the close loop below, so the
+  // tail sits inside the frame it textually belongs to rather than beside it. Pinned by
+  // `finish_partial_trailing_gap_tiles_into_the_innermost_open_node`.
   if covered < source_len {
     let gap = source
       .get(covered as usize..)
@@ -919,7 +933,7 @@ where
 /// | 1 | pass 1, the gather loop over every event | **ticked** (W row 1) |
 /// | 2 | `error_spans.sort_unstable()` | **CHARGED AT COST** (W row 2): unticked inside `std`, so `k·⌈log₂ k⌉` — its real cost, not its element count — is added to `W`. One `O(k log k)` over **diagnostics**, `k ≤ events`, once per finish. Charging the element count instead would make the charged quantity linear by construction and leave the growth cell unable to fail |
 /// | 3 | the cover-merge loop | **ticked** (W row 3) |
-/// | 4 | `first_uncovered`'s sweep of the merged cover | **ticked** (W row 4) — and bounded by `cover.len() + gaps` in total, because the cursor is shared and monotone. This is the construct D9 made quadratic |
+/// | 4 | `first_uncovered`'s sweep of the merged cover | **ticked** (W row 4) — and bounded by `cover.len() + gaps` in total, because the cursor is shared and monotone. This is the construct the defect made quadratic |
 /// | 5 | pass 2, the walk over every event | **ticked** (W row 5) |
 /// | 6 | the retro-wrap chain hop | **ticked** (W row 6) |
 /// | 7 | the end-of-walk close `for _ in 0..open` | **ticked** (W row 7) — the loop the first instrument missed |

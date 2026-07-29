@@ -107,7 +107,7 @@ jobs:
         run: rustup toolchain install 1.87 --no-self-update --profile minimal
       - name: cargo +1.87 check -p tokora --all-features
         run: cargo +1.87 check -p tokora --all-features
-      # R8 (tests/diagnostics.rs): the committed `.stderr` files are pinned to this
+      # The trybuild pins (tests/diagnostics.rs): the committed `.stderr` files are pinned to this
       # toolchain and the test skips itself on any other rustc, so this job is the only
       # place the trybuild half runs. The file-only half runs in every `test` job.
       #
@@ -273,7 +273,7 @@ jobs:
   # It earns its place regardless. The recall-shaped sources a changelog is normally
   # reconstructed from — PR bodies, commit messages, surface greps — are structurally blind to
   # bound additions and to derived-`Debug` movement. In this release two of those three sources
-  # turned out not to EXIST for the earliest rounds (empty PR bodies, bare subject lines), and
+  # turned out not to EXIST for the earliest commits (empty PR bodies, bare subject lines), and
   # this diff found two breaking changes that would otherwise have shipped undisclosed:
   # `CstEmitter::cst_finish` gaining a parameter, and `fuzz::Op` gaining a variant mid-list.
   semver-checks:
@@ -529,6 +529,17 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --all-features --no-deps
+      # The all-features step above documents every item, so a link whose TARGET is
+      # feature-gated always resolves there — it can never see the bare configuration's
+      # broken links. That configuration had 39 of them, and the docs had never been built
+      # in it: `cargo doc --no-default-features` exited 101 with `could not document
+      # tokora`. No RUSTDOCFLAGS is needed here — `[lints] workspace = true` already denies
+      # `rustdoc::broken_intra_doc_links`, so the exit status is the assertion.
+      #
+      # Acceptance is exit 0, not a diagnostic count: rustdoc aborts early, so any fixed
+      # count is a floor, and a floor cannot detect a missing member.
+      - name: cargo doc --no-default-features --no-deps (bare-config link resolution)
+        run: cargo doc -p tokora --no-deps --no-default-features
 
   # ── Gate: bench SMOKE only ──────────────────────────────────────────────────
   #

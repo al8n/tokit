@@ -10,10 +10,10 @@ owns the sink's internals — the deepest seam in Part III. It keeps the part's 
 call it* (that is [chapter 16](super::ch16_lossless_cst), the tutorial, which deliberately treats the
 event stream as an implementation detail), more *why every mechanism is shaped the way it is*.
 
-The subsystem it documents went through several adversarial-review rounds, and the details are
-load-bearing: an era that rewinds by one, a witness dropped from a mark, a gap tiled without a
-covering diagnostic — each is a *wrong tree with no witness*, the failure class the whole design is
-bent to make unrepresentable. So this chapter is precise about the invariants, not just the shapes.
+The details it documents are load-bearing: an era that rewinds by one, a witness dropped from a
+mark, a gap tiled without a covering diagnostic — each is a *wrong tree with no witness*, the
+failure class the whole design is bent to make unrepresentable. So this chapter is precise about
+the invariants, not just the shapes.
 
 ## Events, not eager nodes
 

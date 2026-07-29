@@ -66,7 +66,14 @@ pub type DelimitedOf<'inp, D, L, Ctx, Lang, T> = Result<
 /// `D` is a [`Delimiter`](crate::delimiter::Delimiter) pair passed as the first type
 /// parameter (`delimited::<Paren, …>(inner)`, mirroring the many-builder's
 /// [`.delimited::<D>()`](crate::parser::Separated::delimited) and the atom
-/// [`separated1::<Sep, …>`](crate::parser::separated1)); its [`TypedDelimiter`] impl
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " [`separated1::<Sep, …>`](crate::parser::separated1)); its [`TypedDelimiter`] impl"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " `separated1::<Sep, …>`); its [`TypedDelimiter`] impl"
+)]
 /// supplies the span-carrying punctuator values the result stores. For the built-in pairs,
 /// `delimited::<Paren, …>(inner)` is equivalent to [`parens(inner)`](parens) — and likewise
 /// for [`braces`]/[`brackets`]/[`angles`] — for any vocabulary whose two capability

@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! Comprehensive tests for all separator policies combined with delimited
 //! parsing and count modifiers (unbounded, at_least, at_most, bounded).

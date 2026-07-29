@@ -7,7 +7,7 @@
 // the crate at all. Nothing here has a UB surface for miri to have an opinion about.
 #![cfg(not(miri))]
 
-//! R8 — the bundle's failure messages stay useful.
+//! The bundle's failure messages stay useful.
 //!
 //! Three `#[diagnostic::on_unimplemented]` attributes carry the curated text a consumer
 //! reads when a type is not yet usable with tokora: [`FromTokenErrors`] (the five
@@ -192,7 +192,7 @@ const CASES: &[(&str, &str, &str)] = &[
   ),
 ];
 
-/// The half of R8 that does not need the pinned toolchain — and the half that closes the
+/// The half of this suite that does not need the pinned toolchain — and the half that closes the
 /// golden-file rail's own hole.
 ///
 /// A `.stderr` regenerated after an attribute was accidentally dropped is still a

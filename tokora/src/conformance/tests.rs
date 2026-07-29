@@ -430,7 +430,7 @@ fn non_sticky_exhaustion_is_caught() {
 /// A per-character lexer that **retracts its span at exhaustion**: the moment `lex` returns
 /// `None` it reports `0..0`, so the value both readers of the post-exhaustion span depend on —
 /// the `to`-shaped end-of-input commit and the partial-input frontier — points behind every
-/// item it yielded. This is the R5-era broken-fixture class (`start > end` was its other face)
+/// item it yielded. This is the broken-fixture class (`start > end` was its other face)
 /// made permanently un-shippable.
 struct DyingSpanLexer<'a> {
   src: &'a str,
@@ -861,7 +861,7 @@ fn truncation_unfaithful_lexer_fails_partial_equivalence() {
 
 // ── Positive: the crate's real logos adapter (LogosLexer) ───────────────────────────
 
-#[cfg(feature = "logos")]
+#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
 mod logos_adapter {
   use super::Harness;
   use crate::Token;

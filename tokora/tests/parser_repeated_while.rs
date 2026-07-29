@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 #![allow(warnings)]
 
 //! Tests for the `RepeatedWhile` (condition-based repetition WITHOUT separator) combinator.
@@ -1110,7 +1113,7 @@ fn test_repeated_while_full_container_verbose_records_and_terminates() {
 
 // == 12. Progress guard: a zero-consumption Continue cycle must terminate =====
 //
-// Regression tests for the `repeated_while` progress-guard parity (W7 §6 debt): a condition
+// Regression tests for the `repeated_while` progress-guard parity: a condition
 // that keeps answering `Continue` paired with an element parser that consumes nothing used to
 // loop forever — `Repeated` had the cursor-compare guard, `RepeatedWhile` did not. The guard
 // treats a no-progress cycle as end of elements, exactly as the `Repeated` family does.

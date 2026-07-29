@@ -610,5 +610,9 @@ where
   }
 }
 
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 mod tests;

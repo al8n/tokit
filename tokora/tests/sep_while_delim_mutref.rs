@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! Coverage tests exercising the **mut-ref** (`Collect<&mut DelimitedBy<...>, &mut Container>`)
 //! path (Impl #3) for `SeparatedWhile` delimited combinations across all

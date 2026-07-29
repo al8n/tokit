@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! The `Verbose` write-path conformance suite: every emit channel records on the shared
 //! emission log, so `checkpoint`, `rewind`, `labels()` and `diagnostics()` are exact for
@@ -664,7 +667,7 @@ verbose_channel_conformance! {
     }
   },
 
-  // ── The specialized channels: the eleven this round routed through the chokepoint.
+  // ── The specialized channels: the eleven routed through the chokepoint.
   emit_full_container => {
     span: SimpleSpan::new(0usize, 2usize),
     expect: Expect::Error(ConfError::FullContainer),
@@ -779,7 +782,7 @@ verbose_channel_conformance! {
       .expect("Verbose collects rather than propagates");
     }
   },
-  // The control row: `emit_unclosed` already routed through the chokepoint before this round,
+  // The control row: `emit_unclosed` already routed through the chokepoint beforehand,
   // so it proves the template pins a property rather than describing the repair.
   emit_unclosed => {
     span: SimpleSpan::new(0usize, 1usize),

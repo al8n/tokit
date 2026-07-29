@@ -547,7 +547,11 @@ where
 // The no-growth regression needs a lexer that actually runs (so `save`/`next` push and
 // commit real checkpoints), which pins it to `logos` + `std` — the same set the
 // `live_checkpoints_len` accessor is gated to.
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 mod tests {
   use super::*;
   use crate::{
