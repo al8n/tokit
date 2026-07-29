@@ -196,3 +196,74 @@ fn parse_accepts_identifier() {
   let r = Parser::with_context(ctx()).apply(parse).parse_str("bar");
   assert_eq!(r.unwrap().source(), "bar");
 }
+
+// ── The exclusion pair ───────────────────────────────────────────────────────
+
+#[test]
+fn try_parse_except_declines_an_excluded_spelling_without_consuming_it() {
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
+  ) -> Result<(bool, &'inp str), E> {
+    let attempt = Ident::try_parse_except(inp, &["on"])?;
+    let declined = matches!(attempt, ParseAttempt::Decline);
+    // The decline must be NON-consuming: the same token is still there for the
+    // unrestricted parse. A body that ran the exclusion after taking the token would
+    // read `after` here and this would be `"after"`.
+    let follow = Ident::parse(inp)?;
+    Ok((declined, follow.source()))
+  }
+  let r = Parser::with_context(ctx())
+    .apply(parse)
+    .parse_str("on after");
+  assert_eq!(r.unwrap(), (true, "on"));
+}
+
+#[test]
+fn try_parse_except_accepts_a_spelling_outside_the_exclusion_set() {
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
+  ) -> Result<&'inp str, E> {
+    Ident::try_parse_except(inp, &["on"]).map(|a| match a {
+      ParseAttempt::Accept(id) => id.source(),
+      ParseAttempt::Decline => "<declined>",
+    })
+  }
+  let r = Parser::with_context(ctx()).apply(parse).parse_str("onto");
+  assert_eq!(
+    r.unwrap(),
+    "onto",
+    "the exclusion is by whole spelling, not by prefix"
+  );
+}
+
+#[test]
+fn try_parse_except_declines_a_non_identifier_too() {
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
+  ) -> Result<bool, E> {
+    Ident::try_parse_except(inp, &["on"]).map(|a| matches!(a, ParseAttempt::Decline))
+  }
+  let r = Parser::with_context(ctx()).apply(parse).parse_str("123");
+  assert!(r.unwrap());
+}
+
+#[test]
+fn parse_except_errors_with_the_found_token_on_an_excluded_spelling() {
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, TestEm>>,
+  ) -> Result<Ident<&'inp str, SimpleSpan>, E> {
+    Ident::parse_except(inp, &["on"])
+  }
+  let r = Parser::with_context(ctx()).apply(parse).parse_str("on");
+  assert_eq!(
+    r.unwrap_err(),
+    E::Unexpected {
+      found: Some(TokenKind::Ident)
+    },
+    "the committed form consumes and reports the token it rejected"
+  );
+
+  // And it accepts anything outside the set.
+  let r = Parser::with_context(ctx()).apply(parse).parse_str("name");
+  assert_eq!(r.unwrap().source(), "name");
+}

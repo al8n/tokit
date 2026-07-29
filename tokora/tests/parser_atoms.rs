@@ -299,6 +299,234 @@ fn list_empty_leaves_stop_token() {
   assert!(out.is_ok());
 }
 
+// The observation each differential row compares is `(drove, item count, diagnostic spans,
+// tokens left unconsumed)`. That last part is the one a count and a diagnostic list cannot
+// express: a delegate returning the right items while swallowing the stop token the free
+// function leaves in place produced an identical tuple and passed.
+//
+// It is deliberately NOT `inp.offset()`, which was tried first and does not work. `offset()`
+// tracks the LEX frontier, and the stop predicate peeks the token in order to decide — so the
+// frontier has already advanced past it and reads the same whether or not the cached token is
+// later consumed. Under a swallowing mutant both sides read `(true, 0, 1, [])` on the `"}"`
+// row and the cell passed. Draining what a later parser could still see measures the thing
+// itself rather than a number that moves for a different reason.
+fn remaining<'inp>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, Verbose<E>>>,
+) -> Vec<(SimpleSpan, String)> {
+  let mut out = Vec::new();
+  loop {
+    if !matches!(inp.peek_one(), Ok(Some(_))) {
+      break;
+    }
+    match inp.consume_cached_one() {
+      Some(tok) => out.push((*tok.span_ref(), format!("{:?}", tok.data()))),
+      None => break,
+    }
+  }
+  out
+}
+
+// Every diagnostic span the collecting emitter recorded, in span order — `errors` is a
+// `BTreeMap`, so the keys come out sorted and the comparison is stable. Used to compare a
+// fluent form against the free function it delegates to on inputs where the two could
+// diverge in *which* diagnostic they raise rather than in how many items they return.
+fn error_spans<'inp>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, Verbose<E>>>,
+) -> Vec<SimpleSpan> {
+  inp.emitter().errors().keys().copied().collect()
+}
+
+// ── The fluent forms of the two list atoms ────────────────────────────────
+//
+// `list_until` and `separated1_by` are method forms delegating to `list` and
+// `separated1`. They shipped with no cell of their own: nothing in the suite called
+// either, so delegating to the wrong free function, or routing an argument wrongly,
+// would not have shown up anywhere. Each cell asserts the method form produces what
+// the free function it is named after produces, including where it stops.
+
+#[test]
+fn list_until_is_the_method_form_of_list() {
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      let items = Ident::parse.list_until(is_close_brace)(inp)?;
+      assert_eq!(items.len(), 3);
+      assert_eq!(*items[0].source_ref(), "a");
+      assert_eq!(items[0].span(), SimpleSpan::new(0, 1));
+      assert_eq!(*items[2].source_ref(), "c");
+      assert_eq!(items[2].span(), SimpleSpan::new(4, 5));
+      // The stop token is left in place, exactly as the free function leaves it.
+      let close = CloseBrace::parse(inp)?;
+      assert_eq!(close.span(), &SimpleSpan::new(6, 7));
+      Ok::<_, E>(())
+    },
+    "a b c }",
+  );
+  assert!(out.is_ok());
+
+  // The same matrix the `separated1_by` cell carries, and for the same reason. This one's
+  // single row does discriminate in both directions — a stop-predicate forced to `true`
+  // yields no items and one forced to `false` never stops, and each fails the row above —
+  // but that is a property of the two mutations that happened to be tried, not of the cell.
+  // Comparing against the free function across inputs where stopping is and is not
+  // reachable does not depend on guessing the mutation.
+  for src in ["a b c }", "}", "a }", "a b", "", "a", "} a", "a } b"] {
+    let by_method = drive(
+      Verbose::<E>::new(),
+      |inp| {
+        let got = Ident::parse.list_until(is_close_brace)(inp);
+        let ok = got.is_ok();
+        let n = got.map(|v| v.len()).unwrap_or(0);
+        Ok::<_, E>((ok, n, error_spans(inp), remaining(inp)))
+      },
+      src,
+    );
+    let by_free = drive(
+      Verbose::<E>::new(),
+      |inp| {
+        let got = list(Ident::parse, is_close_brace)(inp);
+        let ok = got.is_ok();
+        let n = got.map(|v| v.len()).unwrap_or(0);
+        Ok::<_, E>((ok, n, error_spans(inp), remaining(inp)))
+      },
+      src,
+    );
+    assert_eq!(
+      by_method.is_ok(),
+      by_free.is_ok(),
+      "method and free must agree on whether {src:?} drives at all"
+    );
+    if let (Ok(m), Ok(f)) = (by_method, by_free) {
+      assert_eq!(m, f, "method and free must agree on {src:?}");
+    }
+  }
+}
+
+#[test]
+fn separated1_by_is_the_method_form_of_separated1() {
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      let items = Ident::parse.separated1_by::<Comma, _>(starts_ident)(inp)?;
+      assert_eq!(items.len(), 3);
+      assert_eq!(*items[0].source_ref(), "A");
+      assert_eq!(items[0].span(), SimpleSpan::new(0, 1));
+      assert_eq!(*items[1].source_ref(), "B");
+      assert_eq!(items[1].span(), SimpleSpan::new(4, 5));
+      assert_eq!(*items[2].source_ref(), "C");
+      assert_eq!(items[2].span(), SimpleSpan::new(8, 9));
+      Ok::<_, E>(())
+    },
+    "A , B , C",
+  );
+  assert!(out.is_ok());
+
+  // The row above cannot fail when `peek` is dropped, and that was measured, not supposed:
+  // every separator in `A , B , C` is followed by an item, so a predicate that always
+  // answers "another item follows" agrees with the real one everywhere on this input. The
+  // continue-predicate is only load-bearing where it must DECLINE, and no row exercised
+  // that. The matrix below adds the inputs where declining changes the outcome and compares
+  // the method against the free function it delegates to, which is the claim the cell's name
+  // makes.
+  //
+  // Its limit, stated as narrowly as it is actually true: a defect present in *both* the
+  // method and the free function agrees on every row here and passes. What covers that is
+  // only the absolute-assertion cells — the ones that name an expected value instead of
+  // comparing two implementations — and they cover it *only for the inputs they name*.
+  //
+  // An earlier version of this comment said the free function's own rows above cover it.
+  // That was false, and it was false in a way worth recording: mutating `list` itself to
+  // drop the last item whenever input ends at EOF after items passed every cell in this
+  // file and every one of the 6318 tests in the crate. The differential rows agreed because
+  // both sides were wrong together, and no absolute cell named that input. The gap was the
+  // sentence's, not the instrument's. `list_stops_at_end_of_input_keeping_every_item` below
+  // now names it; the limit above is what remains after that.
+  for src in [
+    "A , B , C",
+    "A ,",
+    "A , ;",
+    "A , , B",
+    ", A , B",
+    "A",
+    "",
+    ";",
+    "A B",
+  ] {
+    let by_method = drive(
+      Verbose::<E>::new(),
+      |inp| {
+        let got = Ident::parse.separated1_by::<Comma, _>(starts_ident)(inp);
+        let ok = got.is_ok();
+        let n = got.map(|v| v.len()).unwrap_or(0);
+        Ok::<_, E>((ok, n, error_spans(inp), remaining(inp)))
+      },
+      src,
+    );
+    let by_free = drive(
+      Verbose::<E>::new(),
+      |inp| {
+        let got = separated1::<Comma, _, _, _, _, _, _>(Ident::parse, starts_ident)(inp);
+        let ok = got.is_ok();
+        let n = got.map(|v| v.len()).unwrap_or(0);
+        Ok::<_, E>((ok, n, error_spans(inp), remaining(inp)))
+      },
+      src,
+    );
+    assert_eq!(
+      by_method.is_ok(),
+      by_free.is_ok(),
+      "method and free must agree on whether {src:?} drives at all"
+    );
+    if let (Ok(m), Ok(f)) = (by_method, by_free) {
+      assert_eq!(m, f, "method and free must agree on {src:?}");
+    }
+  }
+}
+
+// `list` stopping at the end of input rather than at its stop token, asserted absolutely
+// against named values for BOTH the free function and its method form.
+//
+// This is the cell whose absence made the both-forms limitation worse than documented. The
+// differential matrices compare the two implementations against each other, so a defect in
+// the shared free function agrees and passes; the pre-existing `list` cells drive `a b c }`
+// and `}`, both of which stop at the token, so items-then-EOF was named by no absolute
+// assertion anywhere. A `list` that dropped its last item at EOF passed all 6318 tests.
+#[test]
+fn list_stops_at_end_of_input_keeping_every_item() {
+  // The free function.
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      let items = list(Ident::parse, is_close_brace)(inp)?;
+      assert_eq!(items.len(), 2, "both items must survive a stop at EOF");
+      assert_eq!(*items[0].source_ref(), "a");
+      assert_eq!(items[0].span(), SimpleSpan::new(0, 1));
+      assert_eq!(*items[1].source_ref(), "b");
+      assert_eq!(items[1].span(), SimpleSpan::new(2, 3));
+      Ok::<_, E>(())
+    },
+    "a b",
+  );
+  assert!(out.is_ok());
+
+  // The method form, asserted against the same named values rather than against the free
+  // function, so a defect shared by both is still caught.
+  let out = drive(
+    Fatal::<E>::new(),
+    |inp| {
+      let items = Ident::parse.list_until(is_close_brace)(inp)?;
+      assert_eq!(items.len(), 2, "both items must survive a stop at EOF");
+      assert_eq!(*items[0].source_ref(), "a");
+      assert_eq!(items[0].span(), SimpleSpan::new(0, 1));
+      assert_eq!(*items[1].source_ref(), "b");
+      assert_eq!(items[1].span(), SimpleSpan::new(2, 3));
+      Ok::<_, E>(())
+    },
+    "a b",
+  );
+  assert!(out.is_ok());
+}
+
 // ── `peek_kind` (smear: shape/tests.rs) ──────────────────────────────────────
 //
 // Reports the next kind without consuming, so the same peek repeats and a committed

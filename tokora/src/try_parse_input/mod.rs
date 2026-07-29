@@ -106,6 +106,51 @@ impl<O> ParseAttempt<O> {
       Self::Decline => Ok(ParseAttempt::Decline),
     }
   }
+
+  /// The named `Option` projection: `Accept(v)` → `Some(v)`, `Decline` → `None`.
+  ///
+  /// The `From<ParseAttempt<O>> for Option<O>` conversion already existed; nothing named
+  /// it, so call sites reached for a `match` instead. This is that conversion with a name
+  /// that can be found — and the composition point for the rest of `Option`'s vocabulary
+  /// (`ok_or`, `unwrap_or_default`, `filter`, …), which is why no aliases for those ship
+  /// beside it.
+  #[inline(always)]
+  pub fn into_option(self) -> Option<O> {
+    match self {
+      Self::Accept(value) => Some(value),
+      Self::Decline => None,
+    }
+  }
+}
+
+/// Decline-propagation for hand-sequenced `try_*` productions — `?` for the three-way
+/// vocabulary.
+///
+/// `let v = attempt!(try_x(inp));` applies `?` to the expression, unwraps an `Accept`, and
+/// early-returns `Ok(ParseAttempt::Decline)` on a decline. Without it, a production that
+/// sequences several tentative parses writes the same four-line `match` at every step, and
+/// the enclosing function's decline arm is exactly where a hand-written one gets it wrong.
+///
+/// The enclosing function must return
+/// `Result<ParseAttempt<_>, _>`; that is what the early return produces.
+///
+/// ```ignore
+/// fn try_pair<'inp, Ctx>(inp: &mut InputRef<'inp, '_, L, Ctx>) -> Result<ParseAttempt<(A, B)>, E> {
+///   let a = tokora::attempt!(try_a(inp));
+///   let b = tokora::attempt!(try_b(inp));
+///   Ok(ParseAttempt::Accept((a, b)))
+/// }
+/// ```
+#[macro_export]
+macro_rules! attempt {
+  ($expr:expr) => {
+    match $expr? {
+      $crate::try_parse_input::ParseAttempt::Accept(value) => value,
+      $crate::try_parse_input::ParseAttempt::Decline => {
+        return ::core::result::Result::Ok($crate::try_parse_input::ParseAttempt::Decline);
+      }
+    }
+  };
 }
 
 macro_rules! define_separated_by {
@@ -171,6 +216,23 @@ pub trait TryParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
     Ctx: ParseContext<'inp, L, Lang>,
   {
     Accepted::new(self)
+  }
+
+  /// Method form of the free [`opt`](crate::parser::opt) — a committed parser over
+  /// `Option<O>`: `Accept(v)` → `Some(v)`, `Decline` → `None`.
+  #[inline(always)]
+  fn opt(
+    self,
+  ) -> impl for<'c> FnMut(
+    &mut crate::input::InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
+  ) -> crate::parser::OptOf<'inp, L, Ctx, Lang, O>
+  where
+    Self: Sized,
+    L: Lexer<'inp>,
+    Ctx: crate::ComposableParseContext<'inp, L, Lang>,
+    Cmpl: crate::input::Completeness,
+  {
+    crate::parser::opt(self)
   }
 
   /// Create a parser over a mutable reference to this parser.

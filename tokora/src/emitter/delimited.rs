@@ -127,6 +127,11 @@ where
 /// ([`Delimiter::KIND`](crate::delimiter::Delimiter::KIND), which is what a conversion should
 /// route on) and its display name
 /// ([`Delimiter::name`](crate::delimiter::Delimiter::name)).
+#[diagnostic::on_unimplemented(
+  message = "`{Self}` cannot report an unclosed delimiter for lexer `{L}`",
+  label = "missing `UnclosedEmitter` — a `ComposableEmitter` bundle member",
+  note = "implement `UnclosedEmitter` (usually alongside the other members of the `ComposableEmitter` bundle)"
+)]
 pub trait UnclosedEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// Emits the [`Unclosed`] diagnostic for a delimiter whose opener was committed but whose
   /// closer never arrived before end-of-input.

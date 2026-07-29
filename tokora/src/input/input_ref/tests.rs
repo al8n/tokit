@@ -9257,3 +9257,261 @@ fn r9_set_state_is_atomic_at_every_offset_clone() {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// `try_expect_take` / `try_expect_take_or_stop`.
+//
+// The or_stop asymmetry IS the contract, so the pair is one cell: at a latched
+// boundary the or_stop form raises and the non-stop form folds to `Ok(None)`. A
+// body that folds both — or raises in both — flips it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wapi_b_try_expect_take_or_stop_errs_at_a_latched_boundary() {
+  let (mut input, _scanned) = probe_input("1 2 3");
+  let mut emitter = Silent::<ProbeErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+  assert!(inp.next().unwrap().is_some());
+  assert!(inp.next().unwrap().is_some());
+  assert!(
+    inp.next().unwrap().is_none(),
+    "the third scan trips and latches"
+  );
+  assert!(
+    matches!(
+      inp.try_expect_take_or_stop(|_| true, |sp| Ok(sp.span.start())),
+      Err(ProbeErr::Eot)
+    ),
+    "or_stop take treats the trip as terminal, never as absence"
+  );
+  // The non-stop twin documents the fold — this asymmetry IS the or_stop contract.
+  assert!(
+    matches!(
+      inp.try_expect_take(|_| true, |sp| Ok(sp.span.start())),
+      Ok(None)
+    ),
+    "the non-stop take folds the latch into Ok(None), as try_expect does"
+  );
+}
+
+#[test]
+fn wapi_b_try_expect_take_classifies_before_it_takes() {
+  // A declined classification must not consume: the follow-up take sees the same
+  // head. If `take` ran before `classify`, the second call would read the *next*
+  // token (or none at all) and the span would not be 0..1.
+  let (mut input, _scanned) = probe_input("1 2");
+  let mut emitter = Silent::<ProbeErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+  assert!(
+    matches!(
+      inp.try_expect_take(|_| false, |sp| Ok(sp.span.start())),
+      Ok(None)
+    ),
+    "a declined classification takes nothing"
+  );
+  assert_eq!(
+    inp.try_expect_take(|_| true, |sp| Ok((sp.span.start(), sp.span.end()))),
+    Ok(Some((0, 1))),
+    "the declined head is still at the front — the give-back is real"
+  );
+}
+
+#[test]
+fn wapi_b_try_expect_take_project_error_is_a_real_error_post_commit() {
+  // `project` runs after the commit, so its error is an error and not a decline —
+  // and the token it errored on is gone: the next take reads the SECOND token.
+  let (mut input, _scanned) = probe_input("1 2");
+  let mut emitter = Silent::<ProbeErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+  let out: Result<Option<usize>, ProbeErr> =
+    inp.try_expect_take(|_| true, |_sp| Err(ProbeErr::Lex));
+  assert_eq!(
+    out,
+    Err(ProbeErr::Lex),
+    "a project error propagates as an error"
+  );
+  assert_eq!(
+    inp.try_expect_take(|_| true, |sp| Ok((sp.span.start(), sp.span.end()))),
+    Ok(Some((2, 3))),
+    "the projected-over token was committed before `project` ran"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The terminal-vs-EOF distinction, executed at a latched
+// boundary. A body that folds a trip into `Ok(None)` flips every one of them.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wapi_b_peek_kind_is_terminal_aware_at_a_latched_boundary() {
+  let (mut input, _scanned) = probe_input("1 2 3");
+  let mut emitter = Silent::<ProbeErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+  assert!(inp.next().unwrap().is_some());
+  assert!(inp.next().unwrap().is_some());
+  assert!(
+    inp.next().unwrap().is_none(),
+    "the third scan trips and latches"
+  );
+  assert!(
+    matches!(inp.peek_kind(), Err(ProbeErr::Eot)),
+    "a latched boundary is an error from peek_kind, never a silent None"
+  );
+  assert!(
+    matches!(inp.head_satisfies(|_| true), Err(ProbeErr::Eot)),
+    "head_satisfies raises at the latch instead of answering false"
+  );
+  assert!(
+    matches!(inp.peek_head_map(|sp| sp.span.start()), Err(ProbeErr::Eot)),
+    "peek_head_map raises at the latch"
+  );
+  // The control: the raw read this family exists to replace folds the same latch.
+  assert!(
+    matches!(inp.peek_one(), Ok(None)),
+    "peek_one still folds a latch into Ok(None) — that IS the defect the family fixes"
+  );
+}
+
+#[test]
+fn wapi_b_peek_kind_reads_genuine_eof_as_none() {
+  // The positive twin: under the limit, exhaustion is Ok(None), not an error.
+  let (mut input, _scanned) = probe_input("1");
+  let mut emitter = Silent::<ProbeErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+  assert!(inp.next().unwrap().is_some());
+  assert!(
+    matches!(inp.peek_kind(), Ok(None)),
+    "genuine end of input peeks as None"
+  );
+  assert!(
+    matches!(inp.head_satisfies(|_| true), Ok(false)),
+    "and head_satisfies answers false there rather than raising"
+  );
+}
+
+#[test]
+fn wapi_b_peek_head_map_does_not_consume_the_head() {
+  let (mut input, _scanned) = probe_input("1 2");
+  let mut emitter = Silent::<ProbeErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+  assert_eq!(
+    inp.peek_head_map(|sp| (sp.span.start(), sp.span.end())),
+    Ok(Some((0, 1)))
+  );
+  assert_eq!(
+    inp.peek_head_map(|sp| (sp.span.start(), sp.span.end())),
+    Ok(Some((0, 1))),
+    "a peek is not a take — the second read sees the same head"
+  );
+  let taken = inp
+    .next()
+    .unwrap()
+    .expect("the head is still there to consume");
+  assert_eq!(taken.span_ref().start(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// The terminal **mark**, not merely "an error".
+//
+// `ProbeErr`'s `From<UnexpectedEot>` discards every field, so the cells above
+// prove `Err` rather than `Ok(None)` — they cannot see whether `.into_terminal()`
+// was applied. `TermErr` preserves the flag, so these cells fail if the mark is
+// dropped, and they fail the other way too if it were applied unconditionally:
+// the genuine-EOF arm asserts `is_terminal() == false`.
+//
+// The whole lexer stack is reused; only the emitter's error type changes, so
+// this block is pure addition beside the existing `ProbeErr` fixtures.
+// ---------------------------------------------------------------------------
+
+/// A probe error that **keeps** the terminal flag `UnexpectedEot` carries.
+#[derive(Debug, Clone, PartialEq)]
+enum TermErr {
+  Lex,
+  Limit,
+  /// `terminal` is `UnexpectedEot::is_terminal()` at the moment of conversion.
+  Eot {
+    terminal: bool,
+  },
+}
+
+impl From<()> for TermErr {
+  fn from(_: ()) -> Self {
+    TermErr::Lex
+  }
+}
+
+impl From<ProbeErr> for TermErr {
+  fn from(e: ProbeErr) -> Self {
+    match e {
+      ProbeErr::Limit => TermErr::Limit,
+      _ => TermErr::Lex,
+    }
+  }
+}
+
+impl From<ProbeLimitExceeded> for TermErr {
+  fn from(_: ProbeLimitExceeded) -> Self {
+    TermErr::Limit
+  }
+}
+
+impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for TermErr {
+  fn from(e: UnexpectedEot<O, Lang, Set>) -> Self {
+    TermErr::Eot {
+      terminal: e.is_terminal(),
+    }
+  }
+}
+
+impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, Lang>> for TermErr {
+  fn from(_: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
+    TermErr::Lex
+  }
+}
+
+impl<'a, L: crate::Lexer<'a>, Lang: ?Sized> crate::emitter::FromUnclosed<'a, L, Lang> for TermErr {
+  fn from_unclosed<D>(_: crate::error::Unclosed<D, L::Span, Lang>) -> Self {
+    TermErr::Lex
+  }
+}
+
+type TermCtx<'a> = (Silent<TermErr>, DefaultCache<'a, ProbeLexer<'a>>);
+
+/// The `probe_input` fixture retyped onto the terminal-preserving error.
+fn term_input(src: &str) -> Input<'_, ProbeLexer<'_>, TermCtx<'_>, ()> {
+  let limiter = ProbeLimiter::with_limit(2);
+  let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
+  Input::<ProbeLexer<'_>, TermCtx<'_>, ()>::with_state_and_cache(src, limiter, cache)
+}
+
+#[test]
+fn wapi_b_peek_kind_marks_the_eot_terminal_at_a_latched_boundary() {
+  let mut input = term_input("1 2 3");
+  let mut emitter = Silent::<TermErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+  assert!(inp.next().unwrap().is_some());
+  assert!(inp.next().unwrap().is_some());
+  assert!(
+    inp.next().unwrap().is_none(),
+    "the third scan trips and latches"
+  );
+  assert_eq!(
+    inp.peek_kind(),
+    Err(TermErr::Eot { terminal: true }),
+    "peek_kind's latched EOT must be MARKED terminal, not merely an error"
+  );
+}
+
+#[test]
+fn wapi_b_peek_kind_leaves_a_genuine_eof_unmarked() {
+  // The other direction: a mark applied unconditionally would flip this.
+  let mut input = term_input("1");
+  let mut emitter = Silent::<TermErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+  assert!(inp.next().unwrap().is_some());
+  assert_eq!(
+    inp.peek_kind(),
+    Ok(None),
+    "genuine end of input is not an error at all here"
+  );
+}

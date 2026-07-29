@@ -35,6 +35,8 @@ numbered entry below that carries the full reasoning.
 | `UnexpectedEnd`'s derived `Debug` / `Eq` / `Hash` | include a `terminal: bool` field | Shipped four rounds ago and disclosed nowhere until now. **Re-bless frozen renders.** | [16](#changed-breaking) |
 | `Unclosed`'s derived `Debug`; `SeparatedError` / `MissingToken` derived `Debug`, `Eq`, `Hash` | include `kind` / the name channel | See *Debug and rendered output* below for the complete list. | [20](#changed-breaking), [28](#changed-breaking) |
 | A slice-choice id out of range panicked with `index out of bounds` | `choice id {id} out of bounds for {len} branches` | Message text only; reachability is unchanged. | [35](#changed-breaking) |
+| Your own `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 10 new inherent items and 6 new defaulted trait methods enter the method space. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
+| — | a new `warning: unused import` naming one of *your* combinator traits | That warning is the **only** breadcrumb the silent case gives you: the steal stranded the import. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 
 #### These fail to compile. Your build will point at every one.
 
@@ -65,6 +67,8 @@ numbered entry below that carries the full reasoning.
 | `<[P; N] as ParseChoice>::Id::new(i)` (0-based) | `::new(i + 1)` (1-based) | `RangedUsize`'s bounds are inclusive, so the old id space admitted `N` and every `[P; 0]` id panicked. Tuple choices are unaffected. | [35](#changed-breaking) |
 | `match op { … }` over `fuzz::Op` without a wildcard | add an `IsExhausted` arm | `fuzz` feature only. *Found by the mechanical API diff; disclosed nowhere before.* | [38](#changed-breaking) |
 | `dyn SeparatorHandler` | no longer object-safe | `OBSERVES_SEPARATORS` is an associated const. Nothing in this crate used it. | [5](#changed-breaking) |
+| `parser.labelled("x")` resolving to your own trait's method, that trait in scope | `E0034`, when yours sits at the **same pick** | Six new defaulted names on `ParseInput` / `TryParseInput`. The fix is UFCS; rustc prints the two suggestions. | [source-breaking additions that fail *loudly*](#source-breaking-additions-that-fail-loudly) |
+| `use tokora::*;` beside another glob exporting the same name | `E0659`, or `ambiguous_glob_imports` for a *macro* name on rustc ≥ 1.95 | 13 new glob-reachable names — `select!` against `tokio::select!` is the real one. Measured on three toolchains; the remedy differs by name kind. | [source-breaking additions that fail *loudly*](#source-breaking-additions-that-fail-loudly) |
 
 #### Additive — nothing to do, listed so you know it exists
 
@@ -75,6 +79,10 @@ and `conformance::emitter` · `Dialect` · `CstText` · `PartialSession` and the
 lifecycle · `SeparatedError: Display` · `InputRef::is_exhausted()` · `Cache::RETAINS_FRONT` ·
 `BStr` in the `Equivalent` family · `CstProfile` / `KindValidator` un-gated from `rowan` ·
 `Silent`'s pratt impl loses four bounds it never used.
+
+That list is additive **in the type system**. The names added below are not: adding a name
+is a source break, and the two *Source-breaking additions* sections below say which
+diagnostic you will get.
 
 #### If you froze `Debug` or `Display` output
 
@@ -87,6 +95,210 @@ this campaign, which is why that list exists at all.
 This release's `## Unreleased` section was consolidated from twenty `###` headings carrying
 five independently-numbered lists, so numeric cross-references written before the cut
 ("breaking change 3") do not resolve. The pull-request body carries the full old→new map.
+
+### The new names, and why adding a name is still a break
+
+This release adds 13 glob-reachable root/module names, one new public module
+(`tokora::cst::kinds`, its own glob namespace), 6 trait-declared methods, and 10 inherent
+items — **8 receiver methods and 2 associated functions**, which resolve by different rules
+and are listed separately below for that reason. The items themselves are under
+[Added](#added) with the rest of the release. The lists here are generated from a
+rustdoc-JSON diff of the two sides at the `std,logos,trace,rowan` feature point; none is
+hand-maintained.
+
+### The rule for new names, stated as weakly as it can honestly be stated
+
+> **Any new public name can silently re-resolve a same-named item in your code. Whether
+> you are told depends on spelling details that belong to the compiler, not to this
+> crate.**
+
+Four successively more precise versions of this rule were written during development and
+each was falsified — never by a wrong mechanism, always by a **spelling nobody wrote down**.
+The last one shipped a trait on the strength of "this name cannot collide silently, because
+its type parameter never infers"; a turbofish supplies it, and discarding the return made
+the collision silent with no error and no warning. That trait is not in this release.
+
+So the rule above is the only form of it worth relying on, and the practical advice is
+**detection, not prediction**:
+
+> **If you have a method, associated function, free function, type or macro named any of
+> the names in the two sections below, check that call site after upgrading.** The names
+> are the complete generated list.
+
+Everything after this point is *what was measured*, on the toolchains named. It is useful
+for debugging an actual collision. It is not a guarantee, and a spelling not listed here is
+not thereby safe.
+
+### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+#### Are you exposed? This question terminates.
+
+**You are exposed if you have written a method or associated function with one of the names
+below, on one of these receiver types:**
+
+| you wrote it on | which names |
+|---|---|
+| `InputRef` | `try_expect_take`, `try_expect_take_or_stop`, `peek_head_map`, `head_satisfies`, `peek_kind`, `attempt_parse`, `spanning` |
+| `ParseAttempt` | `into_option` |
+| `Ident` | `parse_except`, `try_parse_except` |
+| any parser-shaped type — one implementing `ParseInput` or `TryParseInput` | `labelled`, `traced`, `list_until`, `separated1_by`, `peek_then_head`, `opt` |
+
+That is a finite question you can answer about your own code, and it is the one to answer.
+**Whether the compiler then tells you depends on how close your signature is to ours — so do
+not rely on it telling you, and do not rely on using the return value.** The remedy is UFCS:
+`MyTrait::peek_kind(inp)` pins your method by name and is immune to all of this.
+
+**Why there is no shortlist of "the silent ones".** An earlier draft of this entry named
+four, measured. It was still wrong: the measurement covered one shape of consumer. Whether a
+collision goes silent depends on how close the consumer's signature is to tokora's — a
+property of code that does not exist yet — so a list of silent names is not a wrong answer,
+it is not a well-formed one. The table above is the question we *can* answer for you.
+
+#### The dangerous case is the one that reads as safest
+
+**If you wrote the helper first**, with the same name and a compatible signature — because
+you needed `peek_kind` or `head_satisfies` while tokora lacked them — then tokora's method
+takes the call with **no error and no warning, even when you use the return value**.
+Measured, byte-identical consumer source, base against this release:
+
+```
+base  CONSUMER-CALLS: 1     head  CONSUMER-CALLS: 0     zero diagnostics on both sides
+```
+
+reproduced for `peek_kind`, `head_satisfies` and `peek_head_map` with the result bound by `?`
+at the caller. **A discarded return is not the precondition; a compatible signature is
+enough.**
+
+And the inversion that matters: **the closer your helper is to ours, the quieter the
+substitution — and the more likely it also changes behaviour.** `peek_kind` and
+`head_satisfies` deliberately have *different halt semantics* from the `peek_one`-based
+helper a consumer would have written; that difference is why they exist (see the
+terminal-stop entries below). So a near-identical replacement is the most dangerous case
+here, not the safest.
+
+Nothing in this release detects this for you. `ci/name_collision/` probes a consumer whose
+signature *differs* from tokora's — the loud case — and reports argument-taking names as
+`loud` on the strength of its own probe's arity. That limit is stated in
+`ci/name_collision/README.md`, and its pass message spells the same limits out inline — that the
+inherent-method and associated-function probes take no arguments, so a `loud` verdict on an
+argument-taking name in those two categories comes from the probe's own arity, while the
+trait-method probes pass real arguments and their rows are genuine — so a reader of a CI log
+is not told "PASS" without being told what it excludes.
+Three reproductions of the case it cannot generate are checked in beside it.
+
+#### The one sub-case that is fully characterised
+
+A consumer whose signature is *incompatible* with tokora's, calling with the return
+**discarded**. There the outcome does depend on the return type. This is a sub-case, not the
+boundary — it is here because it is the part the tooling covers:
+
+| name | discarded value | reported as |
+|---|---|---|
+| `peek_kind` | `Result<…>` | ``warning: unused `Result` that must be used`` |
+| `list_until` | `impl FnMut(…)` | ``warning: unused implementer of `FnMut` that must be used`` |
+| `opt` | `impl FnMut(…)` | ``warning: unused implementer of `FnMut` that must be used`` |
+| `into_option` | `Option<…>` | **nothing** — `Option` is not `#[must_use]` as a type |
+| `labelled` · `traced` · `peek_then_head` | a plain adapter struct | **nothing** |
+
+The discriminator there is whether the `unused_must_use` lint fires: a callable return is
+covered by the lint's own rule for unused function-like values, an `Option` is not covered
+at all, and a plain struct is not either. It is not "returns `Result`" and not
+"is `#[must_use]`".
+
+**There is deliberately no "full silent surface" list here.** An earlier draft gave one, of
+fourteen names — and it omitted `parse_except` and `try_parse_except`, which are exactly the
+two the paragraph above refuses to call safe. Any such list is the well-formedness problem
+again. **The names to check are the exposure table at the top of this section** — the
+sixteen this release adds; which of them go silent for *your* code depends on your
+signatures, which is a thing only your code can answer.
+
+What was measured, on rustc 1.87, 1.95 stable and 1.97-nightly:
+
+- **Pick order, not inherent-ness, decides.** For `recv.m(..)` rustc walks the receiver's
+  autoderef chain and, at each step, tries the receiver by value, then `&`, then `&mut`.
+  Each is a *pick*. Within one pick an inherent candidate beats a trait candidate — but a
+  tokora method taken **by value** sits at an earlier pick than your `&self` method on the
+  same type and wins regardless, even against your *inherent* method. A method reached
+  through a type parameter's bound (`fn f<T: MyTrait>(t: &T)`) buckets inherent at that
+  pick, so generic code that names its combinator in a `where` clause is protected and
+  concrete code is not.
+- **How loud it is depends on your code's shape, not on the steal.** A fully inferable call
+  site flips **silently** — compiles, no warning, runs the other method. A generic one
+  leaves type variables unresolved and gets **`E0282`**. A concrete incompatible one gets
+  **`E0308`**, or **`E0061`** on an arity mismatch, pointing into tokora's source. None of
+  the three names the real cause.
+- **A discarded return removes the last defence.** If a call ignores the result there is no
+  type for the compiler to disagree about, and the steal is silent even where the same call
+  with its return *used* is loud. Which names that reaches is the `unused_must_use` table
+  earlier in this section: four report nothing, three report a warning, and the rest fail to compile — but
+  only for a consumer whose signature is *incompatible* with ours, which is the sub-case
+  that table describes.
+- **The one breadcrumb.** If your method came from an extension trait you imported with a
+  `use`, the steal strands that import and rustc emits **`warning: unused import`** naming
+  the trait. An unused-import warning on a combinator trait after upgrading means one of
+  its methods was re-resolved. If the trait is declared in the same file, you get nothing
+  at all. The remedy either way is UFCS: `MyTrait::labelled(parser, "name")`.
+
+### Source-breaking additions that fail *loudly*
+
+- **`E0034`, "multiple applicable items in scope"**, when one of the 6 new defaulted method
+  names meets a same-named method from another trait **at the same pick**, with that trait
+  in scope. Blanket-ness is irrelevant — a trait with exactly one impl for one concrete
+  input type collides identically. rustc prints its own disambiguation suggestions; the fix
+  is UFCS.
+
+- **Associated functions resolve by a different rule, and it is not the receiver walk.**
+  `Ident::parse_except` and `Ident::try_parse_except` are inherent **associated functions**.
+  A path call `Type::name(..)` has no receiver, so no autoderef and no autoref happen;
+  inherent associated items simply beat trait ones. A consumer trait that supplied either
+  name loses it.
+
+  **These two are not more strongly protected than the methods above, and an earlier draft
+  of this entry said they were.** It claimed every collision shape here is loud, on the
+  strength of the probe — but that probe declares a zero-argument consumer against a
+  two-argument function, so its `loud` verdict comes from its own arity and measures
+  nothing about the name. Treat these exactly like the receiver methods: if you wrote
+  `parse_except` on `Ident`, check the call site and do not rely on a diagnostic.
+
+  What *is* established, for the narrow sub-case of an incompatible signature with the
+  return **discarded**: both functions return `Result`, which is `#[must_use]`, so a
+  discarded result warns.
+
+  **Unsupported is not the same as disproven, and the difference is the whole finding.**
+  Two attempts to build a silently-stealing consumer for `parse_except` produced a compile
+  error instead; a different reviewer, with a different signature, produced a silent steal.
+  Neither outcome settles it, because whether a collision is reported depends on how close
+  the consumer's signature is to ours — and that is a property of code that does not exist
+  yet. So this entry does not claim these two names are safe, and does not claim they are
+  unsafe. It claims the earlier assertion of safety had nothing behind it.
+
+- **Ambiguity between two glob imports**, for the 13 new glob-reachable names — `Pinned`,
+  `pinned`, `WhileHead`, `WhileKind`, `while_head`, `while_kind`, `select`, `try_select`,
+  `attempt`, `syntax_kinds` via `tokora`; `dispatch_take`, `try_dispatch_take` via
+  `tokora::parser`; and `kinds` via `tokora::cst`. The new module `tokora::cst::kinds` opens
+  a glob namespace of its own. `select!` against `tokio::select!` or `futures::select!` is
+  the real-world instance. **The diagnostic and its remedy differ by what kind of name
+  collides, and — for macros only — by toolchain:**
+
+  | Colliding name | 1.87 | 1.95 stable | 1.97 nightly |
+  |---|---|---|---|
+  | item (`Pinned`, `while_head`, …) | hard `error[E0659]` | hard `error[E0659]` | hard `error[E0659]` |
+  | macro (`select`, `try_select`, `attempt`, `syntax_kinds`) | hard `error[E0659]` | `ambiguous_glob_imports` **warning** | `ambiguous_glob_imports` **error** |
+
+  `#[allow(ambiguous_glob_imports)]` **does not suppress the item rows on any toolchain**,
+  and does not suppress the macro row on 1.87 either. For an item name there is exactly one
+  fix: an explicit `use` naming the one you meant.
+
+**Why the names were not changed instead.** 0.8.0 is a breaking release and these are the
+right names. One name *was* removed rather than disclosed — see `pinned` under
+[Added](#added) — because it was the only addition that planted a candidate on every
+`Sized` type in your program, and the argument for accepting that was the loudness
+guarantee the turbofish spelling refuted. A source census of the known consumer, run
+during development, found zero declarations of any of these names and zero
+`use tokora[::…]::*` glob imports. **That census is not re-runnable from this repository —
+its script is not shipped here — so treat it as a development note rather than a check you
+can repeat.** It also saw one consumer at one commit. The disclosure above is the control;
+the census was never more than corroboration.
 
 ### Changed (breaking)
 
@@ -999,6 +1211,86 @@ item that carries them, and listed here only so scanning this section does not m
   declares `true` and then refuses a front push into an empty cache is violating the contract, and
   now panics at the refusal rather than losing the token.
   — *(R5, #116)*
+
+- **Match-first token dispatch.** `select!` / `try_select!` and their runtime,
+  `tokora::parser::dispatch_take` / `try_dispatch_take`. One arm per kind, the kind table
+  written once beside the patterns, the head classified once against the whole table, and
+  each arm receiving the **moved** payload — replacing one annotated closure per kind plus a
+  dead re-match, and the hand-written `unreachable!()` for "the kind matched but the variant
+  did not" (the runtime turns that into a typed error carrying the table). Both runtimes are
+  generic over completeness, so streaming (`Partial`) parsers can use them; the context must
+  be a `ComposableParseContext`. The kind expressions must be **const-promotable** — a
+  non-promotable one is `E0716` pointing at the invocation rather than the arm; the macro's
+  own docs say so and name the fix.
+  — *(W-api-B)*
+
+- **Head observation that does not fold a halt into absence.** `InputRef::peek_head_map`,
+  `head_satisfies` and `peek_kind`. `peek_one` answers `Ok(None)` for genuine end of input
+  **and** for a resource-limit trip or a latched poison boundary, so a production that
+  decides on the answer reads a halt as a grammar fact. The new family reserves `Ok(None)`
+  for the real end of input and raises the terminal end-of-input error otherwise.
+  `peek_one` is unchanged and is not deprecated.
+  — *(W-api-B)*
+
+- **Classify-then-take.** `InputRef::try_expect_take` / `try_expect_take_or_stop`: one
+  classification by reference, the commit, then the token **by value** into a projection.
+  `try_expect_map` projects by reference, so payloads cannot move out of it.
+  — *(W-api-B)*
+
+- **Three-way speculation and an imperative span bracket.** `InputRef::attempt_parse`
+  (`Accept` commits, `Decline` rolls back with no fabricated error, `Err` rolls back and
+  propagates) and `InputRef::spanning`.
+  — *(W-api-B)*
+
+- **Width-1 decisions without a window.** `while_head`, `while_kind` (and their types
+  `WhileHead` / `WhileKind`) plus `ParseInput::peek_then_head`. The adapters are `Decision`
+  impls pinned at `W = U1`, which is what removes the `::<_, U1>` turbofish, the `Peeked`
+  window and the `Ctx` parameter from a hook's signature.
+  — *(W-api-B)*
+
+- **Output pinning.** `pinned::<O2, _>(parser)` and `Pinned<P, O>`, for a receiver with
+  several output impls (`Collect`, `With`, `FailWith`, `Accepted`) that is ambiguous at
+  every downstream site not naming the output. `Pinned`'s phantom is `fn() -> O`, so
+  pinning does not move `O`'s auto-traits onto the parser and stays covariant in `O`.
+  A fluent `.outputs::<O2>()` method was built and then **removed before release**: it had
+  to be a blanket trait method, which plants a candidate on every `Sized` type, and a
+  by-value candidate is picked before a consumer's same-named `&self` method. That was
+  accepted while it was believed such a collision must be loud; a turbofish with a
+  discarded return makes it silent, and an extension method whose job is to pin a type has
+  no inferred spelling, so the silent path is its default. A free function resolves by path
+  and can shadow nothing. The fluent form stays purely additive later.
+  — *(W-api-B)*
+
+- **Three-way ergonomics.** `ParseAttempt::into_option` (the existing `From` conversion, with
+  a name that can be found) and `attempt!` — `?` for the three-way vocabulary, early-returning
+  `Ok(ParseAttempt::Decline)`.
+  — *(W-api-B)*
+
+- **Exclusion parsing.** `Ident::try_parse_except` / `Ident::parse_except`: "a Name, but not
+  `on`". The exclusion runs inside the classify predicate, so a decline consumes nothing.
+  — *(W-api-B)*
+
+- **Fluent parity** for the free functions most reached for: `ParseInput::{labelled, traced,
+  list_until, separated1_by}` and `TryParseInput::opt`. `list_until` and `separated1_by`
+  inherit the `Complete` pin of the free `list` / `separated1` they delegate to; that is
+  stated on each, with the contrast against `select!`.
+  — *(W-api-B)*
+
+- **A declared CST kind space.** `syntax_kinds!` and the module `tokora::cst::kinds`. A
+  dialect hand-keeps three things that must agree — the `#[repr(u16)]` enum, the
+  declaration-order array its consumers index, and the predicate it hands to `CstProfile` —
+  and a disagreement between them is the one shape the sink's own enforcement cannot see,
+  because it only ever sees one side. The macro generates all three, plus a checked
+  `from_raw`. No feature gate: it names `KindValidator`, which this release un-gates from
+  `rowan`, so a `no_std` consumer that cannot enable `rowan` can still declare its kind space
+  — verified from a `no_std`, no-`alloc`, no-`rowan` consumer crate on both stable and the
+  1.87 MSRV.
+  — *(W-api-B)*
+
+- **Emitter diagnostics.** Eight `#[diagnostic::on_unimplemented]` messages across `Emitter`,
+  `ComposableEmitter` and the six members between them, so a type short of the bundle is told
+  which member is missing rather than getting rustc's default trait-bound phrasing.
+  — *(W-api-B)*
 
 ### Fixed
 

@@ -20,6 +20,11 @@ mod unexpected_trailing;
 mod name_census;
 
 /// An emitter that handles missing separator or repeated separators found during parsing.
+#[diagnostic::on_unimplemented(
+  message = "`{Self}` cannot report separator diagnostics for lexer `{L}`",
+  label = "missing `SeparatedEmitter` — required by the separated drivers and by the `ComposableEmitter` bundle",
+  note = "implement `SeparatedEmitter` (usually alongside the other members of the `ComposableEmitter` bundle)"
+)]
 pub trait SeparatedEmitter<'inp, L, Lang: ?Sized = ()>: Emitter<'inp, L, Lang> {
   /// Emits an error or warning for a missing separator found during parsing.
   fn emit_missing_separator(

@@ -1,0 +1,11 @@
+# Probes where both sides run the CONSUMER's item, i.e. the added name was never a
+# candidate. That is sometimes the honest answer — a bound genuinely rejects the receiver —
+# but it is indistinguishable from a vacuous probe, so each one is justified here in
+# writing or the gate fails.
+#
+# Ten of the thirteen glob probes once sat in this state while reporting `ok`: four macro
+# names whose template globbed nothing, three names in `tokora::parser`/`tokora::cst` whose
+# probe globbed only the crate root, and three functions referenced in the type namespace.
+# None of them was tested. That is why agreement is no longer accepted by default.
+#
+# (currently empty — every probe constructs a real collision)

@@ -107,6 +107,11 @@ mod severity;
 /// }
 /// // Implement other atomic traits as needed: TooManyEmitter, SeparatedEmitter, etc.
 /// ```
+#[diagnostic::on_unimplemented(
+  message = "`{Self}` is not a tokora emitter for lexer `{L}`",
+  label = "this type has no `Emitter` impl, so it can neither report nor absorb diagnostics",
+  note = "implement `Emitter` (usually alongside the other members of the `ComposableEmitter` bundle)"
+)]
 pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// The error type that this emitter produces.
   ///
@@ -764,6 +769,11 @@ where
 ///   ladder::<L, E>()
 /// }
 /// ```
+#[diagnostic::on_unimplemented(
+  message = "`{Self}` is not a composable emitter for lexer `{L}`",
+  label = "one or more of the seven `ComposableEmitter` members is missing for this type",
+  note = "the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below"
+)]
 pub trait ComposableEmitter<'inp, L, Lang: ?Sized = ()>:
   Emitter<'inp, L, Lang>
   + FullContainerEmitter<'inp, L, Lang>

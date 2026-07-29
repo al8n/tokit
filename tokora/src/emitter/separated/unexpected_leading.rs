@@ -6,6 +6,11 @@ use crate::{
 use super::*;
 
 /// An emitter that handles unexpected leading separator.
+#[diagnostic::on_unimplemented(
+  message = "`{Self}` cannot report a leading separator for lexer `{L}`",
+  label = "missing `UnexpectedLeadingSeparatorEmitter` — a `ComposableEmitter` bundle member",
+  note = "implement `UnexpectedLeadingSeparatorEmitter` (usually alongside the other members of the `ComposableEmitter` bundle)"
+)]
 pub trait UnexpectedLeadingSeparatorEmitter<'inp, L, Lang: ?Sized = ()>:
   SeparatedEmitter<'inp, L, Lang>
 {

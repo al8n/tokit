@@ -180,6 +180,16 @@ const CASES: &[(&str, &str, &str)] = &[
     "is not a tokora dialect",
     "the trait bound `NotADialect: Dialect",
   ),
+  (
+    "tests/ui/composable_emitter.rs",
+    "is not a composable emitter for lexer",
+    "the trait bound `MyEmitter: ComposableEmitter",
+  ),
+  (
+    "tests/ui/separated_emitter.rs",
+    "cannot report separator diagnostics for lexer",
+    "the trait bound `MyEmitter: SeparatedEmitter",
+  ),
 ];
 
 /// The half of R8 that does not need the pinned toolchain — and the half that closes the
