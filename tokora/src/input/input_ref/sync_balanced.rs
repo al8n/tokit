@@ -207,6 +207,23 @@ where
   /// for a failed hole**. As in [`sync_through`](Self::sync_through), this holds even when
   /// the caller had prefilled the cache with peeked lookahead: a failed sync rewinds the
   /// drained cache prefix too, at the cost of re-lexing those tokens on the next read.
+  ///
+  /// # Partial mode: an `Incomplete` exit leaves no trace
+  ///
+  /// Under [`Partial`](crate::input::Partial), a non-final buffer can end mid-scan and this
+  /// method surfaces `Incomplete`. That exit commits nothing, so it keeps nothing: the position,
+  /// the lexer state, the dedup watermark and every emission the aborted attempt made — each
+  /// skipped token's `commit_token` event included — are restored to the call's entry. Refill
+  /// and call again and the retry is idempotent; nothing accumulates per attempt.
+  ///
+  /// # Panic unwind
+  ///
+  /// A panic out of the predicate, the expected-tokens closure, the lexer or the emitter is an
+  /// exit too, and it settles — this method's `to`-shaped commit posture keeps the diagnosed
+  /// prefix and puts the in-flight token back; the rewinding scans
+  /// ([`sync_through`](Self::sync_through), [`sync_balanced`](Self::sync_balanced)) restore to
+  /// the call's entry instead. Either way no token leaves the stream and no emitter mark is
+  /// stranded.
   #[inline(always)]
   #[allow(clippy::type_complexity)]
   pub fn sync_balanced<D, F>(
@@ -235,11 +252,17 @@ where
     // snapshot and `skip_until` are all infallible (scalar zeroes, `None`s, and a closure
     // construction that captures by reference).
     let error_end = self.emitted_error_end.clone();
+    // Same window, same reason: the rewind cursor is caller code too, and it is cloned here so
+    // that `restore_entry` — which runs with a mark outstanding — performs none.
+    let rewind_to = self.span.end_ref().clone();
+    let latch = self.latch_snapshot();
     let snapshot = ThroughEntry::new(
       self.span.clone(),
       self.state.clone(),
       self.session.emitter.checkpoint(),
       error_end,
+      rewind_to,
+      latch,
     );
 
     let mut depth = 0usize;

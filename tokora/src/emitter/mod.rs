@@ -243,6 +243,28 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// emissions made after this point. Stateless emitters ([`Fatal`], [`Silent`],
   /// [`Ignored`](crate::utils::marker::Ignored)) keep nothing to rewind and use
   /// the default `0`.
+  ///
+  /// # Contract: `checkpoint` is fail-atomic, and a returned mark is settled exactly once
+  ///
+  /// If this call unwinds, the emitter's observable state and any per-mark bookkeeping must be
+  /// as if it never happened. It takes `&self` — registering per-mark state therefore requires
+  /// interior mutability, which is precisely the implementation opting into managing its own
+  /// atomicity: **reserve before you publish**. Grow your storage first, while nothing is
+  /// registered; then write into the reserved capacity, which cannot unwind. That is also why
+  /// this trait has no `reserve_checkpoint` hook: everything such a hook could do is expressible
+  /// inside this body, and the input layer already orders its own capture so that nothing
+  /// crate-side is pending when this is called — a hook would add a second method and no new
+  /// capability, on a trait every wrapper must remember to forward.
+  ///
+  /// A mark that *is* returned is settled exactly once — by [`rewind`](Self::rewind) if the
+  /// branch was abandoned, by [`release`](Self::release) if it was kept — and a call that
+  /// unwinds owes nothing.
+  ///
+  /// **Residue, stated plainly:** an emitter that registers internal state and unwinds
+  /// mid-`checkpoint` still strands its own state; nothing in the crate can release what was
+  /// never returned to it. This clause is what tells you not to — uphold it and there is
+  /// nothing to strand. The recording CST sink's `checkpoint` is the reference implementation:
+  /// it reads, and registers nothing that a later settle must find.
   #[inline(always)]
   fn checkpoint(&self) -> u64 {
     0
@@ -280,6 +302,16 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// diagnostics after backtracking, not as panics. The enforcing tests for the reference
   /// implementation are the `restore_rewinds_verbose_errors_*` family in `tests/emitter.rs`
   /// and `sync_balanced_hole_emission_unwinds_on_rollback` in `src/input/input_ref/tests.rs`.
+  ///
+  /// # Contract: this may run mid-unwind, and must not panic
+  ///
+  /// A rolling-back guard settles in its `Drop`, and a `Drop` can run while a panic is already
+  /// in flight — including for a [`Commit`](crate::Commit)-policy guard, which takes the
+  /// rollback arm on the unwind edge. A panic raised here mid-unwind is a double panic and
+  /// aborts the process. The clause [`release`](Self::release) already carries applies in full:
+  /// stay observably total on the restore path. The built-in emitters are structurally
+  /// non-panicking there (truncations and pops); the crate's rollback-on-drop guarantee is
+  /// conditional on yours being too.
   fn rewind(&mut self, cursor: &Cursor<'a, '_, L>, checkpoint: u64)
   where
     L: Lexer<'a>;
@@ -384,9 +416,9 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   ///
   /// Every `enter_label` is paired with exactly one [`exit_label`](Self::exit_label), and the
   /// pairs nest — the sequence an implementation observes is a well-bracketed push/pop
-  /// stream. [`labelled`](crate::labelled) guarantees this by construction: it brackets the
-  /// sub-parse and pops on **both** the success and error paths, so the law holds even when
-  /// the inner parser's failure propagates out through `?`. No label state needs to ride a
+  /// stream. [`labelled`](crate::labelled) guarantees this by construction: the pop lives in a
+  /// drop guard, so it runs on **every** exit of the sub-parse — success, `?`-propagation, and
+  /// panic unwind alike. No label state needs to ride a
   /// checkpoint, because the live stack follows the call structure of the wrapper scopes and
   /// a rewound emission takes its captured snapshot with it (the rewind story; see
   /// `labelled_guard_rollback_drops_labels_then_reemission_rederives` in `tests/emitter.rs`
@@ -408,6 +440,13 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// it to pop its open-label stack. The stack therefore follows the call structure of
   /// the `labelled` wrappers exactly, so a checkpoint restore needs no label handling —
   /// no label state lives outside the wrapper scopes and the recorded log entries.
+  ///
+  /// # Contract: this may arrive from a drop during a panic unwind
+  ///
+  /// [`labelled`](crate::labelled)'s pop is a drop-guard call — that is how the pairing law
+  /// survives an unwind through the sub-parse — so this can run while a panic is in flight and
+  /// must not panic there. A panic raised mid-unwind aborts the process; same posture as
+  /// [`release`](Self::release) and [`rewind`](Self::rewind).
   #[inline(always)]
   fn exit_label(&mut self) {}
 }

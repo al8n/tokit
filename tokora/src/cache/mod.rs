@@ -3,7 +3,6 @@ use mayber::Maybe;
 
 use crate::{
   Window,
-  input::Checkpoint,
   lexer::Lexer,
   span::{Span, Spanned},
 };
@@ -42,60 +41,63 @@ pub type DefaultCache<'a, L> =
 /// - **Efficiency**: Avoids re-lexing tokens that have already been processed
 /// - **State Management**: Preserves lexer state (extras) alongside each token
 ///
-/// # Design Patterns
+/// # The implementations, and the limit
 ///
-/// Different implementations support different use cases:
-/// - **Fixed-size arrays**: Bounded lookahead with known maximum (e.g., `[CachedToken; 4]`)
-/// - **Dynamic buffers**: Unlimited lookahead using `Vec` or `VecDeque`
-/// - **BlackHole**: No caching at all, for streaming-only scenarios without backtracking
+/// The complete inventory is three, all bounded at compile time:
+///
+/// - `GenericArrayDeque<_, N>` — a fixed-capacity ring, `N` a `typenum` bound.
+///   [`DefaultCache`] is this at `U3`.
+/// - `Option<CachedToken<..>>` — capacity 1, the smallest cache that can still retain the front.
+/// - `()` — capacity 0: no caching at all, for streaming-only use without lookahead.
+///
+/// There is **no dynamic, allocator-backed cache**, and enabling `alloc` does not add one — it
+/// enables allocator-backed *containers and drivers*, and forwards the sub-crates' own `alloc`
+/// features. Nor would one buy unbounded lookahead: [`crate::Window`] is sealed at
+/// **U1–U32**, so no cache of any capacity — built-in or downstream — can serve a public peek
+/// past 32 tokens. Lookahead beyond the window is what **transactions** are for: an
+/// [`attempt`](crate::InputRef::attempt) or a [`Transaction`](crate::Transaction) speculates
+/// arbitrarily far and re-lexes on rollback, which is unbounded speculation without an unbounded
+/// buffer.
 ///
 /// Note: Tokens cannot be overwritten until explicitly consumed, as they must remain
 /// available for backtracking operations. This means the cache can become full and
 /// refuse new tokens if capacity is reached.
 ///
-/// # Cache Operations
+/// # The contract: a cache is a queue, and only a queue
 ///
-/// The cache supports standard queue operations:
-/// - `push_back`: Add newly lexed tokens to the end (fails if cache is full)
-/// - `pop_front`: Remove and return the oldest token
-/// - `peek`: View tokens without removing them
-/// - `rewind`: Restore to a previous state (for backtracking)
+/// The input layer owns every decision about *which* tokens should be resident; a cache decides
+/// only whether it has room. These are the laws it must uphold, phrased over what a caller can
+/// observe — the cache conformance kit checks each one:
 ///
-/// # Safety
+/// - **FIFO append.** [`push_back`](Cache::push_back) places the token after every resident
+///   entry; [`push_front`](Cache::push_front) places it before every resident entry. A refused
+///   push returns the token **unchanged** and leaves the cache exactly as it was.
+/// - **Order.** [`pop_front`](Cache::pop_front) removes the **oldest** resident entry and
+///   [`pop_back`](Cache::pop_back) the **newest**; [`front`](Cache::front) and
+///   [`back`](Cache::back) view those same two entries without removing them.
+/// - **Exact length.** [`len`](Cache::len) is exactly the resident count, and
+///   [`remaining`](Cache::remaining) is exactly how many more `push_back`s will be accepted.
+/// - **Bounded, pure peek.** [`peek`](Cache::peek) appends exactly `min(len(), buffer capacity)`
+///   entries to the buffer, oldest first, once each. It is logically pure: it takes `&self`,
+///   calling it twice yields the same sequence, and it changes no observable. Borrowed and owned
+///   results denote the same tokens.
+/// - **The restore path must not panic.** [`pop_front`](Cache::pop_front),
+///   [`pop_back`](Cache::pop_back), [`clear`](Cache::clear), [`front`](Cache::front),
+///   [`front_span`](Cache::front_span), [`len`](Cache::len) — **and
+///   [`push_front`](Cache::push_front)** — are called by the input layer from guard drops, which
+///   can run **mid-unwind**, where a panic aborts the process. `push_front` is on that list for a
+///   reason worth stating: a scan's unwind edge puts the in-flight token back through it, so it
+///   is a restore-path operation even though it is the only *writing* one. A `push_front` that
+///   panics on the normal path is also the one place the crate cannot make whole — it has taken
+///   the token by value, so the token goes with it.
+/// - [`RETAINS_FRONT`](Cache::RETAINS_FRONT) carries its own law, and it is checked: declaring
+///   `true` and then refusing a front push into an empty cache panics at the refusal site.
 ///
-/// The `peek` method is marked unsafe because it requires implementations to guarantee
-/// that returned slices only contain properly initialized tokens. This is enforced by
-/// the trait's contract.
-///
-/// # Example
-///
-/// ```ignore
-/// // A simple fixed-size cache using a VecDeque-like structure
-/// struct BoundedCache<'a, T: Token<'a>> {
-///     tokens: VecDeque<CachedToken<'a, T>>,
-///     capacity: usize,
-/// }
-///
-/// impl<'a, T: Token<'a>> Cache<'a, T> for BoundedCache<'a, T> {
-///     fn len(&self) -> usize {
-///         self.tokens.len()
-///     }
-///
-///     fn remaining(&self) -> usize {
-///         self.capacity - self.tokens.len()
-///     }
-///
-///     fn push_back(&mut self, tok: CachedToken<'a, T>) -> Result<&CachedToken<'a, T>, CachedToken<'a, T>> {
-///         if self.tokens.len() < self.capacity {
-///             self.tokens.push_back(tok);
-///             Ok(self.tokens.back().unwrap())
-///         } else {
-///             Err(tok) // Cache full, cannot overwrite!
-///         }
-///     }
-///     // ... other methods
-/// }
-/// ```
+/// What is deliberately **not** on this list is any notion of a checkpoint. A cache never sees
+/// one. The cursor-keyed geometry a restore needs is performed by the input layer through the
+/// queue surface above, beside the push-generation bookkeeping only it can do. (`Cache::rewind`
+/// used to ask a cache to do the first half from facts it was never given; see
+/// [`InputRef::restore`](crate::InputRef::restore) and the 0.8.0 changelog.)
 pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// The options for creating a new cache.
   type Options;
@@ -141,16 +143,6 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// For black hole caches, this always returns 0.
   fn remaining(&self) -> usize;
 
-  /// Rewinds the cache to a previously saved checkpoint.
-  ///
-  /// This operation restores the cache state to match the checkpoint, typically
-  /// by clearing any tokens that were added after the checkpoint was created.
-  /// This is used for parser backtracking.
-  fn rewind(&mut self, checkpoint: &Checkpoint<'a, '_, L>)
-  where
-    Self: Sized,
-    L: Lexer<'a>;
-
   /// Attempts to add a token to the front of the cache.
   ///
   /// If successful, returns `Ok` with a reference to the cached token.
@@ -161,11 +153,11 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   ///
   /// ```ignore
   /// match cache.push_front(token) {
-  ///     Ok(cached_ref) => {
-  ///         // Token was cached successfully
+  ///     Ok(cached) => {
+  ///         // `cached: CachedTokenRefOf<'_, 'a, L>` — the entry, borrowed
   ///     }
   ///     Err(token) => {
-  ///         // Cache is full, handle token directly
+  ///         // Cache full, and the token comes back UNCHANGED: handle it directly
   ///     }
   /// }
   /// ```
@@ -210,10 +202,13 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   where
     L: Lexer<'a>;
 
-  /// Removes and returns the token at the back of the cache.
+  /// Removes and returns the **newest** resident token — the one a `push_back` most recently
+  /// accepted, or the last survivor of the resident run.
   ///
-  /// Returns `None` if the cache is empty. This is less commonly used than
-  /// `pop_front` but can be useful for certain cache management operations.
+  /// Returns `None` if the cache is empty. The input layer's restore path is built on exactly
+  /// this law: pushes append to the back only, so the entries lexed on an abandoned
+  /// continuation are the newest ones, and dropping them is a run of `pop_back`s. It must not
+  /// panic — a restore can run from a guard drop mid-unwind.
   #[allow(clippy::type_complexity)]
   fn pop_back(&mut self) -> Option<CachedTokenOf<'a, L>>
   where
@@ -290,30 +285,19 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
     buf.pop_front()
   }
 
-  /// Peeks at multiple cached tokens without removing them.
+  /// Peeks at multiple cached tokens without removing them, appending them to `buf`.
   ///
-  /// Fills the provided buffer with references to cached tokens (or owned tokens if
-  /// necessary). The returned slice contains only the successfully initialized tokens,
-  /// which may be fewer than requested if the cache doesn't have enough tokens.
+  /// # The law
+  ///
+  /// Append **exactly `min(len(), buf`'s remaining capacity`)`** entries, oldest first, each
+  /// resident token once. The call is logically **pure**: it takes `&self`, it changes no
+  /// observable of the cache, and calling it twice on an unchanged cache appends the same
+  /// sequence both times. A borrowed entry and an owned one denote the same token, so a caller
+  /// cannot tell which a cache chose to hand back.
   ///
   /// # Parameters
   ///
-  /// - `buf`: A buffer of uninitialized `MaybeRef` entries to fill with peeked tokens
-  ///
-  /// # Returns
-  ///
-  /// A mutable slice containing initialized token references. The slice length indicates
-  /// how many tokens were actually available.
-  ///
-  /// # Safety
-  ///
-  /// Implementations must guarantee that:
-  /// - The returned slice contains only properly initialized tokens
-  /// - All cached tokens are filled into the buffer if the buffer is large enough
-  /// - The slice bounds are correct and don't include uninitialized memory
-  ///
-  /// Callers must ensure the returned slice is not used beyond its lifetime.
-  #[allow(clippy::mut_from_ref)]
+  /// - `buf`: the destination deque, appended to (not overwritten); its capacity is the bound.
   fn peek<'p, W>(
     &'p self,
     buf: &mut GenericArrayDeque<MaybeRefCachedTokenOf<'p, 'a, L>, W::CAPACITY>,

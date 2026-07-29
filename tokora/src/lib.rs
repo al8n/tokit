@@ -205,10 +205,17 @@ pub mod state;
 /// Token caching for lookahead and backtracking.
 ///
 /// Defines the [`Cache`] trait for buffering tokens to enable lookahead
-/// and backtracking operations. Provides implementations for:
-/// - Fixed-size arrays: Bounded lookahead with known maximum capacity
-/// - Dynamic buffers: Unlimited lookahead (when `alloc` feature is enabled)
-/// - Black hole cache: No caching for streaming-only scenarios
+/// and backtracking operations. The complete set of implementations is three, all
+/// bounded at compile time:
+/// - `GenericArrayDeque<_, N>`: a fixed-capacity ring (`DefaultCache` is this at `U3`)
+/// - `Option<CachedToken<..>>`: capacity 1
+/// - `()`: capacity 0 — no caching, for streaming-only scenarios
+///
+/// There is no dynamic, allocator-backed cache, and `alloc` does not add one: it enables
+/// allocator-backed containers and drivers and forwards the sub-crates' `alloc` features.
+/// Nor would one buy unbounded lookahead — [`Window`] is sealed at U1–U32, so
+/// no cache can serve a public peek past 32 tokens. Lookahead beyond the window is what
+/// transactions are for: they speculate arbitrarily far and re-lex on rollback.
 pub mod cache;
 
 /// Token trait and related types.

@@ -203,6 +203,226 @@ its own measurement.
   residual is not yet attributed. `finish`'s internals are private, so an attribution can
   land in a patch release without breaking anyone.
 
+### Changed (breaking) — the input layer's unwind edges
+
+Nothing that can unwind runs between taking a token out of the stream and recording where
+it went. Every scan, guard and emitter edge that previously had caller code in that gap now
+settles on the panic path as well as the return path, and the rollback protocol has one
+owner instead of two.
+
+1. **`Cache::rewind` is removed.** Rollback was implementable in two places — the cache
+   could rewind itself, and the input drives the same rollback through its lineage — so a
+   cache that took the first route and an input that took the second disagreed about what
+   the stream held. There is now one owner. Implementors of `Cache` delete the method; the
+   four in-tree implementations did, and no caller loses a capability, because every public
+   rollback path already went through the input.
+
+2. **`Cache`'s non-panicking restore-path law now names `push_front`.** The clause previously
+   listed the reading and removing operations the crate calls while restoring — `pop_front`,
+   `pop_back`, `clear`, `front`, `front_span`, `len` — and omitted the one *writing* operation,
+   which is exactly the one the new unwind edge in item 3 depends on. An implementation whose
+   `push_front` can panic was vacuously conforming before and is not now.
+
+   The rider is stated rather than implied: a `push_front` that panics is the single case the
+   crate **cannot** make whole, because it has already taken the token by value and nothing can
+   un-take it. Every other restore-path operation is recoverable.
+
+3. **A panic inside caller code no longer corrupts the stream.** `skip_until` pops a token
+   out of durable state — the parked slot, or the cache front — and then runs caller code
+   over it: the predicate, the expected-tokens closure, `L::State: Clone`, the lexer
+   itself. Any of those can panic, and a panic through one used to be an exit that no
+   put-back and no settle ever saw. The in-flight token was dropped with an unowned local,
+   the skipped prefix stayed behind a frontier that was never committed, and a rewinding
+   mode's entry mark was neither rewound nor released. **With a warm cache that lost tokens
+   outright.** A `Verbose` record could likewise tear if the payload's own allocation
+   panicked mid-push.
+
+   The unwind edge is split by **disposition**, and each half mirrors an exit the scan
+   already owns. Committing modes (`SyncTo`, `SkipWhile`) behave as their fatal exit does —
+   commit the diagnosed prefix, put the in-flight token back — so a host that catches and
+   retries resumes *after* the diagnosed prefix with no duplicate reports. Rewinding modes
+   (`SyncThrough`, `SyncBalanced`) restore the full pre-call state and rewind the mark **when
+   the scan is abandoned mid-flight**.
+
+   Disposition follows the **exit, not the mode**: once a stop has been decided, an
+   interrupted stop keeps the diagnosed prefix for every mode. `SyncBalanced` is where that
+   distinction is load-bearing — it rewinds at end of input and keeps on a stop — so the
+   guard reads which exit it was interrupted in rather than which mode it is running. A uniform clear was tried and
+   measured doing real harm on the committing path — it discarded pre-entry cache entries,
+   the re-lex re-burned a shared limit budget, and a poison boundary latched at a position
+   the original lineage never reached.
+
+   This is a behaviour change only for a host that catches a panic across a parse and keeps
+   using the input. Callers that let a panic propagate see no difference.
+
+4. **The committed position is written as one step, everywhere.** The position is a *pair* —
+   the span, and the lexer state that produced it — and many sites wrote it in two steps with
+   caller code in between. At end of input, `SyncTo::on_eof` advanced the span and then called
+   `lexer.into_state()`; a panic there left the span advanced with the entry state still paired
+   to it, so a host that caught and resumed lexed from the new offset under a state that had
+   seen nothing. Reachable through `sync_to`, `skip_while` and `padded`, and only for
+   **stateful** lexers — the population least likely to notice.
+
+   **Advancing the span without supplying the state is no longer expressible.** The span-only
+   setters are gone — once every caller had to pass the state, the compiler reported them as
+   dead code — and the internal token settle carries the state to a single funnel that
+   evaluates every fallible step first, writes both halves as infallible moves, and drops the
+   replaced values afterwards. A `Drop` is caller code; dropping in place would run it between
+   the halves, which is the tear itself. Where a restore has more to do than the position, the
+   funnel hands the replaced pair back so the caller drops it only after the watermark, the
+   poison latch and the emitter mark are restored too.
+
+   **Both halves are installed before either replaced value is dropped**, at every site that
+   writes one. That ordering is the property a future change has to preserve, and the reason
+   is easy to miss: an assignment installs its new value and *then* drops the old one, so
+   `span = …; state = …;` lets the replaced span's destructor run **between** the two writes.
+   If it unwinds there, the second write never happens and one token's span is published
+   beside the previous token's state — off by exactly one, silently, and only for spans or
+   states that have a destructor at all.
+
+   This is internal surgery: `Emitter::commit_token`'s signature is unchanged, so emitter
+   implementations need no edit. The one implementor-visible consequence is an ordering change
+   — the `commit_token` observer hook now runs **after** the position is published and
+   **before** the replaced pair is dropped, so a panicking destructor cannot swallow the
+   notification.
+   Every caller reaches it having already taken the token off the front of the stream, so
+   notifying first would leave the committed position naming a token the stream no longer
+   holds, and a host that caught the observer's panic would resume past a token it never saw.
+   An observer that panics now leaves the input consistent, with only the notification missing.
+
+5. **`Lexer` gains a clause: the settle path's operations must not panic.** This is a real new
+   constraint on `Span` and `Offset` implementations, not a footnote, and it is the one window
+   in the consume path that **cannot** be closed by reordering.
+
+   The input layer settles a consumed token by computing the committed position **from that
+   token's own span**. The span does not exist until the token has been popped, so those steps
+   necessarily run after the token has left the stream and before the position has moved. The
+   operations are `Source::len`; `Span::end_ref` and the `Ord` on `Offset` that decide whether
+   a clamp is needed; `Span::clone` on the common path; and, only when the span is clamped to
+   the source, `Span::start_ref` plus `Offset::clone` plus `Span::new`. **None of them may
+   panic.**
+
+   Two operations that were in this window during development are **not** in it and are
+   deliberately absent from that list: the `Drop` of the span and state a commit replaces, and
+   the `Drop` of the `Source::len` temporary. Both were moved out — the replaced pair is handed
+   back to the caller and dies after the settle, and the length temporary now rides out with
+   it. Nothing above is removable for the same reason, stated once: **every one of them is
+   computed from the token's own span, which does not exist until the token has been taken.**
+
+   The posture matches `Emitter::release`/`rewind` and the `Cache` restore-path operations, and
+   for the same reason: the operation runs where nothing else can repair it.
+
+   **The bounds are unchanged: `Lexer::Span` still requires `Clone`, not `Copy`.** A span that
+   allocates, refcounts or carries a `Drop` is still welcome — an `Arc`-carrying file id clones
+   by bumping a refcount, which cannot panic, and satisfies this clause fine. `Copy` would force
+   the clause for free, and was rejected precisely because it would ban working code to close a
+   window that a non-panicking `Clone` already closes. The in-tree types happen to satisfy it
+   trivially (`SimpleSpan` is `Copy`; `usize` offsets neither allocate nor drop), which is why
+   the default configuration pays nothing.
+
+   Like the two clauses it matches, this is an obligation the crate **states and cannot check** —
+   Rust has no "this impl does not panic" bound. A span whose `Clone` can allocate and abort
+   under memory pressure will still lose a token, and nothing catches it at compile time.
+
+   **What you get in return is a statable guarantee:** if your span's clone, construction,
+   comparison and drop do not panic, a consumed token is never lost.
+
+   Two alternatives were measured and rejected. Cloning the span before the pop costs an extra
+   `front()` read on `next`, the hottest path in the crate; passing the span by value only
+   relocates the clone — it helps `next`, which destructures, and hurts `consume_cached_one`,
+   which keeps the `Spanned`.
+
+6. **An `Incomplete` scan exit leaves no trace.** A scan that ran out of input mid-decision
+   used to commit the frontier it had reached, so a caller that topped up the source and
+   retried resumed at a position the first attempt had already half-consumed. It now exits
+   as it entered.
+
+### Fixed — a regime change could silently corrupt lexer-error deduplication
+
+`set_state` and `state_mut` share a body that cleared the cache, dropped the parked token and
+cleared the poison boundary, **then** cloned an offset, **then** re-anchored the dedup watermark.
+`Offset::clone` is caller code. A panic there left the watermark holding the **dead regime's**
+value on an input that had just been unpoisoned — so for the rest of the parse, lexer-error
+dedup compared new-regime spans against a stale mark and **silently suppressed or duplicated
+diagnostics**.
+
+The read is now hoisted above every mutation and takes the span's end directly, which is provably
+the same value: the cursor reports the parked token, else the cache front, else the span — and the
+two clears exist precisely to empty the first two, so the fallback branch was the one that ran
+either way. The old "cleared before the cursor read" ordering was documenting a coupling that
+existed only to steer the cursor into that branch.
+
+### Fixed — a checkpoint rollback is all-or-nothing
+
+`restore_unchecked` interleaved caller code with the facts it was installing: cache eviction,
+session-point abandonment and a span clamp all ran between the lineage pop and the position
+restore. A panic in any of them left the input **half-rolled-back** — lineage, cache and emitter
+on the checkpoint's branch while the position and the remaining facts stayed on the abandoned one.
+
+The body is now two phases. **Phase 1 runs every operation that can execute caller code, while
+the input is still wholly on the branch being abandoned** — so a panic there leaves it there,
+which is the *unchanged* half of all-or-nothing. **Phase 2 installs every fact with no caller
+code among them.** (Staging the evicted values to a single drop site was the obvious repair and
+is not available: checkpoints work in allocator-less builds, so there is nowhere to put an
+unbounded number of evicted entries. The ordering achieves the same guarantee without one.)
+
+**The residue, stated precisely:** a rollback is atomic unless a **cached token's, or an abandoned
+session point's, own `Span`/`State` drop panics** — unreachable for every type this crate ships,
+since they are `Copy`. Such a panic leaves the input on the branch it was already on, with part of
+a cache that would have been discarded anyway.
+
+### Fixed — an interrupted restore can no longer make an abandoned scan's diagnostics permanent
+
+`restore_entry` restored the input's position and facts and **then** cloned a cursor to hand
+`Emitter::rewind`. `Offset::clone` is caller code, so a panic there left the input restored with
+the emitter mark **not rewound** — and the scan scope's fallback then *released* that mark, making
+an abandoned scan's diagnostics and token-observer effects permanent while the parser retried from
+the restored position.
+
+**Hoisting the clone within the body does not fix this**, which is worth stating because it is the
+obvious repair: wherever in `restore_entry` the clone sits, failing it still skips the rewind. The
+operation had to leave the body entirely. The scan's entry record now carries the rewind cursor,
+cloned at capture — **before the mark exists** — so `restore_entry` performs no caller operations
+at all.
+
+The same round removed three further in-place field writes on the restore paths where a panic
+would have left the input and the checkpoint disagreeing about the dedup watermark and the poison
+latch.
+
+### Added
+
+- **`conformance::cache`** — the cache contract as a runnable kit rather than prose.
+  `CacheHarness` drives an implementation through the rollback, put-back and lookahead laws
+  the trait states, so a third-party `Cache` can be checked against them instead of
+  inferred to comply.
+
+### Performance
+
+- A nested rollback is **linear in lineage depth** rather than quadratic.
+- **The scan path costs measurably more, and the wall-clock figure is not yet trustworthy.**
+  The ownership that closes item 3 is the cost. It cannot be relocated: the benched path
+  lexes with no peek, so there is no stream slot to borrow the token from, and tracking each
+  handover separately — which is what makes the unwind edge correct — is state the scan must
+  carry.
+
+  What is measured and solid is code size: the `input_scan` bench closure grows **+560 bytes
+  against 0.7.3**, and a **356-byte `drop_glue::<ScanScope>`** symbol now exists where every
+  earlier revision of this round measured none. Two mitigations were tried and both reverted
+  on measurement — outlining the whole `Drop` as cold made a second bench worse.
+
+  An earlier revision of this round disclosed **+1.5%** on `skip_trivia_next`. **That figure
+  is stale** — it was taken when the symbol above was 1 680 bytes and it is now 2 100 — and
+  it is deliberately not restated here rather than reprinted at a precision it no longer has.
+  A replacement is owed on a quiet machine before release; it may be materially larger.
+  Against this, `failed_sync_through_over_8` improved 1.4–2.5% when last measured cleanly.
+
+### Fixed (documentation)
+
+- The `cache` module no longer advertises a dynamic, allocator-backed cache with unlimited
+  lookahead. No such implementation exists, `alloc` does not add one, and none could serve a
+  public peek past 32 tokens — `Window` is sealed at U1–U32. Lookahead beyond the window is
+  what transactions are for.
+
 ### Changed (breaking)
 
 The Pratt driver ends an expression when the RHS channel says so, not when the input

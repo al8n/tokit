@@ -23,7 +23,12 @@
 //!    nonempty (`start < end`), and the run terminates within a generous multiple of
 //!    the source length (an anti-hang guard so the kit itself never spins).
 //! 4. **Sticky exhaustion** — after [`lex`](crate::Lexer::lex) returns `None`, further
-//!    calls keep returning `None`.
+//!    calls keep returning `None`; and the **span survives that exhaustion** —
+//!    [`span`](crate::Lexer::span) keeps answering, well-formed, with the lexer's final
+//!    position (at least the last item's end, at most the source length) and answers the same
+//!    on every later call. The input layer reads that value at two sites, so an unspecified one
+//!    is not academic: a `to`-shaped scan commits there at end of input, and the partial-input
+//!    frontier reports `Incomplete(offset)` from it — the offset a refill driver resumes at.
 //! 5. **Span / slice coherence** — every item's [`slice`](crate::Lexer::slice) equals
 //!    the source over its [`span`](crate::Lexer::span), and spans lie within bounds.
 //! 6. **Gap-free tiling** (optional, [`lossless`](crate::conformance::Harness::lossless)) — consecutive
@@ -49,6 +54,11 @@
 //! A failing check is a bug in the *lexer* (or a mismatch with the documented
 //! contract), surfaced loudly. The kit never mutates the lexer's behavior; it only
 //! observes and asserts.
+
+pub mod cache;
+
+#[cfg(all(test, feature = "logos", feature = "std"))]
+mod cache_tests;
 
 use crate::{
   Lexer, Slice, Source, Span, Token,
@@ -211,8 +221,9 @@ where
       let replay = lex_run::<L>(idx, src, budget);
       assert_run_eq::<L>(idx, "replay-identity", &reference, &replay);
 
-      // 4. Sticky exhaustion.
+      // 4. Sticky exhaustion, and the span that must survive it.
       check_sticky::<L>(idx, src, budget);
+      check_span_after_exhaustion::<L>(idx, src, budget);
 
       // 2. State-resume faithfulness (every position k).
       check_resume::<L>(idx, src, &reference, budget);
@@ -623,6 +634,62 @@ where
     if lexer.lex().is_some() {
       panic!(
         "tokora conformance [input #{idx} sticky-exhaustion] position {n}: lex() returned Some on probe #{probe} after returning None; exhaustion must be sticky"
+      );
+    }
+  }
+}
+
+/// Check 4b: the span survives exhaustion — well-formed, ending at the lexer's final position
+/// within `[last item end, source len]`, and stable across repeated calls.
+///
+/// This is the clause's executable form. The clause was written because the input layer grew a
+/// *second* reader of the value (the partial-input frontier, after the `to`-shaped
+/// end-of-input commit), and the first fixture that reader met left `start > end`.
+fn check_span_after_exhaustion<'inp, L>(idx: usize, src: &'inp L::Source, budget: usize)
+where
+  L: Lexer<'inp>,
+{
+  let src_len = src.len();
+  let mut lexer = L::new(src);
+  let mut last_end: Option<L::Offset> = None;
+  let mut n = 0usize;
+  while lexer.lex().is_some() {
+    n += 1;
+    if n > budget {
+      panic!(
+        "tokora conformance [input #{idx} span-survives-exhaustion] lex() produced more than the budget of {budget} items without exhausting"
+      );
+    }
+    last_end = Some(lexer.span().end());
+  }
+
+  let span = lexer.span();
+  let start = span.start_ref().clone();
+  let end = span.end_ref().clone();
+
+  if end < start {
+    panic!(
+      "tokora conformance [input #{idx} span-survives-exhaustion] after exhaustion span() is malformed: {span:?} has start > end. It must stay well-formed — the partial-input frontier reports this offset to a refill driver."
+    );
+  }
+  // Spelled as a nested `if` rather than a let-chain: the MSRV (1.87) does not have them.
+  if let Some(item_end) = &last_end {
+    if end < *item_end {
+      panic!(
+        "tokora conformance [input #{idx} span-survives-exhaustion] after exhaustion span() ends at {end:?}, before the last item's end {item_end:?}. The final position can only be at or past the last item the lexer yielded; a retracting span hands a refill driver an offset it has already consumed."
+      );
+    }
+  }
+  if end > src_len {
+    panic!(
+      "tokora conformance [input #{idx} span-survives-exhaustion] after exhaustion span() ends at {end:?}, past the source length {src_len:?}. The final position is bounded by the source; an over-reporting span hands a refill driver an offset past its own buffer."
+    );
+  }
+  for probe in 0..3 {
+    let again = lexer.span();
+    if again != span {
+      panic!(
+        "tokora conformance [input #{idx} span-survives-exhaustion] span() changed after exhaustion: first read {span:?}, probe #{probe} read {again:?}. Repeated reads must agree — the input layer reads it more than once."
       );
     }
   }

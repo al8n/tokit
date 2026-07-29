@@ -93,6 +93,37 @@ mod on {
     try_parse_input::ParseAttempt,
   };
 
+  /// The disarm half of a [`traced`] scope's depth bracket.
+  ///
+  /// `trace_enter` bumps the depth and the exit arms drop it again — but only on a *return*
+  /// exit, so an unwind through the sub-parse left the depth raised for the input's whole life
+  /// and every later trace line indented one level too deep. This guard closes that edge
+  /// **without touching the arms**: it is disarmed the moment the sub-parse returns, so the
+  /// arms still decrement-then-emit exactly as before (which is what keeps the exit line at the
+  /// enter line's indentation), and it fires only when no arm ran.
+  struct DepthScope<'g, 'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>
+  where
+    L: Lexer<'inp>,
+    Ctx: ParseContext<'inp, L, Lang>,
+    Cmpl: Completeness,
+  {
+    input: &'g mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
+    armed: bool,
+  }
+
+  impl<'inp, L, Ctx, Lang: ?Sized, Cmpl> Drop for DepthScope<'_, 'inp, '_, L, Ctx, Lang, Cmpl>
+  where
+    L: Lexer<'inp>,
+    Ctx: ParseContext<'inp, L, Lang>,
+    Cmpl: Completeness,
+  {
+    fn drop(&mut self) {
+      if self.armed {
+        self.input.trace_unwind_pop();
+      }
+    }
+  }
+
   impl<'inp, L, O, Ctx, Lang, P, Cmpl> ParseInput<'inp, L, O, Ctx, Lang, Cmpl> for Traced<P>
   where
     Lang: ?Sized,
@@ -108,10 +139,12 @@ mod on {
     ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
       let start = input.offset().clone();
       input.trace_enter(self.name);
-      let res = self.parser.parse_input(input);
+      let mut scope = DepthScope { input, armed: true };
+      let res = self.parser.parse_input(scope.input);
+      scope.armed = false;
       match &res {
-        Ok(_) => input.trace_exit_ok(self.name, &start),
-        Err(_) => input.trace_exit(self.name, "err"),
+        Ok(_) => scope.input.trace_exit_ok(self.name, &start),
+        Err(_) => scope.input.trace_exit(self.name, "err"),
       }
       res
     }
@@ -132,11 +165,13 @@ mod on {
     ) -> Result<ParseAttempt<O>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
       let start = input.offset().clone();
       input.trace_enter(self.name);
-      let res = self.parser.try_parse_input(input);
+      let mut scope = DepthScope { input, armed: true };
+      let res = self.parser.try_parse_input(scope.input);
+      scope.armed = false;
       match &res {
-        Ok(ParseAttempt::Accept(_)) => input.trace_exit_ok(self.name, &start),
-        Ok(ParseAttempt::Decline) => input.trace_exit(self.name, "decline"),
-        Err(_) => input.trace_exit(self.name, "err"),
+        Ok(ParseAttempt::Accept(_)) => scope.input.trace_exit_ok(self.name, &start),
+        Ok(ParseAttempt::Decline) => scope.input.trace_exit(self.name, "decline"),
+        Err(_) => scope.input.trace_exit(self.name, "err"),
       }
       res
     }
@@ -276,6 +311,43 @@ mod tests {
       lines[2].contains("0..2"),
       "consumed span 0..2: {:?}",
       lines[2]
+    );
+  }
+
+  fn boom<'inp>(_inp: &mut InputRef<'inp, '_, Lex<'inp>, Cx<'inp>>) -> Result<bool, Err> {
+    panic!("D45/traced: the inner parser panics inside the traced scope")
+  }
+
+  // §3.3 — the D26 class, member for member: `trace_enter` bumps the depth, the exit arms
+  // decrement it, and an unwind through the sub-parse skips them, so every later trace line
+  // is indented one level too deep for the emitter's whole life.
+  #[test]
+  fn traced_unwind_restores_depth() {
+    let mut emitter = Silent::<Err>::new();
+    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_cache(
+      "12 34",
+      (),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    );
+    let mut inp = input.as_ref(&mut emitter);
+
+    let (_, lines) = crate::trace::capture(|| {
+      let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut p = crate::traced("boom", boom);
+        let _ = p.parse_input(&mut inp);
+      }));
+      assert!(caught.is_err(), "the panic was caught by this host");
+      let mut after = crate::traced("after", eat_num);
+      let _ = after.parse_input(&mut inp);
+    });
+
+    let enter = lines
+      .iter()
+      .find(|l| l.contains("> after"))
+      .unwrap_or_else(|| panic!("no post-unwind enter line: {lines:#?}"));
+    assert!(
+      enter.starts_with("> after"),
+      "the unwound scope leaked its depth: {enter:?} (all lines: {lines:#?})"
     );
   }
 }

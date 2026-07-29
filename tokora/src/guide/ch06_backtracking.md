@@ -293,6 +293,13 @@ the hot path, and only the branch that backs out of a half-consumed operator say
 policy is a zero-sized [typestate](crate::DropPolicy) parameter: the choice is compiled in,
 not branched on.
 
+One thing overrides the policy: **a panic is not a decision**. An undecided guard dropped while
+the thread is unwinding rolls back whatever policy it carries (std builds), because an unwind
+aborts the region rather than completing it — keeping half an iteration would leave the input in
+a state no normal execution can reach, which a host that catches would then see. `?` is a return,
+not an unwind, so the keep-on-`?` behaviour above is untouched. Under `no_std` there is no
+`panicking()` to read and the divergence is documented rather than fixed.
+
 And when you need *several* live fallback points at once — the longest-match shape, where you
 keep parsing and want to return to the best position you have seen — reach for
 [`begin_stacked`](crate::InputRef::begin_stacked). Its

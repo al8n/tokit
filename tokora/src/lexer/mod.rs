@@ -395,6 +395,56 @@ where
 /// backend guarantee documented on its `LogosLexer`, not a requirement on every
 /// lexer.)
 ///
+/// ## The span survives exhaustion
+///
+/// After [`lex`](Lexer::lex) first returns `None`, [`span`](Lexer::span) must keep returning a
+/// **well-formed** span (`start <= end`) whose `end` is the lexer's final position in the
+/// source: at least the end of the last yielded item, at most the source length. Bytes the
+/// lexer consumed and skipped after the last item — trailing trivia — are included, which is
+/// exactly what makes the value useful. Repeated calls must agree.
+///
+/// The input layer reads this at two sites, so an unspecified value is not academic: a
+/// `to`-shaped scan commits at `span().end` when it reaches end of input, and the partial-input
+/// frontier reports `Incomplete(offset)` from it — the offset a refill driver resumes at. The
+/// frontier reader floors and clamps as defence in depth against a non-conforming lexer; that
+/// clamp is not the specification, this clause is.
+///
+/// ## The settle path's operations must not panic
+///
+/// The input layer settles a consumed token by computing the committed position **from that
+/// token's own span** and then installing it. Those steps therefore run after the token has left
+/// the front of the stream and before the position has moved — a window nothing can reorder away,
+/// because the position is a function of the token. The operations in it are:
+///
+/// 1. [`Source::len`](crate::Source);
+/// 2. [`Span::end_ref`](crate::Span) and the `Ord` comparison on [`Offset`](Lexer::Offset)
+///    (the input layer clamps a span to the source);
+/// 3. [`Span::clone`](crate::Span), on the common branch where no clamping is needed;
+/// 4. on the clamping branch only, [`Span::start_ref`](crate::Span) plus `Offset::clone` plus
+///    `Span::new`.
+///
+/// That is the whole list, and it is deliberately shorter than it was. Two operations used to be
+/// in it and are not: the `Drop` of the span and state a commit replaces, and the `Drop` of the
+/// `Source::len` temporary. Both are now handed out of the window and run after the settle, so an
+/// implementor does not have to reason about them at all. Nothing else was removable — every
+/// operation above is computed *from the token's own span*, which does not exist until the token
+/// has been taken, so no ordering can lift them out.
+///
+/// **None of these may panic.** A panic there leaves the token gone from the stream with the
+/// position still behind it, and a host that catches it resumes past a token it never saw — the
+/// crate cannot detect that, and for a stateful lexer it is silent stream corruption. This is the
+/// same posture the crate already takes on
+/// [`Emitter::release`](crate::Emitter::release)/[`rewind`](crate::Emitter::rewind) and the
+/// [`Cache`](crate::cache::Cache) restore-path operations, and for the same reason: the operation
+/// runs at a point where nothing else can repair it.
+///
+/// Every span type the crate ships satisfies this trivially (`SimpleSpan` is `Copy`, and `usize`
+/// offsets neither allocate nor drop). The bound stays [`Clone`] — `Copy` is **not** required, and
+/// a span that allocates is still welcome; what the clause asks is that the allocation not panic
+/// on this path. Like the emitter and cache clauses, this is an obligation the crate states and
+/// cannot check: a violation surfaces as a lost token after a caught panic, not as a compile
+/// error.
+///
 /// ## Truncation faithfulness (partial-input mode only)
 ///
 /// When the input layer is driven in [`Partial`](crate::input::Partial) (Sans-I/O) mode, one
@@ -513,6 +563,9 @@ pub trait Lexer<'inp>: 'inp {
   fn source(&self) -> &'inp Self::Source;
 
   /// Get the range for the current token in `Source`.
+  ///
+  /// After exhaustion this must still answer, well-formed, with the lexer's final position —
+  /// see [the span-survives-exhaustion clause](Self#the-span-survives-exhaustion).
   fn span(&self) -> Self::Span;
 
   /// Returns the slice of the current token in the source.

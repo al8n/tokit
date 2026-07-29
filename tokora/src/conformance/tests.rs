@@ -427,6 +427,165 @@ fn non_sticky_exhaustion_is_caught() {
   Harness::<NonStickyLexer<'_>>::new("abc").run();
 }
 
+/// A per-character lexer that **retracts its span at exhaustion**: the moment `lex` returns
+/// `None` it reports `0..0`, so the value both readers of the post-exhaustion span depend on —
+/// the `to`-shaped end-of-input commit and the partial-input frontier — points behind every
+/// item it yielded. This is the R5-era broken-fixture class (`start > end` was its other face)
+/// made permanently un-shippable.
+struct DyingSpanLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  exhausted: bool,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for DyingSpanLexer<'a> {
+  type State = ();
+  type Source = str;
+  type Token = PTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      exhausted: false,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      exhausted: false,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    if self.exhausted {
+      // The defect: the final position is thrown away instead of kept.
+      return SimpleSpan::new(0, 0);
+    }
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<PTok, Infallible>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      self.exhausted = true;
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    Some(Ok(PTok))
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+#[should_panic(expected = "span-survives-exhaustion")]
+fn span_that_dies_at_exhaustion_is_caught() {
+  Harness::<DyingSpanLexer<'_>>::new("abc").run();
+}
+
+/// A per-character lexer whose post-exhaustion span **runs past the source**, the other
+/// direction of the same clause: a refill driver handed this offset would skip bytes it never
+/// received.
+struct OverReachingSpanLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  exhausted: bool,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for OverReachingSpanLexer<'a> {
+  type State = ();
+  type Source = str;
+  type Token = PTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      exhausted: false,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      exhausted: false,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    if self.exhausted {
+      return SimpleSpan::new(self.start, self.src.len() + 8);
+    }
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<PTok, Infallible>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      self.exhausted = true;
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    Some(Ok(PTok))
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+#[should_panic(expected = "span-survives-exhaustion")]
+fn span_that_over_reaches_at_exhaustion_is_caught() {
+  Harness::<OverReachingSpanLexer<'_>>::new("abc").run();
+}
+
 /// A per-character lexer whose `bump` is a no-op: resume always restarts from 0, so a
 /// resume from any `k > 0` fails to reproduce the suffix.
 struct IgnoreBumpLexer<'a> {

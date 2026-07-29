@@ -148,11 +148,20 @@ where
 
   /// The whole body of an *undecided* guard's [`Drop`], deliberately **outlined** — see the
   /// `Drop` impl for why that is load bearing rather than tidy.
+  ///
+  /// The policy is not the only input: an undecided guard dropped while the thread is
+  /// **unwinding** rolls back whatever its policy says (std builds), because a panic aborts the
+  /// region rather than completing it. See [`Commit`](super::Commit) for the posture and for
+  /// the `no_std` divergence.
   #[cold]
   #[inline(never)]
   fn settle_undecided(&mut self) {
     let Some(ckp) = self.ckp.take() else { return };
-    if P::ROLLBACK_ON_DROP {
+    // A panic in flight overrides the policy: an unwind is an abort of the region, not its
+    // completion, so it must not promote speculative progress. `Rollback` const-folds this to
+    // `true || _` and keeps a byte-identical arm; `Commit` pays one TLS read, on the
+    // undecided-drop path only — this body, which is already `#[cold] #[inline(never)]`.
+    if P::ROLLBACK_ON_DROP || super::drop_policy::unwinding() {
       trace_event!(self.input, "rollback");
       // Unpin the begin point first — exception-safe, so it happens even though the rewind
       // below may be skipped (a `Drop` may run mid-unwind, where panicking is forbidden). The

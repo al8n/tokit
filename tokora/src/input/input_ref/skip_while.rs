@@ -37,6 +37,23 @@ where
   /// boundary, the dedup watermark, the tokens read next — depends on how deep it had peeked. The
   /// `cache_transparency_matrix` tests in `src/input/input_ref/tests.rs` pin that across this
   /// method and `padded`.
+  ///
+  /// # Partial mode: an `Incomplete` exit leaves no trace
+  ///
+  /// Under [`Partial`](crate::input::Partial), a non-final buffer can end mid-scan and this
+  /// method surfaces `Incomplete`. That exit commits nothing, so it keeps nothing: the position,
+  /// the lexer state, the dedup watermark and every emission the aborted attempt made — each
+  /// skipped token's `commit_token` event included — are restored to the call's entry. Refill
+  /// and call again and the retry is idempotent; nothing accumulates per attempt.
+  ///
+  /// # Panic unwind
+  ///
+  /// A panic out of the predicate, the expected-tokens closure, the lexer or the emitter is an
+  /// exit too, and it settles — this method's `to`-shaped commit posture keeps the diagnosed
+  /// prefix and puts the in-flight token back; the rewinding scans
+  /// ([`sync_through`](Self::sync_through), [`sync_balanced`](Self::sync_balanced)) restore to
+  /// the call's entry instead. Either way no token leaves the stream and no emitter mark is
+  /// stranded.
   #[inline(always)]
   pub fn skip_while<F>(
     &mut self,

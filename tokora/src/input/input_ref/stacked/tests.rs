@@ -803,3 +803,138 @@ fn stacked_rollback_to_savepoint_with_live_base_is_legal() {
     "committed at the savepoint position"
   );
 }
+
+// ── D27: the unwind posture of an undecided Commit-policy stacked guard ──────────
+//
+// `StackedTransaction::drop` carries the same policy branch and the same unwind-blind
+// commit arm as its sibling. This is the sibling's own witness, not a copy of it: it
+// additionally checks that the savepoint's emitter mark was settled, which needs an
+// emitter whose marks are TABLE-keyed (a live row per capture) rather than value-keyed.
+
+/// A mark-keyed emitter: one live row per outstanding capture, settled by `rewind`
+/// (the capture and every younger one) or `release` (that capture alone). `Verbose`
+/// cannot show this — its mark is a log length, so a stranded mark is invisible.
+#[derive(Debug, Default)]
+struct MarkLedger {
+  next: core::cell::Cell<u64>,
+  live: core::cell::RefCell<std::vec::Vec<u64>>,
+}
+
+impl MarkLedger {
+  fn live_rows(&self) -> usize {
+    self.live.borrow().len()
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> crate::Emitter<'inp, L, Lang> for MarkLedger
+where
+  L: crate::Lexer<'inp>,
+  <L::Token as Token<'inp>>::Error: Into<NumErr>,
+{
+  type Error = NumErr;
+
+  fn emit_lexer_error(
+    &mut self,
+    err: crate::span::Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
+  ) -> Result<(), NumErr> {
+    let _ = err;
+    Ok(())
+  }
+
+  fn emit_unexpected_token(
+    &mut self,
+    err: crate::error::token::UnexpectedTokenOf<'inp, L, Lang>,
+  ) -> Result<(), NumErr> {
+    let _ = err;
+    Ok(())
+  }
+
+  fn emit_error(&mut self, err: crate::span::Spanned<NumErr, L::Span>) -> Result<(), NumErr> {
+    let _ = err;
+    Ok(())
+  }
+
+  fn checkpoint(&self) -> u64 {
+    let id = self.next.get() + 1;
+    self.next.set(id);
+    self.live.borrow_mut().push(id);
+    id
+  }
+
+  fn rewind(&mut self, _cursor: &crate::input::Cursor<'inp, '_, L>, checkpoint: u64) {
+    self.live.borrow_mut().retain(|m| *m < checkpoint);
+  }
+
+  fn release(&mut self, checkpoint: u64) {
+    let mut live = self.live.borrow_mut();
+    if let Some(pos) = live.iter().rposition(|m| *m == checkpoint) {
+      live.remove(pos);
+    }
+  }
+}
+
+type NumLedgerCtx<'a> = (MarkLedger, DefaultCache<'a, NumLexer<'a>>);
+
+#[test]
+fn stacked_commit_guard_dropped_mid_unwind_rolls_back() {
+  let cache = DefaultCache::<'_, NumLexer<'_>>::default();
+  let mut emitter = MarkLedger::default();
+  let mut input = Input::<NumLexer<'_>, NumLedgerCtx<'_>, ()>::with_state_and_cache(
+    "1 2 3 4",
+    TokenLimiter::with_limitation(usize::MAX),
+    cache,
+  );
+  let mut inp = input.as_ref(&mut emitter);
+
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let mut txn = inp.begin_stacked_with::<Commit>();
+    let _ = txn
+      .next()
+      .unwrap()
+      .expect("the half-iteration consumes `1`");
+    let _sp = txn.savepoint();
+    let _ = txn.next().unwrap().expect("and `2`");
+    panic!("D27: the stacked region panics with the guard undecided");
+  }));
+  assert!(caught.is_err(), "the panic was caught by this host");
+
+  assert_eq!(
+    *inp
+      .next()
+      .unwrap()
+      .expect("a token after the caught panic")
+      .span_ref(),
+    SimpleSpan::new(0, 1),
+    "an undecided Commit stacked guard dropped mid-unwind rolls back to its base"
+  );
+  assert_eq!(
+    inp.emitter().live_rows(),
+    0,
+    "every mark the guard held — base and savepoint — was settled by the unwinding drop"
+  );
+}
+
+#[test]
+fn stacked_commit_guard_dropped_without_unwind_still_commits() {
+  // The control: an ordinary undecided stacked `Commit` drop keeps its progress.
+  let mut input = silent_input("1 2 3 4");
+  let mut emitter = Silent::<NumErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+
+  {
+    let mut txn = inp.begin_stacked_with::<Commit>();
+    let _ = txn.next().unwrap().expect("consume `1`");
+    let _sp = txn.savepoint();
+    let _ = txn.next().unwrap().expect("consume `2`");
+  }
+
+  assert_eq!(
+    *inp
+      .next()
+      .unwrap()
+      .expect("a token after the ordinary drop")
+      .span_ref(),
+    SimpleSpan::new(4, 5),
+    "an ordinary undecided stacked Commit drop still commits"
+  );
+}

@@ -43,6 +43,23 @@ where
   /// earlier in the log; the dedup watermark still reports it exactly once.) The
   /// `cache_transparency_matrix` tests in `src/input/input_ref/tests.rs` pin this
   /// across the whole family.
+  ///
+  /// # Partial mode: an `Incomplete` exit leaves no trace
+  ///
+  /// Under [`Partial`](crate::input::Partial), a non-final buffer can end mid-scan and this
+  /// method surfaces `Incomplete`. That exit commits nothing, so it keeps nothing: the position,
+  /// the lexer state, the dedup watermark and every emission the aborted attempt made — each
+  /// skipped token's `commit_token` event included — are restored to the call's entry. Refill
+  /// and call again and the retry is idempotent; nothing accumulates per attempt.
+  ///
+  /// # Panic unwind
+  ///
+  /// A panic out of the predicate, the expected-tokens closure, the lexer or the emitter is an
+  /// exit too, and it settles — this method's `to`-shaped commit posture keeps the diagnosed
+  /// prefix and puts the in-flight token back; the rewinding scans
+  /// ([`sync_through`](Self::sync_through), [`sync_balanced`](Self::sync_balanced)) restore to
+  /// the call's entry instead. Either way no token leaves the stream and no emitter mark is
+  /// stranded.
   #[inline(always)]
   #[allow(clippy::type_complexity)]
   pub fn sync_through<F, Exp>(
@@ -75,11 +92,17 @@ where
     // are outside it, `ThroughEntry::new` is a `const fn` that only moves, and the `&mut` reborrows
     // between the binding and `skip_until` allocate nothing.
     let error_end = self.emitted_error_end.clone();
+    // Same window, same reason: the rewind cursor is caller code too, and it is cloned here so
+    // that `restore_entry` — which runs with a mark outstanding — performs none.
+    let rewind_to = self.span.end_ref().clone();
+    let latch = self.latch_snapshot();
     let snapshot = ThroughEntry::new(
       self.span.clone(),
       self.state.clone(),
       self.session.emitter.checkpoint(),
       error_end,
+      rewind_to,
+      latch,
     );
 
     // `SyncThrough` consumes the match (`Scanned::Found`) — the same two lines whether the scanner
@@ -170,11 +193,17 @@ where
     // after the capture would be a fallible step between the mark and the `skip_until` call that
     // owns (and settles) it, and an unwind there strands one row of the emitter's checkpoint stack.
     let error_end = self.emitted_error_end.clone();
+    // Same window, same reason: the rewind cursor is caller code too, and it is cloned here so
+    // that `restore_entry` — which runs with a mark outstanding — performs none.
+    let rewind_to = self.span.end_ref().clone();
+    let latch = self.latch_snapshot();
     let snapshot = ThroughEntry::new(
       self.span.clone(),
       self.state.clone(),
       self.session.emitter.checkpoint(),
       error_end,
+      rewind_to,
+      latch,
     );
 
     match self.skip_until::<SyncThrough, _, _>(&mut pred, &mut exp, snapshot)? {

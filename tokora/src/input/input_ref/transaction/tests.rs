@@ -972,3 +972,154 @@ fn txn_nested_attempt_is_legal() {
     "the guard committed at the post-attempt position"
   );
 }
+
+// ── D27: the unwind posture of an undecided Commit-policy guard ──────────────────
+//
+// A panic inside a `begin_with::<Commit>` region that a host catches used to leave the
+// input in a state no non-panicking execution can produce: the operator consumed, the
+// right-hand side absent. The guard's `Drop` ran its commit arm with no unwind gate.
+
+#[test]
+fn commit_guard_dropped_mid_unwind_rolls_back() {
+  // Consume one token inside a `Commit`-policy region, then panic; the host catches. The
+  // guard is undecided, so its `Drop` decides — and an unwind must not promote speculative
+  // progress.
+  let mut input = silent_input("1 2 3 4");
+  let mut emitter = Silent::<NumErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let mut txn = inp.begin_with::<Commit>();
+    let _ = txn
+      .next()
+      .unwrap()
+      .expect("the half-iteration consumes `1`");
+    panic!("D27: the region panics with the guard undecided");
+  }));
+  assert!(caught.is_err(), "the panic was caught by this host");
+
+  assert_eq!(
+    *inp
+      .next()
+      .unwrap()
+      .expect("a token after the caught panic")
+      .span_ref(),
+    SimpleSpan::new(0, 1),
+    "an undecided Commit guard dropped mid-unwind rolls back: the next token is `1`, not `2`"
+  );
+}
+
+#[test]
+fn commit_guard_dropped_without_unwind_still_commits() {
+  // The control that pins WHAT the gate reads: the unwind fact, not the drop itself. A
+  // non-panicking undecided `Commit` drop keeps its progress exactly as before.
+  let mut input = silent_input("1 2 3 4");
+  let mut emitter = Silent::<NumErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+
+  {
+    let mut txn = inp.begin_with::<Commit>();
+    let _ = txn.next().unwrap().expect("consume `1`");
+  }
+
+  assert_eq!(
+    *inp
+      .next()
+      .unwrap()
+      .expect("a token after the ordinary drop")
+      .span_ref(),
+    SimpleSpan::new(2, 3),
+    "an ordinary undecided Commit drop still commits: the next token is `2`"
+  );
+}
+
+#[test]
+fn rollback_guard_dropped_mid_unwind_still_rolls_back() {
+  // p87_12b: the default `begin()` flavour is untouched by the flip.
+  let mut input = silent_input("1 2 3 4");
+  let mut emitter = Silent::<NumErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let mut txn = inp.begin();
+    let _ = txn.next().unwrap().expect("consume `1`");
+    panic!("D27 control: the Rollback-policy region panics");
+  }));
+  assert!(caught.is_err(), "the panic was caught by this host");
+
+  assert_eq!(
+    *inp
+      .next()
+      .unwrap()
+      .expect("a token after the caught panic")
+      .span_ref(),
+    SimpleSpan::new(0, 1),
+    "the Rollback default rolls back mid-unwind exactly as it always did"
+  );
+}
+
+// ── D41: the settle path's cost as a function of nesting depth ───────────────────
+//
+// `Lineage::contains` and `pop_through` back every guard settle. Both scanned front-to-back
+// with no last-element fast path, while `forget`/`unpin` had one — so `d` nested guards
+// unwound by drop scanned exactly `d(d+1)` elements. The odometer in `lineage::scan_probe`
+// makes that law assertable; the bound is deliberately generous (`8d`) so the cell pins the
+// asymptotics, not a constant.
+
+/// Opens `depth` nested default (`Rollback`) guards and lets every one settle by drop.
+fn nest_and_drop<'inp>(inp: &mut InputRef<'inp, '_, NumLexer<'inp>, NumCtx<'inp>>, depth: usize) {
+  if depth == 0 {
+    return;
+  }
+  let mut txn = inp.begin();
+  nest_and_drop(&mut txn, depth - 1);
+  // `txn` drops here, undecided → the Rollback default settles it.
+}
+
+/// Opens `depth` nested default guards and settles every one by an explicit `commit`.
+fn nest_and_commit<'inp>(inp: &mut InputRef<'inp, '_, NumLexer<'inp>, NumCtx<'inp>>, depth: usize) {
+  if depth == 0 {
+    return;
+  }
+  let mut txn = inp.begin();
+  nest_and_commit(&mut txn, depth - 1);
+  txn.commit();
+}
+
+#[test]
+fn nested_drop_rollback_scans_linearly() {
+  for depth in [100usize, 400, 1600] {
+    let mut input = silent_input("1 2 3 4");
+    let mut emitter = Silent::<NumErr>::new();
+    let mut inp = input.as_ref(&mut emitter);
+
+    crate::input::lineage::scan_probe::reset();
+    nest_and_drop(&mut inp, depth);
+    let scanned = crate::input::lineage::scan_probe::scanned();
+
+    assert!(
+      scanned <= 8 * depth,
+      "nested rollback-on-drop is quadratic in lineage depth: {depth} nested guards scanned \
+       {scanned} live-lineage elements (linear bound: {}); d(d+1) = {}",
+      8 * depth,
+      depth * (depth + 1)
+    );
+  }
+}
+
+#[test]
+fn nested_commit_scans_nothing() {
+  // The contrast the audit measured at zero: `forget`/`unpin` already have their fast path, so
+  // a committing settle inspects no live-lineage element through the two scanning primitives.
+  let mut input = silent_input("1 2 3 4");
+  let mut emitter = Silent::<NumErr>::new();
+  let mut inp = input.as_ref(&mut emitter);
+
+  crate::input::lineage::scan_probe::reset();
+  nest_and_commit(&mut inp, 400);
+  assert_eq!(
+    crate::input::lineage::scan_probe::scanned(),
+    0,
+    "the committing settle path scans no lineage elements"
+  );
+}
