@@ -215,13 +215,12 @@ mod trace_tests {
   // naming the label at the current depth — keeping the label DX coherent with `traced`.
   #[test]
   fn labelled_fires_a_single_trace_leaf_naming_the_label() {
-    let mut emitter = Silent::<Err>::new();
-    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_context(
       "12",
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(Silent::<Err>::new(), DefaultCache::<'_, Lex<'_>>::default()),
     );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let mut parser = crate::labelled("while parsing item", eat_num);
     let (res, lines) = crate::trace::capture(|| parser.parse_input(&mut inp));
@@ -317,13 +316,15 @@ mod unwind_tests {
 
   #[test]
   fn labelled_pops_its_label_when_the_inner_parser_panics() {
-    let mut emitter = Verbose::<Err>::new();
-    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_context(
       "12 34",
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(
+        Verbose::<Err>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
     );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
       let mut p = crate::labelled("audit-ctx", boom);
@@ -359,13 +360,15 @@ mod unwind_tests {
 
   #[test]
   fn nested_labels_unwind_pops_exactly_the_unwound_scopes() {
-    let mut emitter = Verbose::<Err>::new();
-    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_context(
       "12 34",
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(
+        Verbose::<Err>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
     );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let inside = SimpleSpan::new(0usize, 1usize);
     let mut outer = crate::labelled("outer", catch_inner_then_mark);

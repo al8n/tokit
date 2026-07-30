@@ -98,7 +98,7 @@
 //! | `state` (the lexer regime) | `Input` | ground truth | overwrite from the checkpoint |
 //! | `span` (last-consumed) | `Input` | ground truth | overwrite from the checkpoint |
 //! | `cache` (the token cache) | `Input` | ground truth | the input layer rewinds the front against the restored cursor through `Cache::pop_front`/`Cache::clear`, then drops the post-save tail through `Cache::pop_back`, sized by the count below |
-//! | `emitter` (the emission log) | `InputRef` (borrowed) | ground truth | truncate to the saved mark |
+//! | `emitter` (the emission log) | `Input` (owned; borrowed through `InputRef`) | ground truth | truncate to the saved mark |
 //! | `emitted_error_end` (dedup watermark) | `Input` | lineage memo | pure-copy the saved value |
 //! | `front_reported_end` (front-report watermark) | `Input` | lineage memo | pure-copy the saved value — beside the emitter rewind, so the witness and the report it names move as one |
 //! | `poison_boundary` (sticky terminal frontier) | `Input` | lineage memo | pure-copy the saved value |
@@ -165,6 +165,12 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     //   witnesses. A witness that did not would be unable to see a rollback at all.
     front_reported_end: _,
     poison_boundary: _,
+    // — GROUND TRUTH, and the aggregate's anchor: the emission log itself, bound at construction
+    //   and owned for the input's whole life. Restore truncates it to the saved mark — the same
+    //   action as when it was borrowed per handle. What changed is that the two watermarks above
+    //   now describe THIS log by construction rather than by call-site discipline, so the live
+    //   structure matches the grouping the rollback structure always had.
+    emitter: _,
     lineage:
       Lineage {
         // — lineage memo: pure-copied (`restore_cache_pushes`).
@@ -322,33 +328,6 @@ impl Lineage {
       cache_pushes: 0,
       #[cfg(any(feature = "std", feature = "alloc"))]
       savepoint_seq: 0,
-      #[cfg(any(feature = "std", feature = "alloc"))]
-      live_ckpts: LineageStack::new(),
-      #[cfg(any(feature = "std", feature = "alloc"))]
-      next_ckp_id: 0,
-      #[cfg(any(feature = "std", feature = "alloc"))]
-      pinned: LineageStack::new(),
-    }
-  }
-
-  /// The memos a **clone** of the input starts with. A clone is a *new* input that happens to
-  /// share the original's cache contents:
-  ///
-  /// - the **cache-push counter** carries forward, so the clone's own future saves and restores
-  ///   stay consistent with the shared cache contents;
-  /// - the **savepoint sequence** carries forward so the clone's savepoint seqs stay monotone;
-  ///   the clone is a distinct struct with a distinct nonce anyway, so its ids never cross the
-  ///   original's regardless of the starting value;
-  /// - the **live-checkpoint stack** and its **id counter** reset — a clone starts with an empty
-  ///   lineage and a fresh id source, so a checkpoint from the original is never mistaken for one
-  ///   of the clone's (restoring it is caught as a foreign input in debug + ptr builds);
-  /// - the **pin set** resets — a clone has no live guards.
-  #[inline(always)]
-  pub(crate) fn forked(&self) -> Self {
-    Self {
-      cache_pushes: self.cache_pushes,
-      #[cfg(any(feature = "std", feature = "alloc"))]
-      savepoint_seq: self.savepoint_seq,
       #[cfg(any(feature = "std", feature = "alloc"))]
       live_ckpts: LineageStack::new(),
       #[cfg(any(feature = "std", feature = "alloc"))]

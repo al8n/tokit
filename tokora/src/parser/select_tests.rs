@@ -217,8 +217,11 @@ type SelCtx<'a> = (Silent<SelErr>, DefaultCache<'a, SelLexer<'a>>);
 fn sel_input(src: &str) -> (Input<'_, SelLexer<'_>, SelCtx<'_>, ()>, Rc<Cell<usize>>) {
   let limiter = Limiter::with_limit(2);
   let scanned = limiter.counter();
-  let cache = DefaultCache::<'_, SelLexer<'_>>::default();
-  let input = Input::<SelLexer<'_>, SelCtx<'_>, ()>::with_state_and_cache(src, limiter, cache);
+  let context = crate::input::InputContext::new(
+    Silent::<SelErr>::new(),
+    DefaultCache::<'_, SelLexer<'_>>::default(),
+  );
+  let input = Input::<SelLexer<'_>, SelCtx<'_>, ()>::with_state_and_context(src, limiter, context);
   (input, scanned)
 }
 
@@ -226,8 +229,11 @@ fn sel_input(src: &str) -> (Input<'_, SelLexer<'_>, SelCtx<'_>, ()>, Rc<Cell<usi
 /// the only setting where `Partial` and `Complete` disagree at exhaustion.
 fn sel_partial(src: &str) -> Input<'_, SelLexer<'_>, SelCtx<'_>, (), Partial> {
   let limiter = Limiter::with_limit(64);
-  let cache = DefaultCache::<'_, SelLexer<'_>>::default();
-  Input::<SelLexer<'_>, SelCtx<'_>, (), Partial>::with_state_and_cache(src, limiter, cache)
+  let context = crate::input::InputContext::new(
+    Silent::<SelErr>::new(),
+    DefaultCache::<'_, SelLexer<'_>>::default(),
+  );
+  Input::<SelLexer<'_>, SelCtx<'_>, (), Partial>::with_state_and_context(src, limiter, context)
 }
 
 const NUMERIC: &[SelKind] = &[SelKind::Int, SelKind::Float];
@@ -237,8 +243,7 @@ const NUMERIC: &[SelKind] = &[SelKind::Int, SelKind::Float];
 #[test]
 fn dispatch_take_hits_and_moves_the_payload_into_the_arm() {
   let (mut input, _scanned) = sel_input("7");
-  let mut emitter = Silent::<SelErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   // The arm receives the token BY VALUE: it returns the payload itself, which an arm
   // that only borrowed the head could not do.
   let out: Result<i64, SelErr> =
@@ -252,8 +257,7 @@ fn dispatch_take_hits_and_moves_the_payload_into_the_arm() {
 #[test]
 fn dispatch_take_miss_errors_with_the_whole_table_and_the_found_token() {
   let (mut input, _scanned) = sel_input("word");
-  let mut emitter = Silent::<SelErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let out: Result<i64, SelErr> = crate::parser::dispatch_take(&mut inp, NUMERIC, |sp| {
     Err(crate::span::Spanned::new(sp.span, sp.data))
   });
@@ -275,8 +279,7 @@ fn dispatch_take_give_back_arm_builds_a_typed_error_and_does_not_panic() {
   // the runtime — where `Lang` is pinned — builds the error. `unreachable!()` here is
   // what the fused-dispatch sites write by hand; this cell is what replaces it.
   let (mut input, _scanned) = sel_input("7");
-  let mut emitter = Silent::<SelErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let out: Result<i64, SelErr> = crate::select!(&mut inp, {
     SelKind::Int => (_span, SelTok::Int(0)) => 0i64,
     SelKind::Float => (_span, SelTok::Float(_)) => 1i64,
@@ -297,8 +300,7 @@ fn dispatch_take_marks_terminal_only_at_a_latch() {
   // Genuine end of input: an EOT error, explicitly NOT terminal.
   {
     let (mut input, _scanned) = sel_input("1");
-    let mut emitter = Silent::<SelErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     assert!(inp.next().unwrap().is_some());
     let out: Result<usize, SelErr> = crate::parser::dispatch_take(&mut inp, NUMERIC, |sp| {
       Ok(crate::span::Span::start(&sp.span))
@@ -312,8 +314,7 @@ fn dispatch_take_marks_terminal_only_at_a_latch() {
   // Latched boundary: the same shape, marked terminal.
   {
     let (mut input, _scanned) = sel_input("1 2 3");
-    let mut emitter = Silent::<SelErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     assert!(inp.next().unwrap().is_some());
     assert!(inp.next().unwrap().is_some());
     assert!(
@@ -336,8 +337,7 @@ fn dispatch_take_marks_terminal_only_at_a_latch() {
 #[test]
 fn try_dispatch_take_declines_a_miss_without_consuming() {
   let (mut input, _scanned) = sel_input("word 7");
-  let mut emitter = Silent::<SelErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let out: Result<ParseAttempt<i64>, SelErr> =
     crate::parser::try_dispatch_take(&mut inp, NUMERIC, |sp| {
       Err(crate::span::Spanned::new(sp.span, sp.data))
@@ -355,8 +355,7 @@ fn try_dispatch_take_declines_a_miss_without_consuming() {
 fn try_dispatch_take_declines_genuine_eof_but_errs_on_a_terminal_stop() {
   {
     let (mut input, _scanned) = sel_input("1");
-    let mut emitter = Silent::<SelErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     assert!(inp.next().unwrap().is_some());
     let out: Result<ParseAttempt<usize>, SelErr> =
       crate::parser::try_dispatch_take(&mut inp, NUMERIC, |sp| {
@@ -370,8 +369,7 @@ fn try_dispatch_take_declines_genuine_eof_but_errs_on_a_terminal_stop() {
   }
   {
     let (mut input, _scanned) = sel_input("1 2 3");
-    let mut emitter = Silent::<SelErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     assert!(inp.next().unwrap().is_some());
     assert!(inp.next().unwrap().is_some());
     assert!(inp.next().unwrap().is_none());
@@ -396,8 +394,7 @@ fn try_dispatch_take_declines_genuine_eof_but_errs_on_a_terminal_stop() {
 #[test]
 fn dispatch_take_surfaces_incomplete_at_an_open_partial_frontier() {
   let mut input = sel_partial("1 ");
-  let mut emitter = Silent::<SelErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(inp.next().unwrap().is_some());
   let out: Result<usize, SelErr> = crate::select!(&mut inp, {
     SelKind::Int => (span, SelTok::Int(_)) => crate::span::Span::start(&span),
@@ -412,8 +409,7 @@ fn dispatch_take_surfaces_incomplete_at_an_open_partial_frontier() {
 #[test]
 fn try_dispatch_take_surfaces_incomplete_at_an_open_partial_frontier() {
   let mut input = sel_partial("1 ");
-  let mut emitter = Silent::<SelErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(inp.next().unwrap().is_some());
   let out: Result<ParseAttempt<usize>, SelErr> = crate::try_select!(&mut inp, {
     SelKind::Int => (span, SelTok::Int(_)) => crate::span::Span::start(&span),
@@ -431,8 +427,7 @@ fn try_dispatch_take_surfaces_incomplete_at_an_open_partial_frontier() {
 #[test]
 fn select_macro_surface_single_arm_no_trailing_comma() {
   let (mut input, _scanned) = sel_input("7");
-  let mut emitter = Silent::<SelErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let out: Result<i64, SelErr> = crate::select!(&mut inp, {
     SelKind::Int => (_span, SelTok::Int(v)) => v
   });
@@ -445,8 +440,7 @@ fn select_macro_surface_or_pattern_arm() {
   // and the match from the pattern column, so they need not be 1:1.
   for (src, want) in [("7", 1i64), ("7.5", 2i64)] {
     let (mut input, _scanned) = sel_input(src);
-    let mut emitter = Silent::<SelErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let out: Result<i64, SelErr> = crate::select!(&mut inp, {
       SelKind::Int => (_span, SelTok::Int(_)) => 1i64,
       SelKind::Float => (_span, SelTok::Float(_) | SelTok::Word) => 2i64,
@@ -458,8 +452,7 @@ fn select_macro_surface_or_pattern_arm() {
 #[test]
 fn select_macro_surface_binds_the_span_into_the_user_arm() {
   let (mut input, _scanned) = sel_input("  42");
-  let mut emitter = Silent::<SelErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let out: Result<(usize, usize, i64), SelErr> = crate::select!(&mut inp, {
     SelKind::Int => (span, SelTok::Int(v)) => (span.start(), span.end(), v),
   });
@@ -473,8 +466,7 @@ fn select_macro_surface_binds_the_span_into_the_user_arm() {
 #[test]
 fn try_select_macro_surface_trailing_comma_and_decline() {
   let (mut input, _scanned) = sel_input("word");
-  let mut emitter = Silent::<SelErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let out: Result<ParseAttempt<i64>, SelErr> = crate::try_select!(&mut inp, {
     SelKind::Int => (_span, SelTok::Int(v)) => v,
     SelKind::Float => (_span, SelTok::Float(_)) => 0i64,

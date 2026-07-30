@@ -421,23 +421,7 @@ impl<E, C> InputContext<E, C> {
 ///
 /// let input = "{ { } }";
 /// let initial_state = LexerState::default();
-/// let stream = Input::with_state(input, initial_state);
-/// ```
-///
-/// ## Cloning and Backtracking
-///
-/// Input supports cloning (when the token type and extras are Clone/Copy),
-/// which is essential for Chumsky's backtracking:
-///
-/// ```rust,ignore
-/// let stream = MyToken::lexer(input);
-/// let checkpoint = stream.clone(); // Save position for backtracking
-///
-/// // Try to parse something
-/// if let Err(_) = try_parser.parse(stream) {
-///     // Backtrack by using the cloned stream
-///     alternative_parser.parse(checkpoint);
-/// }
+/// let stream = Input::with_state_and_context(input, initial_state, ctx.provide());
 /// ```
 pub(crate) struct Input<'inp, L, Ctx = DefaultCache<'inp, L>, Lang: ?Sized = (), Cmpl = Complete>
 where
@@ -512,6 +496,13 @@ where
   /// High-water mark: lexer errors whose span ends at or before this offset have
   /// already been emitted (e.g. during a peek that lexed past this point), so the
   /// consume path must not report them again when it re-lexes the same region.
+  ///
+  /// Its subject is **the bound [`emitter`](Self::emitter)'s log**, and that is a structural
+  /// fact rather than a discipline: the emitter is bound at
+  /// [`with_state_and_context`](Self::with_state_and_context) and owned for the input's whole
+  /// life, so this mark can only ever describe the one log it was raised against. See the
+  /// [`emitter`](Self::emitter) field for the aggregate the two suppression watermarks form
+  /// with it.
   emitted_error_end: L::Offset,
   /// The **front-report watermark**: a lineage fact about the emitter's log.
   ///
@@ -540,50 +531,20 @@ where
   /// A witness must share the rollback semantics of the fact it witnesses. This one does: its
   /// subject is the emission log, and the log is restored in the same move.
   ///
-  /// # The class this belongs to, and why it is safe rather than sound
+  /// # Which log, and why that is no longer a question
   ///
-  /// A **suppression watermark whose subject is one emitter's log, stored on a struct whose
-  /// emitter is chosen per borrow, is unsound by construction.** [`as_ref`](Self::as_ref) takes
-  /// the emitter as a parameter, so *which* log the watermark describes is decided per handle,
-  /// while the watermark itself lives here and outlives any one handle. A watermark set under one
-  /// emitter and read under another claims a report that log never received — and because these
-  /// watermarks **suppress**, the consequence is a silently dropped diagnostic, not a duplicated
-  /// one.
+  /// The log is **the bound [`emitter`](Self::emitter)'s**, decided once at
+  /// [`with_state_and_context`](Self::with_state_and_context) and unchangeable thereafter. A
+  /// suppression watermark whose subject is one emitter's log, stored on a struct whose emitter
+  /// were chosen *per borrow*, would be unsound by construction — set under one log and read
+  /// under another it claims a report that log never received, and because these watermarks
+  /// **suppress**, the consequence is a silently dropped diagnostic rather than a duplicated
+  /// one. Binding the emitter to the input is what makes that shape unconstructable:
+  /// [`as_ref`](Self::as_ref) takes no emitter, so there is no per-borrow choice to get wrong.
   ///
-  /// **There are two members of the class, and this is the second.**
-  ///
-  /// - `emitted_error_end`, above. It gates
-  ///   [`emit_lexer_error_deduped`](InputRef::emit_lexer_error_deduped) with
-  ///   `if end <= *self.emitted_error_end { return Ok(()) }` — carried into a fresh log, every
-  ///   lexer error in the covered region is dropped. It predates this field, so the exposure is
-  ///   pre-existing and broader than the close-miss suppression that added the second member.
-  /// - `front_reported_end`, this field.
-  ///
-  /// `poison_boundary`, borrowed at the same site in the same way, is **genuinely exempt**: its
-  /// subject is the *limiter's* trip, which travels with the `Input` itself and means the same
-  /// thing under any emitter. It gates control flow, not dedup. So the shared borrow site is not
-  /// the discriminator — the question is whether a fact's subject is a particular emitter's log.
-  ///
-  /// # Why it is safe today
-  ///
-  /// No in-crate path pairs one `Input` with two different emitters. Enumerated rather than
-  /// assumed: the three parse entry points each construct an `Input` locally and borrow it exactly
-  /// once — including the partial session, which builds a **fresh** `Input` per attempt and so
-  /// never carries a watermark across one; the two harnesses that genuinely re-borrow one `Input`
-  /// (`fuzz::session` and `fuzz::partial`'s two-phase drain) deliberately reuse the *same* emitter,
-  /// because they exist to check that progress survives a re-borrow; and `Input` is `pub(crate)`
-  /// and unexported, so no external path exists at all.
-  ///
-  /// **That safety is a property of in-crate discipline, not of the type system.** Nothing stops a
-  /// future `as_ref` call from pairing a carried watermark with a different emitter, and the
-  /// compiler will not object. Before adding one, check that the emitter is the same log the
-  /// watermark was set under, or clear the watermark. `as_ref_census_roster_is_unchanged` is the
-  /// alarm for that, and its own blind spot is stated there.
-  ///
-  /// The remedy, if it is ever needed, is available: the flag-to-close-probe window never crosses
-  /// an `as_ref` boundary (`attempt` reborrows the same handle rather than making a new one, and
-  /// no driver calls `as_ref`), so clearing on handle creation would cost a duplicate report at
-  /// worst and could not disarm a live watermark mid-window.
+  /// `poison_boundary`, below, was never in that class and still is not: its subject is the
+  /// *limiter's* trip, which travels with the `Input` itself and means the same thing under any
+  /// log. It gates control flow, not dedup.
   front_reported_end: Option<L::Offset>,
   /// Sticky limit-error boundary, held at the input level so it survives across
   /// the fresh lexers `InputRef` builds per operation.
@@ -614,6 +575,30 @@ where
   /// [the law](crate::input#terminal-beats-incomplete-and-they-never-substitute) for why the ranking
   /// is total, and what an attacker could do without it.
   poison_boundary: Option<L::Offset>,
+  /// The **bound emitter** — the one emission log this input's parse writes, owned here for the
+  /// input's whole life and paired with it at
+  /// [`with_state_and_context`](Self::with_state_and_context).
+  ///
+  /// # The aggregate this anchors
+  ///
+  /// The emission mark, [`emitted_error_end`](Self::emitted_error_end),
+  /// [`front_reported_end`](Self::front_reported_end) and
+  /// [`poison_boundary`](Self::poison_boundary) are **one restore group**: a
+  /// [`Checkpoint`] captures all four and a [`restore`](InputRef::restore) puts all four back
+  /// together, in one no-caller-code block (see [`Checkpoint`]'s fields). The rollback structure
+  /// has always treated them as a unit; owning the emitter here is what makes the *live*
+  /// structure say the same thing. Before it, two of the four were facts about a log the input
+  /// did not hold, and pairing them with a different log was a call-site discipline the compiler
+  /// could not check.
+  ///
+  /// # No mid-life mutator, deliberately
+  ///
+  /// There is [`emitter`](Self::emitter) (shared, for observation between handles) and
+  /// [`into_emitter`](Self::into_emitter) (by value, once the parse is over) — and no
+  /// `emitter_mut`. Mutation during a parse goes through an [`InputRef`], whose
+  /// [`emitter`](InputRef::emitter) is the audited road every emission and every rewind already
+  /// travels. A second way in would be a second place to reason about the aggregate above.
+  emitter: Ctx::Emitter,
   /// The lineage memos — the bookkeeping backtracking rewinds an abandoned continuation with:
   /// the live-checkpoint stack, the pin set, and the cache-push/checkpoint-id/savepoint counters.
   /// Gathered behind one guardian (see [`Lineage`] and its [module](lineage) for the
@@ -634,54 +619,6 @@ where
     target_has_atomic = "ptr"
   ))]
   witness: Witness,
-}
-
-impl<'inp, L, Ctx, Lang: ?Sized, Cmpl> Clone for Input<'inp, L, Ctx, Lang, Cmpl>
-where
-  L: Lexer<'inp>,
-  L::State: Clone,
-  Ctx: ParseContext<'inp, L, Lang>,
-  Ctx::Cache: Clone,
-  Cmpl: Completeness,
-{
-  #[inline(always)]
-  fn clone(&self) -> Self {
-    Self {
-      input: self.input,
-      state: self.state.clone(),
-      span: self.span.clone(),
-      cache: self.cache.clone(),
-      // A clone shares the cache contents, so it shares the parked front too: dropping it would
-      // leave the clone's cursor behind the original's under a cache that retains nothing.
-      pending: self.pending.clone(),
-      // The finality flag is `Copy` (a ZST for `Complete`, a `bool` for `Partial`); a clone shares
-      // the same completeness regime as the original.
-      finality: self.finality,
-      emitted_error_end: self.emitted_error_end.clone(),
-      // NOT carried: a clone is a new input that will be handed a DIFFERENT emitter, so no report
-      // in the original's log can be claimed for it. `None` is the conservative reading — a later
-      // arm emits — and cloning the value would be the permissive one, asserting a live report
-      // this input has never made. The opposite conclusion from the cache-push counter beside it,
-      // for the opposite reason: the subject differs.
-      front_reported_end: None,
-      poison_boundary: self.poison_boundary.clone(),
-      // A clone is a new input that shares the cache contents: `Lineage::forked` carries the
-      // cache-push and savepoint counters forward and starts a fresh, empty live-checkpoint
-      // lineage and pin set (see it for the per-cell rationale).
-      lineage: self.lineage.forked(),
-      // Carry the trace depth forward so nested traces keep indenting across a clone.
-      #[cfg(feature = "trace")]
-      depth: self.depth,
-      // A clone is a new input: `Witness::clone` mints a fresh identity, so the clone's
-      // checkpoints and the original's never cross.
-      #[cfg(all(
-        debug_assertions,
-        any(feature = "std", feature = "alloc"),
-        target_has_atomic = "ptr"
-      ))]
-      witness: self.witness.clone(),
-    }
-  }
 }
 
 impl<'inp, L, Ctx, Lang: ?Sized, Cmpl> core::fmt::Debug for Input<'inp, L, Ctx, Lang, Cmpl>
@@ -709,76 +646,97 @@ where
 impl<'inp, L, Ctx, Lang: ?Sized, Cmpl> Input<'inp, L, Ctx, Lang, Cmpl>
 where
   L: Lexer<'inp>,
-  L::State: Default,
-  Ctx: ParseContext<'inp, L, Lang, Cache = DefaultCache<'inp, L>>,
-  Cmpl: Completeness,
-{
-  /// Creates a new lexer from the given input.
-  #[inline(always)]
-  #[allow(dead_code)]
-  pub fn new(input: &'inp L::Source) -> Self {
-    Self::with_state(input, L::State::default())
-  }
-}
-
-impl<'inp, L, Ctx, Lang: ?Sized, Cmpl> Input<'inp, L, Ctx, Lang, Cmpl>
-where
-  L: Lexer<'inp>,
-  Ctx: ParseContext<'inp, L, Lang, Cache = DefaultCache<'inp, L>>,
-  Cmpl: Completeness,
-{
-  /// Creates a new lexer from the given input and state.
-  #[inline(always)]
-  #[allow(dead_code)]
-  pub fn with_state(input: &'inp L::Source, state: L::State) -> Self {
-    Self {
-      input,
-      state,
-      span: L::Span::new(L::Offset::default(), L::Offset::default()),
-      cache: DefaultCache::<'inp, L>::default(),
-      pending: None,
-      // Born OPEN: non-final (`Partial`) or final-by-definition (`Complete`). A streaming driver
-      // states the world fact by calling [`seal`](Self::seal) when the last chunk lands.
-      finality: Cmpl::initial(),
-      emitted_error_end: L::Offset::default(),
-      front_reported_end: None,
-      poison_boundary: None,
-      lineage: Lineage::new(),
-      #[cfg(feature = "trace")]
-      depth: 0,
-      #[cfg(all(
-        debug_assertions,
-        any(feature = "std", feature = "alloc"),
-        target_has_atomic = "ptr"
-      ))]
-      witness: Witness::new(),
-    }
-  }
-}
-
-impl<'inp, L, Ctx, Lang: ?Sized, Cmpl> Input<'inp, L, Ctx, Lang, Cmpl>
-where
-  L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
   Cmpl: Completeness,
 {
+  /// Creates an input over `input` with `state`, **bound to** the emitter and cache in `context`
+  /// — the one point at which a parse and the emitter serving it are paired, and the reason
+  /// nothing downstream has to re-establish which log a watermark describes. `context` is exactly
+  /// what [`ParseContext::provide`](crate::ParseContext::provide) returns.
+  ///
+  /// # Panics
+  ///
+  /// Twice, for the two ways a pairing can be wrong — see
+  /// [`SourceIdentity::covers`](crate::source::SourceIdentity::covers):
+  ///
+  /// - if the emitter is bound to a **provably different** source value than this input reads;
+  /// - if it is bound to a **strictly shorter extent** of that source than this input reads.
+  ///   The parse can peek past the sink's end without committing anything there and still let
+  ///   those bytes shape the tree, and the result carries no out-of-bounds span and no
+  ///   uncovered gap for a later check to find. A **longer** bound extent is the fixed-arena
+  ///   streaming shape and is not refused.
+  ///
+  /// This is the one point at which both halves are in hand, which is why the check lives here:
+  /// the event log a wrongly-paired sink produces is byte-identical to a legal one — and for
+  /// the prefix case it is not merely indistinguishable but *valid* — so nothing downstream can
+  /// tell. Because the pairing is then fixed for the input's whole life, checking it here covers
+  /// **every** borrow, and costs one check per input rather than one per handle.
+  ///
+  /// Both refusals are deliberately conservative: they fire only where
+  /// [`Source::REFERENT_IS_BYTES`](crate::Source::REFERENT_IS_BYTES) says the reference *is*
+  /// the data, so that an inequality is proof and the extent is a byte length rather than a
+  /// handle size. For a sized backing (every owned handle, and the `&str` / `&[u8]` reference
+  /// forms) neither projection means anything, so nothing is refused. No program that produces
+  /// a correct tree today reaches either panic.
+  ///
+  /// It is **not** `const`, and could not be: the address projection is not const-callable at
+  /// the MSRV (`E0015` on `<*const u8>::addr`). `Input` is `pub(crate)`, so this is not a
+  /// consumer-visible change.
   #[inline(always)]
-  pub fn with_state_and_cache(input: &'inp L::Source, state: L::State, cache: Ctx::Cache) -> Self
-// where
-  //   C: Cache<'inp, L>,
-  {
+  pub fn with_state_and_context(
+    input: &'inp L::Source,
+    state: L::State,
+    context: InputContext<Ctx::Emitter, Ctx::Cache>,
+  ) -> Self {
+    let (emitter, cache) = context.into_components();
+    // The source-identity handshake. See `Emitter::bound_source`.
+    //
+    // `bound_source()` is `None` for every emitter that binds no source — 30 of the 31 core
+    // `Emitter` impls in this tree — so this folds to nothing for them. Once per `Input`, at the
+    // moment the pair forms: never per borrow, never per token.
+    // Spelled without a let-chain on purpose: let-chains are unstable at the MSRV (1.87),
+    // and this crate has now shipped that mistake twice.
+    if <L::Source as crate::Source<L::Offset>>::REFERENT_IS_BYTES {
+      if let Some(bound) = crate::Emitter::<'inp, L, Lang>::bound_source(&emitter) {
+        let current = crate::source::SourceIdentity::of(input);
+        // Two questions, two answers. Origin is an equality; extent is an ordering, and only
+        // in one direction. Collapsing them into a single `==` would refuse the streaming
+        // shape; collapsing them into origin alone is what let a prefix through.
+        assert!(
+          bound.addr() == current.addr(),
+          "the emitter is bound to a different source value than this parse reads \
+           (emitter: {bound}, parse: {current}) — bind the sink to the same `&source` you \
+           hand the parser. A same-length foreign source produces a tree whose text is the \
+           sink's and whose structure is the parse's, and no later check can see it."
+        );
+        assert!(
+          bound.extent() >= current.extent(),
+          "the emitter is bound to a shorter extent of this source than the parse reads \
+           (emitter: {bound}, parse: {current}) — bind the sink to a slice at least as long \
+           as the one you hand the parser. The parse can peek past the sink's end, commit \
+           nothing there, and still let those bytes choose the tree's shape; the result \
+           materializes with no out-of-bounds span and no uncovered gap, so nothing later \
+           sees it. The opposite pairing — a sink bound to a LONGER extent — is the \
+           fixed-arena streaming shape and is accepted here; its unparsed tail is `finish`'s \
+           business, reported as `UncoveredGap` or tiled by `finish_partial`."
+        );
+      }
+    }
+
     Self {
       input,
       state,
       span: L::Span::new(L::Offset::default(), L::Offset::default()),
       cache,
       pending: None,
-      // Born OPEN (see the twin above): a streaming driver states the end of the stream by calling
-      // [`seal`](Self::seal), the one monotone finality transition.
+      // Born OPEN: non-final (`Partial`) or final-by-definition (`Complete`). A streaming driver
+      // states the end of the stream by calling [`seal`](Self::seal), the one monotone finality
+      // transition.
       finality: Cmpl::initial(),
       emitted_error_end: L::Offset::default(),
       front_reported_end: None,
       poison_boundary: None,
+      emitter,
       lineage: Lineage::new(),
       #[cfg(feature = "trace")]
       depth: 0,
@@ -789,6 +747,31 @@ where
       ))]
       witness: Witness::new(),
     }
+  }
+
+  /// The bound emitter, by shared reference — observability *between* handles, which is the one
+  /// window in which an `Input` is reachable and its log is settled.
+  ///
+  /// Deliberately shared-only; see the [field](Self::emitter) for why there is no `emitter_mut`.
+  ///
+  /// `allow(dead_code)` rather than a feature gate: the callers are the `fuzz` harness's oracles
+  /// plus test suites behind a dozen different feature combinations, so an exact gate would be a
+  /// long disjunction that has to be re-derived every time a suite moves — and getting it wrong
+  /// fails the build in one matrix leg only. It is generic and monomorphized only where called,
+  /// so an unused build pays nothing for it.
+  #[allow(dead_code)]
+  #[inline(always)]
+  pub(crate) fn emitter(&self) -> &Ctx::Emitter {
+    &self.emitter
+  }
+
+  /// Consumes the input and returns the bound emitter — the extraction point for an **owned
+  /// recording** emitter (a CST [`Sink`](crate::cst::Sink)), whose `finish` takes `self` and so
+  /// must outlive the input that fed it.
+  #[allow(dead_code)]
+  #[inline(always)]
+  pub(crate) fn into_emitter(self) -> Ctx::Emitter {
+    self.emitter
   }
 
   /// **Seals** the input: the stream has ended, and no further bytes will arrive. The sole writer
@@ -855,74 +838,15 @@ where
     self.lineage.live_len()
   }
 
-  /// Creates a zero-copy reference adapter for this input.
+  /// Creates a zero-copy reference adapter for this input, borrowing the **bound** emitter.
   ///
-  /// # Panics
-  ///
-  /// Twice, for the two ways a pairing can be wrong — see
-  /// [`SourceIdentity::covers`](crate::source::SourceIdentity::covers):
-  ///
-  /// - if `emitter` is bound to a **provably different** source value than this input reads;
-  /// - if it is bound to a **strictly shorter extent** of that source than this input reads.
-  ///   The parse can peek past the sink's end without committing anything there and still let
-  ///   those bytes shape the tree, and the result carries no out-of-bounds span and no
-  ///   uncovered gap for a later check to find. A **longer** bound extent is the fixed-arena
-  ///   streaming shape and is not refused.
-  ///
-  /// This is the one point at which both halves are in hand, which is why the check lives here:
-  /// the event log a wrongly-paired sink produces is byte-identical to a legal one — and for
-  /// the prefix case it is not merely indistinguishable but *valid* — so nothing downstream can
-  /// tell.
-  ///
-  /// Both refusals are deliberately conservative: they fire only where
-  /// [`Source::REFERENT_IS_BYTES`](crate::Source::REFERENT_IS_BYTES) says the reference *is*
-  /// the data, so that an inequality is proof and the extent is a byte length rather than a
-  /// handle size. For a sized backing (every owned handle, and the `&str` / `&[u8]` reference
-  /// forms) neither projection means anything, so nothing is refused. No program that produces
-  /// a correct tree today reaches either panic.
-  ///
-  /// It is **not** `const`, and could not be: the address projection is not const-callable at
-  /// the MSRV (`E0015` on `<*const u8>::addr`). `Input` is `pub(crate)`, so this is not a
-  /// consumer-visible change.
+  /// There is no emitter parameter and no per-borrow emitter choice: the pairing was made at
+  /// [`with_state_and_context`](Self::with_state_and_context), which is also where the
+  /// source-identity handshake that used to live here now runs. Two handles taken from one input
+  /// therefore always write the same log, so a suppression watermark carried across them
+  /// describes exactly the log it was raised against.
   #[inline(always)]
-  pub fn as_ref<'closure>(
-    &'closure mut self,
-    emitter: &'closure mut Ctx::Emitter,
-  ) -> InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl> {
-    // The source-identity handshake. See `Emitter::bound_source`.
-    //
-    // `bound_source()` is `None` for every emitter that binds no source — 30 of the 31 core
-    // `Emitter` impls in this tree — so this folds to nothing for them. Once per `InputRef`,
-    // never per token.
-    // Spelled without a let-chain on purpose: let-chains are unstable at the MSRV (1.87),
-    // and this crate has now shipped that mistake twice.
-    if <L::Source as crate::Source<L::Offset>>::REFERENT_IS_BYTES {
-      if let Some(bound) = crate::Emitter::<'inp, L, Lang>::bound_source(&*emitter) {
-        let current = crate::source::SourceIdentity::of(self.input);
-        // Two questions, two answers. Origin is an equality; extent is an ordering, and only
-        // in one direction. Collapsing them into a single `==` would refuse the streaming
-        // shape; collapsing them into origin alone is what let a prefix through.
-        assert!(
-          bound.addr() == current.addr(),
-          "the emitter is bound to a different source value than this parse reads \
-           (emitter: {bound}, parse: {current}) — bind the sink to the same `&source` you \
-           hand the parser. A same-length foreign source produces a tree whose text is the \
-           sink's and whose structure is the parse's, and no later check can see it."
-        );
-        assert!(
-          bound.extent() >= current.extent(),
-          "the emitter is bound to a shorter extent of this source than the parse reads \
-           (emitter: {bound}, parse: {current}) — bind the sink to a slice at least as long \
-           as the one you hand the parser. The parse can peek past the sink's end, commit \
-           nothing there, and still let those bytes choose the tree's shape; the result \
-           materializes with no out-of-bounds span and no uncovered gap, so nothing later \
-           sees it. The opposite pairing — a sink bound to a LONGER extent — is the \
-           fixed-arena streaming shape and is accepted here; its unparsed tail is `finish`'s \
-           business, reported as `UncoveredGap` or tiled by `finish_partial`."
-        );
-      }
-    }
-
+  pub fn as_ref<'closure>(&'closure mut self) -> InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl> {
     InputRef {
       input: &self.input,
       state: &mut self.state,
@@ -944,7 +868,7 @@ where
       // words once, here, and nothing thereafter. The cell's `Drop` is what releases a point
       // abandoned with the handle — its pin, its lineage entry, and its emitter mark alike
       // (the emitter borrow lives in the cell precisely so that drop can reach it).
-      session: Session::new(&mut self.lineage, emitter),
+      session: Session::new(&mut self.lineage, &mut self.emitter),
       #[cfg(feature = "trace")]
       depth: &mut self.depth,
       #[cfg(all(
@@ -1009,15 +933,14 @@ where
   Partial: SurfaceIncomplete<'inp, L, Ctx, Lang>,
   P: crate::ParseInput<'inp, L, O, Ctx, Lang, Partial>,
 {
-  let (mut emitter, cache) = ctx.provide().into_components();
-  let mut input = Input::<L, Ctx, Lang, Partial>::with_state_and_cache(src, state, cache);
+  let mut input = Input::<L, Ctx, Lang, Partial>::with_state_and_context(src, state, ctx.provide());
   // The driver states the world fact BEFORE the parser ever sees a handle — and it is the only
   // party that can. `seal` takes `&mut Input`, so it is unreachable from the `&mut InputRef` `f`
   // is handed: `f` cannot end the stream, at any depth, inside any speculative branch.
   if is_final {
     input.seal();
   }
-  let mut input_ref = input.as_ref(&mut emitter);
+  let mut input_ref = input.as_ref();
   f.parse_input(&mut input_ref)
 }
 

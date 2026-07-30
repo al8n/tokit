@@ -92,11 +92,14 @@ type NumFatalCtx<'a> = (Fatal<NumErr>, DefaultCache<'a, NumLexer<'a>>);
 
 /// Builds a `Silent` input over `src` with a limit high enough never to trip.
 fn silent_input(src: &str) -> Input<'_, NumLexer<'_>, NumCtx<'_>, ()> {
-  let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  Input::<NumLexer<'_>, NumCtx<'_>, ()>::with_state_and_cache(
+  let context = crate::input::InputContext::new(
+    Silent::<NumErr>::new(),
+    DefaultCache::<'_, NumLexer<'_>>::default(),
+  );
+  Input::<NumLexer<'_>, NumCtx<'_>, ()>::with_state_and_context(
     src,
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    context,
   )
 }
 
@@ -107,8 +110,7 @@ fn txn_commit_keeps_progress() {
   // begin, consume two tokens through the guard, commit: the progress sticks, so the
   // next token is the third.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   let mut txn = inp.begin();
@@ -133,15 +135,14 @@ fn txn_rollback_restores_everything() {
   // lifts the watermark. `rollback` must return every one of those.
   {
     let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-    let mut emitter = Verbose::<NumErr>::new();
-    let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_context(
       "1 @ 2",
       TokenLimiter::with_limitation(usize::MAX),
-      cache,
+      crate::input::InputContext::new(Verbose::<NumErr>::new(), cache),
     );
 
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       let cur0 = *inp.cursor().as_inner();
       let span0 = *inp.span();
@@ -159,7 +160,7 @@ fn txn_rollback_restores_everything() {
     }
 
     // The emission log was truncated by the rollback: nothing the guard emitted survives.
-    let after_rollback: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let after_rollback: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     assert_eq!(
       after_rollback, 0,
       "diagnostics emitted inside the transaction are rolled back (empty emission log)"
@@ -168,16 +169,21 @@ fn txn_rollback_restores_everything() {
     // The watermark rolled back too, so the committed path re-crosses `@` and the
     // rewound lexer error becomes re-emittable — exactly once.
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
       while inp.next().unwrap().is_some() {}
     }
     let at = SimpleSpan::new(2, 3);
     assert_eq!(
-      emitter.errors().get(&at).map(|g| g.len()).unwrap_or(0),
+      input
+        .emitter()
+        .errors()
+        .get(&at)
+        .map(|g| g.len())
+        .unwrap_or(0),
       1,
       "the rewound lexer error re-emits exactly once when re-reached"
     );
-    let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     assert_eq!(total, 1, "only the re-emitted lexer error is retained");
   }
 
@@ -188,14 +194,13 @@ fn txn_rollback_restores_everything() {
   {
     use generic_arraydeque::typenum::U6;
     let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-    let mut emitter = Verbose::<NumErr>::new();
-    let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_context(
       "1 2 3 4 5 6",
       TokenLimiter::with_limitation(5),
-      cache,
+      crate::input::InputContext::new(Verbose::<NumErr>::new(), cache),
     );
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       let mut txn = inp.begin();
       let _ = txn.peek::<U6>().unwrap(); // overflow trip: poison + diagnostic
@@ -213,7 +218,7 @@ fn txn_rollback_restores_everything() {
       while inp.next().unwrap().is_some() {}
       assert!(inp.is_poisoned(), "the committed re-lex re-latches poison");
     }
-    let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     assert_eq!(
       total, 1,
       "the limit diagnostic is emitted exactly once in total"
@@ -225,8 +230,7 @@ fn txn_rollback_restores_everything() {
 fn txn_drop_without_commit_rolls_back() {
   // A guard dropped without deciding rolls back — uncommitted work is discarded.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   {
@@ -252,8 +256,7 @@ fn txn_nested_inner_commit_outer_rollback() {
   // A committed child's progress is discarded when its parent rolls back (savepoint
   // semantics: rolling back a parent discards everything its children committed).
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   let mut outer = inp.begin();
@@ -281,8 +284,7 @@ fn txn_nested_inner_rollback_outer_commit() {
   // The mirror image: the inner rolls back its own work, the outer commits and keeps
   // only its own progress.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut outer = inp.begin();
   let _ = outer.next().unwrap().expect("outer consumes 1");
@@ -314,14 +316,13 @@ fn txn_over_limit_trip_rollback_reemits_exactly_once() {
   use generic_arraydeque::typenum::U6;
 
   let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  let mut emitter = Verbose::<NumErr>::new();
-  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(5),
-    cache,
+    crate::input::InputContext::new(Verbose::<NumErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let mut txn = inp.begin();
     let _ = txn.peek::<U6>().unwrap(); // overflow trip: emits the limit diagnostic
@@ -335,7 +336,7 @@ fn txn_over_limit_trip_rollback_reemits_exactly_once() {
     assert!(inp.is_poisoned(), "the committed re-lex re-latches poison");
   }
 
-  let errs: Vec<&NumErr> = emitter.errors().values().flatten().collect();
+  let errs: Vec<&NumErr> = input.emitter().errors().values().flatten().collect();
   assert_eq!(
     errs.len(),
     1,
@@ -358,8 +359,7 @@ fn txn_passes_as_input_ref() {
   // `&mut Transaction` coerces to `&mut InputRef` via `DerefMut`, so every combinator
   // and helper written against `InputRef` composes with a guard unchanged.
   let mut input = silent_input("1 2 3");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut txn = inp.begin();
   let consumed = consume_all(&mut txn); // deref coercion into fn(&mut InputRef)
@@ -379,8 +379,7 @@ fn txn_commit_policy_drop_keeps_progress() {
   // A `Commit`-policy guard dropped without deciding keeps its progress — the opposite of
   // the `Rollback` default, and the whole point of the policy.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   {
@@ -405,8 +404,7 @@ fn txn_commit_policy_explicit_commit_keeps() {
   // `commit` is available whatever the policy: on a Commit-policy guard it keeps progress,
   // just as on the default flavour.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   let mut txn = inp.begin_with::<Commit>();
@@ -424,8 +422,7 @@ fn txn_commit_policy_explicit_rollback_restores() {
   // `rollback` is available whatever the policy: a Commit-policy guard can still be rolled
   // back explicitly, restoring the input to the begin point.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   let mut txn = inp.begin_with::<Commit>();
@@ -452,13 +449,12 @@ fn txn_commit_policy_keeps_progress_on_fatal_error() {
   // consumed up to the error rather than rolling back. A fail-fast `Fatal` emitter turns the
   // malformed `@` into a propagating error.
   let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  let mut emitter = Fatal::<NumErr>::new();
-  let mut input = Input::<NumLexer<'_>, NumFatalCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<NumLexer<'_>, NumFatalCtx<'_>, ()>::with_state_and_context(
     "1 @ 2",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Fatal::<NumErr>::new(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   // Drives a Commit-policy guard that propagates the first fail-fast error via `?`. When the
   // `@` lexer error fires, `next` commits the span up to it and returns `Err`; the `?` drops
@@ -503,8 +499,7 @@ fn txn_nested_cross_policy() {
   // (seen through the parent), but the parent's own drop then rolls everything back.
   {
     let mut input = silent_input("1 2 3 4");
-    let mut emitter = Silent::<NumErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let start = *inp.cursor().as_inner();
     {
       let mut parent = inp.begin_with::<Rollback>();
@@ -532,8 +527,7 @@ fn txn_nested_cross_policy() {
   // work; the parent's drop then keeps the parent's progress.
   {
     let mut input = silent_input("1 2 3 4");
-    let mut emitter = Silent::<NumErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let after_one;
     {
       let mut parent = inp.begin_with::<Commit>();
@@ -569,8 +563,7 @@ fn txn_commit_removes_id_from_live_stack() {
   // Committing drops a checkpoint that was never restored; its debug-witness id must be
   // forgotten so the live stack does not grow across commit-heavy loops.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let baseline = inp.live_checkpoints_len();
   for _ in 0..100 {
@@ -616,15 +609,14 @@ fn txn_drop_and_explicit_rollback_agree_after_state_surgery() {
 
   fn run(explicit: bool) -> Outcome {
     let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-    let mut emitter = Verbose::<NumErr>::new();
-    let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_context(
       "1 @ 3 4",
       TokenLimiter::with_limitation(2),
-      cache,
+      crate::input::InputContext::new(Verbose::<NumErr>::new(), cache),
     );
     let outcome;
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       // A speculative peek seals `@`'s lexer error above the cursor (lifting the dedup
       // watermark past it) and trips the limiter (latching the poison boundary), all
@@ -724,14 +716,13 @@ fn txn_commit_keeps_state_surgery() {
   // Commit keeps the progress and the re-keyed forward-scanning facts (fresh regime, dropped
   // boundary, reset watermark). Only rolling back across the surgery undoes it.
   let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  let mut emitter = Verbose::<NumErr>::new();
-  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(2),
-    cache,
+    crate::input::InputContext::new(Verbose::<NumErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Trip the limiter via `next`, latching the poison boundary.
     assert!(inp.next().unwrap().is_some(), "1");
@@ -777,14 +768,13 @@ fn txn_rollback_after_state_surgery_restores_poison_and_diagnostic() {
   // retained diagnostic — no duplicate, no diagnostic-less latch. At HEAD the explicit
   // rollback debug-panicked (the surgery cleared the lineage).
   let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  let mut emitter = Verbose::<NumErr>::new();
-  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(2),
-    cache,
+    crate::input::InputContext::new(Verbose::<NumErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     assert!(inp.next().unwrap().is_some(), "1");
     assert!(inp.next().unwrap().is_some(), "2");
@@ -857,8 +847,7 @@ fn txn_raw_restore_below_base_panics_at_the_restore() {
   // and, with further parsing before the drop, the rolling-back drop silently committed the
   // abandoned work.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save(); // raw checkpoint, below the guard's begin point
   let _ = inp.next().unwrap().expect("consume 1"); // advance past A before begin
@@ -878,8 +867,7 @@ fn txn_explicit_rollback_after_raw_restore_below_base_panics_at_restore() {
   // reached. At HEAD the raw restore succeeded and the later `rollback` panicked as stale
   // ("transaction base is stale"); post-fix the pinned restore panics first.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save();
   let _ = inp.next().unwrap().expect("consume 1");
@@ -901,8 +889,7 @@ fn txn_commit_policy_raw_restore_below_base_panics_at_restore() {
   // THE RESTORE too. At HEAD the restore succeeded and the Commit-policy drop was a harmless
   // no-op (it only forgets the already-absent id); post-fix the restore never lands.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save();
   let _ = inp.next().unwrap().expect("consume 1");
@@ -920,8 +907,7 @@ fn txn_lifo_clean_raw_pair_above_base_is_legal() {
   // LIFO-legal and must NOT trip the pin — the pinned base sits BELOW the raw checkpoint, so
   // restoring the raw one pops only itself, never the base. The guard commits normally after.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut txn = inp.begin(); // base pinned
   let _ = txn.next().unwrap().expect("consume 1"); // advance past the base
@@ -949,8 +935,7 @@ fn txn_nested_attempt_is_legal() {
   // closure's extent. A declining attempt rolls back to ITS OWN checkpoint (above the guard's
   // base), never below the base, so it never trips the guard's pin; the guard is usable after.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut txn = inp.begin();
   let _ = txn.next().unwrap().expect("consume 1");
@@ -985,8 +970,7 @@ fn commit_guard_dropped_mid_unwind_rolls_back() {
   // guard is undecided, so its `Drop` decides — and an unwind must not promote speculative
   // progress.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
     let mut txn = inp.begin_with::<Commit>();
@@ -1014,8 +998,7 @@ fn commit_guard_dropped_without_unwind_still_commits() {
   // The control that pins WHAT the gate reads: the unwind fact, not the drop itself. A
   // non-panicking undecided `Commit` drop keeps its progress exactly as before.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   {
     let mut txn = inp.begin_with::<Commit>();
@@ -1037,8 +1020,7 @@ fn commit_guard_dropped_without_unwind_still_commits() {
 fn rollback_guard_dropped_mid_unwind_still_rolls_back() {
   // p87_12b: the default `begin()` flavour is untouched by the flip.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
     let mut txn = inp.begin();
@@ -1090,8 +1072,7 @@ fn nest_and_commit<'inp>(inp: &mut InputRef<'inp, '_, NumLexer<'inp>, NumCtx<'in
 fn nested_drop_rollback_scans_linearly() {
   for depth in [100usize, 400, 1600] {
     let mut input = silent_input("1 2 3 4");
-    let mut emitter = Silent::<NumErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     crate::input::lineage::scan_probe::reset();
     nest_and_drop(&mut inp, depth);
@@ -1112,8 +1093,7 @@ fn nested_commit_scans_nothing() {
   // The contrast the audit measured at zero: `forget`/`unpin` already have their fast path, so
   // a committing settle inspects no live-lineage element through the two scanning primitives.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   crate::input::lineage::scan_probe::reset();
   nest_and_commit(&mut inp, 400);

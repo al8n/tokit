@@ -296,19 +296,25 @@ fn drive(
   script: &[CStep],
   cov: &mut Coverage,
 ) -> (Result<rowan::GreenNode, FinishError>, usize) {
-  let mut sink: Sink<'_> = crate::cst::Sink::new(src.as_bytes(), CountEmitter::new(), profile());
-  let cache = DefaultCache::<'_, ScriptLexer<'_>>::default();
+  let sink: Sink<'_> = crate::cst::Sink::new(src.as_bytes(), CountEmitter::new(), profile());
+  let context =
+    crate::input::InputContext::new(sink, DefaultCache::<'_, ScriptLexer<'_>>::default());
   let state = initial_state(src.as_bytes());
-  let mut input =
-    Input::<'_, ScriptLexer<'_>, Ctx<'_>, ()>::with_state_and_cache(src.as_bytes(), state, cache);
-  let mut ir = input.as_ref(&mut sink);
+  let mut input = Input::<'_, ScriptLexer<'_>, Ctx<'_>, ()>::with_state_and_context(
+    src.as_bytes(),
+    state,
+    context,
+  );
+  let mut ir = input.as_ref();
 
   let mut marks = Vec::new();
   let mut consumed = 0usize;
   exec(&mut ir, script, &mut marks, 0, &mut consumed, cov);
 
   drop(ir);
-  drop(input);
+  // The sink is OWNED by the input now, so the extraction point is the input's death:
+  // `Sink::finish` takes `self`, and the handle's borrow ends at the `drop` above.
+  let sink = input.into_emitter();
   assert_eq!(
     sink.rows_len(),
     0,

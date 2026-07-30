@@ -1384,6 +1384,47 @@ item that carries them, and listed here only so scanning this section does not m
 
 ### Fixed
 
+- **An `Input` is bound to exactly one emitter, at construction, for its whole life.** The input
+  stores two **suppression** watermarks whose meaning is relative to *one emitter's log* —
+  `emitted_error_end` (lexer-error dedup, shipped) and `front_reported_end` (close-miss
+  suppression, added this release) — while `Input::as_ref` took the emitter as a **parameter**,
+  so which log a watermark described was chosen per borrow. A watermark carried into a different
+  log claims a report that log never received, and because these watermarks suppress, the
+  consequence is a **silently dropped diagnostic**, not a duplicated one.
+
+  It was latent: no in-crate path paired one input with two emitters, and `Input` is
+  `pub(crate)` and unexported, so no external path existed. That is a property of in-crate
+  discipline, though, not of the type system — which is what this replaces. `Input` now owns an
+  `emitter: Ctx::Emitter`; `with_state_and_cache` becomes `with_state_and_context`, taking
+  exactly the `InputContext` that `ParseContext::provide` already returns; and `as_ref` loses its
+  emitter argument. The per-borrow choice is not merely unexercised, it is **unconstructable**.
+
+  Three consequences worth naming. The **source-identity handshake** moves into the constructor,
+  which is where the pair now forms — so it runs once per input rather than once per handle, and
+  covers every borrow by construction. `impl Clone for Input` is **deleted**: a clone would have
+  had to duplicate an emission log, which is not a thing a log can be. And the `{emitter mark,
+  emitted_error_end, front_reported_end, poison_boundary}` group that `Checkpoint` has always
+  saved and restored as a unit is now a unit in the *live* structure too — before, two of the
+  four were facts about a log the input did not hold.
+
+  **The `as_ref` call-site census from #127 is deleted in the same change**, and the reason is
+  the point: that rail guarded the claim *"no in-crate path pairs one `Input` with two different
+  emitters"* during the window when the claim needed guarding. There is no longer an emitter
+  argument for a new call site to mispair, so the claim is unconstructable rather than merely
+  unviolated, and the rail has nothing left that could fail. A rail whose property becomes
+  structural dies with the property rather than lingering as a check that can no longer check —
+  the *check that stops being a check* class this campaign catalogued. Its replacement is the
+  type system. One cell arrives in its place, `dedup_watermark_survives_a_reborrow_of_one_input`,
+  which pins the only shape still *writable*: a watermark raised in one handle still suppresses
+  the next handle's re-lex of the same region. That cell is also what forecloses the cheaper
+  remedy the issue weighed — clearing every log-dependent watermark on borrow — from being
+  reintroduced later as a tidy-up, since under it the cell reports twice.
+
+  No public item changes signature: `Input` is `pub(crate)`, and `InputRef` — which *is*
+  re-exported, from both the crate root and the prelude — is untouched, as are `Session`,
+  `Checkpoint`, the scan paths, transactions and session points.
+  — *(R11, #128)*
+
 - **The documentation builds at every feature point.** `cargo doc --no-default-features` had
   never been run: it exited 101 with `error: could not document tokora` and **39 unresolved
   intra-doc links** across 15 files. The crate denies `rustdoc::broken_intra_doc_links` via
@@ -1789,9 +1830,10 @@ exists.
 **Witness 1 — a sink bound to a foreign source — CLOSED where an inequality is proof.**
 `Emitter::bound_source` (defaulted, `None`) lets an emitter declare the source it binds, and the
 point at which an emitter is attached to an input compares that against the source the parse
-reads. A `Sink` built over `"XY"` and driven over a same-length `"ab"` now **panics at the parse
-entry** instead of materializing a tree whose text is `"XY"` and whose structure came from
-`"ab"`. Equal length was always the point: no length check caught it, and `finish` never could,
+reads. Since #128 that point is the input's **constructor** — where the two are bound for the
+input's whole life — so the comparison happens once per input and covers every borrow. A `Sink`
+built over `"XY"` and driven over a same-length `"ab"` now **panics at the parse entry** instead
+of materializing a tree whose text is `"XY"` and whose structure came from `"ab"`. Equal length was always the point: no length check caught it, and `finish` never could,
 because the event log a wrongly-paired sink produces is byte-identical to one a legal single
 parse could produce. The cell that pinned the wrong answer is now
 `sink_bound_to_a_foreign_source_is_refused` and asserts the panic.

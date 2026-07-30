@@ -53,9 +53,13 @@ fn parse_with<'inp, F, O>(src: &'inp str, mut f: F) -> Result<O, ()>
 where
   F: for<'c> FnMut(&mut crate::input::InputRef<'inp, 'c, TestLexer<'inp>, (), ()>) -> Result<O, ()>,
 {
-  let (mut emitter, cache) = <() as ParseContext<'_, TestLexer<'_>>>::provide(()).into_components();
-  let mut input = Input::<TestLexer<'inp>, (), ()>::with_state_and_cache(src, (), cache);
-  let mut inp_ref = input.as_ref(&mut emitter);
+  let (emitter, cache) = <() as ParseContext<'_, TestLexer<'_>>>::provide(()).into_components();
+  let mut input = Input::<TestLexer<'inp>, (), ()>::with_state_and_context(
+    src,
+    (),
+    crate::input::InputContext::new(emitter, cache),
+  );
+  let mut inp_ref = input.as_ref();
   f(&mut inp_ref)
 }
 
@@ -387,19 +391,18 @@ where
     &mut crate::input::InputRef<'inp, '_, TestLexer<'inp>, CountingCtx<'inp>, ()>,
   ) -> Result<(), NeverFatal>,
 {
-  let mut emitter = CountingEmitter::default();
   let cache = crate::cache::DefaultCache::<'inp, TestLexer<'inp>>::default();
   let mut input =
-    crate::input::Input::<TestLexer<'inp>, CountingCtx<'inp>, ()>::with_state_and_cache(
+    crate::input::Input::<TestLexer<'inp>, CountingCtx<'inp>, ()>::with_state_and_context(
       src,
       (),
-      cache,
+      crate::input::InputContext::new(CountingEmitter::default(), cache),
     );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let _ = f(&mut inp);
   }
-  emitter.lexer_errors
+  input.emitter().lexer_errors
 }
 
 fn drain<'inp>(
@@ -581,13 +584,12 @@ fn fatal_overflow_peek_drops_staged_tokens_no_leak() {
   let baseline = STAGED_DROPS.load(Ordering::SeqCst);
 
   let cache = crate::cache::DefaultCache::<'_, DropLexer<'_>>::default();
-  let mut emitter = FatalOnLexError;
-  let mut input = crate::input::Input::<DropLexer<'_>, DropCtx<'_>, ()>::with_state_and_cache(
+  let mut input = crate::input::Input::<DropLexer<'_>, DropCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 @",
     (),
-    cache,
+    crate::input::InputContext::new(FatalOnLexError, cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let result = inp.peek::<U6>().map(|_| ());
   assert_eq!(result, Err(Boom), "the fatal lexer error must propagate");
@@ -753,13 +755,12 @@ where
   let live = || LIMIT_CREATES.load(Ordering::SeqCst) - LIMIT_DROPS.load(Ordering::SeqCst);
 
   let cache = crate::cache::DefaultCache::<'_, TripLexer<'_>>::default();
-  let mut emitter = crate::emitter::Silent::<TripErr>::new();
-  let mut input = crate::input::Input::<TripLexer<'_>, TripCtx<'_>, ()>::with_state_and_cache(
+  let mut input = crate::input::Input::<TripLexer<'_>, TripCtx<'_>, ()>::with_state_and_context(
     src,
     TripLimiter::with_limit(limit),
-    cache,
+    crate::input::InputContext::new(crate::emitter::Silent::<TripErr>::new(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let alive_before = live();
   {
@@ -824,13 +825,12 @@ fn peek_with_emitter_terminal_flags_a_trip_but_not_eof() {
 
   let peek3 = |src: &'static str, limit: usize| {
     let cache = crate::cache::DefaultCache::<'_, TripLexer<'_>>::default();
-    let mut emitter = crate::emitter::Silent::<TripErr>::new();
-    let mut input = crate::input::Input::<TripLexer<'_>, TripCtx<'_>, ()>::with_state_and_cache(
+    let mut input = crate::input::Input::<TripLexer<'_>, TripCtx<'_>, ()>::with_state_and_context(
       src,
       TripLimiter::with_limit(limit),
-      cache,
+      crate::input::InputContext::new(crate::emitter::Silent::<TripErr>::new(), cache),
     );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let (peeked, terminal, _e) = inp.peek_with_emitter_terminal::<U3>().unwrap();
     (peeked.len(), terminal)
   };

@@ -464,10 +464,16 @@ fn regrown_branch_cannot_inherit_a_dead_wrap() {
 #[test]
 fn release_keeps_the_mark_stack_at_live_captures() {
   type Ctx<'inp> = (VerboseSink<'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
-  let mut sink = verbose_sink("abcdef");
-  let mut input = Input::<'_, MiniLexer<'_>, Ctx<'_>, ()>::new("abcdef");
+  let mut input = Input::<'_, MiniLexer<'_>, Ctx<'_>, ()>::with_state_and_context(
+    "abcdef",
+    (),
+    crate::input::InputContext::new(
+      verbose_sink("abcdef"),
+      DefaultCache::<'_, MiniLexer<'_>>::default(),
+    ),
+  );
   {
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
 
     // T3's alias shape first: a declined attempt and a committed attempt capture at the
     // SAME buffer length (the u64s alias); the stack must spend each capture at its
@@ -486,7 +492,7 @@ fn release_keeps_the_mark_stack_at_live_captures() {
     }
   }
   assert_eq!(
-    sink.rows_len(),
+    input.emitter().rows_len(),
     0,
     "kept captures must be released (T3: a stranded row is a stale alias for the next \
      same-length capture)"
@@ -502,18 +508,24 @@ fn release_keeps_the_mark_stack_at_live_captures() {
 #[test]
 fn abandoned_session_points_release_their_emitter_marks() {
   type Ctx<'inp> = (VerboseSink<'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
-  let mut sink = verbose_sink("abcdef");
-  let mut input = Input::<'_, MiniLexer<'_>, Ctx<'_>, ()>::new("abcdef");
+  let mut input = Input::<'_, MiniLexer<'_>, Ctx<'_>, ()>::with_state_and_context(
+    "abcdef",
+    (),
+    crate::input::InputContext::new(
+      verbose_sink("abcdef"),
+      DefaultCache::<'_, MiniLexer<'_>>::default(),
+    ),
+  );
 
   for cycle in 0..3 {
     {
-      let mut inp = input.as_ref(&mut sink);
+      let mut inp = input.as_ref();
       let _point = inp.begin_point();
       let _ = inp.next().expect("verbose collects").expect("a token");
       // …and the handle dies here with the point still open.
     }
     assert_eq!(
-      sink.rows_len(),
+      input.emitter().rows_len(),
       0,
       "cycle {cycle}: an abandoned session point must release its emitter mark row, \
        exactly as it releases its pin and lineage entry"
@@ -523,7 +535,8 @@ fn abandoned_session_points_release_their_emitter_marks() {
   // No rollback rode along with the release: every token consumed through the abandoned
   // points is still on the event buffer.
   assert_eq!(
-    sink
+    input
+      .emitter()
       .events()
       .iter()
       .filter(|ev| matches!(ev, Event::Token { .. }))
@@ -2054,13 +2067,15 @@ type SinkCtx<'inp> = (VerboseSink<'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
 fn auto_emission_settles_flow_peeks_and_declines_do_not() {
   use generic_arraydeque::typenum::U2;
 
-  let mut sink = verbose_sink("abc");
-  let mut input = Input::<MiniLexer<'_>, SinkCtx<'_>>::with_state_and_cache(
+  let mut input = Input::<MiniLexer<'_>, SinkCtx<'_>>::with_state_and_context(
     "abc",
     (),
-    DefaultCache::<MiniLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      verbose_sink("abc"),
+      DefaultCache::<MiniLexer<'_>>::default(),
+    ),
   );
-  let mut inp = input.as_ref(&mut sink);
+  let mut inp = input.as_ref();
 
   // A peek lexes ahead but settles nothing.
   inp.peek::<U2>().expect("verbose collects");
@@ -2094,11 +2109,10 @@ fn auto_emission_settles_flow_peeks_and_declines_do_not() {
   );
 
   drop(inp);
-  drop(input);
   // The parse consumed a prefix and stopped: `c` is unconsumed. That incompleteness is the
   // tooling door's remit (`finish_partial` tiles the tail); strict `finish` would refuse the
   // unexplained trailing gap.
-  let (green, _emitter) = sink.finish_partial(K_ROOT);
+  let (green, _emitter) = input.into_emitter().finish_partial(K_ROOT);
   let green = green.expect("token-only timeline, partial parse");
   assert_eq!(text(green), "abc", "committed tokens + the gap-tiled tail");
 }
@@ -2107,13 +2121,13 @@ fn auto_emission_settles_flow_peeks_and_declines_do_not() {
 /// scan examined but did not consume waits for its real consume.
 #[test]
 fn auto_emission_scan_skips_flow_and_the_stopper_waits() {
-  let mut sink = verbose_sink("xy;z");
-  let mut input = Input::<MiniLexer<'_>, SinkCtx<'_>>::with_state_and_cache(
+  let sink = verbose_sink("xy;z");
+  let mut input = Input::<MiniLexer<'_>, SinkCtx<'_>>::with_state_and_context(
     "xy;z",
     (),
-    DefaultCache::<MiniLexer<'_>>::default(),
+    crate::input::InputContext::new(sink, DefaultCache::<MiniLexer<'_>>::default()),
   );
-  let mut inp = input.as_ref(&mut sink);
+  let mut inp = input.as_ref();
 
   // sync_to skips `x` and `y` (reported + settled behind the frontier) and stops BEFORE
   // `;`, leaving it unconsumed at the cache front.
@@ -2140,21 +2154,18 @@ fn auto_emission_scan_skips_flow_and_the_stopper_waits() {
 /// A rejected lexer error (`settle_fatal`) writes a position, not a token: no event.
 #[test]
 fn auto_emission_settle_fatal_emits_no_token_event() {
-  let mut sink: FatalSink<'_> = Sink::new("!a", Fatal::new(), profile());
   let mut input =
-    Input::<MiniLexer<'_>, (FatalSink<'_>, DefaultCache<'_, MiniLexer<'_>>)>::with_state_and_cache(
+    Input::<MiniLexer<'_>, (FatalSink<'_>, DefaultCache<'_, MiniLexer<'_>>)>::with_state_and_context(
       "!a",
-      (),
-      DefaultCache::<MiniLexer<'_>>::default(),
-    );
-  let mut inp = input.as_ref(&mut sink);
+      (),crate::input::InputContext::new(Sink::new("!a", Fatal::new(), profile()),
+      DefaultCache::<MiniLexer<'_>>::default()));
+  let mut inp = input.as_ref();
 
   let res = inp.next();
   assert!(res.is_err(), "the fatal emitter rejects the lexer error");
 
   drop(inp);
-  drop(input);
-  let events = sink.events();
+  let events = input.emitter().events();
   assert!(
     events.iter().all(|ev| !matches!(ev, Event::Token { .. })),
     "a rejected error item settles a position, never a token event: {events:?}"
@@ -2165,13 +2176,12 @@ fn auto_emission_settle_fatal_emits_no_token_event() {
 /// input commits nothing.
 #[test]
 fn auto_emission_lexer_error_and_eof_emit_no_token_event() {
-  let mut sink = verbose_sink("!a");
-  let mut input = Input::<MiniLexer<'_>, SinkCtx<'_>>::with_state_and_cache(
+  let mut input = Input::<MiniLexer<'_>, SinkCtx<'_>>::with_state_and_context(
     "!a",
     (),
-    DefaultCache::<MiniLexer<'_>>::default(),
+    crate::input::InputContext::new(verbose_sink("!a"), DefaultCache::<MiniLexer<'_>>::default()),
   );
-  let mut inp = input.as_ref(&mut sink);
+  let mut inp = input.as_ref();
 
   // next() crosses the error (reported through the Diag channel) and yields `a`.
   let tok = inp.next().expect("verbose collects").expect("a token");
@@ -2183,8 +2193,7 @@ fn auto_emission_lexer_error_and_eof_emit_no_token_event() {
   assert_eq!(token_spans(inp.emitter()), &[span(1, 2)]);
 
   drop(inp);
-  drop(input);
-  let (green, _emitter) = sink.finish(K_ROOT);
+  let (green, _emitter) = input.into_emitter().finish(K_ROOT);
   assert_eq!(
     text(green.expect("gap tiling covers the error byte")),
     "!a",
@@ -2276,13 +2285,13 @@ fn counting_parens(kind: &u8) -> Balance<u8> {
 /// it tracks the sink's own token-event count exactly, recovery-skipped tokens included.
 #[test]
 fn commit_token_forwards_to_the_inner_emitter_recovery_skips_included() {
-  let mut sink: CountingSink<'_> = Sink::new("a(b)c;d", CountingEmitter::default(), profile());
-  let mut input = Input::<MiniLexer<'_>, CountingCtx<'_>>::with_state_and_cache(
+  let sink: CountingSink<'_> = Sink::new("a(b)c;d", CountingEmitter::default(), profile());
+  let mut input = Input::<MiniLexer<'_>, CountingCtx<'_>>::with_state_and_context(
     "a(b)c;d",
     (),
-    DefaultCache::<MiniLexer<'_>>::default(),
+    crate::input::InputContext::new(sink, DefaultCache::<MiniLexer<'_>>::default()),
   );
-  let mut inp = input.as_ref(&mut sink);
+  let mut inp = input.as_ref();
 
   // A plain consume: `a`.
   inp.next().expect("collects").expect("a token");
@@ -2305,9 +2314,9 @@ fn commit_token_forwards_to_the_inner_emitter_recovery_skips_included() {
   inp.next().expect("collects").expect("the trailing `d`");
 
   drop(inp);
-  drop(input);
 
-  let recorded = sink
+  let recorded = input
+    .emitter()
     .events()
     .iter()
     .filter(|ev| matches!(ev, Event::Token { .. }))
@@ -2317,7 +2326,7 @@ fn commit_token_forwards_to_the_inner_emitter_recovery_skips_included() {
     "a, (, b, ), c, ;, d: seven committed tokens on the sink's own event stream"
   );
   assert_eq!(
-    sink.inner_ref().committed,
+    input.emitter().inner_ref().committed,
     recorded,
     "Sink::commit_token must forward to the wrapped emitter: the inner's count must \
      match the sink's own token-event count exactly, recovery-skipped tokens included"
@@ -2418,13 +2427,15 @@ type JournalingCtx<'inp> = (JournalingSink<'inp>, DefaultCache<'inp, MiniLexer<'
 /// checkpoint captured the inner's own reading and the rewind restores it exactly.
 #[test]
 fn decline_rewinds_inner_to_checkpoint_reading_no_diag() {
-  let mut sink: JournalingSink<'_> = Sink::new("abc", JournalingEmitter::default(), profile());
-  let mut input = Input::<MiniLexer<'_>, JournalingCtx<'_>>::with_state_and_cache(
+  let mut input = Input::<MiniLexer<'_>, JournalingCtx<'_>>::with_state_and_context(
     "abc",
     (),
-    DefaultCache::<MiniLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      Sink::new("abc", JournalingEmitter::default(), profile()),
+      DefaultCache::<MiniLexer<'_>>::default(),
+    ),
   );
-  let mut inp = input.as_ref(&mut sink);
+  let mut inp = input.as_ref();
 
   // Two plain consumes BEFORE the speculative region: both settle through `commit_token`.
   inp.next().expect("collects").expect("a token");
@@ -2441,21 +2452,21 @@ fn decline_rewinds_inner_to_checkpoint_reading_no_diag() {
   );
 
   drop(inp);
-  drop(input);
 
-  let recorded = sink
+  let recorded = input
+    .emitter()
     .events()
     .iter()
     .filter(|ev| matches!(ev, Event::Token { .. }))
     .count();
   assert_eq!(recorded, 2, "a, b survive on the sink's own event stream");
   assert_eq!(
-    sink.inner_ref().journal,
+    input.emitter().inner_ref().journal,
     std::vec![JEntry::Token, JEntry::Token],
     "the inner must be rewound to its checkpoint reading (a, b survive), not past them"
   );
   assert_eq!(
-    sink.inner_ref().journal.len(),
+    input.emitter().inner_ref().journal.len(),
     recorded,
     "the inner's surviving forwards must agree with the sink's own token-event count"
   );
@@ -2471,13 +2482,15 @@ fn decline_rewinds_inner_to_checkpoint_reading_no_diag() {
 /// the checkpoint captured the inner's reading, so `b` survives: `[Token, Diag, Token]`.
 #[test]
 fn decline_rewinds_inner_to_checkpoint_reading_across_diag() {
-  let mut sink: JournalingSink<'_> = Sink::new("a!bc", JournalingEmitter::default(), profile());
-  let mut input = Input::<MiniLexer<'_>, JournalingCtx<'_>>::with_state_and_cache(
+  let mut input = Input::<MiniLexer<'_>, JournalingCtx<'_>>::with_state_and_context(
     "a!bc",
     (),
-    DefaultCache::<MiniLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      Sink::new("a!bc", JournalingEmitter::default(), profile()),
+      DefaultCache::<MiniLexer<'_>>::default(),
+    ),
   );
-  let mut inp = input.as_ref(&mut sink);
+  let mut inp = input.as_ref();
 
   // `a`, then a consume that crosses the `!` lexer error (a forwarded Diag) and yields `b`.
   inp.next().expect("collects").expect("a token");
@@ -2496,10 +2509,9 @@ fn decline_rewinds_inner_to_checkpoint_reading_across_diag() {
   );
 
   drop(inp);
-  drop(input);
 
   assert_eq!(
-    sink.inner_ref().journal,
+    input.emitter().inner_ref().journal,
     std::vec![JEntry::Token, JEntry::Diag, JEntry::Token],
     "the inner must be rewound to its checkpoint reading: a, the crossed diag, and b all \
      survive — the diag-slot derivation dropped the b forwarded after the diagnostic"
@@ -2697,10 +2709,16 @@ fn close_open_nodes(sink: &mut VerboseSink<'_>, depth: usize) {
 /// before the single restore.
 #[test]
 fn stacked_rollback_to_settles_every_aliased_savepoint_row() {
-  let mut sink = sink_with_open_nodes("abcdef", 1);
-  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::with_state_and_context(
+    "abcdef",
+    (),
+    crate::input::InputContext::new(
+      sink_with_open_nodes("abcdef", 1),
+      DefaultCache::<'_, MiniLexer<'_>>::default(),
+    ),
+  );
   {
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
     let mut txn = inp.begin_stacked();
     let sp1 = txn.savepoint();
     let _sp2 = txn.savepoint();
@@ -2710,7 +2728,7 @@ fn stacked_rollback_to_settles_every_aliased_savepoint_row() {
     close_open_nodes(inp.emitter(), 1);
   }
   assert_eq!(
-    sink.rows_len(),
+    input.emitter().rows_len(),
     0,
     "`rollback_to` + `commit` must leave no live row: the younger savepoints' captures \
      alias the target's mark, and a single restore cannot name them"
@@ -2721,10 +2739,16 @@ fn stacked_rollback_to_settles_every_aliased_savepoint_row() {
 /// have to be settled first.
 #[test]
 fn stacked_whole_rollback_settles_every_aliased_savepoint_row() {
-  let mut sink = sink_with_open_nodes("abcdef", 1);
-  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::with_state_and_context(
+    "abcdef",
+    (),
+    crate::input::InputContext::new(
+      sink_with_open_nodes("abcdef", 1),
+      DefaultCache::<'_, MiniLexer<'_>>::default(),
+    ),
+  );
   {
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
     let mut txn = inp.begin_stacked();
     let _sp1 = txn.savepoint();
     let _sp2 = txn.savepoint();
@@ -2732,7 +2756,7 @@ fn stacked_whole_rollback_settles_every_aliased_savepoint_row() {
     close_open_nodes(inp.emitter(), 1);
   }
   assert_eq!(
-    sink.rows_len(),
+    input.emitter().rows_len(),
     0,
     "a whole `rollback` must settle every savepoint capture before restoring the base"
   );
@@ -2743,10 +2767,16 @@ fn stacked_whole_rollback_settles_every_aliased_savepoint_row() {
 /// checkpoints at the moment their marks die, so it is the only place they can be settled.
 #[test]
 fn stacked_rollback_on_drop_settles_every_aliased_savepoint_row() {
-  let mut sink = sink_with_open_nodes("abcdef", 1);
-  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::with_state_and_context(
+    "abcdef",
+    (),
+    crate::input::InputContext::new(
+      sink_with_open_nodes("abcdef", 1),
+      DefaultCache::<'_, MiniLexer<'_>>::default(),
+    ),
+  );
   {
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
     {
       let mut txn = inp.begin_stacked();
       let _sp1 = txn.savepoint();
@@ -2756,7 +2786,7 @@ fn stacked_rollback_on_drop_settles_every_aliased_savepoint_row() {
     close_open_nodes(inp.emitter(), 1);
   }
   assert_eq!(
-    sink.rows_len(),
+    input.emitter().rows_len(),
     0,
     "an undecided rolling-back drop must settle every savepoint capture, exactly as the \
      commit-policy arm does"
@@ -2769,10 +2799,16 @@ fn stacked_rollback_on_drop_settles_every_aliased_savepoint_row() {
 #[test]
 fn stacked_savepoint_rows_settle_at_every_open_node_depth() {
   for depth in 1..=3usize {
-    let mut sink = sink_with_open_nodes("abcdef", depth);
-    let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+    let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::with_state_and_context(
+      "abcdef",
+      (),
+      crate::input::InputContext::new(
+        sink_with_open_nodes("abcdef", depth),
+        DefaultCache::<'_, MiniLexer<'_>>::default(),
+      ),
+    );
     {
-      let mut inp = input.as_ref(&mut sink);
+      let mut inp = input.as_ref();
       {
         let mut txn = inp.begin_stacked();
         let _sp1 = txn.savepoint();
@@ -2782,7 +2818,7 @@ fn stacked_savepoint_rows_settle_at_every_open_node_depth() {
       close_open_nodes(inp.emitter(), depth);
     }
     assert_eq!(
-      sink.rows_len(),
+      input.emitter().rows_len(),
       0,
       "depth {depth}: every aliased capture must be settled whatever the frozen depth"
     );
@@ -2794,10 +2830,16 @@ fn stacked_savepoint_rows_settle_at_every_open_node_depth() {
 /// and the guard's drop is still the only holder of the checkpoints that carry them.
 #[test]
 fn stacked_raw_restore_below_savepoints_still_settles_their_rows() {
-  let mut sink = sink_with_open_nodes("abcdef", 1);
-  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::with_state_and_context(
+    "abcdef",
+    (),
+    crate::input::InputContext::new(
+      sink_with_open_nodes("abcdef", 1),
+      DefaultCache::<'_, MiniLexer<'_>>::default(),
+    ),
+  );
   {
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
     {
       let mut txn = inp.begin_stacked();
       let raw = txn.save();
@@ -2809,7 +2851,7 @@ fn stacked_raw_restore_below_savepoints_still_settles_their_rows() {
     close_open_nodes(inp.emitter(), 1);
   }
   assert_eq!(
-    sink.rows_len(),
+    input.emitter().rows_len(),
     0,
     "a lineage-invalidated savepoint still owns an emitter capture: the drop must settle it"
   );
@@ -2819,10 +2861,16 @@ fn stacked_raw_restore_below_savepoints_still_settles_their_rows() {
 /// exact over aliased marks. They are the shape the abandon paths must match.
 #[test]
 fn stacked_release_and_commit_settle_every_aliased_row() {
-  let mut sink = sink_with_open_nodes("abcdef", 1);
-  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::with_state_and_context(
+    "abcdef",
+    (),
+    crate::input::InputContext::new(
+      sink_with_open_nodes("abcdef", 1),
+      DefaultCache::<'_, MiniLexer<'_>>::default(),
+    ),
+  );
   {
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
     let mut txn = inp.begin_stacked();
     let sp1 = txn.savepoint();
     let _sp2 = txn.savepoint();
@@ -2832,7 +2880,7 @@ fn stacked_release_and_commit_settle_every_aliased_row() {
     close_open_nodes(inp.emitter(), 1);
   }
   assert_eq!(
-    sink.rows_len(),
+    input.emitter().rows_len(),
     0,
     "the settle-each funnel is exact over aliased marks"
   );
@@ -2844,10 +2892,16 @@ fn stacked_release_and_commit_settle_every_aliased_row() {
 /// rewind's reconciliation — before the base's rewind sweeps what is left.
 #[test]
 fn interleaved_session_point_and_savepoints_all_settle_on_drop() {
-  let mut sink = sink_with_open_nodes("abcdef", 1);
-  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::new("abcdef");
+  let mut input = Input::<'_, MiniLexer<'_>, StackedCtx<'_>, ()>::with_state_and_context(
+    "abcdef",
+    (),
+    crate::input::InputContext::new(
+      sink_with_open_nodes("abcdef", 1),
+      DefaultCache::<'_, MiniLexer<'_>>::default(),
+    ),
+  );
   {
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
     {
       let mut txn = inp.begin_stacked();
       let _sp1 = txn.savepoint();
@@ -2859,7 +2913,7 @@ fn interleaved_session_point_and_savepoints_all_settle_on_drop() {
     close_open_nodes(inp.emitter(), 1);
   }
   assert_eq!(
-    sink.rows_len(),
+    input.emitter().rows_len(),
     0,
     "both settle families ran: no savepoint capture and no session-point capture is left"
   );
@@ -2881,10 +2935,16 @@ fn a_borrowed_value_keyed_inner_composes_like_an_owned_one() {
 
   let mut verbose = Verbose::<TestErr>::new();
   {
-    let mut sink: BorrowedSink<'_, '_> = Sink::new("abcdef", &mut verbose, profile());
-    let mut input = Input::<'_, MiniLexer<'_>, BorrowedCtx<'_, '_>, ()>::new("abcdef");
+    let mut input = Input::<'_, MiniLexer<'_>, BorrowedCtx<'_, '_>, ()>::with_state_and_context(
+      "abcdef",
+      (),
+      crate::input::InputContext::new(
+        Sink::new("abcdef", &mut verbose, profile()),
+        DefaultCache::<'_, MiniLexer<'_>>::default(),
+      ),
+    );
     {
-      let mut inp = input.as_ref(&mut sink);
+      let mut inp = input.as_ref();
       // A committed attempt and a declined one, both capturing at the same buffer length.
       let committed: Option<()> = inp.attempt(|inp| inp.next().ok().flatten().map(|_| ()));
       assert!(committed.is_some());
@@ -2895,7 +2955,7 @@ fn a_borrowed_value_keyed_inner_composes_like_an_owned_one() {
       assert!(declined.is_none());
     }
     assert_eq!(
-      sink.rows_len(),
+      input.emitter().rows_len(),
       0,
       "every capture settled through the borrowed inner exactly as through an owned one"
     );
@@ -3882,9 +3942,13 @@ fn sink_and_parse_over_one_buffer_agree_on_identity() {
 
   let mut sink: SesSink<'_> = Sink::new(src, Verbose::new(), profile());
   {
-    let mut borrowed = &mut sink;
-    let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new(src);
-    let mut inp = input.as_ref(&mut borrowed);
+    let mut input =
+      crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::with_state_and_context(
+        src,
+        (),
+        crate::input::InputContext::new(&mut sink, DefaultCache::<'_, MiniLexer<'_>>::default()),
+      );
+    let mut inp = input.as_ref();
     while let Ok(Some(_)) = inp.next() {}
   }
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -3916,9 +3980,12 @@ fn sink_and_parse_over_one_buffer_agree_on_identity() {
 #[should_panic(expected = "bound to a different source value")]
 fn sink_bound_to_a_foreign_source_is_refused() {
   let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
-  let mut borrowed = &mut sink;
-  let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new("ab");
-  let mut inp = input.as_ref(&mut borrowed);
+  let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::with_state_and_context(
+    "ab",
+    (),
+    crate::input::InputContext::new(&mut sink, DefaultCache::<'_, MiniLexer<'_>>::default()),
+  );
+  let mut inp = input.as_ref();
   while let Ok(Some(_)) = inp.next() {}
 }
 
@@ -3941,9 +4008,13 @@ fn a_second_reference_to_one_buffer_is_not_refused() {
 
   let mut sink: SesSink<'_> = Sink::new(sink_view, Verbose::new(), profile());
   {
-    let mut borrowed = &mut sink;
-    let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new(parse_view);
-    let mut inp = input.as_ref(&mut borrowed);
+    let mut input =
+      crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::with_state_and_context(
+        parse_view,
+        (),
+        crate::input::InputContext::new(&mut sink, DefaultCache::<'_, MiniLexer<'_>>::default()),
+      );
+    let mut inp = input.as_ref();
     while let Ok(Some(_)) = inp.next() {}
   }
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -4058,10 +4129,13 @@ fn sink_bound_to_a_prefix_of_the_parsed_source_is_refused() {
   );
 
   let mut sink: SesSink<'_> = Sink::new(sink_src, Verbose::new(), profile());
-  let mut borrowed = &mut sink;
-  let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new(parse_src);
+  let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::with_state_and_context(
+    parse_src,
+    (),
+    crate::input::InputContext::new(&mut sink, DefaultCache::<'_, MiniLexer<'_>>::default()),
+  );
   // The seam. Everything below is what accepting this pairing costs.
-  let mut inp = input.as_ref(&mut borrowed);
+  let mut inp = input.as_ref();
 
   // Consume exactly the two bytes the sink's buffer holds. Both commit, both are in bounds,
   // and together they cover `0..2` completely — so neither `SpanOutOfBounds` nor
@@ -4111,10 +4185,14 @@ fn sink_bound_to_a_longer_extent_than_the_parse_is_accepted_at_the_seam() {
 
   let mut sink: SesSink<'_> = Sink::new(sink_src, Verbose::new(), profile());
   {
-    let mut borrowed = &mut sink;
-    let mut input = crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::new(parse_src);
+    let mut input =
+      crate::input::Input::<MiniLexer<'_>, SesCtx<'_, '_>, ()>::with_state_and_context(
+        parse_src,
+        (),
+        crate::input::InputContext::new(&mut sink, DefaultCache::<'_, MiniLexer<'_>>::default()),
+      );
     // The seam accepts: a longer-bound sink is a capability, not a leak.
-    let mut inp = input.as_ref(&mut borrowed);
+    let mut inp = input.as_ref();
     while let Ok(Some(_)) = inp.next() {}
   }
 
@@ -4286,9 +4364,16 @@ fn conformance_emitter_kit_refuses_a_non_forwarding_wrapper() {
 fn a_non_forwarding_wrapper_is_not_caught() {
   let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
   {
-    let mut wrapper = NonForwardingWrapper(&mut sink);
-    let mut input = crate::input::Input::<MiniLexer<'_>, NonFwdCtx<'_, '_>, ()>::new("ab");
-    let mut inp = input.as_ref(&mut wrapper);
+    let mut input =
+      crate::input::Input::<MiniLexer<'_>, NonFwdCtx<'_, '_>, ()>::with_state_and_context(
+        "ab",
+        (),
+        crate::input::InputContext::new(
+          NonForwardingWrapper(&mut sink),
+          DefaultCache::<'_, MiniLexer<'_>>::default(),
+        ),
+      );
+    let mut inp = input.as_ref();
     while let Ok(Some(_)) = inp.next() {}
   }
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -4317,10 +4402,17 @@ fn a_non_forwarding_wrapper_is_not_caught() {
 fn an_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_caught() {
   let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
   {
-    let mut wrapper = NonForwardingWrapper(&mut sink);
     // Every byte of "!!" lexes as an error, so not one token is committed.
-    let mut input = crate::input::Input::<MiniLexer<'_>, NonFwdCtx<'_, '_>, ()>::new("!!");
-    let mut inp = input.as_ref(&mut wrapper);
+    let mut input =
+      crate::input::Input::<MiniLexer<'_>, NonFwdCtx<'_, '_>, ()>::with_state_and_context(
+        "!!",
+        (),
+        crate::input::InputContext::new(
+          NonForwardingWrapper(&mut sink),
+          DefaultCache::<'_, MiniLexer<'_>>::default(),
+        ),
+      );
+    let mut inp = input.as_ref();
     while let Ok(Some(_)) = inp.next() {}
   }
   let (green, _emitter) = sink.finish(K_ROOT);

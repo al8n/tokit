@@ -333,16 +333,19 @@ where
   L: Lexer<'inp>,
   L::State: Clone,
 {
-  let cache = DefaultCache::<'inp, L>::default();
-  let mut emitter = Silent::<PartialProbe>::new();
+  let context = crate::input::InputContext::new(
+    Silent::<PartialProbe>::new(),
+    DefaultCache::<'inp, L>::default(),
+  );
   let state = L::new(src).into_state();
-  let mut input =
-    Input::<'inp, L, PartialConfCtx<'inp, L>, (), Partial>::with_state_and_cache(src, state, cache);
+  let mut input = Input::<'inp, L, PartialConfCtx<'inp, L>, (), Partial>::with_state_and_context(
+    src, state, context,
+  );
   // The driver states the world fact before any handle exists — the only place it can.
   if is_final {
     input.seal();
   }
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
   let mut out = Vec::new();
   loop {
     if out.len() > budget {
@@ -372,13 +375,15 @@ where
   L: Lexer<'inp>,
   L::State: Clone,
 {
-  let cache = DefaultCache::<'inp, L>::default();
-  let mut emitter = Silent::<PartialProbe>::new();
-  let state = L::new(src).into_state();
-  let mut input = Input::<'inp, L, PartialConfCtx<'inp, L>, (), Complete>::with_state_and_cache(
-    src, state, cache,
+  let context = crate::input::InputContext::new(
+    Silent::<PartialProbe>::new(),
+    DefaultCache::<'inp, L>::default(),
   );
-  let mut ir = input.as_ref(&mut emitter);
+  let state = L::new(src).into_state();
+  let mut input = Input::<'inp, L, PartialConfCtx<'inp, L>, (), Complete>::with_state_and_context(
+    src, state, context,
+  );
+  let mut ir = input.as_ref();
   let mut out = Vec::new();
   loop {
     if out.len() > budget {
@@ -835,11 +840,14 @@ fn drive<'inp, L, R>(
 where
   L: Lexer<'inp>,
 {
-  let cache = DefaultCache::<'inp, L>::default();
-  let mut emitter = Silent::<<L::Token as Token<'inp>>::Error>::new();
+  let context = crate::input::InputContext::new(
+    Silent::<<L::Token as Token<'inp>>::Error>::new(),
+    DefaultCache::<'inp, L>::default(),
+  );
   let state = L::new(src).into_state();
-  let mut input = Input::<'inp, L, ConfCtx<'inp, L>, ()>::with_state_and_cache(src, state, cache);
-  let mut input_ref = input.as_ref(&mut emitter);
+  let mut input =
+    Input::<'inp, L, ConfCtx<'inp, L>, ()>::with_state_and_context(src, state, context);
+  let mut input_ref = input.as_ref();
   f(&mut input_ref)
 }
 

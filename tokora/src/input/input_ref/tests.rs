@@ -148,8 +148,12 @@ type ProbeOptionVerboseCtx<'a> = (Verbose<ProbeErr>, ProbeOptionCache<'a>);
 fn probe_input(src: &str) -> (Input<'_, ProbeLexer<'_>, ProbeCtx<'_>, ()>, Rc<Cell<usize>>) {
   let limiter = ProbeLimiter::with_limit(2);
   let scanned = limiter.counter();
-  let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(src, limiter, cache);
+  let context = crate::input::InputContext::new(
+    Silent::<ProbeErr>::new(),
+    DefaultCache::<'_, ProbeLexer<'_>>::default(),
+  );
+  let input =
+    Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(src, limiter, context);
   (input, scanned)
 }
 
@@ -161,10 +165,12 @@ fn poisoned_input_latches_no_rescan_across_next_and_peek() {
   let scanned = limiter.counter();
 
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input =
-    Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache("1 2 3 4 5 6", limiter, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
+    "1 2 3 4 5 6",
+    limiter,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
+  );
+  let mut inp = input.as_ref();
 
   // Drive `next()` past the trip.
   assert!(inp.next().unwrap().is_some(), "first token");
@@ -201,8 +207,7 @@ fn poisoned_input_latches_no_rescan_across_try_expect() {
   // `try_expect(|_| true)` consumes one token per call; the third rebuilds a
   // lexer that scans the tripping token and latches.
   let (mut input, scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(inp.try_expect(|_| true).unwrap().is_some(), "first token");
   assert!(inp.try_expect(|_| true).unwrap().is_some(), "second token");
@@ -244,8 +249,7 @@ fn try_expect_or_stop_errs_on_fresh_trip() {
   // The first two calls consume `1` and `2`; the third rebuilds a lexer whose
   // scan trips the limiter — a terminal stop, not evidence of absence.
   let (mut input, scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(
     inp.try_expect_or_stop(|_| true).unwrap().is_some(),
@@ -266,8 +270,7 @@ fn try_expect_or_stop_errs_on_fresh_trip() {
 fn try_expect_or_stop_errs_on_latched_boundary_without_rescan() {
   // Latch via `next()`: the third scan trips and latches the poison boundary.
   let (mut input, scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(inp.next().unwrap().is_some(), "first token");
   assert!(inp.next().unwrap().is_some(), "second token");
@@ -296,8 +299,7 @@ fn at_latched_boundary_witnesses_a_trip_at_the_cursor() {
   // boundary at the cursor it scans from, so `at_latched_boundary` reports a terminal element
   // failure without inspecting the error type (no `MaybeTerminal` bound on the driver).
   let (mut input, _scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(!inp.at_latched_boundary(), "no trip before any scan");
   assert!(inp.next().unwrap().is_some(), "first token under the limit");
@@ -326,8 +328,7 @@ fn try_expect_or_stop_declines_on_non_matching_token() {
   // A failing predicate is definite absence: `Ok(None)`, with the scanned token
   // put back at the cache front for the next consume.
   let (mut input, scanned) = probe_input("1 2");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(
     inp.try_expect_or_stop(|_| false).unwrap().is_none(),
@@ -356,10 +357,12 @@ fn try_expect_or_stop_declines_on_genuine_eoi() {
   // Empty input under a roomy limit: genuine end of input declines.
   let limiter = ProbeLimiter::with_limit(usize::MAX);
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input =
-    Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache("", limiter, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
+    "",
+    limiter,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
+  );
+  let mut inp = input.as_ref();
   assert!(
     inp.try_expect_or_stop(|_| true).unwrap().is_none(),
     "empty input declines"
@@ -368,10 +371,12 @@ fn try_expect_or_stop_declines_on_genuine_eoi() {
   // Fully-consumed input under a roomy limit: the exhaustion is genuine too.
   let limiter = ProbeLimiter::with_limit(usize::MAX);
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input =
-    Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache("1", limiter, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
+    "1",
+    limiter,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
+  );
+  let mut inp = input.as_ref();
   assert!(inp.next().unwrap().is_some(), "consume the only token");
   assert!(
     inp.try_expect_or_stop(|_| true).unwrap().is_none(),
@@ -384,8 +389,7 @@ fn try_expect_or_stop_consumes_match() {
   use crate::span::SimpleSpan;
 
   let (mut input, scanned) = probe_input("1 2");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let tok = inp
     .try_expect_or_stop(|_| true)
@@ -412,8 +416,7 @@ fn next_or_stop_errs_on_fresh_trip() {
   // The first two calls consume `1` and `2`; the third rebuilds a lexer whose scan trips the
   // limiter — a terminal stop, not genuine end of input.
   let (mut input, scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(inp.next_or_stop().unwrap().is_some(), "first token");
   assert!(inp.next_or_stop().unwrap().is_some(), "second token");
@@ -428,8 +431,7 @@ fn next_or_stop_errs_on_fresh_trip() {
 fn next_or_stop_errs_on_latched_boundary_without_rescan() {
   // Latch via `next()`: the third scan trips and latches the poison boundary.
   let (mut input, scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(inp.next().unwrap().is_some(), "first token");
   assert!(inp.next().unwrap().is_some(), "second token");
@@ -457,10 +459,12 @@ fn next_or_stop_returns_none_at_genuine_eoi() {
   // Empty input under a roomy limit: genuine end of input yields a plain `None`.
   let limiter = ProbeLimiter::with_limit(usize::MAX);
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input =
-    Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache("", limiter, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
+    "",
+    limiter,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
+  );
+  let mut inp = input.as_ref();
   assert!(
     inp.next_or_stop().unwrap().is_none(),
     "empty input is a genuine end of input — a plain None"
@@ -470,10 +474,12 @@ fn next_or_stop_returns_none_at_genuine_eoi() {
   // token comes back before it.
   let limiter = ProbeLimiter::with_limit(usize::MAX);
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input =
-    Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache("1", limiter, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
+    "1",
+    limiter,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
+  );
+  let mut inp = input.as_ref();
   assert!(
     inp.next_or_stop().unwrap().is_some(),
     "consume the only token"
@@ -493,8 +499,7 @@ fn next_or_stop_returns_none_at_genuine_eoi() {
 #[test]
 fn try_expect_map_or_stop_errs_on_fresh_trip() {
   let (mut input, scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(
     inp.try_expect_map_or_stop(|_| Some(())).unwrap().is_some(),
@@ -517,8 +522,7 @@ fn try_expect_map_or_stop_declines_on_non_matching_and_genuine_eoi() {
 
   // A `None` map is definite absence: `Ok(None)`, token put back at the cache front.
   let (mut input, scanned) = probe_input("1 2");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(
     inp
       .try_expect_map_or_stop(|_| None::<()>)
@@ -540,10 +544,12 @@ fn try_expect_map_or_stop_declines_on_non_matching_and_genuine_eoi() {
   // Genuine end of input under a roomy limit declines.
   let limiter = ProbeLimiter::with_limit(usize::MAX);
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input =
-    Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache("", limiter, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
+    "",
+    limiter,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
+  );
+  let mut inp = input.as_ref();
   assert!(
     inp.try_expect_map_or_stop(|_| Some(())).unwrap().is_none(),
     "empty input declines"
@@ -555,8 +561,7 @@ fn poisoned_input_latches_no_rescan_across_skip_while() {
   // `skip_while(|_| true)` drains every matching token in a single call, so the
   // first call scans through the tripping token and latches.
   let (mut input, scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   inp.skip_while(|_| true).unwrap();
 
@@ -579,8 +584,7 @@ fn poisoned_input_latches_no_rescan_across_sync_to() {
   // `sync_to(|_| false, ..)` never matches, so it skips through the whole input;
   // the first call scans the tripping token and latches.
   let (mut input, scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(
     inp.sync_to(|_| false, || None).unwrap().is_none(),
@@ -608,8 +612,7 @@ fn poisoned_input_latches_no_rescan_across_sync_through() {
   // `sync_through(|_| false, ..)` never matches, so it skips through the whole
   // input; the first call scans the tripping token and latches.
   let (mut input, scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(
     inp.sync_through(|_| false, || None).unwrap().is_none(),
@@ -639,16 +642,15 @@ fn restore_after_peek_across_lexer_error_reemits_error_exactly_once() {
   //   1 @ 2 3
   //   0 2 4 6      (`@` spans [2, 3))
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 @ 2 3",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   {
     use generic_arraydeque::typenum::U2;
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Peek a window that crosses the malformed `@`; this emits (seals) its lexer
     // error and advances the dedup watermark past it. The cursor stays at 0.
@@ -669,7 +671,12 @@ fn restore_after_peek_across_lexer_error_reemits_error_exactly_once() {
     while inp.next().unwrap().is_some() {}
   }
 
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 1,
     "the malformed span's lexer error must appear exactly once after peek → save → restore → re-consume"
@@ -692,15 +699,14 @@ fn restore_drops_cache_entries_from_abandoned_lineage() {
   use generic_arraydeque::typenum::{U1, U3};
 
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 @ 2 3",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Prefill exactly one cached token (`1`); the cursor now sits at its start, so the
     // save's cursor equals the cache front.
@@ -735,7 +741,12 @@ fn restore_drops_cache_entries_from_abandoned_lineage() {
     ],
     "the drained stream is the full faithful token sequence"
   );
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 1,
     "the rolled-back lexer error must be re-emitted exactly once after restore drops the abandoned cache entries"
@@ -756,15 +767,14 @@ fn restore_option_cache_capacity_one_reemits_error_once() {
   use generic_arraydeque::typenum::{U1, U2};
 
   let cache: ProbeOptionCache<'_> = None;
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeOptionVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeOptionVerboseCtx<'_>, ()>::with_state_and_context(
     "1 @ 2 3",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Prefill the single slot with `1`; the cursor sits at its start.
     let _ = inp.peek::<U1>().unwrap();
@@ -790,7 +800,12 @@ fn restore_option_cache_capacity_one_reemits_error_once() {
     ],
     "the capacity-1 cache still drains the full faithful token sequence"
   );
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(total, 1, "the error re-lexes and is emitted exactly once");
 }
 
@@ -817,15 +832,14 @@ fn nested_restore_retains_pre_save_cache_entries() {
   let limiter = ProbeLimiter::with_limit(usize::MAX);
   let scanned = limiter.counter();
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5",
     limiter,
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Prefill exactly one cached token (`1`); the cursor now equals the cache front.
     let _ = inp.peek::<U1>().unwrap();
@@ -875,7 +889,12 @@ fn nested_restore_retains_pre_save_cache_entries() {
     "the drained stream is the full faithful token sequence"
   );
   // (c) No poison diagnostic — nor any diagnostic; the input is clean and never trips.
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(total, 0, "a clean nested restore emits no diagnostic");
 }
 
@@ -892,15 +911,14 @@ fn nested_restore_with_shared_limiter_no_spurious_poison() {
   use generic_arraydeque::typenum::{U1, U3};
 
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5",
     ProbeLimiter::with_limit(7),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let _ = inp.peek::<U1>().unwrap(); // prefill `1`
     let outer = inp.save();
@@ -933,7 +951,8 @@ fn nested_restore_with_shared_limiter_no_spurious_poison() {
     ],
     "the full faithful stream drains — no token is lost to a spurious trip"
   );
-  let limit_diags = emitter
+  let limit_diags = input
+    .emitter()
     .errors()
     .values()
     .flatten()
@@ -971,18 +990,25 @@ fn consumed_pre_save_cache_entry_relexes_identically_on_restore() {
     let limiter = ProbeLimiter::with_limit(usize::MAX);
     let scanned = limiter.counter();
     let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-    let mut emitter = Verbose::<ProbeErr>::new();
-    let mut input =
-      Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(SRC, limiter, cache);
+    let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
+      SRC,
+      limiter,
+      crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
+    );
     let spans = {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
       let mut toks = Vec::new();
       while let Some(t) = inp.next().unwrap() {
         toks.push(*t.span_ref());
       }
       toks
     };
-    let diags: usize = emitter.errors().values().map(|group| group.len()).sum();
+    let diags: usize = input
+      .emitter()
+      .errors()
+      .values()
+      .map(|group| group.len())
+      .sum();
     (spans, scanned.get(), diags)
   };
   assert_eq!(
@@ -1004,11 +1030,13 @@ fn consumed_pre_save_cache_entry_relexes_identically_on_restore() {
   let limiter = ProbeLimiter::with_limit(usize::MAX);
   let scanned = limiter.counter();
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input =
-    Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(SRC, limiter, cache);
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
+    SRC,
+    limiter,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
+  );
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Stage `T` (`1`): exactly one scan.
     let _ = inp.peek::<U1>().unwrap();
@@ -1068,7 +1096,12 @@ fn consumed_pre_save_cache_entry_relexes_identically_on_restore() {
     "the replay costs exactly one scan beyond a single pass — only outside-state instrumentation observes it"
   );
   // (iv) Diagnostics are emitted exactly once, matching a single pass.
-  let diags: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let diags: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     diags, oracle_diags,
     "the `@` error is emitted exactly once, as in a single pass"
@@ -1079,14 +1112,13 @@ fn consumed_pre_save_cache_entry_relexes_identically_on_restore() {
   // re-lexes the whole source once, and because `restore` rewinds the in-`State` counter
   // the recount reaches exactly that total — not one past it — so the budget never trips.
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     SRC,
     TokenLimiter::with_limitation(3),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let _ = inp.peek::<U1>().unwrap();
     let ckp = inp.save();
     let _ = inp.next().unwrap().expect("consume `T` from cache");
@@ -1117,7 +1149,12 @@ fn consumed_pre_save_cache_entry_relexes_identically_on_restore() {
     ],
     "the by-value replay drains the full faithful stream"
   );
-  let diags: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let diags: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     diags, 1,
     "the by-value replay emits the `@` error exactly once"
@@ -1143,17 +1180,16 @@ fn consume_all_cached_then_restore_replays_faithfully() {
   const SRC: &str = "1 @ 2 3 4 5";
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     SRC,
     // Knife-edge: the single pass scans five Nums, so a budget of five tolerates the
     // faithful replay exactly and one less would trip.
     TokenLimiter::with_limitation(5),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Fill the cache with the first three tokens (crossing and sealing `@`).
     let _ = inp.peek::<U3>().unwrap();
@@ -1201,7 +1237,12 @@ fn consume_all_cached_then_restore_replays_faithfully() {
     "the drained stream is the full faithful token sequence"
   );
   // The `@` error is emitted exactly once across peek → consume-run → restore → drain.
-  let diags: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let diags: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     diags, 1,
     "the `@` error is emitted exactly once, as in a single pass"
@@ -1218,15 +1259,14 @@ fn non_lifo_watermark_restore_is_rejected_in_debug() {
   // the dedup-watermark shape: A predates a sealed `@`, B postdates it.)
   //   1 @ 2 3      (`@` is a lexer error spanning [2, 3))
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 @ 2 3",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   use generic_arraydeque::typenum::U2;
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save(); // older, predates the sealed `@`
   let _ = inp.peek::<U2>().unwrap(); // seals `@`, lifts the watermark
@@ -1248,22 +1288,21 @@ fn restore_before_overflow_trip_reemits_limit_diagnostic_exactly_once() {
   // exactly once, never a diagnostic-less latch masquerading as clean EOF.
   //   1 2 3 4 5 6   (limit 5 → the 6th scanned token trips; U6 window > U3 cache)
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     ProbeLimiter::with_limit(5),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   {
     use generic_arraydeque::typenum::U6;
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // save BEFORE the speculative peek: the checkpoint is clean (poisoned = false).
     let ckp = inp.save();
 
     // Overflow peek (U6 > U3 cache) trips the limiter mid-overflow: poison latches
-    // and the limit diagnostic is sealed into the emitter.
+    // and the limit diagnostic is sealed into the input.emitter().
     let _ = inp.peek::<U6>().unwrap();
     assert!(inp.is_poisoned(), "the overflow trip must latch poison");
 
@@ -1286,7 +1325,12 @@ fn restore_before_overflow_trip_reemits_limit_diagnostic_exactly_once() {
     );
   }
 
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 1,
     "the limit diagnostic must survive save → overflow-trip → restore → drain, reported exactly once"
@@ -1303,15 +1347,14 @@ fn non_lifo_poison_boundary_restore_is_rejected_in_debug() {
   // violation the debug witness rejects.
   //   1 2 3 4 5 6   (limit 5 → the 6th scanned token trips; U6 window > U3 cache)
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     ProbeLimiter::with_limit(5),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   use generic_arraydeque::typenum::U6;
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save(); // older, clean
   let _ = inp.peek::<U6>().unwrap(); // overflow trip: poison + diagnostic
@@ -1432,14 +1475,13 @@ fn overflow_trip_peek_save_drain_restore_replays_prefix_and_stops_at_boundary() 
   use generic_arraydeque::typenum::U6;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(5),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Overflow peek (U6 > U3 cache): caches 1..=3, stages 4 & 5, trips on 6. The
     // result is truncated to the 3-token cache-resident prefix; the boundary
@@ -1518,7 +1560,12 @@ fn overflow_trip_peek_save_drain_restore_replays_prefix_and_stops_at_boundary() 
 
   // (c) The limit diagnostic is retained across save → drain → restore → replay,
   // exactly once.
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 1,
     "the limit diagnostic survives save → drain → restore → replay, reported exactly once"
@@ -1542,15 +1589,14 @@ fn sync_through_trip_after_skips_commits_the_diagnosed_prefix() {
   use crate::span::SimpleSpan;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(2),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Pre-call anchor: nothing consumed yet.
     assert_eq!(inp.span(), &SimpleSpan::new(0, 0), "pre-call span anchor");
@@ -1594,13 +1640,15 @@ fn sync_through_trip_after_skips_commits_the_diagnosed_prefix() {
 
   // (iii) Each skipped token is diagnosed exactly once (`1`, `2` → two unexpected-token
   // errors) and the limit trip exactly once (`3` → one limit error).
-  let unexpected = emitter
+  let unexpected = input
+    .emitter()
     .errors()
     .values()
     .flatten()
     .filter(|e| **e == ByValErr::Lex)
     .count();
-  let limit = emitter
+  let limit = input
+    .emitter()
     .errors()
     .values()
     .flatten()
@@ -1625,15 +1673,14 @@ fn sync_through_then_peek_trip_after_skips_commits_the_diagnosed_prefix() {
   use generic_arraydeque::typenum::U1;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(2),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let (matched, peeked) = inp
       .sync_through_then_peek::<_, _, U1>(|_| false, || None)
@@ -1669,13 +1716,15 @@ fn sync_through_then_peek_trip_after_skips_commits_the_diagnosed_prefix() {
     );
   }
 
-  let unexpected = emitter
+  let unexpected = input
+    .emitter()
     .errors()
     .values()
     .flatten()
     .filter(|e| **e == ByValErr::Lex)
     .count();
-  let limit = emitter
+  let limit = input
+    .emitter()
     .errors()
     .values()
     .flatten()
@@ -1708,16 +1757,15 @@ fn widen_then_drain_holds_the_by_value_limit() {
   use generic_arraydeque::typenum::{U1, U2, U3};
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6 7",
     TokenLimiter::with_limitation(2),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   let mut consumed = 0usize;
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     assert_eq!(inp.peek::<U1>().map(|w| w.len()), Ok(1), "U1 fill");
     assert_eq!(inp.peek::<U2>().map(|w| w.len()), Ok(2), "U2 fill");
     // The third step lexes token 3 under token 2's post-state, which is where the tally
@@ -1740,7 +1788,8 @@ fn widen_then_drain_holds_the_by_value_limit() {
     assert!(inp.next().unwrap().is_none());
   }
 
-  let limit_diags: usize = emitter
+  let limit_diags: usize = input
+    .emitter()
     .errors()
     .values()
     .flatten()
@@ -1769,15 +1818,14 @@ fn failed_sync_through_leaves_no_diagnostics() {
   use crate::span::SimpleSpan;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Pre-call anchor: nothing consumed.
     assert_eq!(inp.span(), &SimpleSpan::new(0, 0), "pre-call span anchor");
@@ -1823,7 +1871,12 @@ fn failed_sync_through_leaves_no_diagnostics() {
   // The failed sync left no diagnostics, and a normal drain of valid tokens emits
   // none. At HEAD the failed sync retained one unexpected-token diagnostic per scanned
   // token (three) — the stale, misleading noise this fix removes.
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 0,
     "a failed sync_through leaves no diagnostics behind"
@@ -1839,15 +1892,14 @@ fn successful_sync_through_retains_skipped_token_diagnostics() {
   use crate::span::SimpleSpan;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Match only the third scanned token (`3`); skip `1` and `2`, diagnosing each.
     let mut seen = 0;
@@ -1870,7 +1922,12 @@ fn successful_sync_through_retains_skipped_token_diagnostics() {
     assert_eq!(inp.span(), &SimpleSpan::new(4, 5), "committed at the match");
   }
 
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 2,
     "the skipped `1` and `2` stay diagnosed — the match committed through them"
@@ -1890,14 +1947,13 @@ fn failed_sync_through_reemits_scanned_lexer_error_once() {
   // times); at HEAD the failed sync instead retains it plus two stale unexpected tokens.
   //   1 @ 2   (`@` is a lexer error spanning [2, 3); high limit so no trip)
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 @ 2",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Never matches: skips `1`, crosses `@` (emitting the lexer error and lifting the
     // watermark past it), skips `2`, reaches EOF. The no-match EOF path unwinds every
@@ -1915,7 +1971,8 @@ fn failed_sync_through_reemits_scanned_lexer_error_once() {
   // genuine consume re-emitted the error exactly once.
   let at = SimpleSpan::new(2, 3);
   assert_eq!(
-    emitter
+    input
+      .emitter()
       .errors()
       .get(&at)
       .map(|group| group.len())
@@ -1923,7 +1980,12 @@ fn failed_sync_through_reemits_scanned_lexer_error_once() {
     1,
     "the scanned-past lexer error re-emits exactly once on the genuine consume"
   );
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 1,
     "only the re-emitted lexer error is retained — no stale unexpected-token noise"
@@ -1943,15 +2005,14 @@ fn failed_sync_through_then_peek_leaves_no_diagnostics_and_position() {
   use generic_arraydeque::typenum::U1;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Pre-call anchor: nothing consumed.
     assert_eq!(inp.span(), &SimpleSpan::new(0, 0), "pre-call span anchor");
@@ -2007,7 +2068,12 @@ fn failed_sync_through_then_peek_leaves_no_diagnostics_and_position() {
   // The failed peek-sync left no diagnostics, and a normal drain of valid tokens emits
   // none. At HEAD the failed peek-sync retained one unexpected-token diagnostic per scanned
   // token (three) — the stale, misleading noise this fix removes.
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 0,
     "a failed sync_through_then_peek leaves no diagnostics behind"
@@ -2029,14 +2095,13 @@ fn failed_sync_through_then_peek_reemits_crossed_lexer_error_once() {
   // at HEAD the failed peek-sync instead retains it plus two stale unexpected tokens.
   //   1 @ 2   (`@` is a lexer error spanning [2, 3); high limit so no trip)
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 @ 2",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Never matches: skips `1`, crosses `@` (emitting the lexer error and lifting the
     // watermark past it), skips `2`, reaches EOF. The no-match EOF path unwinds every
@@ -2062,7 +2127,8 @@ fn failed_sync_through_then_peek_reemits_crossed_lexer_error_once() {
   // genuine consume re-emitted the error exactly once.
   let at = SimpleSpan::new(2, 3);
   assert_eq!(
-    emitter
+    input
+      .emitter()
       .errors()
       .get(&at)
       .map(|group| group.len())
@@ -2070,7 +2136,12 @@ fn failed_sync_through_then_peek_reemits_crossed_lexer_error_once() {
     1,
     "the scanned-past lexer error re-emits exactly once on the genuine consume"
   );
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 1,
     "only the re-emitted lexer error is retained — no stale unexpected-token noise"
@@ -2088,15 +2159,14 @@ fn successful_sync_through_then_peek_retains_skipped_token_diagnostics() {
   use generic_arraydeque::typenum::U1;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Match only the third scanned token (`3`); skip `1` and `2`, diagnosing each.
     let mut seen = 0;
@@ -2124,7 +2194,12 @@ fn successful_sync_through_then_peek_retains_skipped_token_diagnostics() {
     assert_eq!(inp.span(), &SimpleSpan::new(4, 5), "committed at the match");
   }
 
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 2,
     "the skipped `1` and `2` stay diagnosed — the match committed through them"
@@ -2151,15 +2226,14 @@ fn failed_sync_through_with_prefilled_cache_leaves_no_trace() {
   use generic_arraydeque::typenum::U3;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Prefill the cache with all three tokens; peeking commits no progress, so the
     // pre-call anchor is still the origin and the cursor sits at the cache front.
@@ -2211,7 +2285,12 @@ fn failed_sync_through_with_prefilled_cache_leaves_no_trace() {
     ],
     "the drain re-lexes every formerly-cached token in faithful order"
   );
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 0,
     "a failed sync_through across a drained cache leaves no diagnostics behind"
@@ -2230,15 +2309,14 @@ fn failed_sync_through_then_peek_with_prefilled_cache_leaves_no_trace() {
   use generic_arraydeque::typenum::{U1, U3};
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let _ = inp.peek::<U3>().unwrap();
     let pre_span = *inp.span();
@@ -2292,7 +2370,12 @@ fn failed_sync_through_then_peek_with_prefilled_cache_leaves_no_trace() {
     ],
     "the drain re-lexes every formerly-cached token in faithful order"
   );
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 0,
     "a failed sync_through_then_peek across a drained cache leaves no diagnostics behind"
@@ -2312,15 +2395,14 @@ fn successful_sync_through_after_cache_drain_commits_and_persists() {
   use generic_arraydeque::typenum::U1;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Prefill only the first token, so the match (`3`) lies beyond the cached prefix.
     let _ = inp.peek::<U1>().unwrap();
@@ -2350,7 +2432,12 @@ fn successful_sync_through_after_cache_drain_commits_and_persists() {
     );
   }
 
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 2,
     "the drained `1` and scanned `2` stay diagnosed — the match committed through them"
@@ -2372,15 +2459,14 @@ fn sync_through_over_a_prefilled_cache_evaluates_the_predicate_once() {
   use generic_arraydeque::typenum::U3;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   let rest: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let _ = inp.peek::<U3>().unwrap();
 
     // Stateful by construction: it counts its calls, so asking twice about `2` would answer
@@ -2428,7 +2514,12 @@ fn sync_through_over_a_prefilled_cache_evaluates_the_predicate_once() {
     ],
     "the stream resumes at the token after the match — nothing cached was skipped"
   );
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 1,
     "one diagnostic for the drained `1` — the match committed through it"
@@ -2450,15 +2541,14 @@ fn sync_through_then_peek_over_a_prefilled_cache_evaluates_the_predicate_once() 
   use generic_arraydeque::typenum::{U2, U3};
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let _ = inp.peek::<U3>().unwrap();
 
     let mut calls = 0usize;
@@ -2494,7 +2584,12 @@ fn sync_through_then_peek_over_a_prefilled_cache_evaluates_the_predicate_once() 
     assert_eq!(inp.span(), &SimpleSpan::new(2, 3), "committed at the match");
   }
 
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 1,
     "one diagnostic for the drained `1` — the match committed through it"
@@ -2514,15 +2609,14 @@ fn sync_through_never_scans_past_a_cached_match() {
   use generic_arraydeque::typenum::U3;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
   let rest: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let _ = inp.peek::<U3>().unwrap();
 
     // Accepts the 2nd examined token (the cached `2`) — and would accept a 4th, which only a
@@ -2562,7 +2656,12 @@ fn sync_through_never_scans_past_a_cached_match() {
     ],
     "the stream resumes in order after the match — the cache and the position agree"
   );
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(total, 1, "one diagnostic for the drained `1`");
 }
 
@@ -2583,10 +2682,9 @@ fn sync_to_returning_a_cached_match_is_not_a_cache_push() {
   use generic_arraydeque::typenum::U3;
 
   let mut input = bal_input("; 1 2 3", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let _ = inp.peek::<U3>().unwrap(); // prefill `;`, `1`, `2`
     assert_eq!(inp.cache().len(), 3, "the peek staged three tokens");
 
@@ -2649,10 +2747,9 @@ fn sync_balanced_staging_a_lexed_match_is_a_cache_push() {
   use crate::span::SimpleSpan;
 
   let mut input = bal_input("; 1 2", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     assert!(inp.cache().is_empty(), "nothing is prefetched");
 
     let ckp = inp.save();
@@ -2716,15 +2813,14 @@ fn failed_sync_through_with_prefilled_cache_reemits_crossed_error_once() {
   use generic_arraydeque::typenum::U1;
 
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 @ 2 3",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   let drained: Vec<SimpleSpan> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Prefill `1` only; `@` lies just beyond the cached prefix.
     let _ = inp.peek::<U1>().unwrap();
@@ -2756,7 +2852,8 @@ fn failed_sync_through_with_prefilled_cache_reemits_crossed_error_once() {
   );
   let at = SimpleSpan::new(2, 3);
   assert_eq!(
-    emitter
+    input
+      .emitter()
       .errors()
       .get(&at)
       .map(|group| group.len())
@@ -2764,7 +2861,12 @@ fn failed_sync_through_with_prefilled_cache_reemits_crossed_error_once() {
     1,
     "`@` is reported exactly once — on the genuine consume, not the unwound failed sync"
   );
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 1,
     "only the re-emitted `@` remains — no stale unexpected-token noise from the failed sync"
@@ -2784,19 +2886,18 @@ fn failed_sync_through_with_prefilled_cache_reemits_crossed_error_once() {
 fn alias_interleave_stale_restore_detected() {
   // THE witness test. After restoring the older A (which invalidates B), one
   // committed emission regrows the emission log to exactly B's saved mark, so a
-  // length-based validity check (`B.mark <= emitter.len()`) would pass — yet B's
+  // length-based validity check (`B.mark <= input.emitter().len()`) would pass — yet B's
   // lineage is gone. The live-checkpoint id stack still rejects the restore.
   //   1 2 3 4 5 6   (limit 2 → the 3rd scanned token trips, emitting the diagnostic)
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     ProbeLimiter::with_limit(2),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   use generic_arraydeque::typenum::U6;
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save(); // older, clean, mark 0
   let _ = inp.peek::<U6>().unwrap(); // trips: emits the limit diagnostic (mark → 1)
@@ -2822,14 +2923,13 @@ fn stale_poisoned_restore_never_exposes_tokens_past_saved_boundary() {
   use generic_arraydeque::typenum::U6;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(5),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
 
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save(); // clean older
   let _ = inp.peek::<U6>().unwrap(); // overflow trip: early boundary
@@ -2848,50 +2948,31 @@ fn restore_with_foreign_checkpoint_rejected_in_debug() {
   // A checkpoint may only be restored into the input that created it.
   let cache1 = DefaultCache::<'_, ProbeLexer<'_>>::default();
   let cache2 = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut em1 = Silent::<ProbeErr>::new();
-  let mut em2 = Silent::<ProbeErr>::new();
-  let mut in1 = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+  let mut in1 = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
     "1 2 3",
     ProbeLimiter::with_limit(usize::MAX),
-    cache1,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache1),
   );
-  let mut in2 = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+  let mut in2 = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
     "1 2 3",
     ProbeLimiter::with_limit(usize::MAX),
-    cache2,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache2),
   );
 
   let foreign = {
-    let mut r1 = in1.as_ref(&mut em1);
+    let mut r1 = in1.as_ref();
     r1.save()
   };
-  let mut r2 = in2.as_ref(&mut em2);
+  let mut r2 = in2.as_ref();
   r2.restore(foreign); // ✗ created by a different input — debug panic
 }
 
-#[test]
-#[cfg(debug_assertions)]
-#[should_panic(expected = "checkpoint restored into a foreign input")]
-fn restore_with_clone_sibling_checkpoint_rejected_in_debug() {
-  // A clone is a NEW input: a checkpoint from the original may not be restored into
-  // the clone — their checkpoints must never cross.
-  let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut em1 = Silent::<ProbeErr>::new();
-  let mut em2 = Silent::<ProbeErr>::new();
-  let mut original = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
-    "1 2 3",
-    ProbeLimiter::with_limit(usize::MAX),
-    cache,
-  );
-  let mut sibling = original.clone();
-
-  let from_original = {
-    let mut r = original.as_ref(&mut em1);
-    r.save()
-  };
-  let mut r2 = sibling.as_ref(&mut em2);
-  r2.restore(from_original); // ✗ the clone is a foreign input — debug panic
-}
+// The clone-sibling twin of the cell above is GONE with `Input: Clone`. An input owns its
+// emitter now, so a clone would have had to duplicate an emission log — which is not a thing a
+// log can be — and the impl went with the field. The property it checked (a checkpoint may not
+// cross into a different input, and the debug witness says so) is unchanged and is exactly what
+// the cell above checks, over two independently constructed inputs; only the *way* the second
+// input came into being is no longer expressible.
 
 // ── Pure copy replays the saved lineage exactly (LIFO-legal) ───────────────────
 
@@ -2902,13 +2983,12 @@ fn twin_checkpoint_restore_after_partial_drain_replays_identically() {
   // younger, re-draining, then restoring the elder and re-draining yields identical
   // span sequences both times — pure copy replays the lineage exactly.
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let elder = inp.save();
   let younger = inp.save(); // same position as elder
@@ -2951,16 +3031,15 @@ fn save_exactly_at_boundary_restores_empty_stream() {
   // retained exactly once.
   //   1 2 3 4 5 6   (limit 2 → the 3rd scanned token trips)
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
   let limiter = ProbeLimiter::with_limit(2);
   let scanned = limiter.counter();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     limiter,
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Drain to the trip: 1, 2, then the 3rd next() trips and latches at the cursor.
     assert!(inp.next().unwrap().is_some(), "first token");
@@ -2996,7 +3075,12 @@ fn save_exactly_at_boundary_restores_empty_stream() {
     );
   }
 
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(total, 1, "the limit diagnostic is retained exactly once");
 }
 
@@ -3007,8 +3091,7 @@ fn sink_emitter_trip_bounds_work_and_survives_restore() {
   // derive it from, and no rescan ever crosses it.
   //   1 2 3 4 5 6   (limit 2 → the 3rd scanned token trips)
   let (mut input, scanned) = probe_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   // Trip the limit.
   assert!(inp.next().unwrap().is_some(), "first token");
@@ -3047,14 +3130,13 @@ fn attempt_backtrack_over_trip_reemits_diagnostic_exactly_once() {
   use generic_arraydeque::typenum::U6;
 
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(5),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let outcome = inp.attempt(|inp| {
       let _ = inp.peek::<U6>(); // overflow trip: emits the limit diagnostic
@@ -3071,7 +3153,7 @@ fn attempt_backtrack_over_trip_reemits_diagnostic_exactly_once() {
     assert!(inp.is_poisoned(), "the committed re-lex re-latches poison");
   }
 
-  let errs: Vec<&ByValErr> = emitter.errors().values().flatten().collect();
+  let errs: Vec<&ByValErr> = input.emitter().errors().values().flatten().collect();
   assert_eq!(
     errs.len(),
     1,
@@ -3089,14 +3171,13 @@ fn restore_after_interleaved_emissions_keeps_rewound_lexer_error_reemittable() {
   // when the committed path re-reaches it — never zero times.
   //   1 @ 2   (`@` is a lexer error spanning [2, 3))
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 @ 2",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let a = inp.save(); // predates every emission
 
@@ -3113,7 +3194,8 @@ fn restore_after_interleaved_emissions_keeps_rewound_lexer_error_reemittable() {
   // Exactly the one `@` lexer error is retained — re-emitted once, never lost.
   let at = SimpleSpan::new(2, 3);
   assert_eq!(
-    emitter
+    input
+      .emitter()
       .errors()
       .get(&at)
       .map(|group| group.len())
@@ -3121,7 +3203,12 @@ fn restore_after_interleaved_emissions_keeps_rewound_lexer_error_reemittable() {
     1,
     "the rewound lexer error re-emits exactly once when re-reached"
   );
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(total, 1, "only the re-emitted lexer error is retained");
 }
 
@@ -3136,13 +3223,12 @@ fn property_random_lifo_scripts_stay_faithful_and_bounded() {
   // Oracle: one fresh single pass over SRC.
   let oracle_tokens: Vec<SimpleSpan> = {
     let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-    let mut em = Verbose::<ProbeErr>::new();
-    let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
       SRC,
       ProbeLimiter::with_limit(usize::MAX),
-      cache,
+      crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
     );
-    let mut inp = input.as_ref(&mut em);
+    let mut inp = input.as_ref();
     let mut toks = Vec::new();
     while let Some(t) = inp.next().unwrap() {
       toks.push(*t.span_ref());
@@ -3167,13 +3253,15 @@ fn property_random_lifo_scripts_stay_faithful_and_bounded() {
     let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
     let limiter = ProbeLimiter::with_limit(usize::MAX);
     let scanned = limiter.counter();
-    let mut em = Verbose::<ProbeErr>::new();
-    let mut input =
-      Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(SRC, limiter, cache);
+    let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
+      SRC,
+      limiter,
+      crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
+    );
 
     let num_ops = 8 + (roll(&mut rng) % 12) as usize; // 8..=19 ops
     {
-      let mut inp = input.as_ref(&mut em);
+      let mut inp = input.as_ref();
       // Live checkpoints as a stack of (checkpoint, saved cursor offset).
       let mut live: Vec<(crate::input::Checkpoint<'_, '_, ProbeLexer<'_>>, usize)> = Vec::new();
 
@@ -3275,7 +3363,7 @@ fn property_random_lifo_scripts_stay_faithful_and_bounded() {
     );
 
     // (b) every retained diagnostic span appears at most once and is a real error.
-    for (span, group) in em.errors() {
+    for (span, group) in input.emitter().errors() {
       assert!(
         group.len() <= 1,
         "diagnostic span {span:?} retained more than once"
@@ -3291,7 +3379,12 @@ fn property_random_lifo_scripts_stay_faithful_and_bounded() {
     // post-save cache entry that skipped a rolled-back error would drop it to zero here.
     for diag in &oracle_diags {
       assert_eq!(
-        em.errors().get(diag).map(|g| g.len()).unwrap_or(0),
+        input
+          .emitter()
+          .errors()
+          .get(diag)
+          .map(|g| g.len())
+          .unwrap_or(0),
         1,
         "after a full final drain, the error at {diag:?} must be retained exactly once"
       );
@@ -3310,13 +3403,12 @@ fn try_attempt_ok_keeps_progress() {
   use crate::span::SimpleSpan;
   // On `Ok`, the closure's progress is kept and the value is passed through.
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   let out: Result<i64, ()> = inp.try_attempt(|inp| {
@@ -3345,17 +3437,16 @@ fn try_attempt_err_rolls_back_everything() {
   // lifts the watermark. Returning `Err` must roll every one of those back.
   {
     let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-    let mut emitter = Verbose::<ByValErr>::new();
-    let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
       "1 @ 2",
       TokenLimiter::with_limitation(usize::MAX),
-      cache,
+      crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
     );
 
     // Phase 1: the attempt consumes across `@` (emitting the lexer error), then
     // abandons. Position, span, and lexer state must all return to their saved values.
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       let cur0 = *inp.cursor().as_inner();
       let span0 = *inp.span();
@@ -3376,7 +3467,7 @@ fn try_attempt_err_rolls_back_everything() {
 
     // The emission log was truncated by the rollback: nothing the attempt emitted
     // survives.
-    let after_rollback: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let after_rollback: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     assert_eq!(
       after_rollback, 0,
       "diagnostics emitted inside the attempt are rolled back (empty emission log)"
@@ -3385,16 +3476,21 @@ fn try_attempt_err_rolls_back_everything() {
     // Phase 2: the watermark rolled back too, so the committed path re-crosses `@`
     // and the rewound lexer error becomes re-emittable — exactly once.
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
       while inp.next().unwrap().is_some() {}
     }
     let at = SimpleSpan::new(2, 3);
     assert_eq!(
-      emitter.errors().get(&at).map(|g| g.len()).unwrap_or(0),
+      input
+        .emitter()
+        .errors()
+        .get(&at)
+        .map(|g| g.len())
+        .unwrap_or(0),
       1,
       "the rewound lexer error re-emits exactly once when re-reached"
     );
-    let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     assert_eq!(total, 1, "only the re-emitted lexer error is retained");
   }
 
@@ -3406,14 +3502,13 @@ fn try_attempt_err_rolls_back_everything() {
   {
     use generic_arraydeque::typenum::U6;
     let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-    let mut emitter = Verbose::<ByValErr>::new();
-    let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
       "1 2 3 4 5 6",
       TokenLimiter::with_limitation(5),
-      cache,
+      crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
     );
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       let out: Result<(), ()> = inp.try_attempt(|inp| {
         let _ = inp.peek::<U6>().unwrap(); // overflow trip: poison + diagnostic
@@ -3429,7 +3524,7 @@ fn try_attempt_err_rolls_back_everything() {
       while inp.next().unwrap().is_some() {}
       assert!(inp.is_poisoned(), "the committed re-lex re-latches poison");
     }
-    let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     assert_eq!(
       total, 1,
       "the limit diagnostic is emitted exactly once in total"
@@ -3446,13 +3541,12 @@ fn try_attempt_nested_lifo() {
   // pairs nest as a stack, so the LIFO witness never fires.
   {
     let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-    let mut emitter = Silent::<ProbeErr>::new();
-    let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
       "1 2 3 4",
       ProbeLimiter::with_limit(usize::MAX),
-      cache,
+      crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
     );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let out = inp.attempt(|inp| {
       let _ = inp.next().unwrap().expect("outer consumes 1");
@@ -3474,13 +3568,12 @@ fn try_attempt_nested_lifo() {
   // The mirror image: an `attempt` nested inside a `try_attempt`.
   {
     let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-    let mut emitter = Silent::<ProbeErr>::new();
-    let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
       "1 2 3 4",
       ProbeLimiter::with_limit(usize::MAX),
-      cache,
+      crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
     );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let out: Result<(), ()> = inp.try_attempt(|inp| {
       let _ = inp.next().unwrap().expect("outer consumes 1");
@@ -3519,13 +3612,12 @@ fn attempt_inner_raw_restore_below_checkpoint_panics_at_restore() {
   // succeeded and the decline's rollback arm panicked as stale ("attempt checkpoint is
   // stale"); post-fix the pinned restore panics first.
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save(); // raw checkpoint, below the attempt's checkpoint
   let _ = inp.next().unwrap().expect("consume 1");
@@ -3545,13 +3637,12 @@ fn try_attempt_inner_raw_restore_below_checkpoint_panics_at_restore() {
   // The `try_attempt` twin of the attempt test: the pinned restore panics inside the closure.
   // Converted from `try_attempt_err_after_inner_raw_restore_below_checkpoint`.
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save();
   let _ = inp.next().unwrap().expect("consume 1");
@@ -3569,13 +3660,12 @@ fn attempt_inner_lifo_clean_raw_pair_is_legal() {
   // (ABOVE the attempt's own pinned checkpoint) is LIFO-legal and must NOT trip the pin — the
   // attempt's checkpoint sits below it and is never popped. The attempt keeps its progress.
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let _ = inp.next().unwrap().expect("consume 1");
   let out: Option<u32> = inp.attempt(|inp| {
@@ -3731,13 +3821,12 @@ fn boundary_replay_zero_width_token_contract() {
   // A hand-rolled lexer that yields a zero-width token trips the debug assert at the
   // single lexing chokepoint before the empty span can corrupt any positional fact.
   let cache = DefaultCache::<'_, ZeroWidthLexer<'_>>::default();
-  let mut emitter = Verbose::<ZeroWidthErr>::new();
-  let mut input = Input::<ZeroWidthLexer<'_>, ZeroWidthVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ZeroWidthLexer<'_>, ZeroWidthVerboseCtx<'_>, ()>::with_state_and_context(
     "abc",
     (),
-    cache,
+    crate::input::InputContext::new(Verbose::<ZeroWidthErr>::new(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let _ = inp.next();
 }
 
@@ -3759,14 +3848,13 @@ fn set_state_after_limit_trip_resumes_scanning() {
   // re-key re-homes offset facts, it never rewrites history that described a real event).
   //   1 2 3 4 5 6   (limit 2 → the 3rd scanned token trips; `2` ends at the frontier offset 3)
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(2),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Drive `next()` past the trip: `1` and `2` consume, the 3rd scan trips → None.
     assert!(inp.next().unwrap().is_some(), "first token");
@@ -3801,7 +3889,8 @@ fn set_state_after_limit_trip_resumes_scanning() {
   }
 
   // The old regime's limit diagnostic remains exactly once.
-  let limit = emitter
+  let limit = input
+    .emitter()
     .errors()
     .values()
     .flatten()
@@ -3820,14 +3909,13 @@ fn state_mut_applies_the_same_rekey() {
   // the returned `&mut` resumes scanning past the old boundary.
   //   1 2 3 4 5 6   (limit 2 → the 3rd scanned token trips; `2` ends at the frontier offset 3)
   let cache = DefaultCache::<'_, ByValLexer<'_>>::default();
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ByValLexer<'_>, ByValVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(2),
-    cache,
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     assert!(inp.next().unwrap().is_some(), "first token");
     assert!(inp.next().unwrap().is_some(), "second token");
@@ -3862,7 +3950,8 @@ fn state_mut_applies_the_same_rekey() {
     );
   }
 
-  let limit = emitter
+  let limit = input
+    .emitter()
     .errors()
     .values()
     .flatten()
@@ -3887,10 +3976,12 @@ fn set_state_clears_stale_cache() {
   let limiter = ProbeLimiter::with_limit(usize::MAX);
   let scanned = limiter.counter();
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input =
-    Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache("1 2 3 4", limiter, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
+    "1 2 3 4",
+    limiter,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
+  );
+  let mut inp = input.as_ref();
 
   // Peek three tokens: scans `1`, `2`, `3` into the cache.
   let _ = inp.peek::<U3>().unwrap();
@@ -3923,6 +4014,89 @@ fn set_state_clears_stale_cache() {
   );
 }
 
+/// #128 — the lexer-error dedup watermark survives a **re-borrow**, and the log it describes is
+/// the log the next handle writes.
+///
+/// The watermark is a fact about one emitter's log. It used to be possible to state that fact
+/// under one emitter and read it under another, because `as_ref` took the emitter as a parameter;
+/// binding the emitter to the `Input` removes the choice, so the two handles below necessarily
+/// share a log and the fact necessarily still holds.
+///
+/// **What is left to check, and why it is the only writable shape.** With the pairing structural,
+/// the interesting question is no longer *which* log but whether the watermark is still there at
+/// all. Clearing every log-dependent watermark on borrow was the cheaper of the two remedies the
+/// issue weighed, and it is behaviourally different: under it this cell reports the `@` twice.
+/// So this cell is what forecloses that remedy being reintroduced later as a tidy-up — and it is
+/// exactly the case a per-borrow clear gets wrong, since the peek that armed the watermark and
+/// the drain that consults it are in different handles.
+///
+/// The capacity-1 `Option` cache is load bearing: it cannot retain both `1` and the token past
+/// the `@`, so the second handle genuinely **re-lexes** the error region rather than replaying it
+/// out of the cache. Without the re-lex there would be no dedup decision to observe.
+///   1 @ 2 3      (`@` spans [2, 3))
+#[test]
+fn dedup_watermark_survives_a_reborrow_of_one_input() {
+  use crate::span::SimpleSpan;
+  use generic_arraydeque::typenum::U2;
+
+  let cache: ProbeOptionCache<'_> = None;
+  let mut input = Input::<ProbeLexer<'_>, ProbeOptionVerboseCtx<'_>, ()>::with_state_and_context(
+    "1 @ 2 3",
+    ProbeLimiter::with_limit(usize::MAX),
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
+  );
+
+  // Handle 1: peek across the malformed `@`. The scan emits its lexer error and lifts the dedup
+  // watermark past [2, 3). Nothing is committed, and the handle then dies.
+  {
+    let mut inp = input.as_ref();
+    let _ = inp.peek::<U2>().unwrap();
+  }
+
+  let at = SimpleSpan::new(2, 3);
+  let after_peek = input
+    .emitter()
+    .errors()
+    .get(&at)
+    .map(|group| group.len())
+    .unwrap_or(0);
+  assert_eq!(
+    after_peek, 1,
+    "the peek's scan crossed `@` and reported it once — the precondition this cell rests on, \
+     asserted rather than assumed"
+  );
+
+  // Handle 2: a FRESH handle over the SAME input drains to EOF, re-lexing the `@` region. The
+  // watermark it reads was raised by handle 1, and the log it would append to is the one handle
+  // 1 appended to — necessarily, because the input owns it.
+  {
+    let mut inp = input.as_ref();
+    while inp.next().unwrap().is_some() {}
+  }
+
+  assert_eq!(
+    input
+      .emitter()
+      .errors()
+      .get(&at)
+      .map(|group| group.len())
+      .unwrap_or(0),
+    1,
+    "the `@` lexer error is reported exactly once ACROSS the re-borrow: the watermark handle 1 \
+     raised still suppresses handle 2's re-lex of the same region"
+  );
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
+  assert_eq!(
+    total, 1,
+    "and it is the only diagnostic in the log — the re-borrow added no noise of its own"
+  );
+}
+
 #[test]
 fn set_state_resets_watermark_to_cursor() {
   // Peek across a malformed `@`: seals its lexer error and lifts the dedup watermark past
@@ -3936,15 +4110,14 @@ fn set_state_resets_watermark_to_cursor() {
   use generic_arraydeque::typenum::U2;
 
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Verbose::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeVerboseCtx<'_>, ()>::with_state_and_context(
     "1 @ 2 3",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Verbose::<ProbeErr>::new(), cache),
   );
 
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Peek a window crossing `@`: seals its lexer error and lifts the watermark past
     // [2, 3). The cursor stays at 0 and the cache holds the valid tokens that skipped `@`.
@@ -3959,7 +4132,12 @@ fn set_state_resets_watermark_to_cursor() {
     while inp.next().unwrap().is_some() {}
   }
 
-  let total: usize = emitter.errors().values().map(|group| group.len()).sum();
+  let total: usize = input
+    .emitter()
+    .errors()
+    .values()
+    .map(|group| group.len())
+    .sum();
   assert_eq!(
     total, 2,
     "the `@` lexer error reports once per regime: at the peek, then again after the re-key re-lexes it"
@@ -3987,8 +4165,7 @@ fn set_state_resets_watermark_to_cursor() {
 #[test]
 fn raw_checkpoint_drop_leaks_lineage_without_commit() {
   let (mut input, _scanned) = probe_input("1 2 3 4");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let baseline = inp.live_checkpoints_len();
   for _ in 0..100 {
@@ -4010,8 +4187,7 @@ fn raw_checkpoint_drop_leaks_lineage_without_commit() {
 #[test]
 fn raw_checkpoint_commit_releases_lineage() {
   let (mut input, _scanned) = probe_input("1 2 3 4");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let baseline = inp.live_checkpoints_len();
   for _ in 0..100 {
@@ -4036,13 +4212,12 @@ fn raw_retry_loop_with_commit_stays_flat() {
   // A high limit: the speculative probes re-scan tokens, and we do not want the shared
   // limiter to trip and turn `next()` into a bounded `None` mid-stream.
   let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4",
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Silent::<ProbeErr>::new(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let baseline = inp.live_checkpoints_len();
   let mut consumed = Vec::new();
@@ -4091,8 +4266,7 @@ fn raw_retry_loop_with_commit_stays_flat() {
 #[test]
 fn commit_of_invalidated_checkpoint_is_noop() {
   let (mut input, _scanned) = probe_input("1 2 3 4");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save();
   let _ = inp.next().unwrap(); // consume `1` so B captures a distinct position
@@ -4219,10 +4393,13 @@ pub(super) fn parens(kind: &BalKind) -> Balance<char> {
 }
 
 fn bal_input(src: &str, limit: usize) -> Input<'_, BalLexer<'_>, BalVerboseCtx<'_>, ()> {
-  Input::with_state_and_cache(
+  Input::with_state_and_context(
     src,
     TokenLimiter::with_limitation(limit),
-    DefaultCache::<'_, BalLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<ByValErr>::new(),
+      DefaultCache::<'_, BalLexer<'_>>::default(),
+    ),
   )
 }
 
@@ -4235,9 +4412,8 @@ fn sync_balanced_skips_enclosed_sync_tokens() {
   use crate::span::SimpleSpan;
 
   let mut input = bal_input("( ; ) ;", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let hole = inp
       .sync_balanced(parens, |t| matches!(t.data(), BalTok::Semi))
@@ -4259,14 +4435,16 @@ fn sync_balanced_skips_enclosed_sync_tokens() {
 
   // One diagnostic per hole — and no per-token unexpected-token noise.
   assert_eq!(
-    emitter
+    input
+      .emitter()
       .skipped_regions()
       .get(&crate::span::SimpleSpan::new(0, 5)),
     Some(&std::vec![3usize]),
     "exactly one skipped-region record, with the hole span and count"
   );
   assert_eq!(
-    emitter
+    input
+      .emitter()
       .skipped_regions()
       .values()
       .map(|g| g.len())
@@ -4274,7 +4452,7 @@ fn sync_balanced_skips_enclosed_sync_tokens() {
     1,
     "exactly one emit_skipped_region call"
   );
-  let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
   assert_eq!(total, 0, "the skipped tokens are not reported individually");
 }
 
@@ -4287,9 +4465,8 @@ fn sync_balanced_stray_closer_is_garbage_and_depth_saturates() {
   use crate::span::SimpleSpan;
 
   let mut input = bal_input(") 1 ;", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let hole = inp
       .sync_balanced(parens, |t| matches!(t.data(), BalTok::Semi))
@@ -4313,9 +4490,8 @@ fn sync_balanced_stray_closer_in_sync_set_syncs_at_depth_zero() {
   use crate::span::SimpleSpan;
 
   let mut input = bal_input("1 )", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let hole = inp
       .sync_balanced(parens, |t| matches!(t.data(), BalTok::RParen))
@@ -4339,9 +4515,8 @@ fn sync_balanced_opener_in_sync_set_syncs_before_counting() {
   use crate::span::SimpleSpan;
 
   let mut input = bal_input("1 (", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let hole = inp
       .sync_balanced(parens, |t| matches!(t.data(), BalTok::LParen))
@@ -4362,9 +4537,8 @@ fn sync_balanced_zero_skip_success_emits_no_diagnostic() {
   use crate::span::SimpleSpan;
 
   let mut input = bal_input("; 1", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let hole = inp
       .sync_balanced(parens, |t| matches!(t.data(), BalTok::Semi))
@@ -4382,7 +4556,12 @@ fn sync_balanced_zero_skip_success_emits_no_diagnostic() {
     assert!(matches!(next.data(), BalTok::Semi));
   }
 
-  let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+  let holes: usize = input
+    .emitter()
+    .skipped_regions()
+    .values()
+    .map(|g| g.len())
+    .sum();
   assert_eq!(holes, 0, "an empty hole is not reported");
 }
 
@@ -4397,9 +4576,8 @@ fn sync_balanced_finds_sync_point_in_prefilled_cache() {
   use generic_arraydeque::typenum::U2;
 
   let mut input = bal_input("1 ;", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     drop(inp.peek::<U2>().unwrap());
 
     let hole = inp
@@ -4415,9 +4593,14 @@ fn sync_balanced_finds_sync_point_in_prefilled_cache() {
     assert_eq!(*next.span_ref(), SimpleSpan::new(2, 3));
   }
 
-  let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+  let holes: usize = input
+    .emitter()
+    .skipped_regions()
+    .values()
+    .map(|g| g.len())
+    .sum();
   assert_eq!(holes, 1, "exactly one hole for the drained prefix");
-  let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
   assert_eq!(total, 0, "no per-token diagnostics for the drained prefix");
 }
 
@@ -4430,9 +4613,8 @@ fn failed_sync_balanced_leaves_no_trace() {
   use crate::span::SimpleSpan;
 
   let mut input = bal_input("1 2 3", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     assert!(
       inp
@@ -4464,9 +4646,14 @@ fn failed_sync_balanced_leaves_no_trace() {
     );
   }
 
-  let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+  let holes: usize = input
+    .emitter()
+    .skipped_regions()
+    .values()
+    .map(|g| g.len())
+    .sum();
   assert_eq!(holes, 0, "a failed hole is never reported");
-  let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
   assert_eq!(total, 0, "a failed balanced sync leaves no diagnostics");
 }
 
@@ -4479,9 +4666,8 @@ fn failed_sync_balanced_with_prefilled_cache_leaves_no_trace() {
   use generic_arraydeque::typenum::U2;
 
   let mut input = bal_input("1 2 3", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     drop(inp.peek::<U2>().unwrap());
 
     assert!(
@@ -4513,7 +4699,12 @@ fn failed_sync_balanced_with_prefilled_cache_leaves_no_trace() {
     );
   }
 
-  let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+  let holes: usize = input
+    .emitter()
+    .skipped_regions()
+    .values()
+    .map(|g| g.len())
+    .sum();
   assert_eq!(holes, 0, "a failed hole is never reported");
 }
 
@@ -4525,9 +4716,8 @@ fn failed_sync_balanced_reemits_crossed_lexer_error_once() {
   use crate::span::SimpleSpan;
 
   let mut input = bal_input("1 @ 2", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     assert!(
       inp
@@ -4542,11 +4732,16 @@ fn failed_sync_balanced_reemits_crossed_lexer_error_once() {
 
   let at = SimpleSpan::new(2, 3);
   assert_eq!(
-    emitter.errors().get(&at).map(|g| g.len()).unwrap_or(0),
+    input
+      .emitter()
+      .errors()
+      .get(&at)
+      .map(|g| g.len())
+      .unwrap_or(0),
     1,
     "the crossed lexer error re-emits exactly once on the genuine consume"
   );
-  let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
   assert_eq!(total, 1, "no other diagnostics survive the failed sync");
 }
 
@@ -4559,9 +4754,8 @@ fn sync_balanced_trip_commits_prefix_without_hole_diagnostic() {
   use crate::span::SimpleSpan;
 
   let mut input = bal_input("1 2 3 4", 2);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     assert!(
       inp
@@ -4584,16 +4778,23 @@ fn sync_balanced_trip_commits_prefix_without_hole_diagnostic() {
     );
   }
 
-  let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+  let holes: usize = input
+    .emitter()
+    .skipped_regions()
+    .values()
+    .map(|g| g.len())
+    .sum();
   assert_eq!(holes, 0, "a tripped (failed) sync reports no hole");
-  let limit = emitter
+  let limit = input
+    .emitter()
     .errors()
     .values()
     .flatten()
     .filter(|e| **e == ByValErr::Limit)
     .count();
   assert_eq!(limit, 1, "the limit trip is diagnosed exactly once");
-  let lex = emitter
+  let lex = input
+    .emitter()
     .errors()
     .values()
     .flatten()
@@ -4610,13 +4811,15 @@ fn sync_balanced_fatal_emitter_mid_skip_commits_the_error_token() {
   //   1 @ ;   (`@` is a lexer error spanning [2, 3); `Fatal` rejects its emission)
   use crate::span::SimpleSpan;
 
-  let mut input = Input::<BalLexer<'_>, BalFatalCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BalLexer<'_>, BalFatalCtx<'_>, ()>::with_state_and_context(
     "1 @ ;",
     TokenLimiter::with_limitation(usize::MAX),
-    DefaultCache::<'_, BalLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      crate::emitter::Fatal::<ByValErr>::new(),
+      DefaultCache::<'_, BalLexer<'_>>::default(),
+    ),
   );
-  let mut emitter = crate::emitter::Fatal::<ByValErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let r = inp.sync_balanced(parens, |t| matches!(t.data(), BalTok::Semi));
   assert_eq!(
@@ -4640,9 +4843,8 @@ fn sync_balanced_hole_emission_unwinds_on_rollback() {
   use crate::span::SimpleSpan;
 
   let mut input = bal_input("1 2 ;", usize::MAX);
-  let mut emitter = Verbose::<ByValErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let declined: Option<()> = inp.attempt(|inp| {
       let hole = inp
@@ -4669,13 +4871,19 @@ fn sync_balanced_hole_emission_unwinds_on_rollback() {
   }
 
   assert_eq!(
-    emitter
+    input
+      .emitter()
       .skipped_regions()
       .get(&crate::span::SimpleSpan::new(0, 3)),
     Some(&std::vec![2usize]),
     "exactly one hole record survives: the rolled-back one was unwound"
   );
-  let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+  let holes: usize = input
+    .emitter()
+    .skipped_regions()
+    .values()
+    .map(|g| g.len())
+    .sum();
   assert_eq!(holes, 1);
 }
 
@@ -4695,20 +4903,22 @@ fn sync_balanced_hole_emission_unwinds_on_rollback() {
 /// An unlimited `Silent` probe input: the attempts below speculate over real tokens, so the
 /// limiter must never trip (contrast [`probe_input`], whose limit of 2 is the point of it).
 fn unlimited_probe_input(src: &str) -> Input<'_, ProbeLexer<'_>, ProbeCtx<'_>, ()> {
-  let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_cache(
+  let context = crate::input::InputContext::new(
+    Silent::<ProbeErr>::new(),
+    DefaultCache::<'_, ProbeLexer<'_>>::default(),
+  );
+  Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
     src,
     ProbeLimiter::with_limit(usize::MAX),
-    cache,
+    context,
   )
 }
 
 #[test]
 fn attempt_closure_panic_releases_the_pinned_begin_point() {
   let mut input = unlimited_probe_input("1 2 3 4 5");
-  let mut emitter = Silent::<ProbeErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let baseline = inp.live_checkpoints_len();
 
     // An OLDER checkpoint — the restore target a stranded pin would poison.
@@ -4744,9 +4954,8 @@ fn attempt_closure_panic_releases_the_pinned_begin_point() {
 #[test]
 fn try_attempt_closure_panic_releases_the_pinned_begin_point() {
   let mut input = unlimited_probe_input("1 2 3 4 5");
-  let mut emitter = Silent::<ProbeErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let baseline = inp.live_checkpoints_len();
 
     let outer = inp.save();
@@ -5444,13 +5653,15 @@ fn run_entry(
 /// the entry point, then observe everything the caller could — including the token stream a retry
 /// would see.
 fn run_cell(cell: &MatrixCell, entry: Entry, prefill: usize) -> Obs {
-  let mut emitter = MatrixEmitter::new(cell.fatal_at);
-  let mut input = Input::<BalLexer<'_>, MatrixCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BalLexer<'_>, MatrixCtx<'_>, ()>::with_state_and_context(
     cell.src,
     TokenLimiter::with_limitation(cell.limit),
-    DefaultCache::<'_, BalLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      MatrixEmitter::new(cell.fatal_at),
+      DefaultCache::<'_, BalLexer<'_>>::default(),
+    ),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   // Both runs read the same prefix, so the sync starts from the same committed position.
   for _ in 0..cell.consume_first {
@@ -5858,14 +6069,16 @@ fn drain_under_lookahead(
 ) -> (std::vec::Vec<SimpleSpan>, usize, std::vec::Vec<ByValErr>) {
   use generic_arraydeque::typenum::{U1, U2, U3};
 
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<BalLexer<'_>, BalVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BalLexer<'_>, BalVerboseCtx<'_>, ()>::with_state_and_context(
     src,
     TokenLimiter::with_limitation(limit),
-    DefaultCache::<'_, BalLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<ByValErr>::new(),
+      DefaultCache::<'_, BalLexer<'_>>::default(),
+    ),
   );
   let (spans, tokens) = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     match pattern {
       Lookahead::None => {}
       Lookahead::Wide => {
@@ -5883,7 +6096,13 @@ fn drain_under_lookahead(
     }
     (spans, inp.state().tokens())
   };
-  let diagnostics = emitter.errors().values().flatten().cloned().collect();
+  let diagnostics = input
+    .emitter()
+    .errors()
+    .values()
+    .flatten()
+    .cloned()
+    .collect();
   (spans, tokens, diagnostics)
 }
 
@@ -5893,14 +6112,16 @@ fn widening_peek_does_not_resume_under_stale_state() {
 
   // "1 2 3 4 5 6 7" behind a two-token limit. Every widening step lexes exactly one more
   // token, so the newest retained token must carry the tally of the whole retained run.
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<BalLexer<'_>, BalVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BalLexer<'_>, BalVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6 7",
     TokenLimiter::with_limitation(2),
-    DefaultCache::<'_, BalLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<ByValErr>::new(),
+      DefaultCache::<'_, BalLexer<'_>>::default(),
+    ),
   );
   let consumed = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     assert_eq!(inp.peek::<U1>().unwrap().len(), 1);
     assert_eq!(
@@ -5941,7 +6162,8 @@ fn widening_peek_does_not_resume_under_stale_state() {
     consumed, 2,
     "a two-token limit bounds the drain at two tokens however deep the caller peeked"
   );
-  let limits = emitter
+  let limits = input
+    .emitter()
     .errors()
     .values()
     .flatten()
@@ -5958,13 +6180,15 @@ fn resume_frontier_pairs_state_with_offset() {
   // state that produced it, so a run of `k` retained tokens ends on a tally of `k`. Nothing
   // is consumed, so the committed tally stays at zero throughout — which is precisely why
   // resuming from it would be wrong.
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<BalLexer<'_>, BalVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BalLexer<'_>, BalVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3",
     TokenLimiter::new(),
-    DefaultCache::<'_, BalLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<ByValErr>::new(),
+      DefaultCache::<'_, BalLexer<'_>>::default(),
+    ),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert_eq!(inp.peek::<U1>().unwrap().len(), 1);
   assert_eq!(inp.cache().back().unwrap().state().tokens(), 1);
@@ -6225,13 +6449,15 @@ mod cst_event_oracles {
   /// One cell run under the recording sink: setup consume, prefill, the entry, the
   /// retry drain, then materialization.
   fn run_cell_cst(cell: &MatrixCell, entry: Entry, prefill: usize) -> rowan::GreenNode {
-    let mut sink = evt_sink(cell.src, cell.fatal_at);
-    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_context(
       cell.src,
       TokenLimiter::with_limitation(cell.limit),
-      DefaultCache::<LosslessBalLexer<'_>>::default(),
+      crate::input::InputContext::new(
+        evt_sink(cell.src, cell.fatal_at),
+        DefaultCache::<LosslessBalLexer<'_>>::default(),
+      ),
     );
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
 
     for _ in 0..cell.consume_first {
       inp
@@ -6266,13 +6492,14 @@ mod cst_event_oracles {
     while let Ok(Some(_)) = inp.next() {}
 
     drop(inp);
-    drop(input);
     // The door matches the run's terminal class. {early-halting cells} =
     // {limit cells} ∪ {fatal cells}, exactly (Rev 1 §A): the retry-drain stops only on
     // Ok(None)=EOF or Err=fatal-verdict, so the frontier reaches EOF for every entry iff the
     // lexer cannot poison (limit == MAX) AND no diagnostic can be rejected (fatal_at == None).
     // Everything else may leave an un-lexed tail — the finish_partial domain — for at least
     // one entry, and finish_partial is a byte-identical superset for the entries that do drain.
+    // The sink is the input's now, so the door takes it BY VALUE off the dead input.
+    let sink = input.into_emitter();
     let (green, _emitter) = if cell.limit == usize::MAX && cell.fatal_at.is_none() {
       sink.finish(K_ROOT)
     } else {
@@ -6316,13 +6543,15 @@ mod cst_event_oracles {
   /// failure — the no-trace law's event column.
   #[test]
   fn t1_failed_sync_over_drained_cache_leaves_zero_events() {
-    let mut sink = evt_sink("1 2 3", None);
-    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_context(
       "1 2 3",
       TokenLimiter::with_limitation(usize::MAX),
-      DefaultCache::<LosslessBalLexer<'_>>::default(),
+      crate::input::InputContext::new(
+        evt_sink("1 2 3", None),
+        DefaultCache::<LosslessBalLexer<'_>>::default(),
+      ),
     );
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
 
     inp.peek::<W2>().expect("prefill is clean");
     let matched = inp
@@ -6360,26 +6589,29 @@ mod cst_event_oracles {
     let drain = |inp: &mut EvtRef<'_, '_>| while let Ok(Some(_)) = inp.next() {};
 
     // The straight drive.
-    let mut straight = evt_sink(src, None);
-    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_context(
       src,
       TokenLimiter::with_limitation(usize::MAX),
-      DefaultCache::<LosslessBalLexer<'_>>::default(),
+      crate::input::InputContext::new(
+        evt_sink(src, None),
+        DefaultCache::<LosslessBalLexer<'_>>::default(),
+      ),
     );
-    let mut inp = input.as_ref(&mut straight);
+    let mut inp = input.as_ref();
     drain(&mut inp);
     drop(inp);
-    drop(input);
-    let (straight_green, straight_emitter) = straight.finish(K_ROOT);
+    let (straight_green, straight_emitter) = input.into_emitter().finish(K_ROOT);
 
     // The decline-then-reparse drive of the same final timeline.
-    let mut sink = evt_sink(src, None);
-    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
+    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_context(
       src,
       TokenLimiter::with_limitation(usize::MAX),
-      DefaultCache::<LosslessBalLexer<'_>>::default(),
+      crate::input::InputContext::new(
+        evt_sink(src, None),
+        DefaultCache::<LosslessBalLexer<'_>>::default(),
+      ),
     );
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
     let declined: Option<()> = inp.attempt(|inp2| {
       // Consume across the lexer error: four settles (`1`, the leading Ws, the Ws past the
       // crossed `@`, then `2`) plus the crossed error's diagnostic.
@@ -6410,8 +6642,7 @@ mod cst_event_oracles {
       "each committed token settles exactly once on the final timeline (T2)"
     );
     drop(inp);
-    drop(input);
-    let (green, emitter) = sink.finish(K_ROOT);
+    let (green, emitter) = input.into_emitter().finish(K_ROOT);
 
     assert_eq!(
       green.expect("balanced"),
@@ -6428,13 +6659,13 @@ mod cst_event_oracles {
   /// the whole event buffer (token events AND diagnostic slots) is untouched.
   #[test]
   fn t4_zero_skip_sync_emits_nothing() {
-    let mut sink = evt_sink("1; 2", None);
-    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
+    let sink = evt_sink("1; 2", None);
+    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_context(
       "1; 2",
       TokenLimiter::with_limitation(usize::MAX),
-      DefaultCache::<LosslessBalLexer<'_>>::default(),
+      crate::input::InputContext::new(sink, DefaultCache::<LosslessBalLexer<'_>>::default()),
     );
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
 
     inp.next().expect("collects").expect("1");
     let before = inp.emitter().events().len();
@@ -6467,13 +6698,13 @@ mod cst_event_oracles {
   #[test]
   fn trip_and_fatal_sync_arms_keep_settled_events() {
     // A sticky limit trip mid-skip: the two durable skipped tokens' events persist.
-    let mut sink = evt_sink("1 2 3 4 5 ;", None);
-    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
+    let sink = evt_sink("1 2 3 4 5 ;", None);
+    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_context(
       "1 2 3 4 5 ;",
       TokenLimiter::with_limitation(2),
-      DefaultCache::<LosslessBalLexer<'_>>::default(),
+      crate::input::InputContext::new(sink, DefaultCache::<LosslessBalLexer<'_>>::default()),
     );
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
     let matched = inp
       .sync_through(|t| matches!(t.data(), LosslessBalTok::Semi), || None)
       .expect("a trip is not a fatal exit");
@@ -6496,13 +6727,13 @@ mod cst_event_oracles {
 
     // A fatal rejection of a skipped token's diagnostic: the token settled BEFORE the
     // verdict, so its event rides out with the committed position.
-    let mut sink = evt_sink("1 2 3 ; 4", Some(SimpleSpan { start: 2, end: 3 }));
-    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_cache(
+    let sink = evt_sink("1 2 3 ; 4", Some(SimpleSpan { start: 2, end: 3 }));
+    let mut input = Input::<LosslessBalLexer<'_>, EvtCtx<'_>, ()>::with_state_and_context(
       "1 2 3 ; 4",
       TokenLimiter::with_limitation(usize::MAX),
-      DefaultCache::<LosslessBalLexer<'_>>::default(),
+      crate::input::InputContext::new(sink, DefaultCache::<LosslessBalLexer<'_>>::default()),
     );
-    let mut inp = input.as_ref(&mut sink);
+    let mut inp = input.as_ref();
     let res = inp.sync_to(|t| matches!(t.data(), LosslessBalTok::Semi), || None);
     assert!(res.is_err(), "the emitter rejects token 2's diagnostic");
     assert_eq!(
@@ -6801,10 +7032,12 @@ fn f2_sync_to_run(
   let tally = ScanTally::with_limit(limit);
   let odometer = tally.odometer();
   let cache = DefaultCache::<'_, ScanLexer<'_>>::default();
-  let mut emitter = ScanLedger::default();
-  let mut input =
-    Input::<ScanLexer<'_>, ScanLedgerCtx<'_>, ()>::with_state_and_cache(src, tally, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<ScanLexer<'_>, ScanLedgerCtx<'_>, ()>::with_state_and_context(
+    src,
+    tally,
+    crate::input::InputContext::new(ScanLedger::default(), cache),
+  );
+  let mut inp = input.as_ref();
 
   if warm {
     let _ = inp.peek::<U3>().unwrap();
@@ -6953,10 +7186,12 @@ fn f2_sync_through_run(
   let tally = ScanTally::with_limit(limit);
   let odometer = tally.odometer();
   let cache = DefaultCache::<'_, ScanLexer<'_>>::default();
-  let mut emitter = ScanLedger::default();
-  let mut input =
-    Input::<ScanLexer<'_>, ScanLedgerCtx<'_>, ()>::with_state_and_cache(src, tally, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<ScanLexer<'_>, ScanLedgerCtx<'_>, ()>::with_state_and_context(
+    src,
+    tally,
+    crate::input::InputContext::new(ScanLedger::default(), cache),
+  );
+  let mut inp = input.as_ref();
 
   if warm {
     let _ = inp.peek::<U3>().unwrap();
@@ -7051,10 +7286,12 @@ fn r9_f2_panicking_state_clone_settles_the_entry_mark() {
   // of the capture.
   let tally = ScanTally::with_limit(usize::MAX);
   let cache = DefaultCache::<'_, ScanLexer<'_>>::default();
-  let mut emitter = ScanLedger::default();
-  let mut input =
-    Input::<ScanLexer<'_>, ScanLedgerCtx<'_>, ()>::with_state_and_cache("ab cd ef", tally, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<ScanLexer<'_>, ScanLedgerCtx<'_>, ()>::with_state_and_context(
+    "ab cd ef",
+    tally,
+    crate::input::InputContext::new(ScanLedger::default(), cache),
+  );
+  let mut inp = input.as_ref();
 
   arm_state_clone(2);
   let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -7781,13 +8018,12 @@ fn r9_settle_path_span_clone_inventory() {
   use generic_arraydeque::typenum::U3;
 
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  let mut emitter = BombEmitter::default();
-  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let _ = inp.peek::<U3>().unwrap();
 
   arm_span_clone(0);
@@ -7803,13 +8039,15 @@ fn r9_settle_path_span_clone_inventory() {
      `r9_f3_panicking_report_span_clone_does_not_lose_a_token`."
   );
 
-  let mut emitter2 = BombEmitter::default();
-  let mut input2 = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+  let mut input2 = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    DefaultCache::<'_, BombLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      BombEmitter::default(),
+      DefaultCache::<'_, BombLexer<'_>>::default(),
+    ),
   );
-  let mut inp2 = input2.as_ref(&mut emitter2);
+  let mut inp2 = input2.as_ref();
   arm_span_clone(0);
   let _ = inp2.sync_through(|_| false, || None);
   disarm_span_clone();
@@ -7859,10 +8097,12 @@ fn r9_f3_panicking_report_span_clone_does_not_lose_a_token() {
 
   let tally = BombTally::default();
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  let mut emitter = BombEmitter::default();
-  let mut input =
-    Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache("ab cd ef gh", tally, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    "ab cd ef gh",
+    tally,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
+  );
+  let mut inp = input.as_ref();
   let _ = inp.peek::<U3>().unwrap();
 
   arm_span_clone(3);
@@ -7919,10 +8159,12 @@ fn r9_f1_rewinding_unwind_restores_the_poison_boundary() {
     limit: 1,
   };
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  let mut emitter = BombEmitter::panicking();
-  let mut input =
-    Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache("ab cd ef gh", tally, cache);
-  let mut inp = input.as_ref(&mut emitter);
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    "ab cd ef gh",
+    tally,
+    crate::input::InputContext::new(BombEmitter::panicking(), cache),
+  );
+  let mut inp = input.as_ref();
 
   let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
     let _ = inp.sync_through(|_| false, || None);
@@ -7962,15 +8204,14 @@ fn r9_f2_panicking_eof_settle_still_settles_the_mark() {
   // `usize` — `BombOffset` is that missing witness, and
   // `r9_restore_entry_is_atomic_at_every_offset_clone` is the measurement it made possible.)
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  let mut emitter = BombEmitter::default();
   let mut input =
-    Input::<BombLexer<'_>, BombCtx<'_>, (), crate::input::Partial>::with_state_and_cache(
+    Input::<BombLexer<'_>, BombCtx<'_>, (), crate::input::Partial>::with_state_and_context(
       "ab cd ef gh",
       BombTally::default(),
-      cache,
+      crate::input::InputContext::new(BombEmitter::default(), cache),
     );
   input.seal();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   arm_into_state(true);
   let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -8119,13 +8360,12 @@ fn r9_stop_exit_panic_still_commits_the_diagnosed_prefix() {
   use generic_arraydeque::typenum::U3;
 
   let cache = <BombCache<'_, BombLexer<'_>> as crate::cache::Cache<'_, BombLexer<'_>, ()>>::new();
-  let mut emitter = BombEmitter::default();
-  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let _ = inp.peek::<U3>().unwrap();
 
   arm_push_front(true);
@@ -8169,13 +8409,12 @@ fn r9_stop_exit_panic_still_commits_the_diagnosed_prefix() {
 /// and they are exactly the two whose stop dispositions differ from their end-of-input ones.
 fn rewinding_stop_settles(balanced: bool) -> (usize, usize, usize) {
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  let mut emitter = BombEmitter::default();
-  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   if balanced {
     use crate::input::Balance;
@@ -8202,13 +8441,12 @@ fn rewinding_stop_settles(balanced: bool) -> (usize, usize, usize) {
 /// The same over a scan that matches nothing and reaches end of input.
 fn rewinding_no_match_settles(balanced: bool) -> (usize, usize, usize) {
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  let mut emitter = BombEmitter::default();
-  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   if balanced {
     use crate::input::Balance;
@@ -8275,13 +8513,12 @@ fn r9_balanced_stop_exit_panic_keeps_the_prefix_like_its_own_stop_does() {
   use generic_arraydeque::typenum::U3;
 
   let cache = <BombCache<'_, BombLexer<'_>> as crate::cache::Cache<'_, BombLexer<'_>, ()>>::new();
-  let mut emitter = BombEmitter::default();
-  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   reset_lex_calls();
   let _ = inp.peek::<U3>().unwrap();
 
@@ -8337,13 +8574,12 @@ fn stop_mid_cache_then_drain(balanced: bool) -> ((usize, usize), std::vec::Vec<(
   use generic_arraydeque::typenum::U3;
 
   let cache = <BombCache<'_, BombLexer<'_>> as crate::cache::Cache<'_, BombLexer<'_>, ()>>::new();
-  let mut emitter = BombEmitter::default();
-  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   // Three resident: (0,2) (3,5) (6,8). The scan skips the first and stops on the second, so (6,8)
   // is still retained when the stop settle panics.
   let _ = inp.peek::<U3>().unwrap();
@@ -8413,13 +8649,12 @@ fn frontier_commit_interrupted_in(
   use generic_arraydeque::typenum::U3;
 
   let cache = <BombCache<'_, BombLexer<'_>> as crate::cache::Cache<'_, BombLexer<'_>, ()>>::new();
-  let mut emitter = BombEmitter::default();
-  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCacheCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let _ = inp.peek::<U3>().unwrap();
 
   arm_state_drop(at);
@@ -8498,13 +8733,12 @@ fn r9_state_drop_inventory() {
 /// `(committed span, committed state's tally)`.
 fn eof_commit_interrupted() -> ((usize, usize), usize) {
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  let mut emitter = BombEmitter::default();
-  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   arm_into_state(true);
   let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -8543,16 +8777,16 @@ fn observer_panic_then_drain(driver: u8) -> (std::vec::Vec<(usize, usize)>, (usi
   use generic_arraydeque::typenum::U3;
 
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  let mut emitter = BombEmitter {
+  let emitter = BombEmitter {
     panic_on_commit_token: true,
     ..BombEmitter::default()
   };
-  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(emitter, cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   // Three resident, so the token the consume takes has a younger suffix behind it.
   let _ = inp.peek::<U3>().unwrap();
 
@@ -8612,13 +8846,12 @@ fn r9_observer_panic_on_a_cache_hit_does_not_skip_the_token() {
 /// that sits between adopt's two assignments. Returns `(committed span, committed tally)`.
 fn adopt_span_drop_interrupted(at: usize) -> ((usize, usize), usize, usize) {
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  let mut emitter = BombEmitter::default();
-  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   arm_span_drop(at);
   let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -8678,13 +8911,12 @@ fn consume_replaced_span_drop(at: usize) -> ((usize, usize), usize) {
   use generic_arraydeque::typenum::U3;
 
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  let mut emitter = BombEmitter::default();
-  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
     BombTally::default(),
-    cache,
+    crate::input::InputContext::new(BombEmitter::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let _ = inp.peek::<U3>().unwrap();
 
   arm_span_drop(at);
@@ -8772,14 +9004,13 @@ fn r9_set_state_is_atomic_at_every_caller_drop() {
   // `run(Some(n))` detonates the n-th and returns what a host that caught it can observe.
   fn run(bomb_at: Option<usize>) -> (usize, usize, usize, usize, bool, bool) {
     let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-    let mut emitter = BombEmitter::default();
     let mut input =
-      Input::<BombLexer<'_>, BombCtx<'_>, (), crate::input::Complete>::with_state_and_cache(
+      Input::<BombLexer<'_>, BombCtx<'_>, (), crate::input::Complete>::with_state_and_context(
         "ab cd ef gh",
         BombTally::default(),
-        cache,
+        crate::input::InputContext::new(BombEmitter::default(), cache),
       );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Give the re-key something to tear down: cached entries, each carrying an `L::State`.
     let _ = inp.peek::<U2>();
@@ -9091,14 +9322,13 @@ fn r9_restore_entry_is_atomic_at_every_offset_clone() {
   fn run(bomb_at: Option<usize>) -> (usize, usize, usize, usize) {
     let src = BombSrc("ab cd ef gh");
     let cache = DefaultCache::<'_, OffsetLexer<'_>>::default();
-    let mut emitter = BombEmitter::default();
     let mut input =
-      Input::<OffsetLexer<'_>, OffsetCtx<'_>, (), crate::input::Complete>::with_state_and_cache(
+      Input::<OffsetLexer<'_>, OffsetCtx<'_>, (), crate::input::Complete>::with_state_and_context(
         &src,
         BombTally::default(),
-        cache,
+        crate::input::InputContext::new(BombEmitter::default(), cache),
       );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     arm_offset_clone(bomb_at.unwrap_or(0));
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -9193,14 +9423,13 @@ fn r9_restore_unchecked_is_all_or_nothing_at_every_caller_drop() {
   /// one to any consumer, and demanding it be all-or-nothing would be demanding the wrong thing.
   fn run(state_bomb: usize, span_bomb: usize, restore: bool) -> (usize, usize, usize, usize, bool) {
     let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-    let mut emitter = BombEmitter::default();
     let mut input =
-      Input::<BombLexer<'_>, BombCtx<'_>, (), crate::input::Complete>::with_state_and_cache(
+      Input::<BombLexer<'_>, BombCtx<'_>, (), crate::input::Complete>::with_state_and_context(
         "ab cd ef gh ij kl",
         BombTally::default(),
-        cache,
+        crate::input::InputContext::new(BombEmitter::default(), cache),
       );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Save with the cache EMPTY, so the checkpoint's cursor equals the position the post-save
     // entries will start at. `reconcile_cache_geometry` then finds `cursor == front_start` and
@@ -9297,14 +9526,13 @@ fn r9_set_state_is_atomic_at_every_offset_clone() {
   fn run(bomb_at: usize) -> (usize, usize, usize) {
     let src = BombSrc("ab cd ef gh");
     let cache = DefaultCache::<'_, OffsetLexer<'_>>::default();
-    let mut emitter = BombEmitter::default();
     let mut input =
-      Input::<OffsetLexer<'_>, OffsetCtx<'_>, (), crate::input::Complete>::with_state_and_cache(
+      Input::<OffsetLexer<'_>, OffsetCtx<'_>, (), crate::input::Complete>::with_state_and_context(
         &src,
         BombTally::default(),
-        cache,
+        crate::input::InputContext::new(BombEmitter::default(), cache),
       );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // Old-regime facts the re-key is supposed to clear, so "not re-keyed" is observable.
     let _ = inp.peek::<U2>();
@@ -9360,8 +9588,7 @@ fn r9_set_state_is_atomic_at_every_offset_clone() {
 #[test]
 fn wapi_b_try_expect_take_or_stop_errs_at_a_latched_boundary() {
   let (mut input, _scanned) = probe_input("1 2 3");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(inp.next().unwrap().is_some());
   assert!(inp.next().unwrap().is_some());
   assert!(
@@ -9391,8 +9618,7 @@ fn wapi_b_try_expect_take_classifies_before_it_takes() {
   // head. If `take` ran before `classify`, the second call would read the *next*
   // token (or none at all) and the span would not be 0..1.
   let (mut input, _scanned) = probe_input("1 2");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(
     matches!(
       inp.try_expect_take(|_| false, |sp| Ok(sp.span.start())),
@@ -9412,8 +9638,7 @@ fn wapi_b_try_expect_take_project_error_is_a_real_error_post_commit() {
   // `project` runs after the commit, so its error is an error and not a decline —
   // and the token it errored on is gone: the next take reads the SECOND token.
   let (mut input, _scanned) = probe_input("1 2");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let out: Result<Option<usize>, ProbeErr> =
     inp.try_expect_take(|_| true, |_sp| Err(ProbeErr::Lex));
   assert_eq!(
@@ -9436,8 +9661,7 @@ fn wapi_b_try_expect_take_project_error_is_a_real_error_post_commit() {
 #[test]
 fn wapi_b_peek_kind_is_terminal_aware_at_a_latched_boundary() {
   let (mut input, _scanned) = probe_input("1 2 3");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(inp.next().unwrap().is_some());
   assert!(inp.next().unwrap().is_some());
   assert!(
@@ -9467,8 +9691,7 @@ fn wapi_b_peek_kind_is_terminal_aware_at_a_latched_boundary() {
 fn wapi_b_peek_kind_reads_genuine_eof_as_none() {
   // The positive twin: under the limit, exhaustion is Ok(None), not an error.
   let (mut input, _scanned) = probe_input("1");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(inp.next().unwrap().is_some());
   assert!(
     matches!(inp.peek_kind(), Ok(None)),
@@ -9483,8 +9706,7 @@ fn wapi_b_peek_kind_reads_genuine_eof_as_none() {
 #[test]
 fn wapi_b_peek_head_map_does_not_consume_the_head() {
   let (mut input, _scanned) = probe_input("1 2");
-  let mut emitter = Silent::<ProbeErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert_eq!(
     inp.peek_head_map(|sp| (sp.span.start(), sp.span.end())),
     Ok(Some((0, 1)))
@@ -9571,15 +9793,17 @@ type TermCtx<'a> = (Silent<TermErr>, DefaultCache<'a, ProbeLexer<'a>>);
 /// The `probe_input` fixture retyped onto the terminal-preserving error.
 fn term_input(src: &str) -> Input<'_, ProbeLexer<'_>, TermCtx<'_>, ()> {
   let limiter = ProbeLimiter::with_limit(2);
-  let cache = DefaultCache::<'_, ProbeLexer<'_>>::default();
-  Input::<ProbeLexer<'_>, TermCtx<'_>, ()>::with_state_and_cache(src, limiter, cache)
+  let context = crate::input::InputContext::new(
+    Silent::<TermErr>::new(),
+    DefaultCache::<'_, ProbeLexer<'_>>::default(),
+  );
+  Input::<ProbeLexer<'_>, TermCtx<'_>, ()>::with_state_and_context(src, limiter, context)
 }
 
 #[test]
 fn wapi_b_peek_kind_marks_the_eot_terminal_at_a_latched_boundary() {
   let mut input = term_input("1 2 3");
-  let mut emitter = Silent::<TermErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(inp.next().unwrap().is_some());
   assert!(inp.next().unwrap().is_some());
   assert!(
@@ -9652,8 +9876,15 @@ fn around_capture<'inp>(
 /// A fixture with something to lose: one older live checkpoint (so a stranded entry reads as a
 /// growth rather than as the only entry), a warm cache, and a position off zero.
 fn d50_input(src: &str) -> Input<'_, BombLexer<'_>, BombCtx<'_>, ()> {
-  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(src, BombTally::default(), cache)
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  );
+  Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    src,
+    BombTally::default(),
+    context,
+  )
 }
 
 #[test]
@@ -9661,9 +9892,8 @@ fn d50_capture_survives_a_panicking_span_clone() {
   use generic_arraydeque::typenum::U2;
 
   let mut input = d50_input("ab cd ef gh");
-  let mut emitter = BombEmitter::default();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     // An older capture, so the live stack and the emitter's mark list are both non-empty: a
     // stranded registration shows as 1 → 2, which an empty-world fixture could not tell from 0 → 1
     // being the legitimate one.
@@ -9714,9 +9944,8 @@ fn d50_capture_survives_a_panicking_state_clone() {
   use generic_arraydeque::typenum::U2;
 
   let mut input = d50_input("ab cd ef gh");
-  let mut emitter = BombEmitter::default();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let _older = inp.save();
     let _ = inp.next().unwrap().expect("ab");
     let _ = inp.peek::<U2>().unwrap();
@@ -9758,9 +9987,8 @@ fn d50_capture_survives_a_panicking_foreign_emitter_checkpoint() {
   use generic_arraydeque::typenum::U2;
 
   let mut input = d50_input("ab cd ef gh");
-  let mut emitter = BombEmitter::default();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let _older = inp.save();
     let _ = inp.next().unwrap().expect("ab");
     let _ = inp.peek::<U2>().unwrap();
@@ -9820,15 +10048,21 @@ fn d50_capture_survives_a_panicking_foreign_emitter_checkpoint() {
 // mechanism is reachable here, and only here.
 
 fn front_watermark_input(src: &str) -> Input<'_, BombLexer<'_>, BombCtx<'_>, ()> {
-  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
-  Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(src, BombTally::default(), cache)
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  );
+  Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    src,
+    BombTally::default(),
+    context,
+  )
 }
 
 #[test]
 fn a_restore_below_the_flag_disarms_the_front_report_watermark() {
   let mut input = front_watermark_input("ab cd");
-  let mut emitter = BombEmitter::default();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   // The checkpoint predates the report, so restoring it must unmake both halves.
   let below = inp.save();
@@ -9869,8 +10103,7 @@ fn a_restore_below_the_flag_disarms_the_front_report_watermark() {
 fn wapi_b_peek_kind_leaves_a_genuine_eof_unmarked() {
   // The other direction: a mark applied unconditionally would flip this.
   let mut input = term_input("1");
-  let mut emitter = Silent::<TermErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(inp.next().unwrap().is_some());
   assert_eq!(
     inp.peek_kind(),
@@ -9882,8 +10115,7 @@ fn wapi_b_peek_kind_leaves_a_genuine_eof_unmarked() {
 #[test]
 fn a_restore_above_the_flag_keeps_the_front_report_watermark() {
   let mut input = front_watermark_input("ab cd");
-  let mut emitter = BombEmitter::default();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let end = 2usize;
   let err = UnexpectedToken::expected_one(BombSpan { start: 0, end }, BombKind).with_found(BombTok);

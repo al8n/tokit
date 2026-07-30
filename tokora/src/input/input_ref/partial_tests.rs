@@ -143,17 +143,19 @@ struct Run {
 /// Drives a **partial** input over `src` with the given `is_final`, draining `next()` to its first
 /// stop.
 fn run_partial(src: &str, is_final: bool) -> Run {
-  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_context(
     src,
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
   if is_final {
     input.seal();
   }
-  let mut emitter = Verbose::<PErr>::new();
   let (kinds, result) = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let mut kinds = std::vec::Vec::new();
     let result = loop {
       match inp.next() {
@@ -164,7 +166,7 @@ fn run_partial(src: &str, is_final: bool) -> Run {
     };
     (kinds, result)
   };
-  let emitted = emitter.errors().values().map(|g| g.len()).sum();
+  let emitted = input.emitter().errors().values().map(|g| g.len()).sum();
   Run {
     kinds,
     result,
@@ -175,14 +177,16 @@ fn run_partial(src: &str, is_final: bool) -> Run {
 /// Drives a **complete** input over `src` — the oracle the `is_final == true` partial run must
 /// match.
 fn run_complete(src: &str) -> Run {
-  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_context(
     src,
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
   let (kinds, result) = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let mut kinds = std::vec::Vec::new();
     let result = loop {
       match inp.next() {
@@ -193,7 +197,7 @@ fn run_complete(src: &str) -> Run {
     };
     (kinds, result)
   };
-  let emitted = emitter.errors().values().map(|g| g.len()).sum();
+  let emitted = input.emitter().errors().values().map(|g| g.len()).sum();
   Run {
     kinds,
     result,
@@ -439,13 +443,15 @@ type FrontierCtx<'a> = (Verbose<PErr>, DefaultCache<'a, FrontierLexer<'a>>);
 /// Drives a non-final partial input over `src` with the hand-written lexer in `mode`,
 /// draining `next()` to its first stop.
 fn run_frontier(src: &str, mode: EofSpan) -> Result<Option<()>, PErr> {
-  let mut input = Input::<FrontierLexer<'_>, FrontierCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<FrontierLexer<'_>, FrontierCtx<'_>, (), Partial>::with_state_and_context(
     src,
     mode,
-    DefaultCache::<'_, FrontierLexer<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, FrontierLexer<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   loop {
     match inp.next() {
       Ok(Some(_)) => {}
@@ -546,17 +552,19 @@ struct Trace {
 
 /// Drains a partial input over `src` at the given `is_final`, capturing the full [`Trace`].
 fn trace_partial(src: &str, is_final: bool) -> Trace {
-  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_context(
     src,
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
   if is_final {
     input.seal();
   }
-  let mut emitter = Verbose::<PErr>::new();
   let (tokens, result) = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let mut tokens = std::vec::Vec::new();
     let result = loop {
       match inp.next() {
@@ -567,7 +575,7 @@ fn trace_partial(src: &str, is_final: bool) -> Trace {
     };
     (tokens, result)
   };
-  let errors = collect_errors(&emitter);
+  let errors = collect_errors(input.emitter());
   Trace {
     tokens,
     errors,
@@ -578,14 +586,16 @@ fn trace_partial(src: &str, is_final: bool) -> Trace {
 /// Drains a complete input over `src`, capturing the full [`Trace`] — the oracle a chunked partial
 /// run is checked against.
 fn trace_complete(src: &str) -> Trace {
-  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_context(
     src,
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
   let (tokens, result) = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let mut tokens = std::vec::Vec::new();
     let result = loop {
       match inp.next() {
@@ -596,7 +606,7 @@ fn trace_complete(src: &str) -> Trace {
     };
     (tokens, result)
   };
-  let errors = collect_errors(&emitter);
+  let errors = collect_errors(input.emitter());
   Trace {
     tokens,
     errors,
@@ -604,7 +614,7 @@ fn trace_complete(src: &str) -> Trace {
   }
 }
 
-/// Collects every emitted lexer error's `(start, end)` in span order from a verbose emitter.
+/// Collects every emitted lexer error's `(start, end)` in span order from a verbose input.emitter().
 fn collect_errors(emitter: &Verbose<PErr>) -> std::vec::Vec<(usize, usize)> {
   emitter
     .errors()
@@ -816,17 +826,19 @@ fn limit_diags(emitter: &Verbose<PErr>) -> usize {
 /// Drains `next()` over a **partial** input behind a `limit`-token limiter.
 fn run_limited(src: &str, limit: usize, is_final: bool) -> LimRun {
   let tracker = LimitTracker::with_limit(limit);
-  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Partial>::with_state_and_context(
     src,
     tracker,
-    DefaultCache::<'_, LimLex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, LimLex<'_>>::default(),
+    ),
   );
   if is_final {
     input.seal();
   }
-  let mut emitter = Verbose::<PErr>::new();
   let (kinds, result, poisoned) = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let mut kinds = std::vec::Vec::new();
     let result = loop {
       match inp.next() {
@@ -840,7 +852,7 @@ fn run_limited(src: &str, limit: usize, is_final: bool) -> LimRun {
   LimRun {
     kinds,
     result,
-    limit_diags: limit_diags(&emitter),
+    limit_diags: limit_diags(input.emitter()),
     poisoned,
   }
 }
@@ -886,17 +898,19 @@ fn frontier_limit_trip_is_terminal_on_the_peek_fill() {
   // the caller's follow-up `next()` would then be told Incomplete — the same mask, one path over.
   let tracker = LimitTracker::with_limit(2);
   let scanned = tracker.counter();
-  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Partial>::with_state_and_context(
     "a b c",
     tracker,
-    DefaultCache::<'_, LimLex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, LimLex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
   let (peeked, poisoned, after) = {
     use generic_arraydeque::typenum::U4;
 
     // Born open: a fresh `Partial` input is non-final until a driver seals it.
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     // A window of 4 over a 3-token source: the fill runs into the tripping token.
     let peeked = inp
@@ -923,7 +937,7 @@ fn frontier_limit_trip_is_terminal_on_the_peek_fill() {
     "the peek fill latched the poison boundary on the frontier trip"
   );
   assert_eq!(
-    limit_diags(&emitter),
+    limit_diags(input.emitter()),
     1,
     "the peek fill emitted the limit diagnostic rather than silently withholding it"
   );
@@ -1156,14 +1170,16 @@ fn refill_loop_still_refills_on_a_genuine_incomplete() {
 /// input final, and the frontier must still owe `Incomplete` afterwards.
 #[test]
 fn speculation_cannot_end_the_stream() {
-  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_context(
     "ab cd",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
   // NOT sealed: the driver has not said the stream ended, so `cd` may yet become `cdef`.
-  let mut emitter = Verbose::<PErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(!inp.is_final(), "a fresh partial input is born open");
 
   // `ab` is clear of the frontier and yields normally.
@@ -1232,17 +1248,19 @@ fn speculation_cannot_end_the_stream() {
 /// rollback) — it closes the leak the sibling test guards and opens this hang in its place.
 #[test]
 fn rollback_cannot_un_end_a_sealed_stream() {
-  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_context(
     "ab cd",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
   // The world fact: the stream has ENDED. Only the driver can say this, and only here — with no
   // handle alive, which is exactly when a driver can honestly know it.
   input.seal();
 
-  let mut emitter = Verbose::<PErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(inp.is_final(), "the driver sealed the stream");
 
   // The same full speculative surface, all of it abandoned.
@@ -1312,20 +1330,22 @@ fn rollback_cannot_un_end_a_sealed_stream() {
 /// quietly toggle.
 #[test]
 fn the_seal_is_monotone() {
-  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_context(
     "ab cd",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
-  assert!(!input.as_ref(&mut emitter).is_final(), "born open");
+  assert!(!input.as_ref().is_final(), "born open");
 
   input.seal();
-  assert!(input.as_ref(&mut emitter).is_final(), "sealed");
+  assert!(input.as_ref().is_final(), "sealed");
 
   input.seal();
   assert!(
-    input.as_ref(&mut emitter).is_final(),
+    input.as_ref().is_final(),
     "sealing an already-sealed stream is a no-op, never a toggle"
   );
 }
@@ -1492,21 +1512,23 @@ fn is_incomplete_error_routes_through_maybe_incomplete_at_partial() {
 /// hands the handle to `$body`, and evaluates to `(body_output, emitted_diagnostics)`.
 macro_rules! with_partial {
   ($src:expr, $is_final:expr, |$inp:ident| $body:expr) => {{
-    let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_context(
       $src,
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(
+        Verbose::<PErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
     );
     if $is_final {
       input.seal();
     }
-    let mut emitter = Verbose::<PErr>::new();
     let out = {
       #[allow(unused_mut)]
-      let mut $inp = input.as_ref(&mut emitter);
+      let mut $inp = input.as_ref();
       $body
     };
-    let emitted: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let emitted: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     (out, emitted)
   }};
 }
@@ -1545,14 +1567,16 @@ fn try_expect_or_stop_partial_matrix() {
   // even though the tripping token sits at the non-final frontier. ("a b c": the two
   // words under the limit are consumed, then the attempt's scan trips on `c`.)
   let tracker = LimitTracker::with_limit(2);
-  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Partial>::with_state_and_context(
     "a b c",
     tracker,
-    DefaultCache::<'_, LimLex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, LimLex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     assert!(inp.next().unwrap().is_some(), "first word under the limit");
     assert!(inp.next().unwrap().is_some(), "second word under the limit");
     let err = inp
@@ -1564,7 +1588,7 @@ fn try_expect_or_stop_partial_matrix() {
     );
   }
   assert_eq!(
-    limit_diags(&emitter),
+    limit_diags(input.emitter()),
     1,
     "the trip's own diagnostic reached the emitter"
   );
@@ -1720,14 +1744,16 @@ fn try_expect_poison_at_frontier_beats_incomplete() {
   // limiter, non-final — the tripping third word ends exactly at the buffer end, and the
   // trip must fire as `Limit` (diagnostic + latch), never be re-raised as `Incomplete`.
   let tracker = LimitTracker::with_limit(2);
-  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Partial>::with_state_and_context(
     "a b c",
     tracker,
-    DefaultCache::<'_, LimLex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, LimLex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
   let (results, poisoned) = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let a = inp.try_expect(|_| true).map(|t| t.is_some());
     let b = inp.try_expect(|_| true).map(|t| t.is_some());
     let c = inp.try_expect(|_| true).map(|t| t.is_some());
@@ -1745,7 +1771,7 @@ fn try_expect_poison_at_frontier_beats_incomplete() {
   );
   assert!(poisoned, "the poison boundary latched at the trip");
   assert_eq!(
-    limit_diags(&emitter),
+    limit_diags(input.emitter()),
     1,
     "the trip was diagnosed exactly once"
   );
@@ -1906,14 +1932,16 @@ fn gate_propagates_frontier_incomplete_out_of_repeated() {
   // Non-final: element 1 completes mid-buffer; element 2's word is cut at the frontier.
   // The collection loop's resilient arm must NOT spend that `Incomplete` as a diagnostic
   // — the gate re-raises it, the loop stops, and the emitter log is untouched.
-  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_context(
     "foo 1 ba",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
   let out: Result<std::vec::Vec<PKind>, PErr> = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     word_then_num.repeated().collect().parse_input(&mut inp)
   };
   assert_eq!(
@@ -1921,7 +1949,7 @@ fn gate_propagates_frontier_incomplete_out_of_repeated() {
     Err(PErr::Incomplete(8)),
     "the frontier incomplete PROPAGATES"
   );
-  let emitted: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let emitted: usize = input.emitter().errors().values().map(|g| g.len()).sum();
   assert_eq!(emitted, 0, "no emit-and-continue: the log is clean");
 }
 
@@ -1931,31 +1959,41 @@ fn gate_is_inert_when_final_and_matches_complete() {
   // The same input sealed: the missing number after "bar" is a genuine error and the
   // resilient arm emits-and-continues — byte-for-byte the Complete-mode outcome.
   fn drive_partial_final(src: &str) -> (Result<std::vec::Vec<PKind>, PErr>, usize) {
-    let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_context(
       src,
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(
+        Verbose::<PErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
     );
     input.seal();
-    let mut emitter = Verbose::<PErr>::new();
     let out = {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
       word_then_num.repeated().collect().parse_input(&mut inp)
     };
-    (out, emitter.errors().values().map(|g| g.len()).sum())
+    (
+      out,
+      input.emitter().errors().values().map(|g| g.len()).sum(),
+    )
   }
   fn drive_complete(src: &str) -> (Result<std::vec::Vec<PKind>, PErr>, usize) {
-    let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_context(
       src,
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(
+        Verbose::<PErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
     );
-    let mut emitter = Verbose::<PErr>::new();
     let out = {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
       word_then_num.repeated().collect().parse_input(&mut inp)
     };
-    (out, emitter.errors().values().map(|g| g.len()).sum())
+    (
+      out,
+      input.emitter().errors().values().map(|g| g.len()).sum(),
+    )
   }
   let sealed = drive_partial_final("foo 1 bar");
   let complete = drive_complete("foo 1 bar");
@@ -1987,13 +2025,15 @@ fn gate_is_inert_when_final_and_matches_complete() {
 fn probe_close_at_genuine_eof_is_eof() {
   // A complete input drained to exhaustion: the probe reports genuine end of input as
   // `Eof` — the delimited drivers' one and only `Unclosed` path.
-  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_context(
     "a b",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   assert!(matches!(inp.next(), Ok(Some(_))));
   assert!(matches!(inp.next(), Ok(Some(_))));
   assert!(matches!(inp.next(), Ok(None)), "the input is exhausted");
@@ -2010,15 +2050,17 @@ fn probe_close_at_a_terminal_trip_is_tripped_not_eof() {
   // terminal stop as `Tripped`, NOT `Eof`, which a delimited driver would otherwise grow
   // into a spurious `Unclosed`. The probe emits nothing itself: the trip's own limit
   // diagnostic stays the only one recorded.
-  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Partial>::with_state_and_context(
     "a b c",
     LimitTracker::with_limit(2),
-    DefaultCache::<'_, LimLex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, LimLex<'_>>::default(),
+    ),
   );
   input.seal();
-  let mut emitter = Verbose::<PErr>::new();
   let status = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     assert!(matches!(inp.next(), Ok(Some(_))), "first under-limit word");
     assert!(matches!(inp.next(), Ok(Some(_))), "second under-limit word");
     assert!(
@@ -2034,7 +2076,7 @@ fn probe_close_at_a_terminal_trip_is_tripped_not_eof() {
     "a terminal scanner stop must probe as `Tripped`, never `Eof`"
   );
   assert_eq!(
-    limit_diags(&emitter),
+    limit_diags(input.emitter()),
     1,
     "only the limit trip's own diagnostic is recorded — the probe adds none"
   );
@@ -2044,13 +2086,15 @@ fn probe_close_at_a_terminal_trip_is_tripped_not_eof() {
 fn probe_close_wrong_token_leaves_the_front_in_place() {
   // A rejecting probe is a peek: it classifies the front token as a wrong token but
   // never advances the committed cursor, so a follow-up `next()` still yields that token.
-  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_context(
     "a",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   assert!(
     matches!(inp.probe_close(|_| false), Ok(CloseStatus::WrongToken(_))),
@@ -2074,13 +2118,15 @@ fn probe_close_carries_the_closer_out_and_commit_probed_advances() {
   // closer is not left behind for a re-lex (the blackhole-cache double-scan the fix
   // removes). This replaces the old "probe never advances / follow-up next() re-yields
   // the closer" contract, which the carry-out changes for the `Close` case.
-  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_context(
     "a",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let carried = match inp.probe_close(|_| true) {
     Ok(CloseStatus::Close(ct)) => ct,
@@ -2112,11 +2158,13 @@ fn commit_probed_lexes_the_closer_once_under_every_cache() {
   // Blackhole `()` cache: the pre-fix push-back-then-`try_expect` re-lexed the closer.
   let tracker = LimitTracker::with_limit(usize::MAX);
   let scanned = tracker.counter();
-  let mut input =
-    Input::<LimLex<'_>, (Verbose<PErr>, ()), (), Complete>::with_state_and_cache("b", tracker, ());
-  let mut emitter = Verbose::<PErr>::new();
+  let mut input = Input::<LimLex<'_>, (Verbose<PErr>, ()), (), Complete>::with_state_and_context(
+    "b",
+    tracker,
+    crate::input::InputContext::new(Verbose::<PErr>::new(), ()),
+  );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let carried = match inp.probe_close(|_| true) {
       Ok(CloseStatus::Close(ct)) => ct,
       _ => panic!("the front word must probe as `Close`"),
@@ -2136,14 +2184,16 @@ fn commit_probed_lexes_the_closer_once_under_every_cache() {
   // DefaultCache twin: capacity-independent — also exactly once.
   let tracker = LimitTracker::with_limit(usize::MAX);
   let scanned = tracker.counter();
-  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Complete>::with_state_and_cache(
+  let mut input = Input::<LimLex<'_>, LimCtx<'_>, (), Complete>::with_state_and_context(
     "b",
     tracker,
-    DefaultCache::<'_, LimLex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, LimLex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let carried = match inp.probe_close(|_| true) {
       Ok(CloseStatus::Close(ct)) => ct,
       _ => panic!("the front word must probe as `Close`"),
@@ -2179,10 +2229,13 @@ fn commit_probed_lexes_the_closer_once_under_every_cache() {
     ),
     (),
     Complete,
-  >::with_state_and_cache("b", tracker, None);
-  let mut emitter = Verbose::<PErr>::new();
+  >::with_state_and_context(
+    "b",
+    tracker,
+    crate::input::InputContext::new(Verbose::<PErr>::new(), None),
+  );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let carried = match inp.probe_close(|_| true) {
       Ok(CloseStatus::Close(ct)) => ct,
       _ => panic!("the front word must probe as `Close`"),
@@ -2212,10 +2265,13 @@ fn commit_probed_lexes_the_closer_once_under_every_cache() {
     ),
     (),
     Complete,
-  >::with_state_and_cache("b", tracker, Default::default());
-  let mut emitter = Verbose::<PErr>::new();
+  >::with_state_and_context(
+    "b",
+    tracker,
+    crate::input::InputContext::new(Verbose::<PErr>::new(), Default::default()),
+  );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let carried = match inp.probe_close(|_| true) {
       Ok(CloseStatus::Close(ct)) => ct,
       _ => panic!("the front word must probe as `Close`"),
@@ -2249,13 +2305,15 @@ fn probe_close_cache_front_is_cursor_neutral_and_recovery_safe() {
 
   // ── (a) cursor-neutral: probe_close must not advance over the cached closer ──
   {
-    let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_context(
       "a b",
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(
+        Verbose::<PErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
     );
-    let mut emitter = Verbose::<PErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     // Fill the cache with BOTH tokens: [closer `a`, trailing `b`].
     assert_eq!(
       inp
@@ -2284,13 +2342,15 @@ fn probe_close_cache_front_is_cursor_neutral_and_recovery_safe() {
 
   // ── (b) recovery-safe: an error before commit leaves the closer in the cache ──
   {
-    let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_context(
       "a b",
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(
+        Verbose::<PErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
     );
-    let mut emitter = Verbose::<PErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     inp.peek::<U2>().expect("peek");
     // Classify the closer, then simulate the deferred driver erroring out of `handle_end`
     // before committing: the `Close` payload is discarded uncommitted (dropping it is a no-op —
@@ -2317,13 +2377,15 @@ fn probe_close_cache_front_is_cursor_neutral_and_recovery_safe() {
 
   // ── (c) commit-once: commit_probed pops+settles the cached closer exactly once ──
   {
-    let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_context(
       "a b",
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(
+        Verbose::<PErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
     );
-    let mut emitter = Verbose::<PErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     inp.peek::<U2>().expect("peek");
     let payload = match inp.probe_close(|_| true) {
       Ok(CloseStatus::Close(p)) => p,
@@ -2452,37 +2514,39 @@ fn sync_to_incomplete_retry_is_trace_free() {
   // Non-final "foo bar 42": the number touches the buffer end, so the sync is not decidable
   // and the scan surfaces `Incomplete(10)`. Two aborted attempts must leave nothing behind;
   // the sealed third call then diagnoses its two skipped words exactly once.
-  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, PartialCtx<'_>, (), Partial>::with_state_and_context(
     "foo bar 42",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
 
   let r1 = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     inp
       .sync_to(|t| matches!(t.data(), PTok::Num), || None)
       .map(|s| s.is_some())
   };
-  let after_first: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let after_first: usize = input.emitter().errors().values().map(|g| g.len()).sum();
 
   let r2 = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     inp
       .sync_to(|t| matches!(t.data(), PTok::Num), || None)
       .map(|s| s.is_some())
   };
-  let after_two: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let after_two: usize = input.emitter().errors().values().map(|g| g.len()).sum();
 
   input.seal();
   let r3 = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     inp
       .sync_to(|t| matches!(t.data(), PTok::Num), || None)
       .map(|s| s.is_some())
   };
-  let after_success: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let after_success: usize = input.emitter().errors().values().map(|g| g.len()).sum();
 
   assert_eq!(
     r1,
@@ -2510,32 +2574,38 @@ fn skip_while_incomplete_retry_settles_exactly_once() {
   // The settle-timeline twin: `commit_token` fires once per token a scan skips, so an aborted
   // attempt that keeps its settles breaks `Emitter::commit_token`'s exactly-once law across
   // retries. The journal emitter records the settles and rewinds them with the mark.
-  let mut input = Input::<Lex<'_>, JournalCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, JournalCtx<'_>, (), Partial>::with_state_and_context(
     "foo bar 42",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      PartialJournal::default(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = PartialJournal::default();
 
   let r1 = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     inp.skip_while(|t| matches!(t.data(), PTok::Word))
   };
-  let after_first = emitter.committed.clone();
+  let after_first = input.emitter().committed.clone();
 
   let r2 = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     inp.skip_while(|t| matches!(t.data(), PTok::Word))
   };
-  let after_two = emitter.committed.clone();
+  let after_two = input.emitter().committed.clone();
 
   input.seal();
   let r3 = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     inp.skip_while(|t| matches!(t.data(), PTok::Word))
   };
-  let final_journal: std::vec::Vec<(usize, usize)> =
-    emitter.committed.iter().map(|s| (s.start, s.end)).collect();
+  let final_journal: std::vec::Vec<(usize, usize)> = input
+    .emitter()
+    .committed
+    .iter()
+    .map(|s| (s.start, s.end))
+    .collect();
 
   assert_eq!(r1, Err(PErr::Incomplete(10)));
   assert_eq!(r2, Err(PErr::Incomplete(10)));
@@ -2554,7 +2624,7 @@ fn skip_while_incomplete_retry_settles_exactly_once() {
     "the sealed completion settles each skipped token exactly once"
   );
   assert_eq!(
-    emitter.live_rows(),
+    input.emitter().live_rows(),
     0,
     "no attempt left an emitter mark outstanding"
   );
@@ -2567,15 +2637,17 @@ fn sync_through_incomplete_then_refill_then_eof_leaves_no_trace() {
   // Under commit-on-incomplete the first attempt's skipped prefix is committed at the
   // `Incomplete` exit, and the post-refill EOF rewind then restores only to the RESUMED
   // position — so the first attempt's skips and diagnostics survive. This cell rejects that.
-  let mut input = Input::<Lex<'_>, JournalCtx<'_>, (), Partial>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, JournalCtx<'_>, (), Partial>::with_state_and_context(
     "foo bar",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      PartialJournal::default(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = PartialJournal::default();
 
   let r1 = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     inp
       .sync_through(|t| matches!(t.data(), PTok::Num), || None)
       .map(|s| s.is_some())
@@ -2588,7 +2660,7 @@ fn sync_through_incomplete_then_refill_then_eof_leaves_no_trace() {
 
   input.seal();
   let (r2, cursor) = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let r = inp
       .sync_through(|t| matches!(t.data(), PTok::Num), || None)
       .map(|s| s.is_some());
@@ -2601,17 +2673,17 @@ fn sync_through_incomplete_then_refill_then_eof_leaves_no_trace() {
     "the failed sync rewound to the pre-call position"
   );
   assert!(
-    emitter.emitted.is_empty(),
+    input.emitter().emitted.is_empty(),
     "no diagnostic survives a failed sync across a refill: {:?}",
-    emitter.emitted
+    input.emitter().emitted
   );
   assert!(
-    emitter.committed.is_empty(),
+    input.emitter().committed.is_empty(),
     "no settle survives it either: {:?}",
-    emitter.committed
+    input.emitter().committed
   );
   assert_eq!(
-    emitter.live_rows(),
+    input.emitter().live_rows(),
     0,
     "both attempts settled their entry mark exactly once"
   );
@@ -2638,13 +2710,15 @@ fn sync_through_incomplete_then_refill_then_eof_leaves_no_trace() {
   should_panic(expected = "the committed cursor moved between `probe_close` and the commit")
 )]
 fn commit_probed_rejects_a_rewound_payload() {
-  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_cache(
+  let mut input = Input::<Lex<'_>, CompleteCtx<'_>, (), Complete>::with_state_and_context(
     "a b",
     (),
-    DefaultCache::<'_, Lex<'_>>::default(),
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, Lex<'_>>::default(),
+    ),
   );
-  let mut emitter = Verbose::<PErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   use generic_arraydeque::typenum::U2;
 

@@ -396,10 +396,20 @@ impl<St, Off> PartialSession<St, Off, RedriveFromBase> {
   /// could produce, so no materialization check can separate them. Both escapes are pinned as
   /// open defects in the sink's own suite.
   ///
-  /// So carrying a recording sink across attempts is **unsound and not currently refused**.
-  /// The supported streaming-CST shape is a **fresh sink per attempt** over the whole
-  /// never-drained buffer, materialized on the final attempt — and until a parse and the
-  /// emitter serving it share an identity, that stays a requirement this API cannot enforce.
+  /// So carrying a recording sink across attempts is **corruption**, and it is refused at
+  /// compile time by the [`ValueKeyedEmitter`](crate::emitter::ValueKeyedEmitter) bound below,
+  /// which a recording `Sink` deliberately does not satisfy. The escapes above are why a
+  /// *runtime* check could not have substituted for that bound. The supported streaming-CST
+  /// shape is a **fresh sink per attempt** over the whole never-drained buffer, materialized on
+  /// the final attempt.
+  ///
+  /// **Identity is delivered per attempt.** The attempt's input *owns* the emitter
+  /// `ctx.provide()` yields, for exactly that attempt's life, so the suppression watermarks the
+  /// attempt raises can only ever describe that attempt's own log — a property of the type
+  /// rather than of this method's discipline. The caveat that survives is the collector one
+  /// above and nothing wider: the binding is to whatever `provide()` hands over, so a `&mut` to
+  /// a collector shared across attempts still observes the replayed prefix once per attempt —
+  /// noisy, never lossy, and a choice you write.
   ///
   /// Cumulative lexer work is Θ(Σ attempt lengths). The budget is the wall.
   ///
@@ -474,9 +484,11 @@ impl<St, Off> PartialSession<St, Off, RedriveFromBase> {
     // Step 3 — seed the attempt from the **base**, byte for byte what the one-shot does.
     // The base state is cloned, never moved out and never written back (see the field's own
     // note).
-    let (mut emitter, cache) = ctx.provide().into_components();
-    let mut input =
-      Input::<L, Ctx, Lang, Partial>::with_state_and_cache(src, self.state.clone(), cache);
+    let mut input = Input::<L, Ctx, Lang, Partial>::with_state_and_context(
+      src,
+      self.state.clone(),
+      ctx.provide(),
+    );
     if is_final {
       input.seal();
     }
@@ -484,7 +496,7 @@ impl<St, Off> PartialSession<St, Off, RedriveFromBase> {
     // Step 4 — drive `f` exactly as the one-shot does. No transaction wrapping: the caller
     // owns transaction discipline, and that ownership is what makes a session possible.
     let outcome = {
-      let mut input_ref = input.as_ref(&mut emitter);
+      let mut input_ref = input.as_ref();
       f.parse_input(&mut input_ref)
     };
 
