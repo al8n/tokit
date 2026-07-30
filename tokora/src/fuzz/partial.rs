@@ -71,13 +71,13 @@ type Tok = (FuzzKind, SimpleSpan);
 
 /// Drains a fresh **complete** input over `src`, returning the committed token stream — the oracle.
 fn complete_stream(src: &[u8], budget: usize) -> Vec<Tok> {
-  let cache = cache();
-  let mut emitter = CountEmitter::new();
+  let context = crate::input::InputContext::new(CountEmitter::new(), cache());
   let state = initial_state(src);
-  let mut input = crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, ()>::with_state_and_cache(
-    src, state, cache,
-  );
-  let mut ir = input.as_ref(&mut emitter);
+  let mut input =
+    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, ()>::with_state_and_context(
+      src, state, context,
+    );
+  let mut ir = input.as_ref();
   let mut out = Vec::new();
   loop {
     assert!(
@@ -97,17 +97,16 @@ fn complete_stream(src: &[u8], budget: usize) -> Vec<Tok> {
 /// Drains a fresh **partial** input over `src` at `is_final`, returning the committed token stream
 /// and whether the drain ended `Incomplete` (rather than at genuine end of input).
 fn partial_stream(src: &[u8], is_final: bool, budget: usize) -> (Vec<Tok>, bool) {
-  let cache = cache();
-  let mut emitter = CountEmitter::new();
+  let context = crate::input::InputContext::new(CountEmitter::new(), cache());
   let state = initial_state(src);
   let mut input =
-    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, (), Partial>::with_state_and_cache(
-      src, state, cache,
+    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, (), Partial>::with_state_and_context(
+      src, state, context,
     );
   if is_final {
     input.seal();
   }
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
   let mut out = Vec::new();
   loop {
     assert!(
@@ -142,19 +141,18 @@ fn partial_stream(src: &[u8], is_final: bool, budget: usize) -> (Vec<Tok>, bool)
 /// so the borrow checker admits the flip exactly where a driver can honestly make it — with no
 /// parser, guard, or speculative branch in flight.
 fn two_phase_stream(src: &[u8], budget: usize) -> Vec<Tok> {
-  let cache = cache();
-  let mut emitter = CountEmitter::new();
+  let context = crate::input::InputContext::new(CountEmitter::new(), cache());
   let state = initial_state(src);
   let mut input =
-    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, (), Partial>::with_state_and_cache(
-      src, state, cache,
+    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, (), Partial>::with_state_and_context(
+      src, state, context,
     );
   let mut out = Vec::new();
 
   // Phase 1: non-final. Drains everything before the frontier, ending Incomplete (or genuine EOF
   // for an empty stream — either way, stop).
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     loop {
       assert!(out.len() <= budget, "two-phase drain exceeded budget");
       match ir.next() {
@@ -178,10 +176,11 @@ fn two_phase_stream(src: &[u8], budget: usize) -> Vec<Tok> {
   // The socket closed: the driver seals. Monotone, and only reachable here.
   input.seal();
 
-  // Phase 2: a fresh handle over the same input — same cache, same cursor, same lexer state — now
-  // sealed. It drains the withheld remainder to genuine end of input.
+  // Phase 2: a fresh handle over the same input — same cache, same cursor, same lexer state, and
+  // now necessarily the same emitter, because the input owns it — sealed. It drains the withheld
+  // remainder to genuine end of input.
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     assert!(ir.is_final(), "the seal is visible to the next handle");
     loop {
       assert!(out.len() <= budget, "two-phase drain exceeded budget");
@@ -209,17 +208,16 @@ fn two_phase_stream(src: &[u8], budget: usize) -> Vec<Tok> {
 /// every bit of it back. The input must still be final afterwards, and the drain must reach genuine
 /// end of input — never `Incomplete`.
 fn seal_survives_rollback(src: &[u8], budget: usize, complete: &[Tok]) {
-  let cache = cache();
-  let mut emitter = CountEmitter::new();
+  let context = crate::input::InputContext::new(CountEmitter::new(), cache());
   let state = initial_state(src);
   let mut input =
-    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, (), Partial>::with_state_and_cache(
-      src, state, cache,
+    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, (), Partial>::with_state_and_context(
+      src, state, context,
     );
   // The world fact: the stream has ENDED.
   input.seal();
 
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
   assert!(ir.is_final(), "the input is sealed");
 
   // Speculate across every rollback shape the crate has, and abandon all of it.
@@ -317,19 +315,18 @@ struct Limited {
 
 /// Drains a fresh input over `src` behind a `limit`-token limiter, in `Partial` mode at `is_final`.
 fn limited_stream(src: &[u8], limit: usize, is_final: bool, budget: usize) -> Limited {
-  let cache = cache();
-  let mut emitter = CountEmitter::new();
+  let context = crate::input::InputContext::new(CountEmitter::new(), cache());
   let mut input =
-    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, (), Partial>::with_state_and_cache(
+    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, (), Partial>::with_state_and_context(
       src,
       ScriptState::with_limit(limit),
-      cache,
+      context,
     );
   if is_final {
     input.seal();
   }
   let (tokens, incomplete) = {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     let mut tokens = Vec::new();
     let incomplete = loop {
       assert!(
@@ -357,7 +354,7 @@ fn limited_stream(src: &[u8], limit: usize, is_final: bool, budget: usize) -> Li
   Limited {
     tokens,
     incomplete,
-    emitted: emitter.count(),
+    emitted: input.emitter().count(),
   }
 }
 

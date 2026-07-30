@@ -274,8 +274,11 @@ type TsEmitErr<'a> = <<TsCtx<'a> as ParseContext<'a, LimLexer<'a>, ()>>::Emitter
 fn ts_input(src: &str) -> (Input<'_, LimLexer<'_>, TsCtx<'_>, ()>, Rc<Cell<usize>>) {
   let limiter = Limiter::with_limit(2);
   let scanned = limiter.counter();
-  let cache = DefaultCache::<'_, LimLexer<'_>>::default();
-  let input = Input::<LimLexer<'_>, TsCtx<'_>, ()>::with_state_and_cache(src, limiter, cache);
+  let context = crate::input::InputContext::new(
+    Silent::<TsErr>::new(),
+    DefaultCache::<'_, LimLexer<'_>>::default(),
+  );
+  let input = Input::<LimLexer<'_>, TsCtx<'_>, ()>::with_state_and_context(src, limiter, context);
   (input, scanned)
 }
 
@@ -307,8 +310,7 @@ macro_rules! committed_leaf_terminal_stop {
       // A fresh trip at the leaf's expected token → a TERMINAL end-of-input error.
       {
         let (mut input, scanned) = ts_input("1 2 3");
-        let mut emitter = Silent::<TsErr>::new();
-        let mut $ir = input.as_ref(&mut emitter);
+        let mut $ir = input.as_ref();
         assert!($ir.next().unwrap().is_some(), "first token under the limit");
         assert!(
           $ir.next().unwrap().is_some(),
@@ -330,8 +332,7 @@ macro_rules! committed_leaf_terminal_stop {
       // Genuine end of input at the same position → a PLAIN (recoverable) end-of-input error.
       {
         let (mut input, _scanned) = ts_input("1 2");
-        let mut emitter = Silent::<TsErr>::new();
-        let mut $ir = input.as_ref(&mut emitter);
+        let mut $ir = input.as_ref();
         assert!($ir.next().unwrap().is_some(), "first token");
         assert!($ir.next().unwrap().is_some(), "second token");
         let r = ($leaf).map(|_| ());
@@ -407,8 +408,7 @@ fn recover_reraises_a_committed_leaf_trip_but_recovers_its_genuine_eof() {
   // Trip: the recoverer must NOT run — the terminal stop is re-raised.
   {
     let (mut input, _scanned) = ts_input("1 2 3");
-    let mut emitter = Silent::<TsErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     assert!(inp.next().unwrap().is_some());
     assert!(inp.next().unwrap().is_some());
 
@@ -433,8 +433,7 @@ fn recover_reraises_a_committed_leaf_trip_but_recovers_its_genuine_eof() {
   // Genuine end of input: the recoverer DOES run — the plain end-of-input error stays recoverable.
   {
     let (mut input, _scanned) = ts_input("1 2");
-    let mut emitter = Silent::<TsErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     assert!(inp.next().unwrap().is_some());
     assert!(inp.next().unwrap().is_some());
 

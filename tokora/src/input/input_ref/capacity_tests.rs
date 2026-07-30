@@ -267,14 +267,13 @@ fn observe<'a, C>(program: Program) -> Observed
 where
   C: Cache<'a, BalLexer<'a>, ()> + Default,
 {
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<BalLexer<'a>, (Verbose<ByValErr>, C), ()>::with_state_and_cache(
+  let mut input = Input::<BalLexer<'a>, (Verbose<ByValErr>, C), ()>::with_state_and_context(
     program.src(),
     TokenLimiter::with_limitation(program.limit()),
-    C::default(),
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), C::default()),
   );
   let (cursor, offset, is_eoi, is_exhausted, span, tokens, drained, produced) = {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let produced = run(&mut inp, program);
     let cursor = *inp.cursor().as_inner();
     let offset = *inp.offset();
@@ -297,13 +296,15 @@ where
       produced,
     )
   };
-  let lex = emitter
+  let lex = input
+    .emitter()
     .errors()
     .values()
     .flatten()
     .filter(|e| **e == ByValErr::Lex)
     .count();
-  let limit = emitter
+  let limit = input
+    .emitter()
     .errors()
     .values()
     .flatten()
@@ -506,13 +507,12 @@ fn exhaustion_trace<'a, C>(program: Program, lookahead: Lookahead) -> std::vec::
 where
   C: Cache<'a, BalLexer<'a>, ()> + Default,
 {
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<BalLexer<'a>, (Verbose<ByValErr>, C), ()>::with_state_and_cache(
+  let mut input = Input::<BalLexer<'a>, (Verbose<ByValErr>, C), ()>::with_state_and_context(
     program.src(),
     TokenLimiter::with_limitation(program.limit()),
-    C::default(),
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), C::default()),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   let _ = run(&mut inp, program);
   match lookahead {
     Lookahead::None => {}
@@ -559,14 +559,12 @@ fn is_exhausted_never_turns_true_early() {
   // The direction that matters for a loop gate: while a token is still consumable the gate must
   // read `false`, however deep the caller peeked. `is_eoi` fails this the moment a lookahead
   // lexes through the end of the buffer, which is why it is the wrong gate.
-  let mut emitter = Verbose::<ByValErr>::new();
   let mut input =
-    Input::<BalLexer<'_>, (Verbose<ByValErr>, DefaultCache<'_, BalLexer<'_>>), ()>::with_state_and_cache(
+    Input::<BalLexer<'_>, (Verbose<ByValErr>, DefaultCache<'_, BalLexer<'_>>), ()>::with_state_and_context(
       "1 2 3",
-      TokenLimiter::new(),
-      DefaultCache::<'_, BalLexer<'_>>::default(),
-    );
-  let mut inp = input.as_ref(&mut emitter);
+      TokenLimiter::new(),crate::input::InputContext::new(Verbose::<ByValErr>::new(),
+      DefaultCache::<'_, BalLexer<'_>>::default()));
+  let mut inp = input.as_ref();
   assert_eq!(inp.peek::<U3>().unwrap().len(), 3);
   assert!(
     inp.is_eoi(),
@@ -593,13 +591,12 @@ fn is_exhausted_stays_false_after_a_bare_drain_with_a_trailing_skip() {
   where
     C: Cache<'a, BalLexer<'a>, ()> + Default,
   {
-    let mut emitter = Verbose::<ByValErr>::new();
-    let mut input = Input::<BalLexer<'a>, (Verbose<ByValErr>, C), ()>::with_state_and_cache(
+    let mut input = Input::<BalLexer<'a>, (Verbose<ByValErr>, C), ()>::with_state_and_context(
       src,
       TokenLimiter::new(),
-      C::default(),
+      crate::input::InputContext::new(Verbose::<ByValErr>::new(), C::default()),
     );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     while inp.next().unwrap().is_some() {}
     if skip_to_end {
       inp.skip_while(|_| true).unwrap();
@@ -647,13 +644,12 @@ fn stop_save_consume_restore<'a, C>() -> Restored
 where
   C: Cache<'a, BalLexer<'a>, ()> + Default,
 {
-  let mut emitter = Verbose::<ByValErr>::new();
-  let mut input = Input::<BalLexer<'a>, (Verbose<ByValErr>, C), ()>::with_state_and_cache(
+  let mut input = Input::<BalLexer<'a>, (Verbose<ByValErr>, C), ()>::with_state_and_context(
     "1   2",
     TokenLimiter::new(),
-    C::default(),
+    crate::input::InputContext::new(Verbose::<ByValErr>::new(), C::default()),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
   inp.next().unwrap().expect("the first number");
   let _ = inp
     .sync_to(|t| t.data().kind() == BalKind::Num, || None)
@@ -727,13 +723,12 @@ fn state_surgery_drops_the_parked_token() {
   where
     C: Cache<'a, BalLexer<'a>, ()> + Default,
   {
-    let mut emitter = Verbose::<ByValErr>::new();
-    let mut input = Input::<BalLexer<'a>, (Verbose<ByValErr>, C), ()>::with_state_and_cache(
+    let mut input = Input::<BalLexer<'a>, (Verbose<ByValErr>, C), ()>::with_state_and_context(
       "1   2",
       TokenLimiter::new(),
-      C::default(),
+      crate::input::InputContext::new(Verbose::<ByValErr>::new(), C::default()),
     );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     inp.next().unwrap().expect("the first number");
     let _ = inp
       .sync_to(|t| t.data().kind() == BalKind::Num, || None)

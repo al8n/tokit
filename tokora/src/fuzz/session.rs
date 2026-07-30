@@ -130,13 +130,13 @@ fn at(ir: &Ir<'_, '_>) -> usize {
 
 /// Runs one session case over `src`, checking the session-point oracles.
 pub(crate) fn run(src: &[u8], seq_seed: u64, cov: &mut Coverage) {
-  let cache = cache();
-  let mut emitter = CountEmitter::new();
+  let context = crate::input::InputContext::new(CountEmitter::new(), cache());
   let state = initial_state(src);
-  let mut input = crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, ()>::with_state_and_cache(
-    src, state, cache,
-  );
-  let mut ir = input.as_ref(&mut emitter);
+  let mut input =
+    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, ()>::with_state_and_context(
+      src, state, context,
+    );
+  let mut ir = input.as_ref();
 
   // Optionally pre-consume a few tokens so the session opens at a non-trivial position.
   let mut rng = Rng::new(seq_seed);
@@ -258,7 +258,7 @@ pub(crate) fn run(src: &[u8], seq_seed: u64, cov: &mut Coverage) {
 
   // Oracle: no implicit rollback. A second handle over the same input sees exactly the progress the
   // abandoned session made — cursor, emission log, and lexer state alike.
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
   assert_eq!(
     at(&ir),
     at_drop,

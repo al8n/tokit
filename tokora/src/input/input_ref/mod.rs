@@ -734,6 +734,7 @@ where
   /// them. Consuming that region later re-lexes it; this dedup — keyed on the error
   /// span's end against a high-water mark — guarantees every lexer error is reported
   /// exactly once, whether it is peeked, consumed, or both.
+  ///
   #[inline(always)]
   fn emit_lexer_error_deduped(
     &mut self,
@@ -743,6 +744,21 @@ where
     if end <= *self.emitted_error_end {
       return Ok(());
     }
+    // ARM BEFORE APPEND, deliberately — and the reverse has now been tried twice, so the reason
+    // lives here rather than only at `Emitter::emit_lexer_error`'s doc.
+    //
+    // Raising a suppressing watermark and *then* doing something that can fail looks like the
+    // arm-then-act defect this crate removed elsewhere (`install_rekey` and friends), and the
+    // instinct to flip it is a strong one. It does not apply, because those windows arm and then
+    // **destroy** — caller code runs between the halves and the destruction cannot be taken back,
+    // so a panic strands a witness describing a front that no longer exists. Here the second step
+    // is an *emission*, and for a rejecting emitter its failure **is** the delivery: an `Err` from
+    // `emit_lexer_error` propagates and becomes the parse's error, so the region has been
+    // surfaced either into the log or onto the error channel. Nothing is lost by arming first.
+    //
+    // Flipping is not merely unnecessary, it regresses a fix: where a caller catches the `Err` and
+    // carries on, an unraised watermark lets a later scan over the same bytes re-offer the same
+    // lexer error — exactly the duplicate this ordering was chosen to close.
     *self.emitted_error_end = end;
     self.emitter().emit_lexer_error(err)
   }

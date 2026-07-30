@@ -185,13 +185,16 @@ fn gen_stacked_body(rng: &mut Rng, _depth: usize) -> Vec<Step> {
 /// shadow model and coverage. `exec_seed` seeds the executor-only randomness (which live savepoint
 /// to target), keeping the whole case reproducible. Panics — a *finding* — on any oracle violation.
 pub(crate) fn run(src: &[u8], script: &[Step], cov: &mut Coverage, exec_seed: u64) {
-  let cache = super::fixtures::cache();
-  let mut emitter = super::fixtures::CountEmitter::new();
-  let state = super::fixtures::initial_state(src);
-  let mut input = crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, ()>::with_state_and_cache(
-    src, state, cache,
+  let context = crate::input::InputContext::new(
+    super::fixtures::CountEmitter::new(),
+    super::fixtures::cache(),
   );
-  let mut ir = input.as_ref(&mut emitter);
+  let state = super::fixtures::initial_state(src);
+  let mut input =
+    crate::input::Input::<'_, ScriptLexer<'_>, FuzzCtx<'_>, ()>::with_state_and_context(
+      src, state, context,
+    );
+  let mut ir = input.as_ref();
   let mut model = Model::new(src);
   let mut marks = Vec::new();
   run_seq(

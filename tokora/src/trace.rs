@@ -289,13 +289,12 @@ mod tests {
   // internal `try_expect` leaf indented one level, then exit-ok with the consumed span.
   #[test]
   fn traced_emits_enter_leaf_exit_with_indentation() {
-    let mut emitter = Silent::<Err>::new();
-    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_context(
       "12",
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(Silent::<Err>::new(), DefaultCache::<'_, Lex<'_>>::default()),
     );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let mut parser = crate::traced("num", eat_num);
     let (res, lines) = crate::trace::capture(|| parser.parse_input(&mut inp));
@@ -333,13 +332,12 @@ mod tests {
   // is indented one level too deep for the emitter's whole life.
   #[test]
   fn traced_unwind_restores_depth() {
-    let mut emitter = Silent::<Err>::new();
-    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_cache(
+    let mut input = Input::<Lex<'_>, Cx<'_>>::with_state_and_context(
       "12 34",
       (),
-      DefaultCache::<'_, Lex<'_>>::default(),
+      crate::input::InputContext::new(Silent::<Err>::new(), DefaultCache::<'_, Lex<'_>>::default()),
     );
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let (_, lines) = crate::trace::capture(|| {
       let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

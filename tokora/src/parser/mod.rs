@@ -570,9 +570,8 @@ where
   fn parse_with_state(self, src: &'inp L::Source, state: L::State) -> Result<O, Error> {
     let Parser { mut f, ctx, .. } = self;
 
-    let (mut emitter, cache) = ctx.provide().into_components();
-    let mut input = Input::with_state_and_cache(src, state, cache);
-    let mut input_ref = input.as_ref(&mut emitter);
+    let mut input = Input::with_state_and_context(src, state, ctx.provide());
+    let mut input_ref = input.as_ref();
     f.parse_input(&mut input_ref)
   }
 }

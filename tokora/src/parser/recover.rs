@@ -658,9 +658,15 @@ mod tests {
     // Before the fix, `Recover`'s `Ok` branch left the `save()`d id on the stack, so this
     // count grew by one per successful parse without bound.
     let src = "1 ".repeat(128);
-    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::new(src.as_str());
-    let mut emitter = Silent::<LexErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::with_state_and_context(
+      src.as_str(),
+      (),
+      crate::input::InputContext::new(
+        Silent::<LexErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
 
     let baseline = inp.live_checkpoints_len();
 
@@ -783,9 +789,15 @@ mod tests {
   // verbatim on the `Err` channel and NEVER invokes the recoverer.
   #[test]
   fn recover_reraises_incomplete_and_never_invokes_recoverer() {
-    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::new("1 2 3");
-    let mut emitter = Silent::<RecErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Silent::<RecErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
 
     let invoked = core::cell::Cell::new(false);
     let mut rec = Recover::<_, _, (), Lex<'_>, RCtx<'_>, ()>::new(
@@ -817,9 +829,15 @@ mod tests {
       "an error built the way the frontier rules build it must report itself incomplete"
     );
 
-    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::new("1 2 3");
-    let mut emitter = Silent::<RecErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Silent::<RecErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
 
     let invoked = core::cell::Cell::new(false);
     let mut rec = Recover::<_, _, (), Lex<'_>, RCtx<'_>, ()>::new(
@@ -843,9 +861,15 @@ mod tests {
   // does not swallow every error, only the incomplete sentinel.
   #[test]
   fn recover_still_recovers_an_ordinary_error() {
-    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::new("1 2 3");
-    let mut emitter = Silent::<RecErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Silent::<RecErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
 
     let invoked = core::cell::Cell::new(false);
     let mut rec = Recover::<_, _, (), Lex<'_>, RCtx<'_>, ()>::new(
@@ -869,9 +893,15 @@ mod tests {
   // verbatim and NEVER invokes the recoverer.
   #[test]
   fn recover_reraises_terminal_and_never_invokes_recoverer() {
-    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::new("1 2 3");
-    let mut emitter = Silent::<RecErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Silent::<RecErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
 
     let invoked = core::cell::Cell::new(false);
     let mut rec = Recover::<_, _, (), Lex<'_>, RCtx<'_>, ()>::new(
@@ -915,9 +945,15 @@ mod tests {
       "a genuine end of input is not a terminal stop"
     );
 
-    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::new("1 2 3");
-    let mut emitter = Silent::<RecErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut input = Input::<Lex<'_>, RCtx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Silent::<RecErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
 
     let invoked = core::cell::Cell::new(false);
     let mut rec = Recover::<_, _, (), Lex<'_>, RCtx<'_>, ()>::new(
@@ -992,9 +1028,15 @@ mod tests {
   // recoverer never runs, and nothing is emitted.
   #[test]
   fn inplace_recover_reraises_incomplete_and_never_invokes_recoverer() {
-    let mut input = Input::<Lex<'_>, VCtx<'_>, ()>::new("1 2 3");
-    let mut emitter = Verbose::<RecErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut input = Input::<Lex<'_>, VCtx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RecErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
 
     let invoked = core::cell::Cell::new(false);
     let mut rec = InplaceRecover::<_, _, (), Lex<'_>, VCtx<'_>, ()>::new(
@@ -1025,9 +1067,15 @@ mod tests {
       "an error built the way the frontier rules build it must report itself incomplete"
     );
 
-    let mut input = Input::<Lex<'_>, VCtx<'_>, ()>::new("1 2 3");
-    let mut emitter = Verbose::<RecErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut input = Input::<Lex<'_>, VCtx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RecErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
 
     let invoked = core::cell::Cell::new(false);
     let mut rec = InplaceRecover::<_, _, (), Lex<'_>, VCtx<'_>, ()>::new(
@@ -1051,9 +1099,15 @@ mod tests {
   // The scoping guard, in-place flavour: an ordinary failure still recovers exactly as before.
   #[test]
   fn inplace_recover_still_recovers_an_ordinary_error() {
-    let mut input = Input::<Lex<'_>, VCtx<'_>, ()>::new("1 2 3");
-    let mut emitter = Verbose::<RecErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut input = Input::<Lex<'_>, VCtx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RecErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
 
     let invoked = core::cell::Cell::new(false);
     let mut rec = InplaceRecover::<_, _, (), Lex<'_>, VCtx<'_>, ()>::new(
@@ -1072,9 +1126,15 @@ mod tests {
   // never have begun, so re-raising before the handler runs is the only correct order.
   #[test]
   fn inplace_recover_reraises_terminal_and_never_invokes_recoverer() {
-    let mut input = Input::<Lex<'_>, VCtx<'_>, ()>::new("1 2 3");
-    let mut emitter = Verbose::<RecErr>::new();
-    let mut inp = input.as_ref(&mut emitter);
+    let mut input = Input::<Lex<'_>, VCtx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RecErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
 
     let invoked = core::cell::Cell::new(false);
     let mut rec = InplaceRecover::<_, _, (), Lex<'_>, VCtx<'_>, ()>::new(

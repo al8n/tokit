@@ -361,10 +361,16 @@ mod tests {
     //   0 2 4
     // The primary fails on `a`; the sync skips `a b` (one hole, two tokens) and the retry
     // parses `1`.
-    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::new("a b 1");
-    let mut emitter = Verbose::<RtErr>::new();
+    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::with_state_and_context(
+      "a b 1",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RtErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       let mut p =
         SkipThenRetry::<_, _, _, (), Lex<'_>, Ctx<'_>, ()>::new(NumParser, neutral, is_num);
@@ -377,11 +383,14 @@ mod tests {
     }
 
     assert_eq!(
-      emitter.skipped_regions().get(&SimpleSpan::new(0, 3)),
+      input
+        .emitter()
+        .skipped_regions()
+        .get(&SimpleSpan::new(0, 3)),
       Some(&vec![2usize]),
       "exactly one hole: the skipped `a b`"
     );
-    let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     assert_eq!(total, 0, "no per-token diagnostics from the recovery skip");
   }
 
@@ -390,11 +399,17 @@ mod tests {
     // The pinned progress guard: the sync point is immediately at hand (zero-skip) and the
     // retry fails without consuming — the cycle consumed nothing, so the combinator bails
     // out with the ORIGINAL error rather than looping.
-    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::new("1 2");
-    let mut emitter = Verbose::<RtErr>::new();
+    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::with_state_and_context(
+      "1 2",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RtErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
     let calls = Rc::new(Cell::new(0));
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       let mut p = SkipThenRetry::<_, _, _, (), Lex<'_>, Ctx<'_>, ()>::new(
         SeqFail {
@@ -412,9 +427,14 @@ mod tests {
     }
 
     assert_eq!(calls.get(), 2, "exactly one retry ran before the bailout");
-    let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+    let holes: usize = input
+      .emitter()
+      .skipped_regions()
+      .values()
+      .map(|g| g.len())
+      .sum();
     assert_eq!(holes, 0, "a zero-skip sync reports no hole");
-    let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     assert_eq!(total, 0, "the bailed-out recovery leaves no diagnostics");
   }
 
@@ -422,13 +442,19 @@ mod tests {
   fn skip_then_retry_reraises_incomplete_without_skipping() {
     // The never-recoverable law: an `Incomplete` passes through untouched — the classifier
     // and the sync predicate are never consulted, nothing is skipped, nothing is emitted.
-    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::new("1 2 3");
-    let mut emitter = Verbose::<RtErr>::new();
+    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RtErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
     let calls = Rc::new(Cell::new(0));
     let classified = Cell::new(false);
     let synced = Cell::new(false);
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       let mut p = SkipThenRetry::<_, _, _, (), Lex<'_>, Ctx<'_>, ()>::new(
         FailWith {
@@ -465,9 +491,14 @@ mod tests {
       !synced.get(),
       "the sync predicate never runs for an Incomplete"
     );
-    let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+    let holes: usize = input
+      .emitter()
+      .skipped_regions()
+      .values()
+      .map(|g| g.len())
+      .sum();
     assert_eq!(holes, 0, "nothing was skipped");
-    let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     assert_eq!(total, 0, "nothing was emitted");
   }
 
@@ -479,13 +510,19 @@ mod tests {
     let surfaced: RtErr = crate::error::Incomplete::new(4usize).into();
     assert!(surfaced.is_incomplete());
 
-    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::new("1 2 3");
-    let mut emitter = Verbose::<RtErr>::new();
+    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RtErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
     let calls = Rc::new(Cell::new(0));
     let classified = Cell::new(false);
     let synced = Cell::new(false);
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
       let mut p = SkipThenRetry::<_, _, _, (), Lex<'_>, Ctx<'_>, ()>::new(
         FailWith {
           err: surfaced.clone(),
@@ -509,7 +546,12 @@ mod tests {
     assert_eq!(calls.get(), 1, "the parser ran once; no retry");
     assert!(!classified.get(), "the classifier never runs");
     assert!(!synced.get(), "the sync predicate never runs");
-    let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+    let holes: usize = input
+      .emitter()
+      .skipped_regions()
+      .values()
+      .map(|g| g.len())
+      .sum();
     assert_eq!(holes, 0, "nothing was skipped");
   }
 
@@ -526,13 +568,19 @@ mod tests {
     assert_eq!(surfaced, RtErr::Terminal);
     assert!(surfaced.is_terminal());
 
-    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::new("1 2 3");
-    let mut emitter = Verbose::<RtErr>::new();
+    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::with_state_and_context(
+      "1 2 3",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RtErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
     let calls = Rc::new(Cell::new(0));
     let classified = Cell::new(false);
     let synced = Cell::new(false);
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
       let mut p = SkipThenRetry::<_, _, _, (), Lex<'_>, Ctx<'_>, ()>::new(
         FailWith {
           err: surfaced.clone(),
@@ -566,7 +614,12 @@ mod tests {
       !synced.get(),
       "the sync predicate never runs for a terminal stop"
     );
-    let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+    let holes: usize = input
+      .emitter()
+      .skipped_regions()
+      .values()
+      .map(|g| g.len())
+      .sum();
     assert_eq!(holes, 0, "nothing was skipped");
   }
 
@@ -574,10 +627,16 @@ mod tests {
   fn skip_then_retry_failed_sync_surfaces_the_error() {
     // No sync point before end of input: the failed sync leaves no trace and the original
     // error surfaces.
-    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::new("a b");
-    let mut emitter = Verbose::<RtErr>::new();
+    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::with_state_and_context(
+      "a b",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RtErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       let mut p =
         SkipThenRetry::<_, _, _, (), Lex<'_>, Ctx<'_>, ()>::new(NumParser, neutral, is_num);
@@ -589,9 +648,14 @@ mod tests {
       assert_eq!(inp.span(), &SimpleSpan::new(0, 0), "no progress committed");
     }
 
-    let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+    let holes: usize = input
+      .emitter()
+      .skipped_regions()
+      .values()
+      .map(|g| g.len())
+      .sum();
     assert_eq!(holes, 0, "a failed sync reports no hole");
-    let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+    let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
     assert_eq!(total, 0, "the failed recovery leaves no diagnostics");
   }
 
@@ -602,10 +666,16 @@ mod tests {
     // Cycle 1 skips `a` (one hole) and retries at `;`, which is not a number — a failed
     // retry after real progress, so the stale sync point is consumed and cycle 2 syncs
     // onward, retrying successfully at `1`. Pins the strictly-past-the-sync-point rule.
-    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::new("a ; 1");
-    let mut emitter = Verbose::<RtErr>::new();
+    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::with_state_and_context(
+      "a ; 1",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RtErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       let mut p = SkipThenRetry::<_, _, _, (), Lex<'_>, Ctx<'_>, ()>::new(
         NumParser,
@@ -617,11 +687,19 @@ mod tests {
     }
 
     assert_eq!(
-      emitter.skipped_regions().get(&SimpleSpan::new(0, 1)),
+      input
+        .emitter()
+        .skipped_regions()
+        .get(&SimpleSpan::new(0, 1)),
       Some(&vec![1usize]),
       "cycle 1's hole covers the skipped `a`"
     );
-    let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+    let holes: usize = input
+      .emitter()
+      .skipped_regions()
+      .values()
+      .map(|g| g.len())
+      .sum();
     assert_eq!(holes, 1, "cycle 2's zero-skip sync adds no hole");
   }
 
@@ -632,10 +710,16 @@ mod tests {
     // exactly once again.
     //   a 1
     //   0 2
-    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::new("a 1");
-    let mut emitter = Verbose::<RtErr>::new();
+    let mut input = Input::<Lex<'_>, Ctx<'_>, ()>::with_state_and_context(
+      "a 1",
+      (),
+      crate::input::InputContext::new(
+        Verbose::<RtErr>::new(),
+        DefaultCache::<'_, Lex<'_>>::default(),
+      ),
+    );
     {
-      let mut inp = input.as_ref(&mut emitter);
+      let mut inp = input.as_ref();
 
       let mut p =
         SkipThenRetry::<_, _, _, (), Lex<'_>, Ctx<'_>, ()>::new(NumParser, neutral, is_num);
@@ -657,11 +741,19 @@ mod tests {
     }
 
     assert_eq!(
-      emitter.skipped_regions().get(&SimpleSpan::new(0, 1)),
+      input
+        .emitter()
+        .skipped_regions()
+        .get(&SimpleSpan::new(0, 1)),
       Some(&vec![1usize]),
       "exactly one hole record survives: the rolled-back one was unwound"
     );
-    let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+    let holes: usize = input
+      .emitter()
+      .skipped_regions()
+      .values()
+      .map(|g| g.len())
+      .sum();
     assert_eq!(holes, 1);
   }
 }

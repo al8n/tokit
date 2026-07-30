@@ -92,11 +92,14 @@ type NumFatalCtx<'a> = (Fatal<NumErr>, DefaultCache<'a, NumLexer<'a>>);
 
 /// Builds a `Silent` input over `src` with a limit high enough never to trip.
 fn silent_input(src: &str) -> Input<'_, NumLexer<'_>, NumCtx<'_>, ()> {
-  let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  Input::<NumLexer<'_>, NumCtx<'_>, ()>::with_state_and_cache(
+  let context = crate::input::InputContext::new(
+    Silent::<NumErr>::new(),
+    DefaultCache::<'_, NumLexer<'_>>::default(),
+  );
+  Input::<NumLexer<'_>, NumCtx<'_>, ()>::with_state_and_context(
     src,
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    context,
   )
 }
 
@@ -108,8 +111,7 @@ fn stacked_rollback_to_middle_destroys_younger_keeps_target() {
   // resumes the stream at exactly its position each time, and the younger savepoint is
   // destroyed structurally.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut txn = inp.begin_stacked();
   let _ = txn.next().unwrap().expect("1");
@@ -146,8 +148,7 @@ fn stacked_rollback_to_middle_destroys_younger_keeps_target() {
 fn stacked_release_keeps_progress_and_forgets() {
   // Release forgets the savepoint but keeps every parsed byte: the position does not move.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut txn = inp.begin_stacked();
   let _ = txn.next().unwrap().expect("1");
@@ -174,8 +175,7 @@ fn stacked_stale_id_after_rollback_panics() {
   // Rolling back to an older savepoint destroys the younger one; using the younger id
   // afterwards panics as stale.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut txn = inp.begin_stacked();
   let _ = txn.next().unwrap().expect("1");
@@ -203,12 +203,10 @@ fn stacked_foreign_input_savepoint_panics() {
   // live inputs are distinct structs at distinct addresses, so the foreign id is caught at
   // runtime in every build.
   let mut input_a = silent_input("1 2 3 4");
-  let mut emitter_a = Silent::<NumErr>::new();
   let mut input_b = silent_input("1 2 3 4");
-  let mut emitter_b = Silent::<NumErr>::new();
 
-  let mut inp_a = input_a.as_ref(&mut emitter_a);
-  let mut inp_b = input_b.as_ref(&mut emitter_b);
+  let mut inp_a = input_a.as_ref();
+  let mut inp_b = input_b.as_ref();
 
   let mut txn_a = inp_a.begin_stacked();
   let mut txn_b = inp_b.begin_stacked();
@@ -225,8 +223,7 @@ fn stacked_drop_rolls_back_to_begin() {
   // An undecided stacked transaction rolls back to its begin point on drop, discarding
   // every savepoint.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   {
@@ -256,14 +253,13 @@ fn stacked_savepoint_over_limit_trip_reemits_exactly_once() {
   use generic_arraydeque::typenum::U6;
 
   let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  let mut emitter = Verbose::<NumErr>::new();
-  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(5),
-    cache,
+    crate::input::InputContext::new(Verbose::<NumErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
 
     let mut txn = inp.begin_stacked();
     let sp = txn.savepoint(); // before the trip
@@ -285,7 +281,7 @@ fn stacked_savepoint_over_limit_trip_reemits_exactly_once() {
     txn.commit();
   }
 
-  let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
   assert_eq!(
     total, 1,
     "the limit diagnostic is emitted exactly once in total"
@@ -298,8 +294,7 @@ fn stacked_best_match_selection() {
   // after each, score them, then roll back to the best-scoring one and resume from
   // exactly there — the younger fallbacks die with the rollback.
   let mut input = silent_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut txn = inp.begin_stacked();
 
@@ -345,8 +340,7 @@ fn stacked_commit_policy_drop_keeps_progress() {
   // An undecided Commit-policy stacked guard (with a live savepoint) keeps its progress on
   // drop — the opposite of the Rollback default.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   {
@@ -371,8 +365,7 @@ fn stacked_commit_policy_drop_keeps_progress() {
 fn stacked_commit_policy_explicit_commit_keeps() {
   // `commit` keeps progress whatever the policy.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   let mut txn = inp.begin_stacked_with::<Commit>();
@@ -392,8 +385,7 @@ fn stacked_commit_policy_explicit_rollback_restores() {
   // `rollback` restores to the begin point whatever the policy: a Commit-policy stacked
   // guard can still be rolled back explicitly.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let start = *inp.cursor().as_inner();
   let mut txn = inp.begin_stacked_with::<Commit>();
@@ -420,13 +412,12 @@ fn stacked_commit_policy_keeps_progress_on_fatal_error() {
   // Commit-policy stacked guard drops it and KEEPS the progress consumed up to the error
   // (forgetting the live savepoint and base), never rolling back.
   let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  let mut emitter = Fatal::<NumErr>::new();
-  let mut input = Input::<NumLexer<'_>, NumFatalCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<NumLexer<'_>, NumFatalCtx<'_>, ()>::with_state_and_context(
     "1 @ 2",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(Fatal::<NumErr>::new(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   fn drive<'inp>(
     inp: &mut InputRef<'inp, '_, NumLexer<'inp>, NumFatalCtx<'inp>>,
@@ -470,8 +461,7 @@ fn stacked_commit_removes_all_ids_from_live_stack() {
   // Committing keeps the parsed progress but forgets the base and every savepoint id, so
   // the debug live-checkpoint stack does not grow across commit-heavy loops.
   let mut input = silent_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let baseline = inp.live_checkpoints_len();
   for _ in 0..100 {
@@ -506,8 +496,7 @@ fn stacked_savepoint_after_raw_restore_panics_stale() {
   // `saves`. The nonce + membership check alone waves the stale id through; the lineage
   // check must reject it.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut txn = inp.begin_stacked();
   let _ = txn.next().unwrap().expect("1");
@@ -531,14 +520,13 @@ fn stacked_savepoint_survives_state_surgery() {
   use generic_arraydeque::typenum::U6;
 
   let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  let mut emitter = Verbose::<NumErr>::new();
-  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_context(
     "1 @ 3 4",
     TokenLimiter::with_limitation(2),
-    cache,
+    crate::input::InputContext::new(Verbose::<NumErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     let mut txn = inp.begin_stacked();
 
     // A speculative peek seals `@`'s lexer error above the cursor (lifting the dedup
@@ -592,7 +580,7 @@ fn stacked_savepoint_survives_state_surgery() {
     txn.commit();
   }
 
-  let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
   assert_eq!(
     total, 2,
     "watermark: `@` and the limit diagnostic each stay exactly once — no duplicate on replay"
@@ -605,14 +593,13 @@ fn stacked_base_drop_undoes_state_surgery() {
   // back to the begin point, UNDOING the surgery (it is transactional). The base checkpoint
   // captures a poisoned pre-surgery state; the drop restores it.
   let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  let mut emitter = Silent::<NumErr>::new();
-  let mut input = Input::<NumLexer<'_>, NumCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<NumLexer<'_>, NumCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(2),
-    cache,
+    crate::input::InputContext::new(Silent::<NumErr>::new(), cache),
   );
   {
-    let mut inp = input.as_ref(&mut emitter);
+    let mut inp = input.as_ref();
     // Trip the limiter before opening the transaction, so the base checkpoint is poisoned.
     assert!(inp.next().unwrap().is_some(), "1");
     assert!(inp.next().unwrap().is_some(), "2");
@@ -660,8 +647,7 @@ fn stacked_savepoints_survive_nested_attempt_and_transaction() {
   // begin/rollback, and a raw save/restore pair — and rollback_to each still resumes at
   // exactly its mark.
   let mut input = silent_input("1 2 3 4 5 6 7 8");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut txn = inp.begin_stacked();
   let _ = txn.next().unwrap().expect("1");
@@ -734,8 +720,7 @@ fn stacked_raw_restore_below_base_panics_at_the_restore() {
   // AT THE RESTORE. At HEAD the restore succeeded and the rolling-back drop silently committed
   // the abandoned work.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save(); // raw checkpoint, below the guard's begin point
   let _ = inp.next().unwrap().expect("consume 1"); // advance past A before begin
@@ -757,8 +742,7 @@ fn stacked_explicit_rollback_after_raw_restore_below_base_panics_at_restore() {
   // succeeded and `rollback` panicked as stale ("transaction base is stale"); post-fix the
   // pinned restore panics first.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let a = inp.save();
   let _ = inp.next().unwrap().expect("consume 1");
@@ -775,8 +759,7 @@ fn stacked_rollback_to_savepoint_with_live_base_is_legal() {
   // pinned base — so it pops only savepoints, never the base. The base stays pinned and the
   // savepoint stays reusable; the pin check must not fire on this ordinary savepoint rollback.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let mut txn = inp.begin_stacked(); // base pinned
   let _ = txn.next().unwrap().expect("consume 1");
@@ -878,13 +861,12 @@ type NumLedgerCtx<'a> = (MarkLedger, DefaultCache<'a, NumLexer<'a>>);
 #[test]
 fn stacked_commit_guard_dropped_mid_unwind_rolls_back() {
   let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  let mut emitter = MarkLedger::default();
-  let mut input = Input::<NumLexer<'_>, NumLedgerCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<NumLexer<'_>, NumLedgerCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4",
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    crate::input::InputContext::new(MarkLedger::default(), cache),
   );
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
     let mut txn = inp.begin_stacked_with::<Commit>();
@@ -918,8 +900,7 @@ fn stacked_commit_guard_dropped_mid_unwind_rolls_back() {
 fn stacked_commit_guard_dropped_without_unwind_still_commits() {
   // The control: an ordinary undecided stacked `Commit` drop keeps its progress.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut inp = input.as_ref(&mut emitter);
+  let mut inp = input.as_ref();
 
   {
     let mut txn = inp.begin_stacked_with::<Commit>();

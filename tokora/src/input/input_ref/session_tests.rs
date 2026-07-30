@@ -96,21 +96,27 @@ type VerboseIr<'inp, 'closure> =
 
 /// Builds a `Silent` input over `src` with a limit high enough never to trip.
 fn silent_input(src: &str) -> Input<'_, NumLexer<'_>, NumCtx<'_>, ()> {
-  let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  Input::<NumLexer<'_>, NumCtx<'_>, ()>::with_state_and_cache(
+  let context = crate::input::InputContext::new(
+    Silent::<NumErr>::new(),
+    DefaultCache::<'_, NumLexer<'_>>::default(),
+  );
+  Input::<NumLexer<'_>, NumCtx<'_>, ()>::with_state_and_context(
     src,
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    context,
   )
 }
 
 /// Builds a `Verbose` input over `src` with a limit high enough never to trip.
 fn verbose_input(src: &str) -> Input<'_, NumLexer<'_>, NumVerboseCtx<'_>, ()> {
-  let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_cache(
+  let context = crate::input::InputContext::new(
+    Verbose::<NumErr>::new(),
+    DefaultCache::<'_, NumLexer<'_>>::default(),
+  );
+  Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_context(
     src,
     TokenLimiter::with_limitation(usize::MAX),
-    cache,
+    context,
   )
 }
 
@@ -142,8 +148,7 @@ fn session_point_commit_keeps_consumed_tokens() {
   // Commit keeps the speculative work done through the point — including the tokens it consumed
   // across separate calls, which is the work a `ParseState` could never have done.
   let mut input = verbose_input("1 2 3 4");
-  let mut emitter = Verbose::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   let point = ir.begin_point();
   assert_eq!(ir.points(), 1, "the point is live");
@@ -175,8 +180,7 @@ fn session_point_rollback_puts_the_tokens_back() {
   // THE capability: mark, consume several tokens across separate calls, emit, then roll back —
   // and the cursor, the token stream, and the emission log all return to the mark.
   let mut input = verbose_input("1 2 3 4");
-  let mut emitter = Verbose::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   assert_eq!(take(&mut ir), "1", "committed work before the session");
   let mark = *ir.cursor().as_inner();
@@ -221,14 +225,13 @@ fn session_point_rollback_restores_state_and_poison() {
   // the point re-keys those forward-scanning facts away and a speculative diagnostic is emitted;
   // the rollback returns state, poison, watermark, position, and the emission log to the trip.
   let cache = DefaultCache::<'_, NumLexer<'_>>::default();
-  let mut emitter = Verbose::<NumErr>::new();
-  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_cache(
+  let mut input = Input::<NumLexer<'_>, NumVerboseCtx<'_>, ()>::with_state_and_context(
     "1 2 3 4 5 6",
     TokenLimiter::with_limitation(2),
-    cache,
+    crate::input::InputContext::new(Verbose::<NumErr>::new(), cache),
   );
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
 
     // Trip the limiter: two tokens, then a poisoned `None`; the limit diagnostic emits once.
     assert!(ir.next().unwrap().is_some(), "1");
@@ -282,13 +285,13 @@ fn session_point_rollback_restores_state_and_poison() {
   // The input now sits at the restored (tripped) lineage: the restored poison boundary stops the
   // stream, and the limit diagnostic is retained exactly once — never duplicated by the rollback.
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     assert!(
       ir.next().unwrap().is_none(),
       "the restored poison boundary stops the stream"
     );
   }
-  let total: usize = emitter.errors().values().map(|g| g.len()).sum();
+  let total: usize = input.emitter().errors().values().map(|g| g.len()).sum();
   assert_eq!(
     total, 1,
     "the limit diagnostic is retained exactly once across the session"
@@ -304,8 +307,7 @@ fn session_points_nest_lifo() {
   // current position but does not disturb the oldest point's saved one, reached by the final
   // rollback.
   let mut input = verbose_input("1 2 3 4 5");
-  let mut emitter = Verbose::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   assert_eq!(take(&mut ir), "1");
   let at1 = *ir.cursor().as_inner();
@@ -353,8 +355,7 @@ fn session_points_nest_lifo() {
 #[should_panic(expected = "no live session point")]
 fn session_point_commit_misuse_panics() {
   let mut input = silent_input("1 2 3");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   // Settling twice with the same id: the second call finds nothing open at all.
   let point = ir.begin_point();
@@ -366,8 +367,7 @@ fn session_point_commit_misuse_panics() {
 #[should_panic(expected = "no live session point")]
 fn session_point_rollback_misuse_panics() {
   let mut input = silent_input("1 2 3");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   let point = ir.begin_point();
   ir.rollback_point(point);
@@ -383,8 +383,7 @@ fn settling_an_older_point_while_a_younger_one_is_open_is_refused() {
   // taken the INNER point and silently applied the outer's intent to it — the shifted-target
   // class the id exists to close.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   let outer = ir.begin_point();
   let _ = ir.next().unwrap().expect("1");
@@ -398,8 +397,7 @@ fn settling_an_already_settled_point_under_a_live_one_is_refused() {
   // The mirror: an id whose point is gone, while an unrelated point is open. A positional settle
   // would have spent the live one.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   let first = ir.begin_point();
   ir.commit_point(first);
@@ -413,8 +411,7 @@ fn a_reissued_point_never_reuses_a_settled_point_s_identity() {
   // position, is a different point. The checkpoint-id source is monotone and never reset, so a
   // stale id can never be mistaken for the fresh one occupying its old slot.
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   let first = ir.begin_point();
   ir.commit_point(first);
@@ -448,12 +445,10 @@ fn settling_a_point_from_another_input_is_refused() {
   // points carry the *same* checkpoint id: the live-point scan alone would find a genuine match
   // and settle B's own point under A's intent.
   let mut input_a = silent_input("1 2 3 4");
-  let mut emitter_a = Silent::<NumErr>::new();
   let mut input_b = silent_input("1 2 3 4");
-  let mut emitter_b = Silent::<NumErr>::new();
 
-  let mut ir_a = input_a.as_ref(&mut emitter_a);
-  let mut ir_b = input_b.as_ref(&mut emitter_b);
+  let mut ir_a = input_a.as_ref();
+  let mut ir_b = input_b.as_ref();
 
   let point_a = ir_a.begin_point();
   let point_b = ir_b.begin_point();
@@ -492,8 +487,7 @@ fn a_point_settles_across_the_handle_s_reborrows() {
   // onward every way the crate allows. Each of these settles is legal and must be honored; an
   // input identity that changed with the handle would turn all three into false refusals.
   let mut input = verbose_input("1 2 3 4 5 6");
-  let mut emitter = Verbose::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   // (a) A `&mut` reborrow into a nested parser, with the id handed along beside it.
   let reborrowed = ir.begin_point();
@@ -529,9 +523,8 @@ fn a_point_settles_on_a_handle_that_moved() {
   // The handle is moved out of this frame with the point still open. Its fields travel with it,
   // the `Input`'s do not — so a settle after the move is legal, and the id must still resolve.
   let mut input = verbose_input("1 2 3");
-  let mut emitter = Verbose::<NumErr>::new();
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     let point = ir.begin_point();
     assert_eq!(take(&mut ir), "1");
     settle_on_a_moved_handle(ir, point);
@@ -559,8 +552,7 @@ fn session_point_is_pinned() {
   // pins that base (like a guard), so the checked restore panics AT the restore with the existing
   // pin message — detect-at-cause, in every allocator build.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   let a = ir.save(); // raw checkpoint, below the session point
   let _ = ir.next().unwrap().expect("consume 1"); // advance past A
@@ -582,9 +574,8 @@ fn guard_drop_rollback_reconciles_the_open_session_point() {
   // destroys; leaving it on the stack would let a later settle rewind to a timeline that no
   // longer exists.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     let _ = ir.next().unwrap().expect("committed work before the guard");
     let before = *ir.cursor().as_inner();
     let baseline = ir.live_checkpoints_len();
@@ -630,8 +621,7 @@ fn settling_a_point_a_guard_drop_reconciled_is_refused() {
   // and the settle rewound to a dead lineage — caught, in debug builds only, as a non-LIFO
   // restore at the settle rather than at the cause.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
   let point = {
     let mut guard = ir.begin();
     let point = guard.begin_point();
@@ -647,9 +637,8 @@ fn attempt_panic_with_an_open_point_leaves_no_stranded_point() {
   // panic out of user code settles it, and that settle must reconcile a point the closure left
   // open. A caught panic hands the host an input with nothing stranded on its behalf.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     let baseline = ir.live_checkpoints_len();
 
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -684,8 +673,7 @@ fn attempt_panic_with_an_open_point_leaves_no_stranded_point() {
 #[test]
 fn session_depth_accessor() {
   let mut input = silent_input("1 2 3 4");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   assert_eq!(ir.points(), 0, "a fresh reference has no points");
   let outer = ir.begin_point();
@@ -705,8 +693,7 @@ fn settled_points_do_not_grow_the_lineage() {
   // Every settle path — commit and rollback alike — releases the point's lineage entry, so a
   // driver that speculates in a loop does not grow the input's live-checkpoint stack.
   let mut input = silent_input("1 2 3 4 5 6 7 8");
-  let mut emitter = Silent::<NumErr>::new();
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
 
   for i in 0..4 {
     let point = ir.begin_point();
@@ -737,9 +724,8 @@ fn dropping_the_handle_releases_the_open_points() {
   // Two points opened and NEITHER settled, then the handle dies. The input's pin set must hold
   // exactly the live begin points — and with no handle alive there are none.
   let mut input = silent_input("1 2 3 4 5");
-  let mut emitter = Silent::<NumErr>::new();
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     let _outer = ir.begin_point();
     let _ = ir.next().unwrap().expect("1");
     let _inner = ir.begin_point();
@@ -770,10 +756,9 @@ fn dropping_the_handle_keeps_the_progress_of_the_open_points() {
   // The no-rollback-on-drop law. Abandoning a point releases its bookkeeping but rewinds nothing:
   // the tokens consumed through it stay consumed, and a later handle resumes where they left off.
   let mut input = verbose_input("1 2 3 4");
-  let mut emitter = Verbose::<NumErr>::new();
   let after_three;
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     assert_eq!(take(&mut ir), "1", "committed work before the session");
     let _point = ir.begin_point();
     assert_eq!(take(&mut ir), "2", "speculative work through the point");
@@ -783,7 +768,7 @@ fn dropping_the_handle_keeps_the_progress_of_the_open_points() {
     assert_eq!(ir.points(), 1, "the point is still open at the drop");
   }
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     assert_eq!(
       *ir.cursor().as_inner(),
       after_three,
@@ -807,14 +792,13 @@ fn a_second_handle_rewinds_across_an_abandoned_point() {
   // session point, an `attempt` — must run to completion, never tripping a pin left behind by a
   // point nobody holds.
   let mut input = silent_input("1 2 3 4 5 6");
-  let mut emitter = Silent::<NumErr>::new();
   {
-    let mut ir = input.as_ref(&mut emitter);
+    let mut ir = input.as_ref();
     let _ = ir.next().unwrap().expect("1");
     let _point = ir.begin_point(); // opened, pinned — and never settled
     let _ = ir.next().unwrap().expect("2");
   }
-  let mut ir = input.as_ref(&mut emitter);
+  let mut ir = input.as_ref();
   let at = *ir.cursor().as_inner();
 
   // A raw save/restore pair over the abandoned point's region.
