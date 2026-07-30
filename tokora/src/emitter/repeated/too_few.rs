@@ -23,6 +23,11 @@ where
 }
 
 /// An emitter that handles too few elements error for repeated parsers.
+#[diagnostic::on_unimplemented(
+  message = "`{Self}` cannot report an under-filled repetition for lexer `{L}`",
+  label = "missing `TooFewEmitter` — a `ComposableEmitter` bundle member",
+  note = "implement `TooFewEmitter` (usually alongside the other members of the `ComposableEmitter` bundle)"
+)]
 pub trait TooFewEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// Emits an error indicating that too few elements were found.
   fn emit_too_few(&mut self, err: TooFew<L::Span, Lang>) -> Result<(), Self::Error>

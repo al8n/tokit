@@ -201,6 +201,7 @@ pub use padded::*;
 pub use peek::*;
 pub use pratt::*;
 pub use recover::*;
+pub use select::*;
 pub use skip_then_retry::*;
 pub use then::*;
 pub use todo::*;
@@ -235,6 +236,7 @@ mod peek;
 mod pratt;
 mod punct;
 mod recover;
+mod select;
 mod skip_then_retry;
 mod then;
 mod todo;
@@ -822,3 +824,6 @@ mod tests;
 
 #[cfg(all(test, feature = "logos", feature = "std"))]
 mod terminal_stop_tests;
+
+#[cfg(all(test, feature = "logos", feature = "std"))]
+mod select_tests;

@@ -1,0 +1,109 @@
+error[E0277]: `MyEmitter` is not a composable emitter for lexer `L`
+  --> tests/ui/composable_emitter.rs:12:14
+   |
+12 |   inner::<L, MyEmitter>();
+   |              ^^^^^^^^^ one or more of the seven `ComposableEmitter` members is missing for this type
+   |
+   = help: the trait `FullContainerEmitter<'_, L>` is not implemented for `MyEmitter`
+   = note: the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below
+   = help: the following other types implement trait `FullContainerEmitter<'a, L, Lang>`:
+             `&mut U` implements `FullContainerEmitter<'a, L, Lang>`
+             `Fatal<E, Lang>` implements `FullContainerEmitter<'a, L, Lang>`
+             `Ignored<()>` implements `FullContainerEmitter<'a, L, Lang>`
+             `Silent<E, Lang>` implements `FullContainerEmitter<'a, L, Lang>`
+             `Verbose<E, S, Lang>` implements `FullContainerEmitter<'a, L, Lang>`
+             `tokora::cst::Sink<'inp, L, E>` implements `FullContainerEmitter<'inp, L, Lang>`
+   = note: required for `MyEmitter` to implement `ComposableEmitter<'_, L>`
+note: required by a bound in `inner`
+  --> tests/ui/composable_emitter.rs:11:37
+   |
+11 |   fn inner<'inp, L: Lexer<'inp>, E: ComposableEmitter<'inp, L>>() {}
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `inner`
+
+error[E0277]: `MyEmitter` is not a composable emitter for lexer `L`
+  --> tests/ui/composable_emitter.rs:12:14
+   |
+12 |   inner::<L, MyEmitter>();
+   |              ^^^^^^^^^ one or more of the seven `ComposableEmitter` members is missing for this type
+   |
+   = help: the trait `UnexpectedLeadingSeparatorEmitter<'_, L>` is not implemented for `MyEmitter`
+   = note: the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below
+   = help: the following other types implement trait `UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>`:
+             &mut U
+             Fatal<E, Lang>
+             Ignored<()>
+             Silent<E, Lang>
+             Verbose<E, S, Lang>
+             tokora::cst::Sink<'inp, L, E>
+   = note: required for `MyEmitter` to implement `ComposableEmitter<'_, L>`
+note: required by a bound in `inner`
+  --> tests/ui/composable_emitter.rs:11:37
+   |
+11 |   fn inner<'inp, L: Lexer<'inp>, E: ComposableEmitter<'inp, L>>() {}
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `inner`
+
+error[E0277]: `MyEmitter` is not a composable emitter for lexer `L`
+  --> tests/ui/composable_emitter.rs:12:14
+   |
+12 |   inner::<L, MyEmitter>();
+   |              ^^^^^^^^^ one or more of the seven `ComposableEmitter` members is missing for this type
+   |
+   = help: the trait `UnexpectedTrailingSeparatorEmitter<'_, L>` is not implemented for `MyEmitter`
+   = note: the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below
+   = help: the following other types implement trait `UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>`:
+             `&mut U` implements `UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>`
+             `Fatal<E, Lang>` implements `UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>`
+             `Ignored<()>` implements `UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>`
+             `Silent<E, Lang>` implements `UnexpectedTrailingSeparatorEmitter<'a, L, Lang>`
+             `Verbose<E, S, Lang>` implements `UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>`
+             `tokora::cst::Sink<'inp, L, E>` implements `UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>`
+   = note: required for `MyEmitter` to implement `ComposableEmitter<'_, L>`
+note: required by a bound in `inner`
+  --> tests/ui/composable_emitter.rs:11:37
+   |
+11 |   fn inner<'inp, L: Lexer<'inp>, E: ComposableEmitter<'inp, L>>() {}
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `inner`
+
+error[E0277]: `MyEmitter` is not a composable emitter for lexer `L`
+  --> tests/ui/composable_emitter.rs:12:14
+   |
+12 |   inner::<L, MyEmitter>();
+   |              ^^^^^^^^^ one or more of the seven `ComposableEmitter` members is missing for this type
+   |
+   = help: the trait `TooFewEmitter<'_, L>` is not implemented for `MyEmitter`
+   = note: the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below
+   = help: the following other types implement trait `TooFewEmitter<'a, L, Lang>`:
+             `&mut U` implements `TooFewEmitter<'a, L, Lang>`
+             `Fatal<E, Lang>` implements `TooFewEmitter<'a, L, Lang>`
+             `Ignored<()>` implements `TooFewEmitter<'a, L, Lang>`
+             `Silent<E, Lang>` implements `TooFewEmitter<'a, L, Lang>`
+             `Verbose<E, S, Lang>` implements `TooFewEmitter<'a, L, Lang>`
+             `tokora::cst::Sink<'inp, L, E>` implements `TooFewEmitter<'inp, L, Lang>`
+   = note: required for `MyEmitter` to implement `ComposableEmitter<'_, L>`
+note: required by a bound in `inner`
+  --> tests/ui/composable_emitter.rs:11:37
+   |
+11 |   fn inner<'inp, L: Lexer<'inp>, E: ComposableEmitter<'inp, L>>() {}
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `inner`
+
+error[E0277]: `MyEmitter` is not a composable emitter for lexer `L`
+  --> tests/ui/composable_emitter.rs:12:14
+   |
+12 |   inner::<L, MyEmitter>();
+   |              ^^^^^^^^^ one or more of the seven `ComposableEmitter` members is missing for this type
+   |
+   = help: the trait `UnclosedEmitter<'_, L>` is not implemented for `MyEmitter`
+   = note: the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below
+   = help: the following other types implement trait `UnclosedEmitter<'a, L, Lang>`:
+             `&mut U` implements `UnclosedEmitter<'a, L, Lang>`
+             `Fatal<E, Lang>` implements `UnclosedEmitter<'a, L, Lang>`
+             `Ignored<()>` implements `UnclosedEmitter<'a, L, Lang>`
+             `Silent<E, Lang>` implements `UnclosedEmitter<'a, L, Lang>`
+             `Verbose<E, S, Lang>` implements `UnclosedEmitter<'a, L, Lang>`
+             `tokora::cst::Sink<'inp, L, E>` implements `UnclosedEmitter<'inp, L, Lang>`
+   = note: required for `MyEmitter` to implement `ComposableEmitter<'_, L>`
+note: required by a bound in `inner`
+  --> tests/ui/composable_emitter.rs:11:37
+   |
+11 |   fn inner<'inp, L: Lexer<'inp>, E: ComposableEmitter<'inp, L>>() {}
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `inner`

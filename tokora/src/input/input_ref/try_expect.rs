@@ -857,4 +857,76 @@ where
       }
     }
   }
+
+  /// Classify the head, then project it by value — one named operation.
+  ///
+  /// `classify` sees the head by reference, so the classification runs **once**; on
+  /// accept the token is committed — the emitter's committed-token hook runs — and
+  /// the token then moves **by value** into `project`, which extracts the payload
+  /// without a clone. `project`'s error is a real error, never a decline: by the time
+  /// it runs, `classify` has already accepted and the token is committed.
+  ///
+  /// `Ok(None)` follows [`try_expect`](Self::try_expect): definite absence (the head
+  /// stays at the cache front, unconsumed) *or* a terminal stop. When a decline
+  /// commits the caller to a different parse, use
+  /// [`try_expect_take_or_stop`](Self::try_expect_take_or_stop), which raises on a
+  /// terminal stop instead of folding it into absence.
+  ///
+  /// # Panics
+  ///
+  /// Nothing here catches a panic out of `project`. If it panics, the token is gone
+  /// with the closure frame — but the commit has already happened and no transaction
+  /// is open, so the input's structural state is settled exactly as it is for a
+  /// caller of [`try_expect`](Self::try_expect) that panics after taking the returned
+  /// token.
+  #[inline]
+  pub fn try_expect_take<O, C, P>(
+    &mut self,
+    classify: C,
+    project: P,
+  ) -> Result<Option<O>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    C: FnMut(Spanned<&L::Token, &L::Span>) -> bool,
+    P: FnOnce(
+      Spanned<L::Token, L::Span>,
+    ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
+  {
+    trace_event!(self, "try_expect_take");
+    match self.try_expect(classify)? {
+      Some(sp) => project(sp).map(Some),
+      None => Ok(None),
+    }
+  }
+
+  /// The or_stop twin of [`try_expect_take`](Self::try_expect_take) — a terminal stop
+  /// is an error, never a decline.
+  ///
+  /// `Ok(None)` means the head is definitely absent (it stays at the cache front,
+  /// unconsumed) or the input genuinely ended. A resource-limit trip or a latched
+  /// poison boundary raises the terminal end-of-input error instead, so a caller that
+  /// commits to a different parse on a decline never mistakes a halt for a grammar
+  /// choice.
+  ///
+  /// # Panics
+  ///
+  /// Same posture as [`try_expect_take`](Self::try_expect_take).
+  #[inline]
+  pub fn try_expect_take_or_stop<O, C, P>(
+    &mut self,
+    classify: C,
+    project: P,
+  ) -> Result<Option<O>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    C: FnMut(Spanned<&L::Token, &L::Span>) -> bool,
+    P: FnOnce(
+      Spanned<L::Token, L::Span>,
+    ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+  {
+    trace_event!(self, "try_expect_take_or_stop");
+    match self.try_expect_or_stop(classify)? {
+      Some(sp) => project(sp).map(Some),
+      None => Ok(None),
+    }
+  }
 }

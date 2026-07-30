@@ -1,0 +1,231 @@
+# Name-collision probe harness
+
+Adding a public name is not additive at the source level. A new method, associated
+function, free function, type or macro can take over a name a consumer already had, and
+whether the consumer is *told* depends on spelling details rustc owns and may change.
+
+Four successive attempts to state a precise rule for this crate were each falsified — never
+by a wrong mechanism, always by a **spelling nobody wrote down**. So this directory does
+not encode a rule. It runs the experiment, two-sided, over the names a release adds —
+subject to the limits below, which are not incidental.
+
+## What it does
+
+`run.sh <base-ref> <inventory.json>` compiles one byte-identical consumer against the base
+and against the working tree, **against each name's real owner**, and classifies. Read the
+scope limit below before reading a green run as safety:
+
+| verdict | meaning | fatal? |
+|---|---|---|
+| `loud` | the sides disagree about compiling, or head gains a diagnostic | no — the disclosed outcome |
+| `warned` | both ran, and head gained a warning **naming the probed subject** that the base side did not emit | no — rustc reported it |
+| `silent*` | a SILENT row listed in `disclosed.txt` | no — known, and in the CHANGELOG |
+| `ok*` | both sides agree AND the row is justified in `no_collision.txt` | no |
+| `SILENT` | both compile, neither warns, the witness disagrees, not disclosed | **yes** |
+| `UNPROBED` | for an item row, both sides agree and it is **not** justified in `no_collision.txt`; for a glob row, rustc said nothing about the name at all. The glob form cannot be silenced by `no_collision.txt` | **yes** |
+| `INCONCL` | no before-state: the base side did not compile, its witness was not 1, or the marker was missing/duplicated | **yes** |
+| `FATAL` | the probe could not be generated at all (unknown category or owner) | **yes** |
+| `STALE` | a baselined row that no longer reproduces | **yes** |
+| `glob-err` | a glob row whose collision the compiler rejected | no — the disclosed outcome |
+| `glob-ok` | a glob row this toolchain does **not** reject | no — see below |
+
+**Glob rows are scored separately and deliberately.** A two-glob collision is a
+name-resolution outcome — it compiles or it does not — so the generated probe carries no
+witness and *cannot* express a silent steal. Running them through the silent/agreement
+ladder asked a question they cannot answer: on rustc 1.95 the four macro names' ambiguity is
+a **warning**, so both sides compile and the witness agrees. The shipped script scored them
+`warned` and passed; once the agreement comparison was fixed they scored `UNPROBED` —
+"possibly vacuous probe". Neither is the true answer, which is "this toolchain does not
+reject this collision". `glob-ok` is that answer, and it
+is why the run header records the toolchain.
+
+Note what is *not* in that list: a bare `ok`. **Both sides agreeing is fatal by default**,
+because agreement is the signature of a probe that constructs no collision — the state ten
+of the thirteen glob rows sat in while reporting clean. To accept one, justify it by name in
+`no_collision.txt`; the gate then prints `ok*` and fails if the justification stops applying.
+
+`disclosed.txt` is the baseline: a silent steal that is known, disclosed and accepted. The
+gate fails on a SILENT row that is *not* listed, and **also on a listed row that no longer
+reproduces** — an allowlist that can rot into a rubber stamp for a probe that stopped
+running is worse than no allowlist. Adding a row there without adding it to the CHANGELOG's
+silent section is the thing this is meant to make awkward.
+
+## Mistakes this harness has already made, kept here so it does not make them again
+
+**It probed a dummy type.** The first version exercised every spelling on a local `Gadget`.
+That can only collide with a name blanket-implemented for every `Sized` type — true of
+exactly one item, the one that was cut for it. `Gadget::parse_except` cannot collide with
+`Ident::parse_except`. Probes are now generated per item against the owner the inventory
+records, and `gen_probe.py` **exits non-zero on an owner or category it cannot express**
+rather than emitting something that compiles and proves nothing.
+
+**CI never fed it the inventory.** The workflow passed only the base ref, so one hard-coded
+name ran and 29 did not, and the job was green. The inventory is now a required argument;
+a missing file, a parse failure, an incomplete schema, an unknown category and an empty
+plan are each fatal. A run over zero names is not a pass.
+
+**The glob probes tested the wrong namespace, the wrong module, and in one case nothing at
+all.** `glob_name` created the competing name as a unit struct and referenced it in a *type*
+position — but `pinned`, `while_head`, `while_kind`, `dispatch_take` and `try_dispatch_take`
+are free functions, which live in the *value* namespace. It also globbed only the crate
+root, so it could not reach `tokora::parser::{dispatch_take, try_dispatch_take}` or
+`tokora::cst::kinds`. And `glob_macro` declared a local macro and never imported or invoked
+tokora's, so all four macro names were untested. **Ten of the thirteen glob rows reported
+clean while constructing no collision.** The inventory now records each name's module path
+*and* namespace kind, and the generator refuses a kind it has no template for.
+
+**The classifier could read a compile failure as a successful run.** It ignored `cargo`'s
+exit status and detected failure by grepping for `^error`; under `CARGO_TERM_COLOR=always`,
+which CI sets, ANSI escapes precede the word and the grep matches nothing. It now uses the
+exit status, forces `CARGO_TERM_COLOR=never`, and requires **exactly one** `CONSUMER-CALLS`
+marker — missing or duplicated is fatal, because a run whose witness cannot be located is
+not interpretable. (This is the third time the ANSI-prefix trap has been load-bearing in
+this campaign.)
+
+All of these are the same defect the harness exists to catch, one level up: **an instrument
+that verifies the case you already knew about.**
+
+## One verdict ladder, several different questions
+
+Three categories here could not express the question they were being scored on, and each
+was found separately as a defect. They are one design fact:
+
+| what is added | what a collision even is | is there a witness? |
+|---|---|---|
+| an inherent method shadowing a consumer's | one of two bodies runs | **yes** — which body ran |
+| an associated function | one of two functions is selected by path | yes in principle, but whether it is *reported* turns on signature proximity |
+| a name reachable through a glob | a name-resolution ambiguity — there is no second body to run | **no** — nothing to witness |
+
+The ladder was built for the first row and applied to all three. That is why a glob row
+scored `UNPROBED` ("possibly vacuous probe") on a toolchain that simply does not reject the
+collision, and why an associated function's `loud` verdict says nothing about the name. The
+`glob-err` / `glob-ok` split is not a special case bolted on — it is the first place this
+was recognised. **If you add a category, ask what a collision *is* for it and whether
+anything can witness one, before deciding which verdicts apply.**
+
+## Every "fine" verdict is asserted by an absence — so each one carries a witness
+
+This harness produced three false-greens in succession, and they were
+one defect wearing three faces:
+
+- `silent` asserted because a warning did not fire — in an environment where it *could not* fire;
+- agreement asserted because `b != h` was false — after a mutation one line above made it false;
+- `glob-ok` asserted because the compile did not fail — when nothing had been compiled.
+
+**An absence is produced equally by the thing not happening and by the measurement not
+happening.** Every verdict here that means "fine" is asserted by one, so each now requires
+positive evidence that the probe actually constructed what it claims:
+
+| verdict | the witness it must produce |
+|---|---|
+| `warned` | a head-only diagnostic **naming this probe's subject** — otherwise an unrelated head-side warning would appear on every row and downgrade a genuine `SILENT` |
+| `silent*` / `SILENT` | both witnesses parsed and **differing**, *and* control reached the call site on both sides — `witness=0` alone is produced equally by the call being stolen and by the drive path never getting there |
+| `glob-err` | a head diagnostic naming the subject **and** mentioning ambiguity — a build that fails for an unrelated reason measured nothing |
+| `glob-ok` | an ambiguity diagnostic naming the subject — "both sides compiled" alone cannot distinguish *this toolchain does not reject it* from *no collision was constructed* |
+| `ok*` | agreement plus a written justification in `no_collision.txt`, staleness-checked |
+| `loud` | the base side ran (`witness=1`), and cargo names **the probe crate** as what failed — so the failure is the probe's, not a dependency's. **Attribution to the collision is still not established**: in the inherent-method and associated-function categories it may be the probe's own arity — see below |
+
+The fatal verdicts — `SILENT`, `UNPROBED`, `INCONCL`, `FATAL`, `STALE` — need no witness, because
+they cannot manufacture a passing run.
+
+**A witness that matches text is satisfiable by every producer of that text** — and the
+producers include the toolchain, the filesystem and the fixture, not only the code under
+test. Twice a witness has been satisfied by the wrong one: the fixture's own naming lint
+(`constant \`dispatch_take\` should have an upper case name`) named the subject while having
+nothing to do with a collision, and a filesystem path satisfied the word-boundary name test
+for a short name — `/opt/homebrew/lib` matches `opt`. The fix in both cases was to remove
+the alternative producer rather than to complicate the pattern: require the ambiguity
+wording, and drop cargo's own status lines before the warning blocks are built. Confirmed
+negatives worth keeping: `try_expect_take_or_stop` does **not** match `try_expect_take`, and
+`Option<T>` does **not** match `opt`. Only paths broke it.
+
+**Existence is only half of it; the other half is attribution.** "Is there evidence?" and
+"was that evidence produced by the thing under test?" are different questions, and the
+second is the one this harness kept failing. Three instances, all now closed: the first
+`glob-ok` witness accepted the fixture's own naming lint, which named the subject and had
+nothing to do with a collision; `loud` and `glob-err` accepted *any* head-side build
+failure, so a broken dependency scored item rows green; and `SILENT` accepted a witness of
+zero, which a stolen call and an unreached call site produce identically. When adding a
+verdict, enumerate what else could produce its evidence — a dependency, an unrelated lint, a
+macro expansion, a diagnostic about the fixture itself — and exclude each, or say the
+verdict is unattributed.
+
+Getting the `glob-ok` witness right took two attempts, and the first failure is worth
+keeping: requiring merely that rustc *named* the subject passed on a vacuous probe, because
+the fixture's own naming lint says "constant `dispatch_take` should have an upper case
+name" — the name, in a diagnostic with nothing to do with a collision. A witness has to be
+evidence of the thing, not of a word.
+
+## What this harness does NOT test — read this before trusting a green run
+
+**For the three item categories it probes exactly one shape of consumer: an extension item
+whose signature is *incompatible* with tokora's** — `-> u8`, hardcoded in **all three** item templates:
+`inherent_method` (`fn name(&mut self) -> u8`), `inherent_assoc_fn`
+(`fn name() -> u8`) and `trait_method`. That shape produces the *loud* outcome, and the
+harness reports it faithfully.
+
+**It cannot generate the shape that matters most: a consumer whose signature is
+compatible** — someone who wrote the helper themselves before tokora had it. For those,
+tokora's method takes the call silently **even when the return value is used**, which is
+the opposite of what the incompatible-signature probe reports. Measured for `peek_kind`,
+`head_satisfies` and `peek_head_map`: byte-identical consumer, zero diagnostics on both
+sides, `CONSUMER-CALLS: 1` on base and `0` on head.
+
+**Why there is no list here of "the names that are safe".** Neither this harness nor any
+document in this branch can produce one. Whether a collision is reported depends on how
+close a consumer's signature is to tokora's, and that is a property of code that does not
+exist yet — so the count of `loud` rows is a count of *what was probed*, never a count of
+names that are fine.
+
+**The associated-function category has the identical gap**, and it is easy to miss because
+the two shapes look different. `inherent_assoc_fn` declares `fn name() -> u8` — zero
+parameters — while `Ident::parse_except` and `Ident::try_parse_except` take two. So their
+`loud` verdicts are arity verdicts about the probe, exactly like the methods', and nothing
+in this harness establishes that a path-resolved collision must be loud.
+
+**Read that as unsupported, not disproven.** Two attempts to construct a silently-stealing
+consumer for `parse_except` produced a compile error; a different reviewer, using a
+different signature, produced a silent steal. Neither settles the category, because whether
+a collision is reported depends on how close the consumer's signature is to tokora's — a
+property of code that does not exist yet. That is also why there is no list here of "the
+names that go silent": such a list is not a wrong answer, it is not a well-formed one.
+
+Consequently, for the **inherent-method and associated-function** categories, an added name
+that takes arguments makes the head side fail with `E0061` — the probe's own arity, not the
+collision — and the row is filed `loud`. That verdict is honest about what was run and
+**misleading about the name**: it means "this probe's consumer collides loudly", not "this
+name cannot be stolen silently". (The trait-method templates *do* pass real arguments, so
+their rows are the harness's strongest: `labelled/later_pick_used` fails with `E0308`, a
+type verdict, and `labelled/later_pick_discarded` is a genuine `silent*`.)
+
+Two things follow, and neither is a bug to be fixed by another round of generator work:
+
+1. **A green run means: no silent steal *of the shape this harness can express*.** It is
+   not a proof of absence. The CHANGELOG says so in the same terms, and says it there
+   rather than only here, because a consumer reads the CHANGELOG.
+2. **Generalising to arbitrary consumer signatures is unbounded.** "How close is close
+   enough to be silent" depends on the consumer's own generics, receiver and return type;
+   enumerating that is the same losing game as enumerating resolution rules, which this
+   project has now lost five times. The harness stays at the shape it can express, and the
+   gap is disclosed instead of papered over.
+
+## Categories and spellings
+
+| category | spellings | why |
+|---|---|---|
+| `inherent_method` | `used`, `discarded` | a discarded return removes the type disagreement that makes it loud |
+| `inherent_assoc_fn` | `used`, `discarded` | path resolution, not the receiver walk — a different rule |
+| `trait_method` | `same_pick`, `later_pick_used`, `later_pick_discarded` | `self` collides at the same pick; `&self` sits at a later one, which is where the silent class lives |
+| `glob_name` / `glob_macro` | `clash` | two competing globs; item names and macro names differ, and macro names differ by toolchain |
+
+A warning counts as a diagnostic. `#[must_use]` on a discarded return is precisely the
+breadcrumb that separates *silent* from *quiet but reported*, and conflating them would
+overstate the hazard where the crate relies on it.
+
+## Regenerating the inventory
+
+    python3 ci/name_collision/surface_diff.py base.json head.json --features "std,logos,trace,rowan"
+
+from rustdoc-JSON dumps of both sides. It splits inherent **receiver methods** from
+**associated functions** — they resolve by different rules — and records each name's owner,
+because a probe that does not know the owner cannot construct the collision.

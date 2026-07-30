@@ -1122,6 +1122,11 @@ where
   /// closure, so the last-in, first-out discipline documented on [`restore`](Self::restore)
   /// holds by construction, even under nesting.
   ///
+  /// For a three-way flow — accept, decline, or a real error — reach for
+  /// [`attempt_parse`](Self::attempt_parse), which speaks the crate's
+  /// [`ParseAttempt`](crate::try_parse_input::ParseAttempt) vocabulary instead of making a
+  /// decline borrow `Option`'s or `Result`'s.
+  ///
   /// # Contract: the closure owns its span of the timeline
   ///
   /// The attempt saves at entry and settles at exit — commit-shaped on `Some`, restore-shaped
@@ -1241,6 +1246,70 @@ where
         Err(e)
       }
     }
+  }
+
+  /// Speculation in the crate's own three-way vocabulary.
+  ///
+  /// - `Ok(Accept(v))` → progress kept (commit).
+  /// - `Ok(Decline)` → rollback, **no trace** — a benign decline needs no fabricated
+  ///   error, which is the whole reason this exists beside
+  ///   [`try_attempt`](Self::try_attempt): a `try_*` production that wants to speculate
+  ///   otherwise has to invent an error value to decline with and then unwrap it again.
+  /// - `Err(e)` → rollback, and the error propagates untouched.
+  ///
+  /// The guard plumbing is exactly [`try_attempt`](Self::try_attempt)'s, so every one of
+  /// its guarantees carries over verbatim: the last-in, first-out law holds structurally,
+  /// a rolled-back attempt leaves no trace, and the begin point rides a rollback-on-drop
+  /// [`Transaction`] for the whole span of `f`.
+  ///
+  /// # If the closure panics
+  ///
+  /// The unwind settles the transaction as a **decline** — roll back, unpin, release the
+  /// lineage id — so a host that catches the panic keeps a consistent input with nothing
+  /// pinned on its behalf.
+  pub fn attempt_parse<F, T, E>(
+    &mut self,
+    f: F,
+  ) -> Result<crate::try_parse_input::ParseAttempt<T>, E>
+  where
+    F: FnOnce(&mut Self) -> Result<crate::try_parse_input::ParseAttempt<T>, E>,
+  {
+    use crate::try_parse_input::ParseAttempt;
+    trace_event!(self, "attempt_parse");
+    let mut txn = self.guard_with::<Rollback>();
+    match f(&mut txn) {
+      Ok(ParseAttempt::Accept(v)) => {
+        txn.commit();
+        Ok(ParseAttempt::Accept(v))
+      }
+      Ok(ParseAttempt::Decline) => {
+        txn.rollback();
+        Ok(ParseAttempt::Decline)
+      }
+      Err(e) => {
+        txn.rollback();
+        Err(e)
+      }
+    }
+  }
+
+  /// Closure-scoped span capture — the imperative twin of
+  /// [`spanned`](crate::ParseInput::spanned), for hand-sequenced productions.
+  ///
+  /// Returns the span covering exactly what `f` consumed, alongside `f`'s value. The
+  /// bracket is `spanned`'s own — [`cursor`](Self::cursor) before, `f`, then
+  /// [`span_since`](Self::span_since) — so the two spellings cannot disagree about where
+  /// a construct starts or ends.
+  ///
+  /// `f`'s error propagates unchanged and no span is produced: a failed production has no
+  /// extent to report.
+  pub fn spanning<F, T, E>(&mut self, f: F) -> Result<(L::Span, T), E>
+  where
+    F: FnOnce(&mut Self) -> Result<T, E>,
+  {
+    let cursor = self.cursor().clone();
+    let value = f(self)?;
+    Ok((self.span_since(&cursor), value))
   }
 
   /// Starts a transaction: a scoped, compile-time-safe form of [`save`](Self::save)

@@ -348,6 +348,55 @@ jobs:
           cd smear
           cargo test -p smear-lexer -p smear-scaffold -p smear-parser-next --no-fail-fast
 
+  # ── Gate: name-collision probe ────────────────────────────────────
+  # Adding a public name is not additive at the source level. Four successively more
+  # precise statements of *when* a collision is loud were each falsified by a spelling
+  # nobody had written down.
+  #
+  # So this job does not check a rule. It derives the inventory of names this branch adds,
+  # then compiles one byte-identical consumer against the merge base and against the
+  # branch — **against each name's real owner** — and fails only on the outcome no
+  # diagnostic can report: both sides compile, neither warns, and the runtime witness
+  # disagrees.
+  #
+  # The inventory is REQUIRED and generated, never hand-listed: the first version of this
+  # job passed the base ref alone, so the script probed one hard-coded name and reported
+  # green over 29 it never ran. `run.sh` now refuses to start without it.
+  name-collision:
+    name: name-collision-probe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install toolchains
+        run: |
+          rustup update stable --no-self-update && rustup default stable
+          rustup toolchain install nightly
+      - name: Derive the added-name inventory from rustdoc JSON, both sides
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
+          echo "base=$base" >> "$GITHUB_ENV"
+          feat="std,logos,trace,rowan"
+          mkdir -p /tmp/nc && git worktree add /tmp/nc/base "$base"
+          # `Cargo.lock` is gitignored, so the worktree has none and would re-resolve.
+          # The inventory drives the whole gate; deriving it from two different dependency
+          # graphs is the confound `run.sh` copies the lock to avoid.
+          cp Cargo.lock /tmp/nc/base/Cargo.lock 2>/dev/null || true
+          for side in base head; do
+            dir="/tmp/nc/base"; [ "$side" = head ] && dir="$PWD"
+            ( cd "$dir" && RUSTC_BOOTSTRAP=1 \
+                RUSTDOCFLAGS="-Z unstable-options --output-format json" \
+                cargo doc -p tokora --no-deps --features "$feat" )
+            cp "$dir/target/doc/tokora.json" "/tmp/nc/$side.json"
+          done
+          python3 ci/name_collision/surface_diff.py \
+            /tmp/nc/base.json /tmp/nc/head.json --features "$feat"
+          cp /tmp/nc/surface_names.json /tmp/nc/inventory.json
+      - name: Probe every added name against its real owner
+        run: bash ci/name_collision/run.sh "$base" /tmp/nc/inventory.json
+
   # ── Gate: sanitizers ────────────────────────────────────────────────────────
   # `ci/sanitizer.sh` existed and had **no caller**: no job in this file referenced it, so it
   # had never run on any branch of this campaign. That is the same class as a configuration CI

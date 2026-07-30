@@ -79,6 +79,15 @@ where
   ///
   /// A token already waiting at the front of the stream — parked or cached — is served without
   /// touching the lexer.
+  ///
+  /// # It folds a terminal stop into `Ok(None)`
+  ///
+  /// This is the raw read: a resource-limit trip or a latched poison boundary is
+  /// indistinguishable here from genuine end of input. A production that decides on the
+  /// answer — "is there a `{` here?" — will read a halt as a grammar fact and keep going.
+  /// Prefer [`peek_kind`](Self::peek_kind), [`head_satisfies`](Self::head_satisfies) or
+  /// [`peek_head_map`](Self::peek_head_map), which raise on a terminal stop and reserve
+  /// `Ok(None)` for the real end of input.
   #[inline]
   pub fn peek_one(
     &mut self,
@@ -353,6 +362,81 @@ where
     }
 
     Ok(self.session.emitter)
+  }
+
+  /// Width-1 head observation in grammar vocabulary, terminal-aware by construction.
+  ///
+  /// `f` sees the head as `Spanned<&Token, &Span>` and its value is returned. `Ok(None)`
+  /// is genuine end of input; a **terminal stop** — a resource-limit trip or a latched
+  /// poison boundary — raises the same terminal end-of-input error the `_or_stop` family
+  /// raises, never a silent `None`. That distinction is the point: a consumer that reads
+  /// a halt as "no head here" builds a value out of an input the scanner already gave up
+  /// on.
+  ///
+  /// Rides the terminal-aware cache read
+  /// ([`peek_with_emitter_terminal`](Self::peek_with_emitter_terminal)) rather than the
+  /// `try_expect` scan, so the head is served from the front slot with no pop/hold
+  /// round-trip.
+  #[inline]
+  pub fn peek_head_map<O, F>(
+    &mut self,
+    f: F,
+  ) -> Result<Option<O>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    F: FnOnce(Spanned<&L::Token, &L::Span>) -> O,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+  {
+    use crate::cache::PeekedTokenExt as _;
+    // Hoisted before the fill: the committed span does not move under a pure peek, and
+    // the window borrow (`peeked` ties to `&mut self`) must not overlap the read.
+    let end = self.span().end();
+    let (mut peeked, terminal, _emitter) =
+      self.peek_with_emitter_terminal::<generic_arraydeque::typenum::U1>()?;
+    match peeked.pop_front() {
+      Some(head) => {
+        let out = f(Spanned::new(head.span(), head.token()));
+        Ok(Some(out))
+      }
+      None if terminal => Err(UnexpectedEot::eot_of(end).into_terminal().into()),
+      None => Ok(None),
+    }
+  }
+
+  /// Does the head satisfy `pred`?
+  ///
+  /// `false` at genuine end of input; a terminal stop is an error. Replaces the
+  /// consumer-side always-decline `try_expect` hack, which answered `false` for both.
+  #[inline]
+  pub fn head_satisfies<F>(
+    &mut self,
+    pred: F,
+  ) -> Result<bool, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    F: FnOnce(&L::Token) -> bool,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+  {
+    self
+      .peek_head_map(|sp| pred(sp.data))
+      .map(|o| o.unwrap_or(false))
+  }
+
+  /// The head's kind, on the same terminal-aware read as
+  /// [`peek_head_map`](Self::peek_head_map).
+  ///
+  /// The method form of the free [`peek_kind`](crate::parser::peek_kind). Note the
+  /// contract difference from a hand-rolled `peek::<U1>()` fork: that discards the
+  /// terminal flag, so a latched boundary reads as `Ok(None)`; this raises.
+  #[inline]
+  pub fn peek_kind(
+    &mut self,
+  ) -> Result<
+    Option<<L::Token as Token<'inp>>::Kind>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
+  >
+  where
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+  {
+    self.peek_head_map(|sp| sp.data.kind())
   }
 }
 

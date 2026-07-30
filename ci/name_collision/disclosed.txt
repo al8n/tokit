@@ -1,0 +1,22 @@
+# Silent steals that are KNOWN, DISCLOSED and ACCEPTED for this release.
+#
+# One `name/spelling` per line. The gate fails on a SILENT row that is NOT listed here, and
+# also fails on a line listed here that no longer reproduces — a baseline that can rot into
+# a rubber stamp is worse than none.
+#
+# Every row below is in the CHANGELOG's "no diagnostic at the call site" section. Each rides
+# a bounded receiver — `ParseInput` / `TryParseInput` / `ParseAttempt`, whose blanket impls
+# reject non-parser receivers — rather than every `Sized` type. That distinction is what
+# decided the one removal this release made: `PinOutputs::outputs` reached every `Sized`
+# type and was cut; these do not.
+#
+# The reason each is silent rather than reported is that `unused_must_use` does not fire on
+# its discarded return. Measured, per name: `Result` is `#[must_use]` as a type
+# (`peek_kind`); an `impl FnMut` return is covered by the lint's own rule for unused
+# callables (`list_until`, `opt`); an `Option` is covered by NEITHER, and a plain adapter
+# struct by neither. So the discriminator is the lint, not a `#[must_use]` attribute — the
+# shorter statement was wrong for two of the three names it was meant to explain.
+into_option/discarded
+labelled/later_pick_discarded
+traced/later_pick_discarded
+peek_then_head/later_pick_discarded

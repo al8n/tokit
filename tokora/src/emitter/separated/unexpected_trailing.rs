@@ -6,6 +6,11 @@ use crate::{
 use super::*;
 
 /// An emitter that handles unexpected trailing separator.
+#[diagnostic::on_unimplemented(
+  message = "`{Self}` cannot report a trailing separator for lexer `{L}`",
+  label = "missing `UnexpectedTrailingSeparatorEmitter` — a `ComposableEmitter` bundle member",
+  note = "implement `UnexpectedTrailingSeparatorEmitter` (usually alongside the other members of the `ComposableEmitter` bundle)"
+)]
 pub trait UnexpectedTrailingSeparatorEmitter<'inp, L, Lang: ?Sized = ()>:
   SeparatedEmitter<'inp, L, Lang>
 {

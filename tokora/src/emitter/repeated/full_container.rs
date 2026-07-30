@@ -23,6 +23,11 @@ where
 }
 
 /// An emitter that handles errors related to containers do not have enough capacity for repeated parsers.
+#[diagnostic::on_unimplemented(
+  message = "`{Self}` cannot report a full container for lexer `{L}`",
+  label = "missing `FullContainerEmitter` — required by the repetition drivers and by the `ComposableEmitter` bundle",
+  note = "implement `FullContainerEmitter` (usually alongside the other members of the `ComposableEmitter` bundle)"
+)]
 pub trait FullContainerEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// Emits an error indicating that the given container is full, and cannot accept more elements.
   fn emit_full_container(&mut self, err: FullContainer<L::Span, Lang>) -> Result<(), Self::Error>

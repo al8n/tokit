@@ -59,6 +59,7 @@ use rowan::{GreenNodeBuilder, Language, SyntaxNode, SyntaxToken};
 use crate::syntax::Syntax;
 
 pub mod event;
+pub mod kinds;
 
 // UN-GATED from `rowan` deliberately (T12). `CstProfile` and `KindValidator` are fn-pointer and
 // data only — `profile.rs`'s single import is `event::TOMBSTONE`, which is itself unconditional

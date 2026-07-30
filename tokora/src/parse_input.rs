@@ -88,6 +88,198 @@ where
   }
 }
 
+/// Width-1 decision adapters in grammar vocabulary.
+///
+/// Each constructor returns a concrete type implementing [`Decision`] **pinned at
+/// `W = U1`**, which is what kills the turbofish: the driver's window parameter infers
+/// from the adapter, so the call site carries no `::<_, U1>` and no [`Peeked`] in the
+/// hook. A `W`-generic impl re-ambiguates it.
+///
+/// A second blanket closure impl would break coherence with the `FnMut` blanket above,
+/// so concrete adapter types are the house pattern here — see `WhileNext` in
+/// `parser/list.rs`.
+mod decision_adapters {
+  use super::*;
+
+  /// Continue while the head satisfies `pred`; stop at a failing head or end of input.
+  pub struct WhileHead<F>(pub(super) F);
+  /// Continue while the head's kind equals `kind` — the punct-tail idiom.
+  pub struct WhileKind<K>(pub(super) K);
+
+  impl<F> core::fmt::Debug for WhileHead<F> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+      f.debug_struct("WhileHead").finish_non_exhaustive()
+    }
+  }
+
+  impl<K: core::fmt::Debug> core::fmt::Debug for WhileKind<K> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+      f.debug_struct("WhileKind").field("kind", &self.0).finish()
+    }
+  }
+
+  impl<'inp, F, L, E, Lang: ?Sized> Decision<'inp, L, E, typenum::U1, Lang> for WhileHead<F>
+  where
+    F: FnMut(&L::Token) -> bool,
+    L: Lexer<'inp>,
+    E: Emitter<'inp, L, Lang>,
+  {
+    #[inline(always)]
+    fn decide(
+      &mut self,
+      mut toks: Peeked<'_, 'inp, L, typenum::U1>,
+      _emitter: &mut E,
+    ) -> Result<Action, E::Error> {
+      use crate::cache::PeekedTokenExt as _;
+      Ok(match toks.pop_front() {
+        Some(t) if (self.0)(t.token()) => Action::Continue,
+        _ => Action::Stop,
+      })
+    }
+  }
+
+  impl<'inp, K, L, E, Lang: ?Sized> Decision<'inp, L, E, typenum::U1, Lang> for WhileKind<K>
+  where
+    K: PartialEq<<L::Token as Token<'inp>>::Kind>,
+    L: Lexer<'inp>,
+    E: Emitter<'inp, L, Lang>,
+  {
+    #[inline(always)]
+    fn decide(
+      &mut self,
+      mut toks: Peeked<'_, 'inp, L, typenum::U1>,
+      _emitter: &mut E,
+    ) -> Result<Action, E::Error> {
+      use crate::cache::PeekedTokenExt as _;
+      Ok(match toks.pop_front() {
+        Some(t) if self.0 == t.token().kind() => Action::Continue,
+        _ => Action::Stop,
+      })
+    }
+  }
+}
+pub use decision_adapters::{WhileHead, WhileKind};
+
+/// Continue while the head satisfies `pred` — width-1, no turbofish, no [`Peeked`].
+///
+/// The closure takes the head by reference. Bare-closure parameters do not infer through
+/// an impl-side `Fn` bound, so a closure written inline needs a `|t: &Tok|` ascription; a
+/// named function needs none. [`while_kind`] needs neither.
+///
+/// "Until" is the same adapter with one `!`: `while_head(|t: &Tok| !t.is_semicolon())`.
+#[inline(always)]
+pub fn while_head<F>(pred: F) -> WhileHead<F> {
+  decision_adapters::WhileHead(pred)
+}
+
+/// Continue while the head's kind equals `kind` — zero annotation at the call site.
+#[inline(always)]
+pub fn while_kind<K>(kind: K) -> WhileKind<K> {
+  decision_adapters::WhileKind(kind)
+}
+
+/// A parser adapter that pins the enclosed parser's output type to `O`.
+///
+/// A parser with several output impls — `Collect`, `With`, `FailWith`, `Accepted` — is
+/// ambiguous at every downstream site that does not name the output. `Pinned<P, O>`
+/// implements [`ParseInput`]/[`TryParseInput`](crate::TryParseInput) at exactly one `O`,
+/// so the ambiguity stops there instead of being re-annotated at every use.
+///
+/// Build one with [`pinned`].
+pub struct Pinned<P, O> {
+  inner: P,
+  // `fn() -> O`, not `O`: the adapter stores no `O`, so it must not inherit `O`'s
+  // auto-traits — `pinned::<*const u8, _>(p)` must not un-`Send` a `Send` parser. A
+  // fn-pointer phantom is `Send + Sync` unconditionally and keeps covariance in `O`.
+  // Variance and auto-traits are public API the moment they ship.
+  _pin: core::marker::PhantomData<fn() -> O>,
+}
+
+impl<P: core::fmt::Debug, O> core::fmt::Debug for Pinned<P, O> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.debug_struct("Pinned")
+      .field("inner", &self.inner)
+      .finish()
+  }
+}
+
+/// Pins `parser`'s output type to `O2`, so a receiver with several output impls stops
+/// being ambiguous downstream.
+///
+/// ```ignore
+/// let items = pinned::<Vec<i64>, _>(element.repeated_while(cond).collect())
+///   .parse_input(inp)?;
+/// let n = items.len(); // resolves: the output type is no longer a variable
+/// ```
+///
+/// # Why this is a free function and not a method
+///
+/// The fluent spelling would have to be a **blanket** trait method — bounding it by
+/// [`ParseInput`] means naming the very parameters whose ambiguity it exists to kill, and
+/// a `Self`-returning method on `ParseInput` re-ambiguates (the next call sees fresh
+/// inference variables). A blanket method plants a candidate on **every `Sized` type** in
+/// the consumer's program, and a by-value candidate is picked before a consumer's
+/// same-named `&self` method.
+///
+/// That was accepted while it was believed such a collision must be loud, because `O2` is
+/// not determined by the receiver. It is not: a caller can supply `O2` with a turbofish,
+/// and if the return value is discarded the call compiles and the consumer's method
+/// silently stops running — with no error and no warning. Worse, an extension method that
+/// exists to *pin a type* has no inferred spelling at all, so the turbofish is its only
+/// spelling and the silent path is the default rather than a corner.
+///
+/// A free function resolves by path, plants nothing in method space, and cannot shadow
+/// anything. The fluent form remains purely additive later if the hazard is ever
+/// understood well enough to price it.
+#[inline(always)]
+pub fn pinned<O2, P>(parser: P) -> Pinned<P, O2> {
+  Pinned {
+    inner: parser,
+    _pin: core::marker::PhantomData,
+  }
+}
+
+impl<'inp, L, O, Ctx, Lang: ?Sized, Cmpl, P> ParseInput<'inp, L, O, Ctx, Lang, Cmpl>
+  for Pinned<P, O>
+where
+  P: ParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
+{
+  #[inline(always)]
+  fn parse_input(
+    &mut self,
+    input: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
+  ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    L: Lexer<'inp>,
+    Ctx: ParseContext<'inp, L, Lang>,
+    Cmpl: Completeness,
+  {
+    self.inner.parse_input(input)
+  }
+}
+
+impl<'inp, L, O, Ctx, Lang: ?Sized, Cmpl, P> crate::TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>
+  for Pinned<P, O>
+where
+  P: crate::TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
+{
+  #[inline(always)]
+  fn try_parse_input(
+    &mut self,
+    input: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
+  ) -> Result<
+    crate::try_parse_input::ParseAttempt<O>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
+  >
+  where
+    L: Lexer<'inp>,
+    Ctx: ParseContext<'inp, L, Lang>,
+    Cmpl: Completeness,
+  {
+    self.inner.try_parse_input(input)
+  }
+}
+
 /// A trait for parsers that accumulate their results into a container.
 pub trait Accumulator<'inp, L, Container, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// Collects the parsed elements into the specified container.
@@ -539,6 +731,99 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
     At,
   );
 
+  /// Method form of the free [`labelled`](crate::parser::labelled).
+  #[inline(always)]
+  fn labelled(self, name: &'static str) -> crate::parser::Labelled<Self>
+  where
+    Self: Sized,
+  {
+    crate::parser::labelled(name, self)
+  }
+
+  /// Method form of the free [`traced`](crate::trace::traced).
+  #[cfg(feature = "trace")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "trace")))]
+  #[inline(always)]
+  fn traced(self, name: &'static str) -> crate::trace::Traced<Self>
+  where
+    Self: Sized,
+  {
+    crate::trace::traced(name, self)
+  }
+
+  /// Method form of the free [`traced`](crate::trace::traced).
+  ///
+  /// With `trace` off this is the identity, exactly as the free function is.
+  #[cfg(not(feature = "trace"))]
+  #[cfg_attr(docsrs, doc(cfg(not(feature = "trace"))))]
+  #[inline(always)]
+  fn traced(self, _name: &'static str) -> Self
+  where
+    Self: Sized,
+  {
+    self
+  }
+
+  /// Method form of the free [`list`](crate::parser::list) — named `list_until` because
+  /// the `until` argument is the distinguishing half.
+  ///
+  /// # Availability
+  ///
+  /// Complete inputs only ([`Complete`](crate::input::Complete)), and the context must be
+  /// a [`ComposableParseContext`]. The completeness pin is **inherited from the free
+  /// [`list`](crate::parser::list)**, which carries it already: this method cannot be
+  /// wider than the function it delegates to, and widening that function would re-bound a
+  /// pre-existing item, which this wave does not do. Streaming callers keep the
+  /// element-level primitives. (Contrast [`select!`](crate::select), whose runtime is new
+  /// here and is therefore generic over completeness.)
+  ///
+  /// The `alloc`/`std` gate is the free function's too — `list` returns a `Vec`.
+  #[cfg(any(feature = "alloc", feature = "std"))]
+  #[cfg_attr(docsrs, doc(cfg(any(feature = "alloc", feature = "std"))))]
+  #[inline(always)]
+  fn list_until<Until>(
+    self,
+    until: Until,
+  ) -> impl for<'c> FnMut(
+    &mut InputRef<'inp, 'c, L, Ctx, Lang>,
+  ) -> crate::parser::ListOf<'inp, L, Ctx, Lang, O>
+  where
+    Self: Sized + ParseInput<'inp, L, O, Ctx, Lang>,
+    L: Lexer<'inp>,
+    Ctx: ComposableParseContext<'inp, L, Lang>,
+    Until: FnMut(&L::Token) -> bool,
+  {
+    crate::parser::list(self, until)
+  }
+
+  /// Method form of the free [`separated1`](crate::parser::separated1) — the
+  /// committed-first "light" list shape, fluent.
+  ///
+  /// # Availability
+  ///
+  /// Same as [`list_until`](Self::list_until): complete inputs only, and a
+  /// [`ComposableParseContext`]. The pin is inherited from the free
+  /// [`separated1`](crate::parser::separated1), and so is the `alloc`/`std` gate — the
+  /// free function returns a `Vec`.
+  #[cfg(any(feature = "alloc", feature = "std"))]
+  #[cfg_attr(docsrs, doc(cfg(any(feature = "alloc", feature = "std"))))]
+  #[inline(always)]
+  fn separated1_by<Sep, Peek>(
+    self,
+    peek: Peek,
+  ) -> impl for<'c> FnMut(
+    &mut InputRef<'inp, 'c, L, Ctx, Lang>,
+  ) -> crate::parser::Separated1Of<'inp, L, Ctx, Lang, O>
+  where
+    Self: Sized + ParseInput<'inp, L, O, Ctx, Lang>,
+    L: Lexer<'inp>,
+    Ctx: ComposableParseContext<'inp, L, Lang>,
+    Sep: Punctuator<'inp, L, Lang>,
+    Peek: FnMut(&L::Token) -> bool,
+  {
+    crate::parser::separated1::<Sep, L, Ctx, Lang, Self, O, Peek>(self, peek)
+  }
+
   /// Creates a `PeekThen` combinator that peeks at most `N` tokens first from the input before parsing.
   ///
   /// If the condition handler `C` returns `Ok(())`, the inner parser is applied, otherwise,
@@ -573,6 +858,45 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
     PeekThen<Self, C, L::Token, W, Cmpl>: TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
   {
     PeekThen::of(self, condition)
+  }
+
+  /// The width-1 twin of [`peek_then`](Self::peek_then): the condition sees `Some(head)`
+  /// or `None` (end of input) in grammar vocabulary.
+  ///
+  /// No [`Peeked`], no typenum, and no emitter parameter — so a hook written as a named
+  /// function does not have to name `Ctx` in its signature just to be callable here.
+  #[inline(always)]
+  fn peek_then_head<C>(
+    self,
+    mut condition: C,
+  ) -> PeekThen<
+    Self,
+    impl FnMut(
+      Peeked<'_, 'inp, L, typenum::U1>,
+      &mut Ctx::Emitter,
+    ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
+    L::Token,
+    typenum::U1,
+    Cmpl,
+  >
+  where
+    Self: Sized,
+    L: Lexer<'inp>,
+    Ctx: ParseContext<'inp, L, Lang>,
+    C: FnMut(
+      Option<Spanned<&L::Token, &L::Span>>,
+    ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
+  {
+    PeekThen::of(
+      self,
+      move |mut toks: Peeked<'_, 'inp, L, typenum::U1>, _emitter: &mut Ctx::Emitter| {
+        use crate::cache::PeekedTokenExt as _;
+        match toks.pop_front() {
+          Some(t) => condition(Some(Spanned::new(t.span(), t.token()))),
+          None => condition(None),
+        }
+      },
+    )
   }
 
   /// Map the output of this parser using the given function.

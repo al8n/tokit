@@ -1,0 +1,20 @@
+error[E0277]: `MyEmitter` cannot report separator diagnostics for lexer `L`
+  --> tests/ui/separated_emitter.rs:12:14
+   |
+12 |   inner::<L, MyEmitter>();
+   |              ^^^^^^^^^ missing `SeparatedEmitter` — required by the separated drivers and by the `ComposableEmitter` bundle
+   |
+   = help: the trait `SeparatedEmitter<'_, L>` is not implemented for `MyEmitter`
+   = note: implement `SeparatedEmitter` (usually alongside the other members of the `ComposableEmitter` bundle)
+   = help: the following other types implement trait `SeparatedEmitter<'inp, L, Lang>`:
+             &mut U
+             Fatal<E, Lang>
+             Ignored<()>
+             Silent<E, Lang>
+             Verbose<E, S, Lang>
+             tokora::cst::Sink<'inp, L, E>
+note: required by a bound in `inner`
+  --> tests/ui/separated_emitter.rs:11:37
+   |
+11 |   fn inner<'inp, L: Lexer<'inp>, E: SeparatedEmitter<'inp, L>>() {}
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `inner`

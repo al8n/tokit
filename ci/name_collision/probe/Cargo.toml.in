@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "name-collision-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokora = { path = "TOKORA_PATH", default-features = false, features = ["std", "logos"] }
+otherlib = { path = "otherlib" }
+
+[features]
+inferred = []
+turbofish_used = []
+turbofish_discarded = []
+assoc_path = []
+glob_clash = []
