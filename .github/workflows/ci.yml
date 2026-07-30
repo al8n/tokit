@@ -380,15 +380,23 @@ jobs:
           echo "base=$base" >> "$GITHUB_ENV"
           feat="std,logos,trace,rowan"
           mkdir -p /tmp/nc && git worktree add /tmp/nc/base "$base"
-          # `Cargo.lock` is gitignored, so the worktree has none and would re-resolve.
-          # The inventory drives the whole gate; deriving it from two different dependency
-          # graphs is the confound `run.sh` copies the lock to avoid.
-          cp Cargo.lock /tmp/nc/base/Cargo.lock 2>/dev/null || true
+          # `Cargo.lock` is gitignored, so a fresh checkout has none and both sides would
+          # re-resolve independently. Generate it once, copy it into base — no `|| true`,
+          # so an absent source fails the step instead of vanishing — assert the copy is
+          # byte-identical, and pass `--locked` below so `cargo doc` refuses to re-resolve.
+          #
+          # A dependency-requirement change in the PR makes base's manifest disagree with
+          # this lock, so `--locked` fails the base side below — expected, not a bug: the
+          # graphs really differ, so read the diff by hand. Don't restore `|| true` for
+          # this; regenerate each side's lock from its own manifest and say so in the PR.
+          cargo generate-lockfile
+          cp Cargo.lock /tmp/nc/base/Cargo.lock
+          cmp Cargo.lock /tmp/nc/base/Cargo.lock
           for side in base head; do
             dir="/tmp/nc/base"; [ "$side" = head ] && dir="$PWD"
             ( cd "$dir" && RUSTC_BOOTSTRAP=1 \
                 RUSTDOCFLAGS="-Z unstable-options --output-format json" \
-                cargo doc -p tokora --no-deps --features "$feat" )
+                cargo doc -p tokora --no-deps --features "$feat" --locked )
             cp "$dir/target/doc/tokora.json" "/tmp/nc/$side.json"
           done
           python3 ci/name_collision/surface_diff.py \
