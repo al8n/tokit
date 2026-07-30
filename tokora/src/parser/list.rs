@@ -141,7 +141,7 @@ pub type ListOf<'inp, L, Ctx, Lang, T> = Result<Vec<T>, ErrorOf<'inp, L, Ctx, La
 /// ```
 #[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
 #[inline]
-// STAYS COMPLETE-TYPED (0.3.0, R1.7): this constructor's ENGINE is the decision-window
+// STAYS COMPLETE-TYPED: this constructor's ENGINE is the decision-window
 // class — its body drives `separated_while` with a peek predicate, and `SeparatedWhile`
 // is Complete-only this release. The returned closure is therefore typed at the default
 // (`Complete`) rather than generic over the completeness parameter; it generalizes for
@@ -261,7 +261,7 @@ where
 /// ```
 #[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
 #[inline]
-// STAYS COMPLETE-TYPED (0.3.0, R1.7): same engine class as `separated1` — the body
+// STAYS COMPLETE-TYPED: same engine class as `separated1` — the body
 // drives `separated_while`, so the closure stays Complete-typed until that engine relaxes.
 pub fn list<'inp, L, Ctx, Lang, P, T, Until>(
   mut item: P,

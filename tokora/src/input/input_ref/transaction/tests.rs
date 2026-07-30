@@ -973,7 +973,7 @@ fn txn_nested_attempt_is_legal() {
   );
 }
 
-// ── D27: the unwind posture of an undecided Commit-policy guard ──────────────────
+// ── The unwind posture of an undecided Commit-policy guard ───────────────────────
 //
 // A panic inside a `begin_with::<Commit>` region that a host catches used to leave the
 // input in a state no non-panicking execution can produce: the operator consumed, the
@@ -1058,7 +1058,7 @@ fn rollback_guard_dropped_mid_unwind_still_rolls_back() {
   );
 }
 
-// ── D41: the settle path's cost as a function of nesting depth ───────────────────
+// ── The settle path's cost as a function of nesting depth ────────────────────────
 //
 // `Lineage::contains` and `pop_through` back every guard settle. Both scanned front-to-back
 // with no last-element fast path, while `forget`/`unpin` had one — so `d` nested guards

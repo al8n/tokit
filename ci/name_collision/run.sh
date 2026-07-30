@@ -62,7 +62,7 @@ python3 - "$INVENTORY" > "$WORK/plan.tsv" <<'PY' || { echo "name-collision: FATA
 import json, sys
 d = json.load(open(sys.argv[1]))
 required = ("inherent_method_names", "inherent_assoc_fn_names", "trait_method_names",
-            "glob_names", "inherent_owners", "trait_method_owners")
+            "glob_names", "glob_details", "inherent_owners", "trait_method_owners")
 missing = [k for k in required if k not in d]
 if missing:
     sys.exit("inventory is missing %s — regenerate it with surface_diff.py" % missing)
@@ -77,10 +77,11 @@ for n in d["inherent_assoc_fn_names"]:
 for n in d["trait_method_names"]:
     for sp in ("same_pick", "later_pick_used", "later_pick_discarded"):
         rows.append(("trait_method", n, to[n], sp))
-gd = d.get("glob_details")
-if not gd:
-    sys.exit("inventory has no glob_details — regenerate it; a glob probe without the "
-             "module path and namespace kind constructs no collision")
+# Presence, not truthiness. `{}` is what a well-formed inventory looks like when the diff
+# added no glob-reachable names; treating that as a malformed inventory turns "this PR adds
+# no public surface" into a FATAL. Absence is still fatal, and the required-key check above
+# is where that is caught.
+gd = d["glob_details"]
 for n in d["glob_names"]:
     det = gd.get(n)
     if not det:
@@ -88,7 +89,14 @@ for n in d["glob_names"]:
     cat = "glob_macro" if det["kind"] == "macro" else "glob_name"
     rows.append((cat, n, "%s:%s" % (det["path"], det["kind"]), "clash"))
 if not rows:
-    sys.exit("inventory produced ZERO probes — that is a failure, not a pass")
+    # Zero probes has two causes and they are opposite. If every name list is empty the diff
+    # genuinely added no public names, there is no collision to construct, and an empty plan is
+    # the correct output. If any list is non-empty then rows should have been built from it and
+    # something is wrong with this flattening — still fatal.
+    named = (d["glob_names"] or d["trait_method_names"]
+             or d["inherent_method_names"] or d["inherent_assoc_fn_names"])
+    if named:
+        sys.exit("inventory lists names but produced ZERO probes — that is a failure, not a pass")
 for r in rows:
     print("\t".join(r))
 PY
@@ -97,6 +105,20 @@ total=$(wc -l < "$WORK/plan.tsv" | tr -d ' ')
 echo "name-collision: base=$BASE_REF  head=<working tree>"
 echo "name-collision: inventory=$INVENTORY  probes=$total"
 echo "name-collision: rustc=$(rustc --version 2>/dev/null || echo unknown)"
+
+# An empty plan from a well-formed inventory means the diff added no public names at all. The
+# python above is fail-closed, so reaching here with zero rows IS that case rather than a parse
+# problem. Return before the probe loop and before the baseline reconciliation: with nothing
+# probed, every disclosed.txt and no_collision.txt entry would be reported STALE for want of a
+# probe to reproduce it, which says nothing about those baselines.
+if [ "$total" -eq 0 ]; then
+  echo "name-collision: PASS — the diff adds no new public names, so there is no name for a"
+  echo "name-collision: consumer to collide with and nothing for this harness to construct."
+  echo "name-collision: The baselines in disclosed.txt and no_collision.txt are NOT reconciled"
+  echo "name-collision: on this run: with zero probes they cannot reproduce, and reporting them"
+  echo "name-collision: stale would be an artifact of an empty diff rather than a finding."
+  exit 0
+fi
 
 DISCLOSED="$HERE/disclosed.txt"
 NOCOLLIDE="$HERE/no_collision.txt"

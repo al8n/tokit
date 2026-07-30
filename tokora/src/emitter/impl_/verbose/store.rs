@@ -413,7 +413,7 @@ impl<Error, S> Store<Error, S> {
   }
 }
 
-/// §4.2 — the record chokepoints are **panic-atomic**: a panic anywhere inside one of the three
+/// The record chokepoints are **panic-atomic**: a panic anywhere inside one of the three
 /// bodies leaves no payload, no label entry and no log entry.
 ///
 /// Each cell drives a record whose *second* user-code step (a `S: Clone`, or a `S: Ord`

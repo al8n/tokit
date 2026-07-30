@@ -164,6 +164,11 @@ where
         let power = precedenced.into_precedence();
         let floor = PrattFloor::Inclusive(power);
         let Some(operand) = self.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
+          // Recovery posture: a prefix operator whose operand never arrived is returned as the
+          // expression's own token, after the diagnostic. Under a recording emitter the parse
+          // therefore continues with the bare operator standing in for the expression it could
+          // not build. Callers wanting the stricter posture — no value where no operand was
+          // parsed — use the typed driver, which has a node to withhold.
           self
             .session
             .emitter
@@ -233,6 +238,10 @@ where
             PrattFloor::Exclusive(lpower.clone())
           };
           let Some(rhs) = self.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
+            // Same recovery posture as the prefix exit above: an infix operator whose right
+            // operand never arrived yields the LHS alone, after the diagnostic — the operator
+            // and its missing side are dropped from the returned expression rather than the
+            // whole parse failing. The typed driver is the stricter alternative.
             self
               .session
               .emitter

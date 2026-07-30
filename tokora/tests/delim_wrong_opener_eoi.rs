@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 #![allow(clippy::type_complexity)]
 //! Regression suite for issue #85 — "Delimited many parsers misclassify a cached wrong
 //! opener at end of input".
@@ -21,7 +24,14 @@
 //! 1. wrong opener as the FINAL token ⇒ expected-open `UnexpectedToken` carrying it, NOT EOT;
 //! 2. the SAME wrong opener followed by another token ⇒ the IDENTICAL diagnostic (parity);
 //! 3. genuinely empty input at the opener position ⇒ `UnexpectedEot` (unchanged);
-//! 4. the wrong opener stays unconsumed (cursor unmoved) under a recovering emitter.
+//! 4. the wrong opener stays unconsumed (cursor unmoved) under a recovering emitter;
+//! 5. the wrong opener is reported exactly ONCE under a recording emitter, and the `"x"` /
+//!    `"x 1"` recorded vectors stay identical (the parity duty on the recording path);
+//! 6. a close miss naming a DIFFERENT token than the wrong opener is preserved.
+//!
+//! Scenarios 5 and 6 are the suppression pair. Scenarios 1-4 run under `Fatal`, where the first
+//! emit aborts the driver, so they cannot see a double report at all: the defect lived only
+//! on the recording path.
 
 mod common;
 
@@ -367,6 +377,241 @@ macro_rules! driver_cases {
       );
     }
   };
+}
+
+// ── Scenarios 5 + 6 — one junk token, one report ──────────────────────────────
+//
+// Scenario 5 pins the suppression. Before the fix every family recorded the same `W@0..1`
+// TWICE under a recording emitter: the opener arm flagged the wrong opener, the token stayed
+// cached and unconsumed, and the close probe then re-saw that very token and reported it
+// again as a close miss.
+//
+// Scenario 6 is its twin and pins the other direction: when a genuinely DIFFERENT token sits
+// at the close position, that second report is real and must survive. The pair makes the
+// relation impossible to invert quietly — a suppression keyed on anything coarser than
+// committed consumption (the naive `open_span.is_none()` gate, a rejected cheap fix)
+// passes scenario 5 and DELETES scenario 6's `Ident@4..5`.
+//
+// Both assert the full recorded vector, never a count and never `any`: `Verbose::errors()` is
+// a `BTreeMap<Span, Vec<Error>>`, so `.values().flatten()` is span-ordered and deterministic.
+
+fn wrong(kind: TokenKind, start: usize, end: usize) -> WE {
+  WE::Wrong {
+    found: Some(kind),
+    span: SimpleSpan::new(start, end),
+  }
+}
+
+macro_rules! flagged_once_cases {
+  ($go:ident, $once:ident, $distinct:ident, $distinct_expected:expr) => {
+    #[test]
+    fn $once() {
+      fn probe<'inp>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
+      ) -> Result<Vec<WE>, WE> {
+        $go(inp)?;
+        Ok(inp.emitter().errors().values().flatten().cloned().collect())
+      }
+      let final_wrong: Vec<WE> = Parser::with_context(verbose_ctx())
+        .apply(probe)
+        .parse_str("x")
+        .expect("a recording emitter recovers past a wrong opener");
+      let followed: Vec<WE> = Parser::with_context(verbose_ctx())
+        .apply(probe)
+        .parse_str("x 1")
+        .expect("a recording emitter recovers past a wrong opener");
+
+      assert_eq!(
+        final_wrong,
+        vec![WE::Other, wrong(TokenKind::Ident, 0, 1)],
+        "the wrong opener must be reported exactly once (the TooFew secondary, then one \
+         expected-open unexpected-token); a second identical entry is the close probe \
+         re-reporting the same still-cached token",
+      );
+      assert_eq!(
+        final_wrong, followed,
+        "final vs followed wrong-opener recorded vectors must be identical — the #85 parity \
+         duty, extended from the Fatal path to the recording path",
+      );
+    }
+
+    #[test]
+    fn $distinct() {
+      fn probe<'inp>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
+      ) -> Result<Vec<WE>, WE> {
+        $go(inp)?;
+        Ok(inp.emitter().errors().values().flatten().cloned().collect())
+      }
+      let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
+        .apply(probe)
+        .parse_str("1 2 x")
+        .expect("a recording emitter recovers past a close miss");
+      assert_eq!(
+        recorded, $distinct_expected,
+        "a close miss naming a DIFFERENT token than the wrong opener is genuine and must \
+         survive suppression",
+      );
+    }
+  };
+}
+
+flagged_once_cases!(
+  go_repeated,
+  repeated_wrong_opener_is_flagged_once,
+  repeated_distinct_close_miss_is_preserved,
+  vec![wrong(TokenKind::Num, 0, 1), wrong(TokenKind::Ident, 4, 5)]
+);
+flagged_once_cases!(
+  go_repeated_while,
+  repeated_while_wrong_opener_is_flagged_once,
+  repeated_while_distinct_close_miss_is_preserved,
+  vec![wrong(TokenKind::Num, 0, 1), wrong(TokenKind::Ident, 4, 5)]
+);
+flagged_once_cases!(
+  go_separated,
+  separated_wrong_opener_is_flagged_once,
+  separated_distinct_close_miss_is_preserved,
+  vec![
+    wrong(TokenKind::Num, 0, 1),
+    WE::Other,
+    wrong(TokenKind::Ident, 4, 5)
+  ]
+);
+flagged_once_cases!(
+  go_separated_while,
+  separated_while_wrong_opener_is_flagged_once,
+  separated_while_distinct_close_miss_is_preserved,
+  vec![
+    wrong(TokenKind::Num, 0, 1),
+    WE::Other,
+    wrong(TokenKind::Ident, 4, 5)
+  ]
+);
+
+// ── Scenario 7 — the rare arms: zero-width × wrong-opener composites ──────────
+//
+// Each driver carries more than one `CloseStatus::WrongToken` arm, and the suppression is
+// applied at every one of them. Scenarios 5/6 above reach only the IN-LOOP arm of each
+// family; the function-level four-way-probe arms are reached, in the rest of the suite, only
+// by zero-width-element fixtures — which never carry a wrong opener, so they never arrive
+// there with the flag set.
+//
+// These composites are the missing intersection: a wrong opener (so the flag is armed and the
+// junk token stays cached at the front) PLUS a zero-width element (so the loop makes no
+// committed progress and breaks to the function-level probe, which then re-sees that same
+// cached token). They are the cells that make the suppression at those arms falsifiable
+// rather than merely present.
+//
+// The element accepts without consuming, so the stall guard breaks the loop after one push;
+// the epilogue's probe then re-sees the still-cached wrong opener. Expected in every case:
+// the wrong opener recorded exactly ONCE.
+
+const ONE_FLAG: fn() -> Vec<WE> = || vec![wrong(TokenKind::Ident, 0, 1)];
+
+// Reaches `parser/many/delim/repeated.rs`'s function-level four-way probe.
+#[test]
+fn repeated_zero_width_stall_arm_flags_wrong_opener_once() {
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
+  ) -> Result<Vec<WE>, WE> {
+    let elem = |_: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>| -> Result<
+      ParseAttempt<i64>,
+      WE,
+    > { Ok(ParseAttempt::Accept(0)) };
+    let _: Vec<i64> = elem
+      .repeated()
+      .delimited_by_braces()
+      .collect()
+      .parse_input(inp)?;
+    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+  }
+  let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
+    .apply(parse)
+    .parse_str("x")
+    .expect("a recording emitter recovers past a wrong opener");
+  assert_eq!(
+    recorded,
+    ONE_FLAG(),
+    "the stall epilogue's close probe re-sees the still-cached wrong opener; it must not \
+     report it a second time",
+  );
+}
+
+// Reaches `parser/many/delim/repeated_while.rs`'s function-level four-way probe. The
+// condition must say `Continue` at least once, or the in-loop arm settles it instead.
+#[test]
+fn repeated_while_zero_width_stall_arm_flags_wrong_opener_once() {
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
+  ) -> Result<Vec<WE>, WE> {
+    let mut budget = 3usize;
+    let cond =
+      move |_: Peeked<'_, 'inp, TestLexer<'inp>, U1>, _: &mut Verbose<WE>| -> Result<Action, WE> {
+        Ok(if budget > 0 {
+          budget -= 1;
+          Action::Continue
+        } else {
+          Action::Stop
+        })
+      };
+    let elem =
+      |_: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>| -> Result<i64, WE> { Ok(0) };
+    let _: Vec<i64> = elem
+      .repeated_while::<_, U1>(cond)
+      .delimited_by_braces()
+      .collect()
+      .parse_input(inp)?;
+    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+  }
+  let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
+    .apply(parse)
+    .parse_str("x")
+    .expect("a recording emitter recovers past a wrong opener");
+  assert_eq!(
+    recorded,
+    ONE_FLAG(),
+    "the stall epilogue's close probe re-sees the still-cached wrong opener; it must not \
+     report it a second time",
+  );
+}
+
+// Reaches `parser/many/sep_while/delim/mod.rs`'s in-loop stall probe (the third of that
+// file's three arms).
+#[test]
+fn separated_while_zero_width_stall_arm_flags_wrong_opener_once() {
+  fn parse<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
+  ) -> Result<Vec<WE>, WE> {
+    let mut budget = 3usize;
+    let cond =
+      move |_: Peeked<'_, 'inp, TestLexer<'inp>, U1>, _: &mut Verbose<WE>| -> Result<Action, WE> {
+        Ok(if budget > 0 {
+          budget -= 1;
+          Action::Continue
+        } else {
+          Action::Stop
+        })
+      };
+    let elem =
+      |_: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>| -> Result<i64, WE> { Ok(0) };
+    let _: Vec<i64> = elem
+      .separated_by_comma_while::<_, U1>(cond)
+      .delimited_by_braces()
+      .collect()
+      .parse_input(inp)?;
+    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+  }
+  let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
+    .apply(parse)
+    .parse_str("x")
+    .expect("a recording emitter recovers past a wrong opener");
+  assert_eq!(
+    recorded,
+    ONE_FLAG(),
+    "the stall probe re-sees the still-cached wrong opener; it must not report it a second \
+     time",
+  );
 }
 
 driver_cases!(

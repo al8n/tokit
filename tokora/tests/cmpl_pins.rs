@@ -1,6 +1,9 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
-//! §8.9 — the 0.3.0 inference-pin battery (the probe's T1–T12, at crate level).
+//! The inference-pin battery (T1–T12, at crate level).
 //!
 //! Candidate F's contract: every 0.2.0 spelling infers **byte-for-byte** at a concrete
 //! `Complete` drive — no turbofish, no annotations — because every builder-returned
@@ -265,7 +268,7 @@ fn t11_delimited_constructor_no_turbofish() {
   assert_eq!(Parser::with_parser(parse).parse_str("(7)"), Ok(7));
 }
 
-// T12 — `.by_ref()` reuse of one parser across two Complete drives (the §8.6 pin).
+// T12 — `.by_ref()` reuse of one parser across two Complete drives.
 #[test]
 fn t12_by_ref_reuse() {
   fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, L<'inp>, Ctx>) -> Result<(i64, i64), ()>

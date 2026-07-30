@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! The `Dialect` anchor carries a lexer's equality block to every production.
 //!

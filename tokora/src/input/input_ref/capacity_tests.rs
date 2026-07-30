@@ -487,7 +487,7 @@ fn every_program_is_compared() {
 
 // ── `is_exhausted`: the consumer gate, at every program point ────────────────────────
 //
-// The gate a driver loop wants, and the one promise this round hands the next: it is a function
+// The gate a driver loop wants, and the promise it makes: it is a function
 // of the token stream and the consumed prefix alone, so it agrees across every capacity at
 // *every* point — including after an arbitrary peek, where `cursor`/`offset`/`is_eoi` are all
 // still legitimately capacity-dependent.

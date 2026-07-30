@@ -46,7 +46,14 @@ pub(crate) mod sealed {
 ///
 /// A closed set of two zero-sized markers, [`Rollback`] and [`Commit`], chosen as a type
 /// parameter on [`Transaction`](super::Transaction) and
-/// [`StackedTransaction`](super::StackedTransaction). The trait is **sealed**: exactly
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " [`StackedTransaction`](super::StackedTransaction). The trait is **sealed**: exactly"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " `StackedTransaction`. The trait is **sealed**: exactly"
+)]
 /// these two policies exist, and the choice is a compile-time typestate rather than a
 /// runtime flag. Each marker's documentation says when to reach for it; the constructors
 /// that select one are [`begin`](super::InputRef::begin) /
@@ -66,12 +73,26 @@ pub trait DropPolicy: sealed::Sealed {}
 /// The speculative, rollback-on-drop policy — the default.
 ///
 /// An undecided [`Transaction`](super::Transaction) /
-/// [`StackedTransaction`](super::StackedTransaction) with this policy restores the input
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " [`StackedTransaction`](super::StackedTransaction) with this policy restores the input"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " `StackedTransaction` with this policy restores the input"
+)]
 /// to its begin point when dropped, exactly as an explicit
 /// [`rollback`](super::Transaction::rollback) would: uncommitted speculative work is
 /// discarded, the database default. This is the policy selected by
 /// [`begin`](super::InputRef::begin) and
-/// [`begin_stacked`](super::InputRef::begin_stacked).
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " [`begin_stacked`](super::InputRef::begin_stacked)."
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " `begin_stacked`."
+)]
 #[derive(Debug)]
 pub struct Rollback;
 
@@ -85,7 +106,14 @@ pub struct Rollback;
 /// loop keeps progress on every success and every `?`-propagation and rolls back only on
 /// its two "operator isn't ours" exits. Select it with
 /// [`begin_with`](super::InputRef::begin_with) /
-/// [`begin_stacked_with`](super::InputRef::begin_stacked_with).
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " [`begin_stacked_with`](super::InputRef::begin_stacked_with)."
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " `begin_stacked_with`."
+)]
 ///
 /// # A panic is not a decision
 ///

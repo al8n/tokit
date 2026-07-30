@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! The dialect-free atom surface: the `ComposableEmitter`/`ComposableParseContext` bundles and the
 //! policy atoms promoted from smear-parser-next (W-MOVE).
@@ -1387,7 +1390,7 @@ fn try_delimited_method_generic_declines_commits_and_nests() {
 #[test]
 fn try_delimited_by_parens_agrees_with_the_free_function_it_delegates_to() {
   // The delegation target is the GENERIC free `try_delimited::<Paren>`, not the named
-  // `try_parens` — the named free fn carries its own opener body (§14.2), so only the
+  // `try_parens` — the named free fn carries its own opener body, so only the
   // generic one is the same code path. Four inputs cover accept, decline-on-wrong-opener,
   // decline-at-EOT, and the committed-unterminated law.
   for src in ["(x)", "{x}", "", "(a"] {

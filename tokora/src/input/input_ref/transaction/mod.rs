@@ -55,7 +55,14 @@ use super::{
 ///
 /// The guards fit lexical scopes; for owned, externally-driven speculation — a driver that owns
 /// its input and is stepped across separate calls — reach for
-/// the [session points](crate::InputRef::begin_point); raw checkpoints sit beneath both.
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " the [session points](crate::InputRef::begin_point); raw checkpoints sit beneath both."
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " the session points; raw checkpoints sit beneath both."
+)]
 ///
 /// # Compile-time last-in, first-out
 ///
@@ -293,5 +300,9 @@ where
   }
 }
 
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 mod tests;

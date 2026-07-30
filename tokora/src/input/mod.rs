@@ -221,7 +221,11 @@ use super::*;
 pub use checkpoint::Checkpoint;
 pub use completeness::{Complete, Completeness, Partial, SurfaceIncomplete};
 pub use cursor::Cursor;
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 pub(crate) use input_ref::ClosePayload;
 pub(crate) use input_ref::CloseStatus;
 pub(crate) use input_ref::Session;
@@ -509,6 +513,78 @@ where
   /// already been emitted (e.g. during a peek that lexed past this point), so the
   /// consume path must not report them again when it re-lexes the same region.
   emitted_error_end: L::Offset,
+  /// The **front-report watermark**: a lineage fact about the emitter's log.
+  ///
+  /// `Some(end)` means the emitter's **current** log holds an unexpected-token report whose
+  /// subject is the token the current regime lexes at the stream front, ending at `end`. `None`
+  /// claims nothing.
+  ///
+  /// It exists because "has this front token already been reported?" is a *transactional*
+  /// question and cannot be answered from a parser's stack frame. A driver-local flag — committed
+  /// position, with or without a re-key count beside it — cannot observe a restore, because a
+  /// restore is exactly the operation that erases frame-visible traces: it rewinds the emitter,
+  /// destroys the front, and returns position to a value the frame cannot distinguish from
+  /// "nothing happened".
+  ///
+  /// The invariant is kept inductive by three writers and no others:
+  ///
+  /// - **set** — [`InputRef::emit_unexpected_front`](InputRef::emit_unexpected_front) publishes it
+  ///   in the same body that appends the report, and only if the append returned `Ok`;
+  /// - **clear** — a re-key ([`set_state`](InputRef::set_state) / [`state_mut`](InputRef::state_mut))
+  ///   takes it, because the regime that lexed its subject has died. Cleared *before* the cache
+  ///   clear, so an unwind through that caller code leaves it already disarmed and a later arm
+  ///   emits rather than suppresses;
+  /// - **restore** — captured into every [`Checkpoint`] and restored beside
+  ///   `emitted_error_end`, in the same no-caller-code block as the emitter rewind.
+  ///
+  /// A witness must share the rollback semantics of the fact it witnesses. This one does: its
+  /// subject is the emission log, and the log is restored in the same move.
+  ///
+  /// # The class this belongs to, and why it is safe rather than sound
+  ///
+  /// A **suppression watermark whose subject is one emitter's log, stored on a struct whose
+  /// emitter is chosen per borrow, is unsound by construction.** [`as_ref`](Self::as_ref) takes
+  /// the emitter as a parameter, so *which* log the watermark describes is decided per handle,
+  /// while the watermark itself lives here and outlives any one handle. A watermark set under one
+  /// emitter and read under another claims a report that log never received — and because these
+  /// watermarks **suppress**, the consequence is a silently dropped diagnostic, not a duplicated
+  /// one.
+  ///
+  /// **There are two members of the class, and this is the second.**
+  ///
+  /// - `emitted_error_end`, above. It gates
+  ///   [`emit_lexer_error_deduped`](InputRef::emit_lexer_error_deduped) with
+  ///   `if end <= *self.emitted_error_end { return Ok(()) }` — carried into a fresh log, every
+  ///   lexer error in the covered region is dropped. It predates this field, so the exposure is
+  ///   pre-existing and broader than the close-miss suppression that added the second member.
+  /// - `front_reported_end`, this field.
+  ///
+  /// `poison_boundary`, borrowed at the same site in the same way, is **genuinely exempt**: its
+  /// subject is the *limiter's* trip, which travels with the `Input` itself and means the same
+  /// thing under any emitter. It gates control flow, not dedup. So the shared borrow site is not
+  /// the discriminator — the question is whether a fact's subject is a particular emitter's log.
+  ///
+  /// # Why it is safe today
+  ///
+  /// No in-crate path pairs one `Input` with two different emitters. Enumerated rather than
+  /// assumed: the three parse entry points each construct an `Input` locally and borrow it exactly
+  /// once — including the partial session, which builds a **fresh** `Input` per attempt and so
+  /// never carries a watermark across one; the two harnesses that genuinely re-borrow one `Input`
+  /// (`fuzz::session` and `fuzz::partial`'s two-phase drain) deliberately reuse the *same* emitter,
+  /// because they exist to check that progress survives a re-borrow; and `Input` is `pub(crate)`
+  /// and unexported, so no external path exists at all.
+  ///
+  /// **That safety is a property of in-crate discipline, not of the type system.** Nothing stops a
+  /// future `as_ref` call from pairing a carried watermark with a different emitter, and the
+  /// compiler will not object. Before adding one, check that the emitter is the same log the
+  /// watermark was set under, or clear the watermark. `as_ref_census_roster_is_unchanged` is the
+  /// alarm for that, and its own blind spot is stated there.
+  ///
+  /// The remedy, if it is ever needed, is available: the flag-to-close-probe window never crosses
+  /// an `as_ref` boundary (`attempt` reborrows the same handle rather than making a new one, and
+  /// no driver calls `as_ref`), so clearing on handle creation would cost a duplicate report at
+  /// worst and could not disarm a live watermark mid-window.
+  front_reported_end: Option<L::Offset>,
   /// Sticky limit-error boundary, held at the input level so it survives across
   /// the fresh lexers `InputRef` builds per operation.
   ///
@@ -582,6 +658,12 @@ where
       // the same completeness regime as the original.
       finality: self.finality,
       emitted_error_end: self.emitted_error_end.clone(),
+      // NOT carried: a clone is a new input that will be handed a DIFFERENT emitter, so no report
+      // in the original's log can be claimed for it. `None` is the conservative reading — a later
+      // arm emits — and cloning the value would be the permissive one, asserting a live report
+      // this input has never made. The opposite conclusion from the cache-push counter beside it,
+      // for the opposite reason: the subject differs.
+      front_reported_end: None,
       poison_boundary: self.poison_boundary.clone(),
       // A clone is a new input that shares the cache contents: `Lineage::forked` carries the
       // cache-push and savepoint counters forward and starts a fresh, empty live-checkpoint
@@ -659,6 +741,7 @@ where
       // states the world fact by calling [`seal`](Self::seal) when the last chunk lands.
       finality: Cmpl::initial(),
       emitted_error_end: L::Offset::default(),
+      front_reported_end: None,
       poison_boundary: None,
       lineage: Lineage::new(),
       #[cfg(feature = "trace")]
@@ -694,6 +777,7 @@ where
       // [`seal`](Self::seal), the one monotone finality transition.
       finality: Cmpl::initial(),
       emitted_error_end: L::Offset::default(),
+      front_reported_end: None,
       poison_boundary: None,
       lineage: Lineage::new(),
       #[cfg(feature = "trace")]
@@ -747,7 +831,11 @@ where
   /// exactly the live begin points, and with no handle alive there are none. Gated to its callers
   /// (the session tests and the `fuzz` harness's abandon oracle).
   #[cfg(any(
-    all(test, feature = "logos", feature = "std"),
+    all(
+      test,
+      any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+      feature = "std"
+    ),
     all(feature = "fuzz", feature = "std")
   ))]
   pub(crate) fn pinned_checkpoints_len(&self) -> usize {
@@ -758,7 +846,11 @@ where
   /// restored nor released. The [`Input`]-level twin of
   /// [`InputRef::live_checkpoints_len`](InputRef), for the same after-the-handle-dies question:
   /// an abandoned session point releases its lineage entry too, so it does not strand one.
-  #[cfg(all(test, feature = "logos", feature = "std"))]
+  #[cfg(all(
+    test,
+    any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+    feature = "std"
+  ))]
   pub(crate) fn live_checkpoints_len(&self) -> usize {
     self.lineage.live_len()
   }
@@ -844,6 +936,7 @@ where
       // snapshot cannot go stale: finality is CONSTANT while any handle lives.
       finality: self.finality,
       emitted_error_end: &mut self.emitted_error_end,
+      front_reported_end: &mut self.front_reported_end,
       poison_boundary: &mut self.poison_boundary,
       // The lineage memos, the emitter borrow, and the session-point stack, in one cell (see
       // `input_ref::session`): the stack starts empty and stays unallocated until the first

@@ -53,7 +53,11 @@ pub(crate) use try_expect::CloseStatus;
 // `ClosePayload` is threaded through the delimited drivers without being named there (the
 // `Close(payload)` arm passes it straight to `commit_probed`); only the tests name the origin,
 // so the re-export is gated to exactly the cfg that compiles `partial_tests`.
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 pub(crate) use try_expect::ClosePayload;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -67,16 +71,32 @@ pub use stacked::{SavepointId, StackedTransaction};
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod census_tests;
 
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 mod tests;
 
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 mod partial_tests;
 
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 mod capacity_tests;
 
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 mod session_tests;
 
 /// A reference to an `Input` instance.
@@ -104,6 +124,9 @@ where
   /// the rollback set by construction (a [`Checkpoint`] does not carry it, and does not need to).
   pub(super) finality: Cmpl::Finality,
   pub(super) emitted_error_end: &'closure mut L::Offset,
+  /// The front-report watermark, borrowed from the owning [`Input`](super::Input) — see that
+  /// field for the invariant and the three writers that keep it inductive.
+  pub(super) front_reported_end: &'closure mut Option<L::Offset>,
   pub(super) poison_boundary: &'closure mut Option<L::Offset>,
   /// The **session cell**: the input's lineage memos (the live-checkpoint stack, the pin set, and
   /// the cache-push/checkpoint-id/savepoint counters), the handle's **emitter borrow** (the
@@ -265,6 +288,17 @@ where
     // land between two facts of one restore.
     let displaced = (
       core::mem::replace(self.emitted_error_end, error_end),
+      // The front-report watermark is deliberately NOT among these, and the reason is an ordering
+      // argument rather than a measurement, so it is written down: a scan captures its emitter mark
+      // inside an element, which runs after the driver has already flagged and reported a wrong
+      // opener. The flag's report therefore PREDATES this mark, the rewind below cannot truncate
+      // it, and the watermark must stay armed — disarming it here would make the driver re-report a
+      // token it has already reported.
+      //
+      // It is not asserted because it is not cheaply assertable: `Emitter::checkpoint` returns an
+      // opaque `u64` with no ordering contract, so the crate cannot compare this mark against the
+      // one the report was appended under. If that contract ever gains an ordering, this is the
+      // site that should carry the assert.
       // The fifth fact. A limit trip latches the boundary before its diagnostic is emitted, so an
       // exit that abandons the scan must un-latch what the scan latched — otherwise the input stays
       // poisoned at a position no committed lineage ever reached. On the normal no-match exit this
@@ -475,7 +509,14 @@ where
   /// it: the pre-surgery regime, boundary, watermark, and position all return, and the cache
   /// re-lexes under the restored regime. Outstanding checkpoints therefore **remain valid**
   /// across state surgery — a raw [`restore`](Self::restore), an [`attempt`](Self::attempt)
-  /// rollback, and a [`StackedTransaction`] savepoint taken before the surgery all roll back
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " rollback, and a [`StackedTransaction`] savepoint taken before the surgery all roll back"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " rollback, and a `StackedTransaction` savepoint taken before the surgery all roll back"
+  )]
   /// across it cleanly.
   #[inline(always)]
   pub fn state_mut(&mut self) -> &mut L::State {
@@ -509,7 +550,14 @@ where
   /// it: the pre-surgery regime, boundary, watermark, and position all return, and the cache
   /// re-lexes under the restored regime. Outstanding checkpoints therefore **remain valid**
   /// across state surgery — a raw [`restore`](Self::restore), an [`attempt`](Self::attempt)
-  /// rollback, and a [`StackedTransaction`] savepoint taken before the surgery all roll back
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " rollback, and a [`StackedTransaction`] savepoint taken before the surgery all roll back"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " rollback, and a `StackedTransaction` savepoint taken before the surgery all roll back"
+  )]
   /// across it cleanly.
   #[inline(always)]
   pub fn set_state(&mut self, state: L::State) {
@@ -521,8 +569,9 @@ where
     // is in place when it runs.
     // SETTLE_CENSUS: the re-key's one fallible step runs FIRST, above the state write.
     //
-    // Round 12 moved the state write ahead of the re-key so the displaced state's `Drop` could
-    // not land mid-surgery. That was right and it is still here — but it left the re-key's own
+    // An earlier repair moved the state write ahead of the re-key so the displaced state's
+    // `Drop` could not land mid-surgery. That was right and it is still here — but it left the
+    // re-key's own
     // `L::Offset::clone` below the state write, so an unwind there carried the NEW lexer state
     // beside a cache, poison boundary and dedup watermark still keyed to the OLD regime. Hoisting
     // the clone costs nothing: it reads `self.span`, which neither the state write nor the
@@ -612,9 +661,30 @@ where
   fn install_rekey(
     &mut self,
     committed: L::Offset,
-  ) -> (L::Offset, Option<L::Offset>, Option<CachedTokenOf<'inp, L>>) {
+  ) -> (
+    L::Offset,
+    Option<L::Offset>,
+    Option<L::Offset>,
+    Option<CachedTokenOf<'inp, L>>,
+  ) {
+    // SETTLE_CENSUS — the front-report watermark is disarmed BEFORE anything that can unwind.
+    //
+    // This body destroys the front of the stream: it takes the parked token, then clears the
+    // cache. `Cache::clear` is a trait method — caller code — and it drops every cache entry,
+    // each owning an `L::Token` and an `L::Span`, so caller code runs *inside* the destruction.
+    // The watermark is therefore taken in the settled block below, above that clear: an unwind
+    // through it leaves the watermark already `None`, and a later close-miss arm emits rather
+    // than suppresses. Conservative in one direction only — noisy, never silent.
+    //
+    // Disarming after the clear instead leaves a window in which the front is gone and the
+    // watermark still claims a live report for it. Measured, not hypothesized: with the disarm
+    // below the clear, `a_rekey_interrupted_by_caller_code_still_witnesses_itself` fails.
     let settled = (
       core::mem::replace(self.emitted_error_end, committed),
+      // The front-report watermark dies with the regime that lexed its subject. Taken HERE,
+      // before the cache clear, because that clear is caller code: an unwind through it leaves
+      // the watermark already disarmed, so a later close-miss arm EMITS. Noisy, never silent.
+      self.front_reported_end.take(),
       self.poison_boundary.take(),
       self.pending.take(),
     );
@@ -627,6 +697,34 @@ where
   #[inline(always)]
   pub const fn emitter(&mut self) -> &mut Ctx::Emitter {
     self.session.emitter
+  }
+
+  /// Emits an unexpected-token report about the **unconsumed** token at the stream front and, on
+  /// success, publishes the front-report watermark for it.
+  ///
+  /// The one writer of the set direction. Pairing the publish with the append in a single body is
+  /// what makes "watermark implies a live report" inductive: there is no ordering in which the
+  /// watermark is armed for a report that was never appended, because a failed append returns
+  /// before the publish.
+  #[inline]
+  pub(crate) fn emit_unexpected_front(
+    &mut self,
+    err: crate::error::token::UnexpectedTokenOf<'inp, L, Lang>,
+    front_end: L::Offset,
+  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
+    self.session.emitter.emit_unexpected_token(err)?;
+    *self.front_reported_end = Some(front_end);
+    Ok(())
+  }
+
+  /// Whether the emitter currently holds a live unexpected-token report naming the front token
+  /// ending at `end`.
+  ///
+  /// The read side of *one junk token, one report*. Frame-independent by construction, which is
+  /// why every close-miss arm in the delimited drivers can ask it with one identical line.
+  #[inline(always)]
+  pub(crate) fn front_report_live(&self, end: &L::Offset) -> bool {
+    self.front_reported_end.as_ref() == Some(end)
   }
 
   /// Emits a lexer error unless the same region has already been reported.
@@ -659,7 +757,11 @@ where
   /// Test-support observability: gated to exactly the feature set of its callers (the
   /// `logos` + `std` guard test suites), so it exists precisely when they do and is never
   /// dead code under `--tests` with leaner feature combinations.
-  #[cfg(all(test, feature = "logos", feature = "std"))]
+  #[cfg(all(
+    test,
+    any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+    feature = "std"
+  ))]
   pub(super) fn is_poisoned(&self) -> bool {
     self.poison_boundary.is_some()
   }
@@ -1921,7 +2023,11 @@ where
   /// `any(std, alloc)`) keeps the method from being dead code under
   /// `cargo hack --each-feature --tests`, whose single-feature combinations never enable both
   /// `logos` and `std` and so compile neither this method nor its callers.
-  #[cfg(all(test, feature = "logos", feature = "std"))]
+  #[cfg(all(
+    test,
+    any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+    feature = "std"
+  ))]
   pub(crate) fn live_checkpoints_len(&self) -> usize {
     self.session.lineage.live_len()
   }
@@ -2081,6 +2187,7 @@ where
     let span = self.span.clone();
     let state = self.state.clone();
     let emitted_error_end = self.emitted_error_end.clone();
+    let front_reported_end = self.front_reported_end.clone();
     let poison_boundary = self.poison_boundary.clone();
     let cache_pushes = self.session.lineage.cache_pushes();
     #[cfg(all(
@@ -2109,6 +2216,7 @@ where
       state,
       emitter_checkpoint,
       emitted_error_end,
+      front_reported_end,
       poison_boundary,
       cache_pushes,
       #[cfg(all(
@@ -2532,9 +2640,9 @@ where
     // SETTLE_CENSUS — the rollback in two phases, because staging every dying value is not
     // available here and ordering is.
     //
-    // Four rounds of findings in this body all had one shape: some owned value died while the
-    // rollback was half-done. Round 13 staged the values the body DISPLACES (the parked entry,
-    // the watermark, the latch, the replaced pair) into one drop site. Round 14 showed there is a
+    // Every finding in this body had one shape: some owned value died while the rollback was
+    // half-done. The first repair staged the values the body DISPLACES (the parked entry, the
+    // watermark, the latch, the replaced pair) into one drop site. The next showed there is a
     // second source it cannot reach — the values the body EVICTS: `reconcile_cache_geometry`
     // drops cache entries through `clear`/`pop_front`, the tail prune through `pop_back`, and
     // `abandon_points_above` drops whole `Checkpoint`s (each owning `L::Span` AND `L::State`)
@@ -2557,6 +2665,7 @@ where
       state,
       emitter_checkpoint,
       emitted_error_end,
+      front_reported_end,
       poison_boundary,
       cache_pushes,
       ..
@@ -2603,6 +2712,11 @@ where
     self.session.lineage.restore_cache_pushes(cache_pushes);
     let displaced_facts = (
       core::mem::replace(self.emitted_error_end, emitted_error_end),
+      // Restored in the same no-caller-code block as the emitter rewind above: the watermark and
+      // the log it describes move as one state. A rollback below the flag truncates the report and
+      // disarms the watermark together; one above it keeps both, because the report predates the
+      // mark. This is the pairing that makes the witness transactional.
+      core::mem::replace(self.front_reported_end, front_reported_end),
       core::mem::replace(self.poison_boundary, poison_boundary),
     );
     let replaced = self.install_position(clamped, spare, state);

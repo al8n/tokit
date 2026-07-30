@@ -7,9 +7,23 @@ use derive_more::{Display, IsVariant};
 /// actually needs them). The tier is a *classification*, not a control-flow decision: whether
 /// a diagnostic stops parsing is the [`Emitter`](crate::Emitter)'s policy, not the severity's.
 /// A [`Fatal`](crate::emitter::Fatal) parse stops on an error and ignores a warning; a
-/// [`Verbose`](crate::emitter::Verbose) parse collects both into parallel channels.
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " [`Verbose`](crate::emitter::Verbose) parse collects both into parallel channels."
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " `Verbose` parse collects both into parallel channels."
+)]
 ///
-/// The severity rides the read-side [`Diagnostic`](crate::emitter::Diagnostic) view so a
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " The severity rides the read-side [`Diagnostic`](crate::emitter::Diagnostic) view so a"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " The severity rides the read-side `Diagnostic` view so a"
+)]
 /// downstream renderer (ariadne, miette, a custom reporter) can map each entry onto its own
 /// report kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IsVariant, Display)]

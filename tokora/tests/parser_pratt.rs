@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! Tests for the Pratt parser API.
 //!
@@ -8,8 +11,8 @@
 mod common;
 
 use tokora::{
-  Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, SimpleSpan,
-  emitter::PrattEmitter,
+  Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext, SimpleSpan,
+  emitter::{PrattEmitter, Verbose},
   error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot, token::UnexpectedTokenOf},
   parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt},
   span::Spanned,
@@ -165,6 +168,53 @@ where
     Some(tok) => Ok(tok_num(tok)),
     None => Err(PrattError),
   }
+}
+
+// ── Recovery posture of the token driver (documented at the two exits) ────────
+//
+// The token-level driver has no node to withhold, so when a prefix operator's operand never
+// arrives it reports the diagnostic and then returns **the operator token itself** as the
+// expression. Under a recording emitter the parse therefore continues carrying a bare `-`
+// where a negation should be. That is a deliberate posture, not an oversight — callers
+// needing the stricter one use the typed driver — and it had no cell, which is how the
+// behaviour stayed undocumented.
+//
+// Falsifier: delete the `emit_unexpected_end_of_lhs` call in `input_ref/pratt.rs` and the
+// diagnostic assertion below fires (recorded count drops to 0) while the return stays
+// `Some(Minus)` — the two halves are independent.
+#[test]
+fn token_driver_returns_the_prefix_operator_after_reporting_its_missing_operand() {
+  fn probe<'inp>(
+    inp: &mut InputRef<
+      'inp,
+      '_,
+      TestLexer<'inp>,
+      ParserContext<'inp, TestLexer<'inp>, Verbose<PrattError>>,
+    >,
+  ) -> Result<(Option<Token>, usize), PrattError> {
+    let out = inp.pratt::<_, _, _, i64, Power>(
+      tok_fold_prefix::<Verbose<PrattError>>,
+      tok_fold_infix::<Verbose<PrattError>>,
+      tok_fold_postfix::<Verbose<PrattError>>,
+    )?;
+    let recorded = inp.emitter().errors().values().flatten().count();
+    Ok((out.map(|t| t.data().clone()), recorded))
+  }
+
+  let (returned, recorded) = Parser::with_context(ParserContext::new(Verbose::<PrattError>::new()))
+    .apply(probe)
+    .parse_str("-")
+    .expect("a recording emitter recovers from a prefix operator at end of input");
+
+  assert_eq!(
+    returned,
+    Some(Token::Minus),
+    "the prefix operator itself is returned as the expression when its operand is missing",
+  );
+  assert_eq!(
+    recorded, 1,
+    "the missing-operand diagnostic must be recorded before the operator is returned",
+  );
 }
 
 #[test]

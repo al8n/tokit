@@ -1,8 +1,11 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! Regression coverage for the `RepeatedWhile::parse` maximum-hook ordering defect.
 //!
-//! This round unified container accounting on counting **parsed** elements (an element counts
+//! Container accounting counts **parsed** elements (an element counts
 //! only once it has actually, successfully parsed). `RepeatedWhile::parse`'s `Continue` arm broke
 //! that convention: it called the `RepeatedHandler` maximum hook (`rh.on_element`, which fires
 //! `TooMany` when the pre-element count equals `max`) *before* attempting

@@ -47,7 +47,7 @@ macro_rules! trace_event {
 /// the grammar. Output is out of band (stderr), so a speculative rollback never eats it.
 ///
 /// ```
-/// # #[cfg(all(feature = "trace", feature = "logos", feature = "std"))]
+/// # #[cfg(all(feature = "trace", any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"), feature = "std"))]
 /// # fn demo<'inp, P>(inner: P) -> tokora::Traced<P> {
 /// // `expr` will print `> expr … / < expr = ok …` around `inner`'s run.
 /// tokora::traced("expr", inner)
@@ -210,7 +210,12 @@ thread_local! {
 /// value alongside the lines it emitted, in order. Test-only, and gated to match its sole
 /// consumer — the `logos`/`std`-backed capture test below — so it is not dead code in a
 /// `trace`-without-`logos` test build.
-#[cfg(all(test, feature = "trace", feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  feature = "trace",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 pub(crate) fn capture<R>(f: impl FnOnce() -> R) -> (R, std::vec::Vec<std::string::String>) {
   SINK.with_borrow_mut(|slot| *slot = Some(std::vec::Vec::new()));
   let value = f();
@@ -218,7 +223,12 @@ pub(crate) fn capture<R>(f: impl FnOnce() -> R) -> (R, std::vec::Vec<std::string
   (value, lines)
 }
 
-#[cfg(all(test, feature = "trace", feature = "logos", feature = "std"))]
+#[cfg(all(
+  test,
+  feature = "trace",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
 mod tests {
   use crate::{
     InputRef, ParseInput, Token, cache::DefaultCache, emitter::Silent,
@@ -318,7 +328,7 @@ mod tests {
     panic!("D45/traced: the inner parser panics inside the traced scope")
   }
 
-  // §3.3 — the D26 class, member for member: `trace_enter` bumps the depth, the exit arms
+  // The label-scope class, member for member: `trace_enter` bumps the depth, the exit arms
   // decrement it, and an unwind through the sub-parse skips them, so every later trace line
   // is indented one level too deep for the emitter's whole life.
   #[test]

@@ -516,7 +516,7 @@ mod event_gate {
   /// that shape is the remaining work: it needs a per-attempt sink harness that the suite does
   /// not have yet.
   ///
-  /// The law it would pin is the one three rounds have circled and no automated check states:
+  /// The law it would pin is the one repeatedly circled and stated by no automated check:
   /// a chunked replay equals the one-shot parse.
   #[test]
   #[ignore = "gated: needs a fresh-sink-per-attempt harness. The two originally-named \

@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 #![allow(clippy::type_complexity)]
 
 //! Regression: the delimited many-builders commit the closing delimiter **without
@@ -262,7 +265,7 @@ fn default_cache_ctx() -> ParserContext<'static, PcLex<'static>, Fatal<PcErr>> {
   ParserContext::new(Fatal::new())
 }
 
-// D17 — the two ends of the capacity range the law claims and the suite did not cover. The
+// The two ends of the capacity range the law claims and the suite did not cover. The
 // #75 regression this file exists for was capacity-dependent, so `()` and the default (U3)
 // are the wrong two points to stop at: capacity 1 is the smallest cache that retains
 // anything, and U8 is above the default.
@@ -522,7 +525,7 @@ fn separated_no_cache_lexes_the_closer_once_via_the_epilogue() {
 
 #[test]
 fn separated_one_slot_cache_lexes_the_closer_once_via_the_epilogue() {
-  // D17's capacity-1 cell at the driver level: the same Shape-B epilogue site, reached with
+  // The capacity-1 cell at the driver level: the same Shape-B epilogue site, reached with
   // the smallest cache that retains anything.
   let state = CloserScans::default();
   let counter = state.handle();
@@ -539,7 +542,7 @@ fn separated_one_slot_cache_lexes_the_closer_once_via_the_epilogue() {
 
 #[test]
 fn separated_wide_cache_lexes_the_closer_once_via_the_epilogue() {
-  // D17's above-the-default cell: capacity independence in the other direction.
+  // The above-the-default cell: capacity independence in the other direction.
   let state = CloserScans::default();
   let counter = state.handle();
   let r: Result<Vec<()>, PcErr> = Parser::with_context(wide_cache_ctx())

@@ -23,7 +23,8 @@ pub use fused::*;
 /// 4. On a miss — a **committed dispatch failure** — return an [`UnexpectedToken`]
 ///    whose expected set is *the entire table* (`expected one of …`), reported as
 ///    [`Expected::OneOf`](crate::utils::Expected::OneOf).
-/// 5. On end-of-input at the dispatch point, return an [`UnexpectedEot`].
+/// 5. On end-of-input at the dispatch point (or a latched limit boundary), return an
+///    [`UnexpectedEot`].
 ///
 /// # Why the expected set is trustworthy
 ///
@@ -40,12 +41,39 @@ pub use fused::*;
 /// several kinds to the same branch, repeat that branch's kind at each relevant position is *not*
 /// supported here — use [`PeekThenChoice`](super::PeekThenChoice) for many-to-one dispatch.
 ///
+/// ## Duplicate kinds: the first entry wins
+///
+/// The lookup is a linear scan that stops at the first match, so if the same kind appears at
+/// two table positions the **lower index** is the branch that runs and the later entry is
+/// dead. This is stated because it is observable, not because it is a feature: a table with
+/// duplicate kinds is almost certainly a mistake, and nothing rejects it.
+///
+/// ## An oversized table is not rejected
+///
+/// A table longer than the branch count is a misuse the type system does not catch. In debug
+/// builds a `debug_assert!` fires. In **release** builds there is no check: the lookup keeps
+/// only indices within branch range, so an entry past the end can never select a branch, and
+/// a token whose kind appears *only* at such an entry classifies as a dispatch miss — an
+/// `UnexpectedToken` whose expected set still prints the whole table, including the entries
+/// that can never match.
+///
+/// Construction deliberately does **not** reject an oversized table: refusing at build time
+/// would turn a misuse into a behaviour change on a path callers may already depend on. The
+/// debug assertion is the tripwire; this paragraph is the release-build contract.
+///
 /// # Error channel
 ///
 /// The dispatch failure travels the **`Err` channel**: the `UnexpectedToken` (carrying the full
 /// expected set) is returned as `Err`, not routed through a bespoke emitter method. Both a
 /// fail-fast [`Fatal`](crate::emitter::Fatal) emitter and an error-collecting
-/// [`Verbose`](crate::emitter::Verbose) emitter therefore observe the identical payload.
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " [`Verbose`](crate::emitter::Verbose) emitter therefore observe the identical payload."
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " `Verbose` emitter therefore observe the identical payload."
+)]
 ///
 /// # The fused twin
 ///

@@ -1,4 +1,4 @@
-// R8: `Dialect` is user-implemented and not blanket, so it is genuinely the root
+// `Dialect` is user-implemented and not blanket, so it is genuinely the root
 // obligation when a type is handed to a dialect-generic signature without one.
 #![allow(dead_code)]
 

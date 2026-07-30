@@ -35,6 +35,7 @@ numbered entry below that carries the full reasoning.
 | `UnexpectedEnd`'s derived `Debug` / `Eq` / `Hash` | include a `terminal: bool` field | Shipped four rounds ago and disclosed nowhere until now. **Re-bless frozen renders.** | [16](#changed-breaking) |
 | `Unclosed`'s derived `Debug`; `SeparatedError` / `MissingToken` derived `Debug`, `Eq`, `Hash` | include `kind` / the name channel | See *Debug and rendered output* below for the complete list. | [20](#changed-breaking), [28](#changed-breaking) |
 | A slice-choice id out of range panicked with `index out of bounds` | `choice id {id} out of bounds for {len} branches` | Message text only; reachability is unchanged. | [35](#changed-breaking) |
+| A wrong opening delimiter produced **two** diagnostics naming the same token — once as the wrong opener, once again as a close miss | exactly one | Only under a recording emitter, and only while the first report is still live in the log. Assertions that counted diagnostics on the recovering path change. | [40](#changed-breaking) |
 | Your own `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 10 new inherent items and 6 new defaulted trait methods enter the method space. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 | — | a new `warning: unused import` naming one of *your* combinator traits | That warning is the **only** breadcrumb the silent case gives you: the steal stranded the import. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 
@@ -1007,6 +1008,60 @@ API and moved like any other.
 
     — *(R5, #116)*
 
+*Diagnostic counts on the recovering path.* Last in this list because it removes a report
+rather than adding one, and only where that report was a duplicate.
+
+40. **A wrong opening delimiter is reported once, not twice.** All four delimited many-drivers
+    (`repeated`, `repeated_while`, `separated`, `separated_while`) probe the opener, and on a
+    wrong token they record it as an expected-open `UnexpectedToken` and leave it **cached and
+    unconsumed**. The close-position probe later re-saw that same cached token and reported it
+    a second time, as an expected-close miss. Under a recording emitter both landed; the two
+    entries carried an identical span.
+
+    The report is now suppressed **iff the emitter's log still holds a live report naming that
+    front token** — and the witness for that is a **lineage fact on the input**, not a flag in the
+    driver's stack frame.
+
+    That distinction is the substance of the fix. "Has this token already been reported?" is a
+    *transactional* question, and a parser's stack frame has no rollback semantics. A driver-local
+    flag — committed position, with or without a re-key counter beside it — cannot observe a
+    restore, because a restore is exactly the operation that erases frame-visible traces: it
+    rewinds the emitter, destroys the stream's front, and returns position to a value the frame
+    cannot tell apart from "nothing happened". Three successive frame-local witnesses were built
+    and each leaked, always toward the same failure: a **deleted** diagnostic.
+
+    So `Input` now carries a front-report watermark. `Some(end)` means the emitter's current log
+    holds an unexpected-token report whose subject is the token the current regime lexes at the
+    stream front, ending at `end`. Three writers keep that inductive, and no others: it is
+    published by the same body that appends the report and only if the append succeeded; it is
+    cleared by a re-key, before the cache clear, so an unwind through that caller code leaves it
+    disarmed and a later arm emits; and it is captured into every `Checkpoint` and restored in the
+    same no-caller-code block as the emitter rewind. A rollback below the flag truncates the report
+    and disarms the watermark as one state; a rollback above it keeps both, because the report
+    predates the mark.
+
+    The general law, now stated in the cell census: **a witness must share the rollback semantics
+    of the fact it witnesses.** The cache-push counter is restored because a restore drops exactly
+    the entries it counts; this watermark is restored because its subject is the emission log, and
+    the log is restored in the same move.
+
+    A close miss naming a **different** token, or arriving once the report for the flagged one is
+    no longer live, is untouched: `"{1 2 x"`-shaped input keeps both of its reports.
+
+    Because the predicate reads input state rather than a driver local, all eight close-miss arms
+    ask it with one identical line — so uniformity across the drivers is a property of the
+    mechanism rather than a claim about each driver's control flow.
+
+    **Only recording emitters are affected.** Under a fail-fast emitter the first emit aborts
+    the driver, so the second report never existed there and no `Fatal`-path behaviour moves.
+    What changes is any assertion that counted diagnostics on the recovering path.
+
+    The suppression is applied at **all eight** `CloseStatus::WrongToken` arms across the four
+    drivers, not only the four that today's tests reach — gating a subset is how a fixed defect
+    relocates to its own sibling.
+
+    — *(R11, D43(b))*
+
 ### Debug and rendered output
 
 Every `Debug` / `Display` movement in this release, in one place, because a consumer who
@@ -1062,6 +1117,41 @@ item that carries them, and listed here only so scanning this section does not m
 `MissingToken`/`SeparatedError`'s `with_name` and `name` (item 20), `PrattFloor` (item 23),
 `DelimiterKind` and `Delimiter::KIND` (item 28), `SeparatorHandler::OBSERVES_SEPARATORS`
 (item 5), `CstProfile` and `KindValidator` (item 13).
+
+- **The logos adapter works on 0.14 and 0.15, and is tested there.** `logos_0_14` /
+  `logos_0_15` / `logos_0_16` were already separate features, but `tokora::logos` (and its
+  `__private` twin) re-exported 0.16 only, and every one of the 79 integration test files was
+  gated on the plain `logos` feature — which *implies* 0.16. The consequence was that the
+  per-version CI legs compiled a crate whose adapter integration tests were all invisible to
+  them: they ran 2452 tests each and not one exercised a logos adapter.
+
+  Both aliases now follow the same newest-wins precedence chain the adapter re-exports use
+  (0.16 > 0.15 > 0.14), and the 118 `feature = "logos"` gates across 99 files became the
+  three-version disjunction. `--features logos` still means exactly what it meant — the
+  feature still enables 0.16 — so no existing consumer changes.
+
+  Measured: the versioned legs go from **2452 to 6020 tests** at 0.14 and 0.15, all passing.
+  Exactly one source construct was version-divergent across the whole surface — logos 0.16's
+  `allow_greedy` nested attribute in one test fixture — and it is now a per-version
+  `cfg_attr` split rather than a 0.16-only file.
+  — *(R11)*
+
+- **Oracle pins for the checkpoint capture window.** Taking a checkpoint (`save`, and so
+  `begin`, `attempt` and session points) registers two things a later settle must find — a
+  lineage entry and an emitter mark — and a `Checkpoint` has no `Drop` to settle them with, so
+  an unwind between the first registration and the finished value would strand it where nothing
+  could ever find it. The capture has run every fallible step ahead of both registrations since
+  that was fixed, and nothing pinned it from the outside.
+
+  Three tests now do, one per kind of caller code the window runs: a panicking `L::Span::clone`,
+  a panicking `L::State::clone`, and a **foreign `Emitter::checkpoint` that panics**. Each
+  asserts that the armed payload actually fired *and* that the world across the caught unwind is
+  the world before it — live checkpoints, pins, emitter marks, cursor, span, recorded
+  diagnostics. These are additive pins, not fixes: they were red before the reordering and are
+  green now, and their red was demonstrated by mutating the capture order rather than claimed.
+  The emitter cell is deliberately a law boundary — it asserts tokora's half only, because a
+  mark the emitter never handed back is the emitter's to reconcile.
+  — *(R11)*
 
 - **Streaming sessions.** `PartialSession`, `Budget`, `SessionRefusal`, `RedriveFromBase` and
   the sealed `ReplayMode` give `parse_partial` a lifecycle: a partial parse survives its
@@ -1293,6 +1383,60 @@ item that carries them, and listed here only so scanning this section does not m
   — *(W-api-B)*
 
 ### Fixed
+
+- **The documentation builds at every feature point.** `cargo doc --no-default-features` had
+  never been run: it exited 101 with `error: could not document tokora` and **39 unresolved
+  intra-doc links** across 15 files. The crate denies `rustdoc::broken_intra_doc_links` via
+  `[lints] workspace = true`, so this was a hard error rather than a warning — but the only
+  doc job built `--all-features`, where every gated target exists and therefore every link
+  resolves. The blind spot was structural: an all-features doc build cannot see this class.
+
+  Each affected link now carries a per-configuration pair — the gated arm is byte-identical
+  to what shipped, the ungated arm renders the same sentence with the unavailable item as
+  plain code text rather than a dead link. The targets are all gated `any(std, alloc)`
+  (`Verbose` and its family, `StackedTransaction`, the session-point and stacked-transaction
+  entry points, `foldrn`, `separated1`), so both configurations render clean prose. No
+  crate- or module-level `allow` was added: an exemption whose subject is "all broken links
+  here" would silently absorb the next genuinely broken one.
+  — *(R11)*
+
+- **Documented what the dispatch tables actually do on a malformed table.** `DispatchOnKind`
+  and `FusedDispatchOnKind` resolve duplicate kinds **first-wins** (the lookup stops at the
+  first match, so a later duplicate is dead), and an oversized table is checked only by a
+  `debug_assert!` — in release, an entry past the branch range can never select a branch and a
+  kind found only there classifies as a dispatch miss. Neither is rejected at construction,
+  deliberately: refusing at build time would turn a misuse into a behaviour change. Nothing
+  moved; the docs now say what the code does. The non-fused constructor also gained the fused
+  twin's "or a latched limit boundary" parenthetical on its end-of-input row.
+  — *(R11)*
+
+- **Documented the token-level Pratt driver's recovery posture.** When a prefix operator's
+  operand never arrives, the driver reports the diagnostic and then returns **the operator
+  token itself** as the expression; an infix operator missing its right operand yields the LHS
+  alone. Under a recording emitter the parse continues carrying that stand-in. The token driver
+  has no node to withhold, so this is deliberate — callers wanting the stricter posture use the
+  typed driver — but it was written down nowhere and had no cell. Both exits are now documented
+  and the prefix exit is pinned.
+  — *(R11)*
+
+- **Corrected where `finish_partial` places a trailing gap.** The tiling comment said the tail
+  tiles "into the root". Measured: the tail is tiled **before** the open frames are closed, so
+  when the stream ends with a node still open the gap becomes a child of the **innermost open
+  node**. Under `finish` the question cannot arise — an unbalanced stream is refused — so the
+  old sentence was true only for the case `finish_partial` exists to relax. `tree.text() ==
+  source` holds either way; it is the placement that differs, and tooling that walks by node
+  rather than by text can see it. Behaviour unchanged; the construct now has its first
+  placement pin, which is why the sentence was unverifiable for as long as it was.
+  — *(R11)*
+
+- **The CAS-less `no_std` source-backend rows say what they require.** Four rows in the feature
+  reference read "as the dep allows". `bytes`, `hipstr` and `smol_bytes` reach a refcounted
+  buffer through `Arc`-shaped sharing and need atomic compare-and-swap, so they cannot build on
+  a target like `thumbv6m-none-eabi`; `bstr` is the CAS-free choice and is pinned by a CI cell
+  on that exact target. The CAS-needing three are documented rather than pinned as
+  expected-failures, since an expected-failure cell would go green for the wrong reason the day
+  an upstream crate gained a CAS-free fallback.
+  — *(R11)*
 
 - **A session's budget guard now holds in release builds.** `PartialSession` refuses an
   attempt that would exceed its budget or that follows a terminal latch, and it relies on the
@@ -1555,6 +1699,17 @@ added because something got through the previous set.
   count, the CI step asserts the count rather than the exit status, and a separate check
   compares the case directory against the harness's registry by exact set equality, because a
   floor cannot detect a missing member.
+- **The docs are built without default features, not only with all of them.** An all-features
+  doc build documents every item, so a link to a feature-gated target always resolves there —
+  it is structurally incapable of seeing a broken link in a smaller configuration. The bare
+  build had never run, and it was failing outright with 39 unresolved links. Acceptance is the
+  exit status, not a diagnostic count: rustdoc aborts early, so a count is a floor and a floor
+  cannot detect a missing member.
+- **The per-version logos legs actually exercise the adapter.** The `logos parity (0.14, 0.15)`
+  matrix job existed, but the crate's 79 adapter integration files were gated on a feature that
+  implies 0.16, so the job ran 2452 tests containing zero logos-adapter coverage — a green gate
+  over an untested configuration. Those gates now name all three versions, and the same job
+  runs **6020 tests** per version.
 - **A guide-only change is no longer un-gated.** The guide chapters are Markdown compiled as
   doctests, so a blanket `**.md` path filter meant a guide-only pull request landed with zero
   CI.
@@ -1740,6 +1895,27 @@ curated message appears; its only effect is to hide *which* member is missing, w
 one datum a consumer needs. Measured on 1.87 and on nightly.
 
 — *(W-api-A, #118)*
+
+**`finish_*` unification attempted and stopped, on the close predicate and close-miss slots.**
+`parens`/`braces`/`brackets`/`angles` and `delimited::<D>` share their close body already
+(`commit_delim_close`); what the four named parsers duplicate is the five slots they fill it
+with. Folding them onto the generic path stops on the two slots that ask the same question
+through different traits: the named route asks the **token** (`PunctuatorToken`'s
+`close_paren() -> Option<Kind>`), the generic route asks the **pair marker**
+(`Punctuator::kind()`, which needs `<L::Token as Token>::Kind: From<CloseParen>`). Neither trait
+implies the other, so the fold does not compile without adding `Kind: From<OpenX>` and
+`Kind: From<CloseX>` to the four public named parsers — measured, four `E0277`s. Unification here
+is signature-stable or it does not happen; the two routes stay disclosed, and 0.9 is equally
+breaking-capable if the bounds are ever worth taking.
+
+Their agreement is now pinned rather than assumed (`tests/delimited_route_parity.rs`): the close
+predicate over every token kind × all four pairs, the close-miss error compared as a value, and a
+16-row corpus — 4 pairs × {unclosed-at-EOF, wrong-closer, wrong-opener, nested-unclosed} — parsed
+both ways under a recording emitter. **No render deltas: all 16 rows are identical**, diagnostics
+and final cursor alike. The suite exists because nothing in the type system ties a token type's
+two punctuator declarations together, so a type whose declarations disagreed would send the two
+routes to different diagnostics silently.
+— *(R11)*
 
 ## 0.7.3 (2026-07-24)
 

@@ -96,7 +96,7 @@ where
 /// # Example
 ///
 /// ```
-/// # #[cfg(all(feature = "logos", feature = "std"))]
+/// # #[cfg(all(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"), feature = "std"))]
 /// # fn demo() {
 /// use tokora::cache::DefaultCache;
 /// use tokora::conformance::cache::CacheHarness;

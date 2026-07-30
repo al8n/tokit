@@ -1,4 +1,4 @@
-// R8: a redriving `PartialSession` refuses a RECORDING emitter at compile time. A session
+// A redriving `PartialSession` refuses a RECORDING emitter at compile time. A session
 // re-drives from base every attempt, so an emitter that records what it is told accumulates
 // the replayed prefix; `Sink` is deliberately not a `ValueKeyedEmitter` — its marks are
 // positions in an event log, not a function of emission state — and `PartialSession::parse`

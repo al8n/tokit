@@ -1,6 +1,9 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
-//! Collection-driver terminal-stop regressions (R1 D20, attempt-relative round).
+//! Collection-driver terminal-stop regressions.
 //!
 //! Three driver gates must tell a **terminal scanner stop** (a resource-limit trip and the poison
 //! boundary it latches) apart from ordinary control flow:

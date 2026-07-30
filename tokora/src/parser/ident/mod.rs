@@ -154,5 +154,9 @@ impl Ident<(), ()> {
   }
 }
 
-#[cfg(all(test, feature = "std", feature = "logos"))]
+#[cfg(all(
+  test,
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 mod tests;

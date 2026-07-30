@@ -1,4 +1,4 @@
-// R8: an error type that absorbs none of the five token-level failures cannot be a tokora
+// An error type that absorbs none of the five token-level failures cannot be a tokora
 // parse error, and the curated `FromTokenErrors` message is what the consumer must read.
 #![allow(dead_code)]
 

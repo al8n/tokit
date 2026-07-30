@@ -6518,13 +6518,13 @@ mod cst_event_oracles {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════
-// R9 §4.1 — the scan's UNWIND edge
+// The scan's UNWIND edge
 //
 // `skip_until`'s loop pops the next token out of durable state (the parked slot, or the cache
 // front) into a local with no `Drop`, runs caller code — the predicate, the expected-tokens
 // closure, the frontier's `State: Clone`, the lexer — and only puts it back on a *return* exit.
 // A panic through any of those windows is an exit the put-back never sees: with a warm cache
-// the in-flight token and the whole skipped prefix leave the stream silently (R9-F2), and a
+// the in-flight token and the whole skipped prefix leave the stream silently, and a
 // rewinding mode's entry mark is neither rewound nor released.
 //
 // Fixture note. The lexer state carries TWO tallies on purpose. `harvested` is BY VALUE, so it
@@ -6897,7 +6897,7 @@ fn r9_f2_warm_limit_no_reburn() {
   // The budget payload. "ab cd ef gh" behind a shared limit of 5: the honest run scans four
   // tokens and never trips. A restore posture that CLEARS the store on the unwind edge re-lexes
   // the untouched suffix, re-burns the shared budget, trips the limiter and latches a poison
-  // boundary at a position the original lineage never reached — the exact harm §2.1 invokes to
+  // boundary at a position the original lineage never reached — the exact harm invoked to
   // justify deleting `Cache::rewind`. This cell is the guard against that posture's return.
   let got = f2_sync_to_run("ab cd ef gh", true, Some(2), None, 5);
   assert_eq!(
@@ -7014,7 +7014,7 @@ fn r9_f2_sync_through_unwind_restores_emissions() {
 
 #[test]
 fn r9_f2_sync_through_warm_unwind_prices_its_re_lex() {
-  // §4.1's PRICED RESIDUE, pinned with its number rather than left as prose.
+  // The PRICED RESIDUE, pinned with its number rather than left as prose.
   //
   // The restore posture is the ratified one for the rewinding modes — it is what their own
   // `on_eof` already does — but at the panic edge, unlike at true end of input, the cache can
@@ -7076,7 +7076,7 @@ fn r9_f2_panicking_state_clone_settles_the_entry_mark() {
   );
 }
 
-// ── D28: the cache-geometry parity matrix ────────────────────────────────────────
+// ── The cache-geometry parity matrix ─────────────────────────────────────────────
 //
 // `Cache::rewind` is gone and its cursor-keyed geometry now runs in the input layer through the
 // trait's own queue surface. This pins the four cursor relations × the caches that can express
@@ -7162,7 +7162,7 @@ fn cache_geometry_parity_matrix() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════
-// The settle path's own fallible steps (Codex R9 F1/F2/F3)
+// The settle path's own fallible steps
 //
 // The unwind edge closed the six windows the loop runs caller code in. The SETTLE code is
 // itself caller code: `L::Span::clone` runs inside `skip_and_report`'s report build and inside
@@ -7263,6 +7263,30 @@ fn lex_calls() -> usize {
   LEX_CALLS.with(Cell::get)
 }
 
+thread_local! {
+  /// How many armed bombs have actually FIRED since the last [`reset_bomb_fired`].
+  ///
+  /// The arming counters above say how many times a step *ran*; this one says the armed index was
+  /// reached and panicked. The distinction is the whole falsifier for a cell whose assertion is
+  /// "nothing moved": a bomb wired to a step the code under test never performs leaves the world
+  /// unmoved for the trivial reason, and a `catch_unwind` that caught somebody else's panic reads
+  /// the same. `FIRED == 1` is the payload-executed witness that rules both out.
+  static BOMB_FIRED: Cell<usize> = const { Cell::new(0) };
+}
+
+fn reset_bomb_fired() {
+  BOMB_FIRED.with(|c| c.set(0));
+}
+
+fn bomb_fired() -> usize {
+  BOMB_FIRED.with(Cell::get)
+}
+
+/// Called from the panicking branch of an armed bomb, immediately before it panics.
+fn record_bomb_fired() {
+  BOMB_FIRED.with(|c| c.set(c.get() + 1));
+}
+
 /// A span whose `Clone` is armable. Everything else is `SimpleSpan`'s behaviour.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct BombSpan {
@@ -7294,11 +7318,14 @@ impl Clone for BombSpan {
       v
     });
     SPAN_LOG.with(|l| l.borrow_mut().push((n, self.start, self.end)));
+    let armed = n == SPAN_BOMB.with(Cell::get);
+    if armed {
+      record_bomb_fired();
+    }
     assert!(
-      n != SPAN_BOMB.with(Cell::get),
+      !armed,
       "R9 settle-path: the armed `L::Span` clone (#{n}, {}..{}) panics",
-      self.start,
-      self.end
+      self.start, self.end
     );
     Self {
       start: self.start,
@@ -7347,13 +7374,56 @@ impl crate::Span for BombSpan {
   }
 }
 
+thread_local! {
+  /// `BombTally::clone` calls since the last arm, and the index that panics (0 = disarmed).
+  ///
+  /// `ScanTally` carries the same instrument under `arm_state_clone` for the *scan* path. This one
+  /// is the Bomb lexer's, because the capture window's `L::State::clone` runs on whatever state
+  /// the input holds, and every cell that can observe the capture's two registrations is built on
+  /// `BombEmitter` — which counts marks and live rows, and `ScanLedger` does not.
+  static TALLY_CLONES: Cell<usize> = const { Cell::new(0) };
+  static TALLY_CLONE_BOMB: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Arms `BombTally`'s `Clone`: the `at`-th clone from now on panics.
+fn arm_tally_clone(at: usize) {
+  TALLY_CLONES.with(|c| c.set(0));
+  TALLY_CLONE_BOMB.with(|c| c.set(at));
+}
+
+fn disarm_tally_clone() {
+  TALLY_CLONE_BOMB.with(|c| c.set(0));
+}
+
 /// A by-value scan tally that also trips: the limit is on the tally the committed lineage
 /// carries, so a restore restores the budget with it — which is what makes the poison boundary
 /// the only thing left over on the unwind edge.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Clone` is hand-written rather than derived so `L::State::clone` — caller code the capture
+/// window runs, and the step this type is the only in-tree witness for — can be armed.
+#[derive(Debug, PartialEq)]
 struct BombTally {
   scanned: usize,
   limit: usize,
+}
+
+impl Clone for BombTally {
+  fn clone(&self) -> Self {
+    let n = TALLY_CLONES.with(|c| {
+      let v = c.get() + 1;
+      c.set(v);
+      v
+    });
+    let armed = n == TALLY_CLONE_BOMB.with(Cell::get);
+    if armed {
+      record_bomb_fired();
+    }
+    assert!(!armed, "the armed `L::State` clone (#{n}) panics");
+    Self {
+      scanned: self.scanned,
+      limit: self.limit,
+    }
+  }
 }
 
 impl Default for BombTally {
@@ -7568,6 +7638,11 @@ struct BombEmitter {
   /// Arms the committed-token OBSERVER. It is foreign code that `commit_token` invokes, and on a
   /// cache-hit consume the token has already left the front stream by the time it runs.
   panic_on_commit_token: bool,
+  /// Arms `Emitter::checkpoint` — the first of the capture window's two registrations, and the
+  /// one taken from *foreign* code. What tokora owes on that edge is its own cleanliness: the
+  /// emitter's half-taken mark is the emitter's problem, but no lineage entry, pin or position of
+  /// ours may survive the unwind.
+  panic_on_checkpoint: bool,
   next: Cell<u64>,
   live: core::cell::RefCell<std::vec::Vec<u64>>,
   /// Settle CALLS, not surviving rows. A double release removes nothing the second time, so a
@@ -7642,6 +7717,13 @@ where
   }
 
   fn checkpoint(&self) -> u64 {
+    if self.panic_on_checkpoint {
+      record_bomb_fired();
+    }
+    assert!(
+      !self.panic_on_checkpoint,
+      "the foreign emitter's `checkpoint` panics"
+    );
     let id = self.next.get() + 1;
     self.next.set(id);
     self.live.borrow_mut().push(id);
@@ -8671,7 +8753,7 @@ fn r9_skip_notifies_the_observer_before_the_adopted_pair_drops() {
   }
 }
 
-// ── State surgery's own window (Codex, round 12) ────────────────────────────
+// ── State surgery's own window ──────────────────────────────────────────────
 
 /// `set_state` re-keys every offset-dependent fact and installs a new `L::State`. Both halves run
 /// caller `Drop` code, and more of it than the site looks like it does: a `CachedToken` carries
@@ -8754,7 +8836,7 @@ fn r9_set_state_is_atomic_at_every_caller_drop() {
   }
 }
 
-// ── An armable `L::Offset` (Codex, round 12) ────────────────────────────────
+// ── An armable `L::Offset` ──────────────────────────────────────────────────
 
 thread_local! {
   /// `BombOffset::clone` calls since the last arm, and the index that panics (0 = disarmed).
@@ -8776,13 +8858,22 @@ fn disarm_offset_clone() -> usize {
 ///
 /// Every offset the crate ships in-tree is `usize`, so `L::Offset::clone` — caller code that the
 /// settle and restore paths both run — had no witness at all, and the note in
-/// `r9_f2_panicking_eof_settle_still_settles_the_mark` said exactly that. Two rounds of findings
+/// `r9_f2_panicking_eof_settle_still_settles_the_mark` said exactly that, and findings
 /// against `restore_entry` were argued on contract grounds for want of this type.
 ///
 /// It brings its own `Source` and `Lexer` rather than re-keying `BombLexer`: `str` has a single
 /// `Source<usize>` impl and the crate leans on that being unique for inference, so adding a second
-/// one breaks type resolution in `source` and `completeness` — 44 errors, in production modules,
-/// to buy a test instrument. A private wrapper costs nothing outside this file.
+/// one breaks type resolution elsewhere. A private wrapper costs nothing outside this file.
+///
+/// The blast radius is **8 errors, all `E0283` in `source/tests.rs`** — re-measured on this tree
+/// by adding `impl Source<BombOffset> for str` and building
+/// `cargo check -p tokora --features std,logos,rowan --tests`. An earlier revision of this note
+/// said "44 errors, in production modules"; that was true of the tree it was written on and is not
+/// true of this one, and the number is worth keeping honest because it is read as a cost estimate
+/// for the next instrument. The conclusion is unchanged — 8 errors is still the wrong price for
+/// something a private wrapper gives away — but the *scope* it names is not a reason to abandon
+/// a fixture. Note also what it does not cover: an armable `L::Span`, `L::State` or `Emitter`
+/// needs no `Source` impl at all (see the `d50_*` pins at the end of this file).
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct BombOffset(usize);
 
@@ -8983,7 +9074,7 @@ impl<'a> crate::Lexer<'a> for OffsetLexer<'a> {
 
 type OffsetCtx<'a> = (BombEmitter, DefaultCache<'a, OffsetLexer<'a>>);
 
-/// `restore_entry` — the site carried as a disclosed limitation for two rounds, now measured.
+/// `restore_entry` — the site carried as a disclosed limitation, now measured.
 ///
 /// A rewinding scan that reaches end of input without matching restores its full entry state and
 /// rewinds the emitter to it. The rewind cursor used to be read back off the input AFTER the
@@ -9064,9 +9155,9 @@ fn r9_restore_entry_is_atomic_at_every_offset_clone() {
   }
 }
 
-// ── The whole restore, not its tail (Codex, round 13) ───────────────────────
+// ── The whole restore, not its tail ─────────────────────────────────────────
 
-/// `restore_unchecked` is the body four consecutive rounds each found something in. This is the
+/// `restore_unchecked` is the body findings kept returning to, one after another. This is the
 /// measurement for its phase-separated form.
 ///
 /// A checkpoint rollback is all-or-nothing, so the assertion is exactly that: for every armed
@@ -9502,6 +9593,278 @@ fn wapi_b_peek_kind_marks_the_eot_terminal_at_a_latched_boundary() {
   );
 }
 
+// ── The capture window's preflight order, pinned from the outside (`d50_*`) ──
+//
+// A capture (`save`, and therefore `begin`/`attempt`/a session point) takes TWO registrations a
+// later settle has to find: a lineage entry and an emitter mark. Neither has an owner until the
+// `Checkpoint` value exists, and `Checkpoint` deliberately has no `Drop` — it could reach neither
+// the input nor the borrowed emitter to settle itself. So an unwind after the first registration
+// and before the finished value strands it outright: no restore spends it, no release frees it,
+// nothing knows it is there. `save_checkpoint` answers that by ordering every fallible step ahead
+// of both registrations — the clones and reads first, then the live stack's slot *reservation*,
+// then the mark, then the entry, then a `const fn` that only moves.
+//
+// These three pins arm that window's caller code, one per kind: a panicking `L::Span::clone`, a
+// panicking `L::State::clone`, and a foreign `Emitter::checkpoint` that panics. Each asserts the
+// same two things — that the payload ran (`FIRED == 1`, which is what separates "the order holds"
+// from "the bomb was wired to a step this path never takes"), and that the world across the
+// caught unwind is the world before it: live checkpoints, pins, emitter marks, cursor, span, and
+// recorded diagnostics.
+//
+// They are ADDITIVE pins, not flips. The order they check has held since the body was
+// rewritten; nothing in this branch changes it. Their red is demonstrated by mutation rather
+// than by a red commit — hoisting the two registrations above the clones, the original defect
+// shape, and recording the failure.
+
+/// The world either side of a capture that unwound. Nothing in it may move.
+///
+/// `live` and `marks` are the two readings with teeth — they are exactly the two registrations
+/// that can strand. `cursor`, `span` and `emissions` are completeness rails: a capture is a read,
+/// so an unwind out of one must not have advanced or emitted anything either.
+#[derive(Debug, PartialEq, Eq)]
+struct AroundCapture {
+  live: usize,
+  marks: usize,
+  cursor: usize,
+  span: (usize, usize),
+  emissions: usize,
+}
+
+fn around_capture<'inp>(
+  inp: &mut crate::input::InputRef<'inp, '_, BombLexer<'inp>, BombCtx<'inp>, ()>,
+) -> AroundCapture {
+  let live = inp.live_checkpoints_len();
+  let cursor = *inp.cursor().as_inner();
+  let span = {
+    let s = inp.span();
+    (s.start, s.end)
+  };
+  let emitter = inp.emitter();
+  AroundCapture {
+    live,
+    marks: emitter.live_rows(),
+    cursor,
+    span,
+    emissions: emitter.emissions,
+  }
+}
+
+/// A fixture with something to lose: one older live checkpoint (so a stranded entry reads as a
+/// growth rather than as the only entry), a warm cache, and a position off zero.
+fn d50_input(src: &str) -> Input<'_, BombLexer<'_>, BombCtx<'_>, ()> {
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(src, BombTally::default(), cache)
+}
+
+#[test]
+fn d50_capture_survives_a_panicking_span_clone() {
+  use generic_arraydeque::typenum::U2;
+
+  let mut input = d50_input("ab cd ef gh");
+  let mut emitter = BombEmitter::default();
+  {
+    let mut inp = input.as_ref(&mut emitter);
+    // An older capture, so the live stack and the emitter's mark list are both non-empty: a
+    // stranded registration shows as 1 → 2, which an empty-world fixture could not tell from 0 → 1
+    // being the legitimate one.
+    let _older = inp.save();
+    let _ = inp.next().unwrap().expect("ab");
+    let _ = inp.peek::<U2>().unwrap();
+
+    let before = around_capture(&mut inp);
+    assert_eq!(
+      (before.live, before.marks),
+      (1, 1),
+      "the fixture must hold one live capture before the armed one, or `no growth` is vacuous"
+    );
+
+    reset_bomb_fired();
+    // The capture performs exactly one `L::Span::clone` (the cursor carries an `L::Offset`, and
+    // `emitted_error_end`/`poison_boundary` are offsets too), so #1 from the arm is that clone.
+    arm_span_clone(1);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _ = inp.begin();
+    }));
+    disarm_span_clone();
+
+    assert!(caught.is_err(), "the armed span clone must have panicked");
+    assert_eq!(
+      bomb_fired(),
+      1,
+      "the armed clone must be the one the capture performs — a bomb that never fires would leave \
+       the world unmoved for the wrong reason"
+    );
+    assert_eq!(
+      around_capture(&mut inp),
+      before,
+      "a panic in the capture's `L::Span::clone` runs with nothing yet registered: no lineage \
+       entry, no emitter mark, and no advance"
+    );
+  }
+  assert_eq!(
+    input.pinned_checkpoints_len(),
+    0,
+    "`begin` reserves its pin slot before the capture and pins only after it, so an unwind inside \
+     the capture leaves no pin either"
+  );
+}
+
+#[test]
+fn d50_capture_survives_a_panicking_state_clone() {
+  use generic_arraydeque::typenum::U2;
+
+  let mut input = d50_input("ab cd ef gh");
+  let mut emitter = BombEmitter::default();
+  {
+    let mut inp = input.as_ref(&mut emitter);
+    let _older = inp.save();
+    let _ = inp.next().unwrap().expect("ab");
+    let _ = inp.peek::<U2>().unwrap();
+
+    let before = around_capture(&mut inp);
+    assert_eq!(
+      (before.live, before.marks),
+      (1, 1),
+      "the fixture must hold one live capture before the armed one, or `no growth` is vacuous"
+    );
+
+    reset_bomb_fired();
+    // One `L::State::clone` per capture, so #1 from the arm is it. This is the raw `save` shape
+    // rather than `begin`'s: the same body, entered without the guard's pin preflight around it.
+    arm_tally_clone(1);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _ = inp.save();
+    }));
+    disarm_tally_clone();
+
+    assert!(caught.is_err(), "the armed state clone must have panicked");
+    assert_eq!(
+      bomb_fired(),
+      1,
+      "the armed clone must be the one the capture performs"
+    );
+    assert_eq!(
+      around_capture(&mut inp),
+      before,
+      "a panic in the capture's `L::State::clone` strands nothing: it runs in the same preflight \
+       step as the span clone, ahead of both registrations"
+    );
+  }
+  assert_eq!(input.pinned_checkpoints_len(), 0, "a raw save pins nothing");
+}
+
+#[test]
+fn d50_capture_survives_a_panicking_foreign_emitter_checkpoint() {
+  use generic_arraydeque::typenum::U2;
+
+  let mut input = d50_input("ab cd ef gh");
+  let mut emitter = BombEmitter::default();
+  {
+    let mut inp = input.as_ref(&mut emitter);
+    let _older = inp.save();
+    let _ = inp.next().unwrap().expect("ab");
+    let _ = inp.peek::<U2>().unwrap();
+
+    let before = around_capture(&mut inp);
+    assert_eq!(
+      (before.live, before.marks),
+      (1, 1),
+      "the fixture must hold one live capture before the armed one, or `no growth` is vacuous"
+    );
+
+    reset_bomb_fired();
+    // The law boundary: the mark is taken from foreign code, and this arms that code to unwind.
+    // What is asserted below is tokora's half only — the emitter's own half-taken mark is the
+    // emitter's problem, and the crate cannot settle a mark it was never handed.
+    inp.emitter().panic_on_checkpoint = true;
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _ = inp.begin();
+    }));
+    inp.emitter().panic_on_checkpoint = false;
+
+    assert!(
+      caught.is_err(),
+      "the armed foreign `checkpoint` must have panicked"
+    );
+    assert_eq!(
+      bomb_fired(),
+      1,
+      "the capture must have reached the emitter mark — arming a call the capture never makes \
+       would leave the lineage side clean for the wrong reason"
+    );
+    assert_eq!(
+      around_capture(&mut inp),
+      before,
+      "the mark is taken while the lineage side is still clean: the slot reserved for the entry \
+       is capacity, not an entry, so an unwind out of the emitter opens nothing on this side"
+    );
+  }
+  assert_eq!(
+    input.pinned_checkpoints_len(),
+    0,
+    "and the guard's pin is taken after the capture returns, so there is none to leak"
+  );
+}
+
+// ── The front-report watermark's restore pairing ──────────────────────────────
+//
+// The watermark claims the emitter's CURRENT log holds an unexpected-token report naming the
+// front token. That is a transactional claim, so it has to move with the log: a rollback that
+// truncates the report must disarm the watermark, and a rollback that predates the report must
+// keep both. Nothing else in the crate can check that pairing — the drivers' suppression only
+// reads the watermark, and reading it cannot tell whether the report behind it is still there.
+//
+// These are unit pins rather than integration cells because the element boundary is
+// higher-ranked: a `Checkpoint` taken before a delimited parse cannot be handed to the element
+// that would restore it, so a below-flag rollback is unreachable from outside the crate. The
+// mechanism is reachable here, and only here.
+
+fn front_watermark_input(src: &str) -> Input<'_, BombLexer<'_>, BombCtx<'_>, ()> {
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_cache(src, BombTally::default(), cache)
+}
+
+#[test]
+fn a_restore_below_the_flag_disarms_the_front_report_watermark() {
+  let mut input = front_watermark_input("ab cd");
+  let mut emitter = BombEmitter::default();
+  let mut inp = input.as_ref(&mut emitter);
+
+  // The checkpoint predates the report, so restoring it must unmake both halves.
+  let below = inp.save();
+  let before = inp.emitter().emissions;
+
+  let end = 2usize;
+  let err = UnexpectedToken::expected_one(BombSpan { start: 0, end }, BombKind).with_found(BombTok);
+  inp
+    .emit_unexpected_front(err, end)
+    .expect("the recording emitter accepts the report");
+  assert!(
+    inp.front_report_live(&end),
+    "the set writer must publish the watermark for the report it just appended"
+  );
+  assert_eq!(
+    inp.emitter().emissions,
+    before + 1,
+    "and the report must actually be in the log"
+  );
+
+  inp.restore(below);
+
+  assert_eq!(
+    inp.emitter().emissions,
+    before,
+    "the restore rewound the emitter past the report, so the log no longer holds it"
+  );
+  assert!(
+    !inp.front_report_live(&end),
+    "so the watermark must be disarmed too. If it survived, the drivers would suppress a \
+     close-miss on the strength of a report that no longer exists — one junk token, NO report. \
+     The watermark is restored in the same block as the emitter rewind precisely so these two \
+     cannot come apart"
+  );
+}
+
 #[test]
 fn wapi_b_peek_kind_leaves_a_genuine_eof_unmarked() {
   // The other direction: a mark applied unconditionally would flip this.
@@ -9513,5 +9876,37 @@ fn wapi_b_peek_kind_leaves_a_genuine_eof_unmarked() {
     inp.peek_kind(),
     Ok(None),
     "genuine end of input is not an error at all here"
+  );
+}
+
+#[test]
+fn a_restore_above_the_flag_keeps_the_front_report_watermark() {
+  let mut input = front_watermark_input("ab cd");
+  let mut emitter = BombEmitter::default();
+  let mut inp = input.as_ref(&mut emitter);
+
+  let end = 2usize;
+  let err = UnexpectedToken::expected_one(BombSpan { start: 0, end }, BombKind).with_found(BombTok);
+  inp
+    .emit_unexpected_front(err, end)
+    .expect("the recording emitter accepts the report");
+  let after_emit = inp.emitter().emissions;
+
+  // This checkpoint POSTDATES the report, so the report predates the emitter mark and survives
+  // the rewind — and the watermark must survive with it.
+  let above = inp.save();
+  let _ = inp.next().unwrap();
+  inp.restore(above);
+
+  assert_eq!(
+    inp.emitter().emissions,
+    after_emit,
+    "a report taken before the mark is not truncated by rewinding to that mark"
+  );
+  assert!(
+    inp.front_report_live(&end),
+    "so the watermark must still be armed. Disarming here would be the opposite failure: the \
+     driver would re-report a token it has already reported, which is the duplicate this whole \
+     mechanism exists to remove"
   );
 }

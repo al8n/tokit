@@ -304,7 +304,7 @@ where
   /// [`ScanScope`]'s `keep_on_unwind` carries it and this constant answers only the questions
   /// that are genuinely about the mode.
   ///
-  /// The obligation that generalizes, recorded because this round paid for it twice: **adding an
+  /// The obligation that generalizes, recorded because it was paid for twice: **adding an
   /// axis that discriminates a case the old proxy conflated makes every existing reader of that
   /// proxy a suspect until it has been re-asked which question it wanted.** The three readers of
   /// this constant were swept when `COMMITS_FRONTIER_ON_STOP` was introduced:
@@ -324,7 +324,7 @@ where
 /// `Option<Fetched>` could not say that. `None` meant both "no token is out of the stream" and
 /// "one was handed to a settle that may not have finished", and those need opposite repairs: the
 /// first is already contiguous, the second is a hole between the committed position and whatever
-/// the stream still retains. Three rounds of findings on this edge all reduced to that conflation,
+/// the stream still retains. Every finding on this edge reduced to that conflation,
 /// so the state names it.
 enum TokenSlot<'inp, L>
 where
@@ -503,7 +503,7 @@ where
   /// Derived, not stored, because the answer changes as an exit hands things over — which is the
   /// defect the previous round's sticky flag left in place. Two clauses:
   ///
-  /// - a **committing mode** always keeps: that is §4.1's ratified posture, measured against the
+  /// - a **committing mode** always keeps: that is the ratified posture, measured against the
   ///   alternative;
   /// - a **rewinding mode** keeps only once the predicate has answered *stop* **and** the scope can
   ///   still perform the commit that a stop's disposition requires. `frontier.is_some()` is that

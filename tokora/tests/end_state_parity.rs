@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! INVARIANT E — the eight-driver end-state parity matrix.
 //!
@@ -294,7 +297,7 @@ parity!(b_sep_while_delim, Vec<i64>, "[1,2]", vec![], inp =>
 // ═══════════════════════════════════════════════════════════════════════════════
 // Case C — `at_least(2)` with 1 element: exactly one `TooFew(1, 2)`.
 //
-// This is the D2 row: on a properly closed `[1]` the `sep/delim` driver used to return
+// This is the closed-list row: on a properly closed `[1]` the `sep/delim` driver used to return
 // through its mid-scan-closer arm without ever running the bound.
 // ═══════════════════════════════════════════════════════════════════════════════
 

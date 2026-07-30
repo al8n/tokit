@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! Regression tests for separator position carried as **data** (a
 //! [`SeparatorPosition`] field on [`SeparatedError`]) rather than encoded in the

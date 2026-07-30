@@ -51,6 +51,18 @@ use crate::{
 /// advanced past it. A full cache simply drops the put-back — the cursor did not move,
 /// so the next operation re-lexes the same token, exactly as an overflowed peek would.
 ///
+/// # Table misuse: duplicates and oversized tables
+///
+/// This combinator shares [`DispatchOnKind`](super::DispatchOnKind)'s table-order contract,
+/// and shares its behaviour on a malformed table.
+///
+/// Duplicate kinds resolve **first-wins**: the lookup stops at the first matching position,
+/// so a later duplicate entry is dead. An oversized table (more entries than branches) fires
+/// a `debug_assert!` in debug builds and is **unchecked in release**, where an entry past the
+/// branch range can never select a branch and a kind found only there classifies as a miss.
+/// Neither shape is rejected at construction: refusing at build time would turn a misuse into
+/// a behaviour change on a path callers may already depend on.
+///
 /// # Committed and tentative dispatch
 ///
 /// `FusedDispatchOnKind` implements both [`ParseInput`] and [`TryParseInput`]. Calling

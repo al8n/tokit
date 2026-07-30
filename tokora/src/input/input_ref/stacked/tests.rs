@@ -804,7 +804,7 @@ fn stacked_rollback_to_savepoint_with_live_base_is_legal() {
   );
 }
 
-// ── D27: the unwind posture of an undecided Commit-policy stacked guard ──────────
+// ── The unwind posture of an undecided Commit-policy stacked guard ───────────────
 //
 // `StackedTransaction::drop` carries the same policy branch and the same unwind-blind
 // commit arm as its sibling. This is the sibling's own witness, not a copy of it: it

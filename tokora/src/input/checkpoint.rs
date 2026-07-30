@@ -15,9 +15,23 @@ use super::{Cursor, Lexer};
 /// to consume one) are public only with that feature. Without it, a `Checkpoint` cannot be
 /// created or spent from another crate, so the raw contract below is unrepresentable downstream —
 /// the supported backtracking surface is the transaction guards
-/// ([`begin`](crate::InputRef::begin) / [`begin_stacked`](crate::InputRef::begin_stacked)), the
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " ([`begin`](crate::InputRef::begin) / [`begin_stacked`](crate::InputRef::begin_stacked)), the"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " ([`begin`](crate::InputRef::begin) / `begin_stacked`), the"
+)]
 /// [`InputRef`](crate::InputRef) session points
-/// ([`begin_point`](crate::InputRef::begin_point)), and
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " ([`begin_point`](crate::InputRef::begin_point)), and"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " (`begin_point`), and"
+)]
 /// [`attempt`](crate::InputRef::attempt)/[`try_attempt`](crate::InputRef::try_attempt). With the
 /// feature on, the last-in, first-out / lineage contract that follows applies unchanged.
 ///
@@ -91,6 +105,13 @@ pub struct Checkpoint<'a, 'closure, L: Lexer<'a>> {
   /// checkpoint were unwound from the emitter, and this mark (predating them)
   /// correctly permits their re-emission if the committed path re-lexes them.
   pub(crate) emitted_error_end: L::Offset,
+  /// The **front-report watermark** at save time (see
+  /// [`Input::front_reported_end`](super::Input)).
+  ///
+  /// Restored verbatim beside the emitter mark, and that pairing is the whole point: a report
+  /// predating the mark survives the rewind together with its watermark, and one postdating the
+  /// mark is truncated together with its watermark. Neither can outlive the other.
+  pub(crate) front_reported_end: Option<L::Offset>,
   /// The input-level sticky limit-error boundary at save time.
   ///
   /// `None` is unpoisoned; `Some(off)` is the durable frontier a trip latched (see
@@ -140,6 +161,7 @@ impl<'a, 'closure, L: Lexer<'a>> Checkpoint<'a, 'closure, L> {
     state: L::State,
     emitter_checkpoint: u64,
     emitted_error_end: L::Offset,
+    front_reported_end: Option<L::Offset>,
     poison_boundary: Option<L::Offset>,
     cache_pushes: u64,
     #[cfg(all(
@@ -156,6 +178,7 @@ impl<'a, 'closure, L: Lexer<'a>> Checkpoint<'a, 'closure, L> {
       state,
       emitter_checkpoint,
       emitted_error_end,
+      front_reported_end,
       poison_boundary,
       cache_pushes,
       #[cfg(all(

@@ -127,7 +127,14 @@ pub enum SessionRefusal {
 /// A resumable partial-parse session: the value that survives between refills.
 ///
 /// See the [module docs](crate::input) for what a session is for and what it costs. Not to be
-/// confused with [`SessionPointId`](crate::input::SessionPointId), which names a savepoint *inside*
+#[cfg_attr(
+  any(feature = "std", feature = "alloc"),
+  doc = " confused with [`SessionPointId`](crate::input::SessionPointId), which names a savepoint *inside*"
+)]
+#[cfg_attr(
+  not(any(feature = "std", feature = "alloc")),
+  doc = " confused with `SessionPointId`, which names a savepoint *inside*"
+)]
 /// one parse.
 ///
 /// # Example

@@ -1,7 +1,11 @@
 use super::super::{Lexer, Token as TokenTrait};
 use crate::span::Span;
 
-use ::logos_0_16 as logos;
+// The version-neutral surfaces: `crate::logos` is the crate alias (newest enabled
+// version wins) and `super::{FromLogos, LogosLexer}` are the adapter re-exports that
+// follow the same precedence. This module therefore compiles unchanged on 0.14, 0.15
+// and 0.16, which is what lets the per-version CI legs run it at all three.
+use crate::logos;
 
 #[derive(Debug, Clone, PartialEq, logos::Logos)]
 #[logos(crate = logos, skip r"[ \t\r\n]+")]
@@ -52,7 +56,7 @@ impl TokenTrait<'_> for TestTok {
   }
 }
 
-type TestLexer<'a> = super::logos_0_16::LogosLexer<'a, TestTok>;
+type TestLexer<'a> = super::LogosLexer<'a, TestTok>;
 
 #[test]
 fn logos_lexer_new() {
@@ -153,14 +157,14 @@ fn logos_lexer_into_inner() {
 #[test]
 fn logos_lexer_into_lexer_trait() {
   use super::super::IntoLexer;
-  use ::logos_0_16::Logos;
+  use crate::logos::Logos;
   let raw_lexer = TestTok::lexer("42");
   let _logos_lexer: TestLexer<'_> = raw_lexer.into_lexer();
 }
 
 #[test]
 fn logos_lexer_from_logos_identity() {
-  use super::logos_0_16::FromLogos;
+  use super::FromLogos;
   let tok = TestTok::Plus;
   let converted = TestTok::from_logos(tok.clone());
   assert_eq!(converted, tok);
@@ -227,7 +231,7 @@ impl TokenTrait<'_> for LimitedTok {
   }
 }
 
-type LimitedLexer<'a> = super::logos_0_16::LogosLexer<'a, LimitedTok>;
+type LimitedLexer<'a> = super::LogosLexer<'a, LimitedTok>;
 
 #[test]
 fn logos_lexer_latches_after_limit_error() {

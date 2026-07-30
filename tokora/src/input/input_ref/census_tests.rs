@@ -215,7 +215,7 @@ fn settle_census_commit_token_routes_every_consume_settle() {
 
 /// SETTLE_CENSUS — **the sequence, not the remedy and not the type.**
 ///
-/// The defect class this round kept re-finding at new addresses is a *sequence*:
+/// The defect class that kept re-appearing at new addresses is a *sequence*:
 ///
 /// > an **irreversible step** (a token leaves durable state, or half a position is installed),
 /// > then a **fallible step** (a `Clone`, a `Drop` of a replaced value, a `to_owned`, a clamp, an
@@ -321,7 +321,7 @@ fn censused_region(raw_body: &str) -> std::string::String {
 /// Interrupted in the middle, the checkpoint has been invalidated — session points settled, the
 /// lineage popped through it — while position, cache and emitter still sit on the abandoned
 /// branch. The mark is then stranded and every later rollback reasons from a lineage that
-/// disagrees with the input. That is a `[high]` this project shipped past two clean rounds,
+/// disagrees with the input. That is a `[high]` this project shipped past two clean reviews,
 /// because group C's fixes were verified by individual cells and cells do not generalize: a new
 /// instance appeared at a site the enumeration had already named and marked fixed.
 ///
@@ -374,14 +374,14 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
     // A clone nobody wrote. The position funnel takes `MaybeRef<L::Span>`, so passing `(&span)`
     // infers `MaybeRef::Borrowed` and `clamped_span` then clones the span to own it — caller code
     // appearing inside a restore purely from an inferred conversion, invisible to a rail that
-    // greps for `.clone()`. Round 13's `[high]` was exactly this, in a body the window rail had
+    // greps for `.clone()`. A `[high]` was exactly this, in a body the window rail had
     // just passed twice. Pass the span BY MOVE; an owned `MaybeRef` clones nothing.
     "((&",
     // A drop nobody wrote. `pop_back()`, `pop_front()`, `take()` and `pop()` all RETURN an owned
     // value; writing the call as a statement discards it, and discarding it IS the `Drop` call.
     // `clear()` is the same thing N times over. The values here own `L::Span` and `L::State` —
     // and, for a session point, a whole `Checkpoint` — so each is caller code, and none of it
-    // appears as `.clone()`, `drop(` or an assignment. Round 14's `[high]` was `pop_back();` in
+    // appears as `.clone()`, `drop(` or an assignment. A later `[high]` was `pop_back();` in
     // a body two rails had just passed. Stage the value, or hoist the eviction above the phase
     // boundary.
     ".pop_back();",
@@ -473,7 +473,7 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
   // RELEASE the mark instead, which keeps the abandoned scan's diagnostics forever.
   //
   // This is not hypothetical and it is not a tightening for its own sake: the first fix attempted
-  // for `restore_entry` this round hoisted its clone to the top of the body, ABOVE the first
+  // for `restore_entry` hoisted its clone to the top of the body, ABOVE the first
   // mutation, and the window rail above was satisfied by it. The behaviour was still wrong —
   // `r9_restore_entry_is_atomic_at_every_offset_clone` reported four diagnostics surviving — and
   // the operation had to leave the body altogether. A rail that only measures from the first
@@ -481,7 +481,7 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
   const WHOLE_BODY: &[(&str, &str)] = &[
     ("mod.rs", "restore_entry"),
     // A checkpoint rollback is all-or-nothing by definition, so its atomic unit is the whole
-    // function and not the stretch after its first mutation. Three consecutive rounds fixed an
+    // function and not the stretch after its first mutation. Three consecutive fixes corrected an
     // ordering in this body and each left a later operation exposed — the window rail was
     // satisfied every time, because a tail is exactly what it cannot see.
     ("mod.rs", "restore_unchecked"),
@@ -711,7 +711,7 @@ fn settle_census_nothing_fallible_between_a_removal_and_its_settle() {
 /// This census counts **raw assignments to either half**, which is the pattern the pair funnel
 /// exists to prevent. Counting calls to the funnel instead would have been useless: a rail that
 /// counts the remedy cannot see the hazard anywhere the remedy was not applied, which is exactly
-/// how four consecutive review rounds each found another unrouted site. Two raw writes are
+/// how four consecutive reviews each found another unrouted site. Two raw writes are
 /// legitimate and both are named:
 ///
 /// - `replace_position`'s own two `core::mem::replace`s — the one body that writes the pair;

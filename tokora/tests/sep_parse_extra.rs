@@ -1,4 +1,7 @@
-#![cfg(all(feature = "std", feature = "logos"))]
+#![cfg(all(
+  feature = "std",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! Tests exercising the **spanned** (`With<Collect<...>, PhantomSpan>`) and
 //! **mut-ref** (`Collect<&mut ..., &mut Container>`) code paths for every
