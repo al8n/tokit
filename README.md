@@ -33,7 +33,7 @@ Most applications use the maintained Logos adapter:
 
 ```toml
 [dependencies]
-tokora = { version = "0.7", features = ["logos"] }
+tokora = { version = "0.8", features = ["logos"] }
 ```
 
 `logos` is the alias for the current `logos_0_16` integration. The default `std` feature remains

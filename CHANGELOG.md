@@ -3,7 +3,7 @@
 All notable changes to this crate are documented here. The project follows semantic
 versioning; before 1.0, a minor bump (0.x → 0.(x+1)) signals a breaking change.
 
-## Unreleased
+## 0.8.0 (2026-07-31)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.
 
@@ -93,7 +93,7 @@ this campaign, which is why that list exists at all.
 
 #### Cross-references from earlier design documents
 
-This release's `## Unreleased` section was consolidated from twenty `###` headings carrying
+This release's `## 0.8.0` section was consolidated from twenty `###` headings carrying
 five independently-numbered lists, so numeric cross-references written before the cut
 ("breaking change 3") do not resolve. The pull-request body carries the full old→new map.
 
