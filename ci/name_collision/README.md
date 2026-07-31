@@ -24,8 +24,9 @@ scope limit below before reading a green run as safety:
 | `SILENT` | both compile, neither warns, the witness disagrees, not disclosed | **yes** |
 | `UNPROBED` | for an item row, both sides agree and it is **not** justified in `no_collision.txt`; for a glob row, rustc said nothing about the name at all. The glob form cannot be silenced by `no_collision.txt` | **yes** |
 | `INCONCL` | no before-state: the base side did not compile, its witness was not 1, or the marker was missing/duplicated | **yes** |
-| `FATAL` | the probe could not be generated at all (unknown category or owner) | **yes** |
-| `STALE` | a baselined row that no longer reproduces | **yes** |
+| `FATAL` | the probe could not be generated at all (unknown category, owner, or trait) | **yes** |
+| `STALE` | a baselined row **this run probed** that no longer reproduces | **yes** |
+| `n/a` | a baselined row this diff gave no occasion to probe — carried, not stale | no |
 | `glob-err` | a glob row whose collision the compiler rejected | no — the disclosed outcome |
 | `glob-ok` | a glob row this toolchain does **not** reject | no — see below |
 
@@ -49,6 +50,28 @@ gate fails on a SILENT row that is *not* listed, and **also on a listed row that
 reproduces** — an allowlist that can rot into a rubber stamp for a probe that stopped
 running is worse than no allowlist. Adding a row there without adding it to the CHANGELOG's
 silent section is the thing this is meant to make awkward.
+
+**Staleness is checked only for rows this run planned.** "Did not reproduce" and "was never
+attempted" are the same absence and only the first is a finding. The inventory is a *delta*:
+a PR is probed for the names it adds, so a row recorded by an earlier release is not in the
+plan and cannot reproduce however healthy it is. Checking every row fired on the first
+name-adding PR after the release that wrote the baseline — #132 adds one name and saw all
+four disclosed rows reported STALE, none of which it touched. A row in the plan and unseen is
+STALE and fatal; a row out of the plan prints `n/a` and is carried. That has a cost worth
+stating: a baseline row is only reconcilable on a run whose diff adds its name, i.e. the
+release that recorded it. Re-probing it on later runs is *not* the fix — by then the name
+exists on both sides, the sides agree, and the row scores UNPROBED rather than reproducing.
+A two-sided delta cannot re-litigate a name that is no longer new.
+
+**The probe crate is built at the inventory's feature point**, which `run.sh` substitutes
+into `probe/Cargo.toml.in`. It used to hardcode `std,logos` while the inventory was derived
+at `std,logos,trace,rowan`, so a name behind any other feature was simply not compiled into
+the tokora the probe linked against — the probe then collided with nothing and the row
+scored `UNPROBED`, *"no collision was constructed"*, when the truth was *"the name was never
+there"*. Those read identically in the log, which is the whole reason the two must not be
+allowed to differ. Measured: with the feature point forced back to `std,logos`, the
+`CastNode` glob row scores `UNPROBED`; at the inventory's own point it scores `glob-err`,
+with nothing else changed.
 
 ## Mistakes this harness has already made, kept here so it does not make them again
 
@@ -82,8 +105,27 @@ marker — missing or duplicated is fatal, because a run whose witness cannot be
 not interpretable. (This is the third time the ANSI-prefix trap has been load-bearing in
 this campaign.)
 
+**It hardcoded the trait a probe rides.** `recvr = "try_num" if owner == "TryParseInput" else
+"parse_num"` — so a name on any *third* trait got a receiver implementing `ParseInput` and
+nothing else, collided with nothing, and would have reported a clean run. The comment two
+lines above it said exactly that this must not happen. This one was latent for every future
+trait and never fired, because until `CastNode` there was no third trait; it was found by
+reading the code rather than by a failing run, which is the only way a false green is ever
+found. See *Regenerating the inventory*.
+
+**It could not express a trait item with no receiver, and did not know one from a method.**
+The receiver split existed on the inherent side only. See *Categories and spellings*.
+
+**It reconciled baselines it had no occasion to probe.** Every `disclosed.txt` row that the
+current PR did not re-probe was reported STALE. See the note under `disclosed.txt` above.
+
+**It probed a different feature point than it inventoried.** See the note above that one.
+
 All of these are the same defect the harness exists to catch, one level up: **an instrument
-that verifies the case you already knew about.**
+that verifies the case you already knew about.** The last four are a sharper version of it —
+an instrument that *refuses to answer* looks like a broken gate and gets routed around,
+which is why each one is fixed by making the shape probeable rather than by widening what
+counts as a pass.
 
 ## One verdict ladder, several different questions
 
@@ -216,7 +258,25 @@ Two things follow, and neither is a bug to be fixed by another round of generato
 | `inherent_method` | `used`, `discarded` | a discarded return removes the type disagreement that makes it loud |
 | `inherent_assoc_fn` | `used`, `discarded` | path resolution, not the receiver walk — a different rule |
 | `trait_method` | `same_pick`, `later_pick_used`, `later_pick_discarded` | `self` collides at the same pick; `&self` sits at a later one, which is where the silent class lives |
+| `trait_assoc_fn` | `used`, `discarded` | a trait item that declares **no receiver**. Same reason as `inherent_assoc_fn` and the same spellings: there is no receiver chain to walk, so the `*_pick` spellings name nothing |
+| `trait_assoc_item` | `no_template` | an associated **type or const** on a trait. There is no probe; the row exists so the refusal is attached to the item instead of the item being dropped |
 | `glob_name` / `glob_macro` | `clash` | two competing globs; item names and macro names differ, and macro names differ by toolchain |
+
+**The receiver split applies to trait items too, and did not.** `surface_diff.py` split the
+*inherent* side into receiver methods and associated functions — they resolve by different
+rules — and put every trait item in one bucket. So a receiver-less trait associated function
+was indistinguishable from a `&self` method, and `gen_probe.trait_method` hardwires
+`{recvr}.{name}(..)`, which cannot typecheck for an item that takes no receiver.
+`CastNode::cast_node` is the shape that found it: three FATAL rows, and a genuinely new
+public name left unguarded. The trait side now carries the same two facts, plus *is this a
+function at all* — an associated type used to land in the method bucket and fail with a
+message about a missing argument template, which named the wrong problem.
+
+The trait-assoc-fn probe is a **path** collision: the consumer's own `impl<T> ConsumerAssoc
+for T` and tokora's trait are both applicable to a type that satisfies tokora's bound, and
+rustc refuses to choose (E0034). Its honest verdict is therefore `loud`, never `silent` —
+path resolution walks no autoderef chain, so there is no later pick to lose the call at
+quietly. A `silent` row in this category would be news.
 
 A warning counts as a diagnostic. `#[must_use]` on a discarded return is precisely the
 breadcrumb that separates *silent* from *quiet but reported*, and conflating them would
@@ -226,6 +286,22 @@ overstate the hazard where the crate relies on it.
 
     python3 ci/name_collision/surface_diff.py base.json head.json --features "std,logos,trace,rowan"
 
-from rustdoc-JSON dumps of both sides. It splits inherent **receiver methods** from
-**associated functions** — they resolve by different rules — and records each name's owner,
-because a probe that does not know the owner cannot construct the collision.
+from rustdoc-JSON dumps of both sides. It splits **receiver methods** from **associated
+functions** on *both* the inherent and the trait side — they resolve by different rules —
+and records each name's owner, because a probe that does not know the owner cannot construct
+the collision. The `--features` string is echoed into the inventory and `run.sh` builds the
+probe crate at exactly that point; regenerating at one feature point and probing at another
+is a silent disagreement about which surface is under test.
+
+For a trait item the owner is the **trait**, and `gen_probe.py` looks it up in its `TRAITS`
+table rather than defaulting. It used to default:
+
+```python
+recvr = "try_num" if owner == "TryParseInput" else "parse_num"
+```
+
+so every trait that was not `TryParseInput` rode a receiver implementing `ParseInput` and
+nothing else. That is worse than an unexpressible shape: a probe whose subject does not
+implement the trait constructs no collision and reports a clean run over an experiment that
+never happened. An unknown trait, or a trait with no entry for the field the row needs, is
+now FATAL and names what to add.

@@ -7,8 +7,20 @@ edition = "2024"
 publish = false
 
 [dependencies]
-tokora = { path = "TOKORA_PATH", default-features = false, features = ["std", "logos"] }
+# `TOKORA_FEATURES` is substituted by run.sh from the INVENTORY's feature point, not written
+# here. It used to read `["std", "logos"]` while the inventory was derived at
+# `std,logos,trace,rowan`, so any name behind `trace` or `rowan` was simply absent from the
+# tokora the probe compiled against — the probe then collided with nothing and the row scored
+# UNPROBED, "no collision was constructed", when the truth was "the name was never compiled
+# in". A feature point hardcoded here is a silent disagreement with the surface being probed.
+tokora = { path = "TOKORA_PATH", default-features = false, features = [TOKORA_FEATURES] }
 otherlib = { path = "otherlib" }
+# A direct dependency, because a consumer of tokora's `rowan` feature has one: the typed-CST
+# fixture names `rowan::Language`, `rowan::SyntaxKind` and `rowan::SyntaxNode`, and tokora
+# re-exports none of them. The requirement matches tokora's own so cargo unifies the two onto
+# one version — a second rowan would make `SyntaxNode<Lang>` a different type and the
+# fixture's `Node` impl would not satisfy tokora's trait at all.
+rowan = "0.16"
 
 [features]
 inferred = []

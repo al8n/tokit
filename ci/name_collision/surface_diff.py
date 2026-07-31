@@ -18,9 +18,16 @@ Emits four categories:
   MODULE          a new public module (its own glob namespace)
   GLOB NAME       a name newly reachable from `use <path>::*` (E0659 risk), with
                   every module path it is reachable from
-  TRAIT-ITEM      a new method declared on a trait, and whether the trait is new
+  TRAIT-ITEM      a new item declared on a trait, and whether the trait is new, SPLIT
+                  into receiver methods, associated functions, and non-fn items
   INHERENT        a new item in an inherent impl, SPLIT into receiver methods and
                   associated functions — they resolve by different rules
+
+The receiver split is applied to BOTH sides for the same reason. It was applied to the
+inherent side only, and the trait side put every item in one bucket — so a receiver-less
+trait associated function was indistinguishable from a `&self` method and got a probe that
+hardwires a `self`-receiver call. `CastNode::cast_node`, which takes no receiver at all, is
+the shape that exposed it: no `self` call can typecheck, and the harness could only refuse.
 
 Writes `surface_names.json` next to the proto dump so `census_v3.py` consumes the
 name set instead of hand-copying it.
@@ -124,7 +131,18 @@ def walk_modules(d, idx):
     return out
 
 
-def trait_methods(idx):
+def trait_items(idx):
+    """{trait_name: {(item_name, is_fn, has_self)}} — a trait's declared items.
+
+    Carries the same two facts the inherent side already carries. Merging them was not a
+    cosmetic loss: `trait_method` in `gen_probe.py` emits `{recvr}.{name}(..)`, which cannot
+    typecheck for an item that declares no receiver, so a receiver-less trait associated
+    function had no expressible probe and the run could only go FATAL.
+
+    `is_fn` is carried too, because an associated TYPE or CONST is a third resolution class
+    with no probe of its own. It used to land silently in the method bucket and fail with a
+    message about a missing argument template, which named the wrong problem.
+    """
     out = defaultdict(set)
     for _tid, it in idx.items():
         inner = it.get("inner")
@@ -134,7 +152,7 @@ def trait_methods(idx):
         for cid in inner["trait"].get("items", []):
             sub = get(idx, cid)
             if sub and sub.get("name"):
-                out[tname].add(sub["name"])
+                out[tname].add((sub["name"], _is_fn(sub), _has_self(sub)))
     return out
 
 
@@ -160,8 +178,20 @@ def inherent_items(idx):
     return out
 
 
+def _is_fn(item):
+    """Is this item a function at all?
+
+    An associated type or const has a name and no signature, so `_has_self` answers `False`
+    for it and it would be filed as a receiver-less associated function. It is neither: it
+    resolves by rules of its own and no template here expresses it. Separating it is what
+    lets the plan say so by name instead of failing with a message about arguments.
+    """
+    inner = item.get("inner")
+    return isinstance(inner, dict) and "function" in inner
+
+
 def _has_self(item):
-    """Does this inherent item take a receiver?
+    """Does this item take a receiver?
 
     Methods and associated functions resolve by DIFFERENT rules — a method call walks the
     receiver's autoderef/autoref chain, a path call `Type::name(..)` does not — so an
@@ -223,16 +253,31 @@ def main():
         print("  %-26s %-10s via %s" % (nm, kind, ", ".join(sorted(paths))))
     print()
 
-    btm, ptm = trait_methods(bidx), trait_methods(pidx)
-    print("== NEW TRAIT-DECLARED METHODS ==")
+    btm, ptm = trait_items(bidx), trait_items(pidx)
+    print("== NEW TRAIT-DECLARED ITEMS ==")
     trait_names = set()
+    trait_assoc_names = set()
+    trait_other_names = set()
     trait_owners = {}
     for t in sorted(ptm, key=lambda x: (x is None, x)):
-        for m in sorted(ptm[t] - btm.get(t, set())):
+        for m, is_fn, has_self in sorted(ptm[t] - btm.get(t, set()), key=str):
             tag = "EXISTING trait" if t in btm else "NEW trait"
-            trait_names.add(m)
             trait_owners[m] = str(t)
-            print("  %-26s on %s   [%s]" % (m, t, tag))
+            if not is_fn:
+                trait_other_names.add(m)
+                kind = "NON-FN ITEM (no probe template)"
+            elif has_self:
+                trait_names.add(m)
+                kind = "method"
+            else:
+                trait_assoc_names.add(m)
+                kind = "ASSOCIATED FN (path-resolved)"
+            print("  %-26s on %-16s %-31s [%s]" % (m, t, kind, tag))
+    print()
+    print(
+        "#   of which %d receiver method(s), %d associated function(s), %d non-fn item(s)"
+        % (len(trait_names), len(trait_assoc_names), len(trait_other_names))
+    )
     print()
 
     bim, pim = inherent_items(bidx), inherent_items(pidx)
@@ -258,8 +303,13 @@ def main():
     )
 
     print(
-        "# totals: %d glob-reachable, %d trait-method, %d inherent, %d new modules"
-        % (len(glob_names), len(trait_names), len(inherent_names), len(new_mods))
+        "# totals: %d glob-reachable, %d trait-item, %d inherent, %d new modules"
+        % (
+            len(glob_names),
+            len(trait_names | trait_assoc_names | trait_other_names),
+            len(inherent_names),
+            len(new_mods),
+        )
     )
 
     out = {
@@ -267,7 +317,12 @@ def main():
         "glob_names": sorted(glob_names),
         "glob_details": glob_details,
         "new_modules": sorted(new_mods),
+        # Three buckets, one owner map. `trait_method_names` keeps its meaning — items that
+        # take a receiver — so the two new keys are additions rather than a redefinition;
+        # `trait_method_owners` answers for every trait item in all three.
         "trait_method_names": sorted(trait_names),
+        "trait_assoc_fn_names": sorted(trait_assoc_names),
+        "trait_other_names": sorted(trait_other_names),
         "inherent_names": sorted(inherent_names),
         "inherent_method_names": sorted(method_names),
         "inherent_assoc_fn_names": sorted(assoc_names),
