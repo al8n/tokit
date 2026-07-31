@@ -7085,7 +7085,7 @@ fn f2_sync_to_run(
 }
 
 #[test]
-fn r9_f2_panicking_pred_does_not_lose_tokens() {
+fn panicking_pred_does_not_lose_tokens() {
   // "foo bar baz 42": foo (0,3), bar (4,7), baz (8,11), 42 (12,14). The cache is warmed to
   // three tokens, then `sync_to`'s predicate panics on the second one it is handed.
   //
@@ -7109,7 +7109,7 @@ fn r9_f2_panicking_pred_does_not_lose_tokens() {
 }
 
 #[test]
-fn r9_f2_panicking_pred_cold_cache_control() {
+fn panicking_pred_cold_cache_control() {
   // The cold-cache twin: with nothing prefetched the loop lexes both tokens itself. Same law.
   let got = f2_sync_to_run("foo bar baz 42", false, Some(2), None, usize::MAX);
   assert_eq!(
@@ -7126,7 +7126,7 @@ fn r9_f2_panicking_pred_cold_cache_control() {
 }
 
 #[test]
-fn r9_f2_warm_limit_no_reburn() {
+fn warm_limit_no_reburn() {
   // The budget payload. "ab cd ef gh" behind a shared limit of 5: the honest run scans four
   // tokens and never trips. A restore posture that CLEARS the store on the unwind edge re-lexes
   // the untouched suffix, re-burns the shared budget, trips the limiter and latches a poison
@@ -7148,7 +7148,7 @@ fn r9_f2_warm_limit_no_reburn() {
 }
 
 #[test]
-fn r9_f2_panicking_exp_closes_the_same_window() {
+fn panicking_exp_closes_the_same_window() {
   // The expected-tokens closure is the SECOND caller-code window inside the skip, and the one
   // that runs with the token already consumed out of the loop's local. It is covered by the
   // same law only if the frontier adopts the token BEFORE the report is built.
@@ -7227,7 +7227,7 @@ fn f2_sync_through_run(
 }
 
 #[test]
-fn r9_f2_sync_through_unwind_restores_emissions() {
+fn sync_through_unwind_restores_emissions() {
   // A rewinding mode's unwind edge behaves like its own no-match end of input: restore-to-entry.
   // Three things must hold TOGETHER — a `live_rows == 0` alone was a passing gate over the token
   // loss: the stream is back (all four tokens still reachable, from the top), the emissions the
@@ -7248,7 +7248,7 @@ fn r9_f2_sync_through_unwind_restores_emissions() {
 }
 
 #[test]
-fn r9_f2_sync_through_warm_unwind_prices_its_re_lex() {
+fn sync_through_warm_unwind_prices_its_re_lex() {
   // The PRICED RESIDUE, pinned with its number rather than left as prose.
   //
   // The restore posture is the ratified one for the rewinding modes — it is what their own
@@ -7276,7 +7276,7 @@ fn r9_f2_sync_through_warm_unwind_prices_its_re_lex() {
 }
 
 #[test]
-fn r9_f2_panicking_state_clone_settles_the_entry_mark() {
+fn panicking_state_clone_settles_the_entry_mark() {
   // The THIRD caller-code window, and the earliest one: the frontier's `L::State: Clone` at the
   // top of `skip_until`. It runs after the caller has already captured the entry mark and moved
   // the snapshot in, so nobody but the scan can settle it — and on the unwind edge nobody did.
@@ -8036,7 +8036,7 @@ fn r9_settle_path_span_clone_inventory() {
      #2..#5 is one skipped token's report clone, taken AFTER the adopt. If a clone appears \
      before an adopt again, the token it belongs to is in neither the scope nor the frontier for \
      the length of it — re-read `skip_and_report` and re-arm \
-     `r9_f3_panicking_report_span_clone_does_not_lose_a_token`."
+     `panicking_report_span_clone_does_not_lose_a_token`."
   );
 
   let mut input2 = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
@@ -8083,7 +8083,7 @@ struct AfterSettle {
 }
 
 #[test]
-fn r9_f3_panicking_report_span_clone_does_not_lose_a_token() {
+fn panicking_report_span_clone_does_not_lose_a_token() {
   // F3 — the defect one window deeper. `skip_and_report` clones the span for the
   // report BEFORE adopting the token into the frontier, and `L::Span::clone` is caller code. In
   // a warm-cache `sync_to` the token has already been popped out of the cache and out of the
@@ -8148,7 +8148,7 @@ fn r9_f3_panicking_report_span_clone_does_not_lose_a_token() {
 }
 
 #[test]
-fn r9_f1_rewinding_unwind_restores_the_poison_boundary() {
+fn rewinding_unwind_restores_the_poison_boundary() {
   // F1 — a limit trip latches the poison boundary inside `classify`, BEFORE its diagnostic is
   // emitted. If the diagnostic path then panics, the rewinding scan restores span, state, the
   // dedup watermark and the emitter mark — and leaves the freshly latched boundary standing, so
@@ -8188,7 +8188,7 @@ fn r9_f1_rewinding_unwind_restores_the_poison_boundary() {
 }
 
 #[test]
-fn r9_f2_panicking_eof_settle_still_settles_the_mark() {
+fn panicking_eof_settle_still_settles_the_mark() {
   // F2 — the end-of-input arm takes the snapshot out of the scope BEFORE `M::on_eof`, and
   // `on_eof` runs caller code. A panic there found the scope already disarmed, so `Drop` had
   // nothing left to settle with and the mark was stranded.
@@ -9089,7 +9089,7 @@ fn disarm_offset_clone() -> usize {
 ///
 /// Every offset the crate ships in-tree is `usize`, so `L::Offset::clone` — caller code that the
 /// settle and restore paths both run — had no witness at all, and the note in
-/// `r9_f2_panicking_eof_settle_still_settles_the_mark` said exactly that, and findings
+/// `panicking_eof_settle_still_settles_the_mark` said exactly that, and findings
 /// against `restore_entry` were argued on contract grounds for want of this type.
 ///
 /// It brings its own `Source` and `Lexer` rather than re-keying `BombLexer`: `str` has a single

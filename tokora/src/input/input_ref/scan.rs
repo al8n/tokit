@@ -437,7 +437,7 @@ where
 /// The rewinding arm keeps a **priced residue**: at true end of input the cache is empty by
 /// construction, so `on_eof`'s restore never faces a warm untouched suffix — the panic edge
 /// does, and re-lexes it. The price is pinned by
-/// `r9_f2_sync_through_warm_unwind_prices_its_re_lex`.
+/// `sync_through_warm_unwind_prices_its_re_lex`.
 pub(super) struct ScanScope<'g, 'inp, 'closure, L, Ctx, Lang, Cmpl, M>
 where
   L: Lexer<'inp>,
