@@ -1956,7 +1956,7 @@ assert_eq!(emitter.errors().values().flatten().count(), 1);
 
 ## Materialization is a typed wall
 
-[`finish(root_kind, source)`](crate::cst::Sink::finish) consumes the sink, validates the
+[`finish(root_kind)`](crate::cst::Sink::finish) consumes the sink, validates the
 recorded stream, and builds the green tree — returning the inner emitter either way, so
 collected diagnostics survive materialization. It **never panics**: a stream that cannot
 become a correct tree comes back as a typed [`FinishError`](crate::cst::FinishError)
@@ -2116,6 +2116,374 @@ exactly that door. And an [`Incomplete`](crate::Completeness) verdict from a
 sink — the buffered events *are* the resumable state — and `finish` once the parse
 completes.
 
+## Reading the tree back: the cast layer
+
+A finished tree is untyped. Every node is a `SyntaxNode<QueryLang>`, and every question you
+ask it — the `first_child()`/`kind()` walks above — is a kind comparison written by hand at
+the call site. The typed layer replaces those comparisons with types, and the whole of what
+it asks of a type is one function.
+
+[`CastNode`](crate::cst::CastNode) is that function:
+[`cast_node`](crate::cst::CastNode::cast_node) takes a `SyntaxNode<Lang>` and returns
+`Option<Self>` — a kind check and a wrap, nothing more.
+[`cast::child`](crate::cst::cast::child), [`cast::children`](crate::cst::cast::children) and
+[`NodeChildren`](crate::cst::NodeChildren) are bound on `CastNode` rather than on
+[`Node`](crate::cst::Node), because casting a child is the only thing they ever do with the
+type, so it is the only thing they ask for.
+
+That distinction is the point. `Node` requires [`Syntax`](crate::syntax::Syntax), which is
+the *parser's* model of a production: a `Component` enum plus type-level counts of the
+possible and required parts, all in service of reporting which parts of a production went
+missing. That is the right shape for a parser and the wrong toll for a reader — a typed
+layer whose job is `field.name()` would otherwise invent a component enum and a typenum
+count per node kind, for a model it never consults.
+
+So there are two positions and a type belongs to exactly one:
+
+- a **parser-facing** node implements [`Node`](crate::cst::Node) — hence `Syntax`, hence the
+  component model — and receives `CastNode` from a blanket impl. Its own entry point is
+  [`try_cast_node`](crate::cst::Node::try_cast_node), which returns a typed
+  [`SyntaxError`](crate::cst::error::SyntaxError) naming the mismatch instead of `None`; the
+  blanket impl is that call with `.ok()` on the end.
+- a **navigation-only** node implements `CastNode` directly and never names `Syntax` at all.
+
+A type cannot be both: the blanket impl covers all of `Node`, so a direct `CastNode` impl on
+a `Node` overlaps it and rustc rejects the direct one (`E0119`). That is a commitment rather
+than an accident — a type that wants both is asking for the component model, and should
+implement `Node`.
+
+Reading this chapter's tree wants the second position:
+
+```rust
+# use tokora::{Token as TokenT, logos::{self, Logos}};
+# #[derive(Clone, Debug, Default, PartialEq)]
+# struct LexError;
+# impl From<()> for LexError { fn from(_: ()) -> Self { LexError } }
+# #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Logos)]
+# #[logos(crate = logos, error = LexError)]
+# enum Tok {
+#   #[regex(r"[ \t\r\n]+")] Whitespace,
+#   #[regex(r"#[^\r\n]*", allow_greedy = true)] Comment,
+#   #[token(",")] Comma,
+#   #[regex(r"[A-Za-z_][A-Za-z0-9_]*")] Ident,
+#   #[regex(r"-?[0-9]+")] Int,
+#   #[token("{")] LBrace,
+#   #[token("}")] RBrace,
+#   #[token("(")] LParen,
+#   #[token(")")] RParen,
+#   #[token(":")] Colon,
+# }
+# impl core::fmt::Display for Tok {
+#   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+#     f.write_str(match self {
+#       Tok::Whitespace => "whitespace", Tok::Comment => "comment", Tok::Comma => "`,`",
+#       Tok::Ident => "identifier", Tok::Int => "integer", Tok::LBrace => "`{`",
+#       Tok::RBrace => "`}`", Tok::LParen => "`(`", Tok::RParen => "`)`", Tok::Colon => "`:`",
+#     })
+#   }
+# }
+# impl TokenT<'_> for Tok {
+#   type Kind = Tok;
+#   type Error = LexError;
+#   const SURFACES_TRIVIA: bool = true;
+#   fn kind(&self) -> Tok { *self }
+#   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }
+# }
+# type QueryLexer<'a> = tokora::lexer::LogosLexer<'a, Tok>;
+# #[derive(Debug, Clone, PartialEq)]
+# enum QueryError { Lex, Unexpected }
+# impl From<LexError> for QueryError { fn from(_: LexError) -> Self { QueryError::Lex } }
+# impl<'a, T, Kd: Clone, S, Lang: ?Sized> From<tokora::error::token::UnexpectedToken<'a, T, Kd, S, Lang>> for QueryError {
+#   fn from(_: tokora::error::token::UnexpectedToken<'a, T, Kd, S, Lang>) -> Self { QueryError::Unexpected }
+# }
+# #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+# #[repr(u16)]
+# enum SyntaxKind {
+#   Whitespace, Comment, Comma, Ident, Int, LBrace, RBrace, LParen, RParen, Colon,
+#   SelectionSet, Field, Alias, Arguments, Argument,
+#   Error, Gap, Root,
+# }
+# type K = SyntaxKind;
+# impl SyntaxKind {
+#   const fn raw(self) -> u16 { self as u16 }
+# }
+# fn map_token(tok: &Tok) -> u16 {
+#   (match tok {
+#     Tok::Whitespace => K::Whitespace, Tok::Comment => K::Comment, Tok::Comma => K::Comma,
+#     Tok::Ident => K::Ident, Tok::Int => K::Int, Tok::LBrace => K::LBrace,
+#     Tok::RBrace => K::RBrace, Tok::LParen => K::LParen, Tok::RParen => K::RParen,
+#     Tok::Colon => K::Colon,
+#   }) as u16
+# }
+# fn query_profile() -> CstProfile<Tok> {
+#   CstProfile::new(
+#     map_token,
+#     KindValidator::new(|kind| kind <= K::Root.raw()),
+#     K::Error.raw(),
+#     K::Gap.raw(),
+#   )
+# }
+# #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+# enum QueryLang {}
+# impl rowan::Language for QueryLang {
+#   type Kind = SyntaxKind;
+#   fn kind_from_raw(raw: rowan::SyntaxKind) -> SyntaxKind {
+#     const KINDS: [SyntaxKind; 18] = [
+#       K::Whitespace, K::Comment, K::Comma, K::Ident, K::Int, K::LBrace, K::RBrace,
+#       K::LParen, K::RParen, K::Colon, K::SelectionSet, K::Field, K::Alias, K::Arguments,
+#       K::Argument, K::Error, K::Gap, K::Root,
+#     ];
+#     KINDS[raw.0 as usize]
+#   }
+#   fn kind_to_raw(kind: SyntaxKind) -> rowan::SyntaxKind { rowan::SyntaxKind(kind as u16) }
+# }
+# use tokora::{
+#   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
+#   cache::DefaultCache,
+#   cst::{CstProfile, KindValidator, Sink},
+#   emitter::{CstEmitter, Fatal},
+#   parser::{node, node_at},
+#   try_parse_input::ParseAttempt,
+# };
+#
+# /// Chapter shorthand for the input reference.
+# type QueryIn<'inp, 'x, Ctx> = InputRef<'inp, 'x, QueryLexer<'inp>, Ctx>;
+#
+# /// The typed result. The AST does not go away when a tree is wanted — the tree is a side
+# /// effect of consuming, and the parser still returns whatever it returned before.
+# #[allow(dead_code)]
+# #[derive(Debug, Clone, PartialEq)]
+# struct Field {
+#   alias: Option<String>,
+#   name: String,
+#   args: usize,
+#   children: Vec<Field>,
+# }
+#
+# /// Commits any leading trivia, then reports the next token's kind without consuming it
+# /// (`None` at end of input). Committing trivia during a peek is safe over a lossless
+# /// stream: trivia belongs to the parse — and to the tree — no matter which branch wins.
+# fn sig_peek<'inp, Ctx>(inp: &mut QueryIn<'inp, '_, Ctx>) -> Result<Option<Tok>, QueryError>
+# where
+#   Ctx: ParseContext<'inp, QueryLexer<'inp>>,
+#   Ctx::Emitter: Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
+# {
+#   inp.skip_while(|t| t.is_trivia())?;
+#   let mut ahead = None;
+#   inp.try_expect(|t| {
+#     ahead = Some(t.data().kind());
+#     false
+#   })?;
+#   Ok(ahead)
+# }
+#
+# fn expect_tok<'inp, Ctx>(inp: &mut QueryIn<'inp, '_, Ctx>, want: Tok) -> Result<(), QueryError>
+# where
+#   Ctx: ParseContext<'inp, QueryLexer<'inp>>,
+#   Ctx::Emitter: Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
+# {
+#   inp.skip_while(|t| t.is_trivia())?;
+#   match inp.try_expect(|t| t.data().kind() == want)? {
+#     Some(_) => Ok(()),
+#     None => Err(QueryError::Unexpected),
+#   }
+# }
+# fn ident<'inp, Ctx>(inp: &mut QueryIn<'inp, '_, Ctx>) -> Result<String, QueryError>
+# where
+#   Ctx: ParseContext<'inp, QueryLexer<'inp>>,
+#   Ctx::Emitter: Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
+# {
+#   inp.skip_while(|t| t.is_trivia())?;
+#   match inp.try_expect(|t| matches!(t.data().kind(), Tok::Ident))? {
+#     Some(_) => Ok(inp.slice().to_string()),
+#     None => Err(QueryError::Unexpected),
+#   }
+# }
+# fn try_colon<'inp, Ctx>(inp: &mut QueryIn<'inp, '_, Ctx>) -> Result<ParseAttempt<()>, QueryError>
+# where
+#   Ctx: ParseContext<'inp, QueryLexer<'inp>>,
+#   Ctx::Emitter: Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
+# {
+#   inp.skip_while(|t| t.is_trivia())?;
+#   Ok(match inp.try_expect(|t| matches!(t.data().kind(), Tok::Colon))? {
+#     Some(_) => ParseAttempt::Accept(()),
+#     None => ParseAttempt::Decline,
+#   })
+# }
+#
+# /// `selection_set := "{" field* "}"` — one `node()` bracket over the whole shape: the
+# /// braces, the trivia, and every child selection land inside the `SelectionSet` node.
+# fn selection_set<'inp, Ctx>(
+#   inp: &mut QueryIn<'inp, '_, Ctx>,
+# ) -> Result<Vec<Field>, QueryError>
+# where
+#   Ctx: ParseContext<'inp, QueryLexer<'inp>>,
+#   Ctx::Emitter: CstEmitter<'inp, QueryLexer<'inp>>
+#     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
+# {
+#   node(K::SelectionSet.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
+#     expect_tok(inp, Tok::LBrace)?;
+#     let mut fields = Vec::new();
+#     loop {
+#       match sig_peek(inp)? {
+#         Some(Tok::Ident) => fields.push(field(inp)?),
+#         Some(Tok::RBrace) => {
+#           expect_tok(inp, Tok::RBrace)?;
+#           return Ok(fields);
+#         }
+#         _ => return Err(QueryError::Unexpected),
+#       }
+#     }
+#   })
+#   .parse_input(inp)
+# }
+#
+# fn field<'inp, Ctx>(inp: &mut QueryIn<'inp, '_, Ctx>) -> Result<Field, QueryError>
+# where
+#   Ctx: ParseContext<'inp, QueryLexer<'inp>>,
+#   Ctx::Emitter: CstEmitter<'inp, QueryLexer<'inp>>
+#     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
+# {
+#   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
+#     let mark = inp.emitter().cst_mark();
+#     let first = ident(inp)?;
+#     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
+#       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
+#       _ => (None, first),
+#     };
+#     let args = opt_arguments(inp)?;
+#     let children = match sig_peek(inp)? {
+#       Some(Tok::LBrace) => selection_set(inp)?,
+#       _ => Vec::new(),
+#     };
+#     Ok(Field { alias, name, args, children })
+#   })
+#   .parse_input(inp)
+# }
+#
+# /// `arguments := "(" argument* ")"`, or nothing at all. Dispatch by PEEK, then let the
+# /// bracketed parser consume the `(` — so the parenthesis lands *inside* the `Arguments`
+# /// node. And when there are no arguments, no node is ever opened: an absent optional
+# /// shape must not leave an empty node behind.
+# fn opt_arguments<'inp, Ctx>(inp: &mut QueryIn<'inp, '_, Ctx>) -> Result<usize, QueryError>
+# where
+#   Ctx: ParseContext<'inp, QueryLexer<'inp>>,
+#   Ctx::Emitter: CstEmitter<'inp, QueryLexer<'inp>>
+#     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
+# {
+#   match sig_peek(inp)? {
+#     Some(Tok::LParen) => node(K::Arguments.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
+#       expect_tok(inp, Tok::LParen)?;
+#       let mut count = 0;
+#       loop {
+#         match sig_peek(inp)? {
+#           Some(Tok::Ident) => {
+#             argument(inp)?;
+#             count += 1;
+#           }
+#           Some(Tok::RParen) => {
+#             expect_tok(inp, Tok::RParen)?;
+#             return Ok(count);
+#           }
+#           _ => return Err(QueryError::Unexpected),
+#         }
+#       }
+#     })
+#     .parse_input(inp),
+#     _ => Ok(0),
+#   }
+# }
+#
+# /// `argument := ident ":" int` — `Argument[Ident, Colon, Int]`, plus whatever trivia was
+# /// consumed along the way.
+# fn argument<'inp, Ctx>(inp: &mut QueryIn<'inp, '_, Ctx>) -> Result<(), QueryError>
+# where
+#   Ctx: ParseContext<'inp, QueryLexer<'inp>>,
+#   Ctx::Emitter: CstEmitter<'inp, QueryLexer<'inp>>
+#     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
+# {
+#   node(K::Argument.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
+#     ident(inp)?;
+#     expect_tok(inp, Tok::Colon)?;
+#     expect_tok(inp, Tok::Int)
+#   })
+#   .parse_input(inp)
+# }
+use tokora::cst::{CastNode, NodeChildren, cast};
+
+/// Navigation-only typed nodes. Each is a newtype over the untyped node, and the whole of
+/// what either implements is one kind check and one wrap.
+struct SelectionSetNode(rowan::SyntaxNode<QueryLang>);
+struct FieldNode(rowan::SyntaxNode<QueryLang>);
+
+impl CastNode<QueryLang> for SelectionSetNode {
+  fn cast_node(syntax: rowan::SyntaxNode<QueryLang>) -> Option<Self> {
+    (syntax.kind() == K::SelectionSet).then_some(Self(syntax))
+  }
+}
+
+impl CastNode<QueryLang> for FieldNode {
+  fn cast_node(syntax: rowan::SyntaxNode<QueryLang>) -> Option<Self> {
+    (syntax.kind() == K::Field).then_some(Self(syntax))
+  }
+}
+
+impl SelectionSetNode {
+  /// Every `Field` child, in source order. `cast::children` casts each child and drops the
+  /// ones that decline, so the braces and the trivia need no filter of their own.
+  fn fields(&self) -> NodeChildren<FieldNode, QueryLang> {
+    cast::children(&self.0)
+  }
+}
+
+impl FieldNode {
+  /// The field's own name. `cast::token` matches a `Lang::Kind` value directly, so a leaf
+  /// needs no wrapper type — and it looks only at *direct* children, so an argument's
+  /// `Ident` (nested under `Arguments`) cannot answer here.
+  fn name(&self) -> Option<String> {
+    cast::token(&self.0, &K::Ident).map(|t| t.text().to_string())
+  }
+
+  /// The nested selection set, if this field has one. `Arguments` is a child too and
+  /// declines the cast, so `cast::child` walks past it.
+  fn selection_set(&self) -> Option<SelectionSetNode> {
+    cast::child(&self.0)
+  }
+}
+
+let src = "{ user(id: 4) { name } }";
+let mut sink: Sink<'_, QueryLexer<'_>, _> =
+  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
+Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
+  .apply(selection_set)
+  .parse_str(src)
+  .unwrap();
+let (green, _emitter) = sink.finish(K::Root.raw());
+let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
+
+// One cast at the root; from there the walk is typed the rest of the way down.
+let top: SelectionSetNode = cast::child(&tree).expect("Root wraps one SelectionSet");
+let user = top.fields().next().expect("one field");
+assert_eq!(user.name().as_deref(), Some("user"));
+
+let inner = user.selection_set().expect("`user` has a nested selection set");
+assert_eq!(
+  inner.fields().map(|f| f.name().unwrap()).collect::<Vec<_>>(),
+  ["name"],
+);
+```
+
+Two things that walk fall out of the cast being the *only* capability asked for. `fields()`
+is `find_map(FieldNode::cast_node)` over the children, so it steps over the braces, the
+trivia and the `Arguments` node without naming any of them — a filter written once, in the
+cast, rather than at each call site. And `cast::token` is not node-typed at all: it matches
+a `Lang::Kind` value against direct token children, so a leaf never needs a wrapper type.
+
+This is also where the contextual-keyword advice from the top of the chapter is paid off.
+`query` lexes as an identifier and reaches the tree as `Ident`; the typed layer is the place
+that classifies it by text, and doing so costs a `cast_node` that reads the token instead of
+nineteen extra kinds in the image space.
+
 ## Pratt expressions
 
 The typed pratt driver of [chapter 5](super::ch05_pratt) carries an additive CST hook:
@@ -2129,10 +2497,12 @@ and is documented CST-unsupported.
 
 ## Where to go next
 
-- **Typed access** over the finished tree: [`Element`](crate::cst::Element),
-  [`Node`](crate::cst::Node), [`Token`](crate::cst::Token), and
-  [`cst::cast`](crate::cst::cast) wrap and cast rowan elements without changing the
-  losslessness story.
+- **Typed access** beyond the navigation-only layer above:
+  [`Element`](crate::cst::Element) and [`Token`](crate::cst::Token) are the element- and
+  leaf-level views, and [`Node`](crate::cst::Node) is the parser-facing node —
+  [`CastNode`](crate::cst::CastNode) plus the [`Syntax`](crate::syntax::Syntax) component
+  model, entered through [`try_cast_node`](crate::cst::Node::try_cast_node). None of them
+  changes the losslessness story.
 - **The event vocabulary**, its depth model, and the era-branded mark validation are
   specified in [`cst::event`](crate::cst::event) — the normative reference behind
   everything this chapter demonstrated.

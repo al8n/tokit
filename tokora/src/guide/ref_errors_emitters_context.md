@@ -262,6 +262,7 @@ nodes) need more than the base surface, so tokora splits each scenario into a fo
 | [`SeparatedEmitter`](crate::emitter::SeparatedEmitter) | missing separator / element | `From<MissingTokenOf>` + `From<MissingSyntaxOf>` | ✅ |
 | [`UnexpectedLeadingSeparatorEmitter`](crate::emitter::UnexpectedLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::UnexpectedTrailingSeparatorEmitter) | a stray separator | `From<SeparatedErrorOf>` | ✅ |
 | [`MissingLeadingSeparatorEmitter`](crate::emitter::MissingLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::MissingTrailingSeparatorEmitter) | a required separator | `From<MissingTokenOf>` | — (in [`PolicyComposableEmitter`](crate::emitter::PolicyComposableEmitter)) |
+| [`UnclosedEmitter`](crate::emitter::UnclosedEmitter) | [`Unclosed`](crate::error::Unclosed) | [`FromUnclosed`](crate::emitter::FromUnclosed) | ✅ |
 | [`PrattEmitter`](crate::emitter::PrattEmitter) | end-of-LHS / end-of-RHS ([chapter 5](super::ch05_pratt)) | `From<UnexpectedEoLhs>` + `From<UnexpectedEoRhs>` | — |
 | [`CstEmitter`](crate::emitter::CstEmitter) | tree events (no error) | — (defaulted no-ops; the recording sink) | — |
 
@@ -289,8 +290,19 @@ emitters implement all of them anyway.
 ```text
 trait ComposableEmitter<'inp, L, Lang = ()>:
     Emitter + FullContainerEmitter + SeparatedEmitter
-    + UnexpectedLeadingSeparatorEmitter + UnexpectedTrailingSeparatorEmitter + TooFewEmitter {}
+    + UnexpectedLeadingSeparatorEmitter + UnexpectedTrailingSeparatorEmitter + TooFewEmitter
+    + UnclosedEmitter {}
 ```
+
+`UnclosedEmitter` is the one member unlocked by a **trait impl** rather than a `From`:
+[`FromUnclosed`](crate::emitter::FromUnclosed) is a single generic impl that covers every
+delimiter pair, user-defined pairs included, replacing the stack of
+`From<Unclosed<Paren, …>> + From<Unclosed<Brace, …>> + …` bounds that preceded it. Route on
+[`Unclosed::kind`](crate::error::Unclosed::kind) — a
+[`DelimiterKind`](crate::delimiter::DelimiterKind), which is what a pair's identity *is* —
+and keep a catch-all arm, because `D` is generic and `DelimiterKind` is `#[non_exhaustive]`.
+[`Unclosed::name_ref`](crate::error::Unclosed::name_ref) is a display string with no
+uniqueness contract, so it is for rendering, never for dispatch.
 
 [`CstEmitter`](crate::emitter::CstEmitter) is the exception that *binds* rather than defaults:
 its methods have no-op defaults (so `Fatal`/`Verbose`/`Silent` are `CstEmitter` for free and run

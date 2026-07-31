@@ -35,7 +35,13 @@ declines, and [`collect`](crate::Accumulator::collect) accumulates the values in
 [`Container`](crate::container::Container) (a `Vec` here; arrays and bounded containers
 work too). If your element is a plain `ParseInput` and you would rather supply the
 stopping decision yourself, [`repeated_while`](crate::ParseInput::repeated_while) takes an
-explicit peek-window condition instead.
+explicit peek-window condition instead —
+[`while_head`](crate::while_head) and [`while_kind`](crate::while_kind) spell the common
+width-1 conditions ("continue while the head satisfies this", "…while its kind is that")
+without a `Peeked` window or a turbofish. For the very common "repeat until a sentinel
+token, and leave it in place" shape there is a one-liner:
+[`list_until(until)`](crate::ParseInput::list_until) collects into a `Vec` and stops before
+the token `until` accepts, so the caller's next step still sees it.
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};
@@ -197,7 +203,10 @@ The `Separated` driver's knobs — its element-count bounds and leading/trailing
 policies — are documented on [`Separated`](crate::parser::Separated); each reports through
 its own [emitter trait](crate::emitter), which is why the `where` clause below names them.
 (There is also [`separated_while`](crate::ParseInput::separated_while) for elements that
-cannot decline, where you provide the lookahead condition.)
+cannot decline, where you provide the lookahead condition — and
+[`separated1_by::<Sep, _>(peek)`](crate::ParseInput::separated1_by), the committed-first
+"light" spelling of it: one-or-more elements, an optional leading separator, a trailing one
+refused, collected into a `Vec`, with the whole policy already chosen.)
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};

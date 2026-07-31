@@ -7,7 +7,7 @@ deliberately does not. Its choice shapes are **deterministic**: look at the next
 half-run and unwound, so a dispatch failure is *committed* — the error cannot be lost to
 backtracking, and its expected set is exact.
 
-Two surfaces, one decision rule:
+Three surfaces, one decision rule:
 
 - [`peek_then_choice`](crate::ParseChoice::peek_then_choice) — you write the decision
   handler yourself over a peek window (any fan-in, your own failure diagnostic);
@@ -17,7 +17,14 @@ Two surfaces, one decision rule:
   table as an `expected one of …` set ([`Expected::OneOf`](crate::utils::Expected)); at
   end of input it is [`UnexpectedEnd`](crate::error::UnexpectedEnd) instead. Use
   `peek_then_choice` when several kinds route to one branch; the table form is one kind
-  per branch.
+  per branch;
+- [`select!`](crate::select) — the table is written **beside the patterns**, one arm per
+  kind, and the classified head moves into its arm *by value*. Its runtime is
+  [`dispatch_take`](crate::parser::dispatch_take), and the declining twin
+  [`try_select!`](crate::try_select) /
+  [`try_dispatch_take`](crate::parser::try_dispatch_take) is the same shape that returns
+  [`Decline`](crate::try_parse_input::ParseAttempt::Decline) on a head outside the table
+  instead of committing.
 
 ## Peeked versus fused
 
@@ -36,6 +43,18 @@ reused elsewhere or wanting the head token left on the input, keep the peek shap
 the [dense-discriminant note](crate::parser::DispatchOnKind#performance-keep-token-kind-discriminants-dense),
 keep your kind enum's discriminants dense (`0, 1, 2, …`) so kind matches beside the table
 compile to jump tables.
+
+The third shape, [`select!`](crate::select), is the fused one with the table moved next to
+the patterns. Each arm is `kind => (span, pattern) => value`: the kinds *are* the table, so
+it is written once instead of twice and cannot drift out of step with the arms; the head is
+classified once against it, committed, and handed to the arm **moved**, so an arm binds the
+payload (`Tok::Int(n)`) rather than re-matching a token it was already routed by. There is
+no hand-written `unreachable!()` — an arm whose pattern is narrower than its kind hands the
+token back and the runtime builds the same whole-table `UnexpectedToken` a miss would get.
+One constraint the diagnostic does not name: the kind expressions must be
+**const-promotable** (a unit-variant path or a `const`), because the expansion hands a
+`&'static [Kind]` to `dispatch_take`; anything else fails at the invocation with `E0716`.
+All three appear below, and the loop at the end asserts they agree.
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};
@@ -97,7 +116,11 @@ compile to jump tables.
 #   fn is_trivia(&self) -> bool { false }
 # }
 # type CalcLexer<'a> = tokora::lexer::LogosLexer<'a, Tok>;
-# use tokora::error::{UnexpectedEnd, token::UnexpectedToken};
+# use tokora::error::{
+#   UnexpectedEnd,
+#   syntax::{FullContainer, MissingSyntax, TooFew},
+#   token::{MissingToken, SeparatedError, UnexpectedToken},
+# };
 # #[derive(Debug, Clone, PartialEq)]
 # enum CalcError { Lex, Unexpected, UnexpectedEnd }
 # impl From<LexError> for CalcError { fn from(_: LexError) -> Self { CalcError::Lex } }
@@ -110,9 +133,24 @@ compile to jump tables.
 # impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CalcError {
 #   fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { CalcError::UnexpectedEnd }
 # }
+# impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for CalcError {
+#   fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { CalcError::Unexpected }
+# }
+# impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for CalcError {
+#   fn from(_: MissingToken<'a, K, O, Lang>) -> Self { CalcError::Unexpected }
+# }
+# impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for CalcError {
+#   fn from(_: MissingSyntax<O, Lang>) -> Self { CalcError::Unexpected }
+# }
+# impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for CalcError {
+#   fn from(_: FullContainer<S, Lang>) -> Self { CalcError::Unexpected }
+# }
+# impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for CalcError {
+#   fn from(_: TooFew<S, Lang>) -> Self { CalcError::Unexpected }
+# }
 use tokora::{
-  Emitter, InputRef, Parse, ParseChoice, ParseContext, ParseInput, ParseTokenChoice, Parser,
-  SimpleSpan, span::Spanned,
+  ComposableParseContext, Emitter, InputRef, Parse, ParseChoice, ParseContext, ParseInput,
+  ParseTokenChoice, Parser, SimpleSpan, span::Spanned,
 };
 
 /// Calc's statement AST (expressions stay integers until chapter 5).
@@ -286,11 +324,47 @@ where
     .parse_input(inp)
 }
 
-// The two shapes agree — on hits and on misses.
+// ── Match-first: the table lives beside the patterns. ──
+
+/// What the head decided, with the span the arm was handed. `Tok::Int(n)` binds `n` **by
+/// value** — the arm receives the moved payload, which an arm that only borrowed the head
+/// could not do.
+enum Head {
+  Let(SimpleSpan),
+  Print(SimpleSpan),
+  Int(SimpleSpan, i64),
+}
+
+fn parse_stmt_select<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, CalcLexer<'inp>, Ctx>,
+) -> Result<Stmt<'inp>, CalcError>
+where
+  Ctx: ComposableParseContext<'inp, CalcLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, CalcLexer<'inp>, Error = CalcError>,
+{
+  // No `static TABLE` beside this one: the three kinds in the first column *are* the
+  // table, so it cannot fall out of step with the arms.
+  let head = tokora::select!(inp, {
+    TokKind::Let => (span, Tok::Let) => Head::Let(span),
+    TokKind::Print => (span, Tok::Print) => Head::Print(span),
+    TokKind::Int => (span, Tok::Int(n)) => Head::Int(span, n),
+  })?;
+  // The input is borrowed for the classification, so the branch that keeps parsing runs
+  // after it — and reuses the fused arms unchanged.
+  match head {
+    Head::Let(span) => let_arm(Spanned::new(span, Tok::Let), inp),
+    Head::Print(span) => print_arm(Spanned::new(span, Tok::Print), inp),
+    Head::Int(span, n) => bare_arm(Spanned::new(span, Tok::Int(n)), inp),
+  }
+}
+
+// All three shapes agree — on hits and on misses.
 for src in ["let x = 7 ;", "print 1 , 2 ;", "42 ;", "; nope"] {
   let peeked = Parser::new().apply(parse_stmt).parse_str(src);
   let fused = Parser::new().apply(parse_stmt_fused).parse_str(src);
+  let selected = Parser::new().apply(parse_stmt_select).parse_str(src);
   assert_eq!(peeked, fused, "shapes diverged on {src:?}");
+  assert_eq!(peeked, selected, "shapes diverged on {src:?}");
 }
 ```
 
