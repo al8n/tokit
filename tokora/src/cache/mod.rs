@@ -77,10 +77,16 @@ pub type DefaultCache<'a, L> =
 ///   [`back`](Cache::back) view those same two entries without removing them.
 /// - **Exact length.** [`len`](Cache::len) is exactly the resident count, and
 ///   [`remaining`](Cache::remaining) is exactly how many more `push_back`s will be accepted.
+///   `len` is **load-bearing and it is checked**: the peek fill reserves the window slots for
+///   the cache region from it *before* it lexes anything, so a `len` that is not the resident
+///   count mis-sizes the room [`peek`](Cache::peek) is later given. That is a panic — in every
+///   build if `len` over-reports, in debug builds if it under-reports — see the law below.
 /// - **Bounded, pure peek.** [`peek`](Cache::peek) appends exactly `min(len(), buffer capacity)`
 ///   entries to the buffer, oldest first, once each. It is logically pure: it takes `&self`,
 ///   calling it twice yields the same sequence, and it changes no observable. Borrowed and owned
-///   results denote the same tokens.
+///   results denote the same tokens. Together with exact `len` this means one thing the input
+///   layer relies on and enforces: **when the buffer has room for `len()` entries, `peek`
+///   delivers the whole resident run, `front` through `back`.**
 /// - **The restore path must not panic.** [`pop_front`](Cache::pop_front),
 ///   [`pop_back`](Cache::pop_back), [`clear`](Cache::clear), [`front`](Cache::front),
 ///   [`front_span`](Cache::front_span), [`len`](Cache::len) — **and
@@ -134,6 +140,24 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// Returns the number of tokens currently stored in the cache.
   ///
   /// This count includes all cached tokens from front to back.
+  ///
+  /// # It must be exact, and an inexact one panics
+  ///
+  /// This is not a hint. [`InputRef::peek`](crate::InputRef::peek) sizes the window before it
+  /// lexes: it reserves `len()` of the caller's slots for the cache region, spends the rest on
+  /// tokens lexed past the cache, and only then calls [`peek`](Cache::peek) into the room that
+  /// is left. On an exact `len` that room is exactly the resident run. On a `len` **below** the
+  /// resident count it is too small, so the copy is clipped mid-run and the window would come
+  /// back missing a resident while still carrying the tokens that follow it — a hole in the
+  /// stream, not a short window. On a `len` **above** it, the fill under-lexes and the window
+  /// comes back short of what was asked for. Every exit of the fill that hands a window back
+  /// checks for both, and neither hands back the window it catches: the count `peek` owes
+  /// against the room it was given, **in every build**, naming the over-report half of this
+  /// contract; and the copied region's endpoints against `front` and `back`, read *instead of*
+  /// `len` precisely so an inexact `len` cannot both cause the fault and hide it, **in debug
+  /// builds**, naming the under-report half — that comparison's cost is release-build price for
+  /// a logic bug, not a soundness one, so it runs in debug and under test rather than on every
+  /// release-mode token a grammar peeks.
   fn len(&self) -> usize;
 
   /// Returns the number of additional tokens that can be cached.
@@ -294,6 +318,29 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// observable of the cache, and calling it twice on an unchanged cache appends the same
   /// sequence both times. A borrowed entry and an owned one denote the same token, so a caller
   /// cannot tell which a cache chose to hand back.
+  ///
+  /// # The whole run, when there is room for the whole run
+  ///
+  /// The consequence the input layer depends on, and the one it enforces: **given room for
+  /// `len()` entries, this appends the resident run entire — the first entry is
+  /// [`front`](Cache::front) and the last is [`back`](Cache::back).**
+  ///
+  /// [`InputRef::peek`](crate::InputRef::peek) reserves exactly that room from
+  /// [`len`](Cache::len) before it lexes, and fills the slots it did not reserve with tokens
+  /// lexed past the cache, which sit in the buffer while this runs. So a copy that stops short
+  /// of `back` here is not a short window — it is a window whose cache region is missing an
+  /// entry the tokens after it are still present for. The fill compares the copied region's
+  /// endpoints against `front` and `back` and **panics in debug builds** rather than return
+  /// one: the comparison prices out well past what the violation is worth in release — two ring
+  /// indices, a `Maybe` discriminant, an `Option<&Span>` compare — for a fault that is a logic
+  /// bug, not a soundness one, in a caller with no `unsafe` behind it. A `len` that is not the
+  /// resident count is the way to get there; see [`len`](Cache::len).
+  ///
+  /// The one place a copy may legitimately stop short of `back` is where the window's own
+  /// capacity stopped it **and nothing is appended behind it** — the cache-hit and
+  /// latched-boundary exits, where the copy is the window's tail and a clip therefore shortens
+  /// rather than holes. Even there, stopping short with **room to spare** fails: `peek` owes
+  /// `min(len(), remaining capacity)` and the fill checks it against both.
   ///
   /// # Parameters
   ///

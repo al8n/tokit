@@ -1878,3 +1878,97 @@ fn front_census_every_probe_is_const_gated() {
     );
   }
 }
+
+/// PEEK_FOOTPRINT — the peek fill's owned token storage is the caller's window and
+/// nothing else.
+///
+/// `Token` and `State` are unconstrained in size, so every `W::CAPACITY`-slot store the
+/// fill builds costs `W::CAPACITY × (Token + State + Span)` of stack. Through 0.8.0 it
+/// built a second one — a `GenericArray<MaybeUninit<_>, W::CAPACITY>` staging the tokens
+/// lexed past the cache until the cache region had been copied into the output buffer —
+/// so a cache miss reserved two full windows and a large token or lexer state doubled a
+/// peek's frame. Those tokens are now staged in the output buffer itself and rotated into
+/// place once the cache region is in, which is what makes the second store unnecessary.
+///
+/// This census is what keeps it gone: a size assertion cannot see a new local, so the
+/// only mechanical guard against the pattern coming back is refusing to let the fill body
+/// name the things that build one. The size law itself is asserted at compile time beside
+/// the oversized fixture in `peek/tests.rs` (grep PEEK_FOOTPRINT).
+///
+/// # It is syntactic, and that is the best available
+///
+/// The needles below are a string match, so a second window behind a `type` alias the
+/// fill does not spell — `let mut spare = Staging::new();` — walks past them. That gap is
+/// known and it is not closable here, because nothing the compiler checks can see the
+/// property:
+///
+/// - a `const` assertion can read `size_of` of a **type**, never the frame of a
+///   **function**; Rust exposes no frame size at compile time, so "this body reserves one
+///   window" is not statable as a type-level fact.
+/// - a runtime stack measurement was tried and rejected on the evidence recorded beside
+///   the fixture: an unoptimized build materializes roughly seven window-sized copies
+///   around the fill, so the term under test is under a seventh of the frame and any
+///   threshold over it is a magic number a compiler release moves.
+/// - `clippy::large_stack_frames` is threshold-based on the same frame, and the frame
+///   legitimately scales with `W::CAPACITY × size_of::<Token>()` — it would fire on the
+///   *single* correct window for a large-token monomorphization.
+///
+/// So this stays a syntactic guard that is honest about being one, rather than a
+/// structural guard that is not structural. The `GenericArrayDeque::` and `.rotate_left(`
+/// counts below are the file-scoped half, and they do bite an alias: whatever it is named,
+/// a second window still has to be *constructed*, and the deque count is the shape a
+/// construction in this file takes.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
+fn peek_footprint_census_the_fill_owns_no_store() {
+  let peek = source("peek/mod.rs");
+  let fill = method_body(peek, "peek_with_emitter_inner");
+
+  // Everything that can build a window-shaped store, plus `unsafe` — the fill needs
+  // none of them now that the staged region lives in the buffer the caller owns, and
+  // each is a way to reintroduce the second window.
+  for needle in [
+    "MaybeUninit",
+    "GenericArray<",
+    "GenericArrayDeque",
+    "uninit(",
+    "W::array",
+    "W::deque",
+    "Window::array",
+    "Window::deque",
+    "unsafe",
+  ] {
+    assert!(
+      count(&fill, needle) == 0,
+      "PEEK_FOOTPRINT drift: the peek fill names `{needle}`. The fill owns no token \
+       storage of its own — tokens past the cache are staged in the caller's window and \
+       rotated into place — so anything that reserves `W::CAPACITY` slots here is the \
+       second owned window this was removed to close, and anything `unsafe` is the \
+       partial-initialization bookkeeping that went with it (grep PEEK_FOOTPRINT)."
+    );
+  }
+
+  // One window per public entry point — the buffer each hands back — and no fourth.
+  let built = count(peek, "GenericArrayDeque::");
+  assert!(
+    built == 3,
+    "PEEK_FOOTPRINT drift: `peek/mod.rs` builds {built} deque(s), expected 3 — one per \
+     public entry point (`peek_one`, `peek_with_emitter`, `peek_with_emitter_terminal`), \
+     each the window it returns. A fourth is a store the caller never sees \
+     (grep PEEK_FOOTPRINT)."
+  );
+
+  // The staged region is put back in stream order by one rotation, and that rotation is
+  // the whole of the reordering: a second one would mean the fill is permuting something
+  // it does not own.
+  let rotations = count(peek, ".rotate_left(");
+  assert!(
+    rotations == 1,
+    "PEEK_FOOTPRINT drift: `peek/mod.rs` rotates {rotations} time(s), expected 1 — the \
+     single left-rotation that moves the staged region behind the front-of-stream region \
+     (grep PEEK_FOOTPRINT)."
+  );
+}
