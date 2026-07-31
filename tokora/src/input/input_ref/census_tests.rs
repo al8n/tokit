@@ -321,9 +321,9 @@ fn censused_region(raw_body: &str) -> std::string::String {
 /// Interrupted in the middle, the checkpoint has been invalidated — session points settled, the
 /// lineage popped through it — while position, cache and emitter still sit on the abandoned
 /// branch. The mark is then stranded and every later rollback reasons from a lineage that
-/// disagrees with the input. That is a `[high]` this project shipped past two clean reviews,
-/// because group C's fixes were verified by individual cells and cells do not generalize: a new
-/// instance appeared at a site the enumeration had already named and marked fixed.
+/// disagrees with the input. That is a serious defect this project shipped, because group C's
+/// fixes were verified by individual cells and cells do not generalize: a new instance appeared
+/// at a site the enumeration had already named and marked fixed.
 ///
 /// So: same discipline, second arm. Once a restore has begun mutating, nothing in the rest of the
 /// body may run caller code — no clone, no `to_owned`. The deliberate trailing `drop` of a
@@ -409,7 +409,7 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
 
   // Windows that are open and known, each with the reason and the disclosure it belongs to. An
   // entry whose body no longer opens a window is itself a failure.
-  // EMPTY, and that is the round's result rather than its starting point. This carried one
+  // EMPTY, and that is an outcome rather than a starting point. This carried one
   // entry — `restore_entry`, whose post-restore cursor read was disclosed in the CHANGELOG as a
   // known limitation — on the reasoning that removing it meant deriving the cursor from the
   // entry, which is only sound while the store is drained. The value it needed turned out not to
@@ -571,7 +571,7 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
 ///   the window, so five consume paths were unguarded;
 /// - it then derived the bodies but exempted `skip_until` **whole**, for a real false positive in
 ///   one of its three windows — silently dropping the other two, which are the scanner's own
-///   hand-over and skip rails and the highest-risk code in the round. Its guards did not catch
+///   hand-over and skip rails and its highest-risk code. Its guards did not catch
 ///   that: the exemption count was still exactly one, and a *floor* on the inspected count cannot
 ///   see a missing member. Only a total can.
 ///
@@ -710,9 +710,8 @@ fn settle_census_nothing_fallible_between_a_removal_and_its_settle() {
 ///
 /// This census counts **raw assignments to either half**, which is the pattern the pair funnel
 /// exists to prevent. Counting calls to the funnel instead would have been useless: a rail that
-/// counts the remedy cannot see the hazard anywhere the remedy was not applied, which is exactly
-/// how four consecutive reviews each found another unrouted site. Two raw writes are
-/// legitimate and both are named:
+/// counts the remedy cannot see the hazard anywhere the remedy was not applied, which is how an
+/// unrouted site goes unnoticed. Two raw writes are legitimate and both are named:
 ///
 /// - `replace_position`'s own two `core::mem::replace`s — the one body that writes the pair;
 /// - `set_state`'s single `*self.state =` — a deliberate position *surgery* on the state alone,

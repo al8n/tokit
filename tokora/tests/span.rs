@@ -602,7 +602,7 @@ fn with_start_const_refuses_inversion() {
   let _ = SimpleSpan::new(5usize, 15usize).with_start_const(20);
 }
 
-/// The payload the audit recorded: `with_end_const(2)` on `(5, 15)` yielded `(5, 2)`, silently.
+/// The defect this pins: `with_end_const(2)` on `(5, 15)` yielded `(5, 2)`, silently.
 #[test]
 #[should_panic(expected = "end must be greater than or equal to start")]
 fn with_end_const_refuses_inversion() {

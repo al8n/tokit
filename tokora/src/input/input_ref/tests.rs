@@ -5900,8 +5900,8 @@ fn assert_cache_transparent(
   );
 
   // A stateful `FnMut` predicate must not be able to tell the drain from the loop: same tokens,
-  // same order, once each. (The previous round's bug — the prologue evaluating `pred` and
-  // discarding the answer, so the loop asked again — shows up here as a repeated span.)
+  // same order, once each. (A prologue that evaluates `pred` and discards the answer, so the
+  // loop asks again, shows up here as a repeated span.)
   assert_eq!(
     cached.pred_calls, uncached.pred_calls,
     "[{at}] the predicate must be asked about the same tokens, in the same order"
@@ -8084,7 +8084,7 @@ struct AfterSettle {
 
 #[test]
 fn r9_f3_panicking_report_span_clone_does_not_lose_a_token() {
-  // F3 — the round's own defect one window deeper. `skip_and_report` clones the span for the
+  // F3 — the defect one window deeper. `skip_and_report` clones the span for the
   // report BEFORE adopting the token into the frontier, and `L::Span::clone` is caller code. In
   // a warm-cache `sync_to` the token has already been popped out of the cache and out of the
   // scope's `in_flight`, so an unwind there leaves it in neither: the committing drop can only
@@ -8232,7 +8232,7 @@ fn r9_f2_panicking_eof_settle_still_settles_the_mark() {
   );
 }
 
-// ── The stop exit's own handover window (Codex, second pass) ────────────────────
+// ── The stop exit's own handover window ─────────────────────────────────────
 //
 // `ScanMode::on_stop` fuses TWO handovers: it settles the stopping token (for a `to`-shaped mode,
 // back into the stream through the public `Cache::push_front`) and then commits the frontier. Both
@@ -8405,7 +8405,7 @@ fn r9_stop_exit_panic_still_commits_the_diagnosed_prefix() {
 /// Drives one rewinding mode to a stop and returns `(releases, rewinds, live_rows)`.
 ///
 /// Both members, not one: naming a cell for the CLASS and instantiating a single member is how
-/// the mode-versus-exit defect survived a round. `SyncThrough` and `SyncBalanced` are the class,
+/// the mode-versus-exit defect survived undetected. `SyncThrough` and `SyncBalanced` are the class,
 /// and they are exactly the two whose stop dispositions differ from their end-of-input ones.
 fn rewinding_stop_settles(balanced: bool) -> (usize, usize, usize) {
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();

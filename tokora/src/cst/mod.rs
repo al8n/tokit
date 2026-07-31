@@ -565,6 +565,90 @@ pub trait Node<Lang: Language>: Element<Lang> + Syntax<Lang = Lang> {
   }
 }
 
+/// The one capability tree *navigation* needs: turn an untyped [`SyntaxNode`] into a typed
+/// node, or decline.
+///
+/// [`cast::child`], [`cast::children`] and [`NodeChildren`] are bound on this trait rather
+/// than on [`Node`], because this is all they ever call. `child` is `find_map(N::cast_node)`
+/// and nothing more — it never reads a `KIND`, a component list, or a component count.
+///
+/// # Why this is not [`Node`]
+///
+/// [`Node`] requires [`Syntax`], and [`Syntax`] is the *parser's* model of a production: a
+/// `Component` enum, and `COMPONENTS`/`REQUIRED` as type-level counts, all of it in service of
+/// reporting which parts of a production were missing. That is the right shape for a parser
+/// and the wrong toll for a reader. A typed CST layer whose job is `field.name()` would
+/// otherwise have to invent a component enum and a typenum count per node kind — once per node
+/// kind, for a model it never consults.
+///
+/// So the navigation helpers ask for navigation. A parser-facing node still satisfies them,
+/// through the blanket impl below.
+///
+/// # One impl per type, by construction
+///
+/// Every [`Node`] receives `CastNode` from a blanket impl, which is what keeps every existing
+/// call site compiling and asks nothing new of existing [`Node`] implementors.
+///
+/// The price is coherence: because that blanket impl covers all of [`Node`], a type cannot
+/// implement `CastNode` **directly** and also implement [`Node`] — the impls would overlap and
+/// rustc rejects the direct one (`E0119`).
+///
+/// That is a commitment, not an accident. The two intended positions are disjoint, and a type
+/// belongs to exactly one:
+///
+/// - a **parser-facing** node implements [`Node`] — hence [`Syntax`], hence the component model
+///   — and gets `CastNode` for free;
+/// - a **navigation-only** typed CST node implements `CastNode` directly and never names
+///   [`Syntax`] at all.
+///
+/// A type that wants both is asking for the component model, and should implement [`Node`].
+///
+/// # Examples
+///
+/// A navigation-only node — no [`Syntax`], no components, no counts:
+///
+/// ```rust,ignore
+/// use rowan::SyntaxNode;
+/// use tokora::cst::{CastNode, cast};
+///
+/// struct Field(SyntaxNode<MyLang>);
+/// struct Name(SyntaxNode<MyLang>);
+///
+/// impl CastNode<MyLang> for Name {
+///     fn cast_node(syntax: SyntaxNode<MyLang>) -> Option<Self> {
+///         (syntax.kind() == MyKind::Name).then_some(Self(syntax))
+///     }
+/// }
+///
+/// impl Field {
+///     fn name(&self) -> Option<Name> {
+///         cast::child(&self.0)
+///     }
+/// }
+/// ```
+#[cfg(feature = "rowan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
+pub trait CastNode<Lang: Language>: Sized {
+  /// Casts an untyped syntax node into this typed node, or returns `None` if it is not one.
+  ///
+  /// This is the whole trait. Implementations should be a kind check and a wrap; they must not
+  /// panic, because the navigation helpers call this once per child and read `None` as "not
+  /// this type, keep looking".
+  fn cast_node(syntax: SyntaxNode<Lang>) -> Option<Self>;
+}
+
+#[cfg(feature = "rowan")]
+impl<N, Lang> CastNode<Lang> for N
+where
+  N: Node<Lang>,
+  Lang: Language,
+{
+  #[inline]
+  fn cast_node(syntax: SyntaxNode<Lang>) -> Option<Self> {
+    Self::try_cast_node(syntax).ok()
+  }
+}
+
 /// An iterator over typed CST children of a particular node type.
 ///
 /// `NodeChildren` filters and casts child nodes to a specific typed node type,
@@ -614,14 +698,14 @@ impl<N, Lang: Language> NodeChildren<N, Lang> {
 #[cfg(feature = "rowan")]
 impl<N, Lang> Iterator for NodeChildren<N, Lang>
 where
-  N: Node<Lang>,
+  N: CastNode<Lang>,
   Lang: Language,
 {
   type Item = N;
 
   #[inline]
   fn next(&mut self) -> Option<N> {
-    self.inner.find_map(|t| N::try_cast_node(t).ok())
+    self.inner.find_map(N::cast_node)
   }
 }
 
@@ -629,6 +713,13 @@ where
 ///
 /// This module provides convenient functions for working with typed CST nodes,
 /// including finding children, accessing tokens, and casting between types.
+///
+/// The node-typed helpers — [`child`](cast::child) and [`children`](cast::children) — are bound
+/// on [`CastNode`], not on [`Node`]. Casting a child is the only thing they do with `N`, so it
+/// is the only thing they ask of it, and a navigation-only typed CST layer can use them without
+/// ever naming the parser's [`Syntax`] model. Every [`Node`] still qualifies, through the
+/// blanket impl. [`token`](cast::token) is not node-typed at all — it matches on a
+/// [`Lang::Kind`](Language::Kind) value and needs no bound beyond the language.
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
 pub mod cast;

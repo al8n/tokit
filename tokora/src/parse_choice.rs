@@ -278,7 +278,7 @@ fused_tuple_choice!(32);
 /// the indices `0..N`. Every id that exists is a valid index, so the dispatch's subtraction
 /// cannot go out of bounds.
 ///
-/// The audit's own suggestion — `RangedUsize<0, { N - 1 }>` — is not writable on stable: a
+/// The obvious alternative — `RangedUsize<0, { N - 1 }>` — is not writable on stable: a
 /// generic `N` in a const operation is `error: generic parameters may not be used in const
 /// operations`, and `generic_const_exprs` is unstable on every toolchain this crate supports.
 ///
@@ -316,7 +316,7 @@ where
 /// What there is instead is a **named** refusal. An out-of-range id used to reach the raw slice
 /// index and panic with `index out of bounds`, which says nothing about the contract that was
 /// broken. The check below panics with the contract in the message. The bounds are also now
-/// documented, which the audit assumed they already were.
+/// documented.
 ///
 /// ## Panics
 ///
@@ -347,7 +347,7 @@ where
 /// What there is instead is a **named** refusal. An out-of-range id used to reach the raw slice
 /// index and panic with `index out of bounds`, which says nothing about the contract that was
 /// broken. The check below panics with the contract in the message. The bounds are also now
-/// documented, which the audit assumed they already were.
+/// documented.
 ///
 /// ## Panics
 ///

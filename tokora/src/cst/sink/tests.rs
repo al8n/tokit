@@ -968,8 +968,8 @@ fn cst_forward_census_one_helper_carries_every_channel() {
 /// sink.rs; (b) drift tripwires on the trait definitions, so any NEW family method forces a
 /// classification (override + forward, or a documented inherit) in the same commit.
 ///
-/// GREEN at 123f840 — the audit's proof that beyond Findings 1 and 2 no third per-method gap
-/// exists — and it stays as the permanent tripwire.
+/// No per-method gap exists beyond the ones already known, and it stays as the permanent
+/// tripwire.
 #[test]
 #[cfg_attr(
   miri,
@@ -3006,7 +3006,7 @@ fn ceil_log2(k: u64) -> u64 {
   }
 }
 
-/// **T-3 — the round's acceptance gate.** Replay work matches its stated shape on error-dense
+/// **T-3 — the acceptance gate.** Replay work matches its stated shape on error-dense
 /// input: **linear in events, plus one `k log k` ordering of the recorded diagnostic spans**.
 ///
 /// The name of this cell used to say "is linear", and the cell used to report 4.00× growth for
