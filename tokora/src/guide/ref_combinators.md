@@ -88,6 +88,18 @@ that attach position/text to the token. [`expect`](crate::parser::expect) is pre
 [`expected …, found …`](crate::error::token::UnexpectedToken) diagnostic from the
 [`Expected`](crate::utils::Expected) the classifier returns.
 
+When the token's **payload** is what you want rather than the token, the family has an
+[`InputRef`](crate::InputRef) form that is one named operation instead of two:
+[`try_expect_take`](crate::InputRef::try_expect_take) classifies the head by reference — so
+the classification runs exactly once — commits it, and then moves it *by value* into a
+projection that lifts the payload out with no clone. `Ok(None)` follows
+[`try_expect`](crate::InputRef::try_expect): a definite absence, with the head left at the
+cache front. Where a decline commits the caller to a different parse, reach for
+[`try_expect_take_or_stop`](crate::InputRef::try_expect_take_or_stop), which raises a
+terminal scanner stop as an error instead of folding it into absence. These are `InputRef`
+methods, not combinators — there is nothing to compose, which is why they are here beside
+the atoms rather than in the table.
+
 ```rust
 # use core::{convert::Infallible, fmt};
 # use tokora::{
@@ -195,6 +207,22 @@ fn boom<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<(), Er
 }
 assert!(Parser::with_parser(nothing).parse_str("").is_ok());
 assert!(Parser::with_parser(boom).parse_str("+").is_err());
+
+// `try_expect_take` — classify by reference, then take the payload by value. The
+// projection runs only after the head was accepted and committed, so its `Err` is a
+// real error, never a decline.
+fn digit_value<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<u32, Error> {
+    inp.try_expect_take(
+        |t| matches!(t.data, Tok::Digit(_)),
+        |sp| match sp.into_components() {
+            (_span, Tok::Digit(n)) => Ok(n),
+            _ => Err(Error),
+        },
+    )?
+    .ok_or(Error)
+}
+assert_eq!(Parser::with_parser(digit_value).parse_str("7").unwrap(), 7);
+assert!(Parser::with_parser(digit_value).parse_str("+").is_err());
 ```
 
 ---
@@ -607,12 +635,40 @@ one of the deterministic selectors (taught in [chapter 4](super::ch04_dispatch))
 |----------|-----|-----------|
 | [`dispatch_on_kind(table)`](crate::ParseChoice::dispatch_on_kind) | `(P0, …)` | pick branch `i` when the next token's kind is `table[i]`; the whole table becomes the expected set on a miss |
 | [`peek_then_choice(h)`](crate::ParseChoice::peek_then_choice) | `(P0, …)` | you write the decision from a peek window, returning the branch id |
-| [`peek_then_try_choice(h)`](crate::ParseChoice::peek_then_choice) | `(P0, …)` | as above, but the handler may return `None` to decline |
+| [`peek_then_try_choice(h)`](crate::ParseChoice::peek_then_try_choice) | `(P0, …)` | as above, but the handler may return `None` to decline |
 | [`fused_dispatch_on_kind(table)`](crate::ParseTokenChoice::fused_dispatch_on_kind) | `(F0, …)` | like `dispatch_on_kind`, but each arm is `FnMut(head, inp)` and the head token is lexed once |
+| [`select!(inp, { … })`](crate::select) | `InputRef` | match-first: the kinds are the arms' own first column, and the head moves into its arm |
+| [`try_select!(inp, { … })`](crate::try_select) | `InputRef` | the declining twin — a head outside the table declines with zero consumption |
+| [`peek_then_head(c)`](crate::ParseInput::peek_then_head) | `ParseInput` | width-1 [`peek_then`](crate::ParseInput::peek_then): the condition sees `Some(head)` or `None`, with no `Peeked` and no typenum |
+
+The two macros are pure syntax; their semantics live in
+[`dispatch_take`](crate::parser::dispatch_take) and
+[`try_dispatch_take`](crate::parser::try_dispatch_take), which are public and callable
+directly. Both take the context bound one tier up from the rest of this section —
+[`ComposableParseContext`](crate::ComposableParseContext) rather than bare
+[`ParseContext`](crate::ParseContext) — because a miss has to be expressible as an error, and
+both run under either [`Completeness`](crate::Completeness).
 
 [`opt`](crate::parser::opt) and [`.accepted()`](crate::try_parse_input::TryParseInput::accepted)
 (which turns a `TryParseInput` into a `ParseInput<ParseAttempt<O>>`/`ParseInput<Option<O>>`) are
-the bridges between the two trait worlds.
+the bridges between the two trait worlds. On the value side,
+[`ParseAttempt::into_option`](crate::try_parse_input::ParseAttempt::into_option) is the same
+`Accept`/`Decline` → `Some`/`None` projection with a name — and it is the composition point
+for the rest of `Option`'s vocabulary (`ok_or`, `filter`, `unwrap_or_default`), which is why
+no aliases for those ship beside it.
+
+```text
+select!(inp,     { Kind::A => (span, Tok::A(x)) => expr, … }) -> Result<O, Error>
+try_select!(inp, { Kind::A => (span, Tok::A(x)) => expr, … }) -> Result<ParseAttempt<O>, Error>
+dispatch_take(inp, table: &'static [Kind], project)           -> Result<O, Error>
+try_dispatch_take(inp, table, project)                        -> Result<ParseAttempt<O>, Error>
+// project: FnOnce(Spanned<Token, Span>) -> Result<O, Spanned<Token, Span>>
+//   `Err(token)` is the kind-matched-but-variant-did-not arm: the token is handed BACK and
+//   the runtime builds the whole-table `UnexpectedToken`, so no arm writes `unreachable!()`.
+// The kind expressions must be const-promotable (a unit-variant path or a `const`) — the
+// expansion hands a `&'static [Kind]` to the runtime, and anything else is `E0716` at the
+// invocation.
+```
 
 ```rust
 # use core::{convert::Infallible, fmt};
@@ -728,6 +784,32 @@ fn choose<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<u32,
 assert_eq!(Parser::with_parser(choose).parse_str("8").unwrap(), 8);
 assert_eq!(Parser::with_parser(choose).parse_str("+").unwrap(), 0);
 assert!(Parser::with_parser(choose).parse_str(";").is_err()); // `;` is in no table slot
+
+// `select!`: the same decision with the table written next to the patterns, and the
+// classified head handed to its arm by value — `Tok::Digit(n)` binds the payload.
+fn select_value<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<u32, Error> {
+    tokora::select!(inp, {
+        Kind::Digit => (_span, Tok::Digit(n)) => n,
+        Kind::Plus  => (_span, Tok::Plus)     => 0,
+    })
+}
+assert_eq!(Parser::with_parser(select_value).parse_str("8").unwrap(), 8);
+assert_eq!(Parser::with_parser(select_value).parse_str("+").unwrap(), 0);
+assert!(Parser::with_parser(select_value).parse_str(";").is_err()); // committed miss
+
+// `try_select!`: the same table, declining instead of committing — and `into_option`
+// names the `Accept`/`Decline` -> `Some`/`None` projection.
+fn try_select_value<'a>(
+    inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>,
+) -> Result<Option<u32>, Error> {
+    Ok(tokora::try_select!(inp, {
+        Kind::Digit => (_span, Tok::Digit(n)) => n,
+        Kind::Plus  => (_span, Tok::Plus)     => 0,
+    })?
+    .into_option())
+}
+assert_eq!(Parser::with_parser(try_select_value).parse_str("8").unwrap(), Some(8));
+assert_eq!(Parser::with_parser(try_select_value).parse_str(";").unwrap(), None);
 ```
 
 ---
@@ -745,6 +827,8 @@ elements into any [`Container`](crate::container::Container) (a `Vec`, a bounded
 |------------|-----|-----------|
 | [`repeated()`](crate::try_parse_input::TryParseInput::repeated) | `TryParseInput` | repeat until the element declines |
 | [`repeated_while(cond)`](crate::ParseInput::repeated_while) | `ParseInput` | repeat while `cond` (a peek decision) returns `Continue` |
+| [`while_head(pred)`](crate::while_head) | a `cond` argument | continue while the head satisfies `pred`; stop at a failing head or end of input |
+| [`while_kind(kind)`](crate::while_kind) | a `cond` argument | continue while the head's kind equals `kind` — the punct-tail idiom |
 | [`collect()`](crate::Accumulator::collect) / [`collect_with(c)`](crate::Accumulator::collect_with) | repetition | gather elements into a `Container` (default / provided) |
 | [`fold(init, acc)`](crate::try_parse_input::TryParseInput::fold) | `TryParseInput` | left-fold: `acc: FnMut(O, O) -> O` |
 | [`try_fold(init, acc)`](crate::try_parse_input::TryParseInput::try_fold) | `TryParseInput` | left-fold with a fallible `acc` |
@@ -755,7 +839,20 @@ elements into any [`Container`](crate::container::Container) (a `Vec`, a bounded
 repeated(self) -> Repeated<…>                          // element: TryParseInput
 collect(self) -> Collect<…>                            // on a repetition/separation driver
 fold<Init, Acc>(self, init: Init, acc: Acc) -> Fold<…> // Init: FnMut() -> O, Acc: FnMut(O, O) -> O
+while_head(pred) -> WhileHead<F>                       // pred: FnMut(&Token) -> bool
+while_kind(kind) -> WhileKind<K>                       // K: PartialEq<Token::Kind>
 ```
+
+The two condition constructors are the grammar-vocabulary spelling of the `cond` argument
+that [`repeated_while`](crate::ParseInput::repeated_while),
+[`separated_while`](crate::ParseInput::separated_while) and the `fold_while` family take.
+Each returns a concrete [`Decision`](crate::Decision) **pinned at width 1**, which is what
+removes the turbofish: the driver's window parameter infers from the adapter, so the call
+site carries no `::<_, U1>` and the hook never sees a [`Peeked`](crate::cache::Peeked). Note
+one asymmetry the type system imposes: a *closure* written inline for `while_head` needs its
+parameter ascribed (`|t: &Tok| …`), because a bare closure parameter does not infer through
+an impl-side `Fn` bound; a named function needs none, and `while_kind` needs neither.
+"Until" is the same adapter with one `!`.
 
 ```rust
 # use core::{convert::Infallible, fmt};
@@ -839,7 +936,9 @@ fold<Init, Acc>(self, init: Init, acc: Acc) -> Fold<…> // Init: FnMut() -> O, 
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
-use tokora::{Accumulator as _, Parse, ParseInput as _, Parser, TryParseInput as _};
+use tokora::{
+    Accumulator as _, Parse, ParseInput as _, Parser, TryParseInput as _, while_head, while_kind,
+};
 use tokora::try_parse_input::ParseAttempt;
 
 fn try_digit<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<ParseAttempt<u32>, Error> {
@@ -860,6 +959,28 @@ fn sum<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<u32, Er
     try_digit.fold(|| 0, |acc, n| acc + n).parse_input(inp)
 }
 assert_eq!(Parser::with_parser(sum).parse_str("123").unwrap(), 6);
+
+// `repeated_while` + `while_head`: a *committed* element, stopped by a head predicate.
+// The element cannot decline, so the loop needs a decision of its own.
+fn digit<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<u32, Error> {
+    match inp.next()? {
+        Some(sp) => match sp.into_data() { Tok::Digit(n) => Ok(n), _ => Err(Error) },
+        None => Err(Error),
+    }
+}
+fn digits_until_semi<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<u32>, Error> {
+    digit
+        .repeated_while(while_head(|t: &Tok| !matches!(t, Tok::Semi)))
+        .collect()
+        .parse_input(inp)
+}
+assert_eq!(Parser::with_parser(digits_until_semi).parse_str("123;").unwrap(), vec![1, 2, 3]);
+
+// `while_kind` keys the same decision on the head's kind, and needs no ascription.
+fn digit_run<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<u32>, Error> {
+    digit.repeated_while(while_kind(Kind::Digit)).collect().parse_input(inp)
+}
+assert_eq!(Parser::with_parser(digit_run).parse_str("12+").unwrap(), vec![1, 2]);
 ```
 
 ---
@@ -1133,13 +1254,21 @@ assert!(Parser::with_parser(bracketed).parse_str("[1 2").is_err());
 ## Ready-made list atoms
 
 For the common one-liners there are free functions (`alloc`/`std`) that assemble the drivers for
-you and collect into a `Vec`:
+you and collect into a `Vec` — each with a fluent method twin on
+[`ParseInput`](crate::ParseInput) that delegates to it:
 
-| Atom | One-liner |
-|------|-----------|
-| [`separated1::<Sep, …>(item, peek)`](crate::parser::separated1) | one-or-more `item`s separated by `Sep`, optional leading separator |
-| [`list(item, until)`](crate::parser::list) | zero-or-more `item`s until `until` accepts the next token (left in place) |
-| [`try_ident_list::<Sep, …>()`](crate::parser::try_ident_list) | a separated list of identifiers into an [`IdentList`](crate::types::IdentList) (needs [`IdentifierToken`](crate::token::IdentifierToken)) |
+| Atom | Method form | One-liner |
+|------|-------------|-----------|
+| [`separated1::<Sep, …>(item, peek)`](crate::parser::separated1) | [`item.separated1_by::<Sep, _>(peek)`](crate::ParseInput::separated1_by) | one-or-more `item`s separated by `Sep`, optional leading separator |
+| [`list(item, until)`](crate::parser::list) | [`item.list_until(until)`](crate::ParseInput::list_until) | zero-or-more `item`s until `until` accepts the next token (left in place) |
+| [`try_ident_list::<Sep, …>()`](crate::parser::try_ident_list) | — | a separated list of identifiers into an [`IdentList`](crate::types::IdentList) (needs [`IdentifierToken`](crate::token::IdentifierToken)) |
+
+The method is named `list_until` rather than `list` because the `until` argument is the
+distinguishing half, and `separated1_by` follows the `separated_by_*` family it sits beside.
+Both inherit their availability from the free function they delegate to: **complete inputs
+only**, and the context must be a
+[`ComposableParseContext`](crate::ComposableParseContext). Streaming callers keep the
+element-level primitives.
 
 One convention governs the free atoms, here and in [*Delimited shapes*](#delimited-shapes)
 below: an atom takes its sub-parser as `impl` [`ParseInput`](crate::ParseInput) — a closure, a
@@ -1152,6 +1281,8 @@ which inspect a token and answer `bool` — are functions, not parsers, and stay
 ```text
 separated1<Sep, …>(item: P, peek: Peek) -> impl FnMut(&mut InputRef) -> Result<Vec<T>, Error>
 list<…>(item: P, until: Until) -> impl FnMut(&mut InputRef) -> Result<Vec<T>, Error>
+   .separated1_by::<Sep, _>(self, peek: Peek) -> impl FnMut(&mut InputRef) -> Separated1Of<…>
+   .list_until(self, until: Until)            -> impl FnMut(&mut InputRef) -> ListOf<…>
 ```
 
 ```rust
@@ -1236,7 +1367,7 @@ list<…>(item: P, until: Until) -> impl FnMut(&mut InputRef) -> Result<Vec<T>, 
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
-use tokora::{Parse, Parser, parser::{list, separated1}};
+use tokora::{Parse, ParseInput as _, Parser, parser::{list, separated1}};
 
 fn digit<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<u32, Error> {
     match inp.next()? { Some(sp) => match sp.into_data() { Tok::Digit(n) => Ok(n), _ => Err(Error) }, None => Err(Error) }
@@ -1253,6 +1384,18 @@ fn run<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<u32
     list(digit, |t| matches!(t, Tok::RBracket))(inp)
 }
 assert_eq!(Parser::with_parser(run).parse_str("123]").unwrap(), vec![1, 2, 3]);
+
+// The method twins are the same two atoms, spelled fluently. `separated1_by` names its
+// separator with a turbofish — nothing else in the call site mentions `Sep`.
+fn sep_digits_fluent<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<u32>, Error> {
+    digit.separated1_by::<Comma, _>(|t| matches!(t, Tok::Digit(_)))(inp)
+}
+assert_eq!(Parser::with_parser(sep_digits_fluent).parse_str(",1,2,3").unwrap(), vec![1, 2, 3]);
+
+fn run_fluent<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<u32>, Error> {
+    digit.list_until(|t| matches!(t, Tok::RBracket))(inp)
+}
+assert_eq!(Parser::with_parser(run_fluent).parse_str("123]").unwrap(), vec![1, 2, 3]);
 ```
 
 ---

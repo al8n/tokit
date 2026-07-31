@@ -73,8 +73,16 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
     fn commit_token(&mut self, tok: &L::Token, span: &L::Span) {}
     fn enter_label(&mut self, label: &'static str) {}
     fn exit_label(&mut self) {}
+    fn bound_source(&self) -> Option<SourceIdentity> { None }
 }
 ```
+
+[`bound_source`](crate::Emitter::bound_source) is the newest of the defaulted members and the
+one with a forwarding obligation: an emitter that binds a particular source — the CST
+[`Sink`](crate::cst::Sink) does — overrides it so a mismatched drive is refused, and a
+**wrapper** that forwards every emission but inherits the `None` default silently disables
+that check for whatever it wraps. It is the same obligation `checkpoint`/`rewind`/`release`
+carry.
 
 Three verbs are not enough for a real grammar. A bounded repetition can report *too few* elements; a
 separated list can report a stray or a missing separator; a Pratt loop can report an operator with
@@ -97,6 +105,7 @@ parsers need.
 | [`SeparatedEmitter`](crate::emitter::SeparatedEmitter) | a missing separator or a missing element | ✅ |
 | [`UnexpectedLeadingSeparatorEmitter`](crate::emitter::UnexpectedLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::UnexpectedTrailingSeparatorEmitter) | a stray leading / trailing separator | ✅ |
 | [`MissingLeadingSeparatorEmitter`](crate::emitter::MissingLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::MissingTrailingSeparatorEmitter) | a required leading / trailing separator absent | — |
+| [`UnclosedEmitter`](crate::emitter::UnclosedEmitter) | an opener committed whose closer never arrived | ✅ |
 | [`PrattEmitter`](crate::emitter::PrattEmitter) | an operator with no left- or right-hand side | — |
 | [`CstEmitter`](crate::emitter::CstEmitter) | tree structure events (not a diagnostic) | — |
 
@@ -122,11 +131,12 @@ pub trait ComposableEmitter<'inp, L, Lang: ?Sized = ()>:
     + UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>
     + UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>
     + TooFewEmitter<'inp, L, Lang>
+    + UnclosedEmitter<'inp, L, Lang>
 {}
 ```
 
 It is blanket-implemented for every emitter that satisfies the whole family, so a bound of
-`E: ComposableEmitter` is interchangeable with spelling out the six sub-traits — that is the
+`E: ComposableEmitter` is interchangeable with spelling out the seven sub-traits — that is the
 **default-policy** surface, and
 [`PolicyComposableEmitter`](crate::emitter::PolicyComposableEmitter) is the same bundle widened
 by the three a count or separator policy needs — and its

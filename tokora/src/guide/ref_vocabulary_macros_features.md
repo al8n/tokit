@@ -224,14 +224,33 @@ the open/close punctuators:
 | [`Angle`](crate::punct::Angle) | `OpenAngle` / `CloseAngle` | `< >` |
 
 ```text
-trait Delimiter<'inp, L, Lang = ()> {
+trait Delimiter<'inp, L, Lang: ?Sized = ()> {
     type Open:  Punctuator<'inp, L, Lang>;
     type Close: Punctuator<'inp, L, Lang>;
-    fn name() -> CowStr;
+    const KIND: DelimiterKind;        // machine identity — REQUIRED, no default
+    fn name() -> CowStr;              // display string — NOT an identity
     fn is_open(&Kind) -> bool;    fn is_close(&Kind) -> bool;
     fn unexpected_open_token(tok) -> UnexpectedToken;   fn unexpected_close_token(tok) -> …;
 }
 ```
+
+The two identity members are not interchangeable, and this is the distinction to get right.
+[`KIND`](crate::delimiter::Delimiter::KIND) is a
+[`DelimiterKind`](crate::delimiter::DelimiterKind) — the pair's *machine* identity, and what
+[`Unclosed::kind`](crate::error::Unclosed::kind) reports and an
+[`UnclosedEmitter`](crate::emitter::UnclosedEmitter) conversion should discriminate on.
+[`name`](crate::delimiter::Delimiter::name) is a display string with no uniqueness contract —
+`"[]"` is correct for *any* bracket-shaped pair, so
+[`Unclosed::name_ref`](crate::error::Unclosed::name_ref) is for rendering and never for
+routing. A pair defined outside tokora declares
+`const KIND: DelimiterKind = DelimiterKind::Custom("my_crate::DocComment")`, which is the only
+variant it can *name*: the four built-ins are `#[non_exhaustive]`, matchable from outside as
+`DelimiterKind::Paren { .. }` and siblings but not writable. There is deliberately **no
+default** — a defaulted `KIND` would let a pair ship with an identity its author never chose.
+
+One more fence to know about: the language brand *is* the context language. `Paren<(), (),
+LangA>` is not a `Delimiter<'_, L, LangB>`, so a pair copy-pasted out of a sibling dialect
+fails to compile instead of type-checking and then driving on the wrong dialect's marker.
 
 `Delimiter` is a **classifier/error helper**, not a combinator: it recognizes the boundary kinds
 and builds the boundary errors. To parse a delimited body, sequence the punctuators (as taught in
