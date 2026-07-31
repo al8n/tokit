@@ -79,7 +79,7 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
 
 [`bound_source`](crate::Emitter::bound_source) is the newest of the defaulted members and the
 one with a forwarding obligation: an emitter that binds a particular source — the CST
-[`Sink`](crate::cst::Sink) does — overrides it so a mismatched drive is refused, and a
+`Sink` does — overrides it so a mismatched drive is refused, and a
 **wrapper** that forwards every emission but inherits the `None` default silently disables
 that check for whatever it wraps. It is the same obligation `checkpoint`/`rewind`/`release`
 carry.
