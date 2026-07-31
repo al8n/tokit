@@ -298,11 +298,17 @@ so it rewinds with its branch, and so its *span* is available to license its gap
 moment the channels are allowed to cross.
 
 Two more walls guard the same seam. A balanced stream that builds structure but carries **no committed
-token at all** over a nonempty source is a [`StructureWithoutTokens`](crate::cst::FinishError): the
-signature of a wrapper emitter that forwarded the `CstEmitter` structuring surface but inherited the
-no-op `commit_token`, so every token silently vanished. It is refused ahead of the gap-coverage law so
-the all-dropped case earns that precise message rather than an uncovered-gap report over the whole
-source. And [`finish_partial`](crate::cst::Sink::finish_partial) is the tooling door for an *incomplete*
+token at all** over a nonempty source *no lexer error explains* is a
+[`StructureWithoutTokens`](crate::cst::FinishError): the signature of a wrapper emitter that forwarded
+the `CstEmitter` structuring surface but inherited the no-op `commit_token`, so every token silently
+vanished. It is refused ahead of the gap-coverage law so the all-dropped case earns that precise
+message rather than an uncovered-gap report over the whole source. The qualifier is what keeps the wall
+off a legitimate shape it would otherwise share a symptom with: the wall reads the **same** evidence the
+coverage law does, and a **lossless** grammar opens its root node before it can know whether any token
+follows — so a buffer holding nothing lexable (an unterminated string mid-edit) reaches `finish` as one
+error span, one open-then-closed node, and zero tokens. Every byte is explained there, so that tree
+tiles rather than being refused.
+And [`finish_partial`](crate::cst::Sink::finish_partial) is the tooling door for an *incomplete*
 parse: it **closes** open nodes rather than reporting [`UnclosedNodes`](crate::cst::FinishError), and
 **tiles** every gap rather than refusing an uncovered one — the two ways an incomplete parse
 legitimately differs from a complete one (a fatal abort leaves nodes open; a fail-fast lexer error
