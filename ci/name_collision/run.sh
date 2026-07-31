@@ -15,9 +15,15 @@
 #   UNPROBED  both sides agree and it is NOT justified — likely a vacuous probe FATAL
 #   INCONCL   no before-state (base did not run, or the witness was unreadable) FATAL
 #   FATAL     the probe could not be generated at all                           FATAL
-#   STALE     a baselined row that no longer reproduces                         FATAL
+#   STALE     a baselined row THIS RUN PROBED that no longer reproduces         FATAL
+#   n/a       a baselined row this diff gave no occasion to probe               non-fatal
 #   glob-err  a glob row whose collision the compiler rejected                  non-fatal
 #   glob-ok   a glob row this toolchain does NOT reject                         non-fatal
+#
+# The probe crate is built at the INVENTORY's feature point, not at a point written here. A
+# name gated behind a feature the probe does not enable is absent from the tokora it links
+# against, and its row then scores UNPROBED — indistinguishable in the log from "no collision
+# was constructed", which is a different finding entirely.
 #
 # For the ITEM categories there is deliberately no bare `ok`: agreement is the signature
 # of a probe that constructs no collision, so it is fatal unless justified by name.
@@ -58,14 +64,36 @@ git -C "$ROOT" archive "$BASE_REF" | tar -x -C "$WORK/base" || {
 
 # Flatten the inventory into `category<TAB>name<TAB>owner<TAB>spelling` rows. A parse
 # failure is fatal; so is an empty plan.
-python3 - "$INVENTORY" > "$WORK/plan.tsv" <<'PY' || { echo "name-collision: FATAL — inventory parse failed" >&2; exit 2; }
+#
+# Second output, second argument: the FEATURE POINT the probe crate must build tokora at.
+# The inventory is a fact about one feature point and records which; the probe crate used to
+# hardcode `std,logos` regardless. Every name behind any other feature was then absent from
+# the probe's tokora, so its probe collided with nothing and scored UNPROBED — which is how
+# `CastNode`, gated on `rowan`, came back "no collision was constructed" when the truth was
+# "the name was not compiled in". Deriving it from the inventory keeps the two sides of the
+# harness looking at the same surface by construction.
+python3 - "$INVENTORY" "$WORK/features.txt" > "$WORK/plan.tsv" <<'PY' || { echo "name-collision: FATAL — inventory parse failed" >&2; exit 2; }
 import json, sys
 d = json.load(open(sys.argv[1]))
 required = ("inherent_method_names", "inherent_assoc_fn_names", "trait_method_names",
-            "glob_names", "glob_details", "inherent_owners", "trait_method_owners")
+            "trait_assoc_fn_names", "trait_other_names",
+            "glob_names", "glob_details", "inherent_owners", "trait_method_owners",
+            "feature_point")
 missing = [k for k in required if k not in d]
 if missing:
     sys.exit("inventory is missing %s — regenerate it with surface_diff.py" % missing)
+feats = [f.strip() for f in d["feature_point"].split(",") if f.strip()]
+# The shared fixture is written against `std` and `logos` — it declares a `Logos` token type
+# and drives a `LogosLexer`. A feature point without them does not describe a surface this
+# fixture can probe at all, and building it anyway would fail on both sides and report
+# INCONCL over every row, which says nothing about the names.
+lack = [f for f in ("std", "logos") if f not in feats]
+if lack:
+    sys.exit("inventory feature point %r lacks %s, which the probe fixture is written "
+             "against — regenerate the inventory at a feature point that includes them"
+             % (d["feature_point"], lack))
+with open(sys.argv[2], "w") as fh:
+    fh.write(", ".join('"%s"' % f for f in feats))
 io, to = d["inherent_owners"], d["trait_method_owners"]
 rows = []
 for n in d["inherent_method_names"]:
@@ -77,6 +105,17 @@ for n in d["inherent_assoc_fn_names"]:
 for n in d["trait_method_names"]:
     for sp in ("same_pick", "later_pick_used", "later_pick_discarded"):
         rows.append(("trait_method", n, to[n], sp))
+# A receiver-less trait associated function takes the INHERENT associated-function
+# spellings, not the method ones: `same_pick`/`later_pick_*` name steps of the receiver's
+# autoderef walk, and a path call has no receiver to walk.
+for n in d["trait_assoc_fn_names"]:
+    for sp in ("used", "discarded"):
+        rows.append(("trait_assoc_fn", n, to[n], sp))
+# An associated TYPE or CONST on a trait. `gen_probe.py` has no template and exits non-zero
+# by name; the row exists so that refusal is attached to the item rather than the item being
+# dropped from the plan. Dropping it is the failure mode this whole harness was built after.
+for n in d["trait_other_names"]:
+    rows.append(("trait_assoc_item", n, to[n], "no_template"))
 # Presence, not truthiness. `{}` is what a well-formed inventory looks like when the diff
 # added no glob-reachable names; treating that as a malformed inventory turns "this PR adds
 # no public surface" into a FATAL. Absence is still fatal, and the required-key check above
@@ -93,7 +132,8 @@ if not rows:
     # genuinely added no public names, there is no collision to construct, and an empty plan is
     # the correct output. If any list is non-empty then rows should have been built from it and
     # something is wrong with this flattening — still fatal.
-    named = (d["glob_names"] or d["trait_method_names"]
+    named = (d["glob_names"] or d["trait_method_names"] or d["trait_assoc_fn_names"]
+             or d["trait_other_names"]
              or d["inherent_method_names"] or d["inherent_assoc_fn_names"])
     if named:
         sys.exit("inventory lists names but produced ZERO probes — that is a failure, not a pass")
@@ -102,15 +142,31 @@ for r in rows:
 PY
 
 total=$(wc -l < "$WORK/plan.tsv" | tr -d ' ')
+FEATURES="$(cat "$WORK/features.txt")"
+[ -n "$FEATURES" ] || { echo "name-collision: FATAL — no feature point derived from the inventory" >&2; exit 2; }
 echo "name-collision: base=$BASE_REF  head=<working tree>"
 echo "name-collision: inventory=$INVENTORY  probes=$total"
+echo "name-collision: tokora features=[$FEATURES]  (from the inventory's feature point)"
 echo "name-collision: rustc=$(rustc --version 2>/dev/null || echo unknown)"
+
+# The labels this run had an OCCASION to construct — `name/spelling`, one per planned row.
+# The baseline reconciliation at the bottom is scoped to these; see the comment there.
+awk -F'\t' 'NF >= 4 { print $2 "/" $4 }' "$WORK/plan.tsv" | sort -u > "$WORK/planned.txt"
+
+DISCLOSED="$HERE/disclosed.txt"
+NOCOLLIDE="$HERE/no_collision.txt"
+# Checked before the empty-plan return, not after. A deleted baseline file is a finding on
+# every run, including the runs that have nothing to probe — otherwise a no-op PR is the one
+# place the harness would accept a missing baseline.
+for f in "$DISCLOSED" "$NOCOLLIDE"; do
+  [ -f "$f" ] || { echo "name-collision: FATAL — $f is missing" >&2; exit 2; }
+done
 
 # An empty plan from a well-formed inventory means the diff added no public names at all. The
 # python above is fail-closed, so reaching here with zero rows IS that case rather than a parse
-# problem. Return before the probe loop and before the baseline reconciliation: with nothing
-# probed, every disclosed.txt and no_collision.txt entry would be reported STALE for want of a
-# probe to reproduce it, which says nothing about those baselines.
+# problem. Return before the probe loop: there is nothing to compile. Reconciliation would now
+# be a no-op anyway — with an empty plan every baseline row is out of scope — but saying it
+# here keeps the empty case readable without making the reader derive it.
 if [ "$total" -eq 0 ]; then
   echo "name-collision: PASS — the diff adds no new public names, so there is no name for a"
   echo "name-collision: consumer to collide with and nothing for this harness to construct."
@@ -120,11 +176,6 @@ if [ "$total" -eq 0 ]; then
   exit 0
 fi
 
-DISCLOSED="$HERE/disclosed.txt"
-NOCOLLIDE="$HERE/no_collision.txt"
-for f in "$DISCLOSED" "$NOCOLLIDE"; do
-  [ -f "$f" ] || { echo "name-collision: FATAL — $f is missing" >&2; exit 2; }
-done
 seen_disclosed=""
 seen_nocollide=""
 
@@ -155,7 +206,15 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     # second exporter cannot live in the probe itself.
     python3 "$HERE/gen_probe.py" --otherlib "$name" > "$d/otherlib/src/lib.rs"
     printf '[package]\nname = "otherlib"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n' > "$d/otherlib/Cargo.toml"
-    sed -e "s|TOKORA_PATH|$dep|" "$HERE/probe/Cargo.toml.in" > "$d/Cargo.toml"
+    sed -e "s|TOKORA_PATH|$dep|" -e "s|TOKORA_FEATURES|$FEATURES|" \
+      "$HERE/probe/Cargo.toml.in" > "$d/Cargo.toml"
+    # A placeholder that survives substitution is not a manifest cargo can read, and the
+    # failure would surface as `upstream-fail` on every row — a whole run of INCONCL blamed
+    # on a dependency. Say what it actually is, once, here.
+    if grep -q TOKORA_ "$d/Cargo.toml"; then
+      echo "name-collision: FATAL — an unsubstituted placeholder is left in $d/Cargo.toml" >&2
+      exit 2
+    fi
     cp "$WORK/probe.rs" "$d/src/lib.rs"
     # The lock copied into `$WORK/base` above pins the base TREE. It does not reach here:
     # these are freshly generated crates with no lock of their own, so each side would
@@ -423,12 +482,34 @@ echo "name-collision: $total probe(s) — $okc justified-no-collision, $loud lou
 
 # A baseline entry that no longer reproduces is stale. Left unchecked it becomes a rubber
 # stamp for a probe that stopped running at all — the failure mode of every allowlist.
+#
+# But "did not reproduce" and "was never attempted" are the same absence, and only the first
+# is a finding. The inventory is a DELTA: a PR is probed for the names IT adds, so a baseline
+# row recorded by an earlier release is not in the plan and cannot reproduce, however healthy
+# it is. Reconciling against every row therefore fired on the first name-adding PR after the
+# release that wrote the baseline — #132 adds one name and saw all four disclosed rows
+# reported STALE, none of which it touched.
+#
+# So a row is reconciled only when this run PLANNED it. In scope and unseen is stale, and
+# still fatal; out of scope is reported and carried. Note what that costs and why it is not
+# avoidable here: a baseline row is only ever reconcilable on a run whose diff adds its name,
+# i.e. the release that recorded it. Probing it on every run is not the fix — the name exists
+# on BOTH sides by then, the two sides agree, and the row would score UNPROBED rather than
+# reproduce. A two-sided delta harness cannot re-litigate a name that is no longer new.
+outscope_d=0
+outscope_n=0
 while read -r line; do
   case "$line" in ''|\#*) continue ;; esac
+  if ! grep -qxF "$line" "$WORK/planned.txt"; then
+    outscope_d=$((outscope_d + 1))
+    echo "  n/a     $line is in disclosed.txt and OUT OF SCOPE for this diff (not probed)"
+    continue
+  fi
   case " $seen_disclosed " in
     *" $line "*) ;;
     *)
-      echo "  STALE   $line is in disclosed.txt but did not reproduce — remove it" >&2
+      echo "  STALE   $line is in disclosed.txt, WAS probed by this run, and did not" >&2
+      echo "          reproduce — remove it" >&2
       [ "$status" -lt 1 ] && status=1
       ;;
   esac
@@ -436,14 +517,26 @@ done < "$DISCLOSED"
 
 while read -r line; do
   case "$line" in ''|\#*) continue ;; esac
+  if ! grep -qxF "$line" "$WORK/planned.txt"; then
+    outscope_n=$((outscope_n + 1))
+    echo "  n/a     $line is in no_collision.txt and OUT OF SCOPE for this diff (not probed)"
+    continue
+  fi
   case " $seen_nocollide " in
     *" $line "*) ;;
     *)
-      echo "  STALE   $line is in no_collision.txt but did not reproduce — remove it" >&2
+      echo "  STALE   $line is in no_collision.txt, WAS probed by this run, and did not" >&2
+      echo "          reproduce — remove it" >&2
       [ "$status" -lt 1 ] && status=1
       ;;
   esac
 done < "$NOCOLLIDE"
+
+if [ "$outscope_d" -ne 0 ] || [ "$outscope_n" -ne 0 ]; then
+  echo "name-collision: $outscope_d disclosed and $outscope_n no-collision row(s) were out of"
+  echo "name-collision: scope: this diff does not add their names, so this run had no occasion"
+  echo "name-collision: to construct them. That is not evidence they still hold."
+fi
 
 if [ "$status" -ne 0 ]; then
   echo "name-collision: RUN FAILED (exit $status) — the verdicts above are incomplete;" >&2
