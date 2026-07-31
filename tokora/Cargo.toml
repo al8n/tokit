@@ -53,10 +53,13 @@ unstable-raw = []
 
 # The lexer conformance test kit (`tokora::conformance`): a `Harness` that drives a custom
 # `Lexer` against the trait-level lexer contract and, through the input machinery, a set of
-# deterministic save/peek/drain/restore schedules. It is a test-time tool — it asserts, formats
-# panic context, and owns `Vec`/`String`, so it requires `std`. Off by default; enabling it only
-# compiles the `conformance` module.
-conformance = ["std"]
+# deterministic save/peek/drain/restore schedules. It is a test-time tool, but it needs only
+# `alloc`: `assert!` and formatted `panic!` are `core`, and `Vec`/`String` come from `alloc`.
+# It required `std` until 2026-08; that forced `std` on for every consumer who enabled it,
+# including through `[dev-dependencies]`, where feature unification silently switched the
+# whole dependency graph's tokora to `std` and made no-std testing of tokora vacuous.
+# Off by default; enabling it only compiles the `conformance` module.
+conformance = ["alloc"]
 
 # The public fuzz harness (`tokora::fuzz`): a deterministic operation-script fuzzer that drives
 # the input/backtracking machinery (consume, peek, the `sync` family, `attempt`, transaction

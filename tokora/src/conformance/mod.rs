@@ -65,6 +65,8 @@ pub mod emitter;
 ))]
 mod cache_tests;
 
+use std::{format, string::String, vec, vec::Vec};
+
 use crate::{
   Lexer, Slice, Source, Span, Token,
   cache::DefaultCache,
