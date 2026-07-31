@@ -151,14 +151,14 @@ Allocator-free `no_std`:
 
 ```toml
 [dependencies]
-tokora = { version = "0.5", default-features = false }
+tokora = { version = "0.8", default-features = false }
 ```
 
 `no_std` with `alloc`:
 
 ```toml
 [dependencies]
-tokora = { version = "0.5", default-features = false, features = ["alloc"] }
+tokora = { version = "0.8", default-features = false, features = ["alloc"] }
 ```
 
 ## Design philosophy and inspirations
