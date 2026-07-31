@@ -343,6 +343,52 @@ jobs:
           p.write_text(s)
           PATCH
           grep -A2 'patch.crates-io' Cargo.toml
+      # `[patch]` is advisory: if the patched version does not satisfy the consumer's
+      # requirement, cargo WARNS and falls back to the registry — exit 0, job green,
+      # having witnessed nothing about this checkout. Measured concretely once tokora
+      # crossed the consumer's `tokora = "0.7.3"` ceiling (>=0.7.3, <0.8.0): `cargo test`
+      # printed `patch `tokora v0.8.0 (...)` was not used in the crate graph`, resolved
+      # v0.7.3 from crates.io instead, and still exited 0.
+      #
+      # So this asserts the fact cargo actually resolved, not cargo's wording for it — a
+      # warning string is cargo's choice of phrasing and can change; the resolved graph
+      # cannot lie the same way. A path dependency resolves with `"source": null`; a
+      # registry crate always has one. That is `cargo metadata`'s answer, not a grep over
+      # a log line that happens not to have fired this time.
+      - name: Assert the patch actually applied (positive check on the resolved graph)
+        run: |
+          set -euo pipefail
+          cd smear
+          cargo metadata --format-version 1 > /tmp/smear-metadata.json
+          python3 - <<'PY'
+          import json, sys
+
+          with open("/tmp/smear-metadata.json") as f:
+              meta = json.load(f)
+
+          matches = [p for p in meta["packages"] if p["name"] == "tokora"]
+
+          if len(matches) != 1:
+              sys.exit(
+                  "::error::expected exactly one `tokora` package in the resolved "
+                  f"graph, found {len(matches)}: the job would otherwise have tested "
+                  "a published tokora rather than this checkout"
+              )
+
+          pkg = matches[0]
+          if pkg["source"] is not None:
+              sys.exit(
+                  "::error::resolved `tokora` has a registry source "
+                  f"({pkg['source']!r}), so [patch.crates-io] did not apply — the "
+                  "job would otherwise have tested a published tokora rather than "
+                  "this checkout"
+              )
+
+          print(
+              f"patch applied: tokora {pkg['version']} resolved with source=null "
+              f"(manifest: {pkg['manifest_path']})"
+          )
+          PY
       - name: cargo test (three-crate scope)
         run: |
           cd smear
@@ -380,18 +426,74 @@ jobs:
           echo "base=$base" >> "$GITHUB_ENV"
           feat="std,logos,trace,rowan"
           mkdir -p /tmp/nc && git worktree add /tmp/nc/base "$base"
-          # `Cargo.lock` is gitignored, so a fresh checkout has none and both sides would
-          # re-resolve independently. Generate it once, copy it into base — no `|| true`,
-          # so an absent source fails the step instead of vanishing — assert the copy is
-          # byte-identical, and pass `--locked` below so `cargo doc` refuses to re-resolve.
+          # `Cargo.lock` is gitignored. The prior scheme generated it ONCE from head's
+          # manifest and copied it into base, so `--locked` below could prove the two
+          # `cargo doc` runs saw the same dependency graph — but that shared lock goes
+          # unsatisfiable the moment the PR edits base's manifest at all, and a manifest
+          # edit is a class, not one shape: a `[dependencies]` requirement change and a
+          # bare package-`version` bump both do it, because both change what the copied
+          # lock is checked against. Seen concretely on the 0.8.0 release PR (#134, zero
+          # `.rs` files in the diff): the shared lock came from head's 0.8.0 manifest,
+          # base was still 0.7.3, and `--locked` refused base for a version bump alone.
           #
-          # A dependency-requirement change in the PR makes base's manifest disagree with
-          # this lock, so `--locked` fails the base side below — expected, not a bug: the
-          # graphs really differ, so read the diff by hand. Don't restore `|| true` for
-          # this; regenerate each side's lock from its own manifest and say so in the PR.
+          # So each side resolves its OWN lock from its OWN manifest — no copy, nothing to
+          # go stale. Stopping there would silently give up what the shared lock existed
+          # to prove, though: that neither side's name-collision finding is an artifact of
+          # the two `cargo doc` runs linking different versions of some third crate. The
+          # comparison below restores that guarantee explicitly instead of assuming it —
+          # every `[[package]]` triple (name, version, source) must match across both
+          # locks, with exactly one allowed exception: tokora's own entry, whose version is
+          # the one manifest edit this job exists to permit. `--locked` stays on both
+          # `cargo doc` calls so a re-resolution during doc generation is refused rather
+          # than silently accepted.
           cargo generate-lockfile
-          cp Cargo.lock /tmp/nc/base/Cargo.lock
-          cmp Cargo.lock /tmp/nc/base/Cargo.lock
+          ( cd /tmp/nc/base && cargo generate-lockfile )
+          python3 - <<'PY'
+          import re, sys
+
+          def parse_lock(path):
+              text = open(path, encoding="utf-8").read()
+              out = []
+              for block in re.split(r"(?m)^\[\[package\]\]\s*$", text)[1:]:
+                  stop = re.search(r"(?m)^\[", block)
+                  body = block[: stop.start()] if stop else block
+                  name = re.search(r'(?m)^name\s*=\s*"([^"]*)"', body)
+                  version = re.search(r'(?m)^version\s*=\s*"([^"]*)"', body)
+                  source = re.search(r'(?m)^source\s*=\s*"([^"]*)"', body)
+                  if not name or not version:
+                      sys.exit(
+                          f"::error::{path}: a [[package]] block has no name/version; "
+                          "the lock format has changed under this parser"
+                      )
+                  out.append((
+                      name.group(1),
+                      version.group(1),
+                      source.group(1) if source else None,
+                  ))
+              return out
+
+          head = parse_lock("Cargo.lock")
+          base = parse_lock("/tmp/nc/base/Cargo.lock")
+
+          if not any(n == "tokora" for n, _, _ in head):
+              sys.exit("::error::Cargo.lock: no tokora [[package]] entry")
+          if not any(n == "tokora" for n, _, _ in base):
+              sys.exit("::error::/tmp/nc/base/Cargo.lock: no tokora [[package]] entry")
+
+          head_set, base_set = set(head), set(base)
+          only_head = {t for t in head_set - base_set if t[0] != "tokora"}
+          only_base = {t for t in base_set - head_set if t[0] != "tokora"}
+
+          if only_head or only_base:
+              print("::error::lock graphs disagree beyond tokora's own version")
+              for n, v, s in sorted(only_base):
+                  print(f"  only in base: {n} {v} ({s or 'path/local'})")
+              for n, v, s in sorted(only_head):
+                  print(f"  only in head: {n} {v} ({s or 'path/local'})")
+              sys.exit(1)
+
+          print("lock parity OK: graphs agree except tokora's own version")
+          PY
           for side in base head; do
             dir="/tmp/nc/base"; [ "$side" = head ] && dir="$PWD"
             ( cd "$dir" && RUSTC_BOOTSTRAP=1 \
