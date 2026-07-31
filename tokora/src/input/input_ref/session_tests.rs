@@ -668,6 +668,318 @@ fn attempt_panic_with_an_open_point_leaves_no_stranded_point() {
   );
 }
 
+// ── 4c. The explicit reconciling rollback ────────────────────────────────────────────────────
+//
+// 4b's reconciliation was reachable only by *dropping* an undecided guard, which is a posture and
+// not a statement. A scope whose exits are "fall out of the block" and "roll back right here"
+// could express the first and not the second, so the second reached for `rollback()` — and turned
+// a legal abandoned point into a release panic on an ordinary exit. `rollback_abandoning_points`
+// is 4b's reconciliation on the explicit path. `rollback` keeps its refusal: the two are for
+// different owners of the points, not for different tastes.
+
+#[test]
+fn the_explicit_reconciling_rollback_abandons_the_open_session_point() {
+  // `Commit` policy on purpose: this is the shape at the call site the verb was added for (a
+  // commit-by-default probe that rolls back explicitly on its few decline exits), and it proves
+  // the verb is available whatever the policy — the drop that reconciles is not.
+  let mut input = silent_input("1 2 3 4 5");
+  {
+    let mut ir = input.as_ref();
+    let _ = ir.next().unwrap().expect("committed work before the guard");
+    let before = *ir.cursor().as_inner();
+    let baseline = ir.live_checkpoints_len();
+
+    {
+      let mut guard = ir.begin_with::<super::Commit>();
+      let _point = guard.begin_point();
+      let _ = guard
+        .next()
+        .unwrap()
+        .expect("speculative work through the point");
+      guard.rollback_abandoning_points();
+    }
+
+    assert_eq!(
+      ir.points(),
+      0,
+      "the explicit reconciling rollback abandoned the point it invalidated"
+    );
+    assert_eq!(
+      ir.live_checkpoints_len(),
+      baseline,
+      "…and released its lineage entry"
+    );
+    assert_eq!(
+      *ir.cursor().as_inner(),
+      before,
+      "…and still rolled back to the guard's own base, exactly as `rollback` would have"
+    );
+  }
+  assert_eq!(
+    input.pinned_checkpoints_len(),
+    0,
+    "…and its pin: the pin set holds exactly the live begin points"
+  );
+}
+
+#[test]
+#[should_panic(
+  expected = "restore would invalidate a live transaction guard or attempt (the target predates its begin point)"
+)]
+fn the_checked_rollback_still_refuses_to_cross_an_open_session_point() {
+  // The other half of the pair, and the reason the reconciling verb is a *third* settle rather
+  // than a change to this one. A scope that owns every point opened inside it wants this refusal:
+  // a point still open above the base means the code that opened it lost track of its own
+  // speculation, and here is where that is cheapest to find. Detect-at-cause, every allocator
+  // build, nothing restored.
+  let mut input = silent_input("1 2 3 4 5");
+  let mut ir = input.as_ref();
+  let mut guard = ir.begin();
+  let _point = guard.begin_point();
+  let _ = guard.next().unwrap().expect("speculative work");
+  guard.rollback();
+}
+
+#[test]
+#[should_panic(expected = "no live session point")]
+fn settling_a_point_the_reconciling_rollback_abandoned_is_refused() {
+  // The flip side, and the same outcome `settling_a_point_a_guard_drop_reconciled_is_refused`
+  // pins for the drop path: an abandoned point is *gone*, so a later settle is refused by the
+  // session verb rather than rewinding to a timeline that no longer exists.
+  let mut input = silent_input("1 2 3 4 5");
+  let mut ir = input.as_ref();
+  let point = {
+    let mut guard = ir.begin();
+    let point = guard.begin_point();
+    let _ = guard.next().unwrap().expect("1");
+    guard.rollback_abandoning_points();
+    point
+  };
+  ir.rollback_point(point);
+}
+
+// ── 4d. The speculation closures settle like their own unwind does ───────────────────────────
+//
+// `attempt`, `try_attempt` and `attempt_parse` hand a whole `InputRef` to **caller-supplied
+// code**, and a closure that opens a point and abandons it is exercising a documented liberty
+// (`begin_point`: an abandoned point keeps its progress and is released with the handle). Each of
+// these has two settling exits for the same decision — the closure declines, or the closure
+// unwinds — and the unwind one has always reconciled, because it is the guard's rolling-back
+// `Drop` and a `Drop` may not refuse anything. The decline one used to spell its restore with the
+// *checked* verb, so the same legal history that unwinds cleanly panicked when it returned
+// cleanly: a release panic, raised before anything was restored, blaming the attempt for someone
+// else's legal choice.
+//
+// The five cells below are the four declining/erring arms plus the accepting one, and they say
+// the same thing 4b's `attempt_panic_with_an_open_point_leaves_no_stranded_point` says about the
+// unwind edge. The pair is the point: an attempt's two exits must reconcile identically, or the
+// contract depends on how the closure chose to leave.
+
+#[test]
+fn attempt_declining_across_an_abandoned_point_reconciles() {
+  let mut input = silent_input("1 2 3 4 5");
+  {
+    let mut ir = input.as_ref();
+    let _ = ir
+      .next()
+      .unwrap()
+      .expect("committed work before the attempt");
+    let before = *ir.cursor().as_inner();
+    let baseline = ir.live_checkpoints_len();
+
+    let declined: Option<()> = ir.attempt(|ir| {
+      let _point = ir.begin_point();
+      let _ = ir
+        .next()
+        .unwrap()
+        .expect("speculative work through the point");
+      None
+    });
+
+    assert!(declined.is_none(), "the closure declined");
+    assert_eq!(
+      ir.points(),
+      0,
+      "the decline reconciled the point the closure abandoned, exactly as the unwind edge does"
+    );
+    assert_eq!(
+      ir.live_checkpoints_len(),
+      baseline,
+      "…and released its lineage entry"
+    );
+    assert_eq!(
+      *ir.cursor().as_inner(),
+      before,
+      "…and still rolled back to the attempt's own base — reconciling is not keeping"
+    );
+  }
+  assert_eq!(
+    input.pinned_checkpoints_len(),
+    0,
+    "…and its pin: the pin set holds exactly the live begin points"
+  );
+}
+
+#[test]
+fn try_attempt_erring_across_an_abandoned_point_reconciles() {
+  let mut input = silent_input("1 2 3 4 5");
+  {
+    let mut ir = input.as_ref();
+    let _ = ir
+      .next()
+      .unwrap()
+      .expect("committed work before the attempt");
+    let before = *ir.cursor().as_inner();
+    let baseline = ir.live_checkpoints_len();
+
+    let erred: Result<(), NumErr> = ir.try_attempt(|ir| {
+      let _point = ir.begin_point();
+      let _ = ir
+        .next()
+        .unwrap()
+        .expect("speculative work through the point");
+      Err(NumErr::Lex)
+    });
+
+    assert_eq!(erred, Err(NumErr::Lex), "the error propagates untouched");
+    assert_eq!(ir.points(), 0, "the error arm reconciled the open point");
+    assert_eq!(
+      ir.live_checkpoints_len(),
+      baseline,
+      "…and released its lineage entry"
+    );
+    assert_eq!(
+      *ir.cursor().as_inner(),
+      before,
+      "…and still rolled back to the attempt's own base"
+    );
+  }
+  assert_eq!(input.pinned_checkpoints_len(), 0, "…and its pin");
+}
+
+#[test]
+fn attempt_parse_declining_across_an_abandoned_point_reconciles() {
+  use crate::try_parse_input::ParseAttempt;
+
+  let mut input = silent_input("1 2 3 4 5");
+  {
+    let mut ir = input.as_ref();
+    let _ = ir
+      .next()
+      .unwrap()
+      .expect("committed work before the attempt");
+    let before = *ir.cursor().as_inner();
+    let baseline = ir.live_checkpoints_len();
+
+    let declined: Result<ParseAttempt<()>, NumErr> = ir.attempt_parse(|ir| {
+      let _point = ir.begin_point();
+      let _ = ir
+        .next()
+        .unwrap()
+        .expect("speculative work through the point");
+      Ok(ParseAttempt::Decline)
+    });
+
+    assert!(
+      matches!(declined, Ok(ParseAttempt::Decline)),
+      "the decline is reported in the crate's own vocabulary"
+    );
+    assert_eq!(ir.points(), 0, "the decline arm reconciled the open point");
+    assert_eq!(
+      ir.live_checkpoints_len(),
+      baseline,
+      "…and released its lineage entry"
+    );
+    assert_eq!(
+      *ir.cursor().as_inner(),
+      before,
+      "…and still rolled back to the attempt's own base"
+    );
+  }
+  assert_eq!(input.pinned_checkpoints_len(), 0, "…and its pin");
+}
+
+#[test]
+fn attempt_parse_erring_across_an_abandoned_point_reconciles() {
+  use crate::try_parse_input::ParseAttempt;
+
+  let mut input = silent_input("1 2 3 4 5");
+  {
+    let mut ir = input.as_ref();
+    let _ = ir
+      .next()
+      .unwrap()
+      .expect("committed work before the attempt");
+    let before = *ir.cursor().as_inner();
+    let baseline = ir.live_checkpoints_len();
+
+    let erred: Result<ParseAttempt<()>, NumErr> = ir.attempt_parse(|ir| {
+      let _point = ir.begin_point();
+      let _ = ir
+        .next()
+        .unwrap()
+        .expect("speculative work through the point");
+      Err(NumErr::Lex)
+    });
+
+    assert_eq!(
+      erred.err(),
+      Some(NumErr::Lex),
+      "the error propagates untouched"
+    );
+    assert_eq!(ir.points(), 0, "the error arm reconciled the open point");
+    assert_eq!(
+      ir.live_checkpoints_len(),
+      baseline,
+      "…and released its lineage entry"
+    );
+    assert_eq!(
+      *ir.cursor().as_inner(),
+      before,
+      "…and still rolled back to the attempt's own base"
+    );
+  }
+  assert_eq!(input.pinned_checkpoints_len(), 0, "…and its pin");
+}
+
+#[test]
+fn attempt_accepting_leaves_the_closure_s_point_open_and_its_progress_kept() {
+  // The arm that does NOT change, pinned so the reconciliation above cannot be mistaken for "an
+  // attempt settles the closure's points". It does not: `commit` keeps progress and releases only
+  // the attempt's own base, so a point the closure left open is still open afterwards — and still
+  // settleable by the caller, which is the whole reason session points are non-lexical. Only a
+  // *rollback below it* abandons it, because only that destroys the lineage it describes.
+  let mut input = silent_input("1 2 3 4 5");
+  {
+    let mut ir = input.as_ref();
+    let _ = ir
+      .next()
+      .unwrap()
+      .expect("committed work before the attempt");
+
+    let point = ir
+      .attempt(|ir| {
+        let point = ir.begin_point();
+        let _ = ir.next().unwrap().expect("kept work through the point");
+        Some(point)
+      })
+      .expect("the closure accepted");
+
+    assert_eq!(
+      ir.points(),
+      1,
+      "an accepted attempt settles its own base only; the closure's point is still open"
+    );
+    let after_accept = *ir.cursor().as_inner();
+    ir.rollback_point(point);
+    assert!(
+      *ir.cursor().as_inner() < after_accept,
+      "…and still settleable: rolling it back put the token consumed inside the attempt back"
+    );
+  }
+  assert_eq!(input.pinned_checkpoints_len(), 0, "nothing left pinned");
+}
+
 // ── 5. The depth accessor through the lifecycle ──────────────────────────────────────────────
 
 #[test]

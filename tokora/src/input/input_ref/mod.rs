@@ -1263,6 +1263,42 @@ where
   /// `attempt_inner_lifo_clean_raw_pair_is_legal`, and
   /// `attempt_backtrack_over_trip_reemits_diagnostic_exactly_once`.
   ///
+  /// # A session point `f` opened and abandoned is legal, and the decline reconciles it
+  ///
+  /// `f` is **caller-supplied code holding a whole `InputRef`**, so it may open a
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " [session point](Self::begin_point) and leave it open. That is a liberty `begin_point`"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " session point and leave it open. That is a liberty `begin_point`"
+  )]
+  /// grants — an abandoned point keeps its progress and is released with the handle — not a bug
+  /// this method may re-classify. So the decline settles through the **reconciling**
+  /// [`rollback_abandoning_points`](Transaction::rollback_abandoning_points): every point younger
+  /// than the attempt's base is abandoned (unpinned, lineage entry dropped, emitter mark
+  /// released) and the rewind then subsumes its progress.
+  ///
+  /// It is not merely the kinder of two answers, it is the only **consistent** one. An abandoned
+  /// point pins its base above the attempt's, and the checked
+  /// [`rollback`](Transaction::rollback) refuses to rewind across a live pin — a release panic,
+  /// in every allocator build, raised *before* anything is restored, leaving the speculative
+  /// progress committed for a host that catches. The attempt's other settling exit for the same
+  /// decision, an **unwind** out of `f`, has always reconciled instead: it is the guard's
+  /// rolling-back `Drop`, and a `Drop` that may run mid-unwind can refuse nothing. Spelling the
+  /// decline with the checked verb therefore made the same legal history panic when `f` returned
+  /// and settle cleanly when `f` panicked. Both exits now restore the same thing.
+  ///
+  /// What this does **not** do is settle points for you. Only a rollback that reaches *below* a
+  /// point abandons it, because only that destroys the lineage the point describes; an
+  /// **accepted** attempt commits, and a point `f` left open is still open and still settleable
+  /// afterwards — the non-lexical property session points exist for. Enforcing cells (in
+  /// `src/input/input_ref/session_tests.rs`):
+  /// `attempt_declining_across_an_abandoned_point_reconciles`,
+  /// `attempt_panic_with_an_open_point_leaves_no_stranded_point`, and
+  /// `attempt_accepting_leaves_the_closure_s_point_open_and_its_progress_kept`.
+  ///
   /// # If the closure panics
   ///
   /// The begin point is *held* by a [`Transaction`] for the whole span of `f`, so an unwind out
@@ -1293,14 +1329,18 @@ where
         txn.commit();
         Some(result)
       }
-      // Declined: `rollback` unpins the begin point FIRST (rolling back to it is legal, so the
-      // checked restore must not see it pinned), then rewinds — position, lexer state,
-      // emissions, dedup watermark, poison boundary — leaving no trace. A raw restore *below*
-      // this checkpoint through `f` would already have panicked at that restore
-      // (detect-at-cause), so the stale-base assert inside `rollback` is an unreachable
-      // backstop, kept for defense in depth and for the allocator-less path, which pins nothing.
+      // Declined: the RECONCILING rollback, decided once here for the whole attempt family — see
+      // the "a session point `f` opened and abandoned is legal" section above for why the checked
+      // verb is the wrong one when the scope spans a caller-supplied closure. It unpins the begin
+      // point FIRST (rolling back to it is
+      // legal, so the restore must not see it pinned), then rewinds — position, lexer state,
+      // emissions, dedup watermark, poison boundary — leaving no trace, after abandoning any
+      // point `f` left open above the base. A raw restore *below* this checkpoint through `f`
+      // would already have panicked at that restore (detect-at-cause), so the stale-base assert
+      // inside the verb is an unreachable backstop, kept for defense in depth and for the
+      // allocator-less path, which pins nothing.
       None => {
-        txn.rollback();
+        txn.rollback_abandoning_points();
         None
       }
     }
@@ -1334,6 +1374,15 @@ where
   /// `try_attempt_nested_lifo`, and
   /// `try_attempt_inner_raw_restore_below_checkpoint_panics_at_restore`.
   ///
+  /// The session-point clause carries over verbatim as well: `f` may open a point and abandon it,
+  /// and the `Err` arm settles through the **reconciling**
+  /// [`rollback_abandoning_points`](Transaction::rollback_abandoning_points) so that it restores
+  /// exactly what an unwind out of `f` restores. See [`attempt`](Self::attempt)'s *"A session
+  /// point `f` opened and abandoned is legal"* section for why the checked verb is the wrong one
+  /// here. Enforcing cell (in
+  /// `src/input/input_ref/session_tests.rs`):
+  /// `try_attempt_erring_across_an_abandoned_point_reconciles`.
+  ///
   /// # If the closure panics
   ///
   /// Exactly [`attempt`](Self::attempt)'s guarantee: the begin point rides in a [`Transaction`]
@@ -1356,11 +1405,12 @@ where
         txn.commit();
         Ok(result)
       }
-      // Declined: `rollback` unpins FIRST (rolling back to the attempt's own base is legal) and
-      // then rewinds through the checked restore; its stale-base assert is the same unreachable
-      // backstop `attempt` describes.
+      // Declined: the reconciling rollback, for the reason `attempt` gives — this scope spans a
+      // caller-supplied closure, so a point it opened and abandoned is a legal history and not a
+      // rollback to refuse. Unpins FIRST (rolling back to the attempt's own base is legal) and
+      // then rewinds; its stale-base assert is the same unreachable backstop `attempt` describes.
       Err(e) => {
-        txn.rollback();
+        txn.rollback_abandoning_points();
         Err(e)
       }
     }
@@ -1377,8 +1427,14 @@ where
   ///
   /// The guard plumbing is exactly [`try_attempt`](Self::try_attempt)'s, so every one of
   /// its guarantees carries over verbatim: the last-in, first-out law holds structurally,
-  /// a rolled-back attempt leaves no trace, and the begin point rides a rollback-on-drop
-  /// [`Transaction`] for the whole span of `f`.
+  /// a rolled-back attempt leaves no trace, the begin point rides a rollback-on-drop
+  /// [`Transaction`] for the whole span of `f`, and **both** restoring arms settle through the
+  /// reconciling [`rollback_abandoning_points`](Transaction::rollback_abandoning_points), so a
+  /// session point `f` opened and abandoned is reconciled rather than refused — see
+  /// [`attempt`](Self::attempt)'s *"A session point `f` opened and abandoned is legal"* section.
+  /// Enforcing cells (in `src/input/input_ref/session_tests.rs`):
+  /// `attempt_parse_declining_across_an_abandoned_point_reconciles` and
+  /// `attempt_parse_erring_across_an_abandoned_point_reconciles`.
   ///
   /// # If the closure panics
   ///
@@ -1400,12 +1456,15 @@ where
         txn.commit();
         Ok(ParseAttempt::Accept(v))
       }
+      // Both restoring arms take the reconciling rollback, for the reason `attempt` gives: the
+      // scope spans a caller-supplied closure, and a point it opened and abandoned is a liberty
+      // `begin_point` grants rather than a rollback to refuse.
       Ok(ParseAttempt::Decline) => {
-        txn.rollback();
+        txn.rollback_abandoning_points();
         Ok(ParseAttempt::Decline)
       }
       Err(e) => {
-        txn.rollback();
+        txn.rollback_abandoning_points();
         Err(e)
       }
     }
@@ -1650,14 +1709,28 @@ where
   /// Two ways to reach it, both caller bugs, and each answered where it can be:
   ///
   /// - a **checked** rewind below the point — a raw [`restore`](Self::restore) (reachable only
-  ///   under `unstable-raw`), or an enclosing guard's or attempt's *explicit* rollback — is
-  ///   refused outright: the pin makes it **panic where it is requested** rather than corrupt the
+  ///   under `unstable-raw`) or [`Transaction::rollback`](Transaction::rollback) — is refused
+  ///   outright: the pin makes it **panic where it is requested** rather than corrupt the
   ///   timeline silently;
-  /// - a guard's or attempt's **rollback on drop** cannot refuse anything (a `Drop` may run while
-  ///   already unwinding, where panicking is forbidden), so it **reconciles** instead: every point
-  ///   younger than its base is abandoned — unpinned, its lineage entry dropped, its emitter mark
+  /// - a **reconciling** rewind cannot refuse anything, so it abandons instead: every point
+  ///   younger than its base is unpinned, its lineage entry dropped and its emitter mark
   ///   released — before the rewind, exactly as dropping the handle abandons a point still open.
-  ///   The point's progress is not rolled back separately; the guard's own rewind subsumes it.
+  ///   The point's progress is not rolled back separately; the rewind subsumes it. Two shapes
+  ///   reach it: a guard's or an attempt's **rollback on drop**, which *may not* refuse (a `Drop`
+  ///   may run while already unwinding, where panicking is forbidden), and the explicit
+  ///   [`Transaction::rollback_abandoning_points`](Transaction::rollback_abandoning_points),
+  ///   which *chooses* not to.
+  ///
+  /// Those are the two *answers*, and which one a given rollback should be is a question about
+  /// **who owns the points** — that verb's docs answer it. A scope that owns every point opened
+  /// inside it keeps the refusal, because there a point still open above the base means the code
+  /// that opened it lost track of its own speculation. A scope spanning foreign code does not:
+  /// [`attempt`](Self::attempt), [`try_attempt`](Self::try_attempt) and
+  /// [`attempt_parse`](Self::attempt_parse) hand a whole handle to a caller-supplied closure, and
+  /// the typed pratt driver hands one to grammar hooks, so **all** of their explicit rollbacks
+  /// reconcile — matching what their own unwind edge has always done. Abandoning is a liberty
+  /// this method grants (see the drop section below); a rollback that answered it with a release
+  /// panic would be re-classifying that liberty as a bug from the wrong side of the seam.
   ///
   /// Settle your points before the scope that opened them ends and neither arises. What never
   /// happens either way is the third outcome: a point left on the stack describing a lineage the
@@ -2597,17 +2670,19 @@ where
   }
 
   /// Rewinds to `checkpoint` without the debug raw-misuse panics, the shared primitive behind
-  /// the checked [`restore`](Self::restore) and the drop-path
-  /// [`restore_unchecked_if_live`](Self::restore_unchecked_if_live). A rolling-back `Drop`
-  /// reaches it through the latter and must stay silent: `Drop` may run while already unwinding,
-  /// and `no_std` has no `thread::panicking()` to guard a drop-bomb, so a debug assert firing
-  /// here would abort. It still maintains the lineage stack (popping through the restored id if
-  /// present) and replays the saved lineage exactly, identically to [`restore`](Self::restore)
-  /// in release. Its own base is usually the oldest live checkpoint, but a raw restore below it
-  /// through the guard can invalidate it first — which is why the drop path consults liveness
-  /// before calling in (skipping a dead base), and an explicit
-  /// [`rollback`](Transaction::rollback) restores through the checked [`restore`](Self::restore),
-  /// panicking on that stale case since it never runs during an unwind.
+  /// the checked [`restore`](Self::restore), the drop-path
+  /// [`restore_unchecked_if_live`](Self::restore_unchecked_if_live), and the explicit reconciling
+  /// [`rollback_abandoning_points`](Transaction::rollback_abandoning_points). A rolling-back
+  /// `Drop` reaches it through the second and must stay silent: `Drop` may run while already
+  /// unwinding, and `no_std` has no `thread::panicking()` to guard a drop-bomb, so a debug assert
+  /// firing here would abort. It still maintains the lineage stack (popping through the restored
+  /// id if present) and replays the saved lineage exactly, identically to
+  /// [`restore`](Self::restore) in release. Its own base is usually the oldest live checkpoint,
+  /// but a raw restore below it through the guard can invalidate it first — which is why the drop
+  /// path consults liveness before calling in (skipping a dead base), while both explicit
+  /// rollbacks report that stale case instead, since neither ever runs during an unwind:
+  /// [`rollback`](Transaction::rollback) through the checked [`restore`](Self::restore)'s own
+  /// assert, and the reconciling verb through one it raises before routing here.
   /// Settles every [session point](Self::begin_point) younger than `target_id` — the suffix a
   /// rewind to that checkpoint invalidates — the whole body of
   /// [`restore_unchecked`](Self::restore_unchecked)'s reconciliation, deliberately **outlined**.
@@ -2622,12 +2697,14 @@ where
   /// the checkpoint id because it is the monotone order of the live-checkpoint stack: a point
   /// whose id is above the target's is exactly one the pop-through below invalidates.
   ///
-  /// Silent by necessity, not by preference: the callers that can reach a live younger point are
-  /// the guards' rolling-back `Drop` and the unwind paths under
-  /// [`attempt`](Self::attempt)/[`try_attempt`](Self::try_attempt), which may run while already
-  /// unwinding. The *checked* [`restore`](Self::restore) never gets here with a younger point
-  /// live — the point's pin refuses it at the cause first, loudly — so this is the reconciliation
-  /// for exactly the paths that are forbidden to panic.
+  /// Silent because most of its callers are forbidden to speak: the guards' rolling-back `Drop`
+  /// and the unwind paths under [`attempt`](Self::attempt)/[`try_attempt`](Self::try_attempt) may
+  /// run while already unwinding. The one caller that is *not* mid-unwind — the explicit
+  /// [`rollback_abandoning_points`](Transaction::rollback_abandoning_points), which asks for this
+  /// reconciliation deliberately — raises its own base-liveness assert before routing in, so
+  /// nothing is lost by this body staying quiet. What never reaches here with a younger point
+  /// live is the *checked* [`restore`](Self::restore): the point's pin refuses that at the cause
+  /// first, loudly, which is the whole difference between the two rollback verbs.
   #[cfg(any(feature = "std", feature = "alloc"))]
   #[cold]
   #[inline(never)]

@@ -131,6 +131,7 @@ const SCOPES: &[Op] = &[
   Op::TryAttemptErr,
   Op::TxnCommit,
   Op::TxnRollback,
+  Op::TxnRollbackAbandoningPoints,
   Op::TxnDropRollback,
   Op::TxnDropCommit,
   Op::StackedCommit,
@@ -314,6 +315,39 @@ fn run_step(
       }
       marks.truncate(entry_marks);
       restore_and_assert(ir, model, o0, c0, saved, "transaction.rollback");
+    }
+    // The reconciling explicit rollback, exercised on the one input that separates it from
+    // `TxnRollback`: a session point opened inside the guard and never settled. Its base is
+    // pinned and younger than the guard's, which is exactly what the checked `rollback` refuses
+    // to cross — so this arm would panic if the verb ever stopped reconciling. Everything else is
+    // `TxnRollback`'s oracle unchanged: cursor and emission count back at the begin point, with
+    // the point gone from the stack rather than left describing a lineage the rewind destroyed.
+    Op::TxnRollbackAbandoningPoints => {
+      cov.mark(op);
+      let (o0, c0, saved) = snapshot(ir, model);
+      let entry_marks = marks.len();
+      let points0 = ir.points();
+      {
+        let mut txn = ir.begin();
+        let _abandoned = txn.begin_point();
+        run_seq(&mut txn, &step.body, model, cov, rng, marks, floor);
+        txn.rollback_abandoning_points();
+      }
+      marks.truncate(entry_marks);
+      assert_eq!(
+        ir.points(),
+        points0,
+        "transaction.rollback_abandoning_points: the abandoned point must be off the stack, not \
+         left describing a lineage the rewind destroyed"
+      );
+      restore_and_assert(
+        ir,
+        model,
+        o0,
+        c0,
+        saved,
+        "transaction.rollback_abandoning_points",
+      );
     }
     Op::TxnDropRollback => {
       cov.mark(op);
