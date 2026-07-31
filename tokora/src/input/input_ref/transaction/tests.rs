@@ -1090,8 +1090,8 @@ fn nested_drop_rollback_scans_linearly() {
 
 #[test]
 fn nested_commit_scans_nothing() {
-  // The contrast the audit measured at zero: `forget`/`unpin` already have their fast path, so
-  // a committing settle inspects no live-lineage element through the two scanning primitives.
+  // The contrast is zero: `forget`/`unpin` already have their fast path, so a committing settle
+  // inspects no live-lineage element through the two scanning primitives.
   let mut input = silent_input("1 2 3 4");
   let mut inp = input.as_ref();
 

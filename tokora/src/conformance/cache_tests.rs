@@ -113,7 +113,7 @@ fn cache_kit_accepts_the_blackhole() {
 
 // ── A third-party queue, correct and broken ─────────────────────────────────────────
 
-/// Defect selectors for [`Queue`]. `SOUND` is the audit's deliberately-literal witness queue —
+/// Defect selectors for [`Queue`]. `SOUND` is the deliberately-literal witness queue —
 /// the shape whose `Cache::rewind` could not be written correctly from the method's own inputs,
 /// and which now conforms because the method it could not implement no longer exists.
 const SOUND: u8 = 0;

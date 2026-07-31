@@ -479,7 +479,7 @@ where
   ///
   /// This is deliberately **not** a disposition. A disposition is what the unwind edge should do,
   /// and that changes *during* an exit as the exit hands things over; a sticky verdict set once
-  /// for a whole exit cannot express it, which is what the previous round's flag got wrong. The
+  /// for a whole exit cannot express it, which is what a stored flag gets wrong. The
   /// disposition is derived instead — see [`ScanScope::keeps_on_unwind`].
   stop_decided: bool,
   /// A committing mode's own entry capture, taken only under [`Partial`](crate::input::Partial)
@@ -501,7 +501,7 @@ where
   /// Whether an unwind from **right here** should keep the scan's progress or abandon it.
   ///
   /// Derived, not stored, because the answer changes as an exit hands things over — which is the
-  /// defect the previous round's sticky flag left in place. Two clauses:
+  /// defect a stored sticky flag leaves in place. Two clauses:
   ///
   /// - a **committing mode** always keeps: that is the ratified posture, measured against the
   ///   alternative;
@@ -1131,7 +1131,7 @@ where
           // durable frontier there is no token left to scan. Commit what the loop already
           // skipped — real progress — and yield the exhausted outcome without rebuilding a lexer.
           if scope.ir.reached_boundary(&at) {
-            // Take-then-record, adjacent: see `take_frontier`. Audited, unchanged.
+            // Take-then-record, adjacent: see `take_frontier`.
             let frontier = scope.take_frontier();
             scope.ir.commit_at(frontier);
             let snapshot = scope.disarm();
@@ -1163,7 +1163,7 @@ where
             // token — so a later scan yields the poisoned outcome there instead of stranding
             // those tokens at the cursor. That commit is real progress, so any diagnostics made
             // over it persist.
-            // Take-then-record, adjacent: see `take_frontier`. Audited, unchanged.
+            // Take-then-record, adjacent: see `take_frontier`.
             let frontier = scope.take_frontier();
             scope.ir.commit_at(frontier);
             let snapshot = scope.disarm();
@@ -1251,7 +1251,6 @@ where
         // honouring the verdict. It also carries the prefix this loop already diagnosed, so nothing
         // already reported is left to be reported again. `skip_one` already consumed the token,
         // so only the frontier is in play here — take-then-record, adjacent: see `take_frontier`.
-        // Audited, unchanged.
         let frontier = scope.take_frontier();
         scope.ir.commit_at(frontier);
         let snapshot = scope.disarm();

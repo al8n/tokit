@@ -343,7 +343,7 @@ fn agree(program: Program) -> Observed {
 
 #[test]
 fn sync_to_stop_is_capacity_independent() {
-  // The audit's history, at its exact numbers: `"1   2"`, consume `1`, then sync to the next
+  // The scenario, at its exact numbers: `"1   2"`, consume `1`, then sync to the next
   // number. The scan lexes `2` itself and stops before it, so the cursor is `2`'s start (4) and
   // the lex frontier is its end (5) — in every capacity, including the one that can retain
   // nothing.

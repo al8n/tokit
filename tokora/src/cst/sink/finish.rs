@@ -26,7 +26,7 @@
 //! the zero-token wall cannot see — and is refused ([`FinishError::UncoveredGap`]). This is
 //! the sink's one **deliberate coupling of the diagnostic and CST channels**: elsewhere they
 //! are independent (a `Diag` slot is invisible to the tree), but at `finish` a lexer error's
-//! *span* is what licenses its gap. The audit kept the channels separate; this law crosses
+//! *span* is what licenses its gap. The channels are otherwise separate; this law crosses
 //! them on purpose, and only at materialization. [`finish_partial`](Sink::finish_partial)
 //! is exempt — it tiles every gap, tolerating an incomplete parse the way it tolerates open
 //! nodes (see its own boundary note on the fail-fast emitter case).

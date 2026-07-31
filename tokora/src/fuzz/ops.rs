@@ -2,7 +2,7 @@
 //! input-machinery surface, plus the anti-lag machinery that keeps it from silently falling behind
 //! that surface.
 //!
-//! # Why this is centralized (the 21-round lesson)
+//! # Why this is centralized
 //!
 //! The crate's earlier property tests caught nothing because their hand-maintained alphabet always
 //! lagged the real surface: every new operation (savepoints, `sync_balanced`, session points,
