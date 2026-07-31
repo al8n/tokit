@@ -65,6 +65,8 @@
 //! A failing check is a bug in the *cache* (or a mismatch with the documented contract),
 //! surfaced loudly. The kit never mutates behaviour; it observes and asserts.
 
+use std::vec::Vec;
+
 use core::marker::PhantomData;
 
 use generic_arraydeque::{GenericArrayDeque, typenum::U4, typenum::Unsigned};
