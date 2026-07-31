@@ -21,6 +21,14 @@ on:
       - 'art'
   workflow_dispatch:
 
+concurrency:
+  # One in-flight run per workflow per ref. A push that supersedes an earlier one cancels it,
+  # so a branch's CI reflects its tip rather than a queue of stale commits. Never on `main`:
+  # there a cancelled run would leave the released commit without a verdict, and `pages.yml`'s
+  # deploy job additionally carries its own `github-pages` group that must not be interrupted.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   loc:
     runs-on: ubuntu-latest
