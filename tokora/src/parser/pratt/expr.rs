@@ -1148,6 +1148,10 @@ enum BenchOperand {
 }
 
 /// What the benchmark's driver recursion returns, spelled once: `Result<BenchSlot, Fault<…>>`.
+#[allow(
+  dead_code,
+  reason = "used only inside `const` size assertions; 1.87's lint misses it"
+)]
 type BenchSlot = crate::span::Spanned<BenchOperand, crate::span::SimpleSpan>;
 
 /// One row of the tripwire: [`Fault`], and the `Result` the recursion actually returns, both held
