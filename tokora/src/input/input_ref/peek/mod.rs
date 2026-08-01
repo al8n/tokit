@@ -373,6 +373,15 @@ where
   /// a halt as "no head here" builds a value out of an input the scanner already gave up
   /// on.
   ///
+  /// The mark carries the same qualification the `_or_stop` family's does: it is what an
+  /// **accepting** emitter earns, after the trip's own diagnostic has gone to it. A fatal
+  /// emitter's rejection of that diagnostic still propagates — from the fill here rather
+  /// than from a scan — but as *that emitter's* value, converted from the lexer error, so
+  /// it carries **no** terminal mark: no `UnexpectedEot` is built on that path for
+  /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) to raise a flag on. The
+  /// arm of your error type holding a lexer error is what answers for it; see
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal#where-the-set-stops-being-closed).
+  ///
   /// Rides the terminal-aware cache read
   /// ([`peek_with_emitter_terminal`](Self::peek_with_emitter_terminal)) rather than the
   /// `try_expect` scan, so the head is served from the front slot with no pop/hold

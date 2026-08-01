@@ -596,9 +596,15 @@ where
   /// means the thing attempted is **definitely absent** (the next valid token mapped to `None` and
   /// stays at the cache front, or the input has genuinely ended), while a terminal stop — a
   /// resource-limit trip on this scan, or an already-latched poison boundary — surfaces as the same
-  /// terminal-marked end-of-input error the committed forms raise. It is the primitive a map-shaped
-  /// attempt (the token-pratt LHS/RHS classifier) should build on when a decline commits it to a
-  /// different parse.
+  /// terminal-marked end-of-input error the committed forms raise, after the trip's own diagnostic
+  /// has gone to the emitter (deduplicated). A fatal emitter's rejection of that diagnostic still
+  /// propagates from the scan itself — but as *that emitter's* value, converted from the lexer
+  /// error, so it carries **no** terminal mark: no `UnexpectedEnd` is built on that path for
+  /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) to raise a flag on. The arm of
+  /// your error type holding a lexer error is what answers for it; see
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal#where-the-set-stops-being-closed). It is the
+  /// primitive a map-shaped attempt (the token-pratt LHS/RHS classifier) should build on when a
+  /// decline commits it to a different parse.
   #[inline(always)]
   pub fn try_expect_map_or_stop<O, F>(
     &mut self,
@@ -835,8 +841,9 @@ where
           Ok(None) // definite absence — the token stays at the cache front.
         }
       },
-      // A fresh trip whose diagnostic a recovering emitter accepted, marked terminal so
-      // recovery re-raises it — mirrors `try_expect_or_stop`'s E3.
+      // A fresh trip whose diagnostic a recovering emitter accepted. (A fatal emitter never
+      // reaches this arm — its rejection propagated out of `scan_with` above.) Marked terminal
+      // so recovery re-raises it — mirrors `try_expect_or_stop`'s E3.
       Scan::Tripped => Err(
         UnexpectedEot::eot_of(self.span().end())
           .into_terminal()
@@ -906,6 +913,14 @@ where
   /// poison boundary raises the terminal end-of-input error instead, so a caller that
   /// commits to a different parse on a decline never mistakes a halt for a grammar
   /// choice.
+  ///
+  /// The classification is [`try_expect_or_stop`](Self::try_expect_or_stop)'s, so the mark
+  /// is too: it is what an **accepting** emitter earns, after the trip's own diagnostic has
+  /// gone to it. A fatal emitter's rejection of that diagnostic still propagates from the
+  /// scan itself — but as *that emitter's* value, converted from the lexer error, so it
+  /// carries **no** terminal mark, and the arm of your error type holding a lexer error is
+  /// what answers for it; see
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal#where-the-set-stops-being-closed).
   ///
   /// # Panics
   ///

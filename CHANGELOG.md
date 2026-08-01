@@ -1612,7 +1612,10 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
   `head_satisfies` and `peek_kind`. `peek_one` answers `Ok(None)` for genuine end of input
   **and** for a resource-limit trip or a latched poison boundary, so a production that
   decides on the answer reads a halt as a grammar fact. The new family reserves `Ok(None)`
-  for the real end of input and raises the terminal end-of-input error otherwise.
+  for the real end of input and raises the terminal end-of-input error otherwise — marked
+  terminal **when your emitter accepts the trip's diagnostic**. A *rejecting* emitter's `Err`
+  is built from your lexer's error value and propagates from the fill unmarked, so recovery
+  can still spend that trip — `MaybeTerminal`'s doc has that path and the arm it needs.
   `peek_one` is unchanged and is not deprecated.
   — *(W-api-B)*
 

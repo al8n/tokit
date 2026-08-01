@@ -967,6 +967,13 @@ where
   /// as the committed form's end-of-input error yet stays distinguishable from a genuine end of
   /// input — see [`is_terminal`](Self::is_terminal) and
   /// [`MaybeTerminal`](crate::error::MaybeTerminal).
+  ///
+  /// They reach this constructor only once the trip's own diagnostic has been **accepted** by the
+  /// emitter. A fatal emitter's rejection of it propagates that emitter's own value from the
+  /// scan instead, converted from the lexer error, and nothing on that path is built for this
+  /// to mark — so the same trip can reach a caller unmarked. See
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal#where-the-set-stops-being-closed) for the arm
+  /// that answers for it.
   #[inline(always)]
   #[must_use]
   pub fn into_terminal(mut self) -> Self {

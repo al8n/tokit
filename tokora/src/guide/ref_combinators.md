@@ -1410,7 +1410,9 @@ close-miss law the many-builders follow: end of input with the opener still open
 `Unclosed` (a fail-fast emitter turns it into `Err`, a recovering one records it and yields the
 construct recovered with a synthesized closer); a wrong token where the closer belongs stays
 the unexpected-token (expected-close) diagnostic; a terminal scanner stop surfaces the
-committed form's end-of-input error. This family fires only `Unclosed`, never the
+committed form's end-of-input error, marked terminal, once the emitter has *accepted* the
+trip's diagnostic — a fatal emitter's rejection of it propagates from the scan itself
+instead, as that emitter's own unmarked value. This family fires only `Unclosed`, never the
 `Unopened`/`Undelimited` half of the recovery vocabulary (see
 [*Error taxonomy*](#error-taxonomy)).
 
