@@ -5,7 +5,7 @@
 //! # Single-writer taxonomy
 //!
 //! Every cell an [`Input`](super::Input) or an [`InputRef`](super::InputRef) owns belongs to
-//! exactly one of five classes. The class *is* the restore semantics: it decides what a
+//! exactly one of six classes. The class *is* the restore semantics: it decides what a
 //! [`restore`](super::InputRef::restore) does to the cell, and it names the cell's single writer.
 //! A cell whose behavior does not match its class is a bug, and this taxonomy exists so that
 //! adding a cell without deciding which class it is in is not a thing that can happen quietly.
@@ -46,6 +46,17 @@
 //!   [`Checkpoint`](super::Checkpoint) has nothing to save. Restoring it instead would be the
 //!   mirror bug: a rollback across a legitimate seal would un-end an ended stream and the parser
 //!   would wait forever for bytes that will never arrive.
+//! - **Control-stack facts** — what the *live frames* know, and input progress does not: the
+//!   descent depth of the recursion budget. Its sole writer is the [`Descent`](super::Descent)
+//!   guard [`descend`](super::InputRef::descend) hands out, and **restore does NOT touch it**. A
+//!   save and the restore returning to it sit at the same frame depth by construction, so the cell
+//!   cannot be observed to change across the pair; and an unwind pops frames a state-restore knows
+//!   nothing about, so the only witness that can be right is one that pops *with* the frame. That
+//!   witness is the guard's destructor, which behaves the same in `std` and `no_std` — hence a
+//!   [`Checkpoint`](super::Checkpoint) does not carry the cell at all. Sibling of the world fact
+//!   above and distinct from it in the way that matters: the world fact is monotone and
+//!   unreachable while a handle lives, while this one moves constantly, under a single writer
+//!   whose lifetime *is* the frame it counts.
 //! - **Witness / instrumentation** — cells that do not affect scanning at all, and are therefore
 //!   never restored: the debug-only, process-unique cross-input identity a checkpoint is stamped
 //!   with (see [`Witness`](super::Witness); its atomic id source keeps it behind the debug +
@@ -62,9 +73,12 @@
 //! # CELL_CENSUS — every mutable cell, and its class
 //!
 //! This is the contract, and it is greppable: `grep CELL_CENSUS` finds it from anywhere in the
-//! tree. **A new scan-affecting mutable cell on [`Input`](super::Input),
-//! [`InputRef`](super::InputRef), [`Session`](super::Session), or [`Lineage`] MUST be added to this
-//! table and classified above.** [`census`] is the tripwire that makes that structural rather than
+//! tree. **A new mutable cell on [`Input`](super::Input), [`InputRef`](super::InputRef),
+//! [`Session`](super::Session), or [`Lineage`] MUST be added to this table and classified
+//! above.** Not merely a *scan-affecting* one, which is how the rule read while three of the rows
+//! below — the finality bit, the identity witness, the `trace` depth — already described cells
+//! that affect no scan: the qualifier read as an exemption and the table's own promise is
+//! "every mutable cell". [`census`] is the tripwire that makes that structural rather than
 //! advisory: it destructures both structs exhaustively — no `..` — so a new field is a **compile
 //! error, right here, in the guardian**, at the table that asks what class it is in.
 //!
@@ -98,6 +112,7 @@
 //! | `state` (the lexer regime) | `Input` | ground truth | overwrite from the checkpoint |
 //! | `span` (last-consumed) | `Input` | ground truth | overwrite from the checkpoint |
 //! | `cache` (the token cache) | `Input` | ground truth | the input layer rewinds the front against the restored cursor through `Cache::pop_front`/`Cache::clear`, then drops the post-save tail through `Cache::pop_back`, sized by the count below |
+//! | `pending` (the parked front token) | `Input` | ground truth | **clear** it — a parked token is not a cache entry and is uncounted, so it is dropped rather than replayed and the region re-lexes it back under the `Lexer` determinism contract |
 //! | `emitter` (the emission log) | `Input` (owned; borrowed through `InputRef`) | ground truth | truncate to the saved mark |
 //! | `emitted_error_end` (dedup watermark) | `Input` | lineage memo | pure-copy the saved value |
 //! | `front_reported_end` (front-report watermark) | `Input` | lineage memo | pure-copy the saved value — beside the emitter rewind, so the witness and the report it names move as one |
@@ -109,6 +124,7 @@
 //! | [`next_ckp_id`](Lineage) | `Lineage` | monotone id source | **nothing** — rewinding would reissue a live id |
 //! | [`savepoint_seq`](Lineage) | `Lineage` | monotone id source | **nothing** — same |
 //! | `finality` (`is_final`) | `Input` (snapshot on `InputRef`) | **world fact** | **nothing** — and it cannot change while a handle lives |
+//! | `recursion` (the descent budget) | `Input` (borrowed through `InputRef`) | **control-stack fact** | **nothing** — a checkpoint does not carry it; the `Descent` guard's drop balances it with the frame it counts |
 //! | `witness` (input identity) | `Input` | witness | nothing (identity is fixed for the input's life) |
 //! | `depth` (trace nesting) | `Input` | instrumentation | nothing (trace events are out of band) |
 

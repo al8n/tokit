@@ -269,8 +269,10 @@ at all, and a plain struct is not either. It is not "returns `Result`" and not
 **There is deliberately no "full silent surface" list here.** An earlier draft gave one, of
 fourteen names — and it omitted `parse_except` and `try_parse_except`, which are exactly the
 two the paragraph above refuses to call safe. Any such list is the well-formedness problem
-again. **The names to check are the exposure table at the top of this section** — the
-sixteen this release adds; which of them go silent for *your* code depends on your
+again. **The names to check are the exposure table at the top of this section** — it lists every
+method and associated-function name this release adds, against the receiver type each one lands
+on. No count is restated here: a restated count is a second inventory that can fall behind the
+first, and this one twice did. Which of those names go silent for *your* code depends on your
 signatures, which is a thing only your code can answer.
 
 What was measured, on rustc 1.87, 1.95 stable and 1.97-nightly:
@@ -1326,7 +1328,9 @@ item that carries them, and listed here only so scanning this section does not m
 (item 5), `CstProfile` and `KindValidator` (item 13), `error::NonAssociativeChain` (item 41),
 `error::RecursionLimitReached` with `input::Descent`, `InputRef::descend`, `InputRef::recursion`,
 `RecursionLimiter::unlimited`, `InputContext::with_recursion_limiter` and
-`ParserContext::with_recursion_limiter` (item 42).
+`ParserContext::with_recursion_limiter` (item 42); and — on an existing public trait —
+`FromPrattError::from_recursion_limit_reached` and `FromPrattError::from_non_associative_chain`
+(item 46; both **required**, so a hand-written impl must add both).
 
 - **The logos adapter works on 0.14 and 0.15, and is tested there.** `logos_0_14` /
   `logos_0_15` / `logos_0_16` were already separate features, but `tokora::logos` (and its
