@@ -67,6 +67,13 @@ where
   /// consumption at frame entry — cache-independent, so a prefilled lookahead window trips at the
   /// same place an empty one does.
   ///
+  /// Recovery reads terminality off the grammar's **own** error type, so that re-raise holds for a
+  /// type that stores the value and delegates `is_terminal`, and not for one whose `From` discards
+  /// it — `()` included. A discarding sink converts the trip into an ordinary recoverable error.
+  /// The level is released before that conversion runs, so the bound and the stack are unaffected
+  /// and only the stop is lost; see
+  /// [`RecursionLimitReached`](RecursionLimitReached#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound).
+  ///
   /// Nothing is latched on the input. A scanner limit trip latches the poison boundary because
   /// the lexer's tally is monotone in the input; descent depth is the opposite kind of fact and
   /// is fully restored by the unwind that carries the error out. See [`RecursionLimitReached`].
