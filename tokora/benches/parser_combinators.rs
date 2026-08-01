@@ -199,6 +199,20 @@ impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Se
   }
 }
 
+// The two the pratt engines RETURN rather than emit: a frame-budget trip and a second same-power
+// non-associative operator. Neither is an `UnexpectedEnd` alias, so neither rides the impl above.
+impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for BenchError {
+  fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self {
+    BenchError
+  }
+}
+
+impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for BenchError {
+  fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self {
+    BenchError
+  }
+}
+
 // The bundle's delimiter half: one generic impl for every pair.
 impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for BenchError
 where
