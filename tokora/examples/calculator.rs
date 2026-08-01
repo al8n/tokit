@@ -19,7 +19,7 @@
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, Parser, SimpleSpan, Token as TokenT,
   emitter::PrattEmitter,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs},
+  error::{NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs},
   logos::{self, Logos},
   parser::{PrattInfix, PrattLHS, PrattPower, PrattRHS, Precedenced},
   span::Spanned,
@@ -178,6 +178,16 @@ impl From<UnexpectedEoLhs> for CalcError {
 
 impl From<UnexpectedEoRhs> for CalcError {
   fn from(_: UnexpectedEoRhs) -> Self {
+    CalcError::UnexpectedEot
+  }
+}
+impl From<RecursionLimitReached> for CalcError {
+  fn from(_: RecursionLimitReached) -> Self {
+    CalcError::UnexpectedEot
+  }
+}
+impl From<NonAssociativeChain> for CalcError {
+  fn from(_: NonAssociativeChain) -> Self {
     CalcError::UnexpectedEot
   }
 }

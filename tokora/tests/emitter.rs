@@ -22,7 +22,7 @@ use tokora::{
     UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter, Verbose,
   },
   error::{
-    UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
+    NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
     syntax::{FullContainer, MissingSyntax, MissingSyntaxOf, TooFew, TooMany},
     token::{
       MissingToken, MissingTokenOf, SeparatedError, SeparatorPosition, UnexpectedToken,
@@ -742,6 +742,10 @@ enum TestError {
   UnexpectedTrailingSep,
   UnexpectedEoLhs,
   UnexpectedEoRhs,
+  /// The pratt frame budget tripped — returned by the engine, never emitted.
+  RecursionLimitReached,
+  /// A second same-power non-associative operator — likewise returned, never emitted.
+  NonAssociativeChain,
 }
 
 impl From<()> for TestError {
@@ -791,6 +795,18 @@ impl<O, Lang: ?Sized> From<UnexpectedEoLhs<O, Lang>> for TestError {
 impl<O, Lang: ?Sized> From<UnexpectedEoRhs<O, Lang>> for TestError {
   fn from(_: UnexpectedEoRhs<O, Lang>) -> Self {
     TestError::UnexpectedEoRhs
+  }
+}
+
+impl<O, Lang: ?Sized> From<RecursionLimitReached<O, Lang>> for TestError {
+  fn from(_: RecursionLimitReached<O, Lang>) -> Self {
+    TestError::RecursionLimitReached
+  }
+}
+
+impl<O, Lang: ?Sized> From<NonAssociativeChain<O, Lang>> for TestError {
+  fn from(_: NonAssociativeChain<O, Lang>) -> Self {
+    TestError::NonAssociativeChain
   }
 }
 

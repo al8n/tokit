@@ -58,7 +58,10 @@ alongside the lexical error and the unexpected token.
 ```rust
 use tokora::{
   Token as TokenT,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs, token::UnexpectedTokenOf},
+  error::{
+    NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs,
+    token::UnexpectedTokenOf,
+  },
   logos::{self, Logos},
 };
 
@@ -177,6 +180,14 @@ impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEoLhs<O, Lang, Set>> 
 }
 impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEoRhs<O, Lang, Set>> for CExprError {
   fn from(_: UnexpectedEoRhs<O, Lang, Set>) -> Self { Self::UnexpectedEot }
+}
+// The two the engines RETURN rather than emit: a recursion-limit trip at a frame prologue, and a
+// second same-power non-associative operator. Both are part of the pratt bundle.
+impl<O, Lang: ?Sized> From<RecursionLimitReached<O, Lang>> for CExprError {
+  fn from(_: RecursionLimitReached<O, Lang>) -> Self { Self::UnexpectedEot }
+}
+impl<O, Lang: ?Sized> From<NonAssociativeChain<O, Lang>> for CExprError {
+  fn from(_: NonAssociativeChain<O, Lang>) -> Self { Self::UnexpectedEot }
 }
 
 assert_eq!(Token::Star.kind(), TokenKind::Star);
@@ -381,6 +392,8 @@ of a token-level `try_pratt_rhs` returning `None`: `parse_rhs` must always retur
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoLhs<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEoLhs<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoRhs<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEoRhs<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
+# impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for CExprError { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Self::UnexpectedEot } }
+# impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for CExprError { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Self::UnexpectedEot } }
 # impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CExprError { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Self::UnexpectedEot } }
 # impl<'inp> From<UnexpectedTokenOf<'inp, CExprLexer<'inp>>> for CExprError { fn from(_: UnexpectedTokenOf<'inp, CExprLexer<'inp>>) -> Self { Self::UnexpectedToken } }
 # #[derive(Clone, Copy, Debug)] enum UnaryOp { Neg, Pos, Not, BNot, PreInc, PreDec }
@@ -566,6 +579,8 @@ delimiter.
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoLhs<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEoLhs<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoRhs<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEoRhs<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
+# impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for CExprError { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Self::UnexpectedEot } }
+# impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for CExprError { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Self::UnexpectedEot } }
 # impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CExprError { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Self::UnexpectedEot } }
 # impl<'inp> From<UnexpectedTokenOf<'inp, CExprLexer<'inp>>> for CExprError { fn from(_: UnexpectedTokenOf<'inp, CExprLexer<'inp>>) -> Self { Self::UnexpectedToken } }
 # #[derive(Clone, Copy, Debug)] enum UnaryOp { Neg, Pos, Not, BNot, PreInc, PreDec }
@@ -781,6 +796,8 @@ operators — now executable inline:
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEot<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEot<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoLhs<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEoLhs<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
 # impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoRhs<O, Lang, Set>> for CExprError { fn from(_: tokora::error::UnexpectedEoRhs<O, Lang, Set>) -> Self { Self::UnexpectedEot } }
+# impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for CExprError { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Self::UnexpectedEot } }
+# impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for CExprError { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Self::UnexpectedEot } }
 # impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CExprError { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Self::UnexpectedEot } }
 # impl<'inp> From<UnexpectedTokenOf<'inp, CExprLexer<'inp>>> for CExprError { fn from(_: UnexpectedTokenOf<'inp, CExprLexer<'inp>>) -> Self { Self::UnexpectedToken } }
 # #[derive(Clone, Copy, Debug)] enum UnaryOp { Neg, Pos, Not, BNot, PreInc, PreDec }

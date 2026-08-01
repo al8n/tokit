@@ -146,7 +146,7 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, L
 // bundle's error type — the full-family conformance test below names every trait.
 const _: () = {
   use crate::error::{
-    UnexpectedEoLhs, UnexpectedEoRhs,
+    NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs,
     syntax::{FullContainer, MissingSyntax, TooFew, TooMany},
     token::{MissingToken, SeparatedError},
   };
@@ -195,6 +195,18 @@ const _: () = {
 
   impl<O, Lang: ?Sized> From<UnexpectedEoRhs<O, Lang>> for TestErr {
     fn from(_: UnexpectedEoRhs<O, Lang>) -> Self {
+      Self::Unexpected
+    }
+  }
+
+  impl<O, Lang: ?Sized> From<RecursionLimitReached<O, Lang>> for TestErr {
+    fn from(_: RecursionLimitReached<O, Lang>) -> Self {
+      Self::Unexpected
+    }
+  }
+
+  impl<O, Lang: ?Sized> From<NonAssociativeChain<O, Lang>> for TestErr {
+    fn from(_: NonAssociativeChain<O, Lang>) -> Self {
       Self::Unexpected
     }
   }

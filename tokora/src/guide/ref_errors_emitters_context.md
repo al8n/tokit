@@ -263,7 +263,7 @@ nodes) need more than the base surface, so tokora splits each scenario into a fo
 | [`UnexpectedLeadingSeparatorEmitter`](crate::emitter::UnexpectedLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::UnexpectedTrailingSeparatorEmitter) | a stray separator | `From<SeparatedErrorOf>` | ✅ |
 | [`MissingLeadingSeparatorEmitter`](crate::emitter::MissingLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::MissingTrailingSeparatorEmitter) | a required separator | `From<MissingTokenOf>` | — (in [`PolicyComposableEmitter`](crate::emitter::PolicyComposableEmitter)) |
 | [`UnclosedEmitter`](crate::emitter::UnclosedEmitter) | [`Unclosed`](crate::error::Unclosed) | [`FromUnclosed`](crate::emitter::FromUnclosed) | ✅ |
-| [`PrattEmitter`](crate::emitter::PrattEmitter) | end-of-LHS / end-of-RHS ([chapter 5](super::ch05_pratt)) | `From<UnexpectedEoLhs>` + `From<UnexpectedEoRhs>` | — |
+| [`PrattEmitter`](crate::emitter::PrattEmitter) | end-of-LHS / end-of-RHS ([chapter 5](super::ch05_pratt)) | `From<UnexpectedEoLhs>` + `From<UnexpectedEoRhs>` + `From<RecursionLimitReached>` + `From<NonAssociativeChain>` (the [`FromPrattError`](crate::emitter::FromPrattError) bundle; the last two are *returned* by the engines, never emitted, so they have no `emit_*` hook) | — |
 | [`CstEmitter`](crate::emitter::CstEmitter) | tree events (no error) | — (defaulted no-ops; the recording sink) | — |
 
 [`ComposableEmitter`](crate::emitter::ComposableEmitter) is the bundle the separated/repeated

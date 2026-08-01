@@ -36,7 +36,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot, token::UnexpectedTokenOf},
+  error::{
+    NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
+    token::UnexpectedTokenOf,
+  },
   parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt},
 };
 
@@ -62,6 +65,16 @@ impl From<UnexpectedEoLhs> for PrefixError {
 }
 impl From<UnexpectedEoRhs> for PrefixError {
   fn from(_: UnexpectedEoRhs) -> Self {
+    PrefixError
+  }
+}
+impl From<RecursionLimitReached> for PrefixError {
+  fn from(_: RecursionLimitReached) -> Self {
+    PrefixError
+  }
+}
+impl From<NonAssociativeChain> for PrefixError {
+  fn from(_: NonAssociativeChain) -> Self {
     PrefixError
   }
 }

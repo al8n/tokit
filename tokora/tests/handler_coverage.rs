@@ -23,7 +23,8 @@ use tokora::{
     UnexpectedTrailingSeparatorEmitter,
   },
   error::{
-    Unclosed, UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
+    NonAssociativeChain, RecursionLimitReached, Unclosed, UnexpectedEoLhs, UnexpectedEoRhs,
+    UnexpectedEot,
     syntax::{FullContainer, MissingSyntax, MissingSyntaxOf, TooFew, TooMany},
     token::{MissingToken, MissingTokenOf, SeparatedError, UnexpectedToken, UnexpectedTokenOf},
   },
@@ -2157,6 +2158,18 @@ impl<O, Lang: ?Sized> From<UnexpectedEoLhs<O, Lang>> for Err {
 
 impl<O, Lang: ?Sized> From<UnexpectedEoRhs<O, Lang>> for Err {
   fn from(_: UnexpectedEoRhs<O, Lang>) -> Self {
+    Err::Any
+  }
+}
+
+impl<O, Lang: ?Sized> From<RecursionLimitReached<O, Lang>> for Err {
+  fn from(_: RecursionLimitReached<O, Lang>) -> Self {
+    Err::Any
+  }
+}
+
+impl<O, Lang: ?Sized> From<NonAssociativeChain<O, Lang>> for Err {
+  fn from(_: NonAssociativeChain<O, Lang>) -> Self {
     Err::Any
   }
 }

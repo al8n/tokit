@@ -216,6 +216,18 @@ impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoRhs<
   }
 }
 
+impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for CExprError {
+  fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self {
+    CExprError::UnexpectedEot
+  }
+}
+
+impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for CExprError {
+  fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self {
+    CExprError::UnexpectedEot
+  }
+}
+
 // ── Unified syntax-kind space ─────────────────────────────────────────────────────
 //
 // The token-image section mirrors the `Token` enum's declaration order; `map_token` bridges

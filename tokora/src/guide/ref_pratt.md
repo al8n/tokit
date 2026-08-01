@@ -74,7 +74,23 @@ table is the whole rule:
 |---|---|---|
 | [`PrattInfix::Left`](crate::parser::PrattInfix) | powers `> power` | equal-power operator to the right folds into the *outer* call → `a - b - c` = `(a - b) - c` |
 | [`PrattInfix::Right`](crate::parser::PrattInfix) | powers `>= power` | equal-power operator to the right is consumed by the *inner* call → `a ^ b ^ c` = `a ^ (b ^ c)` |
-| [`PrattInfix::Neither`](crate::parser::PrattInfix) | powers `> power`, then refuses a second operator of the same power | `a == b == c` is rejected |
+| [`PrattInfix::Neither`](crate::parser::PrattInfix) | powers `> power`, then refuses a second **infix** operator of the same power | `a == b == c` fails with [`NonAssociativeChain`](crate::error::NonAssociativeChain) |
+
+**What "refuses" means, exactly.** Both engines raise the *same* error at the *same* offset: the
+second operator is left on the input, unconsumed, and
+[`NonAssociativeChain`](crate::error::NonAssociativeChain) is **returned** — never emitted, so a
+recording emitter cannot turn it back into a truncated success. It is *not* terminal, so a
+grammar that wants the tolerant reading asks for it explicitly, by wrapping the pratt parser in
+[`recover`](crate::ParseInput::recover) / [`skip_then_retry`](crate::ParseInput::skip_then_retry)
+or by declaring the operator [`Left`](crate::parser::PrattInfix::Left). The latch is armed by a
+`Neither` fold, cleared by folding an infix at a different power, and untouched by a postfix
+fold — so `a == b! == c` still trips.
+
+**Known limitation: the contract is per-operator, not whole-chain fixity resolution.** `a == b < c`
+with `==` non-associative and `<` left-associative at the same power is **rejected**, while
+`a < b == c` is **accepted** as `(a < b) == c`: the latch only exists once a `Neither` operator has
+folded. Haskell and Rust reject both. Tightening tokora to match is a semantic expansion, not a
+fix, and is deliberately out of scope for the table above.
 
 Two further knobs share the same mechanism:
 
@@ -86,6 +102,47 @@ Two further knobs share the same mechanism:
   at the same sub-floor power: `)` is invisible at the top level (below the floor, left for the
   caller) but consumable inside the recursive call a `(` prefix opens (whose floor is that same
   low power). No bracket-matching code — the precedence rule already says it.
+
+---
+
+## Recursion limits
+
+**Both engines bound their own descent, and the bound is on by default.** Each pratt frame enters
+one level of the input's shared
+[`RecursionLimiter`](crate::state::recursion_tracker::RecursionLimiter) through
+[`InputRef::descend`](crate::InputRef::descend), whose [`Descent`](crate::input::Descent) guard
+releases the level on every exit — return, `?`, or unwind, identically in `std` and `no_std`.
+Exceeding the limit fails the parse with
+[`RecursionLimitReached`](crate::error::RecursionLimitReached).
+
+- **Default 500**, so an unconfigured parse of a deeply nested expression fails cleanly instead of
+  risking a native stack abort. Set your own with
+  [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter) or
+  [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter);
+  spell "no limit" as
+  [`RecursionLimiter::unlimited()`](crate::state::recursion_tracker::RecursionLimiter::unlimited).
+  A grammar that parses deep input on a *spawned* thread should pick a limit against that
+  thread's stack rather than rely on the default, which is sized for a main thread.
+- **One budget per input, not per parser.** Two pratt parsers composed into one grammar share the
+  depth, because what the limit protects — the native stack — is shared too. The root expression
+  counts as one level.
+- **Always terminal.** No amount of further input clears a depth budget, so
+  [`recover`](crate::ParseInput::recover),
+  [`InplaceRecover`](crate::parser::InplaceRecover) and
+  [`skip_then_retry`](crate::ParseInput::skip_then_retry) re-raise a trip untouched rather than
+  synthesizing a node. An error type that stores the value and delegates
+  [`is_terminal`](crate::error::MaybeTerminal::is_terminal) keeps that property.
+- **Nothing is latched on the input.** A *scanner* limit trip latches the poison boundary, because
+  the lexer's tally is monotone in the input; parse depth is the opposite kind of fact and is
+  fully restored by the unwind that carries the error out. Scanner trips latch; descent trips
+  unwind.
+
+`descend` is public, so a hand-written recursive combinator can draw on the same budget:
+
+```rust,ignore
+let mut frame = inp.descend()?;   // one level, for as long as `frame` lives
+let inp = &mut *frame;            // the body below is unchanged
+```
 
 ---
 
@@ -211,6 +268,8 @@ re-encoding each result as a `Digit` token.
 # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Set>> for Error { fn from(_: UnexpectedEnd<H, O, Lang, Set>) -> Self { Error } }
+# impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for Error { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Error } }
+# impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for Error { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Error } }
 # impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -407,6 +466,8 @@ grammar. The last stanza adds
 # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Set>> for Error { fn from(_: UnexpectedEnd<H, O, Lang, Set>) -> Self { Error } }
+# impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for Error { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Error } }
+# impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for Error { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Error } }
 # impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # #[derive(Debug, Clone, PartialEq)]

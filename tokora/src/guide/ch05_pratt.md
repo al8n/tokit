@@ -149,6 +149,12 @@ fn fold_postfix(operand,  operator,                 &mut E) -> Result<Spanned<To
 # impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Set>> for CalcError {
 #   fn from(_: UnexpectedEnd<H, O, Lang, Set>) -> Self { CalcError::UnexpectedEnd }
 # }
+# impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for CalcError {
+#   fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { CalcError::UnexpectedEnd }
+# }
+# impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for CalcError {
+#   fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { CalcError::UnexpectedEnd }
+# }
 # impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CalcError {
 #   fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { CalcError::UnexpectedEnd }
 # }
