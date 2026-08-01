@@ -1434,6 +1434,51 @@ fn text(green: rowan::GreenNode) -> std::string::String {
   tree(green).text().to_string()
 }
 
+/// The fixture kinds by name, for the shape renderer below.
+fn kind_name(kind: u16) -> &'static str {
+  match kind {
+    K_ROOT => "Root",
+    K_NODE => "Node",
+    K_LIST => "List",
+    K_WRAP => "Wrap",
+    K_TOK => "Tok",
+    K_ERR => "Err",
+    K_GAP => "Gap",
+    other => unreachable!("kind {other} is outside the fixture dialect"),
+  }
+}
+
+/// One line of tree *shape*, tokens included with their text: `Root[Node[Tok"a" Gap"!"]]`.
+///
+/// Placement cells assert on this rather than on a list of top-level kinds, because a flat
+/// list hides the one thing they exist to pin — which node a gap ended up **inside**. It also
+/// makes a failure readable: the diff is the tree, not an index into a vector.
+fn shape(green: &rowan::GreenNode) -> std::string::String {
+  fn render(node: &rowan::SyntaxNode<RawLang>, out: &mut std::string::String) {
+    out.push_str(kind_name(node.kind()));
+    out.push('[');
+    for (position, child) in node.children_with_tokens().enumerate() {
+      if position > 0 {
+        out.push(' ');
+      }
+      match child {
+        rowan::NodeOrToken::Node(inner) => render(&inner, out),
+        rowan::NodeOrToken::Token(token) => {
+          out.push_str(kind_name(token.kind()));
+          out.push('"');
+          out.push_str(token.text());
+          out.push('"');
+        }
+      }
+    }
+    out.push(']');
+  }
+
+  let mut out = std::string::String::new();
+  render(&tree(green.clone()), &mut out);
+  out
+}
+
 use crate::cst::FinishError;
 
 #[test]
@@ -1477,17 +1522,832 @@ fn round_trip_with_a_lexer_error_is_structural() {
   assert_eq!(emitter.errors().len(), 1);
 }
 
-/// Where a **trailing** gap lands when `finish_partial` is called with a node still open.
+/// **The gap-placement law.** A gap is tiled where it *opens* — immediately after the token it
+/// trails, in the node open at that moment — so the *same* uncovered region tiles into the
+/// *same* node whether or not more input happens to follow it.
 ///
-/// The tiling `builder.token(gap)` runs before the loop that closes the open frames, and
-/// rowan appends a token to whatever node is currently open — so the gap becomes a child of
-/// the **innermost open node**, not of the root. The construct had no pin, which is how the
-/// comment at the tiling site came to say "tile into the root" and stay unchallenged: that is
-/// true only when nothing is open, which is exactly the case `finish` (not `finish_partial`)
-/// enforces.
+/// The two halves below are one stream and its truncation: identical events, identical refused
+/// byte, identical enclosing node — the second one simply has nothing after the gap. Placement
+/// used to split here, the tail becoming a child of the synthetic **root** while the mid-stream
+/// run stayed inside `K_NODE`, so a consumer reading the dialect's own document node saw
+/// garbage in one case and not the other for a reason that is not about the garbage.
 ///
-/// This is a placement pin, not a behaviour proposal — the placement is consistent with
-/// as-emitted ordering and is left as it is. What changes is that it is now stated.
+/// This cell is the readable statement of the law; [`appending_a_token_never_moves_a_gap`] is
+/// the law itself, checked over a corpus with the second half **generated** rather than
+/// written. Three rounds of this rule shipped a hand-written "same stream, one token longer"
+/// that was not one, so the mechanical check is the part that has teeth and this one is the
+/// part that explains what it means.
+///
+/// Teeth (measured): tiling a run at the token that *reveals* it instead of the token it trails
+/// — the pre-rule walk (M1) — turns the trailing half into `Root[Node[Tok"a"] Gap"!"]` and reds
+/// this cell, while the mid-stream half stays green. That is the asymmetry, stated as a diff.
+#[test]
+fn a_trailing_gap_joins_the_node_of_the_token_it_trails() {
+  // Mid-stream: the `!` at [1,2) opens the instant `a` settles, so it tiles into the node open
+  // then — `K_NODE`.
+  let mut sink = verbose_sink("a!b");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+    .expect("verbose collects");
+  sink.cst_token(&MiniTok(b'b'), &span(2, 3));
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let mid = green.expect("the covering diagnostic licenses the gap");
+  assert_eq!(shape(&mid), r#"Root[Node[Tok"a" Gap"!" Tok"b"]]"#);
+  assert_eq!(text(mid), "a!b", "losslessness, mid-stream");
+
+  // Trailing: the identical stream with the following token deleted. Same refused byte, same
+  // enclosing node — and now nothing follows it.
+  let mut sink = verbose_sink("a!");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+    .expect("verbose collects");
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let tail = green.expect("the covering diagnostic licenses the trailing gap too");
+  assert_eq!(
+    shape(&tail),
+    r#"Root[Node[Tok"a" Gap"!"]]"#,
+    "the tail is in `K_NODE` because `a` was: placement must not be decided by whether more \
+     input followed"
+  );
+  assert_eq!(text(tail), "a!", "losslessness, trailing");
+}
+
+/// **Where the diagnostic sits decides nothing**, and that is a hard requirement rather than a
+/// nicety. This cell moves one `emit_lexer_error` across a `cst_finish` and across an unwrapped
+/// checkpoint, and the tree does not move.
+///
+/// Why it is hard: a prefilled lookahead cache **hoists** a lexer-class diagnostic earlier in
+/// the event stream. `input_ref`'s cache-transparency matrix says so in as many words — "a peek
+/// EMITS the lexer errors it crosses, when it crosses them; prefetching therefore moves such a
+/// diagnostic earlier in the timeline", and its `Emission::is_lexer_class` exists precisely to
+/// state that a prefill can hoist *only* that class. The token event stream is exactly invariant
+/// under prefill; the diagnostic stream is not. So the two streams below are **one parse under
+/// two peek schedules**, not two parses, and a rule that reads a diagnostic's position would
+/// make the materialized tree a function of how far the caller happened to look ahead.
+///
+/// Two earlier shapes of the trailing rule did read it, and both are why this cell exists. The
+/// first asked whether a close was the last event *to drive the builder*: a `Diag` drives
+/// nothing, so it was skipped and the close still counted as last. The second held the close and
+/// released it at **any** following event, `Diag` included — which fixed the skip and made the
+/// tree depend on the hoist instead, splitting exactly the pair below into two shapes. Placement
+/// now reads tokens and structure only, so neither hole is expressible.
+///
+/// [`hoisting_a_lexer_error_never_moves_a_gap`] checks this over a corpus, by moving every
+/// diagnostic to every slot; this cell is the one worked example.
+///
+/// Teeth (measured): M4 — round 2's mechanism restored, a root child's close held and released
+/// at the next event of any kind — reds this cell with `Root[Node[Tok"a"] Gap"!"]`, and it is
+/// the only mutation that reds it **together with**
+/// [`hoisting_a_lexer_error_never_moves_a_gap`]. M3 — round 1's mechanism, which skipped `Diag`
+/// — leaves both green, which is exactly the shape of the hole this cell now guards: round 1
+/// was peek-stable by accident, and round 2 gave that away buying an append-invariance it did
+/// not get either.
+#[test]
+fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
+  // The parse: open `K_NODE`, settle `a`, refuse `!`, close. The refusal is recorded INSIDE the
+  // node.
+  let mut sink = verbose_sink("a!");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+    .expect("verbose collects");
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let inside = green.expect("the covering diagnostic licenses the gap");
+  assert_eq!(shape(&inside), r#"Root[Node[Tok"a" Gap"!"]]"#);
+
+  // The same parse whose caller peeked one token further before closing: the identical
+  // diagnostic is emitted one slot later, AFTER the close. Nothing else differs.
+  let mut sink = verbose_sink("a!");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_NODE);
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+    .expect("verbose collects");
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let hoisted = green.expect("the covering diagnostic licenses the gap");
+  assert_eq!(
+    shape(&hoisted),
+    r#"Root[Node[Tok"a" Gap"!"]]"#,
+    "the run trails `a`, and `a` is in `K_NODE`: how far the caller peeked before closing the \
+     node cannot be visible in the tree"
+  );
+  assert_eq!(
+    inside, hoisted,
+    "one parse under two peek schedules is one green tree, node for node"
+  );
+
+  // A second event kind that a rule reading event *positions* would also trip over: an
+  // unwrapped checkpoint, structurally inert at materialization. Inserting one after the close
+  // must be as invisible as hoisting the diagnostic was.
+  let mut sink = verbose_sink("a!");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+    .expect("verbose collects");
+  sink.cst_finish(K_NODE);
+  let _unwrapped = sink.cst_mark();
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect("explained trailing gap"),
+    inside,
+    "an abandoned checkpoint is not a fact about where the refused bytes belong"
+  );
+  assert_eq!(text(inside), "a!", "losslessness under every schedule");
+
+  // And the mirror image: a run the parse refused at ROOT level, after `K_NODE` closed and
+  // after a root-level token settled. It trails a root-level token, so it stays at the root —
+  // whether or not another token follows. Placement is about which token a run trails, not
+  // about depth for its own sake.
+  let mut sink = verbose_sink("ab!c");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_NODE);
+  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
+    .expect("verbose collects");
+  sink.cst_token(&MiniTok(b'c'), &span(3, 4));
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    shape(&green.expect("explained gap")),
+    r#"Root[Node[Tok"a"] Tok"b" Gap"!" Tok"c"]"#,
+    "mid-stream: the run trails the root-level `b`, so it is a root child"
+  );
+
+  let mut sink = verbose_sink("ab!");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_NODE);
+  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
+    .expect("verbose collects");
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    shape(&green.expect("explained trailing gap")),
+    r#"Root[Node[Tok"a"] Tok"b" Gap"!"]"#,
+    "and trailing: deleting the token that follows cannot pull it into a node it never trailed"
+  );
+}
+
+/// **Depth is read off the token, not chosen.** A run goes at whatever depth the token it
+/// trails was committed at — `K_LIST` here, two levels down — and the *number* of frames that
+/// close between the run and the end of the stream has nothing to do with it.
+///
+/// This replaces a rule that said "one level, into the root's last child". That phrasing was an
+/// artifact of the mechanism it came from: a walk that withheld exactly one close could not
+/// express any other depth, so "one level" looked like a law when it was a limitation. Both
+/// halves below now agree at the deeper level, which is the point — the mid-stream half is not
+/// a different answer to be reconciled, it is the same answer.
+///
+/// The trailing half deliberately ends with the **two closes adjacent**, so a rule that tried to
+/// pick a frame at the end of the walk would have both on offer and would have to choose. This
+/// one never looks: by the time the first close is read the run is already in the tree.
+///
+/// Teeth (measured): tiling a run at the token that reveals it instead of at the token it
+/// trails (M1) reds the mid-stream half first, with `Root[Node[List[Tok"a"] Gap"!" Tok"b"]]` —
+/// the run one level up, in the node that revealed it. M2, M3 and M4 red it the same way, which
+/// is the point: every rule that decides depth at or after the close gets this stream wrong.
+#[test]
+fn a_trailing_gap_lands_at_the_depth_of_the_token_it_trails() {
+  let nested = |sink: &mut VerboseSink<'_>| {
+    sink.cst_start(K_NODE);
+    sink.cst_start(K_LIST);
+    sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+    Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(1, 2), MiniErr))
+      .expect("verbose collects");
+    sink.cst_finish(K_LIST);
+  };
+
+  // Mid-stream: `a` settled inside `K_LIST`, so the run it trails is inside `K_LIST` — even
+  // though the token that reveals the run settles one level up, in `K_NODE`.
+  let mut sink = verbose_sink("a!b");
+  nested(&mut sink);
+  sink.cst_token(&MiniTok(b'b'), &span(2, 3));
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    shape(&green.expect("explained gap")),
+    r#"Root[Node[List[Tok"a" Gap"!"] Tok"b"]]"#,
+    "the run opened while `K_LIST` was still open, and it was tiled then"
+  );
+
+  // Trailing: the same depth, with two closes adjacent so an end-of-walk rule would have a
+  // choice to make.
+  let mut sink = verbose_sink("a!");
+  nested(&mut sink);
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    shape(&green.expect("explained trailing gap")),
+    r#"Root[Node[List[Tok"a" Gap"!"]]]"#,
+    "deleting the following token changes nothing: the run was placed when `a` settled"
+  );
+
+  // The same trailing parse with the byte refused between the two closes rather than before
+  // them — a hoist of the diagnostic by one slot. Same answer, because the diagnostic's slot is
+  // not consulted; `a` is still the token the run trails.
+  let mut sink = verbose_sink("a!");
+  sink.cst_start(K_NODE);
+  sink.cst_start(K_LIST);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_LIST);
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+    .expect("verbose collects");
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    shape(&green.expect("explained trailing gap")),
+    r#"Root[Node[List[Tok"a" Gap"!"]]]"#,
+    "still inside `K_LIST`, with the refusal recorded after `K_LIST` closed"
+  );
+
+  // Two children of the root: the run trails `b`, which settled in `K_LIST`, so `K_LIST` gets
+  // it — and `K_NODE`, which closed long before, does not.
+  let mut sink = verbose_sink("ab!");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_NODE);
+  sink.cst_start(K_LIST);
+  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
+    .expect("verbose collects");
+  sink.cst_finish(K_LIST);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    shape(&green.expect("explained trailing gap")),
+    r#"Root[Node[Tok"a"] List[Tok"b" Gap"!"]]"#,
+    "the run goes with the token before it, not with the last child for being last"
+  );
+}
+
+/// The two shapes in which a trailing run stays a **root** child, and they are not exceptions:
+/// in one the token it trails settled at root level, in the other there is no token at all.
+///
+/// Stated as cells because a reader who has just learnt "the tail joins the last child's
+/// content" will expect the tail to descend here, and silence is how a rule acquires an
+/// undocumented third case.
+///
+/// Teeth (measured): holding a root child's close and never releasing it (M2 — "the tail joins
+/// the last child" read as the rule rather than as a consequence) makes the first half
+/// `Root[Node[Tok"a" Tok"b" Gap"!"]]`, swallowing a **root-level token** into the node before
+/// it. The same mutation reds `hole_wrap_materializes_as_an_error_node_with_real_tokens` on
+/// `tree.text()`, so a withheld close is not even a placement-only change.
+#[test]
+fn a_trailing_gap_stays_at_the_root_when_the_token_it_trails_did() {
+  // The run trails a root-level settle, made after `K_NODE` closed.
+  let mut sink = verbose_sink("ab!");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_NODE);
+  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
+    .expect("verbose collects");
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("explained trailing gap");
+  assert_eq!(
+    shape(&green),
+    r#"Root[Node[Tok"a"] Tok"b" Gap"!"]"#,
+    "the run trails `b`, and `b` is a root child: it stays where `b` is"
+  );
+  assert_eq!(text(green), "ab!");
+
+  // The root has NO children: nothing lexable, and no structure over it either.
+  let mut sink = verbose_sink("!");
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
+    .expect("verbose collects");
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    shape(&green.expect("explained trailing gap")),
+    r#"Root[Gap"!"]"#,
+    "no token to trail and no node open: the root keeps it"
+  );
+}
+
+/// **A LEADING run — one no token trails — is the single case placed where it is discovered**,
+/// and it is unchanged from before this rule.
+///
+/// There is no "the token before it" to attach to, so it tiles at the first committed token, in
+/// whatever node that token lands in. That is not a loophole in the rule: appending events
+/// cannot change which token is first, so the placement is as fixed as any other, and
+/// [`appending_a_token_never_moves_a_gap`] covers this shape in its corpus.
+///
+/// The second half is the same clause with **no** committed token anywhere, which is what a
+/// wholly unlexable source produces —
+/// [`a_source_with_nothing_lexable_keeps_its_gap_at_the_root_either_way`] is that case in full.
+///
+/// Teeth (measured): the over-consistent reading of the fallback — tile a leading run at the
+/// very start of the walk, in the root, because that is where it "opens" (M5) — yields
+/// `Root[Gap"!" Node[Tok"b"]]`, ejecting leading trivia from the node the parse opened over it
+/// and leaving that node starting at offset 1. This cell and
+/// [`finish_partial_trailing_gap_tiles_into_the_innermost_open_node`] are what rule that out.
+#[test]
+fn a_leading_gap_tiles_at_the_first_token_that_follows_it() {
+  let mut sink = verbose_sink("!b");
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
+    .expect("verbose collects");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("explained gap");
+  assert_eq!(
+    shape(&green),
+    r#"Root[Node[Gap"!" Tok"b"]]"#,
+    "no token precedes the run, so it tiles where the walk first sees it — inside `K_NODE`, \
+     with the token that revealed it"
+  );
+  assert_eq!(text(green), "!b");
+
+  // The refusal recorded after `K_NODE` opened instead of before it: the same tree, because a
+  // diagnostic's slot is never read.
+  let mut sink = verbose_sink("!b");
+  sink.cst_start(K_NODE);
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
+    .expect("verbose collects");
+  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    shape(&green.expect("explained gap")),
+    r#"Root[Node[Gap"!" Tok"b"]]"#
+  );
+}
+
+/// **A source with nothing lexable in it keeps its gap at the root** — the fallback clause, on
+/// the input that makes it sharpest.
+///
+/// This is what a lossless grammar produces for an unterminated string, an unterminated block
+/// string, a lone stray punctuator: the root production opens its document node before it can
+/// know whether a token follows, every byte is explained by a lexer error, and the parse
+/// finishes with **zero committed tokens**. So there is no token for the run to trail, the
+/// fallback clause applies, and the tree is `Root[Node@0..0[], Gap@0..len]`.
+///
+/// **This is the one shape an earlier round of the rule moved and this one moves back**, so the
+/// reasoning is recorded rather than left as a diff. That round put the run inside the node,
+/// making it `Root[Node@0..len[Gap]]`, and argued the document node "was opened over those
+/// bytes". The argument is appealing and it is wrong for a measurable reason: the identical
+/// parse with one lexable byte appended tiles that same run **at the root** — there is still no
+/// token before it — so descending here would have made the shape depend on whether a lexable
+/// byte followed, which is the exact asymmetry this branch exists to delete. It was not a gain
+/// with an unlucky edge; it was an instance of the defect, and
+/// [`appending_a_token_never_moves_a_gap`] measures it as one.
+///
+/// The second half is the twin that decides it. One committed token is enough for the node to
+/// take the run — because now there *is* a token to trail — and the node widens over it. So the
+/// two halves differ, and they differ for a reason that is about the parse: in one the document
+/// matched something and the garbage follows it, in the other the document matched nothing at
+/// all and the garbage is beside it. Nothing about either answer changes when input is appended.
+///
+/// Teeth (measured): the most sensitive cell in the battery — all five mutations red it, with
+/// **three** distinct wrong answers. M2/M3/M4 put the run inside the node
+/// (`Root[Node[Gap"ab"]]`, the shape this reverts); M5 puts it before the node
+/// (`Root[Gap"ab" Node[]]`); M1 leaves the first two blocks alone and reds the third instead
+/// (`Root[Node[Tok"a"] Gap"b"]`), which is the pre-rule shape.
+#[test]
+fn a_source_with_nothing_lexable_keeps_its_gap_at_the_root_either_way() {
+  let mut sink = verbose_sink("ab");
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 2), MiniErr))
+    .expect("verbose collects");
+  sink.cst_start(K_NODE);
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("the lexer refused every byte and said so");
+  assert_eq!(
+    shape(&green),
+    r#"Root[Node[] Gap"ab"]"#,
+    "no committed token anywhere, so the run trails nothing and tiles where the walk ends"
+  );
+  assert_eq!(
+    tree(green.clone())
+      .first_child()
+      .expect("Root[Node[..]]")
+      .text_range(),
+    rowan::TextRange::new(rowan::TextSize::new(0), rowan::TextSize::new(0)),
+    "the node measures what it matched, which is nothing"
+  );
+  assert_eq!(text(green), "ab");
+
+  // The twin that forces the answer above: the identical parse with one lexable byte appended
+  // at the end of the source. The run is the same `[0,2)`, still preceded by no token, and it
+  // is still a root child — so the first half must place it at the root too, or placement would
+  // once again turn on whether a lexable byte followed.
+  let mut sink = verbose_sink("abc");
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 2), MiniErr))
+    .expect("verbose collects");
+  sink.cst_start(K_NODE);
+  sink.cst_finish(K_NODE);
+  sink.cst_token(&MiniTok(b'c'), &span(2, 3));
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    shape(&green.expect("explained gap")),
+    r#"Root[Node[] Gap"ab" Tok"c"]"#,
+    "one lexable byte after the garbage, and the garbage is still a root child: this is the \
+     twin that makes the first half's answer the only symmetric one"
+  );
+
+  // And the twin that shows the fallback is narrow: one committed token inside the node is
+  // enough for the run to trail it, and the node widens over the run.
+  let mut sink = verbose_sink("ab");
+  sink.cst_start(K_NODE);
+  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+    .expect("verbose collects");
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("explained gap");
+  assert_eq!(
+    shape(&green),
+    r#"Root[Node[Tok"a" Gap"b"]]"#,
+    "there is a token to trail now, so the run is inside the node with it"
+  );
+  assert_eq!(
+    tree(green)
+      .first_child()
+      .expect("Root[Node[..]]")
+      .text_range(),
+    rowan::TextRange::new(rowan::TextSize::new(0), rowan::TextSize::new(2)),
+    "the node widens over the run it took: `0..1` becomes `0..2`"
+  );
+}
+
+// ── The two placement laws, checked over a corpus rather than in prose ──────────
+//
+// Three successive shapes of the gap-placement rule shipped with a table of hand-written
+// "the same stream, one token longer" pairs, and each time the pair that escaped was one
+// nobody had written down. The pairs below are **generated** from the corpus instead: the
+// second member of every append pair is the first with one event pushed onto it, and the
+// peek variants are the same event vector with one entry moved. That is the difference
+// between a table that documents a rule and a check that constrains it.
+
+/// One buffered event, as data, so a stream can be transformed rather than retyped.
+#[derive(Clone, Copy, Debug)]
+enum PlacementOp {
+  Start(u16),
+  Finish(u16),
+  Tok(u8, usize, usize),
+  Diag(usize, usize),
+  Mark,
+}
+
+/// Replays a `PlacementOp` script through the real sink doors.
+fn placement_drive(
+  src: &str,
+  ops: &[PlacementOp],
+  partial: bool,
+) -> Result<rowan::GreenNode, FinishError> {
+  let mut sink = verbose_sink(src);
+  for op in ops {
+    match *op {
+      PlacementOp::Start(kind) => sink.cst_start(kind),
+      PlacementOp::Finish(kind) => sink.cst_finish(kind),
+      PlacementOp::Tok(byte, lo, hi) => sink.cst_token(&MiniTok(byte), &span(lo, hi)),
+      PlacementOp::Diag(lo, hi) => {
+        Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(lo, hi), MiniErr))
+          .expect("verbose collects");
+      }
+      PlacementOp::Mark => {
+        let _abandoned = sink.cst_mark();
+      }
+    }
+  }
+  if partial {
+    sink.finish_partial(K_ROOT).0
+  } else {
+    sink.finish(K_ROOT).0
+  }
+}
+
+/// Every `Gap` token's position in the tree, as `Root>Node>List:"!"`. Appending a root-level
+/// token at the very end cannot change any of these strings — it adds a *later* sibling and
+/// re-parents nothing — so an append pair that disagrees here has moved a gap.
+fn gap_ancestry(green: &rowan::GreenNode) -> std::vec::Vec<std::string::String> {
+  fn walk(
+    node: &rowan::SyntaxNode<RawLang>,
+    path: &mut std::vec::Vec<&'static str>,
+    out: &mut std::vec::Vec<std::string::String>,
+  ) {
+    path.push(kind_name(node.kind()));
+    for child in node.children_with_tokens() {
+      match child {
+        rowan::NodeOrToken::Node(inner) => walk(&inner, path, out),
+        rowan::NodeOrToken::Token(token) => {
+          if token.kind() == K_GAP {
+            out.push(std::format!("{}:{:?}", path.join(">"), token.text()));
+          }
+        }
+      }
+    }
+    path.pop();
+  }
+  let mut out = std::vec::Vec::new();
+  walk(&tree(green.clone()), &mut std::vec::Vec::new(), &mut out);
+  out
+}
+
+/// The corpus both laws run over: `(label, source, script)`. Every shape the placement cells
+/// above state in prose is here, plus the orderings none of them thought to write — a
+/// diagnostic on either side of a close, an abandoned checkpoint after one, adjacent closes,
+/// a leading run, a run with no committed token anywhere.
+fn placement_corpus() -> std::vec::Vec<(&'static str, &'static str, std::vec::Vec<PlacementOp>)> {
+  use PlacementOp::{Diag, Finish, Mark, Start, Tok};
+  std::vec![
+    (
+      "trailing, refusal inside the node",
+      "a!",
+      std::vec![Start(K_NODE), Tok(b'a', 0, 1), Diag(1, 2), Finish(K_NODE)]
+    ),
+    (
+      "trailing, refusal after the close",
+      "a!",
+      std::vec![Start(K_NODE), Tok(b'a', 0, 1), Finish(K_NODE), Diag(1, 2)]
+    ),
+    (
+      "trailing, abandoned checkpoint after the close",
+      "a!",
+      std::vec![
+        Start(K_NODE),
+        Tok(b'a', 0, 1),
+        Diag(1, 2),
+        Finish(K_NODE),
+        Mark
+      ]
+    ),
+    (
+      "mid-stream, token settles inside the node",
+      "a!b",
+      std::vec![
+        Start(K_NODE),
+        Tok(b'a', 0, 1),
+        Diag(1, 2),
+        Tok(b'b', 2, 3),
+        Finish(K_NODE)
+      ]
+    ),
+    (
+      "mid-stream, token settles at the root",
+      "a!b",
+      std::vec![
+        Start(K_NODE),
+        Tok(b'a', 0, 1),
+        Finish(K_NODE),
+        Diag(1, 2),
+        Tok(b'b', 2, 3)
+      ]
+    ),
+    (
+      "trailing, nested, refusal before the inner close",
+      "a!",
+      std::vec![
+        Start(K_NODE),
+        Start(K_LIST),
+        Tok(b'a', 0, 1),
+        Diag(1, 2),
+        Finish(K_LIST),
+        Finish(K_NODE)
+      ]
+    ),
+    (
+      "trailing, nested, refusal between the two closes",
+      "a!",
+      std::vec![
+        Start(K_NODE),
+        Start(K_LIST),
+        Tok(b'a', 0, 1),
+        Finish(K_LIST),
+        Diag(1, 2),
+        Finish(K_NODE)
+      ]
+    ),
+    (
+      "trailing, two root children, refusal inside the last",
+      "ab!",
+      std::vec![
+        Start(K_NODE),
+        Tok(b'a', 0, 1),
+        Finish(K_NODE),
+        Start(K_LIST),
+        Tok(b'b', 1, 2),
+        Diag(2, 3),
+        Finish(K_LIST)
+      ]
+    ),
+    (
+      "trailing, two root children, refusal after the last close",
+      "ab!",
+      std::vec![
+        Start(K_NODE),
+        Tok(b'a', 0, 1),
+        Finish(K_NODE),
+        Start(K_LIST),
+        Tok(b'b', 1, 2),
+        Finish(K_LIST),
+        Diag(2, 3)
+      ]
+    ),
+    (
+      "trailing, the root's last child is a token",
+      "ab!",
+      std::vec![
+        Start(K_NODE),
+        Tok(b'a', 0, 1),
+        Finish(K_NODE),
+        Tok(b'b', 1, 2),
+        Diag(2, 3)
+      ]
+    ),
+    (
+      "trailing, the root has no children",
+      "!",
+      std::vec![Diag(0, 1)]
+    ),
+    (
+      "no committed token, refusal before the node opens",
+      "ab",
+      std::vec![Diag(0, 2), Start(K_NODE), Finish(K_NODE)]
+    ),
+    (
+      "no committed token, refusal inside the node",
+      "ab",
+      std::vec![Start(K_NODE), Diag(0, 2), Finish(K_NODE)]
+    ),
+    (
+      "leading run before the first token",
+      "!b",
+      std::vec![Diag(0, 1), Start(K_NODE), Tok(b'b', 1, 2), Finish(K_NODE)]
+    ),
+    (
+      "leading and trailing runs around one token",
+      "!b?",
+      std::vec![
+        Start(K_NODE),
+        Diag(0, 1),
+        Tok(b'b', 1, 2),
+        Diag(2, 3),
+        Finish(K_NODE)
+      ]
+    ),
+    (
+      "a frame that opens and closes over no token at all",
+      "a!",
+      std::vec![
+        Start(K_NODE),
+        Tok(b'a', 0, 1),
+        Diag(1, 2),
+        Finish(K_NODE),
+        Start(K_LIST),
+        Finish(K_LIST)
+      ]
+    ),
+    (
+      "an unbalanced stream, for the tolerant door",
+      "ab",
+      std::vec![Start(K_NODE), Tok(b'a', 0, 1)]
+    ),
+  ]
+}
+
+/// **Law 1 — nothing that follows a run can move it.** For every stream in the corpus, appending
+/// one root-level token that starts exactly where the source ended must leave every gap in the
+/// node it was already in.
+///
+/// This is the law the branch is named for, and the check three rounds of it did not have. Each
+/// round wrote its own "mid-stream twin" by hand and each hand-written twin was a *different
+/// parse* rather than the same one continued, so the twin agreed while the append did not. Here
+/// the twin is `ops.push(Tok(len, len + 1))` and cannot be anything else.
+///
+/// Only the `Ok`/`Ok` pairs are compared: appending a token can legitimately change whether the
+/// **zero-token wall** fires, and that is a coverage verdict, not a placement one.
+///
+/// Teeth (measured): **both** shipped mechanisms red this cell — round 1's (M3, hold the close
+/// unless the next event drives the builder) and round 2's (M4, hold it until the next event of
+/// any kind), each on `trailing, refusal inside the node` first. The pre-rule walk (M1) and the
+/// never-release reading (M2) leave it green, and that is the division of labour: this cell says
+/// a rule must be *consistent*, and the shape cells above say **which** consistent rule.
+#[test]
+fn appending_a_token_never_moves_a_gap() {
+  for (label, src, ops) in placement_corpus() {
+    for partial in [false, true] {
+      let short = placement_drive(src, &ops, partial);
+      let long_src = std::format!("{src}x");
+      let mut long_ops = ops.clone();
+      long_ops.push(PlacementOp::Tok(b'x', src.len(), src.len() + 1));
+      let long = placement_drive(&long_src, &long_ops, partial);
+      if let (Ok(short), Ok(long)) = (&short, &long) {
+        assert_eq!(
+          gap_ancestry(short),
+          gap_ancestry(long),
+          "{label} (partial={partial}): appending a token moved a gap\n  \
+           without it: {}\n  with it:    {}",
+          shape(short),
+          shape(long)
+        );
+        assert_eq!(text(short.clone()), src, "{label}: losslessness, short");
+        assert_eq!(text(long.clone()), long_src, "{label}: losslessness, long");
+      }
+    }
+  }
+}
+
+/// **Law 2 — a hoisting diagnostic cannot move a run either.** For every stream in the corpus,
+/// moving each `emit_lexer_error` to every other slot must produce the byte-identical green
+/// tree.
+///
+/// This is not a hygiene property, it is a correctness one. A prefilled lookahead cache emits
+/// the lexer errors it crosses *when it crosses them*, so prefetching moves such a diagnostic
+/// earlier in the event stream — `input_ref`'s cache-transparency matrix states exactly that,
+/// and its `Emission::is_lexer_class` exists to say that a prefill can hoist only that class.
+/// The token event stream is invariant under prefill; the diagnostic stream is not. So the
+/// variants below are one parse under different peek schedules, and if the tree moved, the CST
+/// would be a function of how far the caller happened to look ahead.
+///
+/// Teeth (measured): round 2's mechanism — hold a root child's close, release it at the next
+/// event whatever it is (M4) — reds this cell, first on `trailing, refusal inside the node`
+/// with the diagnostic moved from slot 2 to slot 3: the `Diag` released the hold, so which side
+/// of the close it fell on decided the tree. It is the **only** mutation in the battery that
+/// reds this cell. Round 1's (M3) leaves it green, having skipped `Diag` for an unrelated
+/// reason, and law 1 above is what catches that one instead.
+#[test]
+fn hoisting_a_lexer_error_never_moves_a_gap() {
+  for (label, src, ops) in placement_corpus() {
+    for partial in [false, true] {
+      let Ok(baseline) = placement_drive(src, &ops, partial) else {
+        continue;
+      };
+      for from in 0..ops.len() {
+        if !matches!(ops[from], PlacementOp::Diag(..)) {
+          continue;
+        }
+        for to in 0..ops.len() {
+          if to == from {
+            continue;
+          }
+          let mut moved = ops.clone();
+          let diag = moved.remove(from);
+          moved.insert(to, diag);
+          let other = placement_drive(src, &moved, partial).unwrap_or_else(|err| {
+            std::panic!("{label}: hoisting a diagnostic broke the parse: {err:?}")
+          });
+          assert_eq!(
+            baseline,
+            other,
+            "{label} (partial={partial}): moving the diagnostic from slot {from} to {to} \
+             changed the tree\n  before: {}\n  after:  {}",
+            shape(&baseline),
+            shape(&other)
+          );
+        }
+      }
+    }
+  }
+}
+
+/// Both doors agree on a **balanced** stream: `finish_partial` is the tolerant door for
+/// *incompleteness*, and a balanced stream is not incomplete, so it must not get a different
+/// tree. Pinned because the tail's placement is now decided in the walk rather than after it,
+/// and the walk is shared.
+#[test]
+fn finish_partial_places_a_balanced_trailing_gap_exactly_as_finish_does() {
+  let balanced = |sink: &mut VerboseSink<'_>| {
+    sink.cst_start(K_NODE);
+    sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+    Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(1, 2), MiniErr))
+      .expect("verbose collects");
+    sink.cst_finish(K_NODE);
+  };
+
+  let mut sink = verbose_sink("a!");
+  balanced(&mut sink);
+  let (strict, _emitter) = sink.finish(K_ROOT);
+
+  let mut sink = verbose_sink("a!");
+  balanced(&mut sink);
+  let (tolerant, _emitter) = sink.finish_partial(K_ROOT);
+
+  let strict = strict.expect("balanced and explained");
+  let tolerant = tolerant.expect("balanced and explained");
+  assert_eq!(shape(&strict), r#"Root[Node[Tok"a" Gap"!"]]"#);
+  assert_eq!(
+    strict, tolerant,
+    "the tooling door relaxes incompleteness, not placement: a balanced stream has one tree"
+  );
+}
+
+/// Where a trailing gap lands when `finish_partial` is called with a node still open. Here the
+/// run *does* trail a token — `a`, inside the open `K_NODE` — so the ordinary clause already
+/// answers it, and the answer is the one this door promised before the rule changed.
+///
+/// The end-of-walk tiling that the doc calls the innermost-open-node case is the **fallback**
+/// clause, and it is reachable through this door alone: a run no token precedes, tiled before
+/// the loop that closes the open frames, so rowan appends it to whatever node is still open.
+/// `finish` never sees that shape — an unbalanced stream is refused outright — and the second
+/// half below is it.
+///
+/// Teeth (measured): tiling a leading run at the start of the walk instead (M5) yields
+/// `Root[Gap"ab" Node[List[]]]`, putting the run outside both open frames.
 #[test]
 fn finish_partial_trailing_gap_tiles_into_the_innermost_open_node() {
   let mut sink = verbose_sink("ab");
@@ -1518,6 +2378,19 @@ fn finish_partial_trailing_gap_tiles_into_the_innermost_open_node() {
 
   // Losslessness holds either way — which is why placement needed its own pin.
   assert_eq!(root.text().to_string(), "ab");
+
+  // The fallback clause, which only this door can reach: no committed token at all, two frames
+  // open. The run trails nothing, so it tiles at the end of the walk — and the walk ends with
+  // `K_LIST` open, so `K_LIST` gets it rather than the root.
+  let mut sink = verbose_sink("ab");
+  sink.cst_start(K_NODE);
+  sink.cst_start(K_LIST);
+  let (green, _emitter) = sink.finish_partial(K_ROOT);
+  assert_eq!(
+    shape(&green.expect("the tooling door tiles the un-diagnosed run")),
+    r#"Root[Node[List[Gap"ab"]]]"#,
+    "the innermost OPEN node takes a run no token precedes"
+  );
 }
 
 /// The gap-coverage law at the mechanism level (the partial-drop signature the zero-token
@@ -1678,9 +2551,10 @@ fn structure_without_tokens_is_legal_where_a_lexer_error_explains_every_byte() {
   let green = green.expect("the lexer refused every byte and said so — an honest tree");
   assert_eq!(text(green.clone()), "ab", "every byte tiles as a gap");
   assert_eq!(
-    tree(green).first_child().expect("Root[Node]").kind(),
-    K_NODE,
-    "the node the grammar opened must survive"
+    shape(&green),
+    r#"Root[Node[] Gap"ab"]"#,
+    "the node the grammar opened must survive — beside the tile, since a run that no committed \
+     token precedes has nothing to trail and stays at the root"
   );
 
   // Unexplained: the identical stream minus the diagnostic is the severed channel, and the
@@ -4579,7 +5453,7 @@ fn hand_emitted_cst_token_spans_reach_materialization_without_a_settle() {
 /// with the same message, and could not tell them apart. Qualifying it with
 /// `first_uncovered_gap.is_some()` gives up the accident and keeps every stream the wall was
 /// built for: here the diagnostics explain every byte, so the wall stays silent and the tree
-/// materializes as an empty node beside a root gap over the sink's own bytes.
+/// materializes as the forwarded node holding one gap tile over the sink's own bytes.
 ///
 /// Nothing was traded to buy that. A wall keyed on the absence of a token could never have
 /// separated a foreign pairing from a native one, which is the same reason the finish-time wall
@@ -4624,15 +5498,11 @@ fn a_structured_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_cau
     .expect("the node the wrapper forwarded survives");
   assert_eq!(node.kind(), K_NODE);
   assert_eq!(
-    node.children_with_tokens().count(),
-    0,
-    "and it is empty: no token ever settled inside it"
+    shape(&green),
+    r#"Root[Node[] Gap"XY"]"#,
+    "no token ever settled at all, so the run trails nothing and tiles beside the forwarded \
+     node rather than inside it"
   );
-  let gap = root
-    .children_with_tokens()
-    .nth(1)
-    .expect("…with the whole source tiled beside it");
-  assert_eq!(gap.kind(), K_GAP);
   assert_eq!(
     text(green),
     "XY",

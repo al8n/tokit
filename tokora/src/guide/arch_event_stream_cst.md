@@ -286,6 +286,32 @@ committed token covers is *tiled* with a `gap_kind` token in the currently open 
 whitespace region, an undrained tail, a poisoned truncation: whatever the events left uncovered
 becomes a gap tile, so the round-trip holds for *every* input, lexer errors included.
 
+"The currently open node" is more precise than it looks, and the precision is the whole of the
+placement rule: **a gap is tiled where it opens**, not where it is noticed. An uncovered run opens the
+instant the token before it settles — that is the moment the parse stopped covering the source — so it
+is emitted immediately after that token, in the node open then, and it is in the tree before the next
+event is read. The **trailing** run is therefore not a case: the bytes after the last committed token
+are tiled by that token like any other run, so `Root[Document[Tok] Gap]` is `Root[Document[Tok Gap]]`
+and the node widens over the tail. The one clause left over is a run that **no token precedes** — a
+source that begins with bytes no token claims — which has no such moment and so tiles where the walk
+first sees it: at the first committed token, or, with no committed token anywhere, at the end of the
+walk, in whatever node is open there. A wholly unlexable source consequently keeps its run beside the
+document node rather than inside it, and [`finish_partial`](crate::cst::Sink::finish_partial) tiles
+before it closes the frames an unbalanced stream left open, so there the fallback lands in the
+innermost **open** node.
+
+Two invariances follow, and they are why the rule is stated at the *opening* moment rather than at any
+later one. First, nothing that follows a run can move it: two streams sharing a prefix through the
+token a run trails place that run identically, including when one of them simply stops there — so
+placement never depends on whether more input happened to follow. Second, no **diagnostic** can move it
+either, because placement reads the token and structure events only. That second one is load-bearing
+rather than tidy: a prefilled lookahead cache emits the lexer errors it crosses when it crosses them,
+so prefetching *hoists* a lexer-class diagnostic earlier in the event stream. The token stream is
+exactly invariant under prefill and the diagnostic stream is not, so a rule that read a diagnostic's
+position would make the materialized tree a function of how far the caller happened to peek. Coverage —
+the next paragraph's subject — still consults every diagnostic, but through the merged *set* of
+recorded spans, which is order-independent for the same reason.
+
 But tiling is not unconditional, and the condition is the design's **one deliberate coupling of the
 diagnostic and CST channels**. Elsewhere the two are independent — a `Diag` slot is invisible to the
 tree. At `finish`, though, a tiled byte must be *explained*: `finish` tiles a gap only where a recorded

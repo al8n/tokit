@@ -3,6 +3,57 @@
 All notable changes to this crate are documented here. The project follows semantic
 versioning; before 1.0, a minor bump (0.x → 0.(x+1)) signals a breaking change.
 
+## Unreleased
+
+### Changed (breaking)
+
+1. **A gap is now tiled where it opens — in the node of the token it trails — not where it is
+   noticed.** Where an uncovered run of source bytes lands no longer depends on what happens
+   after the run is already determined. A run used to be tiled at the token that *revealed* it,
+   or, for the **trailing** run, at the end of the walk; both are moments at which the parse may
+   have left the node it was in when it stopped covering the source. So the same garbage produced
+   two tree shapes, chosen by whether more input happened to follow: for a lossless dialect the
+   tail landed *outside* the document node while identical garbage mid-document landed inside it.
+
+   The rule now: an uncovered run opens the instant the token before it settles, and it is tiled
+   there, in the node open at that moment. It is in the tree before the next event is read, so
+   nothing that follows can move it. One clause covers the run that **no token precedes** — a
+   source starting with bytes no token claims — which tiles where the walk first sees it: at the
+   first committed token, or, if the parse committed no token at all, at the end of the walk in
+   whatever node is open there.
+
+   `Root[Document[Tok] Gap]` is now `Root[Document[Tok Gap]]`, and the node **widens over** the
+   run it takes — a `Document@0..11` before a four-byte tail is `Document@0..15` after. A run
+   nested deeper goes deeper: it lands at the depth of the token it trails, not one level below
+   the root by fiat.
+
+   Two placement laws hold by construction and are pinned over a corpus rather than as examples.
+   *Appending a token never moves a gap*: two streams sharing a prefix through the token a run
+   trails place that run in the same node, including when one of them stops there. *Hoisting a
+   lexer error never moves a gap*: placement reads the token and structure events only. The
+   second matters because a prefilled lookahead cache emits the lexer errors it crosses when it
+   crosses them, so prefetching moves such a diagnostic earlier in the event stream — the token
+   stream is exactly invariant under prefill and the diagnostic stream is not, and a rule reading
+   a diagnostic's position would make the tree a function of how far the caller peeked.
+
+   Unchanged: a **leading** run still tiles at the first token that follows it, inside whatever
+   node that token lands in; a run trailing a root-level token stays a root child; a source with
+   **nothing lexable in it** keeps its run beside the document node (`Root[Document@0..0,
+   Gap@0..len]`), because there is no token for it to trail and the identical parse with one
+   lexable byte appended puts it at the root too; and
+   [`finish_partial`](https://docs.rs/tokora/latest/tokora/cst/struct.Sink.html#method.finish_partial)
+   on an **unbalanced** stream still tiles a token-less run into the innermost *open* node. On a
+   balanced stream both doors agree, as they did before.
+
+   `tree.text() == source` is untouched: every uncovered byte still tiles, byte-exactly, under
+   every one of these placements. Only the shape moved.
+
+   **Re-bless any snapshot of a tree built over a source with an uncovered run that follows a
+   committed token** — a truncated parse, an unterminated string or block string, a stray
+   unlexable punctuator after real input. Consumers that walk by text see no change; consumers
+   that walk by node, or that assert on a rendered tree, see the run inside the node of the token
+   before it. A source with *no* committed token at all is not affected.
+
 ## 0.8.0 (2026-07-31)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.
