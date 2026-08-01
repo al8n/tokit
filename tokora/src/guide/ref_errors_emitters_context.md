@@ -84,12 +84,19 @@ impl that wires it in.
   spends. Same shape (blanket `false`, empty impl to opt in), and the same three combinators
   require it — [`recover`](crate::ParseInput::recover),
   [`inplace_recover`](crate::ParseInput::inplace_recover),
-  [`skip_then_retry`](crate::ParseInput::skip_then_retry). Override it if your type stores either
-  terminal carrier: an [`UnexpectedEnd`](crate::error::UnexpectedEnd) whose flag the scanner may
-  raise, or a [`RecursionLimitReached`](crate::error::RecursionLimitReached), which is terminal for
-  every value. A pratt grammar meets the second one by default — the descent budget is on unless
-  you turn it off — and a `From` that discards the value discards the marker, so recovery spends a
-  trip it was told to re-raise.
+  [`skip_then_retry`](crate::ParseInput::skip_then_retry). Override it if your type stores any of
+  the **three** terminal sources: an [`UnexpectedEnd`](crate::error::UnexpectedEnd) whose flag the
+  scanner may raise, a [`RecursionLimitReached`](crate::error::RecursionLimitReached), which is
+  terminal for every value, or a [`SessionRefusal`](crate::input::SessionRefusal), terminal for
+  every value too. A pratt grammar meets the second by default — the descent budget is on unless
+  you turn it off. The third is the odd one and the one worth reading twice: it does **not**
+  implement the trait, so there is nothing to delegate to and the arm is written `true` by hand,
+  and it is *required* rather than consulted — `PartialSession::parse` converts the refusal
+  through your `From` and then asserts the result is terminal, unconditionally, so a
+  `Refused(..)` arm left at `false` panics a release build instead of being quietly spent.
+  A `From` that discards the value discards the marker, so recovery spends a trip it was told to
+  re-raise. The trait's own doc carries the full table, including what to do about a terminal
+  carrier of your own that this crate cannot enumerate.
 - **The `Set` / `Expected` machinery.** A token mismatch does not just say "wrong" — it names
   what was wanted. [`UnexpectedToken`](crate::error::token::UnexpectedToken) carries an
   [`Expected<'a, Kind>`](crate::utils::Expected) (`One(kind)` or `OneOf(set)`); classifiers

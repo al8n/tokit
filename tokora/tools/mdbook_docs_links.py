@@ -304,6 +304,7 @@ DOCS_RS_MAP = {
   "crate::input::Cursor": "input/struct.Cursor.html",
   "crate::input::Descent": "input/struct.Descent.html",
   "crate::input::InputContext::with_recursion_limiter": "input/struct.InputContext.html#method.with_recursion_limiter",
+  "crate::input::SessionRefusal": "input/enum.SessionRefusal.html",
   "crate::keyword": "macro.keyword.html",
   "crate::labelled": "parser/fn.labelled.html",
   "crate::lexer::LogosLexer": "lexer/struct.LogosLexer.html",

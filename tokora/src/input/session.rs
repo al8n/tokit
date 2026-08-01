@@ -102,6 +102,12 @@ pub enum Budget {
 /// conversion site inside [`PartialSession::parse`] carries an **unconditional** assertion,
 /// so a violating impl is a loud panic at the cause in every build — including the release
 /// builds that actually face untrusted input.
+///
+/// This is one of the three terminal sources a consumer's error type has to answer for, and the
+/// only one that is not itself a [`MaybeTerminal`] implementor: there is nothing to delegate to,
+/// so the arm is written `true`. It is also the only one whose wrong answer is a panic rather
+/// than a silent spend. See the trait's own
+/// [table of terminal sources](crate::error::MaybeTerminal#the-terminal-sources) for the full set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum SessionRefusal {

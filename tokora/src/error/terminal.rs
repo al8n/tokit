@@ -4,19 +4,28 @@
 /// Discriminates whether an error value represents a **terminal stop** — a resource limit the parse
 /// tripped, which no amount of further input can clear.
 ///
-/// # The two carriers
+/// # The terminal sources
 ///
-/// Two error types in this crate can report themselves terminal, and they differ in how they say so
-/// and in how they reach a caller. An error type that can hold either must be able to answer for it:
+/// **Three** values in this crate can put a terminal stop into a caller's error type, and this is
+/// the whole set. Two of them answer [`is_terminal`](Self::is_terminal) for themselves, so an arm
+/// holding one **delegates**; the third does not implement this trait at all, so an arm holding it
+/// must answer for it. Every variant of your error type that can hold one needs its own arm:
 ///
-/// | Carrier | Terminal when | How it surfaces |
-/// |---|---|---|
-/// | [`UnexpectedEnd`](crate::error::UnexpectedEnd) | its [`is_terminal`](crate::error::UnexpectedEnd::is_terminal) flag is raised — a **scanner** stop: a scanner resource-limit trip, or the poison boundary it latches | as the committed form's end-of-input error, so it reads as an ordinary end of input to a caller that does not care, yet stays distinguishable from a *genuine* end of input to one that does |
-/// | [`RecursionLimitReached`](crate::error::RecursionLimitReached) | **always** — a **descent** stop: the frame budget [`InputRef::descend`](crate::InputRef::descend) enforces, which both Pratt engines enter every frame through | as its own type, returned on the `Err` channel and never emitted. It latches nothing: the unwind restores the depth cell on its way out |
+/// | Source | Terminal when | Your arm writes | How it reaches you, and what a wrong arm costs |
+/// |---|---|---|---|
+/// | [`UnexpectedEnd`](crate::error::UnexpectedEnd) | its [`is_terminal`](crate::error::UnexpectedEnd::is_terminal) flag is raised — a **scanner** stop: a scanner resource-limit trip, or the poison boundary it latches | `e.is_terminal()` | through `From<UnexpectedEnd<…>>`, as the committed form's end-of-input error, so it reads as an ordinary end of input to a caller that does not care yet stays distinguishable from a *genuine* end of input to one that does. An arm left at `false` is **spent silently**, as a recoverable failure |
+/// | [`RecursionLimitReached`](crate::error::RecursionLimitReached) | **always** — a **descent** stop: the frame budget [`InputRef::descend`](crate::InputRef::descend) enforces, which both Pratt engines enter every frame through | `e.is_terminal()` | through `From<RecursionLimitReached<…>>`, as its own type on the `Err` channel, never emitted. It latches nothing: the unwind restores the depth cell on its way out. An arm left at `false` is **spent silently** |
+/// | [`SessionRefusal`](crate::input::SessionRefusal) | **always** — a **session** stop: the cross-attempt byte budget is exhausted, or an earlier attempt latched the session shut. Both are decided before any attempt work | `true`, spelled out — this type deliberately does **not** implement `MaybeTerminal`, so there is nothing to delegate to | through `From<SessionRefusal>` inside [`PartialSession::parse`](crate::input::PartialSession::parse), which then **asserts** the converted value is terminal. That assertion is unconditional, so an arm left at `false` is a **panic in a release build**, not a silent spend — see the [coherence law](crate::input::SessionRefusal#the-coherence-law) for why it is a panic and not a returned error |
 ///
-/// Recovery is the caller that must care, and it asks *this trait* rather than either type — so a
-/// grammar error that holds one of them decides the verdict by what its [`is_terminal`](Self::is_terminal)
-/// returns, not by what the value inside it would have said.
+/// Recovery is the caller that must care about the first two, and it asks *this trait* rather than
+/// either type — so a grammar error that holds one of them decides the verdict by what its
+/// [`is_terminal`](Self::is_terminal) returns, not by what the value inside it would have said. The
+/// third has a stricter caller: the session gate does not consult the verdict, it *requires* it.
+///
+/// Nothing else in this crate is terminal. The trait's only other implementations here are
+/// [`NonAssociativeChain`](crate::error::NonAssociativeChain) and `()`, and both keep the `false`
+/// default deliberately — the first is malformed input, which recovery *may* spend; the second
+/// stores nothing at all.
 ///
 /// # The never-recoverable dual
 ///
@@ -37,29 +46,57 @@
 /// [`MaybeIncomplete`](crate::error::MaybeIncomplete): the single method
 /// [`is_terminal`](Self::is_terminal) has a **blanket `false` default**, so an error type opts in
 /// with an empty `impl MaybeTerminal for MyError {}` and overrides the method only if it can carry a
-/// terminal signal — by delegating to **whichever of the two carriers above it stores**. A type that
-/// stores both must delegate to both: an arm that answers for one and leaves the other at `false`
-/// spends that half as a recoverable failure.
+/// terminal signal — **one arm per source in the table above that it stores**, delegating where the
+/// source reports for itself and answering `true` where it does not. A type that stores several must
+/// answer for every one of them: an arm that answers for one source and leaves another at `false`
+/// spends that half as a recoverable failure, or — for a `SessionRefusal` arm — panics the next
+/// refused attempt.
 ///
-/// A conversion that **discards** the carrier discards the marker with it. The converted value is
+/// A conversion that **discards** the source discards the marker with it. The converted value is
 /// non-terminal whatever the value it came from said — `()` included, since the sink stores nothing
 /// — and recovery will spend the stop rather than re-raise it. See
 /// [`RecursionLimitReached`](crate::error::RecursionLimitReached)'s own
 /// [section on a discarding sink](crate::error::RecursionLimitReached#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound)
 /// for what that costs and what it does not.
 ///
+/// # Where the set stops being closed
+///
+/// The table is the complete set of terminal values **this crate** hands you, and it is closed by
+/// construction rather than by recollection: those three are the only sources, and the trait's only
+/// other implementations here keep the `false` default on purpose. It is *not* closed for values
+/// this crate does not hand you. `MaybeTerminal` is unsealed and its default is `false`, so a
+/// downstream type may report itself terminal for a limit of its own — a lexer's
+/// [`Token::Error`](crate::Token::Error), an error wrapped in from another crate, a resource guard
+/// in your own grammar — and no table here can enumerate those.
+///
+/// An arm holding one of them follows the same two rules. **Delegate** if the value implements
+/// `MaybeTerminal`. Otherwise decide it with the question the whole trait is: *can more input clear
+/// this?* If it can, the arm is `false`. If it cannot, and the value is a tripped limit rather than
+/// malformed input, the arm is `true` — malformed input is the recoverable case, which is exactly
+/// why [`NonAssociativeChain`](crate::error::NonAssociativeChain) answers `false`.
+///
 /// ```
 /// use tokora::{
 ///   error::{MaybeTerminal, RecursionLimitReached, UnexpectedEot},
+///   input::SessionRefusal,
 ///   state::recursion_tracker::{RecursionLimiter, RecursionTracker},
 /// };
 ///
-/// // A user error that keeps both terminal-capable values, so both markers survive.
+/// // A user error that keeps every terminal-capable value, so every marker survives.
 /// enum MyError {
 ///   Eot(UnexpectedEot),
 ///   Depth(RecursionLimitReached),
+///   Refused(SessionRefusal),
 ///   Other,
 /// }
+///
+/// // The session gate converts through this impl, then asserts the result is terminal.
+/// impl From<SessionRefusal> for MyError {
+///   fn from(refusal: SessionRefusal) -> Self {
+///     MyError::Refused(refusal)
+///   }
+/// }
+///
 /// impl MaybeTerminal for MyError {
 ///   fn is_terminal(&self) -> bool {
 ///     match self {
@@ -67,6 +104,8 @@
 ///       MyError::Eot(e) => e.is_terminal(),
 ///       // Always: a depth budget is never cleared by more input.
 ///       MyError::Depth(e) => e.is_terminal(),
+///       // Always, and spelled out: `SessionRefusal` has no `is_terminal` to delegate to.
+///       MyError::Refused(_) => true,
 ///       MyError::Other => false,
 ///     }
 ///   }
@@ -82,6 +121,15 @@
 /// limiter.increase();
 /// let exceeded = RecursionTracker::check(&limiter).unwrap_err();
 /// assert!(MyError::Depth(RecursionLimitReached::of(7, exceeded)).is_terminal());
+///
+/// // The coherence law `PartialSession::parse` asserts, checked here instead of at the panic:
+/// // both refusal legs must convert to a value that answers `true`.
+/// for refusal in [
+///   SessionRefusal::BudgetExhausted { spent: 10, budget: 8 },
+///   SessionRefusal::TerminalLatched,
+/// ] {
+///   assert!(MyError::from(refusal).is_terminal());
+/// }
 /// ```
 pub trait MaybeTerminal {
   /// Returns `true` iff this error value represents a terminal stop. Defaults to `false`.
@@ -91,7 +139,10 @@ pub trait MaybeTerminal {
   }
 }
 
-/// The unit error sink is never a terminal signal: it stores nothing, so it can carry neither
-/// carrier's marker. Converting a terminal stop into `()` is therefore an opt-out of terminal
-/// re-raise — see [Opting in](MaybeTerminal#opting-in).
+/// The unit error sink is never a terminal signal: it stores nothing, so it can carry no source's
+/// marker. Converting a terminal stop into `()` is therefore an opt-out of terminal re-raise — see
+/// [Opting in](MaybeTerminal#opting-in). It is also why this crate ships no
+/// `From<SessionRefusal>` for `()`, and why it never will: that conversion is the one the
+/// [session gate](crate::input::SessionRefusal#the-coherence-law) *requires* to be terminal rather
+/// than merely consulting, and a sink that always answers `false` can never satisfy it.
 impl MaybeTerminal for () {}
