@@ -1271,7 +1271,16 @@ everywhere else.
     The definition is checkable rather than descriptive, and that is the point of it: catch the
     error and **`InputRef::span().end()` *is* the offset**. Everything from that byte onward is
     still available to the caller — including whatever the deciding read had consumed before it was
-    handed back — so a recoverer that resumes at the offset resumes exactly where it was left.
+    handed back.
+
+    That identity is about the **handback**, and it is not a statement about where a recovery
+    combinator restarts. `Recover` and `skip_then_retry` speculate through `try_attempt`, whose
+    failure path restores the pre-attempt checkpoint before the handler runs or the skip loop
+    starts, so both resume at their own attempt origin instead; `InplaceRecover` never backtracks
+    and is the one that stands where the offset names. Measured on `1 ; 2 ; 3` with the whole pratt
+    parser wrapped, where the error carries 5: catching the `Err` yourself reads 5,
+    `inplace_recover` reads 5, `recover` reads **0**, and `skip_then_retry` scans forward from
+    **0** — its first sync candidate is the `1` at 0 and its first skipped region is `0..1`.
 
     Reading it as a pointer at the operator is wrong in four ordinary shapes, each measured:
     whitespace the lexer skips (`1 ; 2 ; 3` — offset 5, the repeat at 6); whitespace surfaced as

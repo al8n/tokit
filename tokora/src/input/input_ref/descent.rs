@@ -18,7 +18,10 @@ where
   ///
   /// Read-only, deliberately. There is no `recursion_mut`: the cell has exactly one writer, the
   /// [`Descent`] guard [`descend`](Self::descend) hands out, which is what makes "every level
-  /// entered is a level left" a property of the type system rather than of caller discipline.
+  /// entered is a level left" a property of the type system on every exit path rather than of
+  /// caller discipline — short of leaking the guard instead of dropping it, which is Rust's
+  /// universal `mem::forget` caveat and is covered on
+  /// [`Descent`](Descent#what-the-type-system-enforces-here-and-what-it-does-not).
   /// *Balance* is the property that buys; **where** a level is left is the guard's scope, and
   /// that is the caller's to place — unless the scope is
   /// [`descending`](Self::descending)'s closure, which places it for you. See
@@ -255,10 +258,16 @@ where
 /// Two of the three properties are the compiler's. The third is not, and it is the one that goes
 /// wrong, so it is stated rather than left to be discovered:
 ///
-/// * **Balance is guaranteed.** Every level entered is left, exactly once, by this type's `Drop`.
-///   There is no `recursion_mut` and no "ascend" to forget, and no exit path — return, `?`, or an
-///   unwind — skips a destructor. That much *is* a property of the type system rather than of
-///   caller discipline.
+/// * **Balance is guaranteed on every exit path.** Every level entered is left, exactly once, by
+///   this type's `Drop`. There is no `recursion_mut` and no "ascend" to forget, and no exit path —
+///   return, `?`, or an unwind — skips a destructor. That much *is* a property of the type system
+///   rather than of caller discipline. What it is not proof against is *leaking* the guard rather
+///   than dropping it: `mem::forget`, `ManuallyDrop` and `Box::leak` skip every destructor in Rust
+///   and this one is not special. Measured, a forgotten guard holds its level for the rest of the
+///   parse — `recursion().depth()` never comes back down and the input stays usable at the raised
+///   depth — which is the opposite failure from the four rows below and the milder one: it
+///   *tightens* the budget rather than removing it, so the worst outcome is a spurious trip and
+///   never a native abort.
 /// * **Nesting through a live guard is guaranteed.** The exclusive borrow means that for as long
 ///   as the guard exists it is the only route to the input, so no code can parse this frame from
 ///   outside its own level.

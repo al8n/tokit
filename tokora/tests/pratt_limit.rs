@@ -1321,6 +1321,285 @@ fn an_explicit_recovery_may_spend_the_repeat() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// R2 — WHERE EACH RECOVERY PATH RESUMES, read off the input rather than assumed
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Every `Resumption` cell above pins the offset against the position the **handback** left the
+// input at. That is a fact about the error's own exit, and it is not a statement about where a
+// recovery combinator restarts — for two of the three paths those are different numbers:
+//
+//   * `Recover` and `skip_then_retry` speculate through `try_attempt`, whose failure path restores
+//     the pre-attempt checkpoint *before* `recover_input` runs / before the skip loop's first sync.
+//     Both therefore resume at their own attempt origin, which is at or before the offset.
+//   * `InplaceRecover` never backtracks, and is the one combinator standing exactly where the
+//     offset names.
+//
+// `an_explicit_recovery_may_spend_the_repeat` above asserts the payload the recoverer is handed and
+// nothing about the input underneath it — which is exactly how "hand the error to `Recover` and the
+// offset it reads is the offset the retry begins at" survived twelve review rounds. These three
+// cells read the position.
+
+thread_local! {
+  /// What a recovery handler observed: the error's offset, `span().end()`, and `cursor()`.
+  static RECOVERY_SITE: core::cell::Cell<Option<(usize, usize, usize)>> =
+    const { core::cell::Cell::new(None) };
+  /// Every offset `skip_then_retry`'s sync predicate was offered a token at, in source order.
+  static SYNC_CANDIDATES: core::cell::RefCell<std::vec::Vec<usize>> =
+    const { core::cell::RefCell::new(std::vec::Vec::new()) };
+}
+
+/// **`Recover` hands its handler the input at its own attempt origin, not at the reported offset.**
+///
+/// On `1 ; 2 ; 3` the error says 5 and the handler is standing on 0: `Recover` speculates through
+/// [`try_attempt`], whose failure path restores the pre-parse checkpoint before `recover_input` is
+/// called. Both numbers are right, and they answer different questions — this cell exists so the
+/// contract cannot fuse them again.
+///
+/// What makes it red: `Recover` ceasing to roll back (the handler would read 5, and the two
+/// `assert_ne!`-shaped claims below would both fail); the handback offset moving (the `at == 5`
+/// pin, shared with `typed_repeat_at_the_top_level_is_named_at_the_handback`); the recoverer being
+/// handed anything other than the whole expression (the post-conditions: frontier 0, next token 0).
+#[test]
+fn a_rollback_recovery_resumes_at_its_attempt_origin_not_at_the_offset() {
+  fn recovery<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+    err: LimErr,
+  ) -> Result<String, LimErr>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+  {
+    let LimErr::NonAssoc { at } = err else {
+      panic!("expected the non-associative chain; got {err:?}");
+    };
+    // Read before anything else: a peek or a consume would move both.
+    RECOVERY_SITE.with(|c| c.set(Some((at, inp.span().end(), *inp.cursor().as_inner()))));
+    Ok(String::from("<recovered>"))
+  }
+
+  /// `(the recovered value, the frontier after the combinator, the next token's start)`.
+  fn probe<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  ) -> Result<(String, usize, Option<usize>), LimErr>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+  {
+    let out = pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix)
+      .recover(recovery)
+      .parse_input(inp)?;
+    let frontier = inp.span().end();
+    Ok((out, frontier, inp.next()?.map(|t| t.span().start())))
+  }
+
+  RECOVERY_SITE.with(|c| c.set(None));
+  let (got, frontier, next) = Parser::with_context(fatal_ctx())
+    .apply(probe)
+    .parse_str("1 ; 2 ; 3")
+    .unwrap();
+  assert_eq!(got, "<recovered>");
+
+  let (at, observed, cursor) = RECOVERY_SITE.with(|c| c.get()).expect("the recoverer ran");
+
+  assert_eq!(at, 5, "the error still carries the handback position");
+  assert_eq!(
+    observed, 0,
+    "`Recover` restores the pre-attempt checkpoint before the handler runs, so the handler is \
+     standing on the position the WRAPPED PARSER started at — 0 here — not on the offset"
+  );
+  assert_eq!(
+    cursor, 0,
+    "the lookahead cursor is rolled back with it: nothing of the expression is still in hand"
+  );
+  assert!(
+    observed < at,
+    "the two are different numbers, and the rollback target is the earlier one: observed \
+     {observed}, offset {at}"
+  );
+  assert_eq!(
+    (frontier, next),
+    (0, Some(0)),
+    "and the whole expression is back in front of the caller — a recoverer that resumed at the \
+     offset would find `; 3` here, not `1 ; 2 ; 3`"
+  );
+}
+
+/// **`InplaceRecover` is the path that does resume at the offset**, and the `Cursor` it is *also*
+/// handed is the other number — where the primary parser started.
+///
+/// This is the control for the cell above: same fixture, same error, no rollback. `span().end()`
+/// in the handler **is** the offset, which is r15's checkable identity observed through a
+/// combinator rather than by catching the `Err` in grammar code.
+///
+/// What makes it red: `InplaceRecover` gaining a rollback (the handler would read 0 and
+/// `observed == at` would fail); the handback moving away from `span().end()`; the `Cursor`
+/// argument ceasing to name the primary's start.
+#[test]
+fn an_in_place_recovery_resumes_at_the_offset_itself() {
+  fn recovery<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+    cursor: tokora::input::Cursor<'inp, '_, TestLexer<'inp>>,
+    err: LimErr,
+  ) -> Result<String, LimErr>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+  {
+    let LimErr::NonAssoc { at } = err else {
+      panic!("expected the non-associative chain; got {err:?}");
+    };
+    RECOVERY_SITE.with(|c| c.set(Some((at, inp.span().end(), *cursor.as_inner()))));
+    Ok(String::from("<recovered>"))
+  }
+
+  fn probe<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  ) -> Result<(String, usize, Option<usize>), LimErr>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+  {
+    let out = pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix)
+      .inplace_recover(recovery)
+      .parse_input(inp)?;
+    let frontier = inp.span().end();
+    Ok((out, frontier, inp.next()?.map(|t| t.span().start())))
+  }
+
+  RECOVERY_SITE.with(|c| c.set(None));
+  let (got, frontier, next) = Parser::with_context(fatal_ctx())
+    .apply(probe)
+    .parse_str("1 ; 2 ; 3")
+    .unwrap();
+  assert_eq!(got, "<recovered>");
+
+  let (at, observed, cursor) = RECOVERY_SITE.with(|c| c.get()).expect("the recoverer ran");
+
+  assert_eq!(at, 5, "the same handback position the rollback cell reads");
+  assert_eq!(
+    observed, at,
+    "the in-place path does not backtrack, so `span().end()` in the handler IS the offset — the \
+     one recovery path on which the two are the same number"
+  );
+  assert_eq!(
+    cursor, 0,
+    "and the `Cursor` it is handed is the OTHER number: where the primary parser started"
+  );
+  assert!(
+    cursor < at,
+    "the two arguments name different positions, which is the whole point of passing both: \
+     cursor {cursor}, offset {at}"
+  );
+  assert_eq!(
+    (frontier, next),
+    (5, Some(6)),
+    "the input is untouched by the handler, so the repeated `;` at 6 is still the next token"
+  );
+}
+
+/// **`skip_then_retry` starts its skip loop at the attempt origin, so it scans from *behind* the
+/// repeat.**
+///
+/// Its first attempt is a `try_attempt` too, so the rollback lands the loop on 0 and
+/// `sync_balanced` scans from there. On `1 ; 2 ; 3` the first token its sync predicate is offered
+/// is the `1` at 0 — three bytes behind the reported offset and four behind the repeated `;` at 6
+/// — and its first skipped region is `0..1`, a stretch the parse had already accepted.
+///
+/// The offset is re-measured in this same cell by a bare run of the same parser over the same
+/// source, so the comparison is against a read number and not against a literal.
+///
+/// What makes it red: the first attempt ceasing to roll back (the first candidate would be the
+/// `;` at 6 and both ordering claims would fail); the sync scan starting anywhere other than the
+/// attempt origin; the skipped regions changing shape.
+#[test]
+fn skip_then_retry_scans_from_the_attempt_origin_not_from_the_offset() {
+  fn probe<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  ) -> Result<(Result<String, LimErr>, usize), LimErr>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+  {
+    let out = pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix)
+      .skip_then_retry(
+        |_: &common::TokenKind| tokora::input::Balance::<char>::Neutral,
+        |tok: tokora::span::Spanned<&Token, &tokora::SimpleSpan>| {
+          SYNC_CANDIDATES.with(|c| c.borrow_mut().push(tok.span().start()));
+          matches!(tok.data(), Token::Semi)
+        },
+      )
+      .parse_input(inp);
+    let frontier = inp.span().end();
+    Ok((out, frontier))
+  }
+
+  // The offset, read rather than assumed, from a bare run of the same parser over the same source.
+  let (at, handback, _) = {
+    let got: Resumption = Parser::with_context(fatal_ctx())
+      .apply(typed_resumption_probe)
+      .parse_str("1 ; 2 ; 3")
+      .unwrap();
+    got
+  };
+  assert_eq!(
+    (at, handback),
+    (5, 5),
+    "the handback identity the retry is being compared against"
+  );
+
+  SYNC_CANDIDATES.with(|c| c.borrow_mut().clear());
+  let mut emitter = Verbose::<LimErr>::new();
+  let (out, frontier) = Parser::with_context((
+    &mut emitter,
+    tokora::cache::DefaultCache::<TestLexer<'_>>::default(),
+  ))
+  .apply(probe)
+  .parse_str("1 ; 2 ; 3")
+  .unwrap();
+
+  let candidates = SYNC_CANDIDATES.with(|c| c.borrow().clone());
+  let first = *candidates.first().expect("the skip loop ran a sync");
+  assert_eq!(
+    first, 0,
+    "the first attempt is rolled back before the loop starts, so the scan begins at the attempt \
+     origin — the `1` at 0 — and not at the offset the error reported"
+  );
+  assert!(
+    first < at,
+    "and it begins strictly BEHIND the reported offset: first candidate {first}, offset {at}"
+  );
+  assert_eq!(
+    candidates,
+    std::vec![0, 2, 4, 6, 8],
+    "every cycle's scan, in source order: cycle 1 syncs on the FIRST `;` at 2 — the one the \
+     expression had already folded — cycle 2 on the second at 6, and cycle 3 runs out of input"
+  );
+
+  assert_eq!(
+    emitter
+      .skipped_regions()
+      .get(&tokora::SimpleSpan::new(0, 1)),
+    Some(&std::vec![1usize]),
+    "cycle 1's hole covers the `1` at 0..1, a region entirely before the reported offset and one \
+     the parse had already accepted — a recovery that resumed at the offset could not have \
+     skipped it"
+  );
+  let holes: usize = emitter.skipped_regions().values().map(|g| g.len()).sum();
+  assert_eq!(holes, 2, "one per cycle that skipped: 0..1 and 4..5");
+
+  assert_eq!(
+    out,
+    Err(LimErr::Unexpected),
+    "and no retry succeeds: every sync point lands the retry on a `;`, which is not an operand"
+  );
+  assert_eq!(
+    frontier, 7,
+    "the loop leaves the input past the second `;` — input the offset's own contract would have \
+     preserved"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // R2 under a TRIVIA-SURFACING grammar
 // ═══════════════════════════════════════════════════════════════════════════════
 //

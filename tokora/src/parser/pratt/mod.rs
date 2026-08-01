@@ -295,8 +295,11 @@ where
 /// the skipped trivia; so is one whose operator is spelled with several tokens, and so is any
 /// operator a whitespace skip or a reported lexer error sits in front of. The driver cannot do
 /// better without running this function, and it must decide the repeat before it may. What the
-/// offset always is, is the byte a recoverer resumes from — see
-/// [`NonAssociativeChain`](crate::error::NonAssociativeChain) for the full statement.
+/// offset always is, is the byte the input was left at — which is where a grammar that catches the
+/// `Err`, or recovers with [`inplace_recover`](crate::ParseInput::inplace_recover), resumes;
+/// [`recover`](crate::ParseInput::recover) and
+/// [`skip_then_retry`](crate::ParseInput::skip_then_retry) roll back to their own attempt origin
+/// first. See [`NonAssociativeChain`](crate::error::NonAssociativeChain) for the full statement.
 ///
 /// ```
 /// use tokora::parser::{PrattInfix, PrattRHS, Precedenced};

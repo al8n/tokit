@@ -80,8 +80,8 @@ table is the whole rule:
 operator on the input, unconsumed. The offset it carries is the **handback position**, and that is
 one specific, checkable number: catch the error and
 [`InputRef::span().end()`](crate::InputRef::span) is the offset. Nothing before it is still
-available to you; everything from it onward is. That is what makes the error usable for recovery —
-the offset you read is the offset a retry starts at.
+available to you; everything from it onward is. That is what makes the error usable: the offset
+names a real boundary in your own input, not a position derived from something near it.
 
 It is **not** the second operator's own start, and you should not read it as a pointer at the
 operator. Anything the handback also returned sits between the two: whitespace your lexer skipped,
@@ -99,6 +99,24 @@ grammar that wants the tolerant reading asks for it explicitly, by wrapping the 
 or by declaring the operator [`Left`](crate::parser::PrattInfix::Left). The latch is armed by a
 `Neither` fold, cleared by folding an infix at a different power, and untouched by a postfix
 fold — so `a == b! == c` still trips.
+
+**The offset is where the handback left the input — not where a recovery combinator restarts.** Two
+of the three roll back further before they run: [`recover`](crate::ParseInput::recover) and
+[`skip_then_retry`](crate::ParseInput::skip_then_retry) speculate through
+[`try_attempt`](crate::InputRef::try_attempt), whose failure path restores the pre-attempt
+checkpoint, so what they hand a handler — or begin skipping from — is their own attempt origin. On
+`1 ; 2 ; 3` with the whole pratt parser wrapped, the error carries offset **5** and:
+
+| Path | The position it observes |
+|---|---|
+| catching the `Err` in your own grammar | **5** |
+| [`inplace_recover`](crate::ParseInput::inplace_recover) | **5** — it never backtracks; the [`Cursor`](crate::input::Cursor) it is *also* handed names where the primary parser started, 0 |
+| [`recover`](crate::ParseInput::recover) | **0** |
+| [`skip_then_retry`](crate::ParseInput::skip_then_retry) | **0**, and it scans forward from there — on this input it synchronises on the *first* `;` at 2, behind the repeat, and its first skipped region is `0..1` |
+
+So a `.recover(…)` handler may render a caret at the offset it was handed, but must not assume the
+input is positioned there. If you want a recovery that resumes at the offset, catch the `Err`
+yourself or reach for [`inplace_recover`](crate::ParseInput::inplace_recover).
 
 **Known limitation: the contract is per-operator, not whole-chain fixity resolution.** `a == b < c`
 with `==` non-associative and `<` left-associative at the same power is **rejected**, while

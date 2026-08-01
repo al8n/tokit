@@ -11,6 +11,10 @@
 //! results, and a change that closes one of them must change that table in the same commit. They
 //! go red the moment the measured behaviour stops matching the prose — in either direction.
 //!
+//! One further cell, `a_leaked_guard_holds_its_level_for_the_rest_of_the_parse`, pins the
+//! *opposite* failure and the reason the balance claim is scoped to exit paths: a guard that is
+//! leaked rather than dropped holds its level permanently.
+//!
 //! What they do **not** measure is the native stack, because a stack overflow aborts the process
 //! rather than failing a test. That half was measured out-of-band, one process per depth, and the
 //! abort depths are recorded in the same documentation table.
@@ -404,4 +408,54 @@ fn descending_builds_the_trip_as_the_frames_own_error() {
     Err(FrameErr(TRIP_DEPTH)),
     "the trip is returned, not emitted, so it is built as the frame's own error"
   );
+}
+
+/// **The one way the balance claim can be broken, and it is Rust's universal one.** Every *exit
+/// path* out of the guard's scope runs its destructor, which is what makes "every level entered is
+/// a level left" a property of the type rather than of caller discipline. Leaking the guard —
+/// `mem::forget`, `ManuallyDrop`, `Box::leak` — is not an exit path, and it holds the level for the
+/// rest of the parse: the cell never comes back down and the input stays usable at the raised
+/// depth.
+///
+/// This is the *opposite* failure from the five bypass cells above, and the milder one: it tightens
+/// the budget rather than removing it, so the worst outcome is a spurious
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached) and never a native abort. It is
+/// pinned because [`Descent`](super::Descent)'s documentation states the balance claim *scoped to
+/// exit paths* — a change that made the claim unconditional, or that closed this hole, must change
+/// that prose in the same commit.
+#[test]
+fn a_leaked_guard_holds_its_level_for_the_rest_of_the_parse() {
+  with_budget(|inp| {
+    assert_eq!(inp.recursion().depth(), 0, "nothing is descended yet");
+
+    {
+      let frame = inp.descend().expect("one level fits under the budget");
+      core::mem::forget(frame);
+    }
+
+    assert_eq!(
+      inp.recursion().depth(),
+      1,
+      "the level survives the scope it was taken in: no destructor ran, so nothing released it"
+    );
+
+    // And the budget is genuinely one level tighter for everything that follows: a chain that
+    // would otherwise trip at `LIMIT + 1` now trips one frame earlier.
+    assert_eq!(
+      scoped(inp, CALLS),
+      Err(ProbeErr::Trip {
+        at: 0,
+        depth: TRIP_DEPTH,
+        limitation: LIMIT
+      }),
+      "the parse continues normally — the leaked level is spent budget, not a broken input — and \
+       trips having descended one frame fewer than a clean parse would"
+    );
+
+    assert_eq!(
+      inp.recursion().depth(),
+      1,
+      "and it is still held after the trip unwinds every level the trip itself raised"
+    );
+  });
 }

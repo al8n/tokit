@@ -67,10 +67,10 @@ use core::marker::PhantomData;
 /// what the driver's transaction rules forbid.
 ///
 /// **What is guaranteed, by identity rather than by agreement, is that the reported offset and the
-/// resumption point are one number.** That is the property recovery correctness rests on: hand the
-/// error to [`Recover`](crate::parser::Recover) or
-/// [`skip_then_retry`](crate::ParseInput::skip_then_retry) and the offset it reads is the offset
-/// the retry begins at.
+/// position the input was handed back at are one number.** That is what makes the value usable:
+/// `at` names a real boundary in the caller's own input, and everything from it onward is still in
+/// front of whoever the error reaches. It is a fact about the *handback*, and the section below
+/// says which callers are standing on it when they read the value.
 ///
 /// **How each engine gets there — neither measures anything near the handback.** The typed engine
 /// carries its cycle's committed-progress watermark, which is the value its probe's checkpoint was
@@ -80,6 +80,39 @@ use core::marker::PhantomData;
 /// cycle found it. Both therefore report the same number on any input both can parse, and the
 /// numbers agree because the two engines answer the same question, not because two mechanisms
 /// happen to line up.
+///
+/// # Which recovery paths resume at the offset, and which do not
+///
+/// The identity above is about the handback, and it holds for whoever the error is handed to
+/// *unchanged*. It is **not** a prediction of where a recovery combinator restarts, because two of
+/// the three roll the input back further before they run: [`Recover`](crate::parser::Recover) and
+/// [`skip_then_retry`](crate::ParseInput::skip_then_retry) both speculate through
+/// [`try_attempt`](crate::InputRef::try_attempt), whose failure path restores the pre-attempt
+/// checkpoint. What they hand a handler, or begin skipping from, is therefore **their own attempt
+/// origin** — at or before this offset, and usually well before it.
+///
+/// Measured on `1 ; 2 ; 3` with the whole pratt parser wrapped, where the error carries `at == 5`:
+///
+/// | Path | The position it observes | Why |
+/// |---|---|---|
+/// | Catch the `Err` yourself | [`span().end()`](crate::InputRef::span) is **5** | nothing has moved since the handback |
+/// | [`inplace_recover`](crate::ParseInput::inplace_recover) | `span().end()` is **5** | it never backtracks; the [`Cursor`](crate::input::Cursor) it is *also* handed names where the primary parser started, **0** |
+/// | [`recover`](crate::ParseInput::recover) | `span().end()` is **0** | the attempt is rolled back before `recover_input` runs |
+/// | [`skip_then_retry`](crate::ParseInput::skip_then_retry) | **0**, and the skip scans forward from there | same rollback; the first token its sync predicate is offered is the `1` at 0, and its first skipped region is `0..1` |
+///
+/// Both facts are true at once, and neither weakens the other. The practical consequences of the
+/// second one are worth spelling out, because they are not what a reader of the offset would guess:
+///
+/// * A `.recover(…)` handler that renders a caret at the offset it was handed is right; one that
+///   assumes the input is *at* that offset — say, by reading the next token expecting to find the
+///   repeated operator — is reading from the start of the expression instead.
+/// * `skip_then_retry` scans for its sync point from behind the repeat, so it can synchronise on a
+///   token the expression had already folded. On `1 ; 2 ; 3` it syncs on the **first** `;` at 2,
+///   three bytes behind the offset and four behind the repeated operator at 6.
+///
+/// **If you need a recovery that resumes where the error says**, catch the `Err` in your own
+/// grammar code, or use [`inplace_recover`](crate::ParseInput::inplace_recover): those are the two
+/// paths on which the input is still where the offset names.
 ///
 /// # A per-operator contract, not whole-chain fixity resolution
 ///
@@ -103,9 +136,10 @@ use core::marker::PhantomData;
 #[error("non-associative operator at {at} cannot be chained at its own power")]
 pub struct NonAssociativeChain<O = usize, Lang: ?Sized = ()> {
   /// The offset the input was handed back at — `InputRef::span().end()` once the error is in the
-  /// caller's hands, and where the surrounding grammar resumes. At or before the repeated
-  /// operator's own start, and strictly before it whenever anything the caller was also handed
-  /// back sits between them. See the type's docs.
+  /// caller's hands, and where the surrounding grammar resumes if it catches the `Err` itself or
+  /// recovers in place; a rollback-based recovery restarts at its own attempt origin instead. At
+  /// or before the repeated operator's own start, and strictly before it whenever anything the
+  /// caller was also handed back sits between them. See the type's docs.
   at: O,
   _lang: PhantomData<Lang>,
 }
@@ -120,8 +154,14 @@ impl<O, Lang: ?Sized> NonAssociativeChain<O, Lang> {
     }
   }
 
-  /// Returns the handback offset — the position the surrounding grammar resumes at, which is at
-  /// or before the repeated operator's own start.
+  /// Returns the handback offset — the position the input was left at, which is at or before the
+  /// repeated operator's own start.
+  ///
+  /// It is where a grammar that catches this error, or one that recovers with
+  /// [`inplace_recover`](crate::ParseInput::inplace_recover), resumes.
+  /// [`Recover`](crate::parser::Recover) and
+  /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) restore their own attempt origin
+  /// first and restart there instead — see the type's docs.
   #[inline(always)]
   pub const fn offset(&self) -> O
   where

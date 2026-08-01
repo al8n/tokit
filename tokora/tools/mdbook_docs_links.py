@@ -300,6 +300,7 @@ DOCS_RS_MAP = {
   "crate::input": "input/index.html",
   "crate::input#the-sans-io-resumption-loop": "input/index.html#the-sans-io-resumption-loop",
   "crate::input::Checkpoint": "input/struct.Checkpoint.html",
+  "crate::input::Cursor": "input/struct.Cursor.html",
   "crate::input::Descent": "input/struct.Descent.html",
   "crate::input::InputContext::with_recursion_limiter": "input/struct.InputContext.html#method.with_recursion_limiter",
   "crate::keyword": "macro.keyword.html",
