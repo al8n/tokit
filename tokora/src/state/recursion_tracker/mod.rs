@@ -73,8 +73,15 @@ impl RecursionLimitExceeded {
 ///
 /// # Default Limit
 ///
-/// The default maximum depth is **500**, which is conservative enough to prevent stack
-/// overflow on most platforms while allowing reasonably deep nesting.
+/// The default maximum depth is **500**, chosen to keep a deeply nested parse well inside a
+/// *main thread's* stack (8 MiB on macOS and Linux) while allowing reasonably deep nesting.
+///
+/// It is not a universal guarantee, and the honest number matters more than the round one: a
+/// debug build of this crate's pratt driver takes roughly 4–6 KiB of native stack per frame, so
+/// on a **2 MiB spawned thread** — the size Rust's own test harness uses — 350 frames complete
+/// and 500 do not. A grammar that parses untrusted, deeply nested input on worker threads should
+/// pick a limit against *that* stack with
+/// [`with_limitation`](Self::with_limitation) rather than inherit this default.
 ///
 /// # Use Cases
 ///
@@ -85,9 +92,24 @@ impl RecursionLimitExceeded {
 ///
 /// # Integration with tokora
 ///
-/// `RecursionLimiter` can be used as part of a Logos lexer's `Extras` state by
-/// implementing the [`State`] trait, allowing you to track recursion
-/// during lexing.
+/// **This is the cell the parse itself descends through.** Every parse input carries one,
+/// configured through
+/// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
+/// (or [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter))
+/// and defaulting to [`new`](Self::new) — depth **500**, on by default. Both Pratt engines enter
+/// one level per live frame through [`InputRef::descend`](crate::InputRef::descend), whose
+/// [`Descent`](crate::input::Descent) guard releases the level on every exit including an
+/// unwind; exceeding the limit fails the parse with the always-terminal
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached). The budget is *per input*,
+/// not per parser, so two pratt parsers composed into one grammar share one depth budget.
+///
+/// It is deliberately **not** part of the checkpoint set: depth is a fact about the control
+/// stack, and a rollback happens at the same frame depth as the save it returns to.
+///
+/// Separately, `RecursionLimiter` can also be used as part of a Logos lexer's `Extras` state by
+/// implementing the [`State`] trait, allowing you to track nesting during *lexing*. That is a
+/// different cell with a different subject: the lexer's tally is monotone in the input and its
+/// trip latches the poison boundary, while the parse's descent unwinds.
 ///
 /// # Examples
 ///
@@ -218,6 +240,32 @@ impl RecursionLimiter {
   #[inline(always)]
   pub const fn with_limitation(max: usize) -> Self {
     Self { max, current: 0 }
+  }
+
+  /// Creates a tracker that never trips — `with_limitation(usize::MAX)`.
+  ///
+  /// "No limit" is spelled rather than implied: a parse configured with this one still counts
+  /// its descent, so [`InputRef::recursion`](crate::InputRef::recursion) stays readable, but
+  /// [`check`](Self::check) can never fail. Use it to opt a parse out of the default budget
+  /// (see [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter))
+  /// when the grammar's depth is bounded by something other than the input.
+  ///
+  /// # Example
+  ///
+  /// ```rust
+  /// use tokora::state::recursion_tracker::RecursionLimiter;
+  ///
+  /// let mut limiter = RecursionLimiter::unlimited();
+  /// assert_eq!(limiter.limitation(), usize::MAX);
+  ///
+  /// for _ in 0..10_000 {
+  ///   limiter.increase();
+  /// }
+  /// assert!(limiter.check().is_ok());
+  /// ```
+  #[inline(always)]
+  pub const fn unlimited() -> Self {
+    Self::with_limitation(usize::MAX)
   }
 
   /// Returns the current depth of the recursion.

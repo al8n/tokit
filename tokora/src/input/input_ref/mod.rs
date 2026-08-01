@@ -28,6 +28,7 @@ pub(crate) use session::Session;
 pub use session::SessionPointId;
 
 mod consume_cached;
+mod descent;
 mod drop_policy;
 mod fold;
 mod peek;
@@ -45,6 +46,7 @@ mod trace;
 mod transaction;
 mod try_expect;
 
+pub use descent::Descent;
 pub use drop_policy::{Commit, DropPolicy, Rollback};
 pub use sync_balanced::{Balance, DelimClass, Hole};
 pub use transaction::Transaction;
@@ -135,6 +137,10 @@ where
   /// field for the invariant and the three writers that keep it inductive.
   pub(super) front_reported_end: &'closure mut Option<L::Offset>,
   pub(super) poison_boundary: &'closure mut Option<L::Offset>,
+  /// The **recursion budget**, borrowed from the owning [`Input`](super::Input) — see that field
+  /// for why it is outside the rollback set. Read through [`recursion`](Self::recursion); its
+  /// only writer is the [`Descent`] guard [`descend`](Self::descend) hands out.
+  pub(super) recursion: &'closure mut crate::state::recursion_tracker::RecursionLimiter,
   /// The **session cell**: the input's lineage memos (the live-checkpoint stack, the pin set, and
   /// the cache-push/checkpoint-id/savepoint counters), the handle's **emitter borrow** (the
   /// ground-truth emission log, reached through [`emitter`](Self::emitter)), and the live

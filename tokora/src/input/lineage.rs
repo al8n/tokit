@@ -165,6 +165,13 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     //   witnesses. A witness that did not would be unable to see a rollback at all.
     front_reported_end: _,
     poison_boundary: _,
+    // — CONTROL-STACK FACT: restore does NOT touch it, and must not. Depth is a property of the
+    //   live frames, not of input progress: a save and the restore returning to it happen at the
+    //   same depth by construction, so nothing observable changes across the pair; and an unwind
+    //   pops frames a state-restore knows nothing about. Its witness is therefore the `Descent`
+    //   guard's destructor, which pops with the frame in `std` and `no_std` alike — the one
+    //   witness whose behaviour does not fork on the unwind edge. Not in `Checkpoint`.
+    recursion: _,
     // — GROUND TRUTH, and the aggregate's anchor: the emission log itself, bound at construction
     //   and owned for the input's whole life. Restore truncates it to the saved mark — the same
     //   action as when it was borrowed per handle. What changed is that the two watermarks above
@@ -210,6 +217,9 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     emitted_error_end: _,
     front_reported_end: _,
     poison_boundary: _,
+    // — CONTROL-STACK FACT (borrowed): raised by `descend`, lowered by the `Descent` guard's
+    //   drop, never restored. Same class as the `Input` field above it.
+    recursion: _,
     // — WORLD FACT, as a read-only `Copy` snapshot: no mutator, and the handle's borrow of the
     //   input locks out the seal, so it is CONSTANT for this handle's life.
     finality: _,

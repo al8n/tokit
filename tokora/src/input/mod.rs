@@ -214,7 +214,9 @@
 
 use core::marker::PhantomData;
 
-use crate::{ParseContext, cache::CachedTokenOf, span::Span};
+use crate::{
+  ParseContext, cache::CachedTokenOf, span::Span, state::recursion_tracker::RecursionLimiter,
+};
 
 use super::*;
 
@@ -230,7 +232,7 @@ pub(crate) use input_ref::ClosePayload;
 pub(crate) use input_ref::CloseStatus;
 pub(crate) use input_ref::Session;
 pub use input_ref::{
-  Balance, Commit, DelimClass, DropPolicy, Hole, InputRef, Rollback, Transaction,
+  Balance, Commit, DelimClass, Descent, DropPolicy, Hole, InputRef, Rollback, Transaction,
 };
 pub(crate) use lineage::Lineage;
 pub use session::{Budget, PartialSession, RedriveFromBase, ReplayMode, SessionRefusal};
@@ -325,19 +327,44 @@ mod witness {
 pub struct InputContext<E, C> {
   emitter: E,
   cache: C,
+  recursion: RecursionLimiter,
 }
 
 impl<E, C> InputContext<E, C> {
   /// Creates a new `InputContext` with the given emitter and cache.
+  ///
+  /// The recursion budget defaults to [`RecursionLimiter::new`] — depth **500**, protection on
+  /// — and is changed with [`with_recursion_limiter`](Self::with_recursion_limiter).
   #[inline(always)]
   pub const fn new(emitter: E, cache: C) -> Self {
-    Self { emitter, cache }
+    Self {
+      emitter,
+      cache,
+      recursion: RecursionLimiter::new(),
+    }
   }
 
-  /// Decomposes this context into its emitter and cache components.
+  /// Sets the **recursion budget** this parse descends against.
+  ///
+  /// The budget is per *input session*, not per parser: every recursive-descent site that goes
+  /// through [`InputRef::descend`](InputRef::descend) — today both Pratt engines' frame
+  /// prologues — draws on this one cell, so two expression parsers composed into one grammar
+  /// cannot each spend the full depth. Exceeding it fails the parse with the always-terminal
+  /// [`RecursionLimitReached`](crate::error::RecursionLimitReached).
+  ///
+  /// Pass [`RecursionLimiter::unlimited`] to opt out, or
+  /// [`RecursionLimiter::with_limitation`] to tighten. Opting out means a sufficiently nested
+  /// input can exhaust the native stack, which is what the default exists to prevent.
   #[inline(always)]
-  pub fn into_components(self) -> (E, C) {
-    (self.emitter, self.cache)
+  pub const fn with_recursion_limiter(mut self, recursion: RecursionLimiter) -> Self {
+    self.recursion = recursion;
+    self
+  }
+
+  /// Decomposes this context into its emitter, cache, and recursion-budget components.
+  #[inline(always)]
+  pub fn into_components(self) -> (E, C, RecursionLimiter) {
+    (self.emitter, self.cache, self.recursion)
   }
 }
 
@@ -575,6 +602,34 @@ where
   /// [the law](crate::input#terminal-beats-incomplete-and-they-never-substitute) for why the ranking
   /// is total, and what an attacker could do without it.
   poison_boundary: Option<L::Offset>,
+  /// The **recursion budget** this parse descends against: live descent depth plus the limit it
+  /// may not exceed, configured at [`with_state_and_context`](Self::with_state_and_context) from
+  /// [`InputContext::with_recursion_limiter`] and defaulting to depth 500.
+  ///
+  /// Its one writer is the [`Descent`](InputRef::descend) guard: [`InputRef::descend`] raises the
+  /// depth, and the guard's `Drop` lowers it on **every** exit of the frame — return, `?`, or
+  /// unwind, identically in `std` and `no_std`. There is no `recursion_mut`, so no caller can
+  /// leave the cell unbalanced.
+  ///
+  /// # Deliberately outside the rollback set
+  ///
+  /// A [`Checkpoint`] does **not** carry it, and that is the same argument
+  /// [`finality`](Self::finality) makes one field up, arriving from the other direction. Depth is
+  /// a fact about the *control stack*, not about input progress: a save and the restore that
+  /// returns to it happen at the same frame depth by construction, so the cell cannot be observed
+  /// to change across the pair — and a restore performed at a *different* depth (expressible only
+  /// through `unstable-raw` checkpoint smuggling) must not clobber the true live depth with a
+  /// stale one. On an unwind, frames pop; only a witness that pops with them is right, and that
+  /// witness is the guard's destructor, which behaves the same under both drop policies and both
+  /// `cfg`s. State-carried depth would instead be double-restored on a `std` unwind and leaked on
+  /// a `no_std` one.
+  ///
+  /// It is also *not* the lexer's [`State`](crate::State), for three independent reasons: a scan
+  /// commit overwrites `state` wholesale with the token's own snapshot, `state_mut` re-keys the
+  /// world (dropping the token cache **and** any latched poison boundary), and a checkpoint
+  /// captures it. See [`RecursionLimiter`] for the lexer-side tracker, which is a different cell
+  /// with a different subject.
+  recursion: RecursionLimiter,
   /// The **bound emitter** — the one emission log this input's parse writes, owned here for the
   /// input's whole life and paired with it at
   /// [`with_state_and_context`](Self::with_state_and_context).
@@ -688,7 +743,7 @@ where
     state: L::State,
     context: InputContext<Ctx::Emitter, Ctx::Cache>,
   ) -> Self {
-    let (emitter, cache) = context.into_components();
+    let (emitter, cache, recursion) = context.into_components();
     // The source-identity handshake. See `Emitter::bound_source`.
     //
     // `bound_source()` is `None` for every emitter that binds no source — 30 of the 31 core
@@ -736,6 +791,11 @@ where
       emitted_error_end: L::Offset::default(),
       front_reported_end: None,
       poison_boundary: None,
+      // The caller's budget, moved in as given. Every constructor of `RecursionLimiter` starts
+      // at depth 0, so this is depth 0 for every context the crate or a caller can build without
+      // deliberately walking one deeper first — and a deliberately-deep one is a caller stating
+      // that this parse continues someone else's descent, which is exactly what the cell means.
+      recursion,
       emitter,
       lineage: Lineage::new(),
       #[cfg(feature = "trace")]
@@ -862,6 +922,9 @@ where
       emitted_error_end: &mut self.emitted_error_end,
       front_reported_end: &mut self.front_reported_end,
       poison_boundary: &mut self.poison_boundary,
+      // The recursion budget, borrowed like the ground-truth cells above rather than snapshotted
+      // like `finality`: a handle's frames raise and lower it, and the value must outlive them.
+      recursion: &mut self.recursion,
       // The lineage memos, the emitter borrow, and the session-point stack, in one cell (see
       // `input_ref::session`): the stack starts empty and stays unallocated until the first
       // `InputRef::begin_point`, so a reference that never opens a session pays a few zeroed
