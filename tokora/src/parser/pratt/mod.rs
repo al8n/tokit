@@ -150,6 +150,15 @@ pub enum PrattInfix<L, R, N> {
   /// A right-associative infix operator with its precedence level and operator type.
   Right(R),
   /// A non-associative infix operator with its precedence level and operator type.
+  ///
+  /// **Non-associative in the conventional sense: chaining is a syntax error.** After a frame
+  /// folds one of these at power `p`, a second *infix* operator at exactly `p` — whatever its own
+  /// associativity — fails the parse with
+  /// [`NonAssociativeChain`](crate::error::NonAssociativeChain), with the offending operator left
+  /// on the input. The latch is cleared by folding an infix at a different power and is untouched
+  /// by a postfix fold. The contract is per-operator rather than whole-chain fixity resolution:
+  /// `a == b < c` (this variant, then `Left` at the same power) is rejected, while `a < b == c` is
+  /// accepted — see the associativity table in the pratt reference.
   Neither(N),
 }
 
@@ -269,6 +278,14 @@ where
 ///
 /// **A terminal stop is an `Err`, never an `End`.** A tripped scanner limit is not the end of
 /// an expression; surfacing it as one lets a truncated view masquerade as a complete parse.
+///
+/// **A second same-power operator after a [`Neither`](PrattInfix::Neither) fold is not yours to
+/// answer.** Report it as the ordinary [`Infix`](PrattRHS::Infix) it is; the driver holds the
+/// chain latch and refuses it, restoring the deciding read and returning
+/// [`NonAssociativeChain`](crate::error::NonAssociativeChain) — not terminal, so an explicit
+/// [`recover`](crate::ParseInput::recover) may spend it. Answering [`End`](PrattRHS::End) instead
+/// would hide the constraint: in a nested position the enclosing frame folds the operator by its
+/// own rules and the chain re-associates across it with nothing left over to reject.
 ///
 /// ```
 /// use tokora::parser::{PrattInfix, PrattRHS, Precedenced};

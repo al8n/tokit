@@ -1,6 +1,8 @@
 use crate::{
   emitter::PrattEmitter,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot},
+  error::{
+    NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
+  },
   parser::{
     PrattFloor, PrattFoldTokenInfix, PrattFoldTokenPostfix, PrattFoldTokenPrefix, PrattInfix,
     PrattLHS, PrattPower, PrattRHS,
@@ -12,11 +14,14 @@ use super::*;
 
 /// The token driver's own RHS report, normalized once by the classifying closure.
 ///
-/// The closure has already applied the floor and the non-associative repeat guard, so what
+/// The closure has already applied the floor and detected the non-associative repeat, so what
 /// crosses back is only what the fold needs — and, for an infix operator, its **true** binding
 /// power. Re-wrapping a [`PrattRHS`] here would mean handing the driver a power the closure
 /// had already transformed, and reconstructing the original by inverse arithmetic on the far
 /// side; that reconstruction was wrong at the ladder's extremes and misfired the repeat guard.
+///
+/// A repeat is *not* one of these variants: the closure parks its token and flags it, and the
+/// loop raises [`NonAssociativeChain`](crate::error::NonAssociativeChain) instead of stepping.
 enum TokRhs<Power> {
   Postfix,
   Infix(PrattInfix<(), (), ()>, Power),
@@ -62,6 +67,17 @@ where
   ///
   /// `Ok(Some(tok))` with the combined expression token on success, `Ok(None)` if the
   /// input cursor did not see an LHS token, or `Err(e)` on a fatal emitter error.
+  ///
+  /// # Two failures that are not the emitter's
+  ///
+  /// Both are **returned**, never emitted, so no recording emitter and no rewind can turn either
+  /// into a truncated-but-successful parse:
+  ///
+  /// - [`RecursionLimitReached`] — the parse's shared depth budget (see
+  ///   [`descend`](Self::descend)) ran out at this frame's prologue. Always terminal.
+  /// - [`NonAssociativeChain`] — a second same-power [`PrattInfix::Neither`] operator appeared in
+  ///   one chain. The operator is left on the input, unconsumed. Not terminal: recovery may
+  ///   spend it.
   pub fn pratt<FoldPrefix, FoldInfix, FoldPostfix, Expr, Power>(
     &mut self,
     fold_prefix: FoldPrefix,
@@ -71,7 +87,9 @@ where
   where
     L::Token: PrattToken<'inp, Expr, Power>,
     Ctx::Emitter: PrattEmitter<'inp, L, Lang>,
-    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>
+      + From<RecursionLimitReached<L::Offset, Lang>>
+      + From<NonAssociativeChain<L::Offset, Lang>>,
     Power: PrattPower,
     FoldPrefix: PrattFoldTokenPrefix<'inp, Power, L, Ctx, Lang>,
     FoldInfix: PrattFoldTokenInfix<'inp, Power, L, Ctx, Lang>,
@@ -111,6 +129,9 @@ where
   ///
   /// `Ok(Some(tok))` with the combined expression token on success, `Ok(None)` if the
   /// input cursor did not see an LHS token, or `Err(e)` on a fatal emitter error.
+  ///
+  /// Plus the two returned-not-emitted failures [`pratt`](Self::pratt) documents:
+  /// [`RecursionLimitReached`] and [`NonAssociativeChain`].
   pub fn pratt_with_min_precedence<FoldPrefix, FoldInfix, FoldPostfix, Expr, Power>(
     &mut self,
     mut fold_prefix: FoldPrefix,
@@ -121,7 +142,9 @@ where
   where
     L::Token: PrattToken<'inp, Expr, Power>,
     Ctx::Emitter: PrattEmitter<'inp, L, Lang>,
-    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>
+      + From<RecursionLimitReached<L::Offset, Lang>>
+      + From<NonAssociativeChain<L::Offset, Lang>>,
     Power: PrattPower,
     FoldPrefix: PrattFoldTokenPrefix<'inp, Power, L, Ctx, Lang>,
     FoldInfix: PrattFoldTokenInfix<'inp, Power, L, Ctx, Lang>,
@@ -146,15 +169,28 @@ where
   where
     L::Token: PrattToken<'inp, Expr, Power>,
     Ctx::Emitter: PrattEmitter<'inp, L, Lang>,
-    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>
+      + From<RecursionLimitReached<L::Offset, Lang>>
+      + From<NonAssociativeChain<L::Offset, Lang>>,
     Power: PrattPower,
     FoldPrefix: PrattFoldTokenPrefix<'inp, Power, L, Ctx, Lang>,
     FoldInfix: PrattFoldTokenInfix<'inp, Power, L, Ctx, Lang>,
     FoldPostfix: PrattFoldTokenPostfix<'inp, Power, L, Ctx, Lang>,
   {
+    // ONE FRAME, ONE LEVEL. Taken before the LHS read, so every recursion site below — the
+    // prefix operand and the infix right operand alike — counts through its own child frame's
+    // prologue and needs no bookkeeping of its own. Depth therefore equals the native pratt depth
+    // it protects, this root frame included, and a future third recursion site inherits the bound
+    // for free. The guard releases the level on every exit of this function, unwind included.
+    //
+    // Nothing of the frame exists yet when the trip raises: no read, no fold, no diagnostic — so
+    // there is nothing to restore beyond the depth cell, which `descend` restores itself.
+    let mut frame = self.descend()?;
+    let this = &mut *frame;
+
     // A terminal scanner stop at the LHS position is not "no expression here" — surface it
     // instead of declining, so a tripped limit cannot masquerade as an empty expression.
-    let Some((lhs, tok)) = self.try_expect_map_or_stop(|tok| tok.try_pratt_lhs())? else {
+    let Some((lhs, tok)) = this.try_expect_map_or_stop(|tok| tok.try_pratt_lhs())? else {
       return Ok(None);
     };
 
@@ -163,20 +199,20 @@ where
       PrattLHS::Prefix(precedenced) => {
         let power = precedenced.into_precedence();
         let floor = PrattFloor::Inclusive(power);
-        let Some(operand) = self.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
+        let Some(operand) = this.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
           // Recovery posture: a prefix operator whose operand never arrived is returned as the
           // expression's own token, after the diagnostic. Under a recording emitter the parse
           // therefore continues with the bare operator standing in for the expression it could
           // not build. Callers wanting the stricter posture — no value where no operand was
           // parsed — use the typed driver, which has a node to withhold.
-          self
+          this
             .session
             .emitter
-            .emit_unexpected_end_of_lhs(UnexpectedEoLhs::eolhs_of(self.offset().clone()))?;
+            .emit_unexpected_end_of_lhs(UnexpectedEoLhs::eolhs_of(this.offset().clone()))?;
           return Ok(Some(tok));
         };
 
-        fold_prefix.fold_prefix(tok, operand, self.emitter())?
+        fold_prefix.fold_prefix(tok, operand, this.emitter())?
       }
     };
 
@@ -201,12 +237,21 @@ where
     //   cursor into a stalled report's place, nor rewind behind a committed one.
     // * **Every descent is preceded by a commit.** The recursive call happens only in the
     //   `TokRhs::Infix` arm, after that operator token is committed, and the lexer contract
-    //   makes every token nonzero-width — so depth is bounded by the token count.
+    //   makes every token nonzero-width — so depth is bounded by the token count. Bounded by
+    //   the token count is not bounded by anything a *machine* has; the frame prologue's
+    //   `descend` is what bounds it by the configured budget.
     let mut prev_op_is_neither: Option<Power> = None;
     loop {
+      // The non-associative repeat, flagged out of the classifying closure rather than answered
+      // inside it. Both the floor decline and the repeat must PARK the token — a decline commits
+      // nothing, and the trip is owed the same handback the `End` arm gets — so both answer
+      // `None`; the flag is what tells the two apart on the far side. Re-declared per cycle, and
+      // written at most once per `try_expect_map_or_stop` call: the closure runs against one
+      // token.
+      let mut nonassoc_trip: Option<L::Offset> = None;
       // A terminal scanner stop mid-loop is not "the expression is complete" — surface it
       // rather than breaking, so a tripped limit cannot end the expression early.
-      let Some((rhs, tok)) = self.try_expect_map_or_stop(|tok| {
+      let step = this.try_expect_map_or_stop(|tok| {
         tok.try_pratt_rhs().and_then(|rhs| match rhs {
           // A classifier may spell the decline as `End`; here it means exactly what `None`
           // means — the token is not this expression's, and it stays in the stream.
@@ -217,17 +262,36 @@ where
           }
           PrattRHS::Infix(precedenced) => {
             let (infix, lpower) = precedenced.into_components();
-            (min_precedence.admits(&lpower) && prev_op_is_neither.as_ref() != Some(&lpower))
-              .then(|| TokRhs::Infix(infix, lpower))
+            // Below the floor: the operator belongs to an enclosing expression. Park it and end
+            // this one — an ordinary handback, and not an error.
+            if !min_precedence.admits(&lpower) {
+              return None;
+            }
+            // The same power as the `Neither` operator this frame just folded: a
+            // declared-non-associative chain. Park the token — the position the caller sees is
+            // the offending operator's own start, matching the typed driver's rollback — and
+            // flag it, so the loop below raises the diagnostic instead of quietly stopping.
+            if prev_op_is_neither.as_ref() == Some(&lpower) {
+              nonassoc_trip = Some(tok.span.start());
+              return None;
+            }
+            Some(TokRhs::Infix(infix, lpower))
           }
         })
-      })?
-      else {
+      })?;
+
+      // The `?` above fires FIRST, so a terminal scanner stop still outranks the repeat: the
+      // ranking law is unchanged. Only once the scanner has answered does the flag decide which
+      // of the two "no step" endings this is.
+      let Some((rhs, tok)) = step else {
+        if let Some(at) = nonassoc_trip {
+          return Err(NonAssociativeChain::of(at).into());
+        }
         break;
       };
 
       match rhs {
-        TokRhs::Postfix => lhs = fold_postfix.fold_postfix(lhs, tok, self.emitter())?,
+        TokRhs::Postfix => lhs = fold_postfix.fold_postfix(lhs, tok, this.emitter())?,
         TokRhs::Infix(infix, lpower) => {
           let is_neither = matches!(infix, PrattInfix::Neither(_));
           let floor = if matches!(infix, PrattInfix::Right(_)) {
@@ -237,15 +301,15 @@ where
             // Left- and non-associative: the right operand stops strictly above it.
             PrattFloor::Exclusive(lpower.clone())
           };
-          let Some(rhs) = self.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
+          let Some(rhs) = this.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
             // Same recovery posture as the prefix exit above: an infix operator whose right
             // operand never arrived yields the LHS alone, after the diagnostic — the operator
             // and its missing side are dropped from the returned expression rather than the
             // whole parse failing. The typed driver is the stricter alternative.
-            self
+            this
               .session
               .emitter
-              .emit_unexpected_end_of_rhs(UnexpectedEoRhs::eorhs_of(self.offset().clone()))?;
+              .emit_unexpected_end_of_rhs(UnexpectedEoRhs::eorhs_of(this.offset().clone()))?;
             return Ok(Some(lhs));
           };
           let infix = {
@@ -257,7 +321,7 @@ where
             };
             Spanned::new(span, infix)
           };
-          lhs = fold_infix.fold_infix(lhs, rhs, infix, self.emitter())?;
+          lhs = fold_infix.fold_infix(lhs, rhs, infix, this.emitter())?;
           prev_op_is_neither = if is_neither { Some(lpower) } else { None };
         }
       }
