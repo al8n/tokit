@@ -79,6 +79,17 @@ impl that wires it in.
   `From<Incomplete<L::Offset>>`, because the input layer *constructs* incompletes while the
   atom layer now also *recognizes* them (the resilient collection loops re-raise a frontier
   `Incomplete` untouched instead of spending it as a diagnostic).
+- [**`MaybeTerminal`**](crate::error::MaybeTerminal) — the same hook for the never-recoverable
+  law's **terminal dual**: a stop no amount of input clears, which recovery re-raises rather than
+  spends. Same shape (blanket `false`, empty impl to opt in), and the same three combinators
+  require it — [`recover`](crate::ParseInput::recover),
+  [`inplace_recover`](crate::ParseInput::inplace_recover),
+  [`skip_then_retry`](crate::ParseInput::skip_then_retry). Override it if your type stores either
+  terminal carrier: an [`UnexpectedEnd`](crate::error::UnexpectedEnd) whose flag the scanner may
+  raise, or a [`RecursionLimitReached`](crate::error::RecursionLimitReached), which is terminal for
+  every value. A pratt grammar meets the second one by default — the descent budget is on unless
+  you turn it off — and a `From` that discards the value discards the marker, so recovery spends a
+  trip it was told to re-raise.
 - **The `Set` / `Expected` machinery.** A token mismatch does not just say "wrong" — it names
   what was wanted. [`UnexpectedToken`](crate::error::token::UnexpectedToken) carries an
   [`Expected<'a, Kind>`](crate::utils::Expected) (`One(kind)` or `OneOf(set)`); classifiers
@@ -479,7 +490,11 @@ assert_eq!(tiers, [Severity::Error]);
 Every parser signature in this book carries a `Ctx` type parameter, yet the tutorials never say
 what it is. A **parse context** is the bundle that supplies the two things a parse needs beyond
 the lexer: the **emitter** (above) and the lookahead **cache**. Signatures are generic over it so
-one parser can run under any emitter/cache pairing; `provide()` hands the pair to the input layer.
+one parser can run under any emitter/cache pairing. `provide()` hands that pairing to the input
+layer inside an `InputContext`, which carries one thing more — the **recursion budget** every
+[descent](super::ref_pratt) draws on, defaulted and changed with
+[`with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter). It is not a third
+associated type: the two below are the whole of what an impl chooses.
 
 ```text
 trait ParseContext<'inp, L, Lang = ()> {

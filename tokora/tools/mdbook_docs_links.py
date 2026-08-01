@@ -263,6 +263,7 @@ DOCS_RS_MAP = {
   "crate::error::Malformed": "error/struct.Malformed.html",
   "crate::error::MaybeIncomplete": "error/trait.MaybeIncomplete.html",
   "crate::error::MaybeIncomplete::is_incomplete": "error/trait.MaybeIncomplete.html#method.is_incomplete",
+  "crate::error::MaybeTerminal": "error/trait.MaybeTerminal.html",
   "crate::error::MaybeTerminal::is_terminal": "error/trait.MaybeTerminal.html#method.is_terminal",
   "crate::error::NonAssociativeChain": "error/struct.NonAssociativeChain.html",
   "crate::error::RecursionLimitReached": "error/struct.RecursionLimitReached.html",

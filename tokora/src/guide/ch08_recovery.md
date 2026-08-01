@@ -379,12 +379,14 @@ use tokora::{
 };
 
 // THE NEVER-RECOVERABLE LAW AND ITS TERMINAL DUAL. `skip_then_retry` requires the emitter's error
-// type to answer two questions: *are you an `Incomplete`?* and *are you a terminal scanner stop?*
-// Either one is re-raised untouched, before any skip and from any retry — recovery synthesises
+// type to answer two questions: *are you an `Incomplete`?* and *are you a terminal stop?* Either
+// one is re-raised untouched, before any skip and from any retry — recovery synthesises
 // progress over a *malformed* construct, while an incomplete one is merely *unfinished* (skipping
 // it throws away input that has not arrived) and a terminal stop is a limit no skip can clear.
-// `CalcError` is never either (it parses whole strings with no resource limit), so the traits'
-// default answers — `false` — are the right ones.
+// `CalcError` is never either: it parses whole strings with no scanner limiter, and it never
+// descends (no pratt engine, no `InputRef::descend`), so neither the scanner's terminal flag nor
+// a `RecursionLimitReached` can reach it. The traits' default answers — `false` — are the right
+// ones. A grammar that *does* descend stores the trip and delegates instead; see `MaybeTerminal`.
 impl MaybeIncomplete for CalcError {}
 impl MaybeTerminal for CalcError {}
 

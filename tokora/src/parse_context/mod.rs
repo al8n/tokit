@@ -1,8 +1,8 @@
 //! Parse context trait and implementations.
 //!
-//! A parse context bundles the error emitter and cache configuration
-//! used during parsing. This provides better type inference and a
-//! simpler API compared to configuring emitter and cache separately.
+//! A parse context bundles the error emitter, the cache configuration, and the recursion
+//! budget used during parsing. This provides better type inference and a
+//! simpler API compared to configuring them separately.
 
 use core::marker::PhantomData;
 
@@ -27,7 +27,8 @@ pub trait ParseContext<'inp, L, Lang: ?Sized = ()> {
   where
     L: Lexer<'inp>;
 
-  /// Provides the emitter and cache instances for parsing.
+  /// Provides the emitter and cache instances for parsing, inside the
+  /// [`InputContext`] that also carries the recursion budget the parse descends against.
   fn provide(self) -> InputContext<Self::Emitter, Self::Cache>
   where
     L: Lexer<'inp>;

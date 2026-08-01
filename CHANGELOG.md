@@ -118,7 +118,7 @@ numbered entry below that carries the full reasoning.
 | `inp.begin_point(); … inp.commit_point();` | `let p = inp.begin_point(); … inp.commit_point(p);` | Nothing tied a settle to the point it settled. Points settle newest-first; four misuse conditions panic by name. | [19](#changed-breaking) |
 | `let (o, e, m) = missing.into_components();` | `let (o, e, m, name) = …` | And `SeparatedError`'s pair becomes a triple. `..` is not available on a tuple pattern, so the compiler points at every site. | [20](#changed-breaking) |
 | An error type without `From<UnexpectedEot<…>>` on the peek / `Expect` / fold / `Repeated` surfaces | add it, or name `ComposableParseContext` | A terminal stop has to be expressible as an error. | [16](#changed-breaking), [17](#changed-breaking) |
-| An error type without `MaybeTerminal` | `impl MaybeTerminal for MyError {}` is enough | Unless the type can carry the flag itself. | [16](#changed-breaking) |
+| An error type without `MaybeTerminal` | `impl MaybeTerminal for MyError {}` is enough | Unless the type can itself carry a terminal stop: an `UnexpectedEnd` whose flag the scanner may raise, or — new in this release, and required of every pratt-driving error type — a `RecursionLimitReached`, which is terminal for **every** value. Delegate to each one you store; an arm left at `false` is spent as a recoverable failure. | [16](#changed-breaking), [46](#changed-breaking) |
 | `<[P; N] as ParseChoice>::Id::new(i)` (0-based) | `::new(i + 1)` (1-based) | `RangedUsize`'s bounds are inclusive, so the old id space admitted `N` and every `[P; 0]` id panicked. Tuple choices are unaffected. | [35](#changed-breaking) |
 | `match op { … }` over `fuzz::Op` without a wildcard | add an `IsExhausted` arm | `fuzz` feature only. *Found by the mechanical API diff; disclosed nowhere before.* | [38](#changed-breaking) |
 | `dyn SeparatorHandler` | no longer object-safe | `OBSERVES_SEPARATORS` is an associated const. Nothing in this crate used it. | [5](#changed-breaking) |
@@ -645,7 +645,10 @@ be reported as *absence* is now reported as *failure*, and the types say so.
     **This is a bound addition on the error type.** `From<UnexpectedEot<L::Offset, Lang>>` is
     now required on the committed peek and `Expect` surfaces, and a downstream error type must
     implement `MaybeTerminal` — an empty `impl MaybeTerminal for MyError {}` is enough unless
-    the type can carry the flag itself. The try-leaf surface gained the `*_or_stop` shape
+    the type can itself carry a terminal stop, in which case it delegates. This release ships a
+    **second** terminal carrier alongside the flag: `RecursionLimitReached` (item 46), which is
+    terminal for every value, so a type that stores both delegates to both.
+    The try-leaf surface gained the `*_or_stop` shape
     (`InputRef::next_or_stop`, `try_expect_map_or_stop`, `peek_with_emitter_terminal`) so a leaf
     can report the stop without inventing a decline.
 
