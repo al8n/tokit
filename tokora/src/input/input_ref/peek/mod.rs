@@ -377,6 +377,27 @@ where
   /// ([`peek_with_emitter_terminal`](Self::peek_with_emitter_terminal)) rather than the
   /// `try_expect` scan, so the head is served from the front slot with no pop/hold
   /// round-trip.
+  ///
+  /// # A head already at the front of the stream is read where it lies
+  ///
+  /// This is a **width-1** read, and on a grammar's decision points the token it wants is almost
+  /// always already there: measured on a GraphQL parse, 17,028 of 17,029 times. So the front of
+  /// the stream is probed first, and a head that is there is handed straight to `f`.
+  ///
+  /// That is the same answer the fill gives, by the fill's own construction. With one token at
+  /// the front — parked or cached — the window request is already met, so the fill takes its
+  /// `want == 0` arm: it heads the window with the parked token if there is one and lets the
+  /// cache fill in behind it, then returns. Nothing is lexed, nothing is committed, the terminal
+  /// flag stays `false` (that arm returns *before* the boundary probe, so a resident head is
+  /// served whatever the poison latch says), and [`Cache::peek`](crate::cache::Cache::peek) is a
+  /// `&self` read the trait documents as logically pure. All the shared route adds under that
+  /// condition is arithmetic over the window slots, an overflow guard that stages nothing, and a
+  /// copy of the entry into a `GenericArrayDeque` that is popped straight back out — and the
+  /// token that copy denotes is the one handed over here.
+  ///
+  /// The end-of-input offset the fill's `None` arms need is not read on this route because those
+  /// arms are unreachable with a head in hand; the trace hook the fill opens with is emitted here
+  /// instead, so a `trace` build sees the same one event per call either way.
   #[inline]
   pub fn peek_head_map<O, F>(
     &mut self,
@@ -387,6 +408,11 @@ where
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   {
     use crate::cache::PeekedTokenExt as _;
+    // ── The resident head, read in place (see the section above) ──
+    if let Some(front) = self.front() {
+      trace_event!(self, "peek");
+      return Ok(Some(f(front.token)));
+    }
     // Hoisted before the fill: the committed span does not move under a pure peek, and
     // the window borrow (`peeked` ties to `&mut self`) must not overlap the read.
     let end = self.span().end();
