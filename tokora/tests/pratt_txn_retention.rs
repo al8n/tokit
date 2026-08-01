@@ -88,7 +88,10 @@ use std::sync::Mutex;
 use tokora::{
   Emitter, InputRef, Lexer, Parse, ParseContext, ParseInput, Parser, ParserContext, SimpleSpan,
   Token as TokenT,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot, token::UnexpectedTokenOf},
+  error::{
+    NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
+    token::UnexpectedTokenOf,
+  },
   input::Cursor,
   parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt},
   span::Spanned,
@@ -347,6 +350,16 @@ impl From<UnexpectedEoLhs> for RetErr {
 }
 impl From<UnexpectedEoRhs> for RetErr {
   fn from(_: UnexpectedEoRhs) -> Self {
+    RetErr
+  }
+}
+impl From<RecursionLimitReached> for RetErr {
+  fn from(_: RecursionLimitReached) -> Self {
+    RetErr
+  }
+}
+impl From<NonAssociativeChain> for RetErr {
+  fn from(_: NonAssociativeChain) -> Self {
     RetErr
   }
 }
@@ -829,6 +842,38 @@ macro_rules! handback_cell {
   };
 }
 
+/// The [`handback_cell!`] twin for the one probe exit that ends the **parse** rather than the
+/// expression: the non-associative repeat, which restores the deciding read exactly as the other
+/// four do and then returns `NonAssociativeChain`. The pratt parser's `Err` is caught inside the
+/// probe so the same question can still be asked of it — *what is the surrounding grammar handed
+/// back?* — which is the retention property these cells exist to pin, and which the repeat's
+/// contract did not change.
+macro_rules! handback_err_cell {
+  ($name:ident, $rhs:expr, $floor:expr, $src:literal, $want:expr, $why:literal) => {
+    #[test]
+    fn $name() {
+      let _g = measuring();
+      let probe = |inp: &mut Ir<'static, '_, _>| -> Result<Option<(usize, usize)>, RetErr> {
+        let outcome = pratt(measured_lhs, $rhs, fold_prefix, fold_infix, fold_postfix)
+          .min_precedence($floor)
+          .parse_input(inp);
+        assert!(
+          outcome.is_err(),
+          "a second same-power non-associative operator must fail the parse"
+        );
+        Ok(inp.next()?.map(|t| (t.span().start(), t.span().end())))
+      };
+      LHS_ENTRIES.store(0, Ordering::Relaxed);
+      TARGET_LHS_ENTRY.store(0, Ordering::Relaxed);
+      let got: Option<(usize, usize)> = Parser::new()
+        .apply(probe)
+        .parse_str($src)
+        .expect("the probe converts the outcome into a report");
+      assert_eq!(got, $want, $why);
+    }
+  };
+}
+
 handback_cell!(
   a_consuming_end_report_is_rolled_back,
   end_after_consuming_rhs,
@@ -849,15 +894,16 @@ handback_cell!(
    back and the `^` goes to the surrounding grammar"
 );
 
-handback_cell!(
+handback_err_cell!(
   a_non_associative_repeat_is_rolled_back,
   neither_rhs,
   0u8,
   "1 ^ 1 ^ 1",
-  (2i64, Some((6usize, 7usize))),
+  Some((6usize, 7usize)),
   "the second non-associative operator at the same power is refused, and the read that reported \
-   it is rolled back: `1 ^ 1` folds and the second `^` at offset 6 is handed on. A driver that \
-   committed its probe before this check would eat it"
+   it is rolled back: the second `^` at offset 6 is parked in front of the surrounding grammar, \
+   which is the position the returned `NonAssociativeChain` names. A driver that committed its \
+   probe before this check would eat it"
 );
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -944,12 +990,12 @@ handback_cell!(
    a report the floor declines is an ordinary handback, never a panic"
 );
 
-handback_cell!(
+handback_err_cell!(
   a_non_associative_repeat_is_rolled_back_across_an_abandoned_point,
   point_leaking_neither_rhs,
   0u8,
   "1 ^ 1 ^ 1",
-  (2i64, Some((6usize, 7usize))),
+  Some((6usize, 7usize)),
   "the non-associative repeat exit must reconcile the abandoned points and restore. This one also \
    crosses a point opened by a cycle that has since COMMITTED its probe, so the reconciliation \
    has to abandon exactly the points younger than the exiting probe's base and leave the older \

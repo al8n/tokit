@@ -19,7 +19,10 @@ mod common;
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser,
   emitter::PrattEmitter,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot, token::UnexpectedTokenOf},
+  error::{
+    NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
+    token::UnexpectedTokenOf,
+  },
   parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt},
   token::PrattToken,
 };
@@ -46,6 +49,16 @@ impl From<UnexpectedEoLhs> for EndError {
 }
 impl From<UnexpectedEoRhs> for EndError {
   fn from(_: UnexpectedEoRhs) -> Self {
+    EndError
+  }
+}
+impl From<RecursionLimitReached> for EndError {
+  fn from(_: RecursionLimitReached) -> Self {
+    EndError
+  }
+}
+impl From<NonAssociativeChain> for EndError {
+  fn from(_: NonAssociativeChain) -> Self {
     EndError
   }
 }
@@ -214,43 +227,62 @@ where
   Ok(left * 10 + right)
 }
 
+/// Reports the pratt parser's own outcome plus, on the error path, where the input was left:
+/// `Ok(value)` for a completed expression, `Err(at)` for a non-associative repeat whose
+/// deciding operator is still the next token.
 fn max_semi_expr<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
-) -> Result<(i64, bool), EndError>
+) -> Result<Result<i64, usize>, EndError>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = EndError>,
 {
-  let value = pratt(
+  match pratt(
     u8_lhs,
     max_semi_rhs,
     u8_fold_prefix,
     digits_fold_infix,
     u8_fold_postfix,
   )
-  .parse_input(inp)?;
-  let second_op_remains = inp
-    .try_expect(|t| matches!(t.data(), Token::Semi))?
-    .is_some();
-  Ok((value, second_op_remains))
+  .parse_input(inp)
+  {
+    Ok(value) => Ok(Ok(value)),
+    Err(EndError) => {
+      // The operator that tripped the chain constraint is handed back unconsumed: the very next
+      // read sees it, at the offset the error reports.
+      let semi = inp
+        .try_expect(|t| matches!(t.data(), Token::Semi))?
+        .expect("the repeated `;` must still be on the input");
+      Ok(Err(semi.span().start()))
+    }
+  }
 }
 
-/// A non-associative chain stops after one fold at the top of the ladder.
+/// A non-associative chain is **rejected** at the top of the ladder, with the second operator
+/// handed back.
 ///
-/// `;` is `Neither(u8::MAX)`, so `1 ; 2 ; 3` must fold once and leave `; 3` for the
-/// surrounding grammar to reject or handle. Under the saturating floor the recursion bound
-/// stayed at `MAX`, so the recursive call itself bound the second `;` before the
-/// repeat guard could ever see it, and both folds ran.
+/// `;` is `Neither(u8::MAX)`, so `1 ; 2 ; 3` is a declared-non-associative chain: the driver
+/// folds `1 ; 2`, sees a second `;` at the same power, and fails the parse rather than ending
+/// the expression. Ending it is not a conservative answer — an enclosing frame would fold the
+/// leftover operator by its own rules and re-associate the chain across it with nothing left
+/// over for any caller to reject.
+///
+/// This replaces `typed_neither_chain_at_the_top_of_the_ladder_stops_after_one_fold`, and it
+/// still pins the regression that test was written for. Under the old saturating floor the
+/// recursion bound at the ladder top stayed `MAX`, so the inner call consumed the second `;`
+/// itself and *both* folds ran — which would show up here as `Ok(123)`. Reaching the repeat
+/// guard at all proves the `Exclusive` floor handed the second `;` back to this frame, and the
+/// error distinguishes the two failure modes strictly better than the old `(12, true)` did.
 #[test]
-fn typed_neither_chain_at_the_top_of_the_ladder_stops_after_one_fold() {
-  let (value, second_remains): (i64, bool) = Parser::new()
+fn typed_neither_chain_at_the_top_of_the_ladder_is_rejected() {
+  let outcome: Result<i64, usize> = Parser::new()
     .apply(max_semi_expr)
     .parse_str("1 ; 2 ; 3")
     .unwrap();
   assert_eq!(
-    (value, second_remains),
-    (12, true),
-    "one fold over `1 ; 2`, with `; 3` left on the input"
+    outcome,
+    Err(6),
+    "the second `;` (at offset 6) must be rejected, not folded and not left as a remainder"
   );
 }
 

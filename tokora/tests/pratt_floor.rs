@@ -25,7 +25,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, SimpleSpan,
   emitter::PrattEmitter,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot, token::UnexpectedTokenOf},
+  error::{
+    NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
+    token::UnexpectedTokenOf,
+  },
   parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt},
   span::Spanned,
   token::PrattToken,
@@ -53,6 +56,16 @@ impl From<UnexpectedEoLhs> for FloorError {
 }
 impl From<UnexpectedEoRhs> for FloorError {
   fn from(_: UnexpectedEoRhs) -> Self {
+    FloorError
+  }
+}
+impl From<RecursionLimitReached> for FloorError {
+  fn from(_: RecursionLimitReached) -> Self {
+    FloorError
+  }
+}
+impl From<NonAssociativeChain> for FloorError {
+  fn from(_: NonAssociativeChain) -> Self {
     FloorError
   }
 }
@@ -792,22 +805,21 @@ where
   Ok((value, second_op_remains))
 }
 
-/// A non-associative chain stops after one fold, at the top of the ladder like anywhere
-/// else.
+/// A non-associative chain is rejected, at the top of the ladder like anywhere else.
 ///
-/// `;` is `Neither(u8::MAX)`. `1 ; 2 ; 3` must fold once and leave `; 3` on the input. The
-/// floor used to be `next(MAX)`, which saturates back to `MAX`, so the recursion itself
-/// admitted the second `;` — the repeat guard never saw it and both folds ran.
+/// `;` is `Neither(u8::MAX)`. `1 ; 2 ; 3` folds once and then fails on the second `;`, which
+/// stays parked on the input. This pins the same floor regression it always did: the floor used
+/// to be `next(MAX)`, which saturates back to `MAX`, so the recursion itself admitted the second
+/// `;` and both folds ran — an `Ok(123)` the repeat guard never got a chance to refuse. Reaching
+/// the guard at all is what the assertion below proves; that it now *fails* rather than
+/// truncating is the contract R2 settled.
 #[test]
-fn token_neither_chain_stops_after_one_fold_at_the_top_of_the_ladder() {
-  let (value, second_remains): (i64, bool) = Parser::new()
-    .apply(chain_expr)
-    .parse_str("1 ; 2 ; 3")
-    .unwrap();
-  assert_eq!(
-    (value, second_remains),
-    (12, true),
-    "one fold over `1 ; 2`, with `; 3` left for the surrounding grammar"
+fn token_neither_chain_is_rejected_at_the_top_of_the_ladder() {
+  let outcome: Result<(i64, bool), FloorError> =
+    Parser::new().apply(chain_expr).parse_str("1 ; 2 ; 3");
+  assert!(
+    outcome.is_err(),
+    "the second `;` must be rejected, not folded and not left as a remainder; got {outcome:?}"
   );
 }
 
