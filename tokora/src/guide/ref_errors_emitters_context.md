@@ -85,7 +85,8 @@ impl that wires it in.
   require it — [`recover`](crate::ParseInput::recover),
   [`inplace_recover`](crate::ParseInput::inplace_recover),
   [`skip_then_retry`](crate::ParseInput::skip_then_retry). Override it if your type stores any of
-  the **three** terminal sources: an [`UnexpectedEnd`](crate::error::UnexpectedEnd) whose flag the
+  the **three** terminal sources this crate builds and marks: an
+  [`UnexpectedEnd`](crate::error::UnexpectedEnd) whose flag the
   scanner may raise, a [`RecursionLimitReached`](crate::error::RecursionLimitReached), which is
   terminal for every value, or a [`SessionRefusal`](crate::input::SessionRefusal), terminal for
   every value too. A pratt grammar meets the second by default — the descent budget is on unless
@@ -95,8 +96,11 @@ impl that wires it in.
   through your `From` and then asserts the result is terminal, unconditionally, so a
   `Refused(..)` arm left at `false` panics a release build instead of being quietly spent.
   A `From` that discards the value discards the marker, so recovery spends a trip it was told to
-  re-raise. The trait's own doc carries the full table, including what to do about a terminal
-  carrier of your own that this crate cannot enumerate.
+  re-raise. **Those three are what the crate knows it produces, not a proof that nothing else is
+  terminal**: a scanner trip whose diagnostic a *rejecting* emitter refuses propagates as that
+  emitter's `Err`, built from your lexer's error value with no marker on it at all, so the arm
+  holding your lexer error may be terminal too. The trait's own doc carries the table, that path,
+  and the rule for an arm the table does not name.
 - **The `Set` / `Expected` machinery.** A token mismatch does not just say "wrong" — it names
   what was wanted. [`UnexpectedToken`](crate::error::token::UnexpectedToken) carries an
   [`Expected<'a, Kind>`](crate::utils::Expected) (`One(kind)` or `OneOf(set)`); classifiers

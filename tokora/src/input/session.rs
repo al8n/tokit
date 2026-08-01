@@ -103,11 +103,15 @@ pub enum Budget {
 /// so a violating impl is a loud panic at the cause in every build — including the release
 /// builds that actually face untrusted input.
 ///
-/// This is one of the three terminal sources a consumer's error type has to answer for, and the
-/// only one that is not itself a [`MaybeTerminal`] implementor: there is nothing to delegate to,
-/// so the arm is written `true`. It is also the only one whose wrong answer is a panic rather
-/// than a silent spend. See the trait's own
-/// [table of terminal sources](crate::error::MaybeTerminal#the-terminal-sources) for the full set.
+/// This is one of the three terminal sources this crate builds and a consumer's error type has to
+/// answer for, and the only one that is not itself a [`MaybeTerminal`] implementor: there is
+/// nothing to delegate to, so the arm is written `true`. It is also the only one whose wrong
+/// answer is a panic rather than a silent spend. See the trait's own
+/// [table of terminal sources](crate::error::MaybeTerminal#the-terminal-sources) for the other
+/// two — and, since those three are what the crate knows it produces rather than a closed set of
+/// terminal conditions,
+/// [where the set stops being closed](crate::error::MaybeTerminal#where-the-set-stops-being-closed)
+/// for the rule covering an arm the table does not name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum SessionRefusal {

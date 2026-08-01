@@ -2961,7 +2961,11 @@ where
   /// - `Err(..)` — a terminal stop (a fresh trip, or the poison boundary it latches), surfaced as the
   ///   committed form's end-of-input error already marked terminal via
   ///   [`into_terminal`](crate::error::UnexpectedEnd::into_terminal), so recovery re-raises it. A
-  ///   fatal emitter's rejection of the trip diagnostic still propagates from the scan itself.
+  ///   fatal emitter's rejection of the trip diagnostic still propagates from the scan itself —
+  ///   but as *that emitter's* value, converted from the lexer error, so it carries **no** terminal
+  ///   mark: no `UnexpectedEnd` is built on that path for `into_terminal` to raise a flag on. The
+  ///   arm of your error type holding a lexer error is what answers for it; see
+  ///   [`MaybeTerminal`](crate::error::MaybeTerminal#where-the-set-stops-being-closed).
   ///
   /// # Zero-cost on the success path
   ///
