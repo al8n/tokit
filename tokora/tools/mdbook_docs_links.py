@@ -64,6 +64,7 @@ DOCS_RS_MAP = {
   "crate::InputRef::commit_point": "input/struct.InputRef.html#method.commit_point",
   "crate::InputRef::cursor": "input/struct.InputRef.html#method.cursor",
   "crate::InputRef::descend": "input/struct.InputRef.html#method.descend",
+  "crate::InputRef::descending": "input/struct.InputRef.html#method.descending",
   "crate::InputRef::emitter": "input/struct.InputRef.html#method.emitter",
   "crate::InputRef::next": "input/struct.InputRef.html#method.next",
   "crate::InputRef::peek": "input/struct.InputRef.html#method.peek",

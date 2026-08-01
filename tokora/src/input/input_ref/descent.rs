@@ -20,7 +20,9 @@ where
   /// [`Descent`] guard [`descend`](Self::descend) hands out, which is what makes "every level
   /// entered is a level left" a property of the type system rather than of caller discipline.
   /// *Balance* is the property that buys; **where** a level is left is the guard's scope, and
-  /// that is the caller's to place — see [`Descent`](Descent#what-the-type-system-enforces-here-and-what-it-does-not).
+  /// that is the caller's to place — unless the scope is
+  /// [`descending`](Self::descending)'s closure, which places it for you. See
+  /// [`Descent`](Descent#what-the-type-system-enforces-here-and-what-it-does-not).
   ///
   /// Configure it with
   /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
@@ -30,8 +32,87 @@ where
     self.recursion
   }
 
+  /// Runs `f` **one level of recursive descent deeper**, or fails terminally if the configured
+  /// limit is exceeded.
+  ///
+  /// **This is the form to write a recursive combinator in.** The level is raised before `f`
+  /// runs and released when `f` returns, propagates with `?`, or unwinds — and nothing `f` can
+  /// write releases it earlier, because `f` is handed the *input* and never the guard, and
+  /// [`recursion`](Self::recursion) is read-only. The scope of the level and the extent of the
+  /// frame are therefore the same region by construction, rather than by the caller placing a
+  /// binding correctly.
+  ///
+  /// ```rust
+  /// use tokora::{
+  ///   Emitter, InputRef, Lexer, ParseContext,
+  ///   error::RecursionLimitReached,
+  /// };
+  ///
+  /// /// A recursive production that counts against the parse's shared depth budget.
+  /// fn nested<'inp, L, Ctx>(
+  ///   inp: &mut InputRef<'inp, '_, L, Ctx>,
+  ///   remaining: usize,
+  /// ) -> Result<usize, <Ctx::Emitter as Emitter<'inp, L>>::Error>
+  /// where
+  ///   L: Lexer<'inp>,
+  ///   Ctx: ParseContext<'inp, L>,
+  ///   <Ctx::Emitter as Emitter<'inp, L>>::Error: From<RecursionLimitReached<L::Offset, ()>>,
+  /// {
+  ///   inp.descending(|inp| match remaining {
+  ///     0 => Ok(inp.recursion().depth()),
+  ///     n => nested(inp, n - 1),
+  ///   })
+  /// }
+  /// ```
+  ///
+  /// # Errors thread through untouched, so `?` composes
+  ///
+  /// `f` returns the frame's own `Result<T, E>` and it is returned unchanged, exactly as
+  /// [`try_attempt`](Self::try_attempt) threads its closure's error. `E` is not tied to the
+  /// emitter's error type — the trip is *returned*, never emitted, so it is built directly as `E`
+  /// through the `From` bound, which the frame's error type satisfies for the same reason
+  /// [`descend`](Self::descend)'s does.
+  ///
+  /// Write the **whole** frame body as the closure and its `return`s keep their meaning: the
+  /// closure returns `Result<T, E>` and this method returns it verbatim, so `return Err(e)` and
+  /// `return Ok(v)` still leave the frame. What a closure cannot host is a `return` meant for an
+  /// *enclosing* function, or a `break`/`continue` aimed at a loop outside it; a body shaped that
+  /// way is what [`descend`](Self::descend) is still public for.
+  ///
+  /// # If `f` panics
+  ///
+  /// The level is released on the unwind, by the guard's destructor, in `std` and `no_std` alike
+  /// — the same edge [`descend`](Self::descend) covers, and for the same reason. A host that
+  /// catches the unwind is handed an input whose depth is what it was before the call.
+  ///
+  /// # What one level means
+  ///
+  /// The same thing it means for [`descend`](Self::descend): whatever the caller says it means,
+  /// counted per call and shared by every parser on this input.
+  #[inline(always)]
+  pub fn descending<F, T, E>(&mut self, f: F) -> Result<T, E>
+  where
+    F: FnOnce(&mut Self) -> Result<T, E>,
+    E: From<RecursionLimitReached<L::Offset, Lang>>,
+  {
+    // The guard lives in THIS frame, not the caller's and not the closure's. `f` never receives
+    // it — only a reborrow of the input through `DerefMut` — so it can neither move it out nor
+    // forget it, and the two ways a caller-placed binding goes wrong (dropped before the
+    // recursion, or never bound at all) are not expressible here.
+    let mut frame = self.raise_level()?;
+    f(&mut frame)
+  }
+
   /// Enters **one level of recursive descent**, or fails terminally if the configured limit is
-  /// exceeded.
+  /// exceeded — the **low-level escape hatch** under [`descending`](Self::descending).
+  ///
+  /// **Reach for [`descending`](Self::descending) instead unless the frame's body cannot be a
+  /// closure** — because it must `return` out of an enclosing function, or `break`/`continue` a
+  /// loop outside it, or because it is large enough that relocating it is a change in its own
+  /// right. This method hands the level back as an ordinary value, so *where the level ends is
+  /// caller code*, and four measured spellings end it before the recursion it was taken for; only
+  /// one of the four warns. The list, the measurements and the reason no rule can close it are on
+  /// [`Descent`](Descent#what-the-type-system-enforces-here-and-what-it-does-not).
   ///
   /// The returned [`Descent`] guard *is* the level: it derefs to this handle, so the frame's body
   /// runs through it, and leaving its scope — by return, by `?`, or by an unwind — releases the
@@ -46,8 +127,8 @@ where
   /// `inp.descend()?;` as a bare statement compiles, because `?` takes the `Result` apart and
   /// leaves the guard a temporary that dies at the semicolon — releasing the level *before* the
   /// recursion it was taken for, and putting the native stack back at risk with the budget
-  /// reading zero. [`Descent`] is `#[must_use]` so that line warns, and a warning is all it is:
-  /// see [what the guard does and does not
+  /// reading zero. [`Descent`] is `#[must_use]` so that one line warns, and a warning on that one
+  /// line is all it is: see [what the guard does and does not
   /// enforce](Descent#what-the-type-system-enforces-here-and-what-it-does-not).
   ///
   /// # What one level means
@@ -90,6 +171,10 @@ where
   ///
   /// # Example
   ///
+  /// [`descending`](Self::descending)'s example, written out by hand — which is all the guard
+  /// form is. Keep the binding and the shadowing `let inp = &mut *frame;` together, because that
+  /// pair is what makes every line below reach the input *through* the level.
+  ///
   /// ```rust
   /// use tokora::{
   ///   Emitter, InputRef, Lexer, ParseContext,
@@ -124,6 +209,20 @@ where
   where
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<RecursionLimitReached<L::Offset, Lang>>,
   {
+    self.raise_level().map_err(Into::into)
+  }
+
+  /// RAISE, CHECK, ARM — the one copy of the sequence, shared by [`descend`](Self::descend) and
+  /// [`descending`](Self::descending) so the two spellings cannot drift apart.
+  ///
+  /// Returns the trip **unconverted**. The `From` that builds the caller's error therefore runs in
+  /// the caller, which is what keeps the documented ordering — decrement first, grammar code after
+  /// — true for both spellings even if that conversion panics.
+  #[inline(always)]
+  fn raise_level(
+    &mut self,
+  ) -> Result<Descent<'_, 'inp, 'closure, L, Ctx, Lang, Cmpl>, RecursionLimitReached<L::Offset, Lang>>
+  {
     // RAISE, CHECK, ARM — and nothing else may sit between the three. `increase` and `check` are
     // const arithmetic over two `usize`s, so neither can fail and neither can panic; the trip arm
     // lowers the depth again before it touches caller code, and the `From` that builds the error
@@ -134,7 +233,7 @@ where
       self.recursion.decrease();
       // Committed consumption, not the cache-front cursor: the same metric the pratt drivers'
       // stall exits report, so the offset does not move with how much lookahead is buffered.
-      return Err(RecursionLimitReached::of(self.span().end(), exceeded).into());
+      return Err(RecursionLimitReached::of(self.span().end(), exceeded));
     }
     Ok(Descent { input: self })
   }
@@ -142,11 +241,14 @@ where
 
 /// One live level of recursive descent, held for the length of the frame that entered it.
 ///
-/// Handed out by [`InputRef::descend`]. It derefs to the [`InputRef`] it was taken from, so the
-/// frame's body runs *through* the guard: while the guard is alive it holds the handle's `&mut`
-/// exclusively, so nothing can read this frame's input outside this frame's level. Leaving the
-/// guard's scope releases the level: on `Ok`, on a `?`-propagation, and on an unwind, in `std`
-/// and `no_std` alike.
+/// Handed out by [`InputRef::descend`], the low-level form. It derefs to the [`InputRef`] it was
+/// taken from, so the frame's body runs *through* the guard: while the guard is alive it holds the
+/// handle's `&mut` exclusively, so nothing can read this frame's input outside this frame's level.
+/// Leaving the guard's scope releases the level: on `Ok`, on a `?`-propagation, and on an unwind,
+/// in `std` and `no_std` alike.
+///
+/// [`InputRef::descending`] hands out no guard at all — it owns one for the span of a closure —
+/// and a frame written that way cannot reach any of what follows.
 ///
 /// # What the type system enforces here, and what it does not
 ///
@@ -173,19 +275,48 @@ where
 ///   `#[must_use]`, so the line above raises `unused_must_use` (*unused … that must be used*)
 ///   with the correct shape in the note. `tests/ui/descent_dropped_early.rs` pins that it does.
 ///
-///   **A lint is the whole of the enforcement, and it has a hole** — one rustc's own `help:`
-///   points straight at. `let _ = inp.descend()?;` is the same defect and is silent, because
-///   `let _` is the sanctioned way to say "drop this now" and the compiler cannot tell that
-///   intent apart from the mistake. Nothing in this type can close that: releasing a level early
-///   is *legal* — a frame that finishes its recursion and then keeps parsing at the shallower
-///   depth wants exactly that — so there is no rule to make it unrepresentable. What closes it is
-///   writing the frame in the documented shape, where the guard's scope and the frame's body are
-///   the same region:
+/// ## Exactly what the lint catches, measured
+///
+/// **One shape of five.** Each row below is a hand-written recursive combinator run against a
+/// `RecursionLimiter` of **8** through 200 nested calls, compiled under `clippy -D warnings`. The
+/// *depth* is what `recursion().depth()` reads at the deepest frame — a bound frame stops at 9 and
+/// never reaches it. The last column is the shallowest probed depth (1 000, 2 000, … 8 000, one
+/// process each) at which the same shape overflows a 2 MiB thread and takes the process down with
+/// `fatal runtime error: stack overflow`:
+///
+/// | frame body | diagnostic | result at 200 | aborts by |
+/// |---|---|---|---|
+/// | `inp.descending(\|inp\| …)` | — | `Err(RecursionLimitReached)`, depth 9 | never |
+/// | `let mut frame = inp.descend()?; let inp = &mut *frame;` | — | `Err(RecursionLimitReached)`, depth 9 | never |
+/// | `inp.descend()?;` | **`unused_must_use`** | `Ok`, depth 0 | 5 000 |
+/// | `let _ = inp.descend()?;` | none | `Ok`, depth 0 | 5 000 |
+/// | `if inp.descend().is_ok() { … }` | none | `Ok`, depth 0 | 5 000 |
+/// | `let d = inp.descend()?.recursion().depth();` | none | `Ok`, depth 1 | 4 000 |
+/// | `drop(inp.descend()?);` | none | `Ok`, depth 0 | 5 000 |
+///
+/// The abort column is a **demonstration, not a constant**: it is one debug build's frame size on
+/// one platform, and it moved by a whole probe step between two builds of the same source. What is
+/// stable is the shape of the finding — the budget is configured, it is consulted, it never sees
+/// more than one live level, and the native abort it exists to delete comes back.
+///
+/// So the attribute catches the bare statement and nothing else, and the four silent rows are not
+/// a closed list — **any** expression that consumes the `Result` or the guard and lets it die
+/// before the recursion does the same thing. rustc's own `help:` on the one caught row suggests
+/// `let _ = …`, which is the second row.
+///
+/// Nothing in this type can close that. Releasing a level early is *legal* — a frame that finishes
+/// its recursion and then keeps parsing at the shallower depth wants exactly that — so there is no
+/// predicate separating the intent from the mistake and no rule to make it unrepresentable. What
+/// closes it for a given frame is writing that frame so the level's scope and the body are the
+/// same region, which [`InputRef::descending`] does by construction and this spelling does by
+/// discipline:
 ///
 ///   ```rust,ignore
 ///   let mut frame = inp.descend()?;
 ///   let inp = &mut *frame;   // every line below runs inside the level, recursion included
 ///   ```
+///
+/// The runtime cells behind the table are in `src/input/input_ref/descent_tests.rs`.
 ///
 /// # Why a guard and not a pair of calls
 ///
@@ -195,10 +326,11 @@ where
 /// set would be restored by rollbacks that do not pop any frame — double-restored on a `std`
 /// unwind (where an undecided [`Commit`] guard rolls back) and leaked on a `no_std` one (where it
 /// commits). The destructor is the one witness whose behaviour does not fork on the unwind edge.
-#[must_use = "hold the `Descent` guard in a binding for the whole recursive frame — \
-              `let mut frame = inp.descend()?; let inp = &mut *frame;` — because dropping it \
-              releases the recursion level, and `inp.descend()?;` as a statement drops it before \
-              the frame it is meant to bound"]
+#[must_use = "write the frame as `inp.descending(|inp| ...)`, which holds the level for the whole \
+              body — or hold this guard in a binding for the whole frame, \
+              `let mut frame = inp.descend()?; let inp = &mut *frame;`. Dropping it releases the \
+              recursion level, and `inp.descend()?;` as a statement drops it before the frame it \
+              is meant to bound"]
 pub struct Descent<'r, 'inp, 'closure, L, Ctx, Lang: ?Sized = (), Cmpl = Complete>
 where
   L: Lexer<'inp>,

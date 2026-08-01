@@ -127,7 +127,10 @@ one level of the input's shared
 [`InputRef::descend`](crate::InputRef::descend), whose [`Descent`](crate::input::Descent) guard
 releases the level on every exit — return, `?`, or unwind, identically in `std` and `no_std`.
 Exceeding the limit fails the parse with
-[`RecursionLimitReached`](crate::error::RecursionLimitReached).
+[`RecursionLimitReached`](crate::error::RecursionLimitReached). Your own recursive combinators
+draw on the same budget through
+[`InputRef::descending`](crate::InputRef::descending) — see
+[Bounding your own recursion](#bounding-your-own-recursion).
 
 - **Default 64**, so an unconfigured parse of a deeply nested expression fails cleanly instead of
   risking a native stack abort. Set your own with
@@ -173,32 +176,57 @@ Exceeding the limit fails the parse with
   fully restored by the unwind that carries the error out. Scanner trips latch; descent trips
   unwind.
 
-`descend` is public, so a hand-written recursive combinator can draw on the same budget:
+### Bounding your own recursion
+
+A hand-written recursive combinator can draw on the same budget, and the way to do it is
+[`InputRef::descending`](crate::InputRef::descending) — the level is the closure:
+
+```rust,ignore
+fn nested(inp: &mut InputRef<'_, '_, L, Ctx>, remaining: usize) -> Result<usize, MyError> {
+  inp.descending(|inp| match remaining {   // one level, for exactly this body
+    0 => Ok(inp.recursion().depth()),
+    n => nested(inp, n - 1),
+  })
+}
+```
+
+`f`'s error is returned untouched, so `?` inside the body composes with everything the frame
+already returns, and the trip is built as the frame's own error type. Write the *whole* frame body
+as the closure and its `return`s keep their meaning — the closure returns the same `Result` the
+frame does. If the body panics, the level is released on the unwind.
+
+**Why a closure and not just a guard.** [`descend`](crate::InputRef::descend) is also public and
+hands the level back as an ordinary value, and then *where the level ends is your code*. The
+correct spelling is a binding held for the whole frame:
 
 ```rust,ignore
 let mut frame = inp.descend()?;   // one level, for as long as `frame` lives
 let inp = &mut *frame;            // the body below is unchanged
 ```
 
-**Bind the guard — the level lasts exactly as long as it does.** The two lines above are not a
-style; they are the contract. Written without the binding, the guard is a temporary that dies at
-the semicolon:
+and there are at least four spellings that end it one statement too early, of which the compiler
+catches exactly one:
 
 ```rust,ignore
-inp.descend()?;        // `?` unwraps, the guard drops HERE, the level is already back
-recurse(inp, n - 1)    // …and this recursion is unbounded again
+inp.descend()?;                                  // warns: `unused_must_use`
+let _ = inp.descend()?;                          // silent
+if inp.descend().is_ok() { recurse(inp, n - 1) } // silent
+let d = inp.descend()?.recursion().depth();      // silent
+drop(inp.descend()?);                            // silent
 ```
 
-That compiles. What the type system does guarantee is *balance* — every level entered is left
-exactly once, by the guard's destructor, on every exit including an unwind — and that a **live**
-guard is the only route to the input. Where the level ends is the guard's scope, and that is
-yours to place. [`Descent`](crate::input::Descent) is `#[must_use]`, so the bad line warns
-(`unused ... that must be used`, with the fix in the note), and `tests/ui/descent_dropped_early.rs`
-pins that it does. But a lint is the whole of the enforcement and it has a hole rustc's own
-`help:` names: `let _ = inp.descend()?;` is the same bug and is silent. Early release cannot be
-made unrepresentable, because it is sometimes what you want — a frame that finishes recursing and
-then keeps parsing shallower needs it. Bind the guard and reach the input through it, and the
-question does not arise.
+All five compile, and all five were measured: against a limit of 8, 200 recursive calls return
+`Ok` with the depth cell reading 0 (or 1 for the chain), and by 4 000–5 000 levels each one aborts
+a 2 MiB thread with `fatal runtime error: stack overflow` — the failure the budget exists to
+delete. [`Descent`](crate::input::Descent) is `#[must_use]`, which is what catches the first
+line, and `tests/ui/descent_dropped_early.rs` pins that it does; the other four are not a closed
+list, because *any* expression that consumes the guard and lets it die before the recursion does
+the same. Early release cannot be made unrepresentable — a frame that finishes recursing and then
+keeps parsing shallower wants exactly it — so what closes the question for a given frame is
+choosing a shape where the level's scope and the body are the same region. `descending` is that
+shape without the discipline; the bound guard is that shape with it. Reach for `descend` when the
+body cannot be a closure — a `return` out of an enclosing function, a `break` aimed at an outer
+loop — and then bind it.
 
 ---
 

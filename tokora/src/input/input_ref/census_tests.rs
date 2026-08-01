@@ -90,6 +90,11 @@ const SOURCES: &[(&str, &str)] = &[
   ("skip_while.rs", include_str!("skip_while.rs")),
   ("fold.rs", include_str!("fold.rs")),
   ("pratt.rs", include_str!("pratt.rs")),
+  // Added by 0.8.0's recursion budget and unregistered until R23 — the one non-test neighbour the
+  // list had fallen behind. Every count it contributes is zero (it settles nothing, reaches no
+  // front, captures no checkpoint), which is exactly what registering it pins: a settle or a front
+  // read added here would now move a count instead of arriving unseen.
+  ("descent.rs", include_str!("descent.rs")),
   ("session.rs", include_str!("session.rs")),
   ("drop_policy.rs", include_str!("drop_policy.rs")),
   ("trace.rs", include_str!("trace.rs")),

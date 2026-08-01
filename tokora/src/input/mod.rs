@@ -347,9 +347,10 @@ impl<E, C> InputContext<E, C> {
   /// Sets the **recursion budget** this parse descends against.
   ///
   /// The budget is per *input session*, not per parser: every recursive-descent site that goes
-  /// through [`InputRef::descend`](InputRef::descend) — today both Pratt engines' frame
-  /// prologues — draws on this one cell, so two expression parsers composed into one grammar
-  /// cannot each spend the full depth. Exceeding it fails the parse with the always-terminal
+  /// through [`InputRef::descending`](InputRef::descending) or the lower-level
+  /// [`InputRef::descend`](InputRef::descend) — today both Pratt engines' frame prologues —
+  /// draws on this one cell, so two expression parsers composed into one grammar cannot each
+  /// spend the full depth. Exceeding it fails the parse with the always-terminal
   /// [`RecursionLimitReached`](crate::error::RecursionLimitReached).
   ///
   /// Pass [`RecursionLimiter::unlimited`] to opt out, or
@@ -610,8 +611,9 @@ where
   /// depth, and the guard's `Drop` lowers it on **every** exit of the guard's scope — return,
   /// `?`, or unwind, identically in `std` and `no_std`. There is no `recursion_mut`, so no caller
   /// can leave the cell unbalanced. *Balance* is what that buys; making the guard's scope the
-  /// **frame's** scope is the caller's job, and the guard is `#[must_use]` because getting it
-  /// wrong is silent otherwise — see
+  /// **frame's** scope is the caller's job unless the frame is written with
+  /// [`InputRef::descending`], which owns the guard for the body and takes the job away. The
+  /// guard is `#[must_use]` because one way of getting it wrong warns and four do not — see
   /// [`Descent`](crate::input::Descent#what-the-type-system-enforces-here-and-what-it-does-not).
   ///
   /// # Deliberately outside the rollback set

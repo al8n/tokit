@@ -108,6 +108,15 @@ mod session_tests;
 ))]
 mod fast_path_tests;
 
+/// What holds a recursion level and what silently gives it back — the runtime half of the table on
+/// [`Descent`]. Needs `std` for the unwind cell's `catch_unwind`.
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
+mod descent_tests;
+
 /// A reference to an `Input` instance.
 pub struct InputRef<'inp, 'closure, L, Ctx, Lang: ?Sized = (), Cmpl = Complete>
 where

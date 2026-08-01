@@ -127,7 +127,10 @@ impl RecursionLimitExceeded {
 /// [`Descent`](crate::input::Descent) guard releases the level on every exit including an
 /// unwind; exceeding the limit fails the parse with the always-terminal
 /// [`RecursionLimitReached`](crate::error::RecursionLimitReached). The budget is *per input*,
-/// not per parser, so two pratt parsers composed into one grammar share one depth budget.
+/// not per parser, so two pratt parsers composed into one grammar share one depth budget. A
+/// hand-written recursive combinator draws on the same cell through
+/// [`InputRef::descending`](crate::InputRef::descending), which is the guard's scoped form and
+/// the one to prefer.
 ///
 /// It is deliberately **not** part of the checkpoint set: depth is a fact about the control
 /// stack, and a rollback happens at the same frame depth as the save it returns to.

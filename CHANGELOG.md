@@ -90,7 +90,7 @@ numbered entry below that carries the full reasoning.
 | A second same-power `PrattInfix::Neither` operator in one chain folded left in silence — `7 = 1 ; 2 ; 3` returned `Ok(((7=(1;2));3))` with the **whole input consumed**, so no end-of-input check had anything to catch | the parse fails with `NonAssociativeChain`, the operator left on the input unconsumed | Handing the operator up re-associates the chain across an enclosing frame that cannot know the constraint. Not terminal: recovery may still spend it. | [41](#changed-breaking) |
 | Recursive descent was unbounded — a deep enough expression exhausted the native stack and **aborted the process** | a shared per-input depth budget, **64** by default, failing the parse with the always-terminal `RecursionLimitReached` | An abort carries no diagnostic and cannot be caught; a refusal names the knob that raises it. `RecursionLimiter::unlimited()` restores 0.7.3's behaviour. | [42](#changed-breaking) |
 | `RecursionLimiter::new` / `Default`, and `Limiter::new` / `Limiter::with_token_tracker`, defaulted to depth **500** | **64** | Reaches code with no pratt parser in it: the same type doubles as a **lexer-side** nesting tracker in a `State` / `Extras` position. | [43](#changed-breaking) |
-| Your own `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 15 new inherent items and 6 new defaulted trait methods enter the method space. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
+| Your own `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 16 new inherent items and 6 new defaulted trait methods enter the method space. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 | — | a new `warning: unused import` naming one of *your* combinator traits | That warning is the **only** breadcrumb the silent case gives you: the steal stranded the import. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 
 #### These fail to compile. Your build will point at every one.
@@ -156,11 +156,11 @@ five independently-numbered lists, so numeric cross-references written before th
 ### The new names, and why adding a name is still a break
 
 This release adds 16 glob-reachable root/module names, one new public module
-(`tokora::cst::kinds`, its own glob namespace), 6 trait-declared methods, and 15 inherent
-items — **12 receiver methods and 3 associated functions**, which resolve by different rules
+(`tokora::cst::kinds`, its own glob namespace), 6 trait-declared methods, and 16 inherent
+items — **13 receiver methods and 3 associated functions**, which resolve by different rules
 and are listed separately below for that reason. The items themselves are under
 [Added](#added) with the rest of the release. The lists here are generated from a
-rustdoc-JSON diff of the two sides at the `std,logos,trace,rowan` feature point; the five
+rustdoc-JSON diff of the two sides at the `std,logos,trace,rowan` feature point; the six
 inherent items and three glob names that items [41–46](#changed-breaking) add were taken from
 the branch diff under the same criteria rather than from a separate hand audit.
 
@@ -196,7 +196,7 @@ below, on one of these receiver types:**
 
 | you wrote it on | which names |
 |---|---|
-| `InputRef` | `try_expect_take`, `try_expect_take_or_stop`, `peek_head_map`, `head_satisfies`, `peek_kind`, `attempt_parse`, `spanning`, `descend`, `recursion` |
+| `InputRef` | `try_expect_take`, `try_expect_take_or_stop`, `peek_head_map`, `head_satisfies`, `peek_kind`, `attempt_parse`, `spanning`, `descending`, `descend`, `recursion` |
 | `ParseAttempt` | `into_option` |
 | `Ident` | `parse_except`, `try_parse_except` |
 | `InputContext`, `ParserContext` | `with_recursion_limiter` |
@@ -1196,24 +1196,58 @@ everywhere else.
     untrusted, deeply nested input should still set its own limit against the stack the parse will
     actually run on, rather than inherit this one.
 
-    **`descend` is public, and the guard has to be bound — `Descent` is `#[must_use]` to say so.**
-    A hand-written recursive combinator draws on the same budget, and the level lasts exactly as
-    long as the guard does. Written `inp.descend()?;`, `?` takes the `Result` apart and leaves the
-    guard a temporary that dies at the semicolon: the level is released *before* the recursion it
-    was taken for, the budget reads zero all the way down, and the native stack abort the limiter
-    exists to prevent is back. Measured on this tree at limitation 8: the bound shape returns
-    `Err(RecursionLimitReached { depth: 9, limitation: 8 })`, the unbound one runs 200 levels and
-    returns `Ok`, and at 5 000 levels it aborts a 2 MiB thread with `fatal runtime error: stack
-    overflow`. Bind it — `let mut frame = inp.descend()?; let inp = &mut *frame;` — and every line
-    below runs inside the level. What the type system guarantees on its own is *balance* (every
-    level entered is left exactly once, by the destructor, unwind included) and that a **live**
-    guard is the only route to the input; **where** the level ends is the guard's scope, and that
-    is caller code. The attribute makes the bad line warn and `tests/ui/descent_dropped_early.rs`
-    pins that it does, but a lint is the whole of the enforcement and `let _ = inp.descend()?;`
-    stays silent — releasing a level early is legal, so there is no rule that could forbid it.
+    **Your own recursive combinators draw on the same budget, and `InputRef::descending` is how.**
+    It takes the frame's body as a closure and owns the level for exactly that body:
+
+    ```rust,ignore
+    inp.descending(|inp| match remaining {
+      0 => Ok(inp.recursion().depth()),
+      n => nested(inp, n - 1),
+    })
+    ```
+
+    The closure's error is returned untouched, so `?` inside composes with whatever the frame
+    already returns and the trip is built as the frame's own error type; a body written entirely
+    as the closure keeps its `return`s; a panic releases the level on the unwind. Nothing the
+    closure can write releases it earlier — it is handed the input, never the guard, and
+    `InputRef::recursion` is read-only.
+
+    **`InputRef::descend` is also public, as the low-level escape hatch, and it is easy to write
+    wrong.** It hands the level back as an ordinary value, so *where the level ends is caller
+    code*. `Descent` is `#[must_use]`, which catches **one** spelling of getting that wrong and
+    not the others. Measured on this tree at limitation 8, over 200 recursive calls, with the
+    abort depth bisected one process per depth on a 2 MiB thread:
+
+    | frame body | diagnostic | at 200 calls | aborts by |
+    |---|---|---|---|
+    | `inp.descending(\|inp\| …)` | — | `Err(RecursionLimitReached { depth: 9, limitation: 8 })` | never |
+    | `let mut frame = inp.descend()?; let inp = &mut *frame;` | — | same | never |
+    | `inp.descend()?;` | `unused_must_use` | `Ok`, depth 0 | 5 000 |
+    | `let _ = inp.descend()?;` | none | `Ok`, depth 0 | 5 000 |
+    | `if inp.descend().is_ok() { … }` | none | `Ok`, depth 0 | 5 000 |
+    | `let d = inp.descend()?.recursion().depth();` | none | `Ok`, depth 1 | 4 000 |
+    | `drop(inp.descend()?);` | none | `Ok`, depth 0 | 5 000 |
+
+    An abort is `fatal runtime error: stack overflow` — the failure this whole item exists to
+    delete, reinstated by a line that compiles. The abort depths are a demonstration rather than
+    a constant: they are one debug build's frame size, probed at 1 000-level steps, and one row
+    moved a whole step between two builds of the same source. The four silent rows are **not a
+    closed list**:
+    any expression that consumes the guard and lets it die before the recursion behaves the same
+    way, and rustc's own `help:` on the caught row suggests the second one. Early release cannot
+    be forbidden, because it is sometimes what a frame wants, so what closes the question is the
+    *shape*: `descending` makes the level's scope and the body the same region by construction,
+    the bound guard makes them the same region by discipline. What the type system guarantees on
+    its own — for both spellings — is *balance* (every level entered is left exactly once, by the
+    destructor, unwind included) and that a **live** guard is the only route to the input.
+
+    Rails: `tests/ui/descent_dropped_early.rs` pins the attribute on the MSRV toolchain,
+    `src/input/input_ref/descent_tests.rs` pins every row of the table above at runtime on every
+    toolchain, and its `#[expect(unused_must_use, …)]` turns a deleted attribute into a hard error
+    under the crate's `deny(warnings)`.
 
     — *(R12; the default resized against measurement in R13; the guard marked `#[must_use]` in
-    R22)*
+    R22; `descending` added and the other three early-release shapes measured in R23)*
 
 43. **`RecursionLimiter`'s default depth drops from 500 to 64 in every constructor that supplies
     one** — `RecursionLimiter::new` and its `Default`, and `Limiter::new` /
@@ -1271,10 +1305,11 @@ everywhere else.
     emitter.** Neither has an `emit_*` counterpart on `PrattEmitter`, by design — a recording
     emitter must not be able to swallow a resource trip or a rejected chain — so the engines
     *return* them, and a returned error becomes the caller's type through `From`. The trip's
-    value is built and converted inside `InputRef::descend`, the recursion guard every
-    recursive-descent grammar shares whether or not it has a pratt parser in it; the repeat is
-    built by each engine at its own exit. Neither point has an emitter in scope, so a conversion
-    method on the emitter-side bundle would be one nothing could ever call. `FromPrattError`
+    value is built and converted at `InputRef::descending` / `InputRef::descend`, the recursion
+    entry every recursive-descent grammar shares whether or not it has a pratt parser in it; the
+    repeat is built by each engine at its own exit. Neither point has an emitter in scope, so a
+    conversion method on the emitter-side bundle would be one nothing could ever call.
+    `FromPrattError`
     keeps exactly the two conversions a `PrattEmitter` body performs, and **no hand-written
     `FromPrattError` impl has to change.**
 
@@ -1342,9 +1377,9 @@ item that carries them, and listed here only so scanning this section does not m
 `MissingToken`/`SeparatedError`'s `with_name` and `name` (item 20), `PrattFloor` (item 23),
 `DelimiterKind` and `Delimiter::KIND` (item 28), `SeparatorHandler::OBSERVES_SEPARATORS`
 (item 5), `CstProfile` and `KindValidator` (item 13), `error::NonAssociativeChain` (item 41),
-`error::RecursionLimitReached` with `input::Descent`, `InputRef::descend`, `InputRef::recursion`,
-`RecursionLimiter::unlimited`, `InputContext::with_recursion_limiter` and
-`ParserContext::with_recursion_limiter` (item 42). **`FromPrattError` is not on this list**:
+`error::RecursionLimitReached` with `input::Descent`, `InputRef::descending`,
+`InputRef::descend`, `InputRef::recursion`, `RecursionLimiter::unlimited`,
+`InputContext::with_recursion_limiter` and `ParserContext::with_recursion_limiter` (item 42). **`FromPrattError` is not on this list**:
 item 46's two new obligations are `From` impls on your own error type, and the trait gains no
 member, so a hand-written `FromPrattError` impl compiles unchanged.
 
