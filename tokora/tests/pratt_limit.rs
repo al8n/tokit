@@ -416,6 +416,54 @@ where
   typed_resumption_probe(inp)
 }
 
+/// **The fourth shape, covered rather than argued away.** A `ParsePrattRHS` that opens a
+/// [session point](tokora::InputRef::begin_point) and **abandons** it — dropping the handle while
+/// the point is still live, which `begin_point`'s contract permits — before reading its operator.
+/// The point pins its base, so the probe's restore takes its reconciling path
+/// (`abandon_points_above`, then the rewind) rather than the plain one.
+///
+/// That is the one remaining way for something other than a plain rewind to decide where the input
+/// ends up, and therefore the last place the reported offset and the restore target could come
+/// apart. `pratt_txn_retention.rs` already pins that this exit hands the operator back across such
+/// a point; what this fixture adds is that the offset it *reports* is still the position it landed
+/// on.
+fn point_abandoning_rhs<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<PrattRHS<&'static str, &'static str, &'static str, &'static str, Power>, LimErr>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+{
+  // Opened and never settled: the handle is dropped while the point is still live, which pins its
+  // base until an enclosing rollback reconciles it.
+  let _ = inp.begin_point();
+  rhs(inp)
+}
+
+fn point_abandoning_probe<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<Resumption, LimErr>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+{
+  let at = match pratt(
+    lhs,
+    point_abandoning_rhs,
+    fold_prefix,
+    fold_infix,
+    fold_postfix,
+  )
+  .parse_input(inp)
+  {
+    Ok(tree) => panic!("a repeated `;` must be refused; got Ok({tree})"),
+    Err(LimErr::NonAssoc { at }) => at,
+    Err(other) => panic!("expected the non-associative chain; got {other:?}"),
+  };
+  let frontier = inp.span().end();
+  Ok((at, frontier, inp.next()?.map(|t| t.span().start())))
+}
+
 thread_local! {
   /// Cycles [`zero_width_repeat_rhs`] has been asked about. Reset by the one cell that uses it.
   static ZERO_WIDTH_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
@@ -1006,6 +1054,41 @@ fn a_skipped_lexer_error_before_the_repeat_does_not_move_the_offset() {
        aborted probe, then re-emitted when the caller read across it again"
     );
   }
+}
+
+/// **The fourth shape: a classifier that abandons a session point.**
+///
+/// Every other fixture varies what sits *between* the restore target and the operator. This one
+/// varies the restore itself: [`point_abandoning_rhs`] leaves a session point open, so the probe's
+/// exit takes `rollback_abandoning_points`' reconciling path — abandon every point above the base,
+/// then rewind — rather than a plain restore.
+///
+/// That is the last remaining way for something other than a straight rewind to decide where the
+/// input ends up, and therefore the last place the reported offset could come apart from it. It
+/// does not: the reconciliation drops the points and the rewind still installs the probe's own
+/// checkpoint, so the frontier is the same number the plain fixture produces, and the offset is
+/// still that frontier.
+///
+/// Beyond it the class is closed by construction rather than by enumeration — the offset is not
+/// *derived from* the restore target, it **is** the value the checkpoint was built from, with no
+/// statement between the two — which is the claim this round is really making.
+#[test]
+fn a_classifier_that_abandons_a_session_point_is_still_named_at_the_restore_target() {
+  let got: Resumption = Parser::with_context(fatal_ctx())
+    .apply(point_abandoning_probe)
+    .parse_str("1 ; 2 ; 3")
+    .unwrap();
+
+  assert_eq!(
+    got,
+    (5, 5, Some(6)),
+    "the reconciling rollback restores the same thing the plain one does, and reports it"
+  );
+  let (at, frontier, _) = got;
+  assert_eq!(
+    at, frontier,
+    "THE CONTRACT, across the restore path a still-open session point forces"
+  );
 }
 
 /// **Round 2's shape, re-verified: a classifier that skips trivia tokens.**
