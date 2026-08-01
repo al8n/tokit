@@ -1552,3 +1552,278 @@ fn head_read_ledger_cold() -> std::vec::Vec<Effect> {
     .unwrap();
   recorded()
 }
+
+// ── The precondition, and that it is load-bearing ──────────────────────────────────────────────
+//
+// !!! NOTHING BELOW IS SUPPORTED BEHAVIOUR. !!!
+//
+// Everything above measures a difference in WHICH caller code each route runs, and concludes that
+// no *value* a caller can read back differs. That conclusion has a condition on it, and these two
+// cells are that condition made concrete: they build the caller the contract on `skip_while` and
+// on `peek_head_map` now explicitly EXCLUDES — one whose predicate or closure reads an
+// input-layer side effect — and show that for such a caller the divergence is not a call count
+// but a **different parse**: a different skip decision, a different committed cursor, different
+// tokens consumed, a different returned value.
+//
+// They exist so that the exclusion is a measured fact rather than a caveat nobody checked, and
+// they pin a **documented precondition, not a behaviour**. No caller may rely on either column:
+// which route answers a given call is this crate's choice and may change between versions, so the
+// only thing a caller can do with the difference below is avoid being able to see it. `Clone` is
+// not required to be pure in Rust and `L::Span`, `L::State` and `L::Offset` are the caller's own
+// types, which is exactly why the precondition has to be written down instead of assumed.
+//
+// Both cells are also red against a build that runs the slow route: ablate either fast path and
+// its two columns collapse onto each other, and the `assert_ne!` that carries the finding fails.
+
+/// How many caller `Clone` calls the input layer has run since [`record`] started this ledger.
+///
+/// This is the hazard in one function: a `Clone` that bumps a counter, and a predicate that reads
+/// it. Both halves are ordinary Rust and neither is forbidden by any trait bound in this crate.
+fn clones_so_far() -> usize {
+  LEDGER.with(|l| {
+    l.borrow()
+      .iter()
+      .filter(|e| {
+        matches!(
+          e,
+          Effect::SpanClone | Effect::StateClone | Effect::OffsetClone
+        )
+      })
+      .count()
+  })
+}
+
+/// The same reading, narrowed to `L::Offset::clone` — the one the head read's routes differ by.
+fn offset_clones_so_far() -> usize {
+  LEDGER.with(|l| {
+    l.borrow()
+      .iter()
+      .filter(|e| **e == Effect::OffsetClone)
+      .count()
+  })
+}
+
+/// What a route left the stream in: the resume cursor, and every token still to be read.
+#[derive(Debug, PartialEq, Eq)]
+struct Left {
+  cursor: usize,
+  remaining: std::vec::Vec<(usize, usize)>,
+}
+
+/// Drains the stream, as `(start, end)` byte pairs — "which tokens did this call consume", read
+/// from the other side.
+fn drain_spans<'a>(
+  inp: &mut InputRef<'a, '_, LedgerLexer<'a>, LedgerCtx<'a>, ()>,
+) -> std::vec::Vec<(usize, usize)> {
+  let mut out = std::vec::Vec::new();
+  while let Some(tok) = inp.next().unwrap() {
+    let span = tok.span_ref();
+    out.push((span.start.0, span.end.0));
+  }
+  out
+}
+
+/// "Skip this token once the input layer has cloned something." On the fast path nothing has been
+/// cloned by the time the head is asked, so this answers *keep* and the skip stops; the scan
+/// clones the frontier pair before it asks anything, so the same predicate answers *skip*.
+fn skip_once_something_has_been_cloned(clones: usize) -> bool {
+  clones > 0
+}
+
+/// The mirror image: "skip only while nothing has been cloned yet."
+fn skip_only_while_nothing_has_been_cloned(clones: usize) -> bool {
+  clones == 0
+}
+
+/// `skip_while` over a resident head, with a predicate whose answer is a function of the input
+/// layer's clone count rather than of the token it was handed.
+fn skip_while_asking_about_clones(skip_when: fn(usize) -> bool) -> Left {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  record();
+  inp.skip_while(|_| skip_when(clones_so_far())).unwrap();
+  let _ = recorded();
+  let cursor = inp.cursor().as_inner().0;
+  let remaining = drain_spans(&mut inp);
+  Left { cursor, remaining }
+}
+
+/// The same predicate, over the same stream in the same residency, driven through the scan the
+/// fast path replaces — `skip_while(pred)` *is* `skip_until::<SkipWhile>(|t| !pred(t))`.
+fn scan_asking_about_clones(skip_when: fn(usize) -> bool) -> Left {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  record();
+  let _ = inp
+    .skip_until::<SkipWhile, _, _>(|_| !skip_when(clones_so_far()), || None, ())
+    .unwrap();
+  let _ = recorded();
+  let cursor = inp.cursor().as_inner().0;
+  let remaining = drain_spans(&mut inp);
+  Left { cursor, remaining }
+}
+
+/// **The precondition, in the direction that matters most.** A predicate that reads the input
+/// layer's clone counter makes the two routes disagree about *what to skip* — so the value
+/// guarantees on [`skip_while`](InputRef::skip_while) are conditional on the caller, and the
+/// contract now says so.
+///
+/// The mechanism is the measured table above and nothing else: the scan clones the frontier pair
+/// **before** it asks the predicate anything, and the fast path asks first and clones nothing. A
+/// predicate keyed on that counter therefore answers one way here and the other way there, and
+/// the answer to a skip predicate is the skip.
+///
+/// Both directions are pinned, because the reviewer's claim is symmetric — the fast path can stop
+/// where the scan skips *and* skip where the scan stops:
+///
+/// | resident head | fast path | the scan |
+/// |---|---|---|
+/// | the probe **rejects** it (`clones > 0`, and nothing is cloned yet) | consumes nothing | consumes everything |
+/// | the probe **accepts** it (`clones == 0`) | consumes the head | consumes nothing |
+///
+/// This is a **documented precondition, not a supported behaviour.** Neither column is a promise:
+/// which route answers a call is this crate's choice, and a caller who can tell them apart is
+/// asking the library a question about itself. The cell is here to prove the exclusion earns its
+/// place in the contract, and it is red against a build that runs the slow route — ablate the
+/// fast path and the two columns become the same.
+#[test]
+fn a_clone_counting_predicate_can_change_the_skip_decision() {
+  // ── The probe REJECTS the head: the fast path stops, the scan skips ──
+  let fast = skip_while_asking_about_clones(skip_once_something_has_been_cloned);
+  let scan = scan_asking_about_clones(skip_once_something_has_been_cloned);
+  assert_eq!(
+    fast,
+    Left {
+      cursor: 0,
+      remaining: std::vec![(0, 2), (3, 5), (6, 8)],
+    },
+    "the head is asked before anything is cloned, so the predicate says keep and the skip stops \
+     on the first token — nothing consumed"
+  );
+  assert_eq!(
+    scan,
+    Left {
+      cursor: 8,
+      remaining: std::vec![],
+    },
+    "the scan clones the frontier pair first, so the SAME predicate says skip, and keeps saying \
+     it: every token in the stream is consumed"
+  );
+  assert_ne!(
+    fast, scan,
+    "and that is the finding: not a clone count, a different parse. The cursor differs and the \
+     tokens consumed differ, from one predicate that answers a question about the library rather \
+     than about the input"
+  );
+
+  // ── The probe ACCEPTS the head: the fast path skips, the scan stops ──
+  let fast = skip_while_asking_about_clones(skip_only_while_nothing_has_been_cloned);
+  let scan = scan_asking_about_clones(skip_only_while_nothing_has_been_cloned);
+  assert_eq!(
+    fast,
+    Left {
+      cursor: 3,
+      remaining: std::vec![(3, 5), (6, 8)],
+    },
+    "nothing is cloned when the head is asked, so the probe accepts it and its answer is carried \
+     into the scan; by the second token the frontier pair has been cloned and the skip stops"
+  );
+  assert_eq!(
+    scan,
+    Left {
+      cursor: 0,
+      remaining: std::vec![(0, 2), (3, 5), (6, 8)],
+    },
+    "the scan has already cloned the frontier pair when it asks about that same first token, so \
+     it stops there and skips nothing"
+  );
+  assert_ne!(
+    fast, scan,
+    "the divergence runs both ways — one token consumed against none, which is why the \
+     precondition is stated as a condition on the caller and not as a note about counters"
+  );
+}
+
+/// The caller's `f`, shared by both routes: its value is a function of the input layer's
+/// `L::Offset::clone` count and not of the head it was handed.
+fn f_reads_the_offset_clone_count(_head: Spanned<&LedgerTok, &LedgerSpan>) -> usize {
+  offset_clones_so_far()
+}
+
+/// [`peek_head_map`](InputRef::peek_head_map) over a resident head — the fast path — with that
+/// `f`.
+fn head_read_value_fast() -> usize {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  record();
+  let value = inp.peek_head_map(f_reads_the_offset_clone_count).unwrap();
+  let _ = recorded();
+  value.expect("the head is resident, so `f` ran")
+}
+
+/// The same `f`, over the same stream in the same residency, driven through the body
+/// `peek_head_map` runs when its probe finds nothing: the hoisted end-offset clone, the fill, and
+/// the same `f` over the entry the fill hands back.
+fn head_read_value_general() -> usize {
+  use crate::cache::PeekedTokenExt as _;
+
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  record();
+  let value = {
+    // Hoisted above the fill exactly as `peek_head_map` hoists it: the `L::Offset::clone` the
+    // terminal end-of-input error would need, taken whether or not that error can arise.
+    let _end = crate::Span::end(inp.span());
+    let (mut peeked, _terminal, _emitter) = inp.peek_with_emitter_terminal::<U1>().unwrap();
+    let head = peeked.pop_front().expect("the head is resident");
+    f_reads_the_offset_clone_count(Spanned::new(head.span(), head.token()))
+  };
+  let _ = recorded();
+  value
+}
+
+/// **The same precondition on the second fast path.** `F: FnOnce(..) -> O` can capture shared
+/// state, and the general route clones an `L::Offset` before it calls `f` — so an `f` that reads
+/// that counter returns a **different `O`** depending on which route answered.
+///
+/// The value guarantee on [`peek_head_map`](InputRef::peek_head_map) is "the same value handed to
+/// `f`, and therefore the same value returned". The first half survives this caller; the second
+/// does not, because `f` is not a function of what it was handed. And the consequence is not
+/// confined to a peek: [`head_satisfies`](InputRef::head_satisfies) and
+/// [`peek_kind`](InputRef::peek_kind) ride this call, so an `O` that differs is a grammar
+/// decision that differs.
+///
+/// The difference is exactly one clone — `self.span().end()`, hoisted above the fill for the
+/// terminal error the general route may have to raise — so the assertion is stated as a
+/// difference rather than as two absolute numbers: with the `trace` feature on, both routes are
+/// one richer, because the trace hook clones the cursor offset on each.
+///
+/// This is a **documented precondition, not a supported behaviour.** The measured column is not a
+/// promise about how many offsets either route clones; it is the proof that an `f` able to count
+/// them is a caller the contract has to exclude. Red against a build that runs the slow route:
+/// ablate the fast path and both routes return the same number.
+#[test]
+fn an_offset_clone_counting_f_can_change_the_value_peek_head_map_returns() {
+  let fast = head_read_value_fast();
+  let general = head_read_value_general();
+  assert_ne!(
+    fast, general,
+    "one `f`, one stream, one residency — and a different `O` out of each route. That is a \
+     different parse for any caller who builds a decision on it"
+  );
+  assert_eq!(
+    general,
+    fast + 1,
+    "and the difference is the single hoisted `L::Offset::clone`: the end offset the general \
+     route takes for an end-of-input error that a resident head makes unreachable (fast={fast}, \
+     general={general})"
+  );
+}

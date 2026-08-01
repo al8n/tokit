@@ -384,8 +384,9 @@ where
   /// always already there: measured on a GraphQL parse, 17,028 of 17,029 times. So the front of
   /// the stream is probed first, and a head that is there is handed straight to `f`.
   ///
-  /// That is the same answer the fill gives, by the fill's own construction. With one token at
-  /// the front — parked or cached — the window request is already met, so the fill takes its
+  /// That is the same **head** the fill gives, by the fill's own construction — and therefore the
+  /// same answer, for an `f` that answers about the head (the precondition below). With one token
+  /// at the front — parked or cached — the window request is already met, so the fill takes its
   /// `want == 0` arm: it heads the window with the parked token if there is one and lets the
   /// cache fill in behind it, then returns. Nothing is lexed, nothing is committed, the terminal
   /// flag stays `false` (that arm returns *before* the boundary probe, so a resident head is
@@ -399,7 +400,7 @@ where
   /// arms are unreachable with a head in hand; the trace hook the fill opens with is emitted here
   /// instead, so a `trace` build sees the same one event per call either way.
   ///
-  /// ## What is guaranteed identical — and what is not
+  /// ## What is guaranteed identical — for which callers, and what is not
   ///
   /// The same distinction [`skip_while`](Self::skip_while) draws applies here, and it is much the
   /// smaller of the two: a peek commits nothing, so there is no frontier to clone and no mark to
@@ -414,15 +415,42 @@ where
   /// | `L::Span::clone`, `L::State::clone` | 0 | 0 |
   /// | `Emitter::checkpoint` / `release` / any emission | none | none |
   ///
+  /// ### The precondition: `f` must not be able to see any of that
+  ///
+  /// **What follows is guaranteed to callers whose `f` does not observe input-layer side
+  /// effects** — how many times `L::Offset`, `L::Span` or `L::State` was cloned, whether an
+  /// [`Emitter`](crate::Emitter) mark was taken, and which [`Cache`](crate::cache::Cache)
+  /// operations ran. `F: FnOnce(..) -> O` may capture whatever it likes, `L::Offset` is *your*
+  /// type, and Rust does not require its `Clone` to be pure — so an `f` that reads a counter an
+  /// `L::Offset::clone` writes is ordinary Rust that no bound here forbids.
+  ///
+  /// **Violate it and the returned `O` differs between the routes**, because `f` is then not a
+  /// function of what it was handed. The whole mechanism is the offset row above: the general
+  /// route takes `self.span().end()` before the fill, for a terminal end-of-input error a resident
+  /// head makes unreachable, and this route does not. And an `O` that differs is a parse that
+  /// differs — [`head_satisfies`](Self::head_satisfies) and [`peek_kind`](Self::peek_kind) ride
+  /// this call, so the value in question is routinely a grammar decision.
+  /// `an_offset_clone_counting_f_can_change_the_value_peek_head_map_returns` in `fast_path_tests`
+  /// is that caller, measured, so the exclusion is a fact and not a caveat.
+  ///
+  /// It is a reasonable thing to require. An `f` whose answer depends on **how the input layer got
+  /// the head to it** is not asking about the head; it is asking which route this crate took, and
+  /// that is a choice this crate makes and may change in any release. Answer out of the
+  /// `Spanned<&L::Token, &L::Span>` you were handed and the condition holds by construction, as it
+  /// does for every `f` in this crate, its tests and its examples.
+  ///
+  /// ### For such a caller
+  ///
   /// **Guaranteed identical:** the value handed to `f` and therefore the value returned; that
   /// nothing is consumed, committed, emitted or latched; that a resident head is served at a
   /// latched poison boundary and a non-resident one still raises the terminal end-of-input error.
   ///
-  /// **Not identical:** a [`Cache`](crate::cache::Cache) that counts its calls sees one `front`
-  /// where the fill makes a `len` and a `peek` — all three are `&self` reads the cache contract
-  /// defines as changing no observable, so a *conforming* cache cannot tell them apart by effect;
-  /// and an `L::Offset` whose `Clone` panics or counts is not reached, because the error that
-  /// offset is for cannot arise with a head in hand.
+  /// **Not identical**, and neither of these is anything `f` observes: a
+  /// [`Cache`](crate::cache::Cache) that counts its calls sees one `front` where the fill makes a
+  /// `len` and a `peek` — all three are `&self` reads the cache contract defines as changing no
+  /// observable, so a *conforming* cache cannot tell them apart by effect; and an `L::Offset`
+  /// whose `Clone` panics or counts is not reached, because the error that offset is for cannot
+  /// arise with a head in hand.
   #[inline]
   pub fn peek_head_map<O, F>(
     &mut self,

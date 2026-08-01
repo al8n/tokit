@@ -36,7 +36,10 @@ where
   /// `skip_while` — the committed span and lexer state, the cursor, the diagnostics, the poison
   /// boundary, the dedup watermark, the tokens read next — depends on how deep it had peeked. The
   /// `cache_transparency_matrix` tests in `src/input/input_ref/tests.rs` pin that across this
-  /// method and `padded`.
+  /// method and `padded`. That promise, and every value promise on this method, is made to
+  /// callers whose predicate does not observe the input layer's own side effects; the precondition
+  /// is stated in full under *What is guaranteed identical* below, and it is what makes "invisible"
+  /// true rather than merely usually true.
   ///
   /// # Partial mode: an `Incomplete` exit leaves no trace
   ///
@@ -72,11 +75,12 @@ where
   /// | run the predicate | the same answer, on the same token |
   /// | commit the untouched frontier | the span and state already committed |
   ///
-  /// Every one of those produces the **value** it started from, so the early return leaves exactly
-  /// the state the scan would have: the stopping token unconsumed at the front of the stream (this
-  /// call never removes it), the committed span and lexer state where they were, and no
-  /// diagnostic, no watermark move and no poison latch — a skip that skips nothing emits nothing
-  /// on either route. The put-back is an identity on **both** origins, which is why the probe does
+  /// Every one of those produces the **value** it started from, so — for a predicate that answers
+  /// about the token it was handed, which is the precondition spelled out below — the early return
+  /// leaves exactly the state the scan would have: the stopping token unconsumed at the front of
+  /// the stream (this call never removes it), the committed span and lexer state where they were,
+  /// and no diagnostic, no watermark move and no poison latch — a skip that skips nothing emits
+  /// nothing on either route. The put-back is an identity on **both** origins, which is why the probe does
   /// not have to exclude a parked head: a cache pop followed by a front push restores the entry it
   /// came from and records no push, and a cache only ever refuses a front push when it is
   /// **full** — so the cache that parked the token in the first place refuses again and the token
@@ -86,7 +90,7 @@ where
   /// can check and the cache-transparency matrix does check: a head the probe accepts is not asked
   /// again, its answer is carried into the scan.
   ///
-  /// ## What is guaranteed identical — and what is not
+  /// ## What is guaranteed identical — for which callers, and what is not
   ///
   /// Producing the same values is not the same as running the same code, and in a generic library
   /// the difference is not academic: `L::Span::clone`, `L::State::clone`, `L::Offset::clone`,
@@ -109,13 +113,48 @@ where
   /// in-tree witness measures 2 under `Complete` and 6 under `Partial` on that shape, against 0
   /// on this route.
   ///
-  /// **Guaranteed identical**, and pinned by the residency matrix: the parse result; the tokens
-  /// read next and the order they arrive in; the resume [`cursor`](Self::cursor); the committed
-  /// span and lexer state; the diagnostics; the poison boundary and the dedup watermark; the
-  /// tokens the predicate is asked about, in order; and the emitter's **outstanding-mark count**,
-  /// which is unchanged by either route because the cycle the scan runs is empty and balanced.
+  /// ### The precondition: `pred` must not be able to see any of that
   ///
-  /// **Not identical**, and stated rather than argued away:
+  /// **Everything guaranteed below is guaranteed to callers whose `pred` does not observe
+  /// input-layer side effects** — how many times `L::Span`, `L::State` or `L::Offset` was cloned,
+  /// whether an [`Emitter`](crate::Emitter) mark was taken, and which
+  /// [`Cache`](crate::cache::Cache) operations ran. That is a real condition and not a formality:
+  /// Rust does not require `Clone` to be pure, `L::Span`, `L::State` and `L::Offset` are *your*
+  /// types, and `pred` is `FnMut`. A `Clone` that bumps a counter and a predicate that reads it
+  /// are both ordinary Rust, and no bound on this method forbids either.
+  ///
+  /// **Violate it and what differs is not a count — it is the parse.** The table above is the
+  /// entire mechanism: the scan clones the frontier pair *before* it asks anything, and this route
+  /// asks first and clones nothing, so a predicate keyed on that counter answers one way here and
+  /// the other way there. The answer to a skip predicate *is* the skip, so the two routes then
+  /// disagree about **which tokens are consumed**, and the resume cursor, the committed span and
+  /// lexer state, and everything downstream diverge with them — in both directions: such a caller
+  /// can make this route stop where the scan skips the whole stream, and make it consume the head
+  /// where the scan consumes nothing. `a_clone_counting_predicate_can_change_the_skip_decision` in
+  /// `fast_path_tests` is that caller, written down and measured, so that the exclusion is a fact
+  /// rather than a caveat.
+  ///
+  /// The condition is reasonable, not merely convenient. A predicate that answers differently
+  /// depending on **how the input layer got the token to it** is not asking a question about the
+  /// input at all — it is asking about this library's internal route, and which route answers a
+  /// given call is a choice this crate makes and may change in any release. Ask about the token
+  /// and the span you were handed and the condition holds by construction; every predicate in this
+  /// crate, its tests and its examples is of that shape. (Recording *that* a call happened is
+  /// fine, and is itself guaranteed identical below — it is letting the recording change the
+  /// answer that is out of contract.)
+  ///
+  /// ### For such a caller, guaranteed identical
+  ///
+  /// Pinned by the residency matrix: the parse result; the tokens read next and the order they
+  /// arrive in; the resume [`cursor`](Self::cursor); the committed span and lexer state; the
+  /// diagnostics; the poison boundary and the dedup watermark; the tokens the predicate is asked
+  /// about, in order; and the emitter's **outstanding-mark count**, which is unchanged by either
+  /// route because the cycle the scan runs is empty and balanced.
+  ///
+  /// ### For such a caller, still not identical
+  ///
+  /// Stated rather than argued away — these survive the precondition, because none of them is
+  /// something `pred` observes:
   ///
   /// * a `Clone` for `L::Span` or `L::State` that **panics** is reachable from the scan and not
   ///   from here — a no-op skip that would have unwound returns `Ok(())` instead;
@@ -131,9 +170,14 @@ where
   ///   than after it, so a predicate and an emitter that share state observe the two in the
   ///   opposite order.
   ///
-  /// None of that is reachable through this crate's own surface: no built-in span, state, offset,
-  /// emitter or cache observes any of it, and nothing a caller can ask the input afterwards
-  /// differs. It is written down because it is the honest boundary of the claim above.
+  /// None of that is reachable through this crate's own surface: no span, state, offset, emitter
+  /// or cache this crate ships has a `Clone` or a method with an observable side effect, and for a
+  /// caller who meets the precondition nothing that can be asked of the input afterwards differs.
+  /// The crate also holds itself to what it asks: every `skip_while` predicate it writes — in its
+  /// own combinators, its tests, its benches, its examples and its conformance kit — answers out of
+  /// the token it was handed, and its adversarial fixtures that *do* count clones read the counter
+  /// in an assertion after the call, never inside the predicate. It is all written down because it
+  /// is the honest boundary of the claim above.
   #[inline(always)]
   pub fn skip_while<F>(
     &mut self,

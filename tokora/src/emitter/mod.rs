@@ -341,6 +341,16 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// whether it ran or not; and `release` is advisory in the first place. An emitter that keys
   /// behaviour on the **number** or the **identity** of the marks a parse takes is outside this
   /// contract, and different versions of this crate may legitimately differ.
+  ///
+  /// This is not only a caveat about an emitter's own bookkeeping. If such an emitter shares state
+  /// with a **predicate or closure the same caller supplies** — a
+  /// [`skip_while`](crate::InputRef::skip_while) predicate, a
+  /// [`peek_head_map`](crate::InputRef::peek_head_map) `f` — then the count leaks into a decision,
+  /// and a mark this crate did or did not take stops being a private matter: it becomes a
+  /// different skip, a different committed cursor, different tokens consumed. Those methods
+  /// therefore state the same rule as a **precondition on the caller**, and it is the same rule as
+  /// this one seen from the other end. Keep an emitter's behaviour a function of what it is
+  /// *emitted*, not of how many marks arrived, and the question never comes up.
   #[inline(always)]
   fn checkpoint(&self) -> u64 {
     0

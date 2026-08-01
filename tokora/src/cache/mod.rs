@@ -107,6 +107,14 @@ pub type DefaultCache<'a, L> =
 /// general route makes the other two. A conforming cache cannot tell them apart — every one of
 /// those is a `&self` read that changes no observable — so a cache that *counts* its calls is
 /// measuring the input layer, not the token stream.
+///
+/// A counting cache is harmless while the count stays inside it. It stops being harmless the
+/// moment the count reaches a **predicate or closure the same caller supplies** — a
+/// [`skip_while`](crate::InputRef::skip_while) predicate, a
+/// [`peek_head_map`](crate::InputRef::peek_head_map) `f` — because then a measurement of the input
+/// layer becomes a parse decision, and which operations ran decides which tokens are consumed.
+/// Those methods state that as a **precondition on the caller**; this paragraph is the same rule
+/// written on the trait that would be doing the counting.
 pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// The options for creating a new cache.
   type Options;
