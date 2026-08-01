@@ -643,7 +643,21 @@ fn pratt_with_cst_kinds_records_no_node_for_a_non_associative_repeat() {
     "one node for the surviving fold, none for the aborted cycle"
   );
   assert_eq!(kids[0].kind(), K_BIN);
-  assert_eq!(kids[0].text().to_string(), "1=2");
+  // *A gap is tiled where it opens*: the handback's uncovered run opens the instant `2` settles,
+  // and `2` settled inside the surviving `K_BIN`, so the run tiles there and the node widens over
+  // it — `1=2=3`, not `1=2`. That is placement, not folding: the fold still covers exactly the
+  // three tokens it folded, which is what the aborted cycle recording no node means here.
+  assert_eq!(kids[0].text().to_string(), "1=2=3");
+  let folded: String = kids[0]
+    .children_with_tokens()
+    .filter_map(|el| el.into_token())
+    .filter(|t| t.kind() != K_GAP)
+    .map(|t| t.text().to_string())
+    .collect();
+  assert_eq!(
+    folded, "1=2",
+    "the surviving fold's own tokens are `1=2`; the trailing gap it houses is not one of them"
+  );
 }
 
 /// The unconfigured driver stays tree-silent over a recording sink: no `with_cst_kinds`,
