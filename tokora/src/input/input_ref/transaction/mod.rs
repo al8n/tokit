@@ -17,8 +17,11 @@ use super::{
 /// Nested transactions behave like database savepoints: rolling back a parent discards
 /// everything its children committed.
 ///
-/// [`commit`](Self::commit) and [`rollback`](Self::rollback) both consume the
-/// transaction and are available whatever the policy.
+/// [`commit`](Self::commit), [`rollback`](Self::rollback) and
+/// [`rollback_abandoning_points`](Self::rollback_abandoning_points) all consume the transaction
+/// and are available whatever the policy. The two rollbacks differ in exactly one thing — what
+/// they do about a session point opened *inside* the guard and left open — and each names the
+/// other, so the choice is made once and in the open.
 ///
 /// **What it actually costs, since "the guard is two words" was never true.**
 /// [`begin`](InputRef::begin) performs exactly one [`save`](InputRef::save), deciding is one
@@ -103,9 +106,9 @@ use super::{
 ///
 /// On allocator-less targets there is no pin set and no lineage stack, so this mixing is
 /// unspecified-but-bounded rather than checked. In allocator builds the older detect-at-use
-/// behaviors remain as backstops behind the pin check — an explicit [`rollback`](Self::rollback)
-/// still asserts a live base, a rolling-back drop still skips a stale one — defense in depth that
-/// the pin check now makes unreachable in ordinary use.
+/// behaviors remain as backstops behind the pin check — both explicit rollbacks still assert a
+/// live base, a rolling-back drop still skips a stale one — defense in depth that the pin check now
+/// makes unreachable in ordinary use.
 ///
 /// This entire mixing surface exists only with the `unstable-raw` feature. Without it, raw
 /// [`save`](InputRef::save) / [`restore`](InputRef::restore) are crate-internal, so a downstream
@@ -202,6 +205,14 @@ where
   /// lexer state, emission log, dedup watermark, and poison boundary all restored.
   /// Available whatever the drop policy (a [`Commit`](super::Commit) guard can still be
   /// rolled back explicitly).
+  ///
+  /// This is the **checked** rollback, and it stays the one to reach for. A rewind that would
+  /// cross a still-open session point younger than the begin point is *refused* — it panics at
+  /// this call, in every allocator build, before anything is restored — because a point still
+  /// open above the base means the code that opened it lost track of its own speculation, and
+  /// this is where that is cheapest to find. When the scope spans foreign code that may
+  /// legitimately open and abandon a point, that refusal is the wrong answer and
+  /// [`rollback_abandoning_points`](Self::rollback_abandoning_points) is the verb; it says why.
   #[inline]
   pub fn rollback(mut self) {
     trace_event!(self.input, "rollback");
@@ -221,6 +232,104 @@ where
         );
       }
       self.input.restore(ckp);
+    }
+  }
+
+  /// Rolls the transaction back the way a **rolling-back drop** of this guard does: restores to
+  /// the begin point after *abandoning* every session point opened inside the guard and left
+  /// open, rather than refusing to rewind across one. Available whatever the drop policy.
+  ///
+  /// Everything [`rollback`](Self::rollback) restores, this restores identically — position,
+  /// span, lexer state, emission log, dedup watermark, poison boundary — and with no open point
+  /// above the base the two are indistinguishable. What differs is the one case that separates
+  /// them.
+  ///
+  /// # Which of the two rollbacks to reach for
+  ///
+  /// [`rollback`](Self::rollback) is the checked restore and the default. A session point still
+  /// open above the begin point pins its base, and the pin makes that rewind **panic where it is
+  /// requested** — in every allocator build, before anything is restored — exactly as a raw
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " [`restore`](InputRef::restore) below a live point is refused. Keep `rollback` wherever this"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " `restore` below a live point is refused. Keep `rollback` wherever this"
+  )]
+  /// scope owns every point opened inside it: there the refusal is a real bug detector, and
+  /// giving it up costs more than it saves.
+  ///
+  /// Reach for `rollback_abandoning_points` when the guard's scope spans **foreign code that may
+  /// legitimately open a point and abandon it** — a grammar hook, a caller-supplied closure, a
+  /// parser you were handed. Abandoning a point is legal, and deliberately so
+  #[cfg_attr(
+    any(feature = "std", feature = "alloc"),
+    doc = " (see [`begin_point`](InputRef::begin_point)); refusing this rollback would turn someone"
+  )]
+  #[cfg_attr(
+    not(any(feature = "std", feature = "alloc")),
+    doc = " (see `begin_point`); refusing this rollback would turn someone"
+  )]
+  /// else's legal choice into *your* release panic — and into one raised before the restore, so
+  /// the speculative progress this rollback exists to retract is still committed for any host
+  /// that catches. That is strictly worse than the state the rollback was asking for.
+  ///
+  /// What this verb does instead is the input layer's own answer for a point an enclosing
+  /// rollback reaches below: every point younger than the base is abandoned — unpinned, its
+  /// lineage entry dropped, its emitter mark released — and then this restore subsumes its
+  /// progress. It is not a new behaviour, it is the **reconciliation an undecided
+  /// [`Rollback`](super::Rollback) guard's `Drop` already performs**, made sayable on the
+  /// explicit path so a scope whose two exits are "drop" and "roll back here" can restore the
+  /// same thing on both. An abandoned point is gone: settling it afterwards is refused by the
+  /// session verb itself, which is the same outcome the drop path has always produced.
+  ///
+  /// # Where the crate itself reaches for it
+  ///
+  /// Every in-crate scope that hands a whole [`InputRef`] to code it did not write, and nowhere
+  /// else: the restoring arms of [`attempt`](InputRef::attempt),
+  /// [`try_attempt`](InputRef::try_attempt) and [`attempt_parse`](InputRef::attempt_parse) (a
+  /// caller-supplied closure), and the typed pratt driver's expression guard and five
+  /// cycle-scoped probe exits (grammar hooks). The test is not "could a point be open here" but
+  /// "**who** would have opened it": in all of these it is someone the scope cannot hold to a
+  /// settle discipline, and whose unwind edge through the same guard already reconciles. Scopes
+  /// that own their own points — every other rollback in this crate — keep
+  /// [`rollback`](Self::rollback) and its refusal.
+  ///
+  /// # Panics
+  ///
+  /// Only where [`rollback`](Self::rollback) does for a reason unrelated to points: a begin
+  /// point invalidated by an earlier restore below it (`transaction base is stale`). Unlike a
+  /// rolling-back `Drop` — which may run mid-unwind, where panicking is forbidden, and so stays
+  /// silent and skips — this is an explicit call on a normal return path and reports that
+  /// misuse.
+  ///
+  /// # Fuzz coverage
+  ///
+  /// In the fuzz alphabet as `Op::TxnRollbackAbandoningPoints`, whose executor opens a point
+  /// inside the guard and abandons it so the corpus exercises the one input that separates this
+  /// verb from [`rollback`](Self::rollback); see `OP_SURFACE_CENSUS` in `src/fuzz/ops.rs`.
+  #[inline]
+  pub fn rollback_abandoning_points(mut self) {
+    trace_event!(self.input, "rollback");
+    if let Some(ckp) = self.ckp.take() {
+      // Unpin the begin point FIRST, exactly as `rollback` does: a guard rolling back to its own
+      // base is legal, and the reconciling rewind below abandons points by id order, so the base
+      // must not still be sitting in the pin set when it goes.
+      #[cfg(any(feature = "std", feature = "alloc"))]
+      {
+        self.input.unpin_checkpoint(ckp.ckp_id);
+        assert!(
+          self.input.live_contains(ckp.ckp_id),
+          "transaction base is stale (invalidated by an earlier restore)"
+        );
+      }
+      // The reconciling rewind — the SAME body the rolling-back `Drop` reaches through
+      // `restore_unchecked_if_live`, whose liveness guard is the assert above rather than a
+      // silent skip. Deliberately NOT `restore`: its pin check is precisely the refusal this
+      // verb exists not to raise, and the remaining checks it performs are either replaced here
+      // (liveness) or unreachable (a guard's own begin point is never foreign to its own input).
+      self.input.restore_unchecked(ckp);
     }
   }
 }

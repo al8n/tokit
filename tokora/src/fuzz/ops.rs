@@ -104,6 +104,8 @@ define_ops! {
   TxnCommit => "transaction.commit",
   /// `InputRef::begin` + `Transaction::rollback` — a guard rolled back explicitly.
   TxnRollback => "transaction.rollback",
+  /// `InputRef::begin` + `Transaction::rollback_abandoning_points` — a guard rolled back explicitly across a session point opened inside it and abandoned, which the checked `rollback` refuses to cross.
+  TxnRollbackAbandoningPoints => "transaction.rollback_abandoning_points",
   /// `InputRef::begin` + drop — a `Rollback`-policy guard rolled back on drop.
   TxnDropRollback => "transaction.drop(rollback)",
   /// `InputRef::begin_with::<Commit>` + drop — a `Commit`-policy guard kept on drop.
@@ -142,7 +144,7 @@ define_ops! {
 /// in the **same** commit: add the `define_ops!` line, wire the op into a generator so the coverage
 /// test exercises it, add its executor arm, and drop a `# Fuzz coverage` note in the op-adding
 /// module's contract docs pointing here. `grep OP_SURFACE_CENSUS` finds every anchor.
-pub const EXPECTED_OP_COUNT: usize = 35;
+pub const EXPECTED_OP_COUNT: usize = 36;
 
 // Compile-time census tripwire: the alphabet cannot change size without this failing to compile at
 // a named location, forcing the checklist above.

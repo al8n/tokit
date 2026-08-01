@@ -184,10 +184,13 @@ pub enum PrattRHS<L, R, N, Post, Power = i64> {
 /// stack runs out — and short of that, folds and records an operator that is not in the source.
 /// The typed driver checks this the instant the report crosses back, before the recursion,
 /// before the fold and before the CST wrap, since all three can move input the report did not.
-/// A `Prefix` report that consumed nothing is a grammar bug: it trips a debug assertion naming
-/// this rule, and in release the driver raises the end-of-LHS error
-/// ([`UnexpectedEoLhs`](crate::error::UnexpectedEoLhs)) marked terminal, rather than descending
-/// or folding a phantom operator.
+/// A `Prefix` report that consumed nothing is a grammar bug: the driver raises the end-of-LHS
+/// error ([`UnexpectedEoLhs`](crate::error::UnexpectedEoLhs)) marked terminal, rather than
+/// descending or folding a phantom operator, and a debug build additionally trips an assertion
+/// naming this rule. That assertion is raised **after** the driver has settled its own guards, so
+/// the two profiles leave the surrounding grammar the same input position and the same emission
+/// log — see the emission contract on [`Pratt`] — and differ only in whether the violation
+/// arrives as a panic or as that error.
 ///
 /// **Every `Prefix` is held to it.** There is no admitted/declined distinction on this channel:
 /// `PrattLHS` has no decline arm, no floor applies to a prefix power, and the driver acts on the
@@ -253,12 +256,16 @@ where
 /// report means "I have taken this operator": the next cycle must see fresh input. The typed
 /// driver checks this the instant the report crosses back — before it recurses and before any
 /// fold runs, since both of those can move input the report did not. A report the floor
-/// **admitted** that consumed nothing is a grammar bug: it trips a debug assertion naming this
-/// rule, and in release the driver rolls the cycle back and raises the end-of-RHS error
+/// **admitted** that consumed nothing is a grammar bug: the driver rolls **the cycle** back — not
+/// the expression — and raises the end-of-RHS error
 /// ([`UnexpectedEoRhs`](crate::error::UnexpectedEoRhs)) marked terminal, rather than folding a
-/// phantom operator or ending the expression with a silent `Ok`. Only admitted reports are
-/// held to it — a report the floor declines is the [`End`](PrattRHS::End) answer in another
-/// spelling, is rolled back, and may consume nothing.
+/// phantom operator or ending the expression with a silent `Ok`, and a debug build additionally
+/// trips an assertion naming this rule. That assertion is raised **after** the cycle rollback and
+/// after the expression-scoped guard has committed, so the two profiles leave the surrounding
+/// grammar the same input position and the same emission log — see the emission contract on
+/// [`Pratt`] — and differ only in whether the violation arrives as a panic or as that error. Only
+/// admitted reports are held to it — a report the floor declines is the [`End`](PrattRHS::End)
+/// answer in another spelling, is rolled back, and may consume nothing.
 ///
 /// **A terminal stop is an `Err`, never an `End`.** A tripped scanner limit is not the end of
 /// an expression; surfacing it as one lets a truncated view masquerade as a complete parse.
