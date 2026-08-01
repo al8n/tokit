@@ -84,7 +84,7 @@ enum ConfError {
   EndOfLhs,
   EndOfRhs,
   /// The pratt frame budget tripped — returned by the engine, never emitted, so this variant
-  /// exists only so the error type satisfies the pratt bundle.
+  /// exists only so the error type satisfies the pratt **entry points**, not the emitter bundle.
   RecursionLimit,
   /// A second same-power non-associative operator — likewise returned, never emitted.
   NonAssociativeChain,

@@ -182,7 +182,8 @@ impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEoRhs<O, Lang, Set>> 
   fn from(_: UnexpectedEoRhs<O, Lang, Set>) -> Self { Self::UnexpectedEot }
 }
 // The two the engines RETURN rather than emit: a recursion-limit trip at a frame prologue, and a
-// second same-power non-associative operator. Both are part of the pratt bundle.
+// second same-power non-associative operator. No `emit_*` hook sees either, so neither is part of
+// the `FromPrattError` bundle — the pratt entry points name these two `From`s themselves.
 impl<O, Lang: ?Sized> From<RecursionLimitReached<O, Lang>> for CExprError {
   fn from(_: RecursionLimitReached<O, Lang>) -> Self { Self::UnexpectedEot }
 }

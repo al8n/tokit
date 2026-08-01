@@ -39,8 +39,7 @@ you: [`UnexpectedTokenOf`](crate::error::token::UnexpectedTokenOf),
 [`MissingSyntaxOf`](crate::error::syntax::MissingSyntaxOf) — the four that ride the emitter's own
 method signatures, where the projection would otherwise be rewritten at every impl and every
 bound. **The rest have none**, and you name their parameters yourself; for an offset-carrying
-leaf that is just `<L::Offset, Lang>`, the spelling
-[`FromPrattError`](crate::emitter::FromPrattError) uses for
+leaf that is just `<L::Offset, Lang>`, the spelling the pratt surfaces use for
 [`UnexpectedEoLhs`](crate::error::UnexpectedEoLhs) and
 [`RecursionLimitReached`](crate::error::RecursionLimitReached) alike. The alias is a shorthand
 where a shorthand paid for itself, not a convention with exceptions.
@@ -55,7 +54,7 @@ impl that wires it in.
 | **End of input** | [`UnexpectedEnd`](crate::error::UnexpectedEnd) (aliases [`UnexpectedEot`](crate::error::UnexpectedEot) / `UnexpectedEof` / `UnexpectedEos`) | `From<UnexpectedEot<O, Lang, Set>>` |
 | **Syntax** | [`TooFew`](crate::error::syntax::TooFew), [`TooMany`](crate::error::syntax::TooMany), [`FullContainer`](crate::error::syntax::FullContainer), [`MissingSyntax`](crate::error::syntax::MissingSyntax) | `From<TooFew>`, `From<TooMany>`, `From<FullContainer>`, `From<MissingSyntax>` |
 | **Delimiter** | [`Unclosed`](crate::error::Unclosed), [`Unopened`](crate::error::Unopened), [`Undelimited`](crate::error::Undelimited), [`Unterminated`](crate::error::Unterminated) | [`FromUnclosed`](crate::emitter::FromUnclosed) — **one** impl for every pair; the other three are raised by your own code, so they need a `From<…>` only if you raise them |
-| **Pratt** | [`RecursionLimitReached`](crate::error::RecursionLimitReached), [`NonAssociativeChain`](crate::error::NonAssociativeChain) — the descent bound and the second same-power `Neither` operator ([Pratt reference](super::ref_pratt)) | [`FromPrattError`](crate::emitter::FromPrattError) — both conversions are **required** by the pratt entry point, not opt-in; both errors are *returned*, never emitted, so no `emit_*` hook sees them |
+| **Pratt** | [`RecursionLimitReached`](crate::error::RecursionLimitReached), [`NonAssociativeChain`](crate::error::NonAssociativeChain) — the descent bound and the second same-power `Neither` operator ([Pratt reference](super::ref_pratt)) | `From<RecursionLimitReached>` + `From<NonAssociativeChain>`, **required** by the pratt entry points, not opt-in. Both errors are *returned*, never emitted, so no `emit_*` hook sees them and neither is part of [`FromPrattError`](crate::emitter::FromPrattError), which covers only what an emitter body converts |
 | **Incomplete** | [`Incomplete`](crate::error::Incomplete) — the never-recoverable partial-input signal | *no `From`*; `impl MaybeIncomplete` instead |
 
 ### The traits your error type implements
@@ -275,7 +274,7 @@ nodes) need more than the base surface, so tokora splits each scenario into a fo
 | [`UnexpectedLeadingSeparatorEmitter`](crate::emitter::UnexpectedLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::UnexpectedTrailingSeparatorEmitter) | a stray separator | `From<SeparatedErrorOf>` | ✅ |
 | [`MissingLeadingSeparatorEmitter`](crate::emitter::MissingLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::MissingTrailingSeparatorEmitter) | a required separator | `From<MissingTokenOf>` | — (in [`PolicyComposableEmitter`](crate::emitter::PolicyComposableEmitter)) |
 | [`UnclosedEmitter`](crate::emitter::UnclosedEmitter) | [`Unclosed`](crate::error::Unclosed) | [`FromUnclosed`](crate::emitter::FromUnclosed) | ✅ |
-| [`PrattEmitter`](crate::emitter::PrattEmitter) | end-of-LHS / end-of-RHS ([chapter 5](super::ch05_pratt)) | `From<UnexpectedEoLhs>` + `From<UnexpectedEoRhs>` + `From<RecursionLimitReached>` + `From<NonAssociativeChain>` (the [`FromPrattError`](crate::emitter::FromPrattError) bundle; the last two are *returned* by the engines, never emitted, so they have no `emit_*` hook) | — |
+| [`PrattEmitter`](crate::emitter::PrattEmitter) | end-of-LHS / end-of-RHS ([chapter 5](super::ch05_pratt)) | `From<UnexpectedEoLhs>` + `From<UnexpectedEoRhs>` (the [`FromPrattError`](crate::emitter::FromPrattError) bundle). The engines' other two failures, `RecursionLimitReached` and `NonAssociativeChain`, are *returned* rather than emitted, so they have no `emit_*` hook and are not in this bundle — their `From`s are named by the pratt **entry points** instead | — |
 | [`CstEmitter`](crate::emitter::CstEmitter) | tree events (no error) | — (defaulted no-ops; the recording sink) | — |
 
 [`ComposableEmitter`](crate::emitter::ComposableEmitter) is the bundle the separated/repeated

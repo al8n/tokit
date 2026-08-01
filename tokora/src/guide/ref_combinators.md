@@ -1846,7 +1846,7 @@ spell with their own parameters (the
 | **Lexer** | [`UnknownLexeme`](crate::error::UnknownLexeme), [`Malformed`](crate::error::Malformed) (+ per-literal aliases), [`Invalid`](crate::error::Invalid), hex/unicode escape errors |
 | **Syntax** | [`TooFew`](crate::error::syntax::TooFew), [`TooMany`](crate::error::syntax::TooMany), [`FullContainer`](crate::error::syntax::FullContainer), [`MissingSyntax`](crate::error::syntax::MissingSyntax), [`IncompleteSyntax`](crate::error::IncompleteSyntax) (in [`error::syntax`](crate::error::syntax)) |
 | **Delimiter** | [`Unclosed`](crate::error::Unclosed), [`Unopened`](crate::error::Unopened), [`Undelimited`](crate::error::Undelimited), [`Unterminated`](crate::error::Unterminated) |
-| **Pratt** | [`RecursionLimitReached`](crate::error::RecursionLimitReached), [`NonAssociativeChain`](crate::error::NonAssociativeChain) — the descent bound and the second same-power `Neither` operator; both are required members of the [`FromPrattError`](crate::emitter::FromPrattError) bundle (see the [Pratt reference](super::ref_pratt)) |
+| **Pratt** | [`RecursionLimitReached`](crate::error::RecursionLimitReached), [`NonAssociativeChain`](crate::error::NonAssociativeChain) — the descent bound and the second same-power `Neither` operator; both are *returned* by the engines rather than emitted, so each is a required `From` on the pratt entry points rather than a member of the [`FromPrattError`](crate::emitter::FromPrattError) bundle (see the [Pratt reference](super::ref_pratt)) |
 | **Incomplete** | [`Incomplete`](crate::error::Incomplete) — the never-recoverable partial-input signal (see [chapter 9](super::ch09_streaming)) |
 
 The whole taxonomy and the emitter/context surface are covered in depth in the

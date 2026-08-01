@@ -712,13 +712,16 @@ where
   // The stalled-report exits below surface the contract violation as the end-of-expression
   // error for the channel that broke it: the LHS one for a prefix report, the RHS one for an
   // infix/postfix report and for the foot of a cycle. Both halves of the pair `FromPrattError`
-  // already bundles.
+  // bundles — but this driver builds them itself rather than emitting them, so it names the two
+  // `From`s here and does not require `PrattEmitter` at all.
   //
   // `NonAssociativeChain` joins them for the same reason and at the same place: the wrapper
   // builds it, after settling, from an offset the driver captured. `RecursionLimitReached` is the
   // one conversion `parse` also carries, because the value that needs it is built by
   // `InputRef::descend` at the frame prologue — before any posture exists to be disturbed — and
-  // not by a deferred effect. All four are in the `FromPrattError` bundle.
+  // not by a deferred effect. All four are *returned* by this driver, never emitted, so all four
+  // are stated as direct `From` obligations here; `FromPrattError` covers only the two an emitter
+  // body converts, and none of these four go through an emitter body.
   <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEoLhs<L::Offset, Lang>>
     + From<UnexpectedEoRhs<L::Offset, Lang>>
     + From<RecursionLimitReached<L::Offset, Lang>>

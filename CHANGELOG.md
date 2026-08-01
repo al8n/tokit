@@ -124,7 +124,6 @@ numbered entry below that carries the full reasoning.
 | `dyn SeparatorHandler` | no longer object-safe | `OBSERVES_SEPARATORS` is an associated const. Nothing in this crate used it. | [5](#changed-breaking) |
 | `let (e, c) = ctx.into_components();` | `let (e, c, recursion) = …` | `InputContext` carries the recursion budget now, and a decomposition that dropped it would hand the input an unconfigured one. `..` is not available on a tuple pattern, so the compiler points at every site. | [45](#changed-breaking) |
 | An error type driving either pratt engine without `From<RecursionLimitReached<…>>` and `From<NonAssociativeChain<…>>` | add both | The engines **return** these two rather than emitting them, so the entry-point bounds ask for them. Two `From` impls; every example in this repo shows the shape. | [46](#changed-breaking) |
-| `impl FromPrattError for MyError` | two more **required** methods: `from_recursion_limit_reached`, `from_non_associative_chain` | No defaults. A defaulted conversion is one the author never chose, and for the trip the choice decides whether terminality survives. | [46](#changed-breaking) |
 | `parser.labelled("x")` resolving to your own trait's method, that trait in scope | `E0034`, when yours sits at the **same pick** | Six new defaulted names on `ParseInput` / `TryParseInput`. The fix is UFCS; rustc prints the two suggestions. | [source-breaking additions that fail *loudly*](#source-breaking-additions-that-fail-loudly) |
 | `use tokora::*;` — or a **module** glob such as `use tokora::error::*;` / `use tokora::input::*;` — beside another glob exporting the same name | `E0659`, or `ambiguous_glob_imports` for a *macro* name on rustc ≥ 1.95 | 16 new glob-reachable names — `select!` against `tokio::select!` is the real one. Three of them reach you only through a module glob, never the root: `RecursionLimitReached` and `NonAssociativeChain` via `tokora::error`, `Descent` via `tokora::input`. Measured on three toolchains; the remedy differs by name kind. | [source-breaking additions that fail *loudly*](#source-breaking-additions-that-fail-loudly) |
 
@@ -1245,30 +1244,30 @@ everywhere else.
 
     — *(R12)*
 
-46. **Both Pratt engines require two more conversions from a grammar's error type**, and the
-    requirement arrives by two routes because there are two ways to satisfy it:
+46. **Both Pratt engines require two more conversions from a grammar's error type.** The token
+    engine's `pratt`, `pratt_with_min_precedence` and `pratt_in`, and the typed driver's
+    `ParseInput::parse_input` impl block, gain `From<RecursionLimitReached<L::Offset, Lang>>` and
+    `From<NonAssociativeChain<L::Offset, Lang>>`. Two `From` impls on your error type; every
+    example and bench in this repo carries the shape.
 
-    - **The blanket route.** The token engine's `pratt`, `pratt_with_min_precedence` and
-      `pratt_in`, and the typed driver's `ParseInput::parse_input` impl block, gain
-      `From<RecursionLimitReached<L::Offset, Lang>>` and
-      `From<NonAssociativeChain<L::Offset, Lang>>`. Two `From` impls on your error type; every
-      example and bench in this repo carries the shape.
-    - **The manual route.** `FromPrattError` gains `from_recursion_limit_reached` and
-      `from_non_associative_chain` as **required** methods, with no defaults, so a hand-written
-      impl stops compiling until both are supplied. No default, for the reason `Delimiter::KIND`
-      has none: a defaulted conversion is one the author never chose — and for the trip that choice
-      is load-bearing. An impl that *stores* the value keeps its always-terminal marker readable
-      through `MaybeTerminal`; one that discards it opts the error type out of terminal re-raise
-      (see *Known limitation — a discarding error sink…* below). Both are legitimate; neither
-      should be picked by a default.
+    **`From`, and not a `FromPrattError` method, because these two never pass through an
+    emitter.** Neither has an `emit_*` counterpart on `PrattEmitter`, by design — a recording
+    emitter must not be able to swallow a resource trip or a rejected chain — so the engines
+    *return* them, and a returned error becomes the caller's type through `From`. The trip's
+    value is built and converted inside `InputRef::descend`, the recursion guard every
+    recursive-descent grammar shares whether or not it has a pratt parser in it; the repeat is
+    built by each engine at its own exit. Neither point has an emitter in scope, so a conversion
+    method on the emitter-side bundle would be one nothing could ever call. `FromPrattError`
+    keeps exactly the two conversions a `PrattEmitter` body performs, and **no hand-written
+    `FromPrattError` impl has to change.**
 
-    The trait exists so that "this error type can drive a pratt parse" stays **one** bound rather
-    than four, so its bundle is every failure a pratt engine can hand a caller — including the two
-    the engines *return* rather than emit. Neither of those two has an `emit_*` counterpart on
-    `PrattEmitter`, by design: a recording emitter must not be able to swallow a resource trip or a
-    rejected chain.
+    The choice this obligation carries is unchanged, only its spelling: an impl that *stores* the
+    trip keeps its always-terminal marker readable through `MaybeTerminal`; one that discards it
+    opts the error type out of terminal re-raise (see *Known limitation — a discarding error
+    sink…* below). Both are legitimate, and a `From` impl is the author's own code either way, so
+    neither is picked for you.
 
-    — *(R12)*
+    — *(R12, R21)*
 
 ### Debug and rendered output
 
@@ -1328,9 +1327,9 @@ item that carries them, and listed here only so scanning this section does not m
 (item 5), `CstProfile` and `KindValidator` (item 13), `error::NonAssociativeChain` (item 41),
 `error::RecursionLimitReached` with `input::Descent`, `InputRef::descend`, `InputRef::recursion`,
 `RecursionLimiter::unlimited`, `InputContext::with_recursion_limiter` and
-`ParserContext::with_recursion_limiter` (item 42); and — on an existing public trait —
-`FromPrattError::from_recursion_limit_reached` and `FromPrattError::from_non_associative_chain`
-(item 46; both **required**, so a hand-written impl must add both).
+`ParserContext::with_recursion_limiter` (item 42). **`FromPrattError` is not on this list**:
+item 46's two new obligations are `From` impls on your own error type, and the trait gains no
+member, so a hand-written `FromPrattError` impl compiles unchanged.
 
 - **The logos adapter works on 0.14 and 0.15, and is tested there.** `logos_0_14` /
   `logos_0_15` / `logos_0_16` were already separate features, but `tokora::logos` (and its

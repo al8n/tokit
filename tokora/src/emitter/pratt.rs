@@ -1,4 +1,4 @@
-use crate::error::{NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs};
+use crate::error::{UnexpectedEoLhs, UnexpectedEoRhs};
 
 use super::*;
 
@@ -51,13 +51,36 @@ where
 
 /// A trait bound for converting pratt emitter errors into emitter errors.
 ///
-/// The bundle is **every** failure a pratt engine can hand a caller, not only the two the
-/// emitter has a hook for: the two end-of-expression reports the drivers raise on a contract
-/// violation, plus the two the engines *return* rather than emit — a
-/// [`RecursionLimitReached`] frame-budget trip and a [`NonAssociativeChain`] repeat. The last
-/// two have no `emit_*` counterpart on [`PrattEmitter`] by design (a recording emitter must not
-/// be able to swallow them), and they are listed here so that "this error type can drive a pratt
-/// parse" stays one bound rather than four.
+/// Exactly the conversions a [`PrattEmitter`] body performs: the two end-of-expression reports
+/// the pratt drivers raise on a contract violation, one per channel. It is the bound the
+/// built-in emitters' [`PrattEmitter`] impls carry, and the blanket impl below means two `From`
+/// impls on your error type are all it takes to satisfy it.
+///
+/// # The two pratt failures that are deliberately not here
+///
+/// A pratt engine can also fail with a
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached) frame-budget trip or a
+/// [`NonAssociativeChain`](crate::error::NonAssociativeChain) repeat, and **neither is an
+/// emitter conversion**. Neither has an `emit_*` counterpart on [`PrattEmitter`], by design — a
+/// recording emitter must not be able to swallow a resource trip or a rejected chain — so
+/// neither passes through an emitter at all: the engines *return* them, and a returned error
+/// becomes the caller's type through `From`.
+///
+/// So the pratt entry points name
+/// `From<RecursionLimitReached<L::Offset, Lang>>` and
+/// `From<NonAssociativeChain<L::Offset, Lang>>` on the error type **directly**, beside this
+/// bound, and this trait has no method for either. A method here would be one nothing calls:
+/// the trip is built and converted inside
+/// [`InputRef::descend`](crate::InputRef::descend) — the recursion guard every recursive-descent
+/// grammar shares, pratt or not — and the repeat is built by each engine at its own exit. Both
+/// happen where no emitter is in scope.
+///
+/// The trip's `From` impl is the one with a consequence past its payload. One that **stores**
+/// the value keeps its always-terminal marker readable through
+/// [`MaybeTerminal`](crate::error::MaybeTerminal); one that discards it opts the error type out
+/// of terminal re-raise, which is the documented `MaybeTerminal` posture. See
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached)'s own docs for what a
+/// discarding sink costs and what it does not.
 pub trait FromPrattError<'inp, L, Lang: ?Sized = ()>: FromEmitterError<'inp, L, Lang> {
   /// Creates an emitter error from an unexpected end of left hand side error.
   fn from_unexpected_end_of_lhs(err: UnexpectedEoLhs<L::Offset, Lang>) -> Self
@@ -68,20 +91,6 @@ pub trait FromPrattError<'inp, L, Lang: ?Sized = ()>: FromEmitterError<'inp, L, 
   fn from_unexpected_end_of_rhs(err: UnexpectedEoRhs<L::Offset, Lang>) -> Self
   where
     L: Lexer<'inp>;
-
-  /// Creates an emitter error from a recursion-limit trip at a pratt frame prologue.
-  ///
-  /// An implementation that stores the value keeps its **always-terminal** marker readable
-  /// through [`MaybeTerminal`](crate::error::MaybeTerminal); one that discards it opts the
-  /// error type out of terminal re-raise, which is the documented `MaybeTerminal` posture.
-  fn from_recursion_limit_reached(err: RecursionLimitReached<L::Offset, Lang>) -> Self
-  where
-    L: Lexer<'inp>;
-
-  /// Creates an emitter error from a second same-power non-associative operator in one chain.
-  fn from_non_associative_chain(err: NonAssociativeChain<L::Offset, Lang>) -> Self
-  where
-    L: Lexer<'inp>;
 }
 
 impl<'inp, T, L, Lang: ?Sized> FromPrattError<'inp, L, Lang> for T
@@ -89,9 +98,7 @@ where
   L: Lexer<'inp>,
   T: FromEmitterError<'inp, L, Lang>
     + From<UnexpectedEoLhs<L::Offset, Lang>>
-    + From<UnexpectedEoRhs<L::Offset, Lang>>
-    + From<RecursionLimitReached<L::Offset, Lang>>
-    + From<NonAssociativeChain<L::Offset, Lang>>,
+    + From<UnexpectedEoRhs<L::Offset, Lang>>,
 {
   #[inline(always)]
   fn from_unexpected_end_of_lhs(err: UnexpectedEoLhs<L::Offset, Lang>) -> Self
@@ -103,22 +110,6 @@ where
 
   #[inline(always)]
   fn from_unexpected_end_of_rhs(err: UnexpectedEoRhs<L::Offset, Lang>) -> Self
-  where
-    L: Lexer<'inp>,
-  {
-    err.into()
-  }
-
-  #[inline(always)]
-  fn from_recursion_limit_reached(err: RecursionLimitReached<L::Offset, Lang>) -> Self
-  where
-    L: Lexer<'inp>,
-  {
-    err.into()
-  }
-
-  #[inline(always)]
-  fn from_non_associative_chain(err: NonAssociativeChain<L::Offset, Lang>) -> Self
   where
     L: Lexer<'inp>,
   {
