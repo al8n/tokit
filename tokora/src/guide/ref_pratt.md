@@ -147,12 +147,27 @@ Exceeding the limit fails the parse with
 - **One budget per input, not per parser.** Two pratt parsers composed into one grammar share the
   depth, because what the limit protects — the native stack — is shared too. The root expression
   counts as one level.
-- **Always terminal.** No amount of further input clears a depth budget, so
-  [`recover`](crate::ParseInput::recover),
+- **Terminal — for a grammar error that keeps it.** No amount of further input clears a depth
+  budget, so [`recover`](crate::ParseInput::recover),
   [`InplaceRecover`](crate::parser::InplaceRecover) and
   [`skip_then_retry`](crate::ParseInput::skip_then_retry) re-raise a trip untouched rather than
-  synthesizing a node. An error type that stores the value and delegates
-  [`is_terminal`](crate::error::MaybeTerminal::is_terminal) keeps that property.
+  synthesizing a node — guaranteed for an error type that stores the value and delegates
+  [`is_terminal`](crate::error::MaybeTerminal::is_terminal). A discarding sink such as `()` erases
+  the stop instead: the converted value reports `is_terminal() == false`, so recovery **spends**
+  the trip rather than re-raising it. What that does not undo is the limiter's own job — by the
+  time any recoverer is handed the converted value, the native stack is already fully unwound and
+  the depth budget already back to what it was before the parse. Measured over a 200-level trip:
+  the recoverer's own frame sits 160 bytes from the pre-parse baseline in a debug build and 0 in a
+  release one, against a descent that reached about 1 MiB and 97 KiB respectively. What a
+  discarding sink does cost is the stop, and the input it would otherwise have preserved: through
+  [`skip_then_retry`](crate::ParseInput::skip_then_retry) the outcome is an `Err` either way, so a
+  caller matching only on the discriminant sees no difference at all. A delegating error type
+  re-raises before any skip and hands the surrounding grammar back offset 0, nothing consumed;
+  `()` instead retries through the sync point and hands back offset 68 — a 32-deep chain and the
+  sync token committed and gone. **Same verdict, different input — the type signature alone does
+  not tell you which one you get.** See
+  [`RecursionLimitReached`](crate::error::RecursionLimitReached#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound)
+  for the measurements in full and a compiling example of an error type that keeps the stop.
 - **Nothing is latched on the input.** A *scanner* limit trip latches the poison boundary, because
   the lexer's tally is monotone in the input; parse depth is the opposite kind of fact and is
   fully restored by the unwind that carries the error out. Scanner trips latch; descent trips
