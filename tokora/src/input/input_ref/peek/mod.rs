@@ -377,6 +377,116 @@ where
   /// ([`peek_with_emitter_terminal`](Self::peek_with_emitter_terminal)) rather than the
   /// `try_expect` scan, so the head is served from the front slot with no pop/hold
   /// round-trip.
+  ///
+  /// # A head already at the front of the stream is read where it lies
+  ///
+  /// This is a **width-1** read, and on a grammar's decision points the token it wants is almost
+  /// always already there: measured on a GraphQL parse, 17,028 of 17,029 times. So the front of
+  /// the stream is probed first, and a head that is there is handed straight to `f`.
+  ///
+  /// That is the same **head** the fill gives, by the fill's own construction — and therefore the
+  /// same answer, for a caller who meets the condition below. With one token
+  /// at the front — parked or cached — the window request is already met, so the fill takes its
+  /// `want == 0` arm: it heads the window with the parked token if there is one and lets the
+  /// cache fill in behind it, then returns. Nothing is lexed, nothing is committed, the terminal
+  /// flag stays `false` (that arm returns *before* the boundary probe, so a resident head is
+  /// served whatever the poison latch says), and [`Cache::peek`](crate::cache::Cache::peek) is a
+  /// `&self` read the trait documents as logically pure. All the shared route adds under that
+  /// condition is arithmetic over the window slots, an overflow guard that stages nothing, and a
+  /// copy of the entry into a `GenericArrayDeque` that is popped straight back out — and the
+  /// token that copy denotes is the one handed over here.
+  ///
+  /// The end-of-input offset the fill's `None` arms need is not read on this route because those
+  /// arms are unreachable with a head in hand; the trace hook the fill opens with is emitted here
+  /// instead, so a `trace` build sees the same one event per call either way.
+  ///
+  /// ## What is guaranteed identical, and the condition that makes it so
+  ///
+  /// The same condition [`skip_while`](Self::skip_while) states applies here, and the difference
+  /// it covers is much the smaller of the two: a peek commits nothing, so there is no frontier to
+  /// clone and no mark to take on **either** route. What differs is confined to the cache surface
+  /// and one offset read. Measured, on the same stream in the same residency, by the effect ledger
+  /// in `fast_path_tests`:
+  ///
+  /// | caller-supplied step, for one width-1 read | this route | the general route |
+  /// |---|---|---|
+  /// | `Cache` | one `front` | one `len`, one `peek` — the fill's `want == 0` arm |
+  /// | `L::Offset::clone` | 0 | 1 — the committed span's end, hoisted *here* above the fill |
+  /// | `L::Span::clone`, `L::State::clone` | 0 | 0 |
+  /// | `Emitter::checkpoint` / `release` / any emission | none | none |
+  ///
+  /// As on [`skip_while`](Self::skip_while), **that table is a measurement and not a boundary**:
+  /// it holds the steps the ledger was built to watch, and the clause below is about every
+  /// caller-supplied operation whether a table names it or not.
+  ///
+  /// ### What this route does differently — the whole of it
+  ///
+  /// Three clauses, meant as exhaustive. Against the general route, for every call it answers,
+  /// this route:
+  ///
+  /// 1. **omits** caller-supplied steps and adds none. The hoisted `L::Offset::clone` is the one
+  ///    the ledger sees; as with clause (1) on `skip_while`, *which* steps is not part of the
+  ///    clause — it is a subset relation, not a list;
+  /// 2. **substitutes** one [`Cache::front`](crate::cache::Cache::front) for the fill's
+  ///    [`len`](crate::cache::Cache::len) + [`peek`](crate::cache::Cache::peek). All three are
+  ///    `&self` reads the cache contract defines as changing no observable, so they are the same
+  ///    read of the same head;
+  /// 3. hands `f` the **same token and the same span**, once.
+  ///
+  /// ### The condition on the caller
+  ///
+  /// What follows holds for a caller who meets both clauses of the condition on
+  /// [`skip_while`](Self::skip_while), read here with `f` in the predicate's place:
+  ///
+  /// * **your input-layer callbacks are inert** — every caller-supplied operation this crate can
+  ///   reach through the input layer does only what its own contract says, and always returns
+  ///   normally: no unwind, no divergence. *All of it, not a list.* Likely to be yours: the
+  ///   `Clone`, `Drop`, `Ord` and `Hash` of `L::Offset` and `L::Span`, the `Clone` and `Drop` of
+  ///   `L::State`, every [`Cache`](crate::cache::Cache) method, the [`Emitter`](crate::Emitter),
+  ///   the [`Lexer`](crate::Lexer) and its [`Source`](crate::Source) — named as the ones you are
+  ///   likely to write, not as the edge of the clause;
+  /// * **`f` is a function of what it is handed** — it answers from the *values* of the
+  ///   `Spanned<&L::Token, &L::Span>` it receives, not from state another callback wrote and not
+  ///   from the addresses those references carry.
+  ///
+  /// The closure argument is the same one, and it is why this is a condition rather than a list:
+  /// the three clauses above say the crate hands `f` the same values, so any difference must come
+  /// from caller-supplied code; the first clause makes all of that code invisible whether it runs
+  /// or not, and the second stops `f` reading which route produced its argument. `F: FnOnce(..)
+  /// -> O` may capture whatever it likes and `L::Offset` is *your* type, so neither clause is a
+  /// formality — but both are properties of your own types, checkable once.
+  ///
+  /// ### For such a caller, guaranteed identical
+  ///
+  /// The value handed to `f`, and therefore the value returned; that `f` runs exactly once; that
+  /// nothing is consumed, committed, emitted or latched; that a resident head is served at a
+  /// latched poison boundary and a non-resident one still raises the terminal end-of-input error.
+  ///
+  /// ### And for a caller who does not meet it
+  ///
+  /// Both of these are one clause failing, and both are measured. Neither is the list of ways to
+  /// fail — a caller who breaks a clause some other way gets the same answer:
+  ///
+  /// * **an `f` that reads the input layer** — the second clause. The offset row above is the
+  ///   whole mechanism: the general route takes `self.span().end()` before the fill, for a
+  ///   terminal end-of-input error a resident head makes unreachable, and this route does not, so
+  ///   the returned `O` differs between them. An `O` that differs is a parse that differs —
+  ///   [`head_satisfies`](Self::head_satisfies) and [`peek_kind`](Self::peek_kind) ride this call,
+  ///   so the value in question is routinely a grammar decision.
+  ///   (`an_offset_clone_counting_f_can_change_the_value_peek_head_map_returns`)
+  /// * **an `L::Offset::clone` that unwinds** — the first clause, and again the sharper case,
+  ///   because such a caller's `f` may observe nothing whatsoever. That hoisted clone is the
+  ///   general route's *first* caller step: arm it to panic and the general route unwinds before
+  ///   `f`, where this route never reads the offset and returns `Ok(Some(_))` with `f` run once.
+  ///   Whether `f` ran at all is then decided by which route answered.
+  ///   (`an_unwinding_offset_clone_decides_whether_peek_head_maps_closure_runs_at_all`)
+  ///
+  /// An `f` whose answer — or whose *reachability* — depends on **how the input layer got the head
+  /// to it** is not asking about the head; it is asking which route this crate took, and that is a
+  /// choice this crate makes and may change in any release. Answer out of the
+  /// `Spanned<&L::Token, &L::Span>` you were handed, from types that clone by copying, and both
+  /// clauses hold by construction — as they do for every `f` in this crate, its tests and its
+  /// examples.
   #[inline]
   pub fn peek_head_map<O, F>(
     &mut self,
@@ -387,6 +497,11 @@ where
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   {
     use crate::cache::PeekedTokenExt as _;
+    // ── The resident head, read in place (see the section above) ──
+    if let Some(front) = self.front() {
+      trace_event!(self, "peek");
+      return Ok(Some(f(front.token)));
+    }
     // Hoisted before the fill: the committed span does not move under a pure peek, and
     // the window borrow (`peeked` ties to `&mut self`) must not overlap the read.
     let end = self.span().end();

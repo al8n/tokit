@@ -324,6 +324,53 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// never returned to it. This clause is what tells you not to — uphold it and there is
   /// nothing to strand. The recording CST sink's `checkpoint` is the reference implementation:
   /// it reads, and registers nothing that a later settle must find.
+  ///
+  /// # Which operations take a mark is **not** part of the contract
+  ///
+  /// What the crate promises is how a mark it *does* take is settled — exactly once, by
+  /// [`rewind`](Self::rewind) or [`release`](Self::release), newest-first within its family. It
+  /// does **not** promise how many marks a given parse takes, nor which internal operation takes
+  /// them. An input path may take a checkpoint/release cycle it turns out not to need, and may
+  /// equally skip one: [`skip_while`](crate::InputRef::skip_while) answers a skip that has nothing
+  /// to skip without entering the scanner at all, so under
+  /// [`Partial`](crate::input::Partial) it performs *neither half* of the empty cycle the scan
+  /// would have run.
+  ///
+  /// Nothing conforming can depend on either choice. Such a cycle is **empty** — no emission is
+  /// made between its two halves — and **balanced**, so the outstanding-mark count is the same
+  /// whether it ran or not; and `release` is advisory in the first place. An emitter that keys
+  /// behaviour on the **number** or the **identity** of the marks a parse takes is outside this
+  /// contract, and different versions of this crate may legitimately differ.
+  ///
+  /// The positive form of that, and the one to build against: **make this method inert** — let it
+  /// do only what this contract says it does (return a mark, and register whatever bookkeeping the
+  /// matching settle will consume), and always return normally. An inert `checkpoint` cannot tell
+  /// whether an input path took a cycle it did not need, so every such choice is free. That is the
+  /// same rule [`skip_while`](crate::InputRef::skip_while) and
+  /// [`peek_head_map`](crate::InputRef::peek_head_map) state as a condition on the caller, seen
+  /// from the end that implements it.
+  ///
+  /// **Inert is the whole requirement**; what follows is not the set of ways to miss it. Two that
+  /// come up, and what each costs:
+  ///
+  /// * **it counts.** Harmless while the count stays inside the emitter. The moment it is shared
+  ///   with a **predicate or closure the same caller supplies** — a `skip_while` predicate, a
+  ///   `peek_head_map` `f` — the count leaks into a decision, and a mark this crate did or did not
+  ///   take stops being a private matter: it becomes a different skip, a different committed
+  ///   cursor, different tokens consumed;
+  /// * **it unwinds.** The fail-atomicity clause above *permits* that, and keeps the emitter's own
+  ///   state sound when it happens — but it does not make the unwind invisible, because whether
+  ///   this method is called at all is a route the crate may change. `skip_while` over a resident
+  ///   head that has nothing to skip returns `Ok(())` where the scan it replaces would have
+  ///   propagated your panic. The two clauses live at different levels and do not conflict: this
+  ///   one is about the emitter's state after an unwind, that one is about the parse. If your
+  ///   `checkpoint` has a reachable panic path, the value guarantees on those two methods are not
+  ///   made to you.
+  ///
+  /// Keep an emitter's behaviour a function of what is *emitted* — not of how many marks arrived,
+  /// and not of whether taking one could fail — and the question never comes up, including for the
+  /// third way of losing inertness that nobody has thought of yet. The requirement is the one
+  /// sentence, not the two bullets under it.
   #[inline(always)]
   fn checkpoint(&self) -> u64 {
     0
