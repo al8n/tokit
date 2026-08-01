@@ -32,8 +32,24 @@
 //! before it probes the latch), and a head that is *not* resident must still raise the terminal
 //! end-of-input error rather than the `Ok(None)` that means a genuine end of input. Both are
 //! pinned below.
+//!
+//! # And what the observable tuple cannot see: the caller code each route runs
+//!
+//! Agreeing on every value a caller can read back is **not** the same as running the same code.
+//! In a generic library the general routes also invoke caller-supplied `L::Span::clone`,
+//! `L::State::clone`, `L::Offset::clone`, `Emitter::checkpoint`/`release` and `Cache` methods on
+//! their way to the same answer, and a fast path that reaches the answer sooner runs fewer of
+//! them. The second half of this file measures exactly that — an ordered **effect ledger** over an
+//! instrumented lexer, emitter and cache — and pins both columns, because a claim about a
+//! difference is only worth what its other side is worth.
+//!
+//! Neither comparison needs an ablation. `skip_while(|_| false)` over a resident head is precisely
+//! `skip_until::<SkipWhile>` with a predicate that stops on the first token, and `peek_head_map`
+//! over a resident head is precisely `peek::<U1>`'s `want == 0` arm — so both routes are reachable
+//! from shipped code, over the same stream, in the same residency, with nothing varying but the
+//! entry point.
 
-use generic_arraydeque::typenum::U3;
+use generic_arraydeque::typenum::{U1, U3};
 
 use crate::{
   InputRef, Token,
@@ -44,7 +60,10 @@ use crate::{
   state::token_tracker::TokenLimiter,
 };
 
-use super::tests::{BalKind, BalLexer, ByValErr};
+use super::{
+  scan::SkipWhile,
+  tests::{BalKind, BalLexer, ByValErr},
+};
 
 /// A one-slot cache: the smallest capacity that still retains a token, so the head the probe
 /// finds is a cache entry.
@@ -530,4 +549,1006 @@ fn peek_head_map_raises_on_a_latched_boundary_with_nothing_resident() {
     inp.next().unwrap().is_none(),
     "the drain stops at the latched boundary"
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// The caller-code effect ledger
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//
+// The tests above pin what a caller can *observe about the input* — the tokens, the cursor, the
+// committed span, the diagnostics. That is not the whole of what a fast path can change. In a
+// generic library the general route also RUNS caller-supplied code on its way to the same answer:
+// `L::Span::clone`, `L::State::clone`, `L::Offset::clone`, `Emitter::checkpoint`/`release`, and
+// every `Cache` method. Those calls are effects in their own right — they can count, they can log,
+// and they can panic.
+//
+// So this section instruments all of them and asks the direct question: **for the calls the fast
+// paths answer, what caller code does each route run, and in what order?** The fixture below is a
+// lexer, an emitter and a cache that record every such step into one ordered ledger, and the tests
+// pin the ledger rather than describing it.
+//
+// The measured answer, and the contract it produces, is written on `skip_while` and on
+// `peek_head_map`. In summary: for a no-op skip the fast path runs **no** caller clone and takes
+// **no** emitter mark, where the general route runs one `L::Span::clone` + one `L::State::clone`
+// under `Complete` and two of each plus a complete `checkpoint`/`release` pair under `Partial`.
+// Every *value* those steps produce is the identity — which is why nothing above can see the
+// difference — but the calls themselves are not made.
+
+use core::cell::{Cell, RefCell};
+
+use crate::{
+  error::{Incomplete, MaybeIncomplete, UnexpectedEot, token::UnexpectedToken},
+  input::{InputContext, Partial},
+  span::Spanned,
+  state::State,
+};
+
+/// One step of **caller-supplied** code the input layer ran, in the order it ran it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Effect {
+  /// `L::Span::clone`. Recorded as one entry: the offsets it copies are moved rather than cloned
+  /// so a span clone reads as a single caller step and not as a variable number of them.
+  SpanClone,
+  /// `L::State::clone`.
+  StateClone,
+  /// `L::Offset::clone`.
+  OffsetClone,
+  /// `Emitter::checkpoint` — a mark taken.
+  Checkpoint,
+  /// `Emitter::release` — a mark settled as kept.
+  Release,
+  /// `Emitter::rewind` — a mark settled as unwound.
+  Rewind,
+  /// `Emitter::commit_token` — the committed-token side channel.
+  CommitToken,
+  CacheFront,
+  CacheLen,
+  CachePeek,
+  CachePopFront,
+  CachePushFront,
+  CachePushBack,
+  /// The caller's own closure: the `skip_while` predicate, or `peek_head_map`'s `f`.
+  Caller,
+}
+
+thread_local! {
+  static LEDGER: RefCell<std::vec::Vec<Effect>> = const { RefCell::new(std::vec::Vec::new()) };
+  /// Only the call under test is recorded; the prefill that sets up its condition is not.
+  static RECORDING: Cell<bool> = const { Cell::new(false) };
+  /// While set, the next `L::Span::clone` panics instead of cloning.
+  static SPAN_CLONE_BOMB: Cell<bool> = const { Cell::new(false) };
+  static STATE_CLONE_BOMB: Cell<bool> = const { Cell::new(false) };
+  static CHECKPOINT_BOMB: Cell<bool> = const { Cell::new(false) };
+  /// Set by a bomb immediately before it panics — the payload-executed witness that tells a cell
+  /// which never reached the armed step apart from one whose armed step did not fire.
+  static BOMB_FIRED: Cell<bool> = const { Cell::new(false) };
+}
+
+fn note(effect: Effect) {
+  if RECORDING.with(Cell::get) {
+    LEDGER.with(|l| l.borrow_mut().push(effect));
+  }
+}
+
+/// Starts a fresh recording.
+fn record() {
+  LEDGER.with(|l| l.borrow_mut().clear());
+  RECORDING.with(|c| c.set(true));
+}
+
+/// Ends the recording and hands back the ledger.
+fn recorded() -> std::vec::Vec<Effect> {
+  RECORDING.with(|c| c.set(false));
+  LEDGER.with(|l| l.borrow().clone())
+}
+
+/// The ledger with the `trace` feature's own bookkeeping removed.
+///
+/// `peek_head_map` emits one `trace` leaf event per call on **both** routes, and building its
+/// source preview clones the cursor offset. That clone is a property of the trace hook, not of the
+/// route, so a build with the feature on would otherwise read one offset clone richer than the
+/// same code with it off.
+fn without_trace_hook(ledger: std::vec::Vec<Effect>) -> std::vec::Vec<Effect> {
+  #[cfg(feature = "trace")]
+  {
+    let mut ledger = ledger;
+    let at = ledger
+      .iter()
+      .position(|e| *e == Effect::OffsetClone)
+      .expect("the `trace` hook's source preview clones the cursor offset, once per peek event");
+    ledger.remove(at);
+    ledger
+  }
+  #[cfg(not(feature = "trace"))]
+  ledger
+}
+
+fn arm_bombs() {
+  BOMB_FIRED.with(|c| c.set(false));
+  SPAN_CLONE_BOMB.with(|c| c.set(true));
+  STATE_CLONE_BOMB.with(|c| c.set(true));
+  CHECKPOINT_BOMB.with(|c| c.set(true));
+}
+
+fn disarm_bombs() {
+  SPAN_CLONE_BOMB.with(|c| c.set(false));
+  STATE_CLONE_BOMB.with(|c| c.set(false));
+  CHECKPOINT_BOMB.with(|c| c.set(false));
+}
+
+fn bomb_fired() -> bool {
+  BOMB_FIRED.with(Cell::get)
+}
+
+fn fire(bomb: &'static std::thread::LocalKey<Cell<bool>>) -> bool {
+  if bomb.with(Cell::get) {
+    BOMB_FIRED.with(|c| c.set(true));
+    return true;
+  }
+  false
+}
+
+// ── The instrumented lexer ────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct LedgerOffset(usize);
+
+impl Clone for LedgerOffset {
+  fn clone(&self) -> Self {
+    note(Effect::OffsetClone);
+    Self(self.0)
+  }
+}
+
+#[derive(Debug)]
+struct LedgerSrc<'a>(&'a str);
+
+impl crate::Source<LedgerOffset> for LedgerSrc<'_> {
+  type Slice<'source>
+    = &'source str
+  where
+    Self: 'source;
+
+  fn is_empty(&self) -> bool {
+    self.0.is_empty()
+  }
+
+  fn len(&self) -> LedgerOffset {
+    LedgerOffset(self.0.len())
+  }
+
+  fn as_slice(&self) -> Self::Slice<'_> {
+    self.0
+  }
+
+  fn slice<R>(&self, range: R) -> Option<Self::Slice<'_>>
+  where
+    R: core::ops::RangeBounds<LedgerOffset>,
+  {
+    self.0.get((
+      range.start_bound().map(|s| s.0),
+      range.end_bound().map(|s| s.0),
+    ))
+  }
+
+  fn find_boundary(&self, index: LedgerOffset) -> LedgerOffset {
+    if index.0 >= self.0.len() {
+      return index;
+    }
+    let mut i = index.0;
+    while !self.0.is_char_boundary(i) {
+      i -= 1;
+    }
+    LedgerOffset(i)
+  }
+
+  fn is_boundary(&self, index: LedgerOffset) -> bool {
+    self.0.is_char_boundary(index.0)
+  }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct LedgerSpan {
+  start: LedgerOffset,
+  end: LedgerOffset,
+}
+
+impl Clone for LedgerSpan {
+  fn clone(&self) -> Self {
+    note(Effect::SpanClone);
+    assert!(
+      !fire(&SPAN_CLONE_BOMB),
+      "the armed `L::Span::clone` panics — a caller clone was reached"
+    );
+    Self {
+      start: LedgerOffset(self.start.0),
+      end: LedgerOffset(self.end.0),
+    }
+  }
+}
+
+impl crate::Span for LedgerSpan {
+  type Offset = LedgerOffset;
+
+  fn new(start: LedgerOffset, end: LedgerOffset) -> Self {
+    Self { start, end }
+  }
+
+  fn into_range(self) -> core::ops::Range<LedgerOffset> {
+    self.start..self.end
+  }
+
+  fn start_ref(&self) -> &LedgerOffset {
+    &self.start
+  }
+
+  fn start_mut(&mut self) -> &mut LedgerOffset {
+    &mut self.start
+  }
+
+  fn into_start(self) -> LedgerOffset {
+    self.start
+  }
+
+  fn end_ref(&self) -> &LedgerOffset {
+    &self.end
+  }
+
+  fn end_mut(&mut self) -> &mut LedgerOffset {
+    &mut self.end
+  }
+
+  fn into_end(self) -> LedgerOffset {
+    self.end
+  }
+
+  fn bump(&mut self, n: &LedgerOffset) {
+    self.end.0 += n.0;
+  }
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct LedgerState {
+  scanned: usize,
+}
+
+impl Clone for LedgerState {
+  fn clone(&self) -> Self {
+    note(Effect::StateClone);
+    assert!(
+      !fire(&STATE_CLONE_BOMB),
+      "the armed `L::State::clone` panics — a caller clone was reached"
+    );
+    Self {
+      scanned: self.scanned,
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LedgerNeverTrips;
+
+impl State for LedgerState {
+  type Error = LedgerNeverTrips;
+
+  fn check(&self) -> Result<(), LedgerNeverTrips> {
+    Ok(())
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum LedgerErr {
+  Lex,
+  Incomplete,
+}
+
+impl From<()> for LedgerErr {
+  fn from(_: ()) -> Self {
+    LedgerErr::Lex
+  }
+}
+
+impl From<LedgerNeverTrips> for LedgerErr {
+  fn from(_: LedgerNeverTrips) -> Self {
+    LedgerErr::Lex
+  }
+}
+
+impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, Lang>>
+  for LedgerErr
+{
+  fn from(_: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
+    LedgerErr::Lex
+  }
+}
+
+impl<O, Lang: ?Sized> From<UnexpectedEot<O, Lang>> for LedgerErr {
+  fn from(_: UnexpectedEot<O, Lang>) -> Self {
+    LedgerErr::Lex
+  }
+}
+
+impl From<Incomplete<LedgerOffset>> for LedgerErr {
+  fn from(_: Incomplete<LedgerOffset>) -> Self {
+    LedgerErr::Incomplete
+  }
+}
+
+impl MaybeIncomplete for LedgerErr {
+  fn is_incomplete(&self) -> bool {
+    matches!(self, LedgerErr::Incomplete)
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum LedgerTok {
+  Word,
+  Trivia,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LedgerKind {
+  Word,
+  Trivia,
+}
+
+impl core::fmt::Display for LedgerKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      Self::Word => "word",
+      Self::Trivia => "trivia",
+    })
+  }
+}
+
+impl Token<'_> for LedgerTok {
+  type Kind = LedgerKind;
+  type Error = LedgerErr;
+
+  fn kind(&self) -> LedgerKind {
+    match self {
+      Self::Word => LedgerKind::Word,
+      Self::Trivia => LedgerKind::Trivia,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    matches!(self, Self::Trivia)
+  }
+}
+
+/// A space-separated word lexer over the instrumented span. A token made only of `~` is trivia,
+/// so a source can open on a token the skip predicate accepts or on one it rejects.
+struct LedgerLexer<'a> {
+  src: &'a LedgerSrc<'a>,
+  start: usize,
+  end: usize,
+  state: LedgerState,
+}
+
+impl<'a> crate::Lexer<'a> for LedgerLexer<'a> {
+  type State = LedgerState;
+  type Source = LedgerSrc<'a>;
+  type Token = LedgerTok;
+  type Span = LedgerSpan;
+  type Offset = LedgerOffset;
+
+  fn new(src: &'a LedgerSrc<'a>) -> Self {
+    Self::with_state(src, LedgerState::default())
+  }
+
+  fn with_state(src: &'a LedgerSrc<'a>, state: LedgerState) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+
+  fn check(&self) -> Result<(), LedgerErr> {
+    Ok(())
+  }
+
+  fn state(&self) -> &LedgerState {
+    &self.state
+  }
+
+  fn state_mut(&mut self) -> &mut LedgerState {
+    &mut self.state
+  }
+
+  fn into_state(self) -> LedgerState {
+    self.state
+  }
+
+  fn source(&self) -> &'a LedgerSrc<'a> {
+    self.src
+  }
+
+  fn span(&self) -> LedgerSpan {
+    LedgerSpan {
+      start: LedgerOffset(self.start),
+      end: LedgerOffset(self.end),
+    }
+  }
+
+  fn slice(&self) -> &'a str {
+    &self.src.0[self.start..self.end]
+  }
+
+  fn lex(&mut self) -> Option<Result<LedgerTok, LedgerErr>> {
+    let bytes = self.src.0.as_bytes();
+    let mut i = self.end;
+    while i < bytes.len() && bytes[i] == b' ' {
+      i += 1;
+    }
+    if i >= bytes.len() {
+      self.start = i;
+      self.end = i;
+      return None;
+    }
+    self.start = i;
+    while i < bytes.len() && bytes[i] != b' ' {
+      i += 1;
+    }
+    self.end = i;
+    self.state.scanned += 1;
+    let trivia = self.src.0.as_bytes()[self.start..self.end]
+      .iter()
+      .all(|b| *b == b'~');
+    Some(Ok(if trivia {
+      LedgerTok::Trivia
+    } else {
+      LedgerTok::Word
+    }))
+  }
+
+  fn bump(&mut self, n: &LedgerOffset) {
+    self.end += n.0;
+  }
+}
+
+// ── The instrumented emitter ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+struct LedgerEmitter {
+  next: Cell<u64>,
+  live: RefCell<std::vec::Vec<u64>>,
+  emissions: usize,
+}
+
+impl LedgerEmitter {
+  fn live_rows(&self) -> usize {
+    self.live.borrow().len()
+  }
+}
+
+impl<'inp, L, Lang: ?Sized> crate::Emitter<'inp, L, Lang> for LedgerEmitter
+where
+  L: crate::Lexer<'inp>,
+  <L::Token as Token<'inp>>::Error: Into<LedgerErr>,
+{
+  type Error = LedgerErr;
+
+  fn emit_lexer_error(
+    &mut self,
+    _err: Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
+  ) -> Result<(), LedgerErr> {
+    self.emissions += 1;
+    Ok(())
+  }
+
+  fn emit_unexpected_token(
+    &mut self,
+    _err: crate::error::token::UnexpectedTokenOf<'inp, L, Lang>,
+  ) -> Result<(), LedgerErr> {
+    self.emissions += 1;
+    Ok(())
+  }
+
+  fn emit_error(&mut self, _err: Spanned<LedgerErr, L::Span>) -> Result<(), LedgerErr> {
+    self.emissions += 1;
+    Ok(())
+  }
+
+  fn commit_token(&mut self, _tok: &L::Token, _span: &L::Span) {
+    note(Effect::CommitToken);
+  }
+
+  fn checkpoint(&self) -> u64 {
+    note(Effect::Checkpoint);
+    assert!(
+      !fire(&CHECKPOINT_BOMB),
+      "the armed `Emitter::checkpoint` panics — a mark was taken"
+    );
+    let id = self.next.get() + 1;
+    self.next.set(id);
+    self.live.borrow_mut().push(id);
+    id
+  }
+
+  fn rewind(&mut self, _cursor: &crate::input::Cursor<'inp, '_, L>, checkpoint: u64) {
+    note(Effect::Rewind);
+    self.live.borrow_mut().retain(|m| *m < checkpoint);
+  }
+
+  fn release(&mut self, checkpoint: u64) {
+    note(Effect::Release);
+    let mut live = self.live.borrow_mut();
+    if let Some(pos) = live.iter().rposition(|m| *m == checkpoint) {
+      live.remove(pos);
+    }
+  }
+}
+
+// ── The instrumented cache ────────────────────────────────────────────────────────────────────
+
+/// `DefaultCache` with every trait method recorded. The cache is caller code too: a `Cache` impl
+/// can count its calls or refuse to be called, so which cache methods a route runs is part of the
+/// same question as which clones it performs.
+#[derive(Default)]
+struct LedgerCache<'a>(Inner<'a>);
+
+/// The cache the wrapper delegates to. Every delegation below is fully qualified through
+/// [`Cache`]: `GenericArrayDeque` has inherent methods of the same names, and an unqualified call
+/// would silently reach those instead of the trait's.
+type Inner<'a> = DefaultCache<'a, LedgerLexer<'a>>;
+
+impl<'a> Cache<'a, LedgerLexer<'a>, ()> for LedgerCache<'a> {
+  type Options = ();
+
+  const RETAINS_FRONT: bool = <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::RETAINS_FRONT;
+
+  fn new() -> Self {
+    Self(<Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::new())
+  }
+
+  fn with_options(_options: ()) -> Self {
+    <Self as Cache<'a, LedgerLexer<'a>, ()>>::new()
+  }
+
+  fn len(&self) -> usize {
+    note(Effect::CacheLen);
+    <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::len(&self.0)
+  }
+
+  fn remaining(&self) -> usize {
+    <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::remaining(&self.0)
+  }
+
+  fn push_front(
+    &mut self,
+    tok: CachedTokenOf<'a, LedgerLexer<'a>>,
+  ) -> Result<
+    crate::cache::CachedTokenRefOf<'_, 'a, LedgerLexer<'a>>,
+    CachedTokenOf<'a, LedgerLexer<'a>>,
+  > {
+    note(Effect::CachePushFront);
+    <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::push_front(&mut self.0, tok)
+  }
+
+  fn push_back(
+    &mut self,
+    tok: CachedTokenOf<'a, LedgerLexer<'a>>,
+  ) -> Result<
+    crate::cache::CachedTokenRefOf<'_, 'a, LedgerLexer<'a>>,
+    CachedTokenOf<'a, LedgerLexer<'a>>,
+  > {
+    note(Effect::CachePushBack);
+    <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::push_back(&mut self.0, tok)
+  }
+
+  fn pop_front(&mut self) -> Option<CachedTokenOf<'a, LedgerLexer<'a>>> {
+    note(Effect::CachePopFront);
+    <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::pop_front(&mut self.0)
+  }
+
+  fn pop_back(&mut self) -> Option<CachedTokenOf<'a, LedgerLexer<'a>>> {
+    <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::pop_back(&mut self.0)
+  }
+
+  fn clear(&mut self) {
+    <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::clear(&mut self.0);
+  }
+
+  fn peek<'p, W>(
+    &'p self,
+    buf: &mut generic_arraydeque::GenericArrayDeque<
+      crate::cache::MaybeRefCachedTokenOf<'p, 'a, LedgerLexer<'a>>,
+      W::CAPACITY,
+    >,
+  ) where
+    W: crate::Window,
+  {
+    note(Effect::CachePeek);
+    <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::peek::<W>(&self.0, buf);
+  }
+
+  fn front(&self) -> Option<crate::cache::CachedTokenRefOf<'_, 'a, LedgerLexer<'a>>> {
+    note(Effect::CacheFront);
+    <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::front(&self.0)
+  }
+
+  fn back(&self) -> Option<crate::cache::CachedTokenRefOf<'_, 'a, LedgerLexer<'a>>> {
+    <Inner<'a> as Cache<'a, LedgerLexer<'a>, ()>>::back(&self.0)
+  }
+}
+
+type LedgerCtx<'a> = (LedgerEmitter, LedgerCache<'a>);
+
+fn ledger_input<'a>(src: &'a LedgerSrc<'a>) -> Input<'a, LedgerLexer<'a>, LedgerCtx<'a>, ()> {
+  Input::with_state_and_context(
+    src,
+    LedgerState::default(),
+    InputContext::new(LedgerEmitter::default(), LedgerCache::default()),
+  )
+}
+
+fn ledger_partial_input<'a>(
+  src: &'a LedgerSrc<'a>,
+) -> Input<'a, LedgerLexer<'a>, LedgerCtx<'a>, (), Partial> {
+  Input::with_state_and_context(
+    src,
+    LedgerState::default(),
+    InputContext::new(LedgerEmitter::default(), LedgerCache::default()),
+  )
+}
+
+// ── The two routes, over the same stream, both on shipped code ────────────────────────────────
+//
+// The comparison needs no ablation. `skip_while(|_| false)` over a resident head is exactly
+// `skip_until::<SkipWhile>` with a predicate that stops on the first token — and `skip_until` is
+// callable from here. So the fast path and the route it replaces run over the *same* input, in the
+// *same* residency, and the only variable is which entry point is used.
+//
+// Likewise for the head read: `peek::<U1>()` over a resident head is precisely the
+// `peek_with_emitter_inner` `want == 0` arm that `peek_head_map` would have taken.
+
+/// `skip_while(|_| false)` over a stream whose head is resident: the no-op skip, answered by the
+/// fast path.
+fn noop_skip_ledger() -> std::vec::Vec<Effect> {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  record();
+  inp
+    .skip_while(|_| {
+      note(Effect::Caller);
+      false
+    })
+    .unwrap();
+  recorded()
+}
+
+/// The scan that call would otherwise have entered, over the same stream in the same residency.
+fn general_scan_ledger() -> std::vec::Vec<Effect> {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  record();
+  let _ = inp
+    .skip_until::<SkipWhile, _, _>(
+      |_| {
+        note(Effect::Caller);
+        true
+      },
+      || None,
+      (),
+    )
+    .unwrap();
+  recorded()
+}
+
+/// The `Partial` pair, where the scanner additionally captures an entry and takes an emitter mark.
+/// Each also reports the emitter's outstanding-row count afterwards.
+fn noop_skip_ledger_partial() -> (std::vec::Vec<Effect>, usize) {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_partial_input(&src);
+  input.seal();
+  let ledger = {
+    let mut inp = input.as_ref();
+    let _ = inp.peek::<U3>().unwrap();
+    record();
+    inp
+      .skip_while(|_| {
+        note(Effect::Caller);
+        false
+      })
+      .unwrap();
+    recorded()
+  };
+  let live = input.emitter().live_rows();
+  (ledger, live)
+}
+
+fn general_scan_ledger_partial() -> (std::vec::Vec<Effect>, usize) {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_partial_input(&src);
+  input.seal();
+  let ledger = {
+    let mut inp = input.as_ref();
+    let _ = inp.peek::<U3>().unwrap();
+    record();
+    let _ = inp
+      .skip_until::<SkipWhile, _, _>(
+        |_| {
+          note(Effect::Caller);
+          true
+        },
+        || None,
+        (),
+      )
+      .unwrap();
+    recorded()
+  };
+  let live = input.emitter().live_rows();
+  (ledger, live)
+}
+
+/// A width-1 head read over a resident head — the call the second fast path answers.
+fn head_read_ledger() -> std::vec::Vec<Effect> {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  record();
+  let _ = inp
+    .peek_head_map(|_| {
+      note(Effect::Caller);
+    })
+    .unwrap();
+  recorded()
+}
+
+/// The window fill that read would otherwise have gone through, in the same residency: its
+/// `want == 0` arm.
+fn general_fill_ledger() -> std::vec::Vec<Effect> {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  record();
+  let _ = inp.peek::<U1>().unwrap();
+  recorded()
+}
+
+/// A `skip_while(is_trivia)` over a source that opens on trivia, so the probe **accepts** the head
+/// and the scan runs behind it. Under [`Partial`], where the scanner's entry capture takes an
+/// emitter mark, this is what places the predicate call relative to that mark.
+fn accepted_head_ledger_partial() -> std::vec::Vec<Effect> {
+  let src = LedgerSrc("~ ab cd");
+  let mut input = ledger_partial_input(&src);
+  input.seal();
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  record();
+  inp
+    .skip_while(|t| {
+      note(Effect::Caller);
+      t.data.is_trivia()
+    })
+    .unwrap();
+  recorded()
+}
+
+fn contains(ledger: &[Effect], effect: Effect) -> bool {
+  ledger.contains(&effect)
+}
+
+fn position_of(ledger: &[Effect], effect: Effect) -> Option<usize> {
+  ledger.iter().position(|e| *e == effect)
+}
+
+// ── The measurement ───────────────────────────────────────────────────────────────────────────
+
+/// **The finding, measured.** A no-op skip over a resident head runs no caller clone and takes no
+/// emitter mark; the scan it replaces runs both.
+///
+/// Both ledgers are asserted whole, so the cell is red in either direction: it fails if the fast
+/// path stops firing (the scan's steps appear on the left), it fails if the fast path grows work
+/// of its own, and it fails if the *scan* stops performing the steps the right-hand list claims —
+/// which is what would make this a comparison of nothing.
+#[test]
+fn a_no_op_skip_runs_no_caller_clone_where_the_scan_runs_two() {
+  assert_eq!(
+    noop_skip_ledger(),
+    std::vec![Effect::CacheFront, Effect::Caller],
+    "the fast path: one `Cache::front`, one predicate call, and nothing else caller-supplied"
+  );
+  assert_eq!(
+    general_scan_ledger(),
+    std::vec![
+      Effect::SpanClone,
+      Effect::StateClone,
+      Effect::CachePopFront,
+      Effect::Caller,
+      Effect::CachePushFront,
+    ],
+    "the scan it replaces, over the same stream in the same residency: the frontier pair is \
+     cloned — `L::Span::clone` and `L::State::clone`, both CALLER code — the head is taken out of \
+     the cache, tested, and pushed straight back. Every value is the identity; the calls are not"
+  );
+}
+
+/// The same pair under [`Partial`], where the scanner captures an entry and the capture takes an
+/// [`Emitter::checkpoint`](crate::Emitter::checkpoint).
+///
+/// This is the sharpest form of the difference: a mark-keyed emitter sees a complete, empty
+/// checkpoint/release cycle on one route and nothing at all on the other. Both leave zero rows
+/// outstanding, which is the part of the emitter contract that is observable *as state* — so the
+/// divergence is in the call sequence, not in the emitter's condition afterwards.
+#[test]
+fn a_no_op_skip_takes_no_emitter_mark_where_the_scan_takes_and_settles_one() {
+  let (fast, fast_live) = noop_skip_ledger_partial();
+  assert_eq!(
+    fast,
+    std::vec![Effect::CacheFront, Effect::Caller],
+    "under `Partial` too, the fast path takes no mark and clones nothing"
+  );
+  assert_eq!(fast_live, 0, "and leaves no row outstanding");
+
+  let (general, general_live) = general_scan_ledger_partial();
+  assert_eq!(
+    general,
+    std::vec![
+      Effect::OffsetClone,
+      Effect::OffsetClone,
+      Effect::SpanClone,
+      Effect::StateClone,
+      Effect::Checkpoint,
+      Effect::SpanClone,
+      Effect::StateClone,
+      Effect::CachePopFront,
+      Effect::Caller,
+      Effect::CachePushFront,
+      Effect::Release,
+    ],
+    "the scan captures an entry first — two `L::Offset::clone`s, an `L::Span::clone`, an \
+     `L::State::clone` and a MARK — then clones the frontier pair, and settles the mark on the \
+     stop. Eleven caller-code calls where the fast path makes two"
+  );
+  assert_eq!(
+    general_live, 0,
+    "the cycle is complete on this route: what the two routes disagree about is whether \
+     `checkpoint` and `release` were CALLED, not what the emitter holds afterwards"
+  );
+}
+
+/// The difference made concrete: a caller `Clone` that panics.
+///
+/// An `L::Span::clone`, an `L::State::clone` and an `Emitter::checkpoint` are all armed to panic.
+/// Over a resident head `skip_while` returns `Ok(())` and **no bomb fires**; the scan it replaces,
+/// over the same stream in the same residency, unwinds — and the fired flag says the armed step
+/// was genuinely reached rather than some other panic being caught.
+///
+/// So this is not a claim that the two routes are indistinguishable. It is the pin on exactly how
+/// they differ, in the direction the difference runs, and it is the cell that fails the day the
+/// fast path stops firing: the first arm would then panic.
+#[test]
+fn a_no_op_skip_over_a_resident_head_reaches_no_panicking_caller_clone() {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+
+  arm_bombs();
+  let fast = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inp.skip_while(|_| false)));
+  disarm_bombs();
+  assert!(
+    matches!(fast, Ok(Ok(()))),
+    "a no-op skip over a resident head returns success without touching an armed caller clone"
+  );
+  assert!(
+    !bomb_fired(),
+    "and no armed step ran at all — if one had, the assertion above would be passing for the \
+     wrong reason"
+  );
+
+  // The same bombs, the same stream, the same resident head — the other route.
+  let general_src = LedgerSrc("ab cd ef");
+  let mut general_input = ledger_input(&general_src);
+  let mut general = general_input.as_ref();
+  let _ = general.peek::<U3>().unwrap();
+  arm_bombs();
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = general.skip_until::<SkipWhile, _, _>(|_| true, || None, ());
+  }));
+  disarm_bombs();
+  assert!(
+    caught.is_err(),
+    "the scan clones the frontier pair before it asks anything, so it reaches the armed clone"
+  );
+  assert!(
+    bomb_fired(),
+    "and it is the ARMED step that panicked — the payload-executed witness"
+  );
+}
+
+/// The second half of the divergence: **order**.
+///
+/// With a head the probe accepts, the fast path asks the predicate *before* the scanner builds
+/// anything — before the `Partial` entry capture takes its emitter mark. The scan asks it after.
+/// Both end with the same marks settled and the same tokens skipped, so nothing in the observable
+/// tuple can see it; a predicate that reads the emitter, or a caller that records mark ids against
+/// its own events, can.
+#[test]
+fn an_accepted_head_is_asked_before_the_scanner_captures_its_entry() {
+  let ledger = accepted_head_ledger_partial();
+  let asked = position_of(&ledger, Effect::Caller).expect("the predicate ran");
+  let mark = position_of(&ledger, Effect::Checkpoint)
+    .expect("the `Partial` entry capture takes a mark once the scan is entered");
+  assert!(
+    asked < mark,
+    "the probe's predicate call comes before the scanner's entry capture on this route, and the \
+     contract on `skip_while` says so. Got {ledger:?}"
+  );
+
+  let general = general_scan_ledger_partial().0;
+  let general_asked = position_of(&general, Effect::Caller).expect("the predicate ran");
+  let general_mark = position_of(&general, Effect::Checkpoint).expect("the entry capture ran");
+  assert!(
+    general_mark < general_asked,
+    "and it is the other way round on the scan — which is what makes the line above a statement \
+     about a difference. Got {general:?}"
+  );
+}
+
+/// The head read's own ledger, against the fill it replaces under the same condition.
+///
+/// The answer to "does the second fast path skip a caller-code effect too?" is yes, and these are
+/// the ones: the fill's `Cache::len` and `Cache::peek` become a single `Cache::front`. No clone,
+/// no mark, no emitter call is involved on either route.
+#[test]
+fn a_resident_head_read_replaces_the_fills_cache_work_with_one_front_probe() {
+  assert_eq!(
+    without_trace_hook(head_read_ledger()),
+    std::vec![Effect::CacheFront, Effect::Caller],
+    "the fast path: one cache read, then the caller's own closure"
+  );
+  assert_eq!(
+    without_trace_hook(general_fill_ledger()),
+    std::vec![Effect::CacheLen, Effect::CachePeek],
+    "the fill's `want == 0` arm over the same resident head: two `Cache` calls, and — being a \
+     pure read of an already-met request — nothing else"
+  );
+}
+
+/// The head read's one clone, and the fact that it is the *only* one on either route.
+///
+/// `peek_head_map` hoists `self.span().end()` above the fill for the terminal end-of-input error
+/// it may have to raise. That is an `L::Offset::clone`, it is caller code, and with a head in hand
+/// the arms that need it are unreachable — so the fast path does not read it. Nothing else about
+/// a head read differs: a peek commits nothing and marks nothing either way.
+#[test]
+fn the_general_head_read_route_clones_the_end_offset_the_fast_path_never_reads() {
+  let cold = head_read_ledger_cold();
+  assert!(
+    contains(&cold, Effect::OffsetClone),
+    "the general route clones the committed span's end offset before the fill. Got {cold:?}"
+  );
+  assert!(
+    !contains(&cold, Effect::Checkpoint) && !contains(&cold, Effect::Release),
+    "but a head read takes no emitter mark on EITHER route. Got {cold:?}"
+  );
+  assert!(
+    !contains(&without_trace_hook(head_read_ledger()), Effect::OffsetClone),
+    "and the resident-head route reads no offset at all"
+  );
+}
+
+/// A head read with nothing resident: the general route, including the lex it has to perform.
+fn head_read_ledger_cold() -> std::vec::Vec<Effect> {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  record();
+  let _ = inp
+    .peek_head_map(|_| {
+      note(Effect::Caller);
+    })
+    .unwrap();
+  recorded()
 }

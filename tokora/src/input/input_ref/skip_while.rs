@@ -72,19 +72,68 @@ where
   /// | run the predicate | the same answer, on the same token |
   /// | commit the untouched frontier | the span and state already committed |
   ///
-  /// Every one of those is the identity here, so the early return leaves exactly the state the
-  /// scan would have: the stopping token unconsumed at the front of the stream (this call never
-  /// removes it), the committed span and lexer state where they were, and no diagnostic, no
-  /// watermark move and no poison latch — a skip that skips nothing emits nothing on either
-  /// route. The put-back is an identity on **both** origins, which is why the probe does not have
-  /// to exclude a parked head: a cache pop followed by a front push restores the entry it came
-  /// from and records no push, and a cache only ever refuses a front push when it is **full** —
-  /// so the cache that parked the token in the first place refuses again and the token re-parks,
-  /// with no push recorded either.
+  /// Every one of those produces the **value** it started from, so the early return leaves exactly
+  /// the state the scan would have: the stopping token unconsumed at the front of the stream (this
+  /// call never removes it), the committed span and lexer state where they were, and no
+  /// diagnostic, no watermark move and no poison latch — a skip that skips nothing emits nothing
+  /// on either route. The put-back is an identity on **both** origins, which is why the probe does
+  /// not have to exclude a parked head: a cache pop followed by a front push restores the entry it
+  /// came from and records no push, and a cache only ever refuses a front push when it is
+  /// **full** — so the cache that parked the token in the first place refuses again and the token
+  /// re-parks, with no push recorded either.
   ///
   /// The predicate still sees each token **exactly once**, which is a promise a stateful `FnMut`
   /// can check and the cache-transparency matrix does check: a head the probe accepts is not asked
   /// again, its answer is carried into the scan.
+  ///
+  /// ## What is guaranteed identical — and what is not
+  ///
+  /// Producing the same values is not the same as running the same code, and in a generic library
+  /// the difference is not academic: `L::Span::clone`, `L::State::clone`, `L::Offset::clone`,
+  /// `Emitter::checkpoint`/`release` and every [`Cache`](crate::cache::Cache) method are all
+  /// **caller-supplied**. This route runs fewer of them. Both columns are measured, on the same
+  /// stream in the same residency, by the effect ledger in `fast_path_tests`:
+  ///
+  /// | caller-supplied step, for one no-op skip | this route | the scan it replaces |
+  /// |---|---|---|
+  /// | `L::Span::clone` | 0 | 1 — **2** under [`Partial`](crate::input::Partial) |
+  /// | `L::State::clone` | 0 | 1 — **2** under `Partial` |
+  /// | `L::Offset::clone`, taken directly | 0 | 0 — **2** under `Partial` |
+  /// | `Emitter::checkpoint`, then `release` | none | none — **one of each** under `Partial` |
+  /// | `Cache` | one `front` | one `pop_front`, one `push_front` |
+  /// | the predicate | 1 | 1 |
+  ///
+  /// The offset row counts only the clones the input layer takes itself — the entry capture's
+  /// dedup watermark and rewind offset. A caller's own `L::Span::clone` may clone offsets on top
+  /// of that, so a span type built from two clonable offsets sees two more per span clone; the
+  /// in-tree witness measures 2 under `Complete` and 6 under `Partial` on that shape, against 0
+  /// on this route.
+  ///
+  /// **Guaranteed identical**, and pinned by the residency matrix: the parse result; the tokens
+  /// read next and the order they arrive in; the resume [`cursor`](Self::cursor); the committed
+  /// span and lexer state; the diagnostics; the poison boundary and the dedup watermark; the
+  /// tokens the predicate is asked about, in order; and the emitter's **outstanding-mark count**,
+  /// which is unchanged by either route because the cycle the scan runs is empty and balanced.
+  ///
+  /// **Not identical**, and stated rather than argued away:
+  ///
+  /// * a `Clone` for `L::Span` or `L::State` that **panics** is reachable from the scan and not
+  ///   from here — a no-op skip that would have unwound returns `Ok(())` instead;
+  /// * an emitter that counts its `checkpoint`/`release` **calls** sees one fewer complete, empty
+  ///   cycle per no-op skip under `Partial`. It cannot see a difference in what it *holds*:
+  ///   nothing is emitted between the two halves, and [`release`](crate::Emitter::release) is
+  ///   documented advisory — correctness must not depend on it being called. Which operations
+  ///   take a mark is not part of the [`Emitter`](crate::Emitter) contract;
+  /// * a `Cache` that counts its calls sees one `front` where the scan makes a `pop_front` and a
+  ///   `push_front`. Both are within the cache contract, which fixes what each operation *means*
+  ///   and leaves the choice of operations to the input layer;
+  /// * with a head the probe **accepts**, `pred` runs *before* the scanner's entry capture rather
+  ///   than after it, so a predicate and an emitter that share state observe the two in the
+  ///   opposite order.
+  ///
+  /// None of that is reachable through this crate's own surface: no built-in span, state, offset,
+  /// emitter or cache observes any of it, and nothing a caller can ask the input afterwards
+  /// differs. It is written down because it is the honest boundary of the claim above.
   #[inline(always)]
   pub fn skip_while<F>(
     &mut self,

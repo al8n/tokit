@@ -398,6 +398,31 @@ where
   /// The end-of-input offset the fill's `None` arms need is not read on this route because those
   /// arms are unreachable with a head in hand; the trace hook the fill opens with is emitted here
   /// instead, so a `trace` build sees the same one event per call either way.
+  ///
+  /// ## What is guaranteed identical — and what is not
+  ///
+  /// The same distinction [`skip_while`](Self::skip_while) draws applies here, and it is much the
+  /// smaller of the two: a peek commits nothing, so there is no frontier to clone and no mark to
+  /// take on **either** route. What differs is confined to the cache surface and one offset read.
+  /// Measured, on the same stream in the same residency, by the effect ledger in
+  /// `fast_path_tests`:
+  ///
+  /// | caller-supplied step, for one width-1 read | this route | the general route |
+  /// |---|---|---|
+  /// | `Cache` | one `front` | one `len`, one `peek` — the fill's `want == 0` arm |
+  /// | `L::Offset::clone` | 0 | 1 — the committed span's end, hoisted *here* above the fill |
+  /// | `L::Span::clone`, `L::State::clone` | 0 | 0 |
+  /// | `Emitter::checkpoint` / `release` / any emission | none | none |
+  ///
+  /// **Guaranteed identical:** the value handed to `f` and therefore the value returned; that
+  /// nothing is consumed, committed, emitted or latched; that a resident head is served at a
+  /// latched poison boundary and a non-resident one still raises the terminal end-of-input error.
+  ///
+  /// **Not identical:** a [`Cache`](crate::cache::Cache) that counts its calls sees one `front`
+  /// where the fill makes a `len` and a `peek` — all three are `&self` reads the cache contract
+  /// defines as changing no observable, so a *conforming* cache cannot tell them apart by effect;
+  /// and an `L::Offset` whose `Clone` panics or counts is not reached, because the error that
+  /// offset is for cannot arise with a head in hand.
   #[inline]
   pub fn peek_head_map<O, F>(
     &mut self,

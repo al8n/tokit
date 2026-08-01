@@ -324,6 +324,23 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// never returned to it. This clause is what tells you not to — uphold it and there is
   /// nothing to strand. The recording CST sink's `checkpoint` is the reference implementation:
   /// it reads, and registers nothing that a later settle must find.
+  ///
+  /// # Which operations take a mark is **not** part of the contract
+  ///
+  /// What the crate promises is how a mark it *does* take is settled — exactly once, by
+  /// [`rewind`](Self::rewind) or [`release`](Self::release), newest-first within its family. It
+  /// does **not** promise how many marks a given parse takes, nor which internal operation takes
+  /// them. An input path may take a checkpoint/release cycle it turns out not to need, and may
+  /// equally skip one: [`skip_while`](crate::InputRef::skip_while) answers a skip that has nothing
+  /// to skip without entering the scanner at all, so under
+  /// [`Partial`](crate::input::Partial) it performs *neither half* of the empty cycle the scan
+  /// would have run.
+  ///
+  /// Nothing conforming can depend on either choice. Such a cycle is **empty** — no emission is
+  /// made between its two halves — and **balanced**, so the outstanding-mark count is the same
+  /// whether it ran or not; and `release` is advisory in the first place. An emitter that keys
+  /// behaviour on the **number** or the **identity** of the marks a parse takes is outside this
+  /// contract, and different versions of this crate may legitimately differ.
   #[inline(always)]
   fn checkpoint(&self) -> u64 {
     0

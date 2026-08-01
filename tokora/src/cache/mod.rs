@@ -98,6 +98,15 @@ pub type DefaultCache<'a, L> =
 /// queue surface above, beside the push-generation bookkeeping only it can do. (`Cache::rewind`
 /// used to ask a cache to do the first half from facts it was never given; see
 /// [`InputRef::restore`](crate::InputRef::restore) and the 0.8.0 changelog.)
+///
+/// Also not on it: **which** of these operations an input path performs. The laws above fix what
+/// each operation *means*; the choice between two calls that mean the same thing belongs to the
+/// input layer and may change between versions. A head served by [`front`](Cache::front) and the
+/// same head served by [`len`](Cache::len) + [`peek`](Cache::peek) are the same read, and
+/// [`InputRef::peek_head_map`](crate::InputRef::peek_head_map) makes the first call where its
+/// general route makes the other two. A conforming cache cannot tell them apart — every one of
+/// those is a `&self` read that changes no observable — so a cache that *counts* its calls is
+/// measuring the input layer, not the token stream.
 pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// The options for creating a new cache.
   type Options;
