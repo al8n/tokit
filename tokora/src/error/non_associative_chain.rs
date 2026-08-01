@@ -114,6 +114,28 @@ use core::marker::PhantomData;
 /// grammar code, or use [`inplace_recover`](crate::ParseInput::inplace_recover): those are the two
 /// paths on which the input is still where the offset names.
 ///
+/// # The rendered text names the handback too
+///
+/// `Display` is the surface a caller who never calls [`offset`](Self::offset) still sees — in a
+/// log line, in a wrapping error's `{}`, in a snapshot — so it names the number the same way the
+/// accessor does rather than as the operator's location:
+///
+/// ```rust
+/// # use tokora::error::NonAssociativeChain;
+/// let error: NonAssociativeChain = NonAssociativeChain::of(5);
+/// assert_eq!(
+///   error.to_string(),
+///   "non-associative operator cannot be chained at its own power; input handed back at 5, at \
+///    or before the operator",
+/// );
+/// ```
+///
+/// That is the render for `1 ; 2 ; 3`, where the repeated `;` starts at **6** — so a wording of the
+/// form `non-associative operator at 5 …` would point a reader at a byte the operator does not
+/// occupy, and the four shapes above are how far apart the two numbers get. The payload and the
+/// sentence around it have to say the same thing, because the sentence is all a caller who logs or
+/// wraps the error ever has.
+///
 /// # A per-operator contract, not whole-chain fixity resolution
 ///
 /// The latch is one step: it is set by folding a `Neither` operator at `p`, cleared by folding
@@ -133,7 +155,10 @@ use core::marker::PhantomData;
 /// assert!(!error.is_terminal());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
-#[error("non-associative operator at {at} cannot be chained at its own power")]
+#[error(
+  "non-associative operator cannot be chained at its own power; input handed back at {at}, at \
+   or before the operator"
+)]
 pub struct NonAssociativeChain<O = usize, Lang: ?Sized = ()> {
   /// The offset the input was handed back at — `InputRef::span().end()` once the error is in the
   /// caller's hands, and where the surrounding grammar resumes if it catches the `Err` itself or

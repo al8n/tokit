@@ -1294,6 +1294,11 @@ everywhere else.
     where its operator begins, so the only way to learn what it would skip is to run it — and the
     repeat has to be decided before it may.
 
+    **`Display` names it the same way**, because the text is what a caller who never calls
+    `offset()` still has: `non-associative operator cannot be chained at its own power; input
+    handed back at 5, at or before the operator`. It does not report the operator's position,
+    for the reason above — the engine does not have it. See *Debug and rendered output*.
+
     — *(R14 defined it, R15 made the number the restore target)*
 
 45. **`InputContext::into_components` returns `(E, C, RecursionLimiter)`** where it returned
@@ -1355,7 +1360,7 @@ what an earlier inventory of this release assumed.
 | `PartialSession`, `Budget`, `SessionRefusal` | new types | `PartialSession` hand-written (pinned field list); the other two derived | R8, #123 |
 | `MissingToken`, `UnexpectedToken` | `Display` drops the doubled word: `…, expected expected '}'` becomes `…, expected '}'` | rendering change, both carriers | R10 |
 | `SeparatedError` | gained a `Display` it never had | new rendered surface | R10 |
-| `RecursionLimitReached`, `NonAssociativeChain` | new types, so nothing frozen moves; listed because both are carriers a consumer will render — `Debug` derived, `Display` from `thiserror` | derived | R12 |
+| `RecursionLimitReached`, `NonAssociativeChain` | new types, so nothing frozen moves; listed because both are carriers a consumer will render — `Debug` derived, `Display` from `thiserror`. Each render names its offset the way the type's accessor does, not as a construct's location: `recursion limit reached at 15: depth 9, maximum 8` (committed consumption at the frame that could not be entered) and `non-associative operator cannot be chained at its own power; input handed back at 5, at or before the operator` (the handback of item 44 — on `1 ; 2 ; 3` the repeated operator starts at 6, and the render deliberately does not claim to name it). Both strings, and both derived `Debug`s, are pinned in `tests/render_freeze.rs` | derived | R12 |
 
 **New panic messages.** A consumer that captures panic payloads — a test harness, a supervisor
 loop, a `catch_unwind` host — sees new observable strings even though no `Debug` or `Display`

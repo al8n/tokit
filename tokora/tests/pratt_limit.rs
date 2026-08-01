@@ -148,9 +148,23 @@ impl<Lang: ?Sized> From<NonAssociativeChain<usize, Lang>> for LimErr {
       !e.is_terminal(),
       "a non-associative repeat is malformed input, not a resource trip"
     );
+    // The rendered text of the value the ENGINE built, kept before the conversion discards it.
+    // `LimErr` keeps the offset, so every cell in this file went on passing while `Display`
+    // named that number something it is not — see
+    // `the_render_names_the_handback_and_not_the_operator`.
+    RENDERED_CHAIN.with(|c| *c.borrow_mut() = Some(e.to_string()));
     LimErr::NonAssoc { at: e.offset() }
   }
 }
+
+thread_local! {
+  /// What `Display` produced for the last [`NonAssociativeChain`] the engines handed this
+  /// fixture — the caller-visible surface, captured at the conversion boundary because the
+  /// grammar's error type keeps the payload's offset rather than the payload itself.
+  static RENDERED_CHAIN: core::cell::RefCell<Option<String>> =
+    const { core::cell::RefCell::new(None) };
+}
+
 /// Never an incomplete: this fixture is complete-mode only. The empty impl is the documented
 /// opt-in that `Recover` and friends require.
 impl tokora::error::MaybeIncomplete for LimErr {}
@@ -1597,6 +1611,67 @@ fn skip_then_retry_scans_from_the_attempt_origin_not_from_the_offset() {
     frontier, 7,
     "the loop leaves the input past the second `;` — input the offset's own contract would have \
      preserved"
+  );
+}
+
+/// **What a caller *reads* names the handback, not the repeated operator.**
+///
+/// Every other R2 cell asserts `offset()` off the converted payload, and `offset()` was right the
+/// whole time — so nothing here noticed that `Display` rendered `non-associative operator at 5
+/// cannot be chained at its own power` on the very fixture whose repeated `;` starts at **6**. The
+/// payload was correct and the sentence around it was not, and a caller that logs, wraps or
+/// snapshots the error only ever has the sentence.
+///
+/// So this cell reads `Display` on the value the **engine** built — captured in
+/// [`RENDERED_CHAIN`] at the `From` boundary, because `LimErr` keeps the offset rather than the
+/// payload — over a real `1 ; 2 ; 3` trip, and checks it against both measured numbers rather than
+/// against literals.
+///
+/// The exact bytes are frozen separately, in `tests/render_freeze.rs`, on a hand-built value. That
+/// suite says *this string moved and must be disclosed*; this cell says *the string agrees with
+/// where the parse actually left the input*, which is the claim the old wording broke.
+///
+/// What makes it red: the render presenting the offset as the operator's own position again
+/// (either negative pin); the render dropping the offset (the positive pin); the handback or the
+/// operator's start moving (the two measured pins, shared with
+/// [`typed_repeat_at_the_top_level_is_rejected_and_hands_the_operator_back`]).
+#[test]
+fn the_render_names_the_handback_and_not_the_operator() {
+  RENDERED_CHAIN.with(|c| *c.borrow_mut() = None);
+
+  let (at, handback, operator): Resumption = Parser::with_context(fatal_ctx())
+    .apply(typed_resumption_probe)
+    .parse_str("1 ; 2 ; 3")
+    .unwrap();
+  assert_eq!(
+    (at, handback),
+    (5, 5),
+    "the handback identity the render is being measured against"
+  );
+  let operator = operator.expect("the repeated `;` is still on the input");
+  assert_eq!(
+    operator, 6,
+    "and the repeated operator's own start — the position the render must NOT be naming"
+  );
+  assert!(at < operator, "the two are different bytes on this fixture");
+
+  let rendered = RENDERED_CHAIN
+    .with(|c| c.borrow().clone())
+    .expect("the engine built a `NonAssociativeChain`, and the conversion rendered it");
+
+  assert!(
+    rendered.contains(&std::format!("handed back at {at}")),
+    "the render must name {at} for what it is — the position the input was handed back at; got \
+     {rendered:?}"
+  );
+  assert!(
+    !rendered.contains(&std::format!("operator at {at}")),
+    "and must never present it as the operator's location: the repeated operator starts at \
+     {operator}, so `operator at {at}` points at a byte it does not occupy; got {rendered:?}"
+  );
+  assert!(
+    !rendered.starts_with("non-associative operator at "),
+    "and not by re-adopting the opening this cell was written against; got {rendered:?}"
   );
 }
 
