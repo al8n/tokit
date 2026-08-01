@@ -49,7 +49,7 @@ use core::marker::PhantomData;
 /// ```text
 ///   1 ; 2   ; 3        `;` non-associative, whitespace lexed as tokens
 ///   0 2 4   8 10       the second `;` is at 8 — the repeat
-///       ^              offset 5: the whitespace the handback returns, and where the caller resumes
+///        ^             offset 5: the whitespace the handback returns, and where the caller resumes
 /// ```
 ///
 /// A grammar whose lexer skips trivia — the ordinary syntactic shape — has nothing between the

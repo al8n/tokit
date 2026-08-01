@@ -816,7 +816,7 @@ fn a_multi_token_repeat_is_named_where_the_handback_leaves_the_input() {
 /// ```text
 ///   1 ; 2   ; 3
 ///   0 2 4   8 10
-///       ^^^ the whitespace the second `;`'s classifier would skip: 5..8
+///        ^^^ the whitespace the second `;`'s classifier would skip: 5..8
 /// ```
 ///
 /// The driver decides the repeat *before* the classifier runs — it has to, because running the
