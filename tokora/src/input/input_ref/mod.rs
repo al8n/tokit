@@ -99,6 +99,13 @@ mod capacity_tests;
 ))]
 mod session_tests;
 
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
+mod fast_path_tests;
+
 /// A reference to an `Input` instance.
 pub struct InputRef<'inp, 'closure, L, Ctx, Lang: ?Sized = (), Cmpl = Complete>
 where
