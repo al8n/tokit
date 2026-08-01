@@ -357,6 +357,52 @@ where
   ///   ([`FinishError::UnclosedNodes`]) — [`finish_partial`](Self::finish_partial) is
   ///   the explicit opt-in that closes them for tooling.
   ///
+  /// # Where a gap lands
+  ///
+  /// **A gap is tiled where it opens.** An uncovered run opens the instant the token before it
+  /// settles — that is the moment the parse stopped covering the source — so the run is tiled
+  /// immediately after that token, in the node that was open then. It is in the tree before the
+  /// next event is read, so nothing that happens afterwards can move it.
+  ///
+  /// One clause covers the run that has no token before it (the source starts with bytes no
+  /// token claims): there is no such moment, so it is tiled where the walk first sees it — at
+  /// the first committed token, or, if the parse committed **no** token at all, at the end of
+  /// the walk in whatever node is open there.
+  ///
+  /// Two properties follow, and they are the whole point of stating placement this way. Both are
+  /// pinned as laws over a corpus rather than as table rows, because a hand-written "the same
+  /// stream, one token longer" is exactly the thing three rounds of this rule got wrong.
+  ///
+  /// - **Nothing that follows a run can move it.** Two streams that share a prefix through the
+  ///   token a run trails place that run in the same node — including when one of them simply
+  ///   *stops* there. Placement is never decided by whether more input happened to follow, which
+  ///   is the asymmetry this rule exists to remove: the bytes after the last committed token of
+  ///   a document join that document, exactly as an identical run mid-document does, and
+  ///   `Root[Document[Tok] Gap]` is now `Root[Document[Tok Gap]]`.
+  /// - **A diagnostic cannot move it either.** Placement reads the token and structure events
+  ///   only; a `Diag` is never consulted. That is not tidiness — a prefilled lookahead cache
+  ///   *hoists* a lexer-class diagnostic earlier in the event stream (`input_ref`'s
+  ///   cache-transparency matrix says so in as many words), so a rule that read a diagnostic's
+  ///   position would make the tree a function of how far the caller happened to peek. Coverage
+  ///   still consults every diagnostic, through the merged **set** of recorded spans, which is
+  ///   order-independent for the same reason.
+  ///
+  /// The node a run joins **widens over it**: a node spanning `0..11` before a four-byte tail
+  /// spans `0..15` after. That is the rule working, not a side effect — the node now contains
+  /// those bytes. It applies at every extent, a zero-width node included: a node whose only
+  /// content is a zero-width committed token still takes the run that token trails.
+  ///
+  /// A source with **nothing lexable in it** therefore keeps its tail at the root. There is no
+  /// token for the run to trail, so the fallback clause applies and the run tiles where the walk
+  /// ends: `Root[Document@0..0, Gap@0..len]`. That is not an exemption carved out for the
+  /// degenerate case — it is the same clause that governs a leading run, and it is forced: the
+  /// identical parse with one lexable byte appended puts that run at the root too, so any other
+  /// answer would re-open the asymmetry rather than close it.
+  ///
+  /// `tree.text() == source` holds under every placement; it is the *shape* this rule fixes.
+  /// [`finish_partial`](Self::finish_partial), which tolerates an unbalanced stream, states in
+  /// its own note the one case this rule does not reach.
+  ///
   /// # The fail-fast boundary (precise)
   ///
   /// The gap-coverage guarantee holds for a **collecting** inner emitter (the lossless
@@ -389,13 +435,17 @@ where
   /// the two ways an incomplete parse differs from a complete one; refusing them would defeat
   /// the door.
   ///
-  /// # Where a trailing gap lands
+  /// # Where a gap lands
   ///
-  /// The two exemptions interact, and the result is worth stating: when the stream ends with
-  /// a node still open, the tail is tiled **before** the open frames are closed, so the gap
-  /// becomes a child of the **innermost open node** rather than of the root. Under
-  /// [`finish`](Self::finish) the question cannot arise — an unbalanced stream is refused —
-  /// so "the tail tiles into the root" holds only for balanced streams. `tree.text() ==
+  /// This door places every gap exactly where [`finish`](Self::finish) does, by the rule that
+  /// method's own *Where a gap lands* note states in full: a run is tiled where it opens, in the
+  /// node open at the token it trails. Nothing about an unbalanced stream changes that — a run
+  /// trailing a token inside a node the stream never closed still lands in that node.
+  ///
+  /// The one case only this door can reach is the run that trails **no** token: the fallback
+  /// clause tiles it at the end of the walk, and here that is **before** the open frames are
+  /// closed, so it becomes a child of the **innermost open node** rather than of the root.
+  /// `finish` never sees it, since an unbalanced stream is refused outright. `tree.text() ==
   /// source` holds either way; it is the *placement* that differs, and tooling that walks by
   /// node rather than by text will see it.
   pub fn finish_partial(self, root_kind: u16) -> (Result<GreenNode, FinishError>, E)
@@ -543,6 +593,13 @@ fn ceil_log2(k: u64) -> u64 {
 /// one `sort_unstable` over **diagnostics** (see the `W` inventory for how that cost is
 /// charged and pinned) and one linear merge into sorted, non-overlapping intervals.
 ///
+/// It also reads the **uncovered runs** off the token spans, which is what lets pass 2 tile a
+/// run at the token it trails instead of at the token that reveals it: at the trailing token
+/// only the *next* token knows where the run ends. This is bookkeeping per **gap**, not per
+/// event — a source every token covers allocates nothing — and it is derived from tokens and
+/// the source length alone, never from a diagnostic, which is what keeps the tree independent
+/// of a prefilled cache's hoisting.
+///
 /// # Pass 2 — walk
 ///
 /// Drives the builder, and recovers each target's retro-wraps from **the target's own chain**
@@ -602,6 +659,22 @@ where
 
   // ── Pass 1: gather ──────────────────────────────────────────────────────────
   let mut error_spans: Vec<(u32, u32)> = Vec::new();
+
+  // The uncovered runs, read off the token spans alone — see `finish`'s *Where a gap lands*.
+  // A run is tiled the moment it OPENS, immediately after the token it trails, and at that
+  // moment only the *next* token knows where it ends; this is what supplies that end. It is
+  // computed from tokens and `source_len` and from nothing else, which is what makes placement
+  // independent of where a hoisting diagnostic happens to sit.
+  //
+  // Empty for a source every token covers, which is the ordinary case: one `(u32, u32)` per
+  // gap, nothing per event.
+  let mut gaps: Vec<(u32, u32)> = Vec::new();
+  let mut scan_covered: u32 = 0;
+  // The scan refuses nothing of its own. Every condition that stops it is one pass 2 refuses
+  // below, at its own index and with its own typed error; stopping just returns tiling to the
+  // shape it had before this rule, and the walk then errors anyway.
+  let mut gap_scan_ok = true;
+
   for (index, event) in events.iter().enumerate() {
     w_tick(); // W row 1
     let index = index as u64;
@@ -640,12 +713,31 @@ where
         }
       }
       Event::StartNode { kind, .. } if *kind == TOMBSTONE => {}
-      Event::StartNode { kind, .. } | Event::Token { kind, .. } => {
+      Event::StartNode { kind, .. } => {
+        if cfg!(debug_assertions) && !validator.admits(*kind) {
+          return Err(FinishError::InvalidDialectKind { index, kind: *kind });
+        }
+      }
+      Event::Token { kind, span } => {
         if *kind == TOMBSTONE {
           return Err(FinishError::ReservedKind { index });
         }
         if cfg!(debug_assertions) && !validator.admits(*kind) {
           return Err(FinishError::InvalidDialectKind { index, kind: *kind });
+        }
+        if gap_scan_ok {
+          let start: Result<u32, _> = span.start().try_into();
+          let end: Result<u32, _> = span.end().try_into();
+          match (start, end) {
+            // Exactly pass 2's span discipline, restated as a predicate instead of a refusal.
+            (Ok(start), Ok(end)) if start >= scan_covered && end >= start && end <= source_len => {
+              if start > scan_covered {
+                gaps.push((scan_covered, start));
+              }
+              scan_covered = end;
+            }
+            _ => gap_scan_ok = false,
+          }
         }
       }
       Event::Diag {
@@ -673,6 +765,20 @@ where
       }
       Event::FinishNode { .. } | Event::Diag { error_span: None } => {}
     }
+  }
+
+  // The last run, the one no token reveals. It trails the last committed token exactly as any
+  // other does, so it is not a special case in the walk — only its far end comes from the
+  // source's length rather than from a token.
+  if gap_scan_ok {
+    if scan_covered < source_len {
+      gaps.push((scan_covered, source_len));
+    }
+  } else {
+    // A partial scan must not place anything: an incomplete run list would tile a run early
+    // whose end the walk never confirmed. Dropping it restores the pre-rule tiling for the one
+    // walk that is about to refuse anyway.
+    gaps.clear();
   }
 
   // One sort, over DIAGNOSTICS: `O(k log k)` with `k ≤ events`. Its comparisons happen inside
@@ -722,6 +828,13 @@ where
   let mut first_uncovered_gap: Option<(u32, u32)> = None;
   // The shared monotone cursor into `error_cover` — see `first_uncovered`.
   let mut cover_at: usize = 0;
+
+  // The monotone cursor into the runs pass 1 found. `rowan`'s builder is a stream — a closed
+  // node cannot be reopened — so a run cannot be re-parented after the fact; instead it is
+  // never mis-parented in the first place, because it is emitted at the token it trails,
+  // while that token's node is still the open one. Runs are consumed in source order and each
+  // exactly once, so the cursor only ever moves forward and never scans.
+  let mut gap_at: usize = 0;
 
   // The retro-wrap reachability set: one bit per event index, set for every `StartAt` the
   // walk opened by following a target's chain. Its purpose is the integrity the old
@@ -791,9 +904,10 @@ where
         if end > source_len {
           return Err(FinishError::SpanOutOfBounds { index });
         }
-        // Tile the gap this token reveals: bytes no committed token covered (a skipped
-        // lexer error, an undrained region) become one gap token in the currently open
-        // node — losslessness by construction, not by lexer luck.
+        // The LEADING run — bytes before the first committed token, which no token trails —
+        // is the one case with no opening moment of its own, so it tiles where the walk first
+        // sees it: here, in the node this token is landing in. Every other run has already
+        // been tiled below, at the token it trails, so `start > covered` cannot hold for it.
         if start > covered {
           let gap = source
             .get(covered as usize..start as usize)
@@ -802,12 +916,43 @@ where
             first_uncovered_gap = first_uncovered(covered, start, &error_cover, &mut cover_at);
           }
           builder.token(SyntaxKind(gap_kind), gap);
+          // Retire it from the cursor: pass 1 found the same run, and it must not be tiled twice.
+          if gaps.get(gap_at).is_some_and(|&(s, _)| s == covered) {
+            gap_at += 1;
+          }
         }
         let text = source
           .get(start as usize..end as usize)
           .ok_or(FinishError::SpanOutOfBounds { index })?;
         builder.token(SyntaxKind(*kind), text);
         covered = end;
+        // The run this token OPENS, if it opens one — the bytes between it and whatever comes
+        // next that no token will ever claim. Tiling it *here*, rather than at the token that
+        // reveals it or at the end of the walk, is the whole of the placement rule: the run
+        // goes in the node the parse was in when it stopped covering the source, and it is in
+        // the tree before the next event is read, so no later event can move it. The end of
+        // the stream is not a case — a run that trails the last committed token is tiled by
+        // that token like any other.
+        //
+        // Slicing may still fail on a *following* token span that starts off a `char`
+        // boundary; leaving the run untiled then hands it back to the branch above, which
+        // refuses at the revealing token's own index, exactly as it did before this rule.
+        let opens = gaps
+          .get(gap_at)
+          .filter(|&&(gap_start, _)| gap_start == covered)
+          .and_then(|&(gap_start, gap_end)| {
+            source
+              .get(gap_start as usize..gap_end as usize)
+              .map(|gap| (gap_start, gap_end, gap))
+          });
+        if let Some((gap_start, gap_end, gap)) = opens {
+          gap_at += 1;
+          if first_uncovered_gap.is_none() {
+            first_uncovered_gap = first_uncovered(gap_start, gap_end, &error_cover, &mut cover_at);
+          }
+          builder.token(SyntaxKind(gap_kind), gap);
+          covered = gap_end;
+        }
       }
       Event::FinishNode { kind } => {
         // Precedence is deliberate and unchanged at the top: the two STRUCTURAL walls first
@@ -844,6 +989,12 @@ where
           });
         }
         stack.pop();
+        // A close decides nothing about gap placement, and that is deliberate. Two earlier
+        // shapes of this rule read a trailing run's owner off *where the event log ends*
+        // relative to this close — first "was it the last event to drive the builder", then
+        // "was it the last event at all". Both made the answer a function of what happened
+        // after the run was already determined, and each time a different ordering escaped.
+        // The run is now tiled at the token it trails, before this close is even read.
         builder.finish_node();
       }
       Event::StartAt { target, .. } => {
@@ -869,11 +1020,13 @@ where
     }
   }
 
-  // The trailing gap: bytes after the last covered token (an undrained tail, a poisoned
-  // truncation) tile into whatever node is open here — the ROOT under `finish`, which
-  // refuses unbalanced streams outright, but the INNERMOST OPEN node under `finish_partial`,
-  // which tolerates them. This append deliberately precedes the close loop below, so the
-  // tail sits inside the frame it textually belongs to rather than beside it. Pinned by
+  // The run that trails NO token. It is the only run left for the end of the walk to tile: a
+  // run that trails a token was tiled by that token, whether or not anything followed. So this
+  // fires on exactly one shape — a parse that committed no token at all, over a source with
+  // bytes in it. It tiles into whatever node is open here, which is the ROOT under `finish`
+  // (a balanced stream has closed everything else) and the INNERMOST OPEN node under
+  // `finish_partial` (this append deliberately precedes the close loop below). Pinned by
+  // `a_source_with_nothing_lexable_keeps_its_gap_at_the_root_either_way` and
   // `finish_partial_trailing_gap_tiles_into_the_innermost_open_node`.
   if covered < source_len {
     let gap = source
@@ -971,6 +1124,7 @@ where
 /// | 7 | the end-of-walk close `for _ in 0..open` | **ticked** (W row 7) — the loop the first instrument missed |
 /// | 8 | reachability bitset `std::vec![0u64; events.len().div_ceil(64)]` | justified: one lazy `alloc_zeroed` of `ceil(events/64)` words, no per-event iteration, no keyed structure — allocated only when a chain is actually walked |
 /// | 9 | `builder.start_node` / `token` / `finish_node`, `source.get`, `stack` push/pop | justified O(1) amortized per event |
+/// | 10 | the uncovered-run list `gaps` and its cursor `gap_at` | justified: two `u32` comparisons per token in pass 1 and one `Vec::get` per token in pass 2, both O(1) — **no iteration construct and no scan**, because the cursor is consumed in source order and advances only where a run is tiled. Storage is one `(u32, u32)` per *gap*, nothing per event, and the `Vec` is never allocated for a source every token covers |
 ///
 /// Deleted by the rewrite: the per-materialization `BTreeMap<target, Vec<(u64, u16)>>` —
 /// `O(log n)` per `StartAt` plus one `Vec` allocation per target, and the last keyed structure
