@@ -73,15 +73,33 @@ impl RecursionLimitExceeded {
 ///
 /// # Default Limit
 ///
-/// The default maximum depth is **500**, chosen to keep a deeply nested parse well inside a
-/// *main thread's* stack (8 MiB on macOS and Linux) while allowing reasonably deep nesting.
+/// The default maximum depth is **500**. It is sized against a **release build on a 2 MiB
+/// stack** — the size Rust gives every `std::thread::spawn` and every libtest harness thread,
+/// and so the smallest stack a production parse is likely to get. It is *not* sized against a
+/// debug build, and the honest numbers matter more than the round one.
 ///
-/// It is not a universal guarantee, and the honest number matters more than the round one: a
-/// debug build of this crate's pratt driver takes roughly 4–6 KiB of native stack per frame, so
-/// on a **2 MiB spawned thread** — the size Rust's own test harness uses — 350 frames complete
-/// and 500 do not. A grammar that parses untrusted, deeply nested input on worker threads should
-/// pick a limit against *that* stack with
-/// [`with_limitation`](Self::with_limitation) rather than inherit this default.
+/// Measured on this tree, one pratt frame per level of nesting, bisected to the last depth that
+/// completes on an explicitly sized 2 MiB thread before the native stack aborts the process:
+///
+/// | build | typed driver | token driver |
+/// |---|---|---|
+/// | release (`opt-level = 3`) | **3871** frames, ~0.53 KiB each | **4247** frames, ~0.48 KiB each |
+/// | debug (`opt-level = 0`) | **384** frames, ~5.3 KiB each | **125** frames, ~16.4 KiB each |
+///
+/// So on the stack the default is sized against, 500 clears the tightest driver by about **7.7×**
+/// and the limiter — not the native stack — is what stops a runaway descent. A **debug** build of
+/// the same code spends eight to thirty times more per frame and overruns that same 2 MiB before
+/// 500, so there the stack aborts first. That is a development-and-test concern rather than a
+/// production one, and it is why this crate's own deep-recursion tests either run on a
+/// deliberately enlarged stack or configure a limit that fits the debug ceiling.
+///
+/// **A grammar that parses untrusted, deeply nested input should still set its own limit** with
+/// [`with_limitation`](Self::with_limitation) rather than inherit this default — especially on a
+/// worker thread, where the stack is 2 MiB and not the main thread's 8 MiB. The figures above are
+/// this crate's pratt frames on one platform and one toolchain; a grammar whose own recursive
+/// combinators sit between them spends more per level, and a build with overflow checks, extra
+/// debuginfo or a different codegen unit count spends more again. Pick the limit against the
+/// stack the parse will actually run on.
 ///
 /// # Use Cases
 ///

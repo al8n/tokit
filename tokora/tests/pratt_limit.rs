@@ -1324,16 +1324,28 @@ fn a_trip_leaves_the_depth_unchanged() {
 /// budget existed the same input killed the whole test process with `has overflowed its stack` —
 /// which is why this cell exists and why it must never be moved onto `on_a_deep_stack`.
 ///
-/// The limit is 100 rather than the default 500 on purpose. **Measured on this tree, debug
-/// build, 2 MiB thread: depth 350 completes and depth 500 overflows** (an 8 MiB stack takes 500
-/// comfortably). So the shipped default protects the main thread's 8 MiB but is *not* by itself
-/// below the debug-build ceiling of a 2 MiB worker; a grammar that runs deep parses on spawned
-/// threads should configure a smaller one. The cells above that do use the default run on a
-/// deliberately huge stack for exactly that reason.
+/// The limit is 32, far below the default 500, on purpose — and the margin is chosen from a
+/// measurement rather than guessed. Bisected on this tree, one frame per level, on a 2 MiB
+/// thread, taking the last depth that completes before the process aborts:
+///
+/// | build | typed | token |
+/// |---|---|---|
+/// | release | 3871 | 4247 |
+/// | debug | 384 | **125** |
+///
+/// This cell runs in whatever profile the suite is built in, so it has to fit the **smallest** of
+/// those four numbers with room to spare: 32 clears the debug token engine by ~3.9×. An earlier
+/// 100 fit too, but only by 1.25× — close enough that a codegen change on another platform could
+/// turn this cell from a failure into a process abort, which is not a test result.
+///
+/// The same table is why the shipped default is 500: on the 2 MiB stack a spawned thread gets, a
+/// **release** build clears 500 by ~7.7×, so the limiter fires long before the stack does. A
+/// debug build does not, which is exactly why every cell above that exercises the default runs on
+/// `on_a_deep_stack` instead.
 #[test]
 fn a_configured_budget_holds_on_an_ordinary_thread_stack() {
   let src = prefix_chain(1_000);
-  let got: Outcome = Parser::with_context(limited(100))
+  let got: Outcome = Parser::with_context(limited(32))
     .apply(typed_probe)
     .parse_str(&src)
     .unwrap();
@@ -1341,15 +1353,15 @@ fn a_configured_budget_holds_on_an_ordinary_thread_stack() {
     matches!(
       got,
       Err(LimErr::Limit {
-        depth: 101,
-        limitation: 100,
+        depth: 33,
+        limitation: 32,
         ..
       })
     ),
     "the trip happens long before the stack does; got {got:?}"
   );
 
-  let token: TokOutcome = Parser::with_context(limited(100))
+  let token: TokOutcome = Parser::with_context(limited(32))
     .apply(token_probe)
     .parse_str(&src)
     .unwrap();
@@ -1357,8 +1369,8 @@ fn a_configured_budget_holds_on_an_ordinary_thread_stack() {
     matches!(
       token,
       Err(LimErr::Limit {
-        depth: 101,
-        limitation: 100,
+        depth: 33,
+        limitation: 32,
         ..
       })
     ),

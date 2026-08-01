@@ -121,8 +121,15 @@ Exceeding the limit fails the parse with
   [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter);
   spell "no limit" as
   [`RecursionLimiter::unlimited()`](crate::state::recursion_tracker::RecursionLimiter::unlimited).
-  A grammar that parses deep input on a *spawned* thread should pick a limit against that
-  thread's stack rather than rely on the default, which is sized for a main thread.
+  The default is sized against a **release** build on a **2 MiB** stack — what a spawned thread
+  and a libtest harness thread get — where the tighter of the two engines fits 3871 frames, so
+  500 clears it by about 7.7×. A **debug** build spends eight to thirty times more stack per
+  frame and overruns the same 2 MiB well before 500 (the measured ceilings are 384 typed and 125
+  token), which is why the deep-recursion *tests* run on an enlarged stack or configure their own
+  limit. See
+  [`RecursionLimiter`](crate::state::recursion_tracker::RecursionLimiter#default-limit) for the
+  full table. A grammar that parses deep untrusted input should still pick a limit against the
+  stack it will actually run on rather than inherit this one.
 - **One budget per input, not per parser.** Two pratt parsers composed into one grammar share the
   depth, because what the limit protects — the native stack — is shared too. The root expression
   counts as one level.
