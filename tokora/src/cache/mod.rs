@@ -115,7 +115,8 @@ pub type DefaultCache<'a, L> =
 /// [`peek_head_map`](crate::InputRef::peek_head_map) state as a condition on the caller, seen from
 /// the end that implements it.
 ///
-/// Two ways a cache stops being inert, and what each costs:
+/// **Inert is the whole requirement**; what follows is not the set of ways to miss it. Two that
+/// come up, and what each costs:
 ///
 /// * **it counts.** Harmless while the count stays inside the cache. It stops being harmless the
 ///   moment the count reaches a **predicate or closure the same caller supplies** — a `skip_while`
@@ -128,7 +129,9 @@ pub type DefaultCache<'a, L> =
 ///   panic, one route unwinds and the other returns `Ok(())`. The value guarantees on those two
 ///   methods are not made to a caller whose cache can do that.
 ///
-/// Both are the same rule written on the trait that would be doing it.
+/// Both are the same rule written on the trait that would be doing it, and the rule is the
+/// sentence above them rather than the two bullets: a third way of losing inertness would cost the
+/// same, and would need no amendment here.
 pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// The options for creating a new cache.
   type Options;

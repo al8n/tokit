@@ -93,10 +93,13 @@ where
   /// ## What is guaranteed identical, and the condition that makes it so
   ///
   /// Producing the same values is not the same as running the same code, and in a generic library
-  /// the difference is not academic: `L::Span::clone`, `L::State::clone`, `L::Offset::clone`,
-  /// `Emitter::checkpoint`/`release` and every [`Cache`](crate::cache::Cache) method are all
-  /// **caller-supplied**. This route runs fewer of them. Both columns are measured, on the same
-  /// stream in the same residency, by the effect ledger in `fast_path_tests`:
+  /// the difference is not academic: `L::Span`, `L::State` and `L::Offset` are the **caller's own
+  /// types**, so every operation the input layer performs on one of them — clone, drop, compare,
+  /// hash, format — is caller code, as are [`Emitter::checkpoint`](crate::Emitter::checkpoint) and
+  /// [`release`](crate::Emitter::release), every [`Cache`](crate::cache::Cache) method, and the
+  /// [`Lexer`](crate::Lexer) with its [`Source`](crate::Source). This route runs fewer of them.
+  /// Some are measured, on the same stream in the same residency, by the effect ledger in
+  /// `fast_path_tests`:
   ///
   /// | caller-supplied step, for one no-op skip | this route | the scan it replaces |
   /// |---|---|---|
@@ -113,12 +116,25 @@ where
   /// in-tree witness measures 2 under `Complete` and 6 under `Partial` on that shape, against 0
   /// on this route.
   ///
+  /// **That table is a measurement, not a boundary**, and the distinction is the whole lesson of
+  /// how this contract was arrived at. The table carries the steps the ledger was built to watch.
+  /// The scan's closing commit also runs a [`Source::len`](crate::Source::len) and one `L::Offset`
+  /// comparison — the clamp inside `commit_position`, measured once each on the scan and zero
+  /// times here — and those are simply two the table never had. Four successive readings of this
+  /// method have each found an operation the previous naming did not contain, so the condition
+  /// below is quantified over **all** caller-supplied code and every list inside it, this table
+  /// included, is illustration. What `fast_path_tests` pins is the *emptiness* of this route's
+  /// side, not an inventory of the scan's: an inventory would be one review round out of date.
+  ///
   /// ### What this route does differently — the whole of it
   ///
   /// Four clauses, meant as exhaustive and not as illustration. Against the scan it replaces, for
   /// every call it answers, this route:
   ///
-  /// 1. **omits** caller-supplied steps — the table above is the list — and never adds one;
+  /// 1. **omits** caller-supplied steps, and never adds one. *Which* steps is deliberately not
+  ///    part of the clause: the table above measures some, the elided drops and the clamp's
+  ///    `Source::len` and `L::Offset` comparison are more, and the clause is about all of them —
+  ///    it is a subset relation, not a list;
   /// 2. **substitutes** a single [`Cache::front`](crate::cache::Cache::front) for the
   ///    [`pop_front`](crate::cache::Cache::pop_front) +
   ///    [`push_front`](crate::cache::Cache::push_front) pair the scan uses to look at the same
@@ -139,14 +155,18 @@ where
   /// properties you check *once*, about your own types — not a list of differences to keep up
   /// with:
   ///
-  /// * **your input-layer callbacks are inert.** Every caller-supplied item this crate may invoke
-  ///   on the way to an answer — the `Clone` and `Drop` of `L::Span`, `L::State` and `L::Offset`;
-  ///   [`Emitter::checkpoint`](crate::Emitter::checkpoint) and
+  /// * **your input-layer callbacks are inert.** Every caller-supplied operation this crate can
+  ///   reach through the input layer does **only** what its own contract says it does, and always
+  ///   returns normally: it does not unwind, and it does not diverge. Then running one, running it
+  ///   twice, and not running it at all are the same thing to everyone. *That is the clause, and
+  ///   it is not a list.* The ones you are likely to be the author of: the `Clone` and `Drop` of
+  ///   `L::Span`, `L::State` and `L::Offset`, and the `Ord` and `Hash` the bounds also ask of the
+  ///   span and the offset; [`Emitter::checkpoint`](crate::Emitter::checkpoint) and
   ///   [`release`](crate::Emitter::release); every [`Cache`](crate::cache::Cache) method; the
-  ///   [`Lexer`](crate::Lexer) and its [`Source`](crate::Source) — does **only** what its own
-  ///   contract says it does, and always returns normally: it does not unwind, and it does not
-  ///   diverge. Then running one, running it twice, and not running it at all are the same thing
-  ///   to everyone;
+  ///   [`Lexer`](crate::Lexer) and its [`Source`](crate::Source). Those are named because they are
+  ///   the ones you are likely to write, **not because they are the boundary** — the boundary is
+  ///   the sentence above them, and each time this contract named a set instead, the next reading
+  ///   found something outside it;
   /// * **`pred` is a function of what it is handed.** It answers from the *values* of the
   ///   `Spanned<&L::Token, &L::Span>` it receives — not from state some other callback wrote, and
   ///   not from the addresses those two references carry (the scan asks about a token it has moved
@@ -161,8 +181,12 @@ where
   /// running it in a different order produce nothing; the second says your own predicate cannot
   /// read which route produced its argument. Nothing is left over. That closure is the point of
   /// stating a condition rather than listing exclusions — a list has to anticipate every way a
-  /// caller might differ, and each way found so far (a `Clone` that keeps state, a `Clone` that
-  /// panics, a `Drop` elided with its clone) is an instance of one clause rather than a new entry.
+  /// caller might differ, and every way found so far is an instance of one clause rather than a
+  /// new entry: a `Clone` that keeps state, a `Clone` that panics, a `Drop` elided along with its
+  /// clone, the `Source::len` and `L::Offset` comparison the scan's clamp runs, and a `pred` that
+  /// reads its argument's address. The first three arrived as three separate escalations of a list
+  /// that was each time believed complete; the last two arrived after the clause replaced it, and
+  /// needed no change to it.
   ///
   /// Two things the condition does not cover, because no fast path could: **time and stack**. This
   /// route is quicker and shallower, which is the whole reason it exists.
@@ -178,8 +202,10 @@ where
   ///
   /// ### And for a caller who does not meet it
   ///
-  /// Not a second list to maintain: each of these is one of the two clauses failing, and each is
-  /// measured in `fast_path_tests`, so the condition is a fact rather than a caveat.
+  /// Not a second list to maintain, and not one that has to be complete — each of these is one of
+  /// the two clauses failing, and each is measured in `fast_path_tests`, so the condition is a
+  /// fact rather than a caveat. A caller who breaks a clause in a way no bullet here describes
+  /// gets the same answer: the guarantees are not made to them.
   ///
   /// * **a `Clone` that keeps state, and a `pred` that reads it** — the second clause. The table
   ///   above is the entire mechanism: the scan clones the frontier pair before it asks, this route
@@ -207,6 +233,18 @@ where
   ///   The count becomes a parse only once it reaches `pred`.
   /// * **a `Drop` that is not inert** — the first clause again, and the one a list of clone counts
   ///   would have missed: a frontier clone this route never takes is a value it never drops.
+  ///   Measured over one no-op skip: one `L::State::drop` and three `L::Offset::drop`s on the scan
+  ///   under `Complete`, two and seven under `Partial`, against none of either here.
+  ///   (`a_no_op_skip_runs_no_caller_drop_where_the_scan_runs_one_per_frontier_clone`)
+  /// * **a `pred` that reads its argument's *address*** — the second clause, in the half that says
+  ///   *values*. The scan moves the head out of the cache into the scan scope and asks about it
+  ///   there; this route asks about it where it lies. A predicate that compares the address it is
+  ///   handed against the cache's own front entry therefore answers one way here and the other
+  ///   there, and the answer to a skip predicate is the skip: one token consumed against none.
+  ///   This one is not even new to the fast paths — the cache has always been an invisible
+  ///   optimization, and how deep a caller peeked has always decided where a token sits — which is
+  ///   exactly why it belongs in a condition on the caller rather than in a list of this route's
+  ///   differences. (`an_address_reading_predicate_can_change_the_skip_decision`)
   ///
   /// The condition is reasonable, not merely convenient. A predicate that answers differently
   /// depending on **how the input layer got the token to it** is not asking a question about the
@@ -216,8 +254,10 @@ where
   /// and which steps ran is not part of the contract either.
   ///
   /// The crate meets its own condition and holds itself to it. Every span, state and offset it
-  /// ships clones by copying fields, with no side effect and no panic path — surveyed impl by
-  /// impl — so the first clause holds for every in-tree lexer by inspection. Every `skip_while`
+  /// ships clones by copying fields and compares and hashes by derive over integers, with no side
+  /// effect and no panic path — surveyed impl by impl — so the first clause holds for every
+  /// in-tree lexer by inspection, and holds for the operations no table names as readily as for
+  /// the ones it does. That is what checking a clause instead of a list buys. Every `skip_while`
   /// predicate it writes, in its own combinators, its tests, its benches, its examples and its
   /// conformance kit, answers out of the token it was handed, and the adversarial fixtures that
   /// *do* count clones read the counter in an assertion after the call, never inside the

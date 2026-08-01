@@ -415,13 +415,18 @@ where
   /// | `L::Span::clone`, `L::State::clone` | 0 | 0 |
   /// | `Emitter::checkpoint` / `release` / any emission | none | none |
   ///
+  /// As on [`skip_while`](Self::skip_while), **that table is a measurement and not a boundary**:
+  /// it holds the steps the ledger was built to watch, and the clause below is about every
+  /// caller-supplied operation whether a table names it or not.
+  ///
   /// ### What this route does differently — the whole of it
   ///
   /// Three clauses, meant as exhaustive. Against the general route, for every call it answers,
   /// this route:
   ///
-  /// 1. **omits** the hoisted `L::Offset::clone` — and no other caller-supplied step, and adds
-  ///    none;
+  /// 1. **omits** caller-supplied steps and adds none. The hoisted `L::Offset::clone` is the one
+  ///    the ledger sees; as with clause (1) on `skip_while`, *which* steps is not part of the
+  ///    clause — it is a subset relation, not a list;
   /// 2. **substitutes** one [`Cache::front`](crate::cache::Cache::front) for the fill's
   ///    [`len`](crate::cache::Cache::len) + [`peek`](crate::cache::Cache::peek). All three are
   ///    `&self` reads the cache contract defines as changing no observable, so they are the same
@@ -433,11 +438,13 @@ where
   /// What follows holds for a caller who meets both clauses of the condition on
   /// [`skip_while`](Self::skip_while), read here with `f` in the predicate's place:
   ///
-  /// * **your input-layer callbacks are inert** — the `Clone` and `Drop` of `L::Offset`, `L::Span`
-  ///   and `L::State`, every [`Cache`](crate::cache::Cache) method, the
-  ///   [`Emitter`](crate::Emitter), the [`Lexer`](crate::Lexer) and its
-  ///   [`Source`](crate::Source) each do only what their own contract says, and always return
-  ///   normally: no unwind, no divergence;
+  /// * **your input-layer callbacks are inert** — every caller-supplied operation this crate can
+  ///   reach through the input layer does only what its own contract says, and always returns
+  ///   normally: no unwind, no divergence. *All of it, not a list.* Likely to be yours: the
+  ///   `Clone`, `Drop`, `Ord` and `Hash` of `L::Offset` and `L::Span`, the `Clone` and `Drop` of
+  ///   `L::State`, every [`Cache`](crate::cache::Cache) method, the [`Emitter`](crate::Emitter),
+  ///   the [`Lexer`](crate::Lexer) and its [`Source`](crate::Source) — named as the ones you are
+  ///   likely to write, not as the edge of the clause;
   /// * **`f` is a function of what it is handed** — it answers from the *values* of the
   ///   `Spanned<&L::Token, &L::Span>` it receives, not from state another callback wrote and not
   ///   from the addresses those references carry.
@@ -457,7 +464,8 @@ where
   ///
   /// ### And for a caller who does not meet it
   ///
-  /// Both are one clause failing, and both are measured:
+  /// Both of these are one clause failing, and both are measured. Neither is the list of ways to
+  /// fail — a caller who breaks a clause some other way gets the same answer:
   ///
   /// * **an `f` that reads the input layer** — the second clause. The offset row above is the
   ///   whole mechanism: the general route takes `self.span().end()` before the fill, for a

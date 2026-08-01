@@ -617,6 +617,17 @@ enum Effect {
   CachePushBack,
   /// The caller's own closure: the `skip_while` predicate, or `peek_head_map`'s `f`.
   Caller,
+  /// `L::State::drop`. A **wide** probe — see [`Wide`].
+  StateDrop,
+  /// `L::Offset::drop`, which is also how an `L::Span::drop` shows up: this span owns two offsets
+  /// and the `Span` impl moves them out by value, so the span itself cannot carry a `Drop` impl.
+  /// A **wide** probe.
+  OffsetDrop,
+  /// `L::Offset`'s `Ord`/`PartialOrd` — the trait bound asks for it and the input layer uses it.
+  /// A **wide** probe.
+  OffsetCmp,
+  /// [`Source::len`](crate::Source::len). A **wide** probe.
+  SourceLen,
 }
 
 thread_local! {
@@ -637,11 +648,51 @@ thread_local! {
   /// cells at the foot of this file and read only once the call has returned or unwound — which
   /// is the shape the contract's precondition explicitly permits, and the reason those cells bite.
   static CALLER_CALLS: Cell<usize> = const { Cell::new(0) };
+  /// While set, the **wide** probes record too — see [`Wide`].
+  static WIDE: Cell<bool> = const { Cell::new(false) };
 }
 
 fn note(effect: Effect) {
   if RECORDING.with(Cell::get) {
     LEDGER.with(|l| l.borrow_mut().push(effect));
+  }
+}
+
+/// The wide probes on, for as long as this guard lives.
+///
+/// The ledger has two settings, and the reason is the contract's own history. The **narrow**
+/// setting — the default, and what every cell above uses — records the caller steps whose *order*
+/// is the finding: the clones, the marks, the cache calls, the caller's own closure. Those
+/// sequences are asserted whole, which is what makes them bite in both directions.
+///
+/// The **wide** setting adds the operations that are caller-supplied too but that no reading of
+/// this contract had thought to name: the `Drop` that goes with each elided clone, the
+/// `Source::len` and the `L::Offset` comparison the scan's closing clamp runs. Turning those on
+/// permanently would mean editing every whole-sequence assertion above each time a further one is
+/// found — which is exactly the list-maintenance the contract stopped doing when it replaced its
+/// enumeration of exclusions with a condition. So they are gated, and the cell that uses them
+/// asserts what the *clause* actually says: that this route's side is **empty**, whatever the
+/// probe set happens to contain. A new probe added here strengthens that cell without touching
+/// any other.
+struct Wide;
+
+impl Wide {
+  fn on() -> Self {
+    WIDE.with(|c| c.set(true));
+    Self
+  }
+}
+
+impl Drop for Wide {
+  fn drop(&mut self) {
+    WIDE.with(|c| c.set(false));
+  }
+}
+
+/// Records `effect` only while a [`Wide`] guard is live.
+fn note_wide(effect: Effect) {
+  if WIDE.with(Cell::get) {
+    note(effect);
   }
 }
 
@@ -748,7 +799,7 @@ fn caller_calls() -> usize {
 
 // ── The instrumented lexer ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, PartialEq, Eq, Hash)]
 struct LedgerOffset(usize);
 
 impl Clone for LedgerOffset {
@@ -759,6 +810,30 @@ impl Clone for LedgerOffset {
       "the armed `L::Offset::clone` panics — a caller clone was reached"
     );
     Self(self.0)
+  }
+}
+
+/// A wide probe: `L::Offset: Ord` is a bound the caller satisfies, so every comparison the input
+/// layer makes on an offset is a caller call. `Ord` is written out rather than derived for that
+/// reason alone.
+impl Ord for LedgerOffset {
+  fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+    note_wide(Effect::OffsetCmp);
+    self.0.cmp(&other.0)
+  }
+}
+
+impl PartialOrd for LedgerOffset {
+  fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+/// A wide probe. Every clone this offset takes is a value that must later die, and the route that
+/// does not take the clone does not run this either.
+impl Drop for LedgerOffset {
+  fn drop(&mut self) {
+    note_wide(Effect::OffsetDrop);
   }
 }
 
@@ -775,7 +850,10 @@ impl crate::Source<LedgerOffset> for LedgerSrc<'_> {
     self.0.is_empty()
   }
 
+  /// A wide probe: the clamp inside `commit_position` asks the source how long it is, and a
+  /// `Source` is the caller's.
   fn len(&self) -> LedgerOffset {
+    note_wide(Effect::SourceLen);
     LedgerOffset(self.0.len())
   }
 
@@ -884,6 +962,13 @@ impl Clone for LedgerState {
     Self {
       scanned: self.scanned,
     }
+  }
+}
+
+/// A wide probe — the other half of a frontier clone the fast path never takes.
+impl Drop for LedgerState {
+  fn drop(&mut self) {
+    note_wide(Effect::StateDrop);
   }
 }
 
@@ -1624,21 +1709,28 @@ fn head_read_ledger_cold() -> std::vec::Vec<Effect> {
 // `skip_while` and on `peek_head_map` as two clauses about the caller rather than as a list of
 // exclusions:
 //
-//   1. the caller's input-layer callbacks — the `Clone`/`Drop` of `L::Span`, `L::State` and
-//      `L::Offset`, the `Emitter` methods these paths reach, every `Cache` method, the `Lexer`
-//      and its `Source` — are INERT: each does only what its own contract says it does, always
-//      returns, and never unwinds;
+//   1. every caller-supplied operation the input layer can reach is INERT: it does only what its
+//      own contract says it does, always returns, does not unwind, does not diverge. ALL of it —
+//      the clause is a quantifier, not a set. The ones a caller is likely to have written are the
+//      `Clone`, `Drop`, `Ord` and `Hash` of `L::Span` and `L::Offset`, the `Clone` and `Drop` of
+//      `L::State`, the `Emitter` methods these paths reach, every `Cache` method, and the `Lexer`
+//      with its `Source`; they are named for legibility and are explicitly NOT the boundary;
 //   2. the caller's predicate or closure is a FUNCTION OF WHAT IT IS HANDED: it answers from the
-//      values of the `Spanned<&L::Token, &L::Span>` it receives, and from nothing else.
+//      *values* of the `Spanned<&L::Token, &L::Span>` it receives — not from state another
+//      callback wrote, and not from the addresses those two references carry.
 //
-// The four cells below are those two clauses made concrete: each builds a caller that fails one
-// of them and shows that the failure is not a call count but a **different parse** — a different
+// The cells below are those two clauses made concrete: each builds a caller that fails one of
+// them and shows that the failure is not a call count but a **different parse** — a different
 // skip decision, a different committed cursor, different tokens consumed, a different returned
-// value, or a different number of predicate calls surviving an unwind. Clause 2 fails in the
-// first two; clause 1 — the *non-unwinding* half — fails in the last two, and those two matter
-// most, because their callers satisfy clause 2 in full: a predicate that records only its own
-// calls observes no input-layer side effect at all, and still cannot be promised the same call
-// sequence once a caller `Clone` panics.
+// value, or a different number of predicate calls surviving an unwind. They are instances, not an
+// enumeration: a caller who breaks a clause in a way none of them describes is outside the
+// guarantee just the same, and adding a cell here never narrows the clause.
+//
+// Clause 2 fails in the clone-counting, offset-counting and address-reading cells; clause 1 fails
+// in the two unwinding ones and in the elided-drop one. The unwinding pair matters most, because
+// their callers satisfy clause 2 in full: a predicate that records only its own calls observes no
+// input-layer side effect at all, and still cannot be promised the same call sequence once a
+// caller `Clone` panics.
 //
 // They exist so that the condition is a measured fact rather than a caveat nobody checked, and
 // they pin a **documented precondition, not a behaviour**. No caller may rely on either column:
@@ -1648,8 +1740,8 @@ fn head_read_ledger_cold() -> std::vec::Vec<Effect> {
 // are the caller's own types, which is exactly why the condition has to be written down instead
 // of assumed.
 //
-// All four are red against a build that runs the slow route: ablate either fast path and its two
-// columns collapse onto each other, and the `assert_ne!` that carries the finding fails.
+// All of them are red against a build that runs the slow route: ablate either fast path and its
+// two columns collapse onto each other, and the assertion that carries the finding fails.
 
 /// How many caller `Clone` calls the input layer has run since [`record`] started this ledger.
 ///
@@ -2111,5 +2203,262 @@ fn an_unwinding_offset_clone_decides_whether_peek_head_maps_closure_runs_at_all(
     "`f` ran on one route and not on the other, from an `f` that observes nothing. `Ok(Some(_))` \
      against an unwind is the largest form the difference takes, and it is why the condition on \
      these methods names unwinding explicitly"
+  );
+}
+
+// ── Clause 1 again, on the operations no list of clone counts reaches ──────────────────────────
+
+/// How many of `effect` a ledger holds.
+fn count_of(ledger: &[Effect], effect: Effect) -> usize {
+  ledger.iter().filter(|e| **e == effect).count()
+}
+
+/// **Clause 1, on `Drop`** — and, in the same measurement, the demonstration that clause 1 is a
+/// quantifier rather than a table.
+///
+/// A clone this route does not take is a value it never produces, and therefore one it never
+/// drops. `Drop` is caller code exactly as `Clone` is, and no enumeration of this contract's
+/// exclusions ever listed it: it was found by working out what a *condition* would have to say,
+/// not by a fifth reading of the differences.
+///
+/// So the assertion is shaped the way the clause is. With the [wide](Wide) probes on — the `Drop`
+/// of `L::State` and `L::Offset`, the [`Source::len`](crate::Source::len) and the `L::Offset`
+/// comparison the scan's closing clamp runs — this route's caller-code ledger is **still exactly
+/// `[CacheFront, Caller]`**, byte for byte what it is with the probes off. It is not that this
+/// route runs few of the operations somebody thought to name; it is that it runs *none of them*.
+/// The scan, over the same stream in the same residency:
+///
+/// | one no-op skip | this route | the scan | under `Partial` |
+/// |---|---:|---:|---|
+/// | `L::State::drop` | 0 | 1 | 0 against 2 |
+/// | `L::Offset::drop` | 0 | 3 | 0 against 7 |
+/// | `Source::len` | 0 | 1 | 0 against 1 |
+/// | `L::Offset` compare | 0 | 1 | 0 against 1 |
+///
+/// The last two rows are the point of the whole exercise: they are caller-supplied operations that
+/// the measured table on [`skip_while`](InputRef::skip_while) does not carry and that no round of
+/// review had named, and the contract needed no amendment to cover them, because it stopped
+/// naming a set.
+///
+/// This is a **documented precondition, not a supported behaviour.** Neither column is a promise.
+/// Red against a build that runs the slow route: ablate the probe and the left column becomes the
+/// right one — the whole-ledger assertion fails first, and every zero after it.
+#[test]
+fn a_no_op_skip_runs_no_caller_drop_where_the_scan_runs_one_per_frontier_clone() {
+  let (fast, scan, fast_partial, scan_partial) = {
+    let _wide = Wide::on();
+    (
+      noop_skip_ledger(),
+      general_scan_ledger(),
+      noop_skip_ledger_partial().0,
+      general_scan_ledger_partial().0,
+    )
+  };
+
+  // ── The emptiness, which is what the clause actually claims ──
+  assert_eq!(
+    fast,
+    std::vec![Effect::CacheFront, Effect::Caller],
+    "with every probe this fixture has switched on, the fast path's caller-code ledger is \
+     unchanged: one `Cache::front`, one predicate call. Nothing was hiding behind the narrow \
+     probe set"
+  );
+  assert_eq!(
+    fast_partial,
+    std::vec![Effect::CacheFront, Effect::Caller],
+    "and the same under `Partial`"
+  );
+
+  // ── The drops, which are what a list of clone counts could not have reached ──
+  for (label, ledger, states, offsets) in [
+    ("the scan", &scan, 1, 3),
+    ("the scan under `Partial`", &scan_partial, 2, 7),
+  ] {
+    assert_eq!(
+      count_of(ledger, Effect::StateDrop),
+      states,
+      "{label} clones the frontier state and later drops it — caller code both times. Got \
+       {ledger:?}"
+    );
+    assert_eq!(
+      count_of(ledger, Effect::OffsetDrop),
+      offsets,
+      "{label} drops the offsets those clones own. This span moves its offsets out by value, so \
+       an `L::Span::drop` reaches the ledger as its offsets' drops. Got {ledger:?}"
+    );
+  }
+  for (label, ledger) in [("", &fast), (" under `Partial`", &fast_partial)] {
+    assert_eq!(
+      (
+        count_of(ledger, Effect::StateDrop),
+        count_of(ledger, Effect::OffsetDrop)
+      ),
+      (0, 0),
+      "a value this route never clones is a value it never drops{label}"
+    );
+  }
+  assert_ne!(
+    count_of(&scan, Effect::StateDrop),
+    count_of(&fast, Effect::StateDrop),
+    "one `L::State::drop` against none — the finding, in the operation the enumeration form never \
+     had an entry for"
+  );
+
+  // ── And the two the measured table on `skip_while` does not carry, for the same reason ──
+  for (label, ledger) in [
+    ("the scan", &scan),
+    ("the scan under `Partial`", &scan_partial),
+  ] {
+    assert_eq!(
+      (
+        count_of(ledger, Effect::SourceLen),
+        count_of(ledger, Effect::OffsetCmp)
+      ),
+      (1, 1),
+      "{label} finishes through `commit_at` -> `commit_position` -> the clamp, which asks the \
+       caller's `Source` how long it is and compares the caller's `L::Offset` against the answer. \
+       Both are caller code; neither appears in any table on these methods. Got {ledger:?}"
+    );
+  }
+  for (label, ledger) in [("", &fast), (" under `Partial`", &fast_partial)] {
+    assert_eq!(
+      (
+        count_of(ledger, Effect::SourceLen),
+        count_of(ledger, Effect::OffsetCmp)
+      ),
+      (0, 0),
+      "this route commits nothing, so it runs neither{label} — which the condition covers without \
+       ever having named them"
+    );
+  }
+}
+
+// ── Clause 2 again, in the half that says *values* and not addresses ───────────────────────────
+
+thread_local! {
+  /// The address of the token the cache holds at its front when a call begins.
+  static CACHE_FRONT_ADDR: Cell<usize> = const { Cell::new(0) };
+  /// The address of each token the predicate was handed, in order.
+  static HANDED_ADDRS: RefCell<std::vec::Vec<usize>> = const { RefCell::new(std::vec::Vec::new()) };
+}
+
+fn addr_of(tok: &LedgerTok) -> usize {
+  core::ptr::from_ref(tok) as usize
+}
+
+/// "Skip this token if it is the very entry that is still sitting in the cache."
+///
+/// Nothing about the token's **value** is read — not its kind, not its span, not its text. The
+/// predicate answers purely from *where* its argument lives, which is the one thing clause 2
+/// forbids and the reason that clause says *values* rather than merely *pure*.
+fn skip_the_token_that_is_still_in_the_cache(t: Spanned<&LedgerTok, &LedgerSpan>) -> bool {
+  let handed = addr_of(t.data);
+  HANDED_ADDRS.with(|a| a.borrow_mut().push(handed));
+  handed == CACHE_FRONT_ADDR.with(Cell::get)
+}
+
+/// What one route did: where it left the stream, and the addresses its predicate saw.
+fn skip_while_asking_about_addresses(via_scan: bool) -> (Left, usize, std::vec::Vec<usize>) {
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+
+  // Read before the ledger opens, so it costs no recorded step: the address of the entry the
+  // cache is holding at its front, which is what the probe hands over and what the scan moves.
+  let front = addr_of(inp.front().expect("the head is resident").token.data);
+  CACHE_FRONT_ADDR.with(|c| c.set(front));
+  HANDED_ADDRS.with(|a| a.borrow_mut().clear());
+
+  record();
+  if via_scan {
+    // `skip_while(pred)` *is* `skip_until::<SkipWhile>(|t| !pred(t))` — the same predicate over
+    // the same stream in the same residency, entered the other way.
+    let _ = inp
+      .skip_until::<SkipWhile, _, _>(
+        |t| !skip_the_token_that_is_still_in_the_cache(t),
+        || None,
+        (),
+      )
+      .unwrap();
+  } else {
+    inp
+      .skip_while(skip_the_token_that_is_still_in_the_cache)
+      .unwrap();
+  }
+  let _ = recorded();
+
+  let handed = HANDED_ADDRS.with(|a| a.borrow().clone());
+  let cursor = inp.cursor().as_inner().0;
+  let remaining = drain_spans(&mut inp);
+  (Left { cursor, remaining }, front, handed)
+}
+
+/// **Clause 2, on the address rather than the value.** A predicate that reads *where* its argument
+/// lives — and nothing else about it — makes the two routes skip different tokens.
+///
+/// This route hands `pred` the cache entry **where it lies**. The scan pops the head out of the
+/// cache into the scan scope and asks about it there, putting it back afterwards. Same token, same
+/// value, same span; two addresses. A predicate that compares the address it was handed against
+/// the cache's own front entry therefore answers `true` here and `false` there — and the answer to
+/// a skip predicate is the skip:
+///
+/// | resident head | this route | the scan |
+/// |---|---|---|
+/// | is my argument the entry still in the cache? | yes — skip it | no — stop |
+/// | tokens consumed | **1** | **0** |
+///
+/// This class was never reported by any review of the fast paths, and it is not even new to them:
+/// the cache has always been an invisible optimization, and how deep a caller peeked has always
+/// decided whether a token is read in place or copied. That is precisely why it belongs in a
+/// condition on the caller and not in a list of one route's differences — the positive form covers
+/// it without an amendment, which is what the positive form is for.
+///
+/// This is a **documented precondition, not a supported behaviour.** Neither column is a promise.
+/// Red against a build that runs the slow route: ablate the probe and this route reads the moved
+/// token too, both columns become the scan's, and the `assert_ne!` fails.
+#[test]
+fn an_address_reading_predicate_can_change_the_skip_decision() {
+  let (fast, fast_front, fast_handed) = skip_while_asking_about_addresses(false);
+  let (scan, scan_front, scan_handed) = skip_while_asking_about_addresses(true);
+
+  // ── The mechanism, before the consequence: where each route's predicate was pointed ──
+  assert_eq!(
+    fast_handed.first().copied(),
+    Some(fast_front),
+    "this route asks about the head where it lies, so the first address the predicate sees IS \
+     the cache's front entry"
+  );
+  assert_ne!(
+    scan_handed.first().copied(),
+    Some(scan_front),
+    "the scan asks about a token it has moved out of the cache and into the scan scope, so the \
+     same predicate is pointed somewhere else"
+  );
+
+  // ── The consequence: a different skip, from a predicate that read no value at all ──
+  assert_eq!(
+    fast,
+    Left {
+      cursor: 3,
+      remaining: std::vec![(3, 5), (6, 8)],
+    },
+    "the head is the cache entry, so the predicate skips it; the next token is somewhere else \
+     again, so the skip stops there — one token consumed"
+  );
+  assert_eq!(
+    scan,
+    Left {
+      cursor: 0,
+      remaining: std::vec![(0, 2), (3, 5), (6, 8)],
+    },
+    "the scan's first token is already out of the cache when the predicate sees it, so the same \
+     predicate stops immediately — nothing consumed"
+  );
+  assert_ne!(
+    fast, scan,
+    "one token consumed against none, from a predicate that never looked at a kind, a span or a \
+     byte. `pred` is a function of what it is handed means the VALUES it is handed, and this is \
+     the cell that makes the word load-bearing"
   );
 }

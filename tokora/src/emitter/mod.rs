@@ -350,7 +350,8 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// [`peek_head_map`](crate::InputRef::peek_head_map) state as a condition on the caller, seen
   /// from the end that implements it.
   ///
-  /// Two ways an emitter stops being inert, and what each costs:
+  /// **Inert is the whole requirement**; what follows is not the set of ways to miss it. Two that
+  /// come up, and what each costs:
   ///
   /// * **it counts.** Harmless while the count stays inside the emitter. The moment it is shared
   ///   with a **predicate or closure the same caller supplies** — a `skip_while` predicate, a
@@ -367,7 +368,9 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   ///   made to you.
   ///
   /// Keep an emitter's behaviour a function of what is *emitted* — not of how many marks arrived,
-  /// and not of whether taking one could fail — and the question never comes up.
+  /// and not of whether taking one could fail — and the question never comes up, including for the
+  /// third way of losing inertness that nobody has thought of yet. The requirement is the one
+  /// sentence, not the two bullets under it.
   #[inline(always)]
   fn checkpoint(&self) -> u64 {
     0
