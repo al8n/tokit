@@ -1357,8 +1357,9 @@ thread_local! {
 ///
 /// What makes it red: `Recover` ceasing to roll back (the handler would read 5, and the two
 /// `assert_ne!`-shaped claims below would both fail); the handback offset moving (the `at == 5`
-/// pin, shared with `typed_repeat_at_the_top_level_is_named_at_the_handback`); the recoverer being
-/// handed anything other than the whole expression (the post-conditions: frontier 0, next token 0).
+/// pin, shared with `typed_repeat_at_the_top_level_is_rejected_and_hands_the_operator_back`); the
+/// recoverer being handed anything other than the whole expression (the post-conditions: frontier
+/// 0, next token 0).
 #[test]
 fn a_rollback_recovery_resumes_at_its_attempt_origin_not_at_the_offset() {
   fn recovery<'inp, Ctx>(
