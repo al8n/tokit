@@ -607,9 +607,12 @@ where
   /// [`InputContext::with_recursion_limiter`] and defaulting to depth 64.
   ///
   /// Its one writer is the [`Descent`](InputRef::descend) guard: [`InputRef::descend`] raises the
-  /// depth, and the guard's `Drop` lowers it on **every** exit of the frame — return, `?`, or
-  /// unwind, identically in `std` and `no_std`. There is no `recursion_mut`, so no caller can
-  /// leave the cell unbalanced.
+  /// depth, and the guard's `Drop` lowers it on **every** exit of the guard's scope — return,
+  /// `?`, or unwind, identically in `std` and `no_std`. There is no `recursion_mut`, so no caller
+  /// can leave the cell unbalanced. *Balance* is what that buys; making the guard's scope the
+  /// **frame's** scope is the caller's job, and the guard is `#[must_use]` because getting it
+  /// wrong is silent otherwise — see
+  /// [`Descent`](crate::input::Descent#what-the-type-system-enforces-here-and-what-it-does-not).
   ///
   /// # Deliberately outside the rollback set
   ///

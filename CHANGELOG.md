@@ -1196,7 +1196,24 @@ everywhere else.
     untrusted, deeply nested input should still set its own limit against the stack the parse will
     actually run on, rather than inherit this one.
 
-    — *(R12; the default resized against measurement in R13)*
+    **`descend` is public, and the guard has to be bound — `Descent` is `#[must_use]` to say so.**
+    A hand-written recursive combinator draws on the same budget, and the level lasts exactly as
+    long as the guard does. Written `inp.descend()?;`, `?` takes the `Result` apart and leaves the
+    guard a temporary that dies at the semicolon: the level is released *before* the recursion it
+    was taken for, the budget reads zero all the way down, and the native stack abort the limiter
+    exists to prevent is back. Measured on this tree at limitation 8: the bound shape returns
+    `Err(RecursionLimitReached { depth: 9, limitation: 8 })`, the unbound one runs 200 levels and
+    returns `Ok`, and at 5 000 levels it aborts a 2 MiB thread with `fatal runtime error: stack
+    overflow`. Bind it — `let mut frame = inp.descend()?; let inp = &mut *frame;` — and every line
+    below runs inside the level. What the type system guarantees on its own is *balance* (every
+    level entered is left exactly once, by the destructor, unwind included) and that a **live**
+    guard is the only route to the input; **where** the level ends is the guard's scope, and that
+    is caller code. The attribute makes the bad line warn and `tests/ui/descent_dropped_early.rs`
+    pins that it does, but a lint is the whole of the enforcement and `let _ = inp.descend()?;`
+    stays silent — releasing a level early is legal, so there is no rule that could forbid it.
+
+    — *(R12; the default resized against measurement in R13; the guard marked `#[must_use]` in
+    R22)*
 
 43. **`RecursionLimiter`'s default depth drops from 500 to 64 in every constructor that supplies
     one** — `RecursionLimiter::new` and its `Default`, and `Limiter::new` /

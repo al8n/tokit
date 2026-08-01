@@ -1,0 +1,16 @@
+error: unused `Descent` that must be used
+  --> tests/ui/descent_dropped_early.rs:41:3
+   |
+41 |   inp.descend()?;
+   |   ^^^^^^^^^^^^^^
+   |
+   = note: hold the `Descent` guard in a binding for the whole recursive frame — `let mut frame = inp.descend()?; let inp = &mut *frame;` — because dropping it releases the recursion level, and `inp.descend()?;` as a statement drops it before the frame it is meant to bound
+note: the lint level is defined here
+  --> tests/ui/descent_dropped_early.rs:27:9
+   |
+27 | #![deny(unused_must_use)]
+   |         ^^^^^^^^^^^^^^^
+help: use `let _ = ...` to ignore the resulting value
+   |
+41 |   let _ = inp.descend()?;
+   |   +++++++

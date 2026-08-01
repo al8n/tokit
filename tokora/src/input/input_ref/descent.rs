@@ -19,6 +19,8 @@ where
   /// Read-only, deliberately. There is no `recursion_mut`: the cell has exactly one writer, the
   /// [`Descent`] guard [`descend`](Self::descend) hands out, which is what makes "every level
   /// entered is a level left" a property of the type system rather than of caller discipline.
+  /// *Balance* is the property that buys; **where** a level is left is the guard's scope, and
+  /// that is the caller's to place — see [`Descent`](Descent#what-the-type-system-enforces-here-and-what-it-does-not).
   ///
   /// Configure it with
   /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
@@ -39,6 +41,14 @@ where
   /// let mut frame = inp.descend()?;   // one level, for as long as `frame` lives
   /// let inp = &mut *frame;            // the body below is unchanged
   /// ```
+  ///
+  /// **Bind it.** There is no "ascend" to forget, but there is a scope to place wrong:
+  /// `inp.descend()?;` as a bare statement compiles, because `?` takes the `Result` apart and
+  /// leaves the guard a temporary that dies at the semicolon — releasing the level *before* the
+  /// recursion it was taken for, and putting the native stack back at risk with the budget
+  /// reading zero. [`Descent`] is `#[must_use]` so that line warns, and a warning is all it is:
+  /// see [what the guard does and does not
+  /// enforce](Descent#what-the-type-system-enforces-here-and-what-it-does-not).
   ///
   /// # What one level means
   ///
@@ -133,10 +143,49 @@ where
 /// One live level of recursive descent, held for the length of the frame that entered it.
 ///
 /// Handed out by [`InputRef::descend`]. It derefs to the [`InputRef`] it was taken from, so the
-/// frame's body runs *through* the guard — and because the guard holds the handle's `&mut`
-/// exclusively, there is no way to keep parsing while dropping the level early. Leaving the
-/// scope releases it: on `Ok`, on a `?`-propagation, and on an unwind, in `std` and `no_std`
-/// alike.
+/// frame's body runs *through* the guard: while the guard is alive it holds the handle's `&mut`
+/// exclusively, so nothing can read this frame's input outside this frame's level. Leaving the
+/// guard's scope releases the level: on `Ok`, on a `?`-propagation, and on an unwind, in `std`
+/// and `no_std` alike.
+///
+/// # What the type system enforces here, and what it does not
+///
+/// Two of the three properties are the compiler's. The third is not, and it is the one that goes
+/// wrong, so it is stated rather than left to be discovered:
+///
+/// * **Balance is guaranteed.** Every level entered is left, exactly once, by this type's `Drop`.
+///   There is no `recursion_mut` and no "ascend" to forget, and no exit path — return, `?`, or an
+///   unwind — skips a destructor. That much *is* a property of the type system rather than of
+///   caller discipline.
+/// * **Nesting through a live guard is guaranteed.** The exclusive borrow means that for as long
+///   as the guard exists it is the only route to the input, so no code can parse this frame from
+///   outside its own level.
+/// * **Where the level *ends* is not.** It ends where the guard's scope ends, and choosing that
+///   scope is ordinary caller code. The scope can be put in the wrong place:
+///
+///   ```rust,ignore
+///   inp.descend()?;        // `?` unwraps, and the guard is a temporary: the level dies HERE
+///   recurse(inp, n - 1)    // …so this recursion runs with the budget already given back
+///   ```
+///
+///   That shape type-checks, and it silently reinstates the unbounded descent — and with it the
+///   native stack overflow — that the budget exists to prevent. The guard is therefore
+///   `#[must_use]`, so the line above raises `unused_must_use` (*unused … that must be used*)
+///   with the correct shape in the note. `tests/ui/descent_dropped_early.rs` pins that it does.
+///
+///   **A lint is the whole of the enforcement, and it has a hole** — one rustc's own `help:`
+///   points straight at. `let _ = inp.descend()?;` is the same defect and is silent, because
+///   `let _` is the sanctioned way to say "drop this now" and the compiler cannot tell that
+///   intent apart from the mistake. Nothing in this type can close that: releasing a level early
+///   is *legal* — a frame that finishes its recursion and then keeps parsing at the shallower
+///   depth wants exactly that — so there is no rule to make it unrepresentable. What closes it is
+///   writing the frame in the documented shape, where the guard's scope and the frame's body are
+///   the same region:
+///
+///   ```rust,ignore
+///   let mut frame = inp.descend()?;
+///   let inp = &mut *frame;   // every line below runs inside the level, recursion included
+///   ```
 ///
 /// # Why a guard and not a pair of calls
 ///
@@ -146,6 +195,10 @@ where
 /// set would be restored by rollbacks that do not pop any frame — double-restored on a `std`
 /// unwind (where an undecided [`Commit`] guard rolls back) and leaked on a `no_std` one (where it
 /// commits). The destructor is the one witness whose behaviour does not fork on the unwind edge.
+#[must_use = "hold the `Descent` guard in a binding for the whole recursive frame — \
+              `let mut frame = inp.descend()?; let inp = &mut *frame;` — because dropping it \
+              releases the recursion level, and `inp.descend()?;` as a statement drops it before \
+              the frame it is meant to bound"]
 pub struct Descent<'r, 'inp, 'closure, L, Ctx, Lang: ?Sized = (), Cmpl = Complete>
 where
   L: Lexer<'inp>,

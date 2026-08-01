@@ -180,6 +180,26 @@ let mut frame = inp.descend()?;   // one level, for as long as `frame` lives
 let inp = &mut *frame;            // the body below is unchanged
 ```
 
+**Bind the guard — the level lasts exactly as long as it does.** The two lines above are not a
+style; they are the contract. Written without the binding, the guard is a temporary that dies at
+the semicolon:
+
+```rust,ignore
+inp.descend()?;        // `?` unwraps, the guard drops HERE, the level is already back
+recurse(inp, n - 1)    // …and this recursion is unbounded again
+```
+
+That compiles. What the type system does guarantee is *balance* — every level entered is left
+exactly once, by the guard's destructor, on every exit including an unwind — and that a **live**
+guard is the only route to the input. Where the level ends is the guard's scope, and that is
+yours to place. [`Descent`](crate::input::Descent) is `#[must_use]`, so the bad line warns
+(`unused ... that must be used`, with the fix in the note), and `tests/ui/descent_dropped_early.rs`
+pins that it does. But a lint is the whole of the enforcement and it has a hole rustc's own
+`help:` names: `let _ = inp.descend()?;` is the same bug and is silent. Early release cannot be
+made unrepresentable, because it is sometimes what you want — a frame that finishes recursing and
+then keeps parsing shallower needs it. Bind the guard and reach the input through it, and the
+question does not arise.
+
 ---
 
 ## `Precedenced<T, Power>`
