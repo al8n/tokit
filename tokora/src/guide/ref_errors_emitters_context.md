@@ -32,7 +32,18 @@ for free.
 
 ### Taxonomy by category
 
-Every leaf has an `…Of<'inp, L, Lang>` alias that fixes its span/offset to the lexer's, and
+Four leaves carry an `…Of<'inp, L, Lang>` alias that projects the lexer's associated types for
+you: [`UnexpectedTokenOf`](crate::error::token::UnexpectedTokenOf),
+[`MissingTokenOf`](crate::error::token::MissingTokenOf),
+[`SeparatedErrorOf`](crate::error::token::SeparatedErrorOf) and
+[`MissingSyntaxOf`](crate::error::syntax::MissingSyntaxOf) — the four that ride the emitter's own
+method signatures, where the projection would otherwise be rewritten at every impl and every
+bound. **The rest have none**, and you name their parameters yourself; for an offset-carrying
+leaf that is just `<L::Offset, Lang>`, the spelling
+[`FromPrattError`](crate::emitter::FromPrattError) uses for
+[`UnexpectedEoLhs`](crate::error::UnexpectedEoLhs) and
+[`RecursionLimitReached`](crate::error::RecursionLimitReached) alike. The alias is a shorthand
+where a shorthand paid for itself, not a convention with exceptions.
 [`ErrorOf<'inp, L, Ctx, Lang>`](crate::ErrorOf) names a context's error type. Full type list in
 the [combinator reference](super::ref_combinators); here each category is paired with the `From`
 impl that wires it in.
@@ -44,6 +55,7 @@ impl that wires it in.
 | **End of input** | [`UnexpectedEnd`](crate::error::UnexpectedEnd) (aliases [`UnexpectedEot`](crate::error::UnexpectedEot) / `UnexpectedEof` / `UnexpectedEos`) | `From<UnexpectedEot<O, Lang, Set>>` |
 | **Syntax** | [`TooFew`](crate::error::syntax::TooFew), [`TooMany`](crate::error::syntax::TooMany), [`FullContainer`](crate::error::syntax::FullContainer), [`MissingSyntax`](crate::error::syntax::MissingSyntax) | `From<TooFew>`, `From<TooMany>`, `From<FullContainer>`, `From<MissingSyntax>` |
 | **Delimiter** | [`Unclosed`](crate::error::Unclosed), [`Unopened`](crate::error::Unopened), [`Undelimited`](crate::error::Undelimited), [`Unterminated`](crate::error::Unterminated) | [`FromUnclosed`](crate::emitter::FromUnclosed) — **one** impl for every pair; the other three are raised by your own code, so they need a `From<…>` only if you raise them |
+| **Pratt** | [`RecursionLimitReached`](crate::error::RecursionLimitReached), [`NonAssociativeChain`](crate::error::NonAssociativeChain) — the descent bound and the second same-power `Neither` operator ([Pratt reference](super::ref_pratt)) | [`FromPrattError`](crate::emitter::FromPrattError) — both conversions are **required** by the pratt entry point, not opt-in; both errors are *returned*, never emitted, so no `emit_*` hook sees them |
 | **Incomplete** | [`Incomplete`](crate::error::Incomplete) — the never-recoverable partial-input signal | *no `From`*; `impl MaybeIncomplete` instead |
 
 ### The traits your error type implements
