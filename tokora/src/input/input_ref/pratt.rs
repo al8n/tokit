@@ -276,15 +276,22 @@ where
               return None;
             }
             // The same power as the `Neither` operator this frame just folded: a
-            // declared-non-associative chain. Park the token — the position the caller sees is
-            // the offending operator's own start, matching the typed driver's rollback — and
-            // flag it, so the loop below raises the diagnostic instead of quietly stopping.
+            // declared-non-associative chain. Park the token and flag it, so the loop below
+            // raises the diagnostic instead of quietly stopping.
             //
             // One token, so one offset: this classifier is a pure function of `tok`, and the
-            // token is parked rather than committed, so the start recorded here *is* the position
-            // the surrounding grammar resumes at. The typed driver has to work for the same
-            // guarantee — its classifier may spell an operator with several tokens — and does it
-            // by reading the position before that classifier runs.
+            // token is parked rather than committed, so the start recorded here *is* the handback
+            // position `NonAssociativeChain` documents — the point the surrounding grammar
+            // resumes at. The typed driver has to work for the same guarantee, because its
+            // classifier holds a whole `InputRef`, and does it by reading the position before that
+            // classifier runs.
+            //
+            // Here the handback position is also the operator's own head, and that is structural
+            // rather than lucky: nothing can sit between the two, because this classifier cannot
+            // skip anything. A trivia token arriving here answers `None` and ends the expression,
+            // so a token-level pratt grammar is a trivia-less grammar by construction — which is
+            // exactly the scope of the offset parity the typed and token engines share, and the
+            // reason `pratt_limit.rs` says so on the cell that asserts it.
             if prev_op_is_neither.as_ref() == Some(&lpower) {
               nonassoc_trip = Some(tok.span.start());
               return None;

@@ -12,7 +12,12 @@
 //!   including an unwind.
 //! * **R2 — the non-associative contract.** A second same-power `PrattInfix::Neither` operator in
 //!   one chain is a **syntax error** (`NonAssociativeChain`, non-terminal, operator left on the
-//!   input), not a place to stop. Both engines, same trigger, same offset.
+//!   input), not a place to stop. Both engines, same trigger. The offset both report is the
+//!   **handback position** — where the surrounding grammar resumes — which for a trivia-less
+//!   grammar is also the operator's own head, and for a trivia-surfacing one is strictly before
+//!   it. The last section of this file is where that distinction is measured; every cell above it
+//!   runs on `common::TestLexer`, which skips whitespace at the lexer level and so cannot tell
+//!   the two definitions apart.
 //!
 //! # Termination defects do not fail; they hang or abort
 //!
@@ -25,18 +30,19 @@
 mod common;
 
 use tokora::{
-  Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext,
+  Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext, Token as TokenT,
   emitter::{Fatal, PrattEmitter, Verbose},
   error::{
     MaybeTerminal, NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs,
-    UnexpectedEot, token::UnexpectedTokenOf,
+    UnexpectedEot, token::UnexpectedToken,
   },
+  logos::{self, Logos},
   parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt},
   state::recursion_tracker::RecursionLimiter,
   token::PrattToken,
 };
 
-use common::{Power, TestLexer, Token};
+use common::{Power, TestLexer, Token, TokenKind};
 
 use tokora::utils::typenum::U4;
 
@@ -88,8 +94,14 @@ impl From<()> for LimErr {
     LimErr::Lex
   }
 }
-impl<'inp> From<UnexpectedTokenOf<'inp, TestLexer<'inp>>> for LimErr {
-  fn from(_: UnexpectedTokenOf<'inp, TestLexer<'inp>>) -> Self {
+/// Spelled with concrete parameters rather than `UnexpectedTokenOf<'inp, TestLexer<'inp>>`, which
+/// is the same type: coherence does not normalize the alias's `<L as Lexer<'inp>>::Token`
+/// projection, so an impl written through the alias reads to the overlap check as a blanket impl
+/// over `UnexpectedToken<'_, _, _, _>` and collides with the second lexer's impl further down.
+/// Uses of the bound normalize normally, so every `Ctx::Emitter: Emitter<…, Error = LimErr>`
+/// obligation is satisfied exactly as before.
+impl<'inp> From<UnexpectedToken<'inp, Token, TokenKind>> for LimErr {
+  fn from(_: UnexpectedToken<'inp, Token, TokenKind>) -> Self {
     LimErr::Unexpected
   }
 }
@@ -605,6 +617,16 @@ fn typed_repeat_under_an_enclosing_operator_is_rejected_not_reassociated() {
 }
 
 /// The token engine, same two inputs, same offsets: the parity the contract requires.
+///
+/// **Scope, stated rather than assumed: this is parity over a TRIVIA-LESS grammar.** `TestLexer`
+/// carries `skip r"[ \t\r\n]+"`, so whitespace never becomes a token and the handback position —
+/// which is what both engines report, see `NonAssociativeChain` — is also the operator's own head
+/// in both. The cell does **not** cover, and no cell could, a grammar that surfaces trivia: the
+/// token engine's classifier is a pure function of one token and ends the expression on the first
+/// trivia token it sees, so there is no such input on which both engines reach a trip and could
+/// disagree. [`the_token_engine_ends_the_expression_at_the_first_trivia_token`] pins that half,
+/// and [`a_trivia_skipping_classifier_is_named_at_the_handback_not_at_the_operator`] pins what
+/// the typed engine reports where the token engine cannot follow.
 #[test]
 fn token_repeat_is_rejected_at_the_same_offsets_as_the_typed_engine() {
   let top: TokOutcome = Parser::with_context(fatal_ctx())
@@ -779,8 +801,98 @@ fn a_multi_token_repeat_is_named_where_the_handback_leaves_the_input() {
   assert_eq!(
     Some(at),
     front,
-    "`NonAssociativeChain::offset` names the operator that was left on the input, so it must equal \
+    "`NonAssociativeChain::offset` is the position the input was handed back at, so it must equal \
      the start of the very next token the surrounding grammar reads"
+  );
+}
+
+/// **The reported offset is the handback position, and under a trivia-surfacing grammar that is
+/// strictly before the operator.** Measured, and pinned as the definition rather than as a
+/// tolerated deviation from one.
+///
+/// [`trivia_rhs`] skips whitespace *tokens* before it reads the `;` — the shape a CST-style
+/// grammar has, and one `ParsePrattRHS` explicitly permits. On `1 ; 2   ; 3`:
+///
+/// ```text
+///   1 ; 2   ; 3
+///   0 2 4   8 10
+///       ^^^ the whitespace the second `;`'s classifier would skip: 5..8
+/// ```
+///
+/// The driver decides the repeat *before* the classifier runs — it has to, because running the
+/// classifier is what the transaction rules forbid at that point — so it cannot know that 5..8
+/// would be skipped, and reports **5**, the position its probe restores to. The caller is handed
+/// back exactly that: the next token it reads verbatim is the whitespace at 5, and the operator's
+/// own head is at 8, one trivia skip further on.
+///
+/// The cell asserts the *relationship*, not just the literals: `at == handback`. That equality is
+/// the contract — a recoverer resumes where the error says it will — and it is the one claim that
+/// survives any classifier shape, because both numbers come from the same rollback target.
+///
+/// Both cache states, for the reason the multi-token cell runs both: an offset that moves with
+/// how much has been peeked has bitten this project before.
+#[test]
+fn a_trivia_skipping_classifier_is_named_at_the_handback_not_at_the_operator() {
+  const SRC: &str = "1 ; 2   ; 3";
+
+  let empty: TriviaTrip = Parser::with_context(trivia_ctx())
+    .apply(trivia_probe)
+    .parse_str(SRC)
+    .unwrap();
+  let prefilled: TriviaTrip = Parser::with_context(trivia_ctx())
+    .apply(prefilled_trivia_probe)
+    .parse_str(SRC)
+    .unwrap();
+
+  assert_eq!(
+    empty, prefilled,
+    "neither the trip offset nor the handback may move with how much has been peeked"
+  );
+  assert_eq!(
+    empty,
+    (5, Some(5), Some(8)),
+    "the trip names 5 — the whitespace the handback returns — while the repeated `;` starts at 8"
+  );
+
+  let (at, handback, operator_head) = empty;
+  assert_eq!(
+    Some(at),
+    handback,
+    "THE CONTRACT: `NonAssociativeChain::offset` is the position the input was handed back at, so \
+     it must equal the start of the very next token the surrounding grammar reads"
+  );
+  assert_ne!(
+    Some(at),
+    operator_head,
+    "and it is NOT the operator's head under this grammar — a driver that reported 8 here would \
+     be naming a byte the caller was never handed back to"
+  );
+}
+
+/// The **token** engine cannot express the grammar above at all, which is what scopes the
+/// two-engine offset parity to trivia-less grammars.
+///
+/// `PrattToken::try_pratt_rhs` is a pure function of one token: there is no `InputRef` to skip
+/// with. So the whitespace at 1..2 answers `None`, the expression ends there, and the chain's
+/// second `;` is never reached — the parse returns the bare operand `1` with the whitespace left
+/// at the front. No `NonAssociativeChain`, because no repeat was ever seen.
+///
+/// That is why [`token_repeat_is_rejected_at_the_same_offsets_as_the_typed_engine`] does not need
+/// a trivia twin and could not have one: the two engines never report *different* offsets for one
+/// trip, because there is no trivia-surfacing input on which the token engine reaches a trip at
+/// all. Where it does reach one, its handback position and the operator's head are the same byte
+/// by construction — acceptance is the commit, and the parked token is the operator.
+#[test]
+fn the_token_engine_ends_the_expression_at_the_first_trivia_token() {
+  let got: TokOutcome = Parser::with_context(trivia_ctx())
+    .apply(trivia_token_probe)
+    .parse_str("1 ; 2   ; 3")
+    .unwrap();
+  assert_eq!(
+    got,
+    Ok((1, Some(1))),
+    "the operand alone, and the whitespace at 1 left on the input: a token-level pratt grammar is \
+     a trivia-less grammar by construction"
   );
 }
 
@@ -919,6 +1031,297 @@ fn an_explicit_recovery_may_spend_the_repeat() {
     .parse_str("1 ; 2 ; 3")
     .unwrap();
   assert_eq!(got, "<recovered>");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// R2 under a TRIVIA-SURFACING grammar
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Every fixture above is lexed by `common::TestLexer`, whose logos declaration carries
+// `skip r"[ \t\r\n]+"`: whitespace never becomes a token, so "the position the handback leaves
+// the input at" and "the offending operator's first token" cannot differ there. This section
+// supplies the grammar shape where they can — a lexer that emits whitespace as a token, and an
+// RHS classifier that skips it before consuming the operator, which is what a CST-style tokora
+// grammar looks like and what `ParsePrattRHS` explicitly permits.
+
+/// A token vocabulary that **surfaces trivia**: whitespace is a token, not a lexer-level skip.
+#[derive(Debug, Clone, Logos, PartialEq)]
+#[logos(crate = logos)]
+enum TriviaToken {
+  #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().unwrap_or(0))]
+  Num(i64),
+  #[token(";")]
+  Semi,
+  #[regex(r"[ \t\r\n]+")]
+  Ws,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TriviaKind {
+  Num,
+  Semi,
+  Ws,
+}
+
+impl core::fmt::Display for TriviaKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      TriviaKind::Num => write!(f, "number"),
+      TriviaKind::Semi => write!(f, ";"),
+      TriviaKind::Ws => write!(f, "whitespace"),
+    }
+  }
+}
+
+impl core::fmt::Display for TriviaToken {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      TriviaToken::Num(n) => write!(f, "{n}"),
+      TriviaToken::Semi => write!(f, ";"),
+      TriviaToken::Ws => write!(f, "whitespace"),
+    }
+  }
+}
+
+impl From<&TriviaToken> for TriviaKind {
+  fn from(t: &TriviaToken) -> Self {
+    match t {
+      TriviaToken::Num(_) => TriviaKind::Num,
+      TriviaToken::Semi => TriviaKind::Semi,
+      TriviaToken::Ws => TriviaKind::Ws,
+    }
+  }
+}
+
+impl TokenT<'_> for TriviaToken {
+  type Kind = TriviaKind;
+  type Error = ();
+
+  fn kind(&self) -> TriviaKind {
+    TriviaKind::from(self)
+  }
+
+  fn is_trivia(&self) -> bool {
+    matches!(self, TriviaToken::Ws)
+  }
+}
+
+type TriviaLexer<'a> = tokora::lexer::LogosLexer<'a, TriviaToken>;
+
+/// Spelled with concrete parameters rather than `UnexpectedTokenOf<'inp, TriviaLexer<'inp>>`:
+/// coherence does not normalize the alias's `<L as Lexer>::Token` projection when it checks this
+/// against the `TestLexer` impl above, and reads the two as one blanket impl over
+/// `UnexpectedToken<'_, _, _, _>`. The expanded form is the same type and the two are disjoint.
+impl<'inp> From<UnexpectedToken<'inp, TriviaToken, TriviaKind>> for LimErr {
+  fn from(_: UnexpectedToken<'inp, TriviaToken, TriviaKind>) -> Self {
+    LimErr::Unexpected
+  }
+}
+
+/// Skips leading trivia, then reads one operand — the ordinary shape for a trivia-surfacing
+/// grammar's LHS channel.
+fn trivia_lhs<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TriviaLexer<'inp>, Ctx>,
+) -> Result<PrattLHS<String, &'static str, Power>, LimErr>
+where
+  Ctx: ParseContext<'inp, TriviaLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TriviaLexer<'inp>, Error = LimErr>,
+{
+  inp.skip_while(|t| t.is_trivia())?;
+  match inp.next()? {
+    Some(tok) => match tok.into_data() {
+      TriviaToken::Num(n) => Ok(PrattLHS::Operand(n.to_string())),
+      _ => Err(LimErr::Unexpected),
+    },
+    None => Err(LimErr::Eot),
+  }
+}
+
+/// **Skips trivia before it reads the operator.** This is the classifier shape the finding is
+/// about: the operator's first token is not the first token the probe sees, so a position read
+/// ahead of this function names the whitespace rather than the `;`.
+fn trivia_rhs<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TriviaLexer<'inp>, Ctx>,
+) -> Result<PrattRHS<&'static str, &'static str, &'static str, &'static str, Power>, LimErr>
+where
+  Ctx: ParseContext<'inp, TriviaLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TriviaLexer<'inp>, Error = LimErr>,
+{
+  inp.skip_while(|t| t.is_trivia())?;
+  Ok(match inp.next()? {
+    Some(tok) => match tok.into_data() {
+      TriviaToken::Semi => PrattRHS::Infix(Precedenced::new(PrattInfix::Neither(";"), P_CHAIN)),
+      _ => PrattRHS::End,
+    },
+    None => PrattRHS::End,
+  })
+}
+
+fn trivia_fold_prefix<'inp, Ctx>(
+  _inp: &mut InputRef<'inp, '_, TriviaLexer<'inp>, Ctx>,
+  operand: String,
+  op: Precedenced<&'static str, Power>,
+) -> Result<String, LimErr>
+where
+  Ctx: ParseContext<'inp, TriviaLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TriviaLexer<'inp>, Error = LimErr>,
+{
+  Ok(format!("({}{operand})", op.into_data()))
+}
+
+fn trivia_fold_infix<'inp, Ctx>(
+  _inp: &mut InputRef<'inp, '_, TriviaLexer<'inp>, Ctx>,
+  left: String,
+  right: String,
+  op: Precedenced<PrattInfix<&'static str, &'static str, &'static str>, Power>,
+) -> Result<String, LimErr>
+where
+  Ctx: ParseContext<'inp, TriviaLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TriviaLexer<'inp>, Error = LimErr>,
+{
+  let (PrattInfix::Left(s) | PrattInfix::Right(s) | PrattInfix::Neither(s)) = op.into_data();
+  Ok(format!("({left}{s}{right})"))
+}
+
+fn trivia_fold_postfix<'inp, Ctx>(
+  _inp: &mut InputRef<'inp, '_, TriviaLexer<'inp>, Ctx>,
+  operand: String,
+  op: Precedenced<&'static str, Power>,
+) -> Result<String, LimErr>
+where
+  Ctx: ParseContext<'inp, TriviaLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TriviaLexer<'inp>, Error = LimErr>,
+{
+  Ok(format!("({operand}{})", op.into_data()))
+}
+
+/// `(the offset the trip reported, the start of the very next token — trivia included — the
+/// surrounding grammar is handed, the start of the next **non-trivia** token after it)`.
+type TriviaTrip = (usize, Option<usize>, Option<usize>);
+
+fn trivia_probe<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TriviaLexer<'inp>, Ctx>,
+) -> Result<TriviaTrip, LimErr>
+where
+  Ctx: ParseContext<'inp, TriviaLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TriviaLexer<'inp>, Error = LimErr>,
+{
+  let at = match pratt(
+    trivia_lhs,
+    trivia_rhs,
+    trivia_fold_prefix,
+    trivia_fold_infix,
+    trivia_fold_postfix,
+  )
+  .parse_input(inp)
+  {
+    Ok(tree) => panic!("a repeated `;` must be refused; got Ok({tree})"),
+    Err(LimErr::NonAssoc { at }) => at,
+    Err(other) => panic!("expected the non-associative chain; got {other:?}"),
+  };
+  // The raw resumption point: whatever token a caller reading the input verbatim receives first.
+  let handback = inp.next()?.map(|t| t.span().start());
+  // The operator's own head, reached the way this grammar's own classifier would reach it.
+  inp.skip_while(|t| t.is_trivia())?;
+  let operator_head = inp.next()?.map(|t| t.span().start());
+  Ok((at, handback, operator_head))
+}
+
+fn prefilled_trivia_probe<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TriviaLexer<'inp>, Ctx>,
+) -> Result<TriviaTrip, LimErr>
+where
+  Ctx: ParseContext<'inp, TriviaLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TriviaLexer<'inp>, Error = LimErr>,
+{
+  let _ = inp.peek::<U4>()?;
+  trivia_probe(inp)
+}
+
+impl PrattToken<'_, i64, Power> for TriviaToken {
+  fn try_pratt_lhs(&self) -> Option<PrattLHS<(), (), Power>> {
+    match self {
+      TriviaToken::Num(_) => Some(PrattLHS::Operand(())),
+      _ => None,
+    }
+  }
+
+  fn try_pratt_rhs(&self) -> Option<PrattRHS<(), (), (), (), Power>> {
+    match self {
+      TriviaToken::Semi => Some(PrattRHS::Infix(Precedenced::new(
+        PrattInfix::Neither(()),
+        P_CHAIN,
+      ))),
+      _ => None,
+    }
+  }
+}
+
+type TriviaTok = tokora::span::Spanned<TriviaToken, tokora::SimpleSpan>;
+
+fn trivia_tok_fold_prefix<E>(
+  _op: TriviaTok,
+  operand: TriviaTok,
+  _: &mut E,
+) -> Result<TriviaTok, LimErr> {
+  Ok(operand)
+}
+
+fn trivia_tok_fold_postfix<E>(
+  operand: TriviaTok,
+  _op: TriviaTok,
+  _: &mut E,
+) -> Result<TriviaTok, LimErr> {
+  Ok(operand)
+}
+
+fn trivia_tok_fold_infix<E>(
+  left: TriviaTok,
+  right: TriviaTok,
+  infix: tokora::span::Spanned<
+    PrattInfix<TriviaToken, TriviaToken, TriviaToken>,
+    tokora::SimpleSpan,
+  >,
+  _: &mut E,
+) -> Result<TriviaTok, LimErr> {
+  let value = match (left.data(), right.data()) {
+    (TriviaToken::Num(l), TriviaToken::Num(r)) => l * 10 + r,
+    _ => return Err(LimErr::Unexpected),
+  };
+  Ok(tokora::span::Spanned::new(
+    infix.into_span(),
+    TriviaToken::Num(value),
+  ))
+}
+
+/// The token engine over the same trivia-surfacing source: value plus handback, or its error.
+fn trivia_token_probe<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TriviaLexer<'inp>, Ctx>,
+) -> Result<TokOutcome, LimErr>
+where
+  Ctx: ParseContext<'inp, TriviaLexer<'inp>>,
+  Ctx::Emitter:
+    Emitter<'inp, TriviaLexer<'inp>, Error = LimErr> + PrattEmitter<'inp, TriviaLexer<'inp>>,
+{
+  match inp.pratt::<_, _, _, i64, Power>(
+    trivia_tok_fold_prefix::<Ctx::Emitter>,
+    trivia_tok_fold_infix::<Ctx::Emitter>,
+    trivia_tok_fold_postfix::<Ctx::Emitter>,
+  ) {
+    Ok(out) => {
+      let value = match out.expect("the input opens with an operand").into_data() {
+        TriviaToken::Num(n) => n,
+        _ => return Err(LimErr::Unexpected),
+      };
+      let front = inp.next()?.map(|t| t.span().start());
+      Ok(Ok((value, front)))
+    }
+    Err(e) => Ok(Err(e)),
+  }
+}
+
+fn trivia_ctx<'inp>() -> ParserContext<'inp, TriviaLexer<'inp>, Fatal<LimErr>> {
+  ParserContext::new(Fatal::new())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

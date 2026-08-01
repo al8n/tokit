@@ -76,12 +76,21 @@ table is the whole rule:
 | [`PrattInfix::Right`](crate::parser::PrattInfix) | powers `>= power` | equal-power operator to the right is consumed by the *inner* call → `a ^ b ^ c` = `a ^ (b ^ c)` |
 | [`PrattInfix::Neither`](crate::parser::PrattInfix) | powers `> power`, then refuses a second **infix** operator of the same power | `a == b == c` fails with [`NonAssociativeChain`](crate::error::NonAssociativeChain) |
 
-**What "refuses" means, exactly.** Both engines raise the *same* error at the *same* offset: the
-second operator is left on the input, unconsumed, and the offset is its **start** — which is also
-the start of the next token the surrounding grammar reads, for an operator of any width. A
-classifier for the AST-level engine may spell one operator with several tokens (`not in`, `<>`);
-the reported offset is the head of that spelling, not its tail, because the head is what the
-handback returns. And
+**What "refuses" means, exactly.** Both engines raise the *same* error and leave the second
+operator on the input, unconsumed. The offset it carries is the **handback position** — the byte
+the surrounding grammar, or a recoverer, resumes reading from once the deciding read has been
+restored. That is a definition rather than an approximation of something else, and it is what
+makes the error usable for recovery: the offset you read is the offset a retry starts at.
+
+For a grammar whose lexer skips whitespace — every example in this book, and the shape of the
+token-level engine always — that byte is the second operator's own start, because nothing sits
+between the two. For a grammar that *surfaces* trivia as tokens and whose
+[`ParsePrattRHS`](crate::parser::ParsePrattRHS) skips it before reading the operator, the handback
+returns the trivia as well, so the reported offset **precedes** the operator by however much the
+classifier would have skipped. The AST-level driver cannot report the operator's own head there:
+finding it means running the classifier, and the driver has to decide the repeat before it may.
+(A multi-token spelling — `not in`, `<>` — is reported at its head and never its tail; the tail is
+neither the handback nor the operator's start.) And
 [`NonAssociativeChain`](crate::error::NonAssociativeChain) is **returned** — never emitted, so a
 recording emitter cannot turn it back into a truncated success. It is *not* terminal, so a
 grammar that wants the tolerant reading asks for it explicitly, by wrapping the pratt parser in

@@ -287,6 +287,15 @@ where
 /// would hide the constraint: in a nested position the enclosing frame folds the operator by its
 /// own rules and the chain re-associates across it with nothing left over to reject.
 ///
+/// The offset that error carries is the position the driver **hands the input back at** — the
+/// start of its own restore, taken before this function runs. An implementation that skips
+/// leading trivia tokens before reading its operator (the CST-style shape, entirely permitted:
+/// this function holds the whole [`InputRef`] and decides for itself where its operator begins)
+/// is therefore reported *before* the skipped trivia, not at the operator. The driver cannot do
+/// better without running this function, and it must decide the repeat before it may. What the
+/// offset always is, is the byte a recoverer resumes from — see
+/// [`NonAssociativeChain`](crate::error::NonAssociativeChain) for the full statement.
+///
 /// ```
 /// use tokora::parser::{PrattInfix, PrattRHS, Precedenced};
 ///
