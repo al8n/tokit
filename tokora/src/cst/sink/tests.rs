@@ -9,7 +9,7 @@ use crate::{
   cache::DefaultCache,
   cst::{
     CstProfile, KindValidator,
-    event::{Event, TOMBSTONE},
+    event::{Event, EventMark, TOMBSTONE},
   },
   emitter::{CstEmitter, Emitter, Fatal, Verbose},
   error::token::{UnexpectedToken, UnexpectedTokenOf},
@@ -1651,6 +1651,60 @@ fn token_channel_wall_boundaries() {
   assert_eq!(
     text(green.expect("the abort shape keeps its tooling door")),
     "ab"
+  );
+}
+
+/// The wall's **lossless** boundary: a token-free parse whose every source byte a recorded
+/// lexer error explains is an honest parse of unlexable bytes, not a severed token channel.
+///
+/// This is the shape a lossless grammar produces for a source with nothing lexable in it —
+/// `"unterminated` in an editor buffer — because its root production opens the document node
+/// before it can know whether any token follows. The wall used to refuse it, which made a
+/// half-typed string a materialization failure and, one `expect` upstream, a crash.
+///
+/// The two halves are the whole of the distinction the wall now draws, over the *same*
+/// zero-token structure and the *same* nonempty source: with the covering error the tree is
+/// honest and tiles, without it the bytes are unexplained and the wall fires. Deleting the
+/// `first_uncovered_gap` test reds the first half; deleting the wall reds the second.
+#[test]
+fn structure_without_tokens_is_legal_where_a_lexer_error_explains_every_byte() {
+  // Explained: one error over the whole source, one open-then-closed node, no tokens.
+  let mut sink = verbose_sink("ab");
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 2), MiniErr))
+    .expect("verbose collects");
+  sink.cst_start(K_NODE);
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("the lexer refused every byte and said so — an honest tree");
+  assert_eq!(text(green.clone()), "ab", "every byte tiles as a gap");
+  assert_eq!(
+    tree(green).first_child().expect("Root[Node]").kind(),
+    K_NODE,
+    "the node the grammar opened must survive"
+  );
+
+  // Unexplained: the identical stream minus the diagnostic is the severed channel, and the
+  // wall still names it precisely rather than deferring to the gap-coverage law.
+  let mut sink = verbose_sink("ab");
+  sink.cst_start(K_NODE);
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("nothing explains these bytes"),
+    FinishError::StructureWithoutTokens
+  );
+
+  // Partially explained is still the severed channel: one byte with no covering error is
+  // enough, and the wall — not `UncoveredGap` — is what reports it.
+  let mut sink = verbose_sink("ab");
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
+    .expect("verbose collects");
+  sink.cst_start(K_NODE);
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("byte 1 is unexplained"),
+    FinishError::StructureWithoutTokens
   );
 }
 
@@ -3854,8 +3908,9 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, L
 type SesSink<'inp> = Sink<'inp, MiniLexer<'inp>, Verbose<SesErr>>;
 type SesCtx<'inp, 'e> = (&'e mut SesSink<'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
 
-/// A deliberately **incomplete** forwarder: every emission goes through, `bound_source` does
-/// not. It exists to pin the residue, not to be imitated — a real wrapper forwards
+/// A deliberately **incomplete** forwarder: every emission goes through — the diagnostic
+/// surface, the settle channel, and the `CstEmitter` structuring surface below — `bound_source`
+/// does not. It exists to pin the residue, not to be imitated — a real wrapper forwards
 /// `bound_source` exactly as the `&mut U` blanket does.
 struct NonForwardingWrapper<'a, 'inp>(&'a mut SesSink<'inp>);
 
@@ -3920,6 +3975,32 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'i
   // `bound_source` is DELIBERATELY not forwarded — that omission is the whole point of the
   // type, and `a_non_forwarding_wrapper_disables_the_check_and_that_is_pinned` asserts what
   // it costs.
+}
+
+/// The structuring surface, forwarded whole — because a wrapper that did **not** forward it
+/// could not carry a CST parse at all (`CstEmitter` is a bound, not a default, on the `node()`
+/// combinators), so the realistic adversary is a wrapper that forwards everything a tree needs
+/// and still hides the binding. Pin 5 is the shape that needs it.
+impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'inp> {
+  fn cst_start(&mut self, kind: u16) {
+    self.0.cst_start(kind);
+  }
+
+  fn cst_token(&mut self, tok: &MiniToken<'inp>, span: &MiniSpan<'inp>) {
+    self.0.cst_token(tok, span);
+  }
+
+  fn cst_finish(&mut self, kind: u16) {
+    self.0.cst_finish(kind);
+  }
+
+  fn cst_mark(&mut self) -> EventMark {
+    self.0.cst_mark()
+  }
+
+  fn cst_start_at(&mut self, mark: EventMark, kind: u16) {
+    self.0.cst_start_at(mark, kind);
+  }
 }
 
 // ── The source-identity handshake ──────────────────────────────────────────────
@@ -4346,7 +4427,7 @@ fn conformance_emitter_kit_refuses_a_non_forwarding_wrapper() {
   assert_forwards_bound_source::<MiniLexer<'_>, (), _, _>(&wrapper, &inner_probe);
 }
 
-/// **A PIN OF A KNOWN-OPEN RESIDUE (1 of 4).** A wrapper that forwards every emission but hides
+/// **A PIN OF A KNOWN-OPEN RESIDUE (1 of 5).** A wrapper that forwards every emission but hides
 /// `Emitter::bound_source` reports `None`, so the seam concludes "this emitter binds no source"
 /// and accepts a pairing it would otherwise refuse.
 ///
@@ -4386,7 +4467,7 @@ fn a_non_forwarding_wrapper_is_not_caught() {
   );
 }
 
-/// **A PIN OF A KNOWN-OPEN RESIDUE (2 of 4): a parse whose events are all diagnostics.**
+/// **A PIN OF A KNOWN-OPEN RESIDUE (2 of 5): a parse whose events are all diagnostics.**
 ///
 /// No token is committed, so nothing token-shaped exists for a downstream check to key on —
 /// while the lexer diagnostics' spans still license gap tokens at materialization. A
@@ -4396,6 +4477,10 @@ fn a_non_forwarding_wrapper_is_not_caught() {
 ///
 /// This is the shape the other fixtures structurally could not produce: every one of them
 /// commits at least one token.
+///
+/// The stream here builds **no structure**, which is why the zero-token wall was never in its
+/// path even before the wall was qualified. Add a node and it was — pin 5 is that variant, and
+/// records that it no longer is.
 ///
 /// Flips when the sink is minted from the input.
 #[test]
@@ -4428,7 +4513,7 @@ fn an_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_caught() {
   );
 }
 
-/// **A PIN OF A KNOWN-OPEN RESIDUE (3 of 4): the binding can be *pre-armed*.**
+/// **A PIN OF A KNOWN-OPEN RESIDUE (3 of 5): the binding can be *pre-armed*.**
 /// `Emitter::bound_source` is a public trait method and `InputRef::emitter()` hands parser code
 /// `&mut Ctx::Emitter`, so anything holding the sink — or the emitter through a parse — can
 /// query it. Any state a sink recorded from "I was asked" is therefore settable by a caller who
@@ -4452,7 +4537,7 @@ fn bound_source_is_publicly_queryable_so_no_sink_side_witness_can_encode_provena
   );
 }
 
-/// **A PIN OF A KNOWN-OPEN RESIDUE (4 of 4): hand-emitted `cst_token` spans.**
+/// **A PIN OF A KNOWN-OPEN RESIDUE (4 of 5): hand-emitted `cst_token` spans.**
 /// `InputRef::emitter()` exposes the emitter to parser code, so a grammar can push token events
 /// with spans of its own choosing while consuming nothing through the auto-emission door. The
 /// log then carries source-indexing spans that no committed token accounts for, and the tree
@@ -4472,6 +4557,88 @@ fn hand_emitted_cst_token_spans_reach_materialization_without_a_settle() {
     "ab",
     "the residue: `cst_token` is the manual emission door and carries a span, so a caller \
      chooses which source bytes the tree shows without any settle having happened"
+  );
+}
+
+/// **A PIN OF A KNOWN-OPEN RESIDUE (5 of 5): pin 2's shape with a node in it — and the
+/// widening is *this commit's*.**
+///
+/// The bypass is pin 2's exactly: a wrapper that hides `bound_source`, a parse over a foreign
+/// buffer of equal length, every event a diagnostic. The one addition is the one a **lossless**
+/// grammar always makes — it opens its document node before it can know whether a token follows
+/// — and it is forwarded through the same wrapper as everything else, because a wrapper that
+/// did not forward the structuring surface could not carry a CST parse at all.
+///
+/// **The delta, stated plainly.** Up to this commit — on `main` before it — this variant was
+/// refused: the unqualified zero-token wall read `saw_structure && !saw_token && source_len > 0`
+/// and answered `StructureWithoutTokens`, so this pairing did not materialize while pin 2's
+/// structureless one did. That refusal was
+/// **incidental, not a protection**: the wall's witness is "no committed token arrived", which
+/// is a fact about the emitter chain and says nothing about *which buffer* the parse read — it
+/// refused this shape and the honest all-error parse of an unlexable source in the same breath,
+/// with the same message, and could not tell them apart. Qualifying it with
+/// `first_uncovered_gap.is_some()` gives up the accident and keeps every stream the wall was
+/// built for: here the diagnostics explain every byte, so the wall stays silent and the tree
+/// materializes as an empty node beside a root gap over the sink's own bytes.
+///
+/// Nothing was traded to buy that. A wall keyed on the absence of a token could never have
+/// separated a foreign pairing from a native one, which is the same reason the finish-time wall
+/// pin 1 describes was built and then removed: the witness was flags on the sink, and the sink
+/// cannot tell who set them.
+///
+/// Recorded as an acceptance the crate does **not** want, exactly as pins 1–4 are — this cell
+/// asserts what materializes today, not a refusal anyone should read as a guarantee.
+///
+/// Flips when the sink is minted from the input, with pins 1–4.
+#[test]
+fn a_structured_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_caught() {
+  let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
+  {
+    // Every byte of "!!" lexes as an error, so not one token is committed.
+    let mut input =
+      crate::input::Input::<MiniLexer<'_>, NonFwdCtx<'_, '_>, ()>::with_state_and_context(
+        "!!",
+        (),
+        crate::input::InputContext::new(
+          NonForwardingWrapper(&mut sink),
+          DefaultCache::<'_, MiniLexer<'_>>::default(),
+        ),
+      );
+    let mut inp = input.as_ref();
+    // The lossless root: opened before the first lex, closed after the last, through the
+    // wrapper — the shape every lossless grammar produces, and what the unqualified wall
+    // refused.
+    inp.emitter().cst_start(K_NODE);
+    while let Ok(Some(_)) = inp.next() {}
+    inp.emitter().cst_finish(K_NODE);
+  }
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect(
+    "today: the diagnostics explain every byte, so the qualified zero-token wall stays silent \
+     and the gap-licensed tree materializes — the unqualified wall answered \
+     StructureWithoutTokens here",
+  );
+  let root = tree(green.clone());
+  let node = root
+    .first_child()
+    .expect("the node the wrapper forwarded survives");
+  assert_eq!(node.kind(), K_NODE);
+  assert_eq!(
+    node.children_with_tokens().count(),
+    0,
+    "and it is empty: no token ever settled inside it"
+  );
+  let gap = root
+    .children_with_tokens()
+    .nth(1)
+    .expect("…with the whole source tiled beside it");
+  assert_eq!(gap.kind(), K_GAP);
+  assert_eq!(
+    text(green),
+    "XY",
+    "the residue as this commit widened it: the parse read \"!!\" and a *structured* tree's \
+     text is the sink's \"XY\" — the shape the unqualified wall refused, accepted now, and by \
+     accident either way"
   );
 }
 

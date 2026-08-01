@@ -22,7 +22,7 @@ use super::*;
 /// and still inherit the core no-op — structure flows, tokens vanish. The type system
 /// cannot see a provided-method override, so that shape is caught at the other end: a
 /// recording sink's `finish` **refuses** a balanced stream that builds structure without a
-/// single committed token over a nonempty source
+/// single committed token over a nonempty source *no lexer error explains*
 /// (`cst::FinishError::StructureWithoutTokens`) — a typed error, never a plausible
 /// gap-tiled tree. A wrapper must forward
 /// [`Emitter::commit_token`] alongside these methods.

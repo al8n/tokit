@@ -10,8 +10,9 @@
 //! validator rejects), span discipline for tokens **and** for the diagnostic spans that
 //! license gaps (monotone, non-overlapping, in-bounds, u32-fitting, char-aligned), the
 //! **token-channel wall** (a balanced
-//! stream that builds structure without one committed token over a nonempty source is
-//! the half-forwarding-wrapper signature, refused instead of dressed up by tiling — see
+//! stream that builds structure without one committed token over a nonempty source *no
+//! lexer error explains* is the half-forwarding-wrapper signature, refused instead of
+//! dressed up by tiling — see
 //! [`FinishError::StructureWithoutTokens`]), and **gap tiling**: every source byte no
 //! committed token covers becomes a `gap_kind` token, which is what makes
 //! `tree.text() == source` structural for every input — poisoned, error-bearing, and
@@ -26,7 +27,9 @@
 //! the zero-token wall cannot see — and is refused ([`FinishError::UncoveredGap`]). This is
 //! the sink's one **deliberate coupling of the diagnostic and CST channels**: elsewhere they
 //! are independent (a `Diag` slot is invisible to the tree), but at `finish` a lexer error's
-//! *span* is what licenses its gap. The channels are otherwise separate; this law crosses
+//! *span* is what licenses its gap. The token-channel wall reads that **same** evidence — it
+//! fires only where a byte is left unexplained — so the crossing stays one coupling with two
+//! readers, not two couplings. The channels are otherwise separate; this law crosses
 //! them on purpose, and only at materialization. [`finish_partial`](Sink::finish_partial)
 //! is exempt — it tiles every gap, tolerating an incomplete parse the way it tolerates open
 //! nodes (see its own boundary note on the fail-fast emitter case).
@@ -132,11 +135,27 @@ pub enum FinishError {
   /// this shape: the parse succeeds, every structuring event flows, and every committed
   /// token silently vanishes between the input layer and the sink. Gap tiling would
   /// happily return a *plausible* tree (full text, empty nodes), so `finish` refuses
-  /// instead — the loud failure the wrapper contract promises. A parse that legitimately
-  /// consumed nothing builds either no structure (nothing to refuse) or a tree over an
-  /// empty source (also not refused); a fatally-aborted parse inspected through
-  /// [`finish_partial`](Sink::finish_partial) still has its open nodes as the abort
-  /// witness and is likewise not refused.
+  /// instead — the loud failure the wrapper contract promises.
+  ///
+  /// # What is NOT this shape
+  ///
+  /// The wall fires only where a byte is **unexplained** — the same evidence the
+  /// [gap-coverage law](Self::UncoveredGap) uses, asked of the zero-token case so it can
+  /// name it precisely. A parse that legitimately consumed nothing is therefore never
+  /// refused here:
+  ///
+  /// - it builds no structure (nothing to refuse); or
+  /// - its source is empty (nothing to consume); or
+  /// - **every byte of a nonempty source is covered by a recorded lexer-error
+  ///   diagnostic** — the source held nothing lexable, the lexer said so with its spans,
+  ///   and the whole region tiles as `gap_kind`. This is an ordinary shape for a lossless
+  ///   grammar, whose root production opens its document node before it can know whether
+  ///   any token follows: `"unterminated` in an editor buffer reaches `finish` as exactly
+  ///   one error span and one open-then-closed document. Refusing it made a half-typed
+  ///   string a crash.
+  ///
+  /// A fatally-aborted parse inspected through [`finish_partial`](Sink::finish_partial)
+  /// still has its open nodes as the abort witness and is likewise not refused.
   #[error(
     "the event stream builds structure but carries no committed token over a nonempty \
      source (a wrapper emitter forwarding the CstEmitter structuring surface without \
@@ -321,7 +340,8 @@ where
   /// [`FinishError::InvalidDialectKind`]), span discipline for tokens and for the diagnostic
   /// spans that license gaps ([`FinishError::InvalidDiagnosticSpan`]), the token-channel wall
   /// ([`FinishError::StructureWithoutTokens`] — structure with zero committed tokens
-  /// over a nonempty source is a severed `commit_token` channel, not a tree), the
+  /// over a nonempty source *no lexer error explains* is a severed `commit_token` channel,
+  /// not a tree), the
   /// **gap-coverage law** (every uncovered byte tiles as a `gap_kind` token only where a
   /// recorded lexer error explains it; an unexplained gap is a dropped committed token —
   /// [`FinishError::UncoveredGap`]) — so on success `tree.text() == source` holds and
@@ -689,7 +709,9 @@ where
   // The token-channel witnesses (see `StructureWithoutTokens`): whether any committed
   // token survived to materialization, and whether any real node did. Structure without a
   // single token over a nonempty source is the half-forwarding-wrapper signature — the
-  // gap tiling below would otherwise dress it up as a plausible tree.
+  // gap tiling below would otherwise dress it up as a plausible tree — but only where a
+  // byte is left UNEXPLAINED; a token-free stream whose whole source a lexer error covers
+  // is an honest parse of unlexable bytes, not a severed channel.
   let mut saw_token = false;
   let mut saw_structure = false;
 
@@ -878,7 +900,7 @@ where
       w_tick(); // W row 7
       builder.finish_node();
     }
-  } else if saw_structure && !saw_token && source_len > 0 {
+  } else if saw_structure && !saw_token && source_len > 0 && first_uncovered_gap.is_some() {
     // The token-channel wall: a *balanced* stream that builds structure without one
     // committed token over a nonempty source is the half-forwarding-wrapper signature
     // (structuring forwarded, `Emitter::commit_token` inherited as the core no-op), and
@@ -887,6 +909,16 @@ where
     // open nodes (the `open > 0` arm above), so the abort shape is never refused here.
     // Kept ahead of the gap-coverage law so the all-dropped case earns this precise
     // message rather than an `UncoveredGap` over the whole source.
+    //
+    // `first_uncovered_gap.is_some()` is what keeps the wall from OVERFIRING, and it costs
+    // the wall no detection power: a severed token channel records no lexer errors, so its
+    // whole source is unexplained and the latch is always set — every stream this wall ever
+    // caught, it still catches, `finish_partial`'s flavour included (the latch is recorded
+    // during tiling on both doors). What the test removes is the one shape that shares the
+    // wall's *symptom* and none of its cause: a token-free parse over a source the lexer
+    // refused byte for byte and said so. That is the ordinary reading of `"unterminated` by
+    // a lossless grammar whose root opens its document node before it can know whether any
+    // token follows — refusing it turned a half-typed string into a crash.
     return Err(FinishError::StructureWithoutTokens);
   } else if !close_open_nodes {
     // The gap-coverage law, `finish`-only (the partial-drop generalization of the wall
