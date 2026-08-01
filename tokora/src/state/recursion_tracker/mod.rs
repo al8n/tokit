@@ -73,25 +73,33 @@ impl RecursionLimitExceeded {
 ///
 /// # Default Limit
 ///
-/// The default maximum depth is **500**. It is sized against a **release build on a 2 MiB
-/// stack** — the size Rust gives every `std::thread::spawn` and every libtest harness thread,
-/// and so the smallest stack a production parse is likely to get. It is *not* sized against a
-/// debug build, and the honest numbers matter more than the round one.
+/// The default maximum depth is **64**, and it is sized against the **tightest measured
+/// configuration**, not the most generous one.
 ///
 /// Measured on this tree, one pratt frame per level of nesting, bisected to the last depth that
-/// completes on an explicitly sized 2 MiB thread before the native stack aborts the process:
+/// completes on an explicitly sized **2 MiB** thread — the stack Rust gives every
+/// `std::thread::spawn` and every libtest harness thread, and so the smallest stack a parse is
+/// likely to get — before the native stack aborts the process. All four cells were measured, and
+/// all four are what the default has to clear:
 ///
 /// | build | typed driver | token driver |
 /// |---|---|---|
-/// | release (`opt-level = 3`) | **3871** frames, ~0.53 KiB each | **4247** frames, ~0.48 KiB each |
-/// | debug (`opt-level = 0`) | **384** frames, ~5.3 KiB each | **125** frames, ~16.4 KiB each |
+/// | release (`opt-level = 3`), 2 MiB thread | **3871** frames, ~0.53 KiB each | **4247** frames, ~0.48 KiB each |
+/// | debug (`opt-level = 0`), 2 MiB thread | **384** frames, ~5.3 KiB each | **125** frames, ~16.4 KiB each |
 ///
-/// So on the stack the default is sized against, 500 clears the tightest driver by about **7.7×**
-/// and the limiter — not the native stack — is what stops a runaway descent. A **debug** build of
-/// the same code spends eight to thirty times more per frame and overruns that same 2 MiB before
-/// 500, so there the stack aborts first. That is a development-and-test concern rather than a
-/// production one, and it is why this crate's own deep-recursion tests either run on a
-/// deliberately enlarged stack or configure a limit that fits the debug ceiling.
+/// The binding cell is the **debug token driver at 125**, not the release figures above it. Sizing
+/// a default against the release ceiling was the mistake this number corrects: an unconfigured
+/// parse in a debug build — which is what every test suite runs — reached the native stack before
+/// the limiter, and the two failure modes are not symmetric. A limit that is too *low* returns a
+/// clean, catchable, documented [`RecursionLimitReached`](crate::error::RecursionLimitReached)
+/// telling the caller to raise it. A limit that is too *high* aborts the process with no
+/// diagnostic at all and takes the whole suite with it. Only one of those can be recovered from,
+/// so the default is set where **every** measured configuration survives.
+///
+/// 64 is the largest power of two leaving roughly **1.9×** margin under 125, and it clears the
+/// debug typed driver by 6×, the release typed driver by 60× and the release token driver by 66×.
+/// It also sits far above any realistic nesting depth in a GraphQL document or an arithmetic
+/// expression, so raising it is a deliberate act rather than a routine one.
 ///
 /// **A grammar that parses untrusted, deeply nested input should still set its own limit** with
 /// [`with_limitation`](Self::with_limitation) rather than inherit this default — especially on a
@@ -114,7 +122,7 @@ impl RecursionLimitExceeded {
 /// configured through
 /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
 /// (or [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter))
-/// and defaulting to [`new`](Self::new) — depth **500**, on by default. Both Pratt engines enter
+/// and defaulting to [`new`](Self::new) — depth **64**, on by default. Both Pratt engines enter
 /// one level per live frame through [`InputRef::descend`](crate::InputRef::descend), whose
 /// [`Descent`](crate::input::Descent) guard releases the level on every exit including an
 /// unwind; exceeding the limit fails the parse with the always-terminal
@@ -245,11 +253,12 @@ impl Default for RecursionLimiter {
 impl RecursionLimiter {
   /// Creates a new recursion tracker.
   ///
-  /// Defaults to a maximum depth of 500.
+  /// Defaults to a maximum depth of 64 — see the type's `Default Limit` section for why that
+  /// number and not a larger one.
   #[inline(always)]
   pub const fn new() -> Self {
     Self {
-      max: 500,
+      max: 64,
       current: 0,
     }
   }

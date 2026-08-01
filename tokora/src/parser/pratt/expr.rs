@@ -128,7 +128,7 @@ where
 /// layer down: the driver enters each frame through
 /// [`InputRef::descend`](crate::InputRef::descend), so every live frame holds one level of the
 /// input's shared [recursion budget](crate::state::recursion_tracker::RecursionLimiter) — depth
-/// **500** unless the context says otherwise — and a deeper expression fails with the terminal
+/// **64** unless the context says otherwise — and a deeper expression fails with the terminal
 /// [`RecursionLimitReached`](crate::error::RecursionLimitReached) rather than exhausting the
 /// native stack. The budget belongs to the *input*, not to this parser, so nested expression
 /// parsers share it.

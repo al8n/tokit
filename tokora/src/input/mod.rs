@@ -333,7 +333,7 @@ pub struct InputContext<E, C> {
 impl<E, C> InputContext<E, C> {
   /// Creates a new `InputContext` with the given emitter and cache.
   ///
-  /// The recursion budget defaults to [`RecursionLimiter::new`] — depth **500**, protection on
+  /// The recursion budget defaults to [`RecursionLimiter::new`] — depth **64**, protection on
   /// — and is changed with [`with_recursion_limiter`](Self::with_recursion_limiter).
   #[inline(always)]
   pub const fn new(emitter: E, cache: C) -> Self {
@@ -604,7 +604,7 @@ where
   poison_boundary: Option<L::Offset>,
   /// The **recursion budget** this parse descends against: live descent depth plus the limit it
   /// may not exceed, configured at [`with_state_and_context`](Self::with_state_and_context) from
-  /// [`InputContext::with_recursion_limiter`] and defaulting to depth 500.
+  /// [`InputContext::with_recursion_limiter`] and defaulting to depth 64.
   ///
   /// Its one writer is the [`Descent`](InputRef::descend) guard: [`InputRef::descend`] raises the
   /// depth, and the guard's `Drop` lowers it on **every** exit of the frame — return, `?`, or

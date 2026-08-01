@@ -20,7 +20,7 @@ fn input_context_new_and_into_components() {
   assert_eq!(c, 42u32);
   // `new` carries the default budget: protection on, at the type's own conservative depth.
   assert_eq!(r, crate::state::recursion_tracker::RecursionLimiter::new());
-  assert_eq!(r.limitation(), 500);
+  assert_eq!(r.limitation(), 64);
   assert_eq!(r.depth(), 0);
 }
 

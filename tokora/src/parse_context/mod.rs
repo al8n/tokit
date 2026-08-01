@@ -82,7 +82,7 @@ where
   emitter: E,
   cache: Option<C::Options>,
   /// The recursion budget handed to the [`Input`](crate::input::Input) at
-  /// [`provide`](ParseContext::provide) — depth 500 unless
+  /// [`provide`](ParseContext::provide) — depth 64 unless
   /// [`with_recursion_limiter`](Self::with_recursion_limiter) says otherwise.
   recursion: RecursionLimiter,
   _marker: PhantomData<&'inp L>,
@@ -129,7 +129,7 @@ where
   /// Threaded straight to
   /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
   /// by [`provide`](ParseContext::provide); see it for what the budget covers. The default is
-  /// [`RecursionLimiter::new`] — depth 500, protection on.
+  /// [`RecursionLimiter::new`] — depth 64, protection on.
   ///
   /// ```rust,ignore
   /// // Deep but bounded grammar: raise the ceiling for this parse only.

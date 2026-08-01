@@ -106,7 +106,7 @@ pub enum LimitExceeded {
 /// # Default Configuration
 ///
 /// - **Token limit**: Unlimited (`usize::MAX`)
-/// - **Recursion limit**: 500
+/// - **Recursion limit**: 64
 ///
 /// You typically want to configure at least the token limit using
 /// [`with_token_tracker`](Self::with_token_tracker) or set both limits explicitly.
@@ -269,7 +269,7 @@ impl Limiter {
   /// Creates a new tracker with default limits.
   ///
   /// - Token limit: Unlimited (`usize::MAX`)
-  /// - Recursion limit: 500
+  /// - Recursion limit: 64
   ///
   /// # Example
   ///
@@ -277,7 +277,7 @@ impl Limiter {
   /// use tokora::state::tracker::Limiter;
   ///
   /// let tracker = Limiter::new();
-  /// assert_eq!(tracker.recursion().limitation(), 500);
+  /// assert_eq!(tracker.recursion().limitation(), 64);
   /// assert_eq!(tracker.token().limitation(), usize::MAX);
   /// ```
   #[inline(always)]
@@ -298,7 +298,7 @@ impl Limiter {
   /// );
   ///
   /// assert_eq!(tracker.token().limitation(), 10000);
-  /// assert_eq!(tracker.recursion().limitation(), 500);
+  /// assert_eq!(tracker.recursion().limitation(), 64);
   /// ```
   #[inline(always)]
   pub const fn with_token_tracker(token_tracker: TokenLimiter) -> Self {

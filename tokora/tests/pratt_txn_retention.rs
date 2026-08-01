@@ -88,6 +88,7 @@ use std::sync::Mutex;
 use tokora::{
   Emitter, InputRef, Lexer, Parse, ParseContext, ParseInput, Parser, ParserContext, SimpleSpan,
   Token as TokenT,
+  emitter::Fatal,
   error::{
     NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
     token::UnexpectedTokenOf,
@@ -95,7 +96,7 @@ use tokora::{
   input::Cursor,
   parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt},
   span::Spanned,
-  state::State,
+  state::{State, recursion_tracker::RecursionLimiter},
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -505,13 +506,27 @@ struct Measured {
   value: i64,
 }
 
+/// The context the sweeping probes run under, and the one thing about it that is not incidental:
+/// it sets its **own** recursion budget.
+///
+/// [`DEPTHS`] tops out at 64 operators, which is 65 live driver frames, and the input's *default*
+/// budget is 64 — deliberately conservative, sized against the tightest measured native ceiling
+/// rather than the most generous (see `RecursionLimiter`'s `Default Limit`). A retention probe
+/// that inherited it would stop measuring retention and start measuring the budget, and it would
+/// do so silently: `measure` would fail at its `expect`, at one depth, for a reason that has
+/// nothing to do with checkpoints. What the default is, and that both engines honour it, is
+/// `pratt_limit.rs`'s subject; this suite says so explicitly and looks away.
+fn measuring_ctx<'inp>() -> ParserContext<'inp, CountLexer<'inp>, Fatal<RetErr>> {
+  ParserContext::new(Fatal::new()).with_recursion_limiter(RecursionLimiter::unlimited())
+}
+
 fn measure(d: usize) -> Measured {
   let src = chain(d);
   LHS_ENTRIES.store(0, Ordering::Relaxed);
   TARGET_LHS_ENTRY.store(d + 1, Ordering::Relaxed);
   LIVE_AT_DEEPEST.store(-1, Ordering::Relaxed);
   reset_counters();
-  let value: i64 = Parser::new()
+  let value: i64 = Parser::with_context(measuring_ctx())
     .apply(measured_expr)
     .parse_str(&src)
     .expect("the chain parses");

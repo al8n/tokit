@@ -7,7 +7,7 @@
 //!
 //! * **R1 — the recursion budget.** Every pratt frame, in either engine, enters one level of the
 //!   input's [`RecursionLimiter`] through `InputRef::descend`, and exceeding it fails the parse
-//!   with the always-terminal `RecursionLimitReached`. On by default (depth 500), configurable
+//!   with the always-terminal `RecursionLimitReached`. On by default (depth 64), configurable
 //!   through the context, shared by every parser on one input, and released on every exit
 //!   including an unwind.
 //! * **R2 — the non-associative contract.** A second same-power `PrattInfix::Neither` operator in
@@ -1276,13 +1276,17 @@ fn two_composed_pratt_parsers_share_one_budget() {
   );
 }
 
-/// **Protection is on by default.** An unconfigured `parse_str` over a chain deeper than 500
+/// **Protection is on by default.** An unconfigured `parse_str` over a chain deeper than 64
 /// fails terminally instead of risking a native-stack abort — and `unlimited()` puts the deep
 /// parse back, which proves the default is the thing doing the refusing.
+///
+/// The chain is deeper than the default but still well inside every measured native ceiling, so
+/// what refuses it can only be the limiter. `on_a_deep_stack` stays on both halves anyway: the
+/// `unlimited()` half runs 1000 levels deep, which no 2 MiB stack survives in a debug build.
 #[test]
 fn the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it() {
   let defaulted = on_a_deep_stack(|| {
-    let src = prefix_chain(600);
+    let src = prefix_chain(80);
     Parser::new()
       .apply(typed_probe)
       .parse_str(&src)
@@ -1293,12 +1297,12 @@ fn the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it() {
     matches!(
       defaulted,
       Err(LimErr::Limit {
-        depth: 501,
-        limitation: 500,
+        depth: 65,
+        limitation: 64,
         ..
       })
     ),
-    "the default budget is 500 and the 501st frame is refused; got {defaulted:?}"
+    "the default budget is 64 and the 65th frame is refused; got {defaulted:?}"
   );
 
   // Deliberately far below the measured native threshold: this cell proves `unlimited` removes
@@ -1320,7 +1324,7 @@ fn the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it() {
 
   // And the same on the token engine, so "default on" is not a typed-only claim.
   let token_defaulted = on_a_deep_stack(|| {
-    let src = prefix_chain(600);
+    let src = prefix_chain(80);
     Parser::new()
       .apply(token_probe)
       .parse_str(&src)
@@ -1331,8 +1335,8 @@ fn the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it() {
     matches!(
       token_defaulted,
       Err(LimErr::Limit {
-        depth: 501,
-        limitation: 500,
+        depth: 65,
+        limitation: 64,
         ..
       })
     ),
@@ -1558,7 +1562,7 @@ fn a_trip_leaves_the_depth_unchanged() {
 /// budget existed the same input killed the whole test process with `has overflowed its stack` —
 /// which is why this cell exists and why it must never be moved onto `on_a_deep_stack`.
 ///
-/// The limit is 32, far below the default 500, on purpose — and the margin is chosen from a
+/// The limit is 32, half the default 64, on purpose — and the margin is chosen from a
 /// measurement rather than guessed. Bisected on this tree, one frame per level, on a 2 MiB
 /// thread, taking the last depth that completes before the process aborts:
 ///
@@ -1572,10 +1576,13 @@ fn a_trip_leaves_the_depth_unchanged() {
 /// 100 fit too, but only by 1.25× — close enough that a codegen change on another platform could
 /// turn this cell from a failure into a process abort, which is not a test result.
 ///
-/// The same table is why the shipped default is 500: on the 2 MiB stack a spawned thread gets, a
-/// **release** build clears 500 by ~7.7×, so the limiter fires long before the stack does. A
-/// debug build does not, which is exactly why every cell above that exercises the default runs on
-/// `on_a_deep_stack` instead.
+/// The same table is why the shipped default is **64** and not the 500 this branch first carried.
+/// 500 was sized against the *release* ceilings on the top row and cleared them by ~7.7×, but the
+/// bottom row is the one an unconfigured parse meets in a test suite, and 500 is four times the
+/// debug token engine's 125: the stack aborted before the limiter could return anything. 64 clears
+/// the tightest of the four by ~1.9×, so the same table now supports the default rather than
+/// contradicting it — and a cell that exercises the default no longer *needs* an enlarged stack,
+/// though the ones above keep `on_a_deep_stack` because their `unlimited()` halves still do.
 #[test]
 fn a_configured_budget_holds_on_an_ordinary_thread_stack() {
   let src = prefix_chain(1_000);

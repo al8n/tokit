@@ -119,18 +119,18 @@ releases the level on every exit — return, `?`, or unwind, identically in `std
 Exceeding the limit fails the parse with
 [`RecursionLimitReached`](crate::error::RecursionLimitReached).
 
-- **Default 500**, so an unconfigured parse of a deeply nested expression fails cleanly instead of
+- **Default 64**, so an unconfigured parse of a deeply nested expression fails cleanly instead of
   risking a native stack abort. Set your own with
   [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter) or
   [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter);
   spell "no limit" as
   [`RecursionLimiter::unlimited()`](crate::state::recursion_tracker::RecursionLimiter::unlimited).
-  The default is sized against a **release** build on a **2 MiB** stack — what a spawned thread
-  and a libtest harness thread get — where the tighter of the two engines fits 3871 frames, so
-  500 clears it by about 7.7×. A **debug** build spends eight to thirty times more stack per
-  frame and overruns the same 2 MiB well before 500 (the measured ceilings are 384 typed and 125
-  token), which is why the deep-recursion *tests* run on an enlarged stack or configure their own
-  limit. See
+  The default is sized against the **tightest** of the four measured configurations, on the
+  **2 MiB** stack a spawned thread and a libtest harness thread get: release fits 3871 typed
+  frames and 4247 token frames, debug fits 384 typed and **125 token**. 64 clears that last figure
+  by about 1.9× and every other by 6× or more. It is deliberately conservative, because the two
+  failure modes are not symmetric — too low returns a catchable error telling you to raise it, too
+  high aborts the process with no diagnostic. See
   [`RecursionLimiter`](crate::state::recursion_tracker::RecursionLimiter#default-limit) for the
   full table. A grammar that parses deep untrusted input should still pick a limit against the
   stack it will actually run on rather than inherit this one.
