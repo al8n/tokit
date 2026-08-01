@@ -256,7 +256,10 @@ where
       // `None`; the flag is what tells the two apart on the far side. Re-declared per cycle, and
       // written at most once per `try_expect_map_or_stop` call: the closure runs against one
       // token.
-      let mut nonassoc_trip: Option<L::Offset> = None;
+      //
+      // A bare flag, and no offset rides in it. The offset is read on the far side, off the input
+      // itself, for the reason spelled out at the raise below.
+      let mut nonassoc_trip = false;
       // A terminal scanner stop mid-loop is not "the expression is complete" — surface it
       // rather than breaking, so a tripped limit cannot end the expression early.
       let step = this.try_expect_map_or_stop(|tok| {
@@ -278,22 +281,8 @@ where
             // The same power as the `Neither` operator this frame just folded: a
             // declared-non-associative chain. Park the token and flag it, so the loop below
             // raises the diagnostic instead of quietly stopping.
-            //
-            // One token, so one offset: this classifier is a pure function of `tok`, and the
-            // token is parked rather than committed, so the start recorded here *is* the handback
-            // position `NonAssociativeChain` documents — the point the surrounding grammar
-            // resumes at. The typed driver has to work for the same guarantee, because its
-            // classifier holds a whole `InputRef`, and does it by reading the position before that
-            // classifier runs.
-            //
-            // Here the handback position is also the operator's own head, and that is structural
-            // rather than lucky: nothing can sit between the two, because this classifier cannot
-            // skip anything. A trivia token arriving here answers `None` and ends the expression,
-            // so a token-level pratt grammar is a trivia-less grammar by construction — which is
-            // exactly the scope of the offset parity the typed and token engines share, and the
-            // reason `pratt_limit.rs` says so on the cell that asserts it.
             if prev_op_is_neither.as_ref() == Some(&lpower) {
-              nonassoc_trip = Some(tok.span.start());
+              nonassoc_trip = true;
               return None;
             }
             Some(TokRhs::Infix(infix, lpower))
@@ -304,9 +293,24 @@ where
       // The `?` above fires FIRST, so a terminal scanner stop still outranks the repeat: the
       // ranking law is unchanged. Only once the scanner has answered does the flag decide which
       // of the two "no step" endings this is.
+      //
+      // THE OFFSET IS READ HERE, AFTER THE HANDBACK, and off the input rather than off the token.
+      // `NonAssociativeChain`'s offset is *defined* as the position the input was handed back at,
+      // and `self.span().end()` is that position by identity: `try_expect_map_or_stop` calls
+      // `commit_token` only when the closure accepts, so a declined token is parked and the
+      // committed span is still the one this cycle started from. That is the same quantity the
+      // typed driver's probe rollback restores, and the same one `try_expect_map_or_stop` builds
+      // its own terminal `UnexpectedEot` from when it stops for a scanner reason instead.
+      //
+      // Reading the PARKED TOKEN's start instead would be the operator's own head, and it is a
+      // different number whenever the lexer skipped anything to reach it — `1 ; 2 ; 3` parks the
+      // second `;` at 6 with the committed frontier at 5. That is the same over-reach the typed
+      // driver kept re-deriving from a position adjacent to its restore target, and reproducing it
+      // here would also split the two engines' answers on the one input shape they can both parse.
+      // The park is unchanged; only what is reported about it is.
       let Some((rhs, tok)) = step else {
-        if let Some(at) = nonassoc_trip {
-          return Err(NonAssociativeChain::of(at).into());
+        if nonassoc_trip {
+          return Err(NonAssociativeChain::of(this.span().end()).into());
         }
         break;
       };

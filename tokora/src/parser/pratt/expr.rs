@@ -2,7 +2,6 @@ use core::marker::PhantomData;
 
 use crate::{
   Commit, Rollback,
-  cache::PeekedTokenExt as _,
   error::{NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs},
   span::Span as _,
 };
@@ -1021,20 +1020,23 @@ where
 /// the exception that proves the rule: its `E` was built by caller code *before* control came back
 /// to the driver, so `map_err(Fault::Keep)` moves an error rather than making one.
 ///
-/// `NonAssoc`'s offset obeys the rule the same way, and it took one statement to arrange: the
-/// handback position is read at the top of the *cycle*, ahead of the RHS classifier and therefore
-/// ahead of the floor test, the report boundary and the repeat test alike, so the branch that
-/// decides this posture is handed a value that already exists. Reading it inside the branch would
-/// have put an `L::Offset::clone` — caller code — between the decision and the settle, which is
-/// the class the rule exists to close.
+/// `NonAssoc`'s offset obeys the rule with **no arrangement at all**, which is the strongest form
+/// available: it carries `committed`, the cycle's own progress watermark, and carries it by
+/// **move**. Nothing is read, cloned or peeked to build this posture, so the window the rule is
+/// about does not exist for it — not "is empty", but has no statement in it.
 ///
-/// Reading it *there* rather than after the classifier is also what makes the value right, and
-/// that is a separate argument from this one. The probe restores to the point the read is taken
-/// at, so the token peeked there is the token the caller is handed back — which is what
-/// `NonAssociativeChain`'s offset is defined to be. The committed span after the classifier holds
-/// its **last** token instead, which for a multi-token operator names the operator's tail: a
-/// position no caller is ever handed. See the capture site, and `NonAssociativeChain`'s own
-/// documentation.
+/// That is also, separately, what makes the value *right*. `committed` is `inp.span().end()` read
+/// at the one program point that `begin_with` snapshots into the probe's checkpoint, and
+/// `rollback_abandoning_points` — the first half of this posture — installs that snapshot back. So
+/// the offset and the position the caller is handed are one value from one read, and
+/// `inp.span().end() == at` holds after the return for every grammar shape.
+///
+/// The rule and the correctness argument used to pull against each other here, and that is worth
+/// recording because it is what a post-restore read would revive: reading the resumption position
+/// *after* the rollback is the most direct spelling of "the offset is where the input is", but it
+/// puts an `L::Offset::clone` — caller code, fallible in both profiles — between the branch that
+/// decided this posture and the return that honours it, which is exactly what the rule forbids.
+/// Taking the restore target instead needs no read, so there is nothing left to rank.
 ///
 /// The rule has the compiler behind it and not only this paragraph. `parse` does **not** carry the
 /// `From<UnexpectedEoLhs<…>> + From<UnexpectedEoRhs<…>> + From<NonAssociativeChain<…>>` bounds —
@@ -1130,11 +1132,12 @@ enum Fault<E, Off> {
   /// report-boundary stalls, its own cycle-scoped restore has already happened through a probe
   /// guard that was still live for it, so the wrapper's settle is a commit.
   NonAssoc {
-    /// The **handback position**: the point the probe's rollback restores to, and therefore the
-    /// point the surrounding grammar resumes at. Captured before the RHS classifier ran, which is
-    /// the only point in the cycle at which it exists as a value. It sits at or before the
-    /// repeated operator's own start — strictly before it when the classifier skips trivia tokens
-    /// to reach the operator, which is a shape `ParsePrattRHS` permits.
+    /// The **handback position**: the probe's own restore target, moved out of the cycle's
+    /// `committed` watermark rather than measured anywhere near it. After the rollback that
+    /// precedes this posture, `inp.span().end()` is this number. It sits at or before the repeated
+    /// operator's own start — strictly before it whenever anything the caller is also handed back
+    /// sits in between: whitespace the lexer skips, trivia tokens a `ParsePrattRHS` would skip, or
+    /// a region a non-fatal lexer error was reported over.
     at: Off,
   },
   /// Restore the input to before the expression, then assert `at > committed_before`, then build
@@ -1462,6 +1465,15 @@ where
   // metric is committed consumption (`span().end()`), never the cache-front cursor
   // ([`InputRef::cursor`]) — a lookahead fill moves that across skipped trivia without
   // consuming, reading a zero-width report as false progress.
+  //
+  // IT IS ALSO THE NON-ASSOCIATIVE TRIP'S OFFSET, and that is not a second job bolted on: this
+  // value and the probe's rollback target are the same read of the same field. `begin_with` a few
+  // lines down snapshots `inp.span()` into its checkpoint with **no statement in between** — read
+  // here on the first cycle, at the foot of the loop on every later one — and
+  // `rollback_abandoning_points` installs that snapshot back verbatim. So after any restoring exit
+  // `inp.span().end() == committed`, by identity rather than by agreement, and the offset a repeat
+  // reports is the position the caller is measurably at. See the repeat guard below, and
+  // `NonAssociativeChain`'s own documentation for why the offset is *defined* that way.
   let mut committed = inp.span().end();
   loop {
     // The operator PROBE, and nothing more. This guard used to span the whole cycle — the
@@ -1494,59 +1506,6 @@ where
     // This is not a licence for the probe to be careless: the driver opens no point of its own,
     // and every point crossed here was opened by a hook and left open by it.
     let mut txn = inp.begin_with::<Commit>();
-    // THE POSITION A NON-ASSOCIATIVE TRIP WOULD NAME, read HERE — inside the probe, ahead of the
-    // classifier, and only on a cycle whose latch is armed.
-    //
-    // `NonAssociativeChain`'s offset is DEFINED as the handback position — the point this probe
-    // restores to, and therefore the point the surrounding grammar and any recoverer resume from.
-    // This statement is where that point exists as a value, and reading it here is what makes the
-    // definition hold by construction rather than by agreement: the rollback below restores to
-    // exactly this position, so the token peeked here is byte-for-byte the token the caller reads
-    // next.
-    //
-    // It is deliberately NOT "the offending operator's head", and that is not a shortfall this
-    // driver could close. `parse_pratt_rhs` is caller code holding a whole `InputRef`: it decides
-    // for itself where its operator begins, and a CST-style classifier over a trivia-surfacing
-    // lexer legitimately skips whitespace and comment *tokens* before consuming one. Learning how
-    // much it would skip means running it, and running it before the repeat is decided is what
-    // this scope's transaction rules forbid. So on such a grammar this offset precedes the
-    // operator by whatever the classifier would have skipped — which is also, exactly, what the
-    // caller is handed back, trivia included. `pratt_limit.rs`'s trivia section pins the equality
-    // on a grammar where the two numbers differ; `NonAssociativeChain`'s own documentation states
-    // the definition.
-    //
-    // Nothing derived AFTER the classifier has the property either, and for a second reason: the
-    // input's committed span then holds the classifier's **last** token, which for a multi-token
-    // operator (`not in`, `is not`, a two-token `<>`) names the operator's tail — neither the
-    // handback nor the head. Measured on a two-token operator, that read reported offset 10 for an
-    // operator the caller was handed back at offset 8; this one reports 8, with an empty lookahead
-    // cache and a prefilled one alike, because a peek *is* the cache fill and the token's own span
-    // does not move with how much was peeked before it.
-    //
-    // It also obeys `Fault`'s rule — a posture carries values that already exist at the branch
-    // deciding it — more cheaply than the read it replaces: that one paid an `L::Offset::clone` on
-    // *every* infix cycle, this one pays a peek only on the cycle after a `Neither` fold, and the
-    // peek's lex is work the classifier's own first read would have done a statement later.
-    //
-    // The error is propagated as `Fault::Keep`, the driver's ordinary posture for anything caller
-    // code raises. The one behaviour this adds is narrow and deliberate: on a latched cycle whose
-    // next token cannot be lexed at all, the failure now surfaces here rather than from whichever
-    // read the classifier chose to make — and a classifier that would have declined *without*
-    // reading that token is the only case where the two differ.
-    //
-    // `None` is genuine exhaustion or a terminal stop folded into one (`peek_one`'s documented
-    // shape). Neither can reach the repeat guard below: that guard now sits behind the report
-    // boundary, which refuses any report that committed nothing, and a cycle with no token left
-    // cannot commit one. The committed frontier stands in so the value is total rather than
-    // fallible, and no path reads it.
-    let latched_at = if prev_op_is_neither.is_some() {
-      Some(match txn.peek_one().map_err(Fault::Keep)? {
-        Some(tok) => tok.span().start(),
-        None => committed.clone(),
-      })
-    } else {
-      None
-    };
     let report = parse_rhs.parse_pratt_rhs(&mut *txn).map_err(Fault::Keep)?;
     // The report boundary. Read the instant the report crosses back, before this cycle
     // recurses and before any fold runs, because both of those can move the input on a
@@ -1682,16 +1641,37 @@ where
         // restore is the `End` arm's own — the same reconciling verb, handing back everything the
         // classifier consumed while deciding, the operator included — and it is the first half of
         // this posture rather than work done alongside it. Nothing between the branch and the
-        // return can fail: `latched_at` was read before the classifier ran and is moved. It names
-        // the point this restore lands on, which is what the report means by its offset.
+        // return can fail: `committed` is an `L::Offset` this frame already owns, and it is
+        // **moved**, not cloned.
         //
-        // `filter` rather than a second `if`, because `latched_at` is `Some` exactly when
-        // `prev_op_is_neither` is: both are read from that one latch inside this one cycle, the
-        // peek above under `is_some()` and the equality here. The pair therefore cannot drift, and
-        // the `Option` carries the offset rather than an assertion that it exists.
-        if let Some(at) = latched_at.filter(|_| prev_op_is_neither.as_ref() == Some(lpower)) {
+        // THE OFFSET IS THE RESTORE TARGET, NOT SOMETHING MEASURED NEAR IT. `committed` is the
+        // value `begin_with` snapshotted into this probe's checkpoint (see its declaration above
+        // the loop) and the value the line above just installed back, so the number this posture
+        // carries and the position the caller is at after the handback are one value from one
+        // read — `inp.span().end() == at`, checkable by the caller and pinned that way in
+        // `pratt_limit.rs`.
+        //
+        // That is what closes the class three review rounds kept re-finding. Every earlier source
+        // was adjacent to the restore target rather than equal to it, and each one drifted on a
+        // different input: the committed span read AFTER the classifier names the classifier's
+        // last token — an operator's tail for a multi-token spelling (`not in`, `is not`, `<>`) —
+        // and a `peek_one` taken BEFORE it names the first token the scanner can produce, which
+        // skips whatever the scanner skips. Trivia the classifier would have skipped, a
+        // multi-token operator's gap and a non-fatal lexer error the peek stepped over and emitted
+        // are all bytes that sit between the restore target and that first token; each in turn was
+        // reported as a position the caller had not been handed. The restore target has no such
+        // window: nothing runs between the read and the checkpoint, and the rollback's whole job is
+        // to put that checkpoint back.
+        //
+        // What this offset does NOT claim is the offending operator's head, and that is not a
+        // shortfall the driver could close. `parse_pratt_rhs` is caller code holding a whole
+        // `InputRef` and decides for itself where its operator begins; learning how much it would
+        // skip means running it, and running it before the repeat is decided is what this scope's
+        // transaction rules forbid. `NonAssociativeChain`'s own documentation states the
+        // definition, and the token engine's park site states why the two coincide there.
+        if prev_op_is_neither.as_ref() == Some(lpower) {
           txn.rollback_abandoning_points();
-          return Err(Fault::NonAssoc { at });
+          return Err(Fault::NonAssoc { at: committed });
         }
 
         let next_neither = if matches!(infix.token_ref(), PrattInfix::Neither(_)) {

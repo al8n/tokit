@@ -29,48 +29,57 @@ use core::marker::PhantomData;
 /// [`Left`](crate::parser::PrattInfix::Left); tolerance is a caller policy stated in grammar
 /// code, not a silent engine default.
 ///
-/// # The offset is the handback position
+/// # The offset is the handback position, and that is one specific number
 ///
-/// [`offset`](Self::offset) is **defined** as the position the input was handed back at: the byte
-/// the surrounding grammar — or a recoverer — resumes reading from once the deciding read has been
-/// restored. It is *not* defined as the offending operator's first byte, and the two are not
-/// always the same number.
+/// [`offset`](Self::offset) is **defined** as the position the input was handed back at, and the
+/// definition is checkable rather than descriptive: catch the error and
+/// [`InputRef::span().end()`](crate::InputRef::span) *is* the offset. Nothing before that byte is
+/// still available to the caller, and everything from it onward is — including whatever the
+/// deciding read had consumed before it was handed back.
 ///
-/// The operator's head is not a quantity the typed engine can obtain in general.
-/// [`ParsePrattRHS`](crate::parser::ParsePrattRHS) is caller code holding a whole
-/// [`InputRef`](crate::InputRef), and it decides for itself where its operator begins: a
-/// CST-style classifier over a trivia-surfacing lexer skips whitespace and comment **tokens**
-/// before it reads the operator, which the contract permits and which the driver cannot see
-/// without *running* the classifier — and running it before the repeat has been decided is what
-/// the driver's transaction rules forbid. So the driver reports the position it does know: the
-/// point its own probe restores to. Whatever the classifier would have skipped is in front of
-/// that point, and in front of the caller too:
+/// It is **not** the offending operator's first byte. The two coincide only when nothing sits
+/// between them, and four ordinary things do:
 ///
 /// ```text
-///   1 ; 2   ; 3        `;` non-associative, whitespace lexed as tokens
-///   0 2 4   8 10       the second `;` is at 8 — the repeat
-///        ^             offset 5: the whitespace the handback returns, and where the caller resumes
+///   1 ; 2 ; 3          whitespace the lexer skips
+///   0 2 4 6 8          offset 5, the repeat at 6
+///
+///   1 ; 2   ; 3        whitespace lexed as TOKENS, skipped by the classifier
+///   0 2 4   8 10       offset 5, the repeat at 8
+///
+///   1 < > 2 < > 3      an operator spelled with two tokens
+///   0 2 4 6 8 10 12    offset 7, the repeat's head at 8 and its tail at 10
+///
+///   1 ; 2 @ ; 3        a non-fatal lexer error, reported and stepped over
+///   0 2 4 6 8 10       offset 5, the repeat at 8
 /// ```
 ///
-/// A grammar whose lexer skips trivia — the ordinary syntactic shape — has nothing between the
-/// two, so its offset is the operator's head as well. That is a property of those grammars, not a
-/// promise of this field.
+/// Each of those is a region the caller *was* handed back. Naming the operator instead would
+/// describe a position no caller was ever left at, and would invite a recoverer that resumes at
+/// the offset to discard the region in between — the lexer error's own bytes, in the last case,
+/// together with the diagnostic that was rewound with the aborted probe and is due to be
+/// re-emitted.
 ///
-/// **What is guaranteed, by construction rather than by agreement, is that the reported offset and
-/// the resumption point are one number.** That is the property recovery correctness rests on: hand
-/// the error to [`Recover`](crate::parser::Recover) or
+/// The operator's head is also not a quantity the typed engine could report even if it wanted to.
+/// [`ParsePrattRHS`](crate::parser::ParsePrattRHS) is caller code holding a whole
+/// [`InputRef`](crate::InputRef) and decides for itself where its operator begins; learning how
+/// much it would skip means *running* it, and running it before the repeat has been decided is
+/// what the driver's transaction rules forbid.
+///
+/// **What is guaranteed, by identity rather than by agreement, is that the reported offset and the
+/// resumption point are one number.** That is the property recovery correctness rests on: hand the
+/// error to [`Recover`](crate::parser::Recover) or
 /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) and the offset it reads is the offset
 /// the retry begins at.
 ///
-/// **How each engine gets there.** Neither reconstructs the number after the fact. The token
-/// engine reads it off the token it parked, and there the handback and the operator's head always
-/// coincide: its classifier is a pure function of one token, so a trivia token reaching it ends
-/// the expression rather than being skipped — a token-level pratt grammar is a trivia-less grammar
-/// by construction. The typed engine reads the position *before* running its classifier, from the
-/// token that classifier is about to see first. Reading it afterwards instead — off the committed
-/// span, which by then holds the classifier's **last** token — would name the operator's *tail*
-/// for a multi-token spelling (`not in`, `is not`, `<>`): neither the handback nor the head, and a
-/// position no caller is ever handed.
+/// **How each engine gets there — neither measures anything near the handback.** The typed engine
+/// carries its cycle's committed-progress watermark, which is the value its probe's checkpoint was
+/// built from and the value the probe's rollback installs back. The token engine reads
+/// `span().end()` on the far side of the park, and `try_expect_map_or_stop` commits a token only
+/// when the classifier accepts it, so a declined token leaves that frontier exactly where the
+/// cycle found it. Both therefore report the same number on any input both can parse, and the
+/// numbers agree because the two engines answer the same question, not because two mechanisms
+/// happen to line up.
 ///
 /// # A per-operator contract, not whole-chain fixity resolution
 ///
@@ -93,9 +102,10 @@ use core::marker::PhantomData;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[error("non-associative operator at {at} cannot be chained at its own power")]
 pub struct NonAssociativeChain<O = usize, Lang: ?Sized = ()> {
-  /// The offset the input was handed back at — where the surrounding grammar resumes. At or
-  /// before the repeated operator's own start; strictly before it when the classifier skipped
-  /// trivia tokens to reach it. See the type's docs.
+  /// The offset the input was handed back at — `InputRef::span().end()` once the error is in the
+  /// caller's hands, and where the surrounding grammar resumes. At or before the repeated
+  /// operator's own start, and strictly before it whenever anything the caller was also handed
+  /// back sits between them. See the type's docs.
   at: O,
   _lang: PhantomData<Lang>,
 }

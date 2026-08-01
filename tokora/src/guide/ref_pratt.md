@@ -77,20 +77,21 @@ table is the whole rule:
 | [`PrattInfix::Neither`](crate::parser::PrattInfix) | powers `> power`, then refuses a second **infix** operator of the same power | `a == b == c` fails with [`NonAssociativeChain`](crate::error::NonAssociativeChain) |
 
 **What "refuses" means, exactly.** Both engines raise the *same* error and leave the second
-operator on the input, unconsumed. The offset it carries is the **handback position** — the byte
-the surrounding grammar, or a recoverer, resumes reading from once the deciding read has been
-restored. That is a definition rather than an approximation of something else, and it is what
-makes the error usable for recovery: the offset you read is the offset a retry starts at.
+operator on the input, unconsumed. The offset it carries is the **handback position**, and that is
+one specific, checkable number: catch the error and
+[`InputRef::span().end()`](crate::InputRef::span) is the offset. Nothing before it is still
+available to you; everything from it onward is. That is what makes the error usable for recovery —
+the offset you read is the offset a retry starts at.
 
-For a grammar whose lexer skips whitespace — every example in this book, and the shape of the
-token-level engine always — that byte is the second operator's own start, because nothing sits
-between the two. For a grammar that *surfaces* trivia as tokens and whose
-[`ParsePrattRHS`](crate::parser::ParsePrattRHS) skips it before reading the operator, the handback
-returns the trivia as well, so the reported offset **precedes** the operator by however much the
-classifier would have skipped. The AST-level driver cannot report the operator's own head there:
+It is **not** the second operator's own start, and you should not read it as a pointer at the
+operator. Anything the handback also returned sits between the two: whitespace your lexer skipped,
+trivia *tokens* a [`ParsePrattRHS`](crate::parser::ParsePrattRHS) would have skipped, the gap
+inside a multi-token spelling (`not in`, `<>`), or a region a non-fatal lexer error was reported
+over. On `1 ; 2 ; 3` the offset is 5 and the repeated `;` is at 6. If you are rendering a caret,
+skip forward from the offset the way your own grammar would; if you are resuming a parse, start
+exactly there. The AST-level driver could not report the operator's head even in principle:
 finding it means running the classifier, and the driver has to decide the repeat before it may.
-(A multi-token spelling — `not in`, `<>` — is reported at its head and never its tail; the tail is
-neither the handback nor the operator's start.) And
+And
 [`NonAssociativeChain`](crate::error::NonAssociativeChain) is **returned** — never emitted, so a
 recording emitter cannot turn it back into a truncated success. It is *not* terminal, so a
 grammar that wants the tolerant reading asks for it explicitly, by wrapping the pratt parser in

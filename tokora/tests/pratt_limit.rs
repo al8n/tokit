@@ -13,11 +13,17 @@
 //! * **R2 — the non-associative contract.** A second same-power `PrattInfix::Neither` operator in
 //!   one chain is a **syntax error** (`NonAssociativeChain`, non-terminal, operator left on the
 //!   input), not a place to stop. Both engines, same trigger. The offset both report is the
-//!   **handback position** — where the surrounding grammar resumes — which for a trivia-less
-//!   grammar is also the operator's own head, and for a trivia-surfacing one is strictly before
-//!   it. The last section of this file is where that distinction is measured; every cell above it
-//!   runs on `common::TestLexer`, which skips whitespace at the lexer level and so cannot tell
-//!   the two definitions apart.
+//!   **handback position**, and that is one specific number: `InputRef::span().end()` after the
+//!   error comes back — the committed frontier the input was restored (typed engine) or parked
+//!   (token engine) to. Every offset cell here reads that frontier and asserts `at == frontier`,
+//!   so the claim is a measured identity rather than a literal that happens to match.
+//!
+//!   It is deliberately **not** "the offending operator's head", and the two differ whenever
+//!   anything the caller is also handed back sits between them: whitespace the lexer skips, trivia
+//!   tokens a `ParsePrattRHS` skips, the gap inside a multi-token operator, or a region a
+//!   non-fatal lexer error was reported over. This file has one fixture per shape, and each pins
+//!   the identity against the position the operator actually starts at, so a future edit that
+//!   "corrects" the offset to the head reds with a reason.
 //!
 //! # Termination defects do not fail; they hang or abort
 //!
@@ -337,12 +343,24 @@ where
   }
 }
 
-/// `(the offset the trip reported, the start of the token the surrounding grammar is handed)`.
-type TripAlignment = (usize, Option<usize>);
+/// What every offset cell in this file measures, in the order it must be measured:
+///
+/// `(the offset the trip reported, the committed frontier the input was handed back at, the start
+/// of the very next token the surrounding grammar reads)`.
+///
+/// The middle field is the contract. `NonAssociativeChain::offset` is *defined* as the position
+/// the input was handed back at, so the claim a cell makes is `at == frontier` — and the frontier
+/// is **read**, from `InputRef::span().end()`, never assumed. The third field is the observable
+/// that kept drifting away from it: three review rounds derived the offset from something near the
+/// first token a scan can produce, and trivia, a multi-token operator's gap and a skipped lexer
+/// error each pushed that token past the position the caller was actually handed.
+///
+/// The frontier is read **before** the token, because reading a token moves both.
+type Resumption = (usize, usize, Option<usize>);
 
 fn two_token_probe<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
-) -> Result<TripAlignment, LimErr>
+) -> Result<Resumption, LimErr>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
@@ -352,18 +370,50 @@ where
     Err(LimErr::NonAssoc { at }) => at,
     Err(other) => panic!("expected the non-associative chain; got {other:?}"),
   };
-  Ok((at, inp.next()?.map(|t| t.span().start())))
+  let frontier = inp.span().end();
+  Ok((at, frontier, inp.next()?.map(|t| t.span().start())))
 }
 
 fn prefilled_two_token_probe<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
-) -> Result<TripAlignment, LimErr>
+) -> Result<Resumption, LimErr>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
 {
   let _ = inp.peek::<U4>()?;
   two_token_probe(inp)
+}
+
+/// The ladder's own [`rhs`] classifier, driven to a trip, reporting a [`Resumption`].
+///
+/// Used by the plain chain, by the lexer-error fixture — which differs only in its source and its
+/// emitter — and by both engines' parity cell.
+fn typed_resumption_probe<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<Resumption, LimErr>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+{
+  let at = match pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp) {
+    Ok(tree) => panic!("a repeated `;` must be refused; got Ok({tree})"),
+    Err(LimErr::NonAssoc { at }) => at,
+    Err(other) => panic!("expected the non-associative chain; got {other:?}"),
+  };
+  let frontier = inp.span().end();
+  Ok((at, frontier, inp.next()?.map(|t| t.span().start())))
+}
+
+fn prefilled_typed_resumption_probe<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<Resumption, LimErr>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+{
+  let _ = inp.peek::<U4>()?;
+  typed_resumption_probe(inp)
 }
 
 thread_local! {
@@ -524,6 +574,30 @@ where
   }
 }
 
+/// The token engine's twin of [`typed_resumption_probe`]: it parks the operator instead of rolling
+/// a probe back, so this is where the two engines' *definitions* of the handback position are
+/// compared against each other rather than each against itself.
+fn token_resumption_probe<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<Resumption, LimErr>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter:
+    Emitter<'inp, TestLexer<'inp>, Error = LimErr> + PrattEmitter<'inp, TestLexer<'inp>>,
+{
+  let at = match inp.pratt::<_, _, _, i64, Power>(
+    tok_fold_prefix::<Ctx::Emitter>,
+    tok_fold_infix::<Ctx::Emitter>,
+    tok_fold_postfix::<Ctx::Emitter>,
+  ) {
+    Ok(out) => panic!("a repeated `;` must be refused; got Ok({out:?})"),
+    Err(LimErr::NonAssoc { at }) => at,
+    Err(other) => panic!("expected the non-associative chain; got {other:?}"),
+  };
+  let frontier = inp.span().end();
+  Ok((at, frontier, inp.next()?.map(|t| t.span().start())))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Harness
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -581,8 +655,8 @@ fn right_chain(depth: usize) -> String {
 // R2 — the non-associative contract
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The ladder-top case, typed: `1 ; 2 ; 3` folds once and then **fails** on the second `;`,
-/// which is handed back unconsumed at its own offset.
+/// The ladder-top case, typed: `1 ; 2 ; 3` folds once and then **fails** on the second `;`, which
+/// is handed back unconsumed.
 ///
 /// Before this contract landed the same input returned `Ok(("(1;2)", 2 tokens left))`.
 #[test]
@@ -593,8 +667,9 @@ fn typed_repeat_at_the_top_level_is_rejected_and_hands_the_operator_back() {
     .unwrap();
   assert_eq!(
     got,
-    Err(LimErr::NonAssoc { at: 6 }),
-    "the second `;` sits at offset 6 and is rejected there"
+    Err(LimErr::NonAssoc { at: 5 }),
+    "the input is handed back at 5 — the end of the `2` the expression committed — and that is \
+     what the offset names. The second `;` starts at 6, one skipped space further on"
   );
 }
 
@@ -611,35 +686,67 @@ fn typed_repeat_under_an_enclosing_operator_is_rejected_not_reassociated() {
     .unwrap();
   assert_eq!(
     got,
-    Err(LimErr::NonAssoc { at: 10 }),
-    "the second `;` is at offset 10; re-associating it across the `=` is the misparse this pins"
+    Err(LimErr::NonAssoc { at: 9 }),
+    "the input is handed back at 9, the end of the committed `2`; re-associating the second `;` \
+     across the `=` is the misparse this pins"
   );
 }
 
-/// The token engine, same two inputs, same offsets: the parity the contract requires.
+/// The token engine, same two inputs, same offsets — and the parity now rests on both engines
+/// answering the *same question* rather than on two mechanisms coinciding.
 ///
-/// **Scope, stated rather than assumed: this is parity over a TRIVIA-LESS grammar.** `TestLexer`
-/// carries `skip r"[ \t\r\n]+"`, so whitespace never becomes a token and the handback position —
-/// which is what both engines report, see `NonAssociativeChain` — is also the operator's own head
-/// in both. The cell does **not** cover, and no cell could, a grammar that surfaces trivia: the
-/// token engine's classifier is a pure function of one token and ends the expression on the first
-/// trivia token it sees, so there is no such input on which both engines reach a trip and could
-/// disagree. [`the_token_engine_ends_the_expression_at_the_first_trivia_token`] pins that half,
-/// and [`a_trivia_skipping_classifier_is_named_at_the_handback_not_at_the_operator`] pins what
-/// the typed engine reports where the token engine cannot follow.
+/// The two hand back by different means: the typed driver rolls a probe transaction back, the
+/// token driver parks the classified token. Neither reports what it did — both report where the
+/// input ended up, `InputRef::span().end()`, and that is the same number on the same input because
+/// neither engine committed the operator. The cell reads that frontier out of both and asserts the
+/// whole triple is equal, so a change to either mechanism that moved one engine's answer reds here
+/// naming which column drifted.
+///
+/// **What the two engines' answers are NOT is the parked/rolled-back operator's own start.** On
+/// `1 ; 2 ; 3` that is 6, and both report 5: `TestLexer` carries `skip r"[ \t\r\n]+"`, so the
+/// space at 5 is lexed away and belongs to neither the committed expression nor the operator. This
+/// is the same over-reach the trivia and lexer-error fixtures below measure at a larger scale, and
+/// it is visible even here, on the plainest possible input.
+///
+/// **Scope, stated rather than assumed.** The engines cannot be compared on a *trivia-surfacing*
+/// grammar at all: the token engine's classifier is a pure function of one token and ends the
+/// expression on the first trivia token it sees, so there is no such input on which both reach a
+/// trip. [`the_token_engine_ends_the_expression_at_the_first_trivia_token`] pins that half, and
+/// [`a_trivia_skipping_classifier_is_named_at_the_handback_not_at_the_operator`] pins what the
+/// typed engine reports where the token engine cannot follow.
 #[test]
 fn token_repeat_is_rejected_at_the_same_offsets_as_the_typed_engine() {
-  let top: TokOutcome = Parser::with_context(fatal_ctx())
-    .apply(token_probe)
-    .parse_str("1 ; 2 ; 3")
-    .unwrap();
-  assert_eq!(top, Err(LimErr::NonAssoc { at: 6 }));
+  for (src, want) in [
+    ("1 ; 2 ; 3", (5usize, 5usize, Some(6usize))),
+    ("7 = 1 ; 2 ; 3", (9, 9, Some(10))),
+  ] {
+    let typed: Resumption = Parser::with_context(fatal_ctx())
+      .apply(typed_resumption_probe)
+      .parse_str(src)
+      .unwrap();
+    let token: Resumption = Parser::with_context(fatal_ctx())
+      .apply(token_resumption_probe)
+      .parse_str(src)
+      .unwrap();
 
-  let nested: TokOutcome = Parser::with_context(fatal_ctx())
-    .apply(token_probe)
-    .parse_str("7 = 1 ; 2 ; 3")
-    .unwrap();
-  assert_eq!(nested, Err(LimErr::NonAssoc { at: 10 }));
+    assert_eq!(
+      typed, token,
+      "the two engines must report the same offset AND land on the same position, on {src}"
+    );
+    assert_eq!(typed, want, "on {src}");
+
+    let (at, frontier, next) = typed;
+    assert_eq!(
+      at, frontier,
+      "THE CONTRACT: the offset is the position the input was handed back at, on {src}"
+    );
+    assert_ne!(
+      Some(at),
+      next,
+      "and it is NOT the repeated operator's own start — the skipped space sits between them, on \
+       {src}"
+    );
+  }
 }
 
 /// The trigger is the **power**, not the newcomer's associativity: a `Left` operator at the
@@ -650,13 +757,13 @@ fn a_left_operator_at_the_same_power_trips_the_chain() {
     .apply(typed_probe)
     .parse_str("1 ; 2 + 3")
     .unwrap();
-  assert_eq!(typed, Err(LimErr::NonAssoc { at: 6 }));
+  assert_eq!(typed, Err(LimErr::NonAssoc { at: 5 }));
 
   let token: TokOutcome = Parser::with_context(fatal_ctx())
     .apply(token_probe)
     .parse_str("1 ; 2 + 3")
     .unwrap();
-  assert_eq!(token, Err(LimErr::NonAssoc { at: 6 }));
+  assert_eq!(token, Err(LimErr::NonAssoc { at: 5 }));
 }
 
 /// A **lower-power** infix ends the chain: the latch frame folds it, clears the latch, and the
@@ -720,8 +827,9 @@ fn the_latch_survives_a_postfix_fold() {
     .unwrap();
   assert_eq!(
     tripped,
-    Err(LimErr::NonAssoc { at: 8 }),
-    "the postfix left the latch alone, so the `;` after it is still a repeat"
+    Err(LimErr::NonAssoc { at: 7 }),
+    "the postfix left the latch alone, so the `;` after it is still a repeat — handed back at 7, \
+     the end of the `/` this expression did commit"
   );
 }
 
@@ -735,80 +843,172 @@ fn a_tighter_operator_inside_the_right_operand_does_not_clear_the_latch() {
     .apply(typed_probe)
     .parse_str("1 ; 2 * 3 ; 4")
     .unwrap();
-  assert_eq!(got, Err(LimErr::NonAssoc { at: 10 }));
+  assert_eq!(got, Err(LimErr::NonAssoc { at: 9 }));
 }
 
-/// A prefilled lookahead window changes nothing — not the outcome, not the offset.
+/// A prefilled lookahead window changes nothing — not the outcome, not the offset, not the
+/// position the input is handed back at.
 #[test]
 fn the_repeat_offset_is_the_same_with_a_prefilled_cache() {
-  let empty: Outcome = Parser::with_context(fatal_ctx())
-    .apply(typed_probe)
+  let empty: Resumption = Parser::with_context(fatal_ctx())
+    .apply(typed_resumption_probe)
     .parse_str("7 = 1 ; 2 ; 3")
     .unwrap();
-  let prefilled: Outcome = Parser::with_context(fatal_ctx())
-    .apply(prefilled_typed_probe)
+  let prefilled: Resumption = Parser::with_context(fatal_ctx())
+    .apply(prefilled_typed_resumption_probe)
     .parse_str("7 = 1 ; 2 ; 3")
     .unwrap();
   assert_eq!(empty, prefilled);
-  assert_eq!(prefilled, Err(LimErr::NonAssoc { at: 10 }));
+  assert_eq!(prefilled, (9, 9, Some(10)));
+  let (at, frontier, _) = prefilled;
+  assert_eq!(at, frontier, "THE CONTRACT, under a prefilled cache too");
 }
 
-/// **The offset a trip reports is the offset the handback leaves the input at — for an operator
-/// of any width.** Measured, not assumed.
+/// **Round 1's shape, re-verified against the settled contract: a multi-token operator.**
 ///
 /// `1 < > 2 < > 3` spells one non-associative operator with two tokens:
 ///
 /// ```text
 ///   1 < > 2 < > 3
 ///   0 2 4 6 8 10 12
+///        ^ 7: where the handback leaves the input, and what the trip reports
 /// ```
 ///
-/// The second `<>` is the repeat. Its head is at **8** and its tail at **10**, and the deciding
-/// read is handed back whole, so the surrounding grammar's next token is the `<` at 8. The two
-/// numbers are asserted against each other as well as against their literals, because it is their
-/// *relationship* that is the contract: a driver that named the last token the classifier consumed
-/// reported 10 here while handing the input back at 8, and every one-token cell above stayed green
-/// through it — 10 and 8 coincide whenever the operator is one token wide.
+/// The second `<>` is the repeat: head at **8**, tail at **10**. Three numbers are therefore in
+/// play on one input, and the fixture exists because a one-token operator collapses them into
+/// one — which is why every cell above it stayed green through a driver that named the wrong one.
+/// The tail (10) is what a position read *after* the classifier names, and no caller is ever
+/// handed it. The head (8) is what a position read *before* the classifier named, and it is one
+/// skipped space past where the input actually is.
+///
+/// What the trip reports is **7**: the end of the `2` this expression committed, which is where
+/// the probe's rollback puts the input back. The cell asserts `at == frontier` — the identity that
+/// is the contract — and `at != head`, so an edit that "corrects" the offset to the operator reds
+/// with a reason rather than a bare literal mismatch.
 ///
 /// Run twice, because a trip offset that moves with how much has been peeked has bitten this
 /// project before: the empty-cache and prefilled-cache runs must be equal, not merely both
-/// "reasonable". The peek the driver takes to learn the position *is* a cache fill, and a token's
-/// own span does not depend on when it entered the cache.
+/// "reasonable".
 #[test]
 fn a_multi_token_repeat_is_named_where_the_handback_leaves_the_input() {
   const SRC: &str = "1 < > 2 < > 3";
 
-  let empty: TripAlignment = Parser::with_context(fatal_ctx())
+  let empty: Resumption = Parser::with_context(fatal_ctx())
     .apply(two_token_probe)
     .parse_str(SRC)
     .unwrap();
-  let prefilled: TripAlignment = Parser::with_context(fatal_ctx())
+  let prefilled: Resumption = Parser::with_context(fatal_ctx())
     .apply(prefilled_two_token_probe)
     .parse_str(SRC)
     .unwrap();
 
   assert_eq!(
     empty, prefilled,
-    "the trip offset and the handback must not move with how much has been peeked"
+    "neither the trip offset nor the handback may move with how much has been peeked"
   );
   assert_eq!(
     empty,
-    (8, Some(8)),
-    "the repeated `<>` starts at 8, and 8 is where the surrounding grammar resumes; naming the \
-     operator's tail (10) would describe a position the caller was never handed"
+    (7, 7, Some(8)),
+    "the input comes back at 7; the repeated `<>` starts at 8 and ends at 10, and neither is where \
+     the caller was left"
   );
-  let (at, front) = empty;
+
+  let (at, frontier, head) = empty;
   assert_eq!(
+    at, frontier,
+    "THE CONTRACT: `NonAssociativeChain::offset` is `InputRef::span().end()` after the handback"
+  );
+  assert_ne!(
     Some(at),
-    front,
-    "`NonAssociativeChain::offset` is the position the input was handed back at, so it must equal \
-     the start of the very next token the surrounding grammar reads"
+    head,
+    "and it is not the operator's head: naming 8 would skip the byte at 7 that the caller was \
+     handed back, and naming the tail (10) would skip the operator's own first token"
   );
 }
 
-/// **The reported offset is the handback position, and under a trivia-surfacing grammar that is
-/// strictly before the operator.** Measured, and pinned as the definition rather than as a
-/// tolerated deviation from one.
+/// **Round 3's shape: a non-fatal lexer error between the fold and the repeat.**
+///
+/// This is the fixture that separates "the position the input was handed back at" from "the start
+/// of the first token a scan can produce", on a grammar with no trivia tokens and a one-token
+/// operator — the two shapes the earlier fixtures used to expose the gap. Nothing above it can:
+/// trivia is a *token*, and a skipped lexer error is not.
+///
+/// ```text
+///   1 ; 2 @ ; 3
+///   0 2 4 6 8 10
+///         ^ 6..7: not a token at all — a lexer error, emitted and stepped over
+/// ```
+///
+/// The scan skips 6..7, emits the error, and produces the `;` at 8. So a driver deriving its
+/// offset from that token reports **8** — three bytes past where its own rollback puts the input,
+/// and past a region a recoverer resuming at 8 would silently swallow together with the
+/// diagnostic that was just rewound off the log. Measured against the pre-fix driver, both cache
+/// states reported `(8, 5, Some(8))`: `at` and the frontier disagreed by exactly the error's
+/// region plus its surrounding spaces.
+///
+/// The emitter must be a **recording** one for the shape to exist at all — a `Fatal` emitter turns
+/// the lexer error into the parse's error and no repeat is ever reached — and the log is asserted
+/// too: the error is rewound with the probe and re-emitted exactly once when the caller reads
+/// across it again, which is the dedup watermark travelling in the checkpoint.
+#[test]
+fn a_skipped_lexer_error_before_the_repeat_does_not_move_the_offset() {
+  const SRC: &str = "1 ; 2 @ ; 3";
+
+  let mut empty_emitter = Verbose::<LimErr>::new();
+  let empty: Resumption = Parser::with_context((
+    &mut empty_emitter,
+    tokora::cache::DefaultCache::<TestLexer<'_>>::default(),
+  ))
+  .apply(typed_resumption_probe)
+  .parse_str(SRC)
+  .unwrap();
+
+  let mut prefilled_emitter = Verbose::<LimErr>::new();
+  let prefilled: Resumption = Parser::with_context((
+    &mut prefilled_emitter,
+    tokora::cache::DefaultCache::<TestLexer<'_>>::default(),
+  ))
+  .apply(prefilled_typed_resumption_probe)
+  .parse_str(SRC)
+  .unwrap();
+
+  assert_eq!(
+    empty, prefilled,
+    "the prefill lexes across the error before the parse starts, so it also sets the dedup \
+     watermark; neither the offset nor the handback may move with it"
+  );
+  assert_eq!(
+    empty,
+    (5, 5, Some(8)),
+    "the input comes back at 5, the end of the committed `2`; the first token a scan can produce \
+     from there is the `;` at 8, and the bytes between them include the lexer error"
+  );
+
+  let (at, frontier, next) = empty;
+  assert_eq!(
+    at, frontier,
+    "THE CONTRACT: `NonAssociativeChain::offset` is `InputRef::span().end()` after the handback"
+  );
+  assert_ne!(
+    Some(at),
+    next,
+    "and it is NOT the first token a scan produces — that token sits past a lexer error the \
+     handback returned; reporting 8 would name a position the caller was never left at and would \
+     invite a recoverer to skip the error's own region"
+  );
+
+  for (label, emitter) in [("empty", &empty_emitter), ("prefilled", &prefilled_emitter)] {
+    let log: Vec<LimErr> = emitter.errors().values().flatten().cloned().collect();
+    assert_eq!(
+      log,
+      std::vec![LimErr::Lex],
+      "the lexer error is reported exactly once on the {label}-cache run: rewound with the \
+       aborted probe, then re-emitted when the caller read across it again"
+    );
+  }
+}
+
+/// **Round 2's shape, re-verified: a classifier that skips trivia tokens.**
 ///
 /// [`trivia_rhs`] skips whitespace *tokens* before it reads the `;` — the shape a CST-style
 /// grammar has, and one `ParsePrattRHS` explicitly permits. On `1 ; 2   ; 3`:
@@ -821,13 +1021,14 @@ fn a_multi_token_repeat_is_named_where_the_handback_leaves_the_input() {
 ///
 /// The driver decides the repeat *before* the classifier runs — it has to, because running the
 /// classifier is what the transaction rules forbid at that point — so it cannot know that 5..8
-/// would be skipped, and reports **5**, the position its probe restores to. The caller is handed
-/// back exactly that: the next token it reads verbatim is the whitespace at 5, and the operator's
-/// own head is at 8, one trivia skip further on.
+/// would be skipped, and reports **5**, the position its probe restores to. This grammar surfaces
+/// whitespace as a token, so 5 is also where the next token starts, and the operator's own head is
+/// at 8, one trivia skip further on.
 ///
-/// The cell asserts the *relationship*, not just the literals: `at == handback`. That equality is
-/// the contract — a recoverer resumes where the error says it will — and it is the one claim that
-/// survives any classifier shape, because both numbers come from the same rollback target.
+/// This is the fixture on which the three columns pull furthest apart, and the one that makes the
+/// contract's wording load bearing: `at == frontier` holds, `at == the next token's start` also
+/// holds *here* but is the coincidence the lexer-error fixture below breaks, and `at != the
+/// operator's head` is the claim a future "fix" would violate.
 ///
 /// Both cache states, for the reason the multi-token cell runs both: an offset that moves with
 /// how much has been peeked has bitten this project before.
@@ -850,22 +1051,26 @@ fn a_trivia_skipping_classifier_is_named_at_the_handback_not_at_the_operator() {
   );
   assert_eq!(
     empty,
-    (5, Some(5), Some(8)),
+    (5, 5, Some(5), Some(8)),
     "the trip names 5 — the whitespace the handback returns — while the repeated `;` starts at 8"
   );
 
-  let (at, handback, operator_head) = empty;
+  let (at, frontier, next, operator_head) = empty;
+  assert_eq!(
+    at, frontier,
+    "THE CONTRACT: `NonAssociativeChain::offset` is `InputRef::span().end()` after the handback"
+  );
   assert_eq!(
     Some(at),
-    handback,
-    "THE CONTRACT: `NonAssociativeChain::offset` is the position the input was handed back at, so \
-     it must equal the start of the very next token the surrounding grammar reads"
+    next,
+    "and on THIS grammar the next token starts there too, because the whitespace is a token; that \
+     coincidence is what made the weaker definition look right for two rounds"
   );
   assert_ne!(
     Some(at),
     operator_head,
-    "and it is NOT the operator's head under this grammar — a driver that reported 8 here would \
-     be naming a byte the caller was never handed back to"
+    "but it is NOT the operator's head — a driver that reported 8 here would be naming a byte the \
+     caller was never handed back to"
   );
 }
 
@@ -915,9 +1120,8 @@ fn the_token_engine_ends_the_expression_at_the_first_trivia_token() {
 /// `pratt_txn_retention.rs`'s stall cells use. **Debug**: the wrapper's "consumed nothing"
 /// assertion must fire, which the previous ordering never reached. **Release**: there is no
 /// assertion, so the returned error must be the terminal end-of-RHS at the position the report
-/// failed to advance past. Before the reorder this returned `Err(NonAssoc { at: 4 })` in both —
-/// non-terminal, and naming the start of the *previous* token, since a zero-width report leaves
-/// the committed span on whatever the last real read consumed.
+/// failed to advance past. Before the reorder this returned a non-terminal `NonAssoc` in both,
+/// describing the grammar's bug as the user's bad input.
 #[test]
 #[cfg_attr(debug_assertions, should_panic(expected = "consumed nothing"))]
 fn a_zero_width_same_power_report_after_a_neither_fold_is_the_stall_not_the_chain() {
@@ -983,7 +1187,7 @@ fn a_recording_emitter_sees_the_repeat_as_an_error_and_keeps_its_earlier_log() {
   .unwrap();
   assert_eq!(
     got,
-    Err(LimErr::NonAssoc { at: 6 }),
+    Err(LimErr::NonAssoc { at: 5 }),
     "returned, never emitted: a recording emitter cannot turn the repeat into a success"
   );
 
@@ -1010,8 +1214,8 @@ fn an_explicit_recovery_may_spend_the_repeat() {
   {
     assert_eq!(
       err,
-      LimErr::NonAssoc { at: 6 },
-      "the recoverer is handed the repeat itself"
+      LimErr::NonAssoc { at: 5 },
+      "the recoverer is handed the repeat itself, naming the position it may resume from"
     );
     Ok(String::from("<recovered>"))
   }
@@ -1195,9 +1399,10 @@ where
   Ok(format!("({operand}{})", op.into_data()))
 }
 
-/// `(the offset the trip reported, the start of the very next token — trivia included — the
-/// surrounding grammar is handed, the start of the next **non-trivia** token after it)`.
-type TriviaTrip = (usize, Option<usize>, Option<usize>);
+/// [`Resumption`] plus one column this grammar alone can supply: `(at, frontier, next token —
+/// trivia included, the start of the next **non-trivia** token after it)`. The last is the
+/// operator's own head, reached the way this grammar's own classifier would reach it.
+type TriviaTrip = (usize, usize, Option<usize>, Option<usize>);
 
 fn trivia_probe<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TriviaLexer<'inp>, Ctx>,
@@ -1219,12 +1424,14 @@ where
     Err(LimErr::NonAssoc { at }) => at,
     Err(other) => panic!("expected the non-associative chain; got {other:?}"),
   };
-  // The raw resumption point: whatever token a caller reading the input verbatim receives first.
+  // The position the input was handed back at — read, not assumed.
+  let frontier = inp.span().end();
+  // The first token a caller reading the input verbatim receives.
   let handback = inp.next()?.map(|t| t.span().start());
   // The operator's own head, reached the way this grammar's own classifier would reach it.
   inp.skip_while(|t| t.is_trivia())?;
   let operator_head = inp.next()?.map(|t| t.span().start());
-  Ok((at, handback, operator_head))
+  Ok((at, frontier, handback, operator_head))
 }
 
 fn prefilled_trivia_probe<'inp, Ctx>(

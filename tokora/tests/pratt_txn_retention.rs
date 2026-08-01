@@ -916,9 +916,10 @@ handback_err_cell!(
   "1 ^ 1 ^ 1",
   Some((6usize, 7usize)),
   "the second non-associative operator at the same power is refused, and the read that reported \
-   it is rolled back: the second `^` at offset 6 is parked in front of the surrounding grammar, \
-   which is the position the returned `NonAssociativeChain` names. A driver that committed its \
-   probe before this check would eat it"
+   it is rolled back: the second `^` at offset 6 is sitting in front of the surrounding grammar. \
+   A driver that committed its probe before this check would eat it. (What the returned \
+   `NonAssociativeChain` NAMES is the restore target — the committed frontier at 5 — not this \
+   token; see `pratt_limit.rs`, which is where that is measured.)"
 );
 
 // ═══════════════════════════════════════════════════════════════════════════════
