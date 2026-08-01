@@ -108,13 +108,27 @@ pub type DefaultCache<'a, L> =
 /// those is a `&self` read that changes no observable — so a cache that *counts* its calls is
 /// measuring the input layer, not the token stream.
 ///
-/// A counting cache is harmless while the count stays inside it. It stops being harmless the
-/// moment the count reaches a **predicate or closure the same caller supplies** — a
-/// [`skip_while`](crate::InputRef::skip_while) predicate, a
-/// [`peek_head_map`](crate::InputRef::peek_head_map) `f` — because then a measurement of the input
-/// layer becomes a parse decision, and which operations ran decides which tokens are consumed.
-/// Those methods state that as a **precondition on the caller**; this paragraph is the same rule
-/// written on the trait that would be doing the counting.
+/// The positive form of that, and the one to implement against: **make every method inert** — let
+/// it do only what its own law above says it does, and always return normally. An inert cache
+/// cannot tell one contract-equal choice of operations from another, so every such choice is free.
+/// That is the same rule [`skip_while`](crate::InputRef::skip_while) and
+/// [`peek_head_map`](crate::InputRef::peek_head_map) state as a condition on the caller, seen from
+/// the end that implements it.
+///
+/// Two ways a cache stops being inert, and what each costs:
+///
+/// * **it counts.** Harmless while the count stays inside the cache. It stops being harmless the
+///   moment the count reaches a **predicate or closure the same caller supplies** — a `skip_while`
+///   predicate, a `peek_head_map` `f` — because then a measurement of the input layer becomes a
+///   parse decision, and which operations ran decides which tokens are consumed;
+/// * **it unwinds.** A method with a reachable panic path turns *which operations an input path
+///   chose* into control flow. `skip_while` over a resident head that has nothing to skip reads
+///   the head with [`front`](Cache::front) where the scan it replaces would have called
+///   [`pop_front`](Cache::pop_front) and [`push_front`](Cache::push_front); if either of those can
+///   panic, one route unwinds and the other returns `Ok(())`. The value guarantees on those two
+///   methods are not made to a caller whose cache can do that.
+///
+/// Both are the same rule written on the trait that would be doing it.
 pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// The options for creating a new cache.
   type Options;

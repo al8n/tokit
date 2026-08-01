@@ -342,15 +342,32 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// behaviour on the **number** or the **identity** of the marks a parse takes is outside this
   /// contract, and different versions of this crate may legitimately differ.
   ///
-  /// This is not only a caveat about an emitter's own bookkeeping. If such an emitter shares state
-  /// with a **predicate or closure the same caller supplies** — a
-  /// [`skip_while`](crate::InputRef::skip_while) predicate, a
-  /// [`peek_head_map`](crate::InputRef::peek_head_map) `f` — then the count leaks into a decision,
-  /// and a mark this crate did or did not take stops being a private matter: it becomes a
-  /// different skip, a different committed cursor, different tokens consumed. Those methods
-  /// therefore state the same rule as a **precondition on the caller**, and it is the same rule as
-  /// this one seen from the other end. Keep an emitter's behaviour a function of what it is
-  /// *emitted*, not of how many marks arrived, and the question never comes up.
+  /// The positive form of that, and the one to build against: **make this method inert** — let it
+  /// do only what this contract says it does (return a mark, and register whatever bookkeeping the
+  /// matching settle will consume), and always return normally. An inert `checkpoint` cannot tell
+  /// whether an input path took a cycle it did not need, so every such choice is free. That is the
+  /// same rule [`skip_while`](crate::InputRef::skip_while) and
+  /// [`peek_head_map`](crate::InputRef::peek_head_map) state as a condition on the caller, seen
+  /// from the end that implements it.
+  ///
+  /// Two ways an emitter stops being inert, and what each costs:
+  ///
+  /// * **it counts.** Harmless while the count stays inside the emitter. The moment it is shared
+  ///   with a **predicate or closure the same caller supplies** — a `skip_while` predicate, a
+  ///   `peek_head_map` `f` — the count leaks into a decision, and a mark this crate did or did not
+  ///   take stops being a private matter: it becomes a different skip, a different committed
+  ///   cursor, different tokens consumed;
+  /// * **it unwinds.** The fail-atomicity clause above *permits* that, and keeps the emitter's own
+  ///   state sound when it happens — but it does not make the unwind invisible, because whether
+  ///   this method is called at all is a route the crate may change. `skip_while` over a resident
+  ///   head that has nothing to skip returns `Ok(())` where the scan it replaces would have
+  ///   propagated your panic. The two clauses live at different levels and do not conflict: this
+  ///   one is about the emitter's state after an unwind, that one is about the parse. If your
+  ///   `checkpoint` has a reachable panic path, the value guarantees on those two methods are not
+  ///   made to you.
+  ///
+  /// Keep an emitter's behaviour a function of what is *emitted* — not of how many marks arrived,
+  /// and not of whether taking one could fail — and the question never comes up.
   #[inline(always)]
   fn checkpoint(&self) -> u64 {
     0

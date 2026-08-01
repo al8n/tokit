@@ -43,6 +43,14 @@
 //! instrumented lexer, emitter and cache — and pins both columns, because a claim about a
 //! difference is only worth what its other side is worth.
 //!
+//! Measuring it is half the job. The other half is the **condition** under which running less
+//! caller code is nevertheless invisible, and the last four cells build the callers who break it:
+//! two whose predicate or closure reads the input layer, and two whose input-layer `Clone`
+//! unwinds. The condition is written on the two methods as a property of the caller — *inert*
+//! input-layer callbacks, and a predicate that is a *function of what it is handed* — rather than
+//! as a list of the differences it excludes, so that satisfying it is something a caller checks
+//! once about its own types instead of a list it has to keep up with.
+//!
 //! Neither comparison needs an ablation. `skip_while(|_| false)` over a resident head is precisely
 //! `skip_until::<SkipWhile>` with a predicate that stops on the first token, and `peek_head_map`
 //! over a resident head is precisely `peek::<U1>`'s `want == 0` arm — so both routes are reachable
@@ -619,9 +627,16 @@ thread_local! {
   static SPAN_CLONE_BOMB: Cell<bool> = const { Cell::new(false) };
   static STATE_CLONE_BOMB: Cell<bool> = const { Cell::new(false) };
   static CHECKPOINT_BOMB: Cell<bool> = const { Cell::new(false) };
+  /// While set to `Some(n)`, an `L::Offset::clone` of exactly the offset `n` panics — see
+  /// [`arm_offset_clone_bomb_at`] for why this one is keyed by value where the others are not.
+  static OFFSET_CLONE_BOMB_AT: Cell<Option<usize>> = const { Cell::new(None) };
   /// Set by a bomb immediately before it panics — the payload-executed witness that tells a cell
   /// which never reached the armed step apart from one whose armed step did not fire.
   static BOMB_FIRED: Cell<bool> = const { Cell::new(false) };
+  /// The caller's own tally of the caller's own calls. Written by the predicate or closure in the
+  /// cells at the foot of this file and read only once the call has returned or unwound — which
+  /// is the shape the contract's precondition explicitly permits, and the reason those cells bite.
+  static CALLER_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn note(effect: Effect) {
@@ -688,6 +703,49 @@ fn fire(bomb: &'static std::thread::LocalKey<Cell<bool>>) -> bool {
   false
 }
 
+/// Arms a panicking `L::Offset::clone` for **one particular offset value**.
+///
+/// The other three bombs are armed wholesale, because the step each guards is taken on exactly one
+/// of the two routes. This one cannot be: with the `trace` feature on, the head read's resident
+/// route clones the *frontier* offset to build the hook's source preview, so a bomb that fired on
+/// every offset clone would unwind both routes before the caller's closure and measure nothing.
+/// Keying it to the **committed span's end** — the offset the general route hoists above the fill
+/// for its terminal error, and the only one the cell below is about — isolates that one step in a
+/// `trace` build and a non-`trace` build alike. A `Clone` that unwinds for some values and not
+/// others is ordinary Rust; nothing here needs it to be more contrived than that.
+fn arm_offset_clone_bomb_at(offset: usize) {
+  BOMB_FIRED.with(|c| c.set(false));
+  OFFSET_CLONE_BOMB_AT.with(|c| c.set(Some(offset)));
+}
+
+fn disarm_offset_clone_bomb() {
+  OFFSET_CLONE_BOMB_AT.with(|c| c.set(None));
+}
+
+fn fire_offset_bomb(offset: usize) -> bool {
+  if OFFSET_CLONE_BOMB_AT.with(Cell::get) == Some(offset) {
+    BOMB_FIRED.with(|c| c.set(true));
+    return true;
+  }
+  false
+}
+
+/// One call of the caller's own predicate or closure, recorded twice: into the ledger, so the
+/// cells can see *where* in the route it fell, and into the caller's own counter, so they can see
+/// how many times it ran when the route did not finish.
+fn caller_call() {
+  note(Effect::Caller);
+  CALLER_CALLS.with(|c| c.set(c.get() + 1));
+}
+
+fn reset_caller_calls() {
+  CALLER_CALLS.with(|c| c.set(0));
+}
+
+fn caller_calls() -> usize {
+  CALLER_CALLS.with(Cell::get)
+}
+
 // ── The instrumented lexer ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -696,6 +754,10 @@ struct LedgerOffset(usize);
 impl Clone for LedgerOffset {
   fn clone(&self) -> Self {
     note(Effect::OffsetClone);
+    assert!(
+      !fire_offset_bomb(self.0),
+      "the armed `L::Offset::clone` panics — a caller clone was reached"
+    );
     Self(self.0)
   }
 }
@@ -1558,22 +1620,36 @@ fn head_read_ledger_cold() -> std::vec::Vec<Effect> {
 // !!! NOTHING BELOW IS SUPPORTED BEHAVIOUR. !!!
 //
 // Everything above measures a difference in WHICH caller code each route runs, and concludes that
-// no *value* a caller can read back differs. That conclusion has a condition on it, and these two
-// cells are that condition made concrete: they build the caller the contract on `skip_while` and
-// on `peek_head_map` now explicitly EXCLUDES — one whose predicate or closure reads an
-// input-layer side effect — and show that for such a caller the divergence is not a call count
-// but a **different parse**: a different skip decision, a different committed cursor, different
-// tokens consumed, a different returned value.
+// no *value* a caller can read back differs. That conclusion has a condition on it, stated on
+// `skip_while` and on `peek_head_map` as two clauses about the caller rather than as a list of
+// exclusions:
 //
-// They exist so that the exclusion is a measured fact rather than a caveat nobody checked, and
+//   1. the caller's input-layer callbacks — the `Clone`/`Drop` of `L::Span`, `L::State` and
+//      `L::Offset`, the `Emitter` methods these paths reach, every `Cache` method, the `Lexer`
+//      and its `Source` — are INERT: each does only what its own contract says it does, always
+//      returns, and never unwinds;
+//   2. the caller's predicate or closure is a FUNCTION OF WHAT IT IS HANDED: it answers from the
+//      values of the `Spanned<&L::Token, &L::Span>` it receives, and from nothing else.
+//
+// The four cells below are those two clauses made concrete: each builds a caller that fails one
+// of them and shows that the failure is not a call count but a **different parse** — a different
+// skip decision, a different committed cursor, different tokens consumed, a different returned
+// value, or a different number of predicate calls surviving an unwind. Clause 2 fails in the
+// first two; clause 1 — the *non-unwinding* half — fails in the last two, and those two matter
+// most, because their callers satisfy clause 2 in full: a predicate that records only its own
+// calls observes no input-layer side effect at all, and still cannot be promised the same call
+// sequence once a caller `Clone` panics.
+//
+// They exist so that the condition is a measured fact rather than a caveat nobody checked, and
 // they pin a **documented precondition, not a behaviour**. No caller may rely on either column:
 // which route answers a given call is this crate's choice and may change between versions, so the
-// only thing a caller can do with the difference below is avoid being able to see it. `Clone` is
-// not required to be pure in Rust and `L::Span`, `L::State` and `L::Offset` are the caller's own
-// types, which is exactly why the precondition has to be written down instead of assumed.
+// only thing a caller can do with the difference below is meet the condition. `Clone` is not
+// required to be pure, total or non-unwinding in Rust, and `L::Span`, `L::State` and `L::Offset`
+// are the caller's own types, which is exactly why the condition has to be written down instead
+// of assumed.
 //
-// Both cells are also red against a build that runs the slow route: ablate either fast path and
-// its two columns collapse onto each other, and the `assert_ne!` that carries the finding fails.
+// All four are red against a build that runs the slow route: ablate either fast path and its two
+// columns collapse onto each other, and the `assert_ne!` that carries the finding fails.
 
 /// How many caller `Clone` calls the input layer has run since [`record`] started this ledger.
 ///
@@ -1825,5 +1901,215 @@ fn an_offset_clone_counting_f_can_change_the_value_peek_head_map_returns() {
     "and the difference is the single hoisted `L::Offset::clone`: the end offset the general \
      route takes for an end-of-input error that a resident head makes unreachable (fast={fast}, \
      general={general})"
+  );
+}
+
+// ── The other clause: a callback that UNWINDS, for a caller who observes nothing ───────────────
+//
+// The two cells above fail clause 2 — their predicate and their `f` read the input layer. The two
+// below satisfy clause 2 completely and fail clause 1 instead, in its non-unwinding half. That is
+// the sharper statement, and the one three rounds of narrowing kept missing: a caller can record
+// nothing but its own calls, answer from nothing but the token it was handed, and still see the
+// two routes disagree — because *whether the caller's code was reached at all* depends on where
+// in the route a panicking caller `Clone` sits.
+
+/// A predicate that observes nothing: it records its own call and accepts every token. Under
+/// clause 2 this caller is entirely in contract — it reads no clone count, no mark, no cache call.
+fn recording_accepting_pred(_t: Spanned<&LedgerTok, &LedgerSpan>) -> bool {
+  caller_call();
+  true
+}
+
+/// The same shape for the head read: `f` records its own call and returns nothing.
+fn recording_f(_head: Spanned<&LedgerTok, &LedgerSpan>) {
+  caller_call();
+}
+
+/// **Clause 1, the non-unwinding half, on `skip_while`.** A caller `Clone` that panics decides
+/// *how many times the predicate ran*, and the two routes answer differently.
+///
+/// The head is one the probe **accepts**, so this route asks `pred` and then enters the scan —
+/// where the frontier clone is armed. The scan it replaces clones the frontier pair before it asks
+/// anything, so the same armed clone fires before the first predicate call:
+///
+/// | route | order | predicate calls before the unwind |
+/// |---|---|---|
+/// | this one | `Cache::front`, `pred`, **`L::Span::clone` panics** | **1** |
+/// | the scan | **`L::Span::clone` panics** | **0** |
+///
+/// The predicate here reads nothing — it records its own calls and returns `true` — so it meets
+/// the "function of what it is handed" clause in full. What it fails is the *other* clause, and
+/// not even by its own doing: the `Clone` unwinds. Catch the unwind and the caller's retry state
+/// differs by one call between the routes, which is why the guarantee on the predicate call
+/// sequence is stated under a condition that says **non-unwinding** and not merely **pure**.
+///
+/// This is a **documented precondition, not a supported behaviour.** Neither column is a promise.
+/// Red against a build that runs the slow route: ablate the probe and both columns read 0.
+#[test]
+fn an_unwinding_caller_clone_leaves_the_predicate_with_a_different_call_count() {
+  // ── This route: the head is asked, and the armed clone comes after ──
+  let src = LedgerSrc("~ ab cd");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  record();
+  reset_caller_calls();
+  arm_bombs();
+  let fast = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    inp.skip_while(recording_accepting_pred)
+  }));
+  disarm_bombs();
+  let fast_ledger = recorded();
+  let fast_calls = caller_calls();
+  let fast_fired = bomb_fired();
+
+  assert!(
+    fast.is_err(),
+    "the probe accepts the head, so this route still enters the scan — whose frontier clone is \
+     armed. The fast path is not a claim that nothing can panic; it is a claim about ORDER"
+  );
+  assert!(
+    fast_fired,
+    "and it is the armed clone that panicked, not something else"
+  );
+  assert_eq!(
+    fast_ledger,
+    std::vec![Effect::CacheFront, Effect::Caller, Effect::SpanClone],
+    "the order is the whole finding: probe, predicate, THEN the clone that unwinds"
+  );
+  assert_eq!(
+    fast_calls, 1,
+    "so the predicate ran exactly once before the unwind"
+  );
+
+  // ── The scan it replaces: same stream, same residency, same predicate, opposite order ──
+  let scan_src = LedgerSrc("~ ab cd");
+  let mut scan_input = ledger_input(&scan_src);
+  let mut scan = scan_input.as_ref();
+  let _ = scan.peek::<U3>().unwrap();
+  record();
+  reset_caller_calls();
+  arm_bombs();
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = scan.skip_until::<SkipWhile, _, _>(|t| !recording_accepting_pred(t), || None, ());
+  }));
+  disarm_bombs();
+  let scan_ledger = recorded();
+  let scan_calls = caller_calls();
+
+  assert!(
+    caught.is_err() && bomb_fired(),
+    "the scan reaches the armed clone too — it is the same armed clone"
+  );
+  assert_eq!(
+    scan_ledger,
+    std::vec![Effect::SpanClone],
+    "but it is the FIRST caller step the scan takes, so nothing else got to run"
+  );
+  assert_eq!(scan_calls, 0, "and the predicate never ran at all");
+
+  assert_ne!(
+    fast_calls, scan_calls,
+    "one predicate call against none, from a predicate that observes nothing and a `Clone` that \
+     panics. A caller who catches the unwind and retries starts from different state depending on \
+     which route this crate took — which is why the value guarantees are conditioned on callbacks \
+     that do not unwind, and not only on callbacks that are pure"
+  );
+}
+
+/// **Clause 1, the non-unwinding half, on `peek_head_map`.** The same class on the head read, and
+/// here it decides not how often `f` ran but *whether it ran at all*.
+///
+/// The general route hoists `self.span().end()` above the fill — one `L::Offset::clone`, taken for
+/// a terminal error a resident head makes unreachable. Arm that clone to panic and the general
+/// route unwinds before `f`; this route never reads the offset, so `f` runs and the call returns
+/// `Ok(Some(_))`. One armed clone, one stream, one residency, and one route produces a value where
+/// the other produces a panic.
+///
+/// The bomb is keyed to that one offset value rather than to every offset clone, because under
+/// `trace` this route clones the frontier offset for the hook's preview — see
+/// [`arm_offset_clone_bomb_at`]. The cell therefore measures the same difference with the feature
+/// on and off.
+///
+/// `f` here observes nothing but its own calls, so — as in the cell above — the caller is fully
+/// within the "function of what it is handed" clause and outside the non-unwinding one.
+///
+/// This is a **documented precondition, not a supported behaviour.** Red against a build that runs
+/// the slow route: ablate the probe and this route unwinds too, with `f` never called.
+#[test]
+fn an_unwinding_offset_clone_decides_whether_peek_head_maps_closure_runs_at_all() {
+  // The offset the general route hoists: the committed span's end. Read before the ledger opens,
+  // so arming it neither records a step nor fires on the read that discovers it.
+  let src = LedgerSrc("ab cd ef");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+  let hoisted = crate::Span::end(inp.span()).0;
+
+  record();
+  reset_caller_calls();
+  arm_offset_clone_bomb_at(hoisted);
+  let fast = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    inp.peek_head_map(recording_f)
+  }));
+  disarm_offset_clone_bomb();
+  let fast_ledger = recorded();
+  let fast_calls = caller_calls();
+
+  assert!(
+    matches!(fast, Ok(Ok(Some(())))),
+    "this route reads the head where it lies, so the armed offset is never cloned and the call \
+     answers normally"
+  );
+  assert!(!bomb_fired(), "nothing armed ran");
+  assert_eq!(
+    without_trace_hook(fast_ledger),
+    std::vec![Effect::CacheFront, Effect::Caller],
+    "one cache read, then the caller's own closure"
+  );
+  assert_eq!(fast_calls, 1, "and `f` ran");
+
+  // ── The body `peek_head_map` runs when its probe finds nothing, over the same resident head ──
+  let general_src = LedgerSrc("ab cd ef");
+  let mut general_input = ledger_input(&general_src);
+  let mut general = general_input.as_ref();
+  let _ = general.peek::<U3>().unwrap();
+  assert_eq!(
+    crate::Span::end(general.span()).0,
+    hoisted,
+    "same stream, same residency, same committed span — the armed offset is the same one"
+  );
+
+  record();
+  reset_caller_calls();
+  arm_offset_clone_bomb_at(hoisted);
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    use crate::cache::PeekedTokenExt as _;
+    // Exactly what the method runs when its probe misses, in the order it runs it.
+    let _end = crate::Span::end(general.span());
+    let (mut peeked, _terminal, _emitter) = general.peek_with_emitter_terminal::<U1>().unwrap();
+    let head = peeked.pop_front().expect("the head is resident");
+    recording_f(Spanned::new(head.span(), head.token()));
+  }));
+  disarm_offset_clone_bomb();
+  let general_ledger = recorded();
+  let general_calls = caller_calls();
+
+  assert!(
+    caught.is_err() && bomb_fired(),
+    "the hoisted clone is the general route's first caller step, and it is armed"
+  );
+  assert_eq!(
+    general_ledger,
+    std::vec![Effect::OffsetClone],
+    "so the route gets no further: no fill, no cache read, no `f`"
+  );
+  assert_eq!(general_calls, 0, "`f` never ran");
+
+  assert_ne!(
+    fast_calls, general_calls,
+    "`f` ran on one route and not on the other, from an `f` that observes nothing. `Ok(Some(_))` \
+     against an unwind is the largest form the difference takes, and it is why the condition on \
+     these methods names unwinding explicitly"
   );
 }

@@ -36,10 +36,10 @@ where
   /// `skip_while` — the committed span and lexer state, the cursor, the diagnostics, the poison
   /// boundary, the dedup watermark, the tokens read next — depends on how deep it had peeked. The
   /// `cache_transparency_matrix` tests in `src/input/input_ref/tests.rs` pin that across this
-  /// method and `padded`. That promise, and every value promise on this method, is made to
-  /// callers whose predicate does not observe the input layer's own side effects; the precondition
-  /// is stated in full under *What is guaranteed identical* below, and it is what makes "invisible"
-  /// true rather than merely usually true.
+  /// method and `padded`. That promise, and every value promise on this method, is made to callers
+  /// who meet one two-clause condition — input-layer callbacks that are **inert**, and a predicate
+  /// that is a **function of what it is handed**. It is stated in full under *What is guaranteed
+  /// identical* below, and it is what makes "invisible" true rather than merely usually true.
   ///
   /// # Partial mode: an `Incomplete` exit leaves no trace
   ///
@@ -75,8 +75,8 @@ where
   /// | run the predicate | the same answer, on the same token |
   /// | commit the untouched frontier | the span and state already committed |
   ///
-  /// Every one of those produces the **value** it started from, so — for a predicate that answers
-  /// about the token it was handed, which is the precondition spelled out below — the early return
+  /// Every one of those produces the **value** it started from, so — for a caller who meets the
+  /// condition spelled out below — the early return
   /// leaves exactly the state the scan would have: the stopping token unconsumed at the front of
   /// the stream (this call never removes it), the committed span and lexer state where they were,
   /// and no diagnostic, no watermark move and no poison latch — a skip that skips nothing emits
@@ -90,7 +90,7 @@ where
   /// can check and the cache-transparency matrix does check: a head the probe accepts is not asked
   /// again, its answer is carried into the scan.
   ///
-  /// ## What is guaranteed identical — for which callers, and what is not
+  /// ## What is guaranteed identical, and the condition that makes it so
   ///
   /// Producing the same values is not the same as running the same code, and in a generic library
   /// the difference is not academic: `L::Span::clone`, `L::State::clone`, `L::Offset::clone`,
@@ -113,71 +113,115 @@ where
   /// in-tree witness measures 2 under `Complete` and 6 under `Partial` on that shape, against 0
   /// on this route.
   ///
-  /// ### The precondition: `pred` must not be able to see any of that
+  /// ### What this route does differently — the whole of it
   ///
-  /// **Everything guaranteed below is guaranteed to callers whose `pred` does not observe
-  /// input-layer side effects** — how many times `L::Span`, `L::State` or `L::Offset` was cloned,
-  /// whether an [`Emitter`](crate::Emitter) mark was taken, and which
-  /// [`Cache`](crate::cache::Cache) operations ran. That is a real condition and not a formality:
-  /// Rust does not require `Clone` to be pure, `L::Span`, `L::State` and `L::Offset` are *your*
-  /// types, and `pred` is `FnMut`. A `Clone` that bumps a counter and a predicate that reads it
-  /// are both ordinary Rust, and no bound on this method forbids either.
+  /// Four clauses, meant as exhaustive and not as illustration. Against the scan it replaces, for
+  /// every call it answers, this route:
   ///
-  /// **Violate it and what differs is not a count — it is the parse.** The table above is the
-  /// entire mechanism: the scan clones the frontier pair *before* it asks anything, and this route
-  /// asks first and clones nothing, so a predicate keyed on that counter answers one way here and
-  /// the other way there. The answer to a skip predicate *is* the skip, so the two routes then
-  /// disagree about **which tokens are consumed**, and the resume cursor, the committed span and
-  /// lexer state, and everything downstream diverge with them — in both directions: such a caller
-  /// can make this route stop where the scan skips the whole stream, and make it consume the head
-  /// where the scan consumes nothing. `a_clone_counting_predicate_can_change_the_skip_decision` in
-  /// `fast_path_tests` is that caller, written down and measured, so that the exclusion is a fact
-  /// rather than a caveat.
+  /// 1. **omits** caller-supplied steps — the table above is the list — and never adds one;
+  /// 2. **substitutes** a single [`Cache::front`](crate::cache::Cache::front) for the
+  ///    [`pop_front`](crate::cache::Cache::pop_front) +
+  ///    [`push_front`](crate::cache::Cache::push_front) pair the scan uses to look at the same
+  ///    head. The cache laws make that pair an identity on the entry it came from, so the two are
+  ///    the same read of the same token;
+  /// 3. **reorders**: with a head the probe accepts, `pred` runs *before* the omitted steps of (1)
+  ///    rather than after them;
+  /// 4. hands `pred` the **same token and the same span**, once per token, in the same order —
+  ///    which the residency matrix pins directly.
   ///
-  /// The condition is reasonable, not merely convenient. A predicate that answers differently
-  /// depending on **how the input layer got the token to it** is not asking a question about the
-  /// input at all — it is asking about this library's internal route, and which route answers a
-  /// given call is a choice this crate makes and may change in any release. Ask about the token
-  /// and the span you were handed and the condition holds by construction; every predicate in this
-  /// crate, its tests and its examples is of that shape. (Recording *that* a call happened is
-  /// fine, and is itself guaranteed identical below — it is letting the recording change the
-  /// answer that is out of contract.)
+  /// A step this route does not take is also a value it does not produce, and therefore one it
+  /// does not drop: the scan runs an `L::Span::drop` and an `L::State::drop` on frontier clones
+  /// that this route never creates.
+  ///
+  /// ### The condition on the caller
+  ///
+  /// Everything guaranteed below holds for a caller who meets **both** of these. They are
+  /// properties you check *once*, about your own types — not a list of differences to keep up
+  /// with:
+  ///
+  /// * **your input-layer callbacks are inert.** Every caller-supplied item this crate may invoke
+  ///   on the way to an answer — the `Clone` and `Drop` of `L::Span`, `L::State` and `L::Offset`;
+  ///   [`Emitter::checkpoint`](crate::Emitter::checkpoint) and
+  ///   [`release`](crate::Emitter::release); every [`Cache`](crate::cache::Cache) method; the
+  ///   [`Lexer`](crate::Lexer) and its [`Source`](crate::Source) — does **only** what its own
+  ///   contract says it does, and always returns normally: it does not unwind, and it does not
+  ///   diverge. Then running one, running it twice, and not running it at all are the same thing
+  ///   to everyone;
+  /// * **`pred` is a function of what it is handed.** It answers from the *values* of the
+  ///   `Spanned<&L::Token, &L::Span>` it receives — not from state some other callback wrote, and
+  ///   not from the addresses those two references carry (the scan asks about a token it has moved
+  ///   out of the cache; this route asks about it where it lies). Recording *that* a call
+  ///   happened, in your own state, and reading the record after the call returns, is fine: the
+  ///   call sequence is itself guaranteed identical below.
+  ///
+  /// **Why those two are the whole condition.** Any difference between the routes has to be
+  /// produced by something. Clauses (1)–(4) say the crate's own contribution is the same values in
+  /// the same order, so the only remaining producer is caller-supplied code; the first clause
+  /// covers *all* of that code and makes omitting it, running it a different number of times, and
+  /// running it in a different order produce nothing; the second says your own predicate cannot
+  /// read which route produced its argument. Nothing is left over. That closure is the point of
+  /// stating a condition rather than listing exclusions — a list has to anticipate every way a
+  /// caller might differ, and each way found so far (a `Clone` that keeps state, a `Clone` that
+  /// panics, a `Drop` elided with its clone) is an instance of one clause rather than a new entry.
+  ///
+  /// Two things the condition does not cover, because no fast path could: **time and stack**. This
+  /// route is quicker and shallower, which is the whole reason it exists.
   ///
   /// ### For such a caller, guaranteed identical
   ///
   /// Pinned by the residency matrix: the parse result; the tokens read next and the order they
   /// arrive in; the resume [`cursor`](Self::cursor); the committed span and lexer state; the
   /// diagnostics; the poison boundary and the dedup watermark; the tokens the predicate is asked
-  /// about, in order; and the emitter's **outstanding-mark count**, which is unchanged by either
-  /// route because the cycle the scan runs is empty and balanced.
+  /// about, in order, and how many times it is asked; and the emitter's **outstanding-mark
+  /// count**, which is unchanged by either route because the cycle the scan runs is empty and
+  /// balanced.
   ///
-  /// ### For such a caller, still not identical
+  /// ### And for a caller who does not meet it
   ///
-  /// Stated rather than argued away — these survive the precondition, because none of them is
-  /// something `pred` observes:
+  /// Not a second list to maintain: each of these is one of the two clauses failing, and each is
+  /// measured in `fast_path_tests`, so the condition is a fact rather than a caveat.
   ///
-  /// * a `Clone` for `L::Span` or `L::State` that **panics** is reachable from the scan and not
-  ///   from here — a no-op skip that would have unwound returns `Ok(())` instead;
-  /// * an emitter that counts its `checkpoint`/`release` **calls** sees one fewer complete, empty
-  ///   cycle per no-op skip under `Partial`. It cannot see a difference in what it *holds*:
-  ///   nothing is emitted between the two halves, and [`release`](crate::Emitter::release) is
-  ///   documented advisory — correctness must not depend on it being called. Which operations
-  ///   take a mark is not part of the [`Emitter`](crate::Emitter) contract;
-  /// * a `Cache` that counts its calls sees one `front` where the scan makes a `pop_front` and a
-  ///   `push_front`. Both are within the cache contract, which fixes what each operation *means*
-  ///   and leaves the choice of operations to the input layer;
-  /// * with a head the probe **accepts**, `pred` runs *before* the scanner's entry capture rather
-  ///   than after it, so a predicate and an emitter that share state observe the two in the
-  ///   opposite order.
+  /// * **a `Clone` that keeps state, and a `pred` that reads it** — the second clause. The table
+  ///   above is the entire mechanism: the scan clones the frontier pair before it asks, this route
+  ///   asks first and clones nothing, so a predicate keyed on that counter answers one way here
+  ///   and the other way there. The answer to a skip predicate *is* the skip, so what differs is
+  ///   not a count but the parse — the committed cursor, the tokens consumed, everything
+  ///   downstream — and it differs in both directions: such a caller can make this route stop
+  ///   where the scan skips the whole stream, and consume the head where the scan consumes
+  ///   nothing. (`a_clone_counting_predicate_can_change_the_skip_decision`)
+  /// * **a `Clone` that unwinds** — the first clause, and the sharper case, because the caller
+  ///   here satisfies the second one completely. A `pred` that records nothing but its **own**
+  ///   calls observes no input-layer side effect at all, and still cannot be promised the same
+  ///   call sequence: with a head this route accepts, `pred` runs once and *then* the scan's
+  ///   `L::Span::clone` panics, where the scan panics before asking anything — one call against
+  ///   none, measured. Catch the unwind and the two routes have left your predicate in different
+  ///   states. And a no-op skip that would have unwound returns `Ok(())` instead.
+  ///   (`an_unwinding_caller_clone_leaves_the_predicate_with_a_different_call_count`,
+  ///   `a_no_op_skip_over_a_resident_head_reaches_no_panicking_caller_clone`)
+  /// * **an emitter or a cache that counts** — the first clause, with the second deciding whether
+  ///   it matters. Under `Partial` a mark-keyed emitter sees one fewer complete, empty
+  ///   `checkpoint`/`release` cycle per no-op skip, and a counting cache sees one `front` where
+  ///   the scan makes a `pop_front` and a `push_front`. Neither can see a difference in what it
+  ///   *holds*: the cycle is empty and balanced and [`release`](crate::Emitter::release) is
+  ///   documented advisory, and the pop/push pair leaves the cache with the contents `front` read.
+  ///   The count becomes a parse only once it reaches `pred`.
+  /// * **a `Drop` that is not inert** — the first clause again, and the one a list of clone counts
+  ///   would have missed: a frontier clone this route never takes is a value it never drops.
   ///
-  /// None of that is reachable through this crate's own surface: no span, state, offset, emitter
-  /// or cache this crate ships has a `Clone` or a method with an observable side effect, and for a
-  /// caller who meets the precondition nothing that can be asked of the input afterwards differs.
-  /// The crate also holds itself to what it asks: every `skip_while` predicate it writes — in its
-  /// own combinators, its tests, its benches, its examples and its conformance kit — answers out of
-  /// the token it was handed, and its adversarial fixtures that *do* count clones read the counter
-  /// in an assertion after the call, never inside the predicate. It is all written down because it
-  /// is the honest boundary of the claim above.
+  /// The condition is reasonable, not merely convenient. A predicate that answers differently
+  /// depending on **how the input layer got the token to it** is not asking a question about the
+  /// input at all — it is asking about this library's internal route, and which route answers a
+  /// given call is a choice this crate makes and may change in any release. A callback that
+  /// unwinds asks the same question in control flow: it turns *which steps ran* into an outcome,
+  /// and which steps ran is not part of the contract either.
+  ///
+  /// The crate meets its own condition and holds itself to it. Every span, state and offset it
+  /// ships clones by copying fields, with no side effect and no panic path — surveyed impl by
+  /// impl — so the first clause holds for every in-tree lexer by inspection. Every `skip_while`
+  /// predicate it writes, in its own combinators, its tests, its benches, its examples and its
+  /// conformance kit, answers out of the token it was handed, and the adversarial fixtures that
+  /// *do* count clones read the counter in an assertion after the call, never inside the
+  /// predicate. It is all written down because it is the honest boundary of the claim above.
   #[inline(always)]
   pub fn skip_while<F>(
     &mut self,
