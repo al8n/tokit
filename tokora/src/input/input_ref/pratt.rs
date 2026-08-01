@@ -232,6 +232,14 @@ where
     //   answers `Some`, and parks it — `Ok(None)`, which leaves the loop — when it answers
     //   `None`. There is no position at which grammar code can admit an operator and leave
     //   the input where it was.
+    //
+    //   That is also why this engine has no ordering question to answer between a stalled report
+    //   and the non-associative repeat, which the typed driver does have and had wrong: there is
+    //   no stall guard here because there is no report the guard could catch. A closure that
+    //   answers `Some` has committed its token, so the two conditions the typed driver must rank
+    //   — "this report consumed nothing" and "this operator repeats the chain" — cannot both hold
+    //   at once, and the first of them cannot hold at all. Restoring a stall guard here would be
+    //   dead code; the invariant that makes it dead is the three bullets around this one.
     // * **No fold can move the input.** The token folds take `Spanned` tokens and the
     //   emitter; none of the three is handed an [`InputRef`], so no fold can advance the
     //   cursor into a stalled report's place, nor rewind behind a committed one.
@@ -271,6 +279,12 @@ where
             // declared-non-associative chain. Park the token — the position the caller sees is
             // the offending operator's own start, matching the typed driver's rollback — and
             // flag it, so the loop below raises the diagnostic instead of quietly stopping.
+            //
+            // One token, so one offset: this classifier is a pure function of `tok`, and the
+            // token is parked rather than committed, so the start recorded here *is* the position
+            // the surrounding grammar resumes at. The typed driver has to work for the same
+            // guarantee — its classifier may spell an operator with several tokens — and does it
+            // by reading the position before that classifier runs.
             if prev_op_is_neither.as_ref() == Some(&lpower) {
               nonassoc_trip = Some(tok.span.start());
               return None;

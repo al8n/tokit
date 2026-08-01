@@ -77,7 +77,11 @@ table is the whole rule:
 | [`PrattInfix::Neither`](crate::parser::PrattInfix) | powers `> power`, then refuses a second **infix** operator of the same power | `a == b == c` fails with [`NonAssociativeChain`](crate::error::NonAssociativeChain) |
 
 **What "refuses" means, exactly.** Both engines raise the *same* error at the *same* offset: the
-second operator is left on the input, unconsumed, and
+second operator is left on the input, unconsumed, and the offset is its **start** — which is also
+the start of the next token the surrounding grammar reads, for an operator of any width. A
+classifier for the AST-level engine may spell one operator with several tokens (`not in`, `<>`);
+the reported offset is the head of that spelling, not its tail, because the head is what the
+handback returns. And
 [`NonAssociativeChain`](crate::error::NonAssociativeChain) is **returned** — never emitted, so a
 recording emitter cannot turn it back into a truncated success. It is *not* terminal, so a
 grammar that wants the tolerant reading asks for it explicitly, by wrapping the pratt parser in

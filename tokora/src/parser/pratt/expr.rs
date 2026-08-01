@@ -2,6 +2,7 @@ use core::marker::PhantomData;
 
 use crate::{
   Commit, Rollback,
+  cache::PeekedTokenExt as _,
   error::{NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs},
   span::Span as _,
 };
@@ -1021,10 +1022,17 @@ where
 /// to the driver, so `map_err(Fault::Keep)` moves an error rather than making one.
 ///
 /// `NonAssoc`'s offset obeys the rule the same way, and it took one statement to arrange: the
-/// deciding token's start is read at the top of the `Infix` arm, *ahead* of the floor test and the
-/// repeat test, so the branch that decides this posture is handed a value that already exists.
-/// Reading it inside the branch would have put an `L::Offset::clone` — caller code — between the
-/// decision and the settle, which is the class the rule exists to close.
+/// offending operator's start is read at the top of the *cycle*, ahead of the RHS classifier and
+/// therefore ahead of the floor test, the report boundary and the repeat test alike, so the branch
+/// that decides this posture is handed a value that already exists. Reading it inside the branch
+/// would have put an `L::Offset::clone` — caller code — between the decision and the settle, which
+/// is the class the rule exists to close.
+///
+/// Reading it *there* rather than after the classifier is also what makes the value right, and
+/// that is a separate argument from this one. The probe restores to the point the read is taken
+/// at, so the token peeked there is the token the caller is handed back; the committed span after
+/// the classifier holds its **last** token instead, which for a multi-token operator names the
+/// operator's tail. See the capture site, and `NonAssociativeChain`'s own documentation.
 ///
 /// The rule has the compiler behind it and not only this paragraph. `parse` does **not** carry the
 /// `From<UnexpectedEoLhs<…>> + From<UnexpectedEoRhs<…>> + From<NonAssociativeChain<…>>` bounds —
@@ -1120,8 +1128,9 @@ enum Fault<E, Off> {
   /// report-boundary stalls, its own cycle-scoped restore has already happened through a probe
   /// guard that was still live for it, so the wrapper's settle is a commit.
   NonAssoc {
-    /// The **start** of the deciding token — the repeated operator, parked back on the input by
-    /// the probe's rollback — captured before that rollback, since the span is gone after it.
+    /// The **start of the repeated operator**, parked back on the input by the probe's rollback —
+    /// captured before the RHS classifier ran, which is the only point in the cycle at which it
+    /// equals the position that rollback restores to.
     at: Off,
   },
   /// Restore the input to before the expression, then assert `at > committed_before`, then build
@@ -1481,6 +1490,45 @@ where
     // This is not a licence for the probe to be careless: the driver opens no point of its own,
     // and every point crossed here was opened by a hook and left open by it.
     let mut txn = inp.begin_with::<Commit>();
+    // THE POSITION A NON-ASSOCIATIVE TRIP WOULD NAME, read HERE — inside the probe, ahead of the
+    // classifier, and only on a cycle whose latch is armed.
+    //
+    // `NonAssociativeChain`'s contract is that its offset is the offending operator's own start,
+    // which is also the position the surrounding grammar resumes from once the deciding read is
+    // handed back. This is the only place in the cycle where those two are the *same fact*: the
+    // handback restores to exactly this point, so the token peeked here is byte-for-byte the token
+    // the caller reads next. Nothing derived after the classifier has that property — the input's
+    // committed span then holds the classifier's **last** token, which for a multi-token operator
+    // (`not in`, `is not`, a two-token `<>`) names the operator's tail while the handback returns
+    // its head. Measured on a two-token operator, that read reported offset 10 for an operator the
+    // caller was handed back at offset 8; this one reports 8, with an empty lookahead cache and a
+    // prefilled one alike, because a peek *is* the cache fill and the token's own span does not
+    // move with how much was peeked before it.
+    //
+    // It also obeys `Fault`'s rule — a posture carries values that already exist at the branch
+    // deciding it — more cheaply than the read it replaces: that one paid an `L::Offset::clone` on
+    // *every* infix cycle, this one pays a peek only on the cycle after a `Neither` fold, and the
+    // peek's lex is work the classifier's own first read would have done a statement later.
+    //
+    // The error is propagated as `Fault::Keep`, the driver's ordinary posture for anything caller
+    // code raises. The one behaviour this adds is narrow and deliberate: on a latched cycle whose
+    // next token cannot be lexed at all, the failure now surfaces here rather than from whichever
+    // read the classifier chose to make — and a classifier that would have declined *without*
+    // reading that token is the only case where the two differ.
+    //
+    // `None` is genuine exhaustion or a terminal stop folded into one (`peek_one`'s documented
+    // shape). Neither can reach the repeat guard below: that guard now sits behind the report
+    // boundary, which refuses any report that committed nothing, and a cycle with no token left
+    // cannot commit one. The committed frontier stands in so the value is total rather than
+    // fallible, and no path reads it.
+    let latched_at = if prev_op_is_neither.is_some() {
+      Some(match txn.peek_one().map_err(Fault::Keep)? {
+        Some(tok) => tok.span().start(),
+        None => committed.clone(),
+      })
+    } else {
+      None
+    };
     let report = parse_rhs.parse_pratt_rhs(&mut *txn).map_err(Fault::Keep)?;
     // The report boundary. Read the instant the report crosses back, before this cycle
     // recurses and before any fold runs, because both of those can move the input on a
@@ -1561,21 +1609,44 @@ where
           PrattInfix::Left(_) | PrattInfix::Neither(_) => PrattFloor::Exclusive(lpower.clone()),
         };
 
-        // The deciding read's START, and it is read HERE — ahead of both tests below — for
-        // `Fault`'s rule: a posture may only carry values that already exist at the branch that
-        // decides it, and this is an `L::Offset::clone`, which is caller code. One clone per
-        // infix cycle, on the arm that already paid for a checkpoint save; the alternative was a
-        // clone between the repeat decision and its settle, which is exactly the window the rule
-        // closes. It is the *start* rather than the committed end because the position a caller
-        // is handed back is the offending operator's own — and for a multi-token operator it is
-        // the last token the classifier committed, the caveat `NonAssociativeChain` documents.
-        let deciding_at = txn.span().start();
-
+        // THREE TESTS, AND THE ORDER IS THE CONTRACT: floor, then report boundary, then the
+        // chain constraint. Each one's precondition is the previous one's answer.
+        //
         // Below the floor: this operator belongs to an enclosing expression. Hand the deciding
         // read back and end this one — an ordinary decline, and not an error.
+        //
+        // FIRST, deliberately: an operator the floor declines is not this expression's to judge,
+        // so it can neither be held to this expression's report boundary — a declined report
+        // legitimately consumes nothing, which is `ParsePrattRHS`'s own exemption — nor trip this
+        // expression's chain constraint.
         if !min_precedence.admits(lpower) {
           txn.rollback_abandoning_points();
           break;
+        }
+
+        // The report boundary again, and here it is also the recursion guard: a
+        // right-associative report admits its own power, so an inner call handed the same
+        // zero-width report re-reports it and descends again — without the check, until the
+        // stack runs out. Restore here, assert and report in the wrapper: same shape and same
+        // reason as the Postfix arm above, where the argument is written out.
+        //
+        // SECOND, and ahead of the repeat guard below rather than behind it, because the two
+        // answer questions of different rank. A report that consumed nothing is a **contract
+        // violation by the RHS classifier** — grammar code that admitted an operator and left the
+        // input where it was — and this exit is the one that says so, terminally. The repeat is a
+        // statement about the *input*: malformed, non-terminal, and spendable by a recoverer.
+        // Ordered the other way, a classifier that re-reports the chain's own operator at zero
+        // width has its bug re-described as the user's bad input and handed to recovery, which
+        // then spends it and re-enters a cycle that will report exactly the same thing — the
+        // non-terminating shape this boundary exists to refuse. A parser that cannot advance
+        // cannot produce a meaningful diagnosis of what it is reading, so the violation wins.
+        if after_report <= committed {
+          txn.rollback_abandoning_points();
+          return Err(Fault::Stall {
+            at: after_report,
+            committed_before: committed,
+            channel: StalledChannel::Rhs,
+          });
         }
 
         // THE NON-ASSOCIATIVE REPEAT. This frame folded a `Neither` operator at exactly this
@@ -1585,31 +1656,24 @@ where
         // admissible operator, folds it by its own rules, and `a = b ; c ; d` parses to
         // completion as `((a = (b ; c)) ; d)` with nothing left over for any caller to reject.
         //
+        // THIRD, and by the time it is reached both of the questions above are settled: the
+        // operator is this expression's, and it was really consumed. So this branch judges an
+        // operator that exists, which is what makes its offset meaningful.
+        //
         // Restore, then return the posture; the wrapper commits and builds the report. The
         // restore is the `End` arm's own — the same reconciling verb, handing the operator back
         // unconsumed so the position a caller sees is the offending operator's — and it is the
         // first half of this posture rather than work done alongside it. Nothing between the
-        // branch and the return can fail: `deciding_at` was read a few lines up and is moved.
+        // branch and the return can fail: `latched_at` was read before the classifier ran and is
+        // moved.
         //
-        // The floor test above runs FIRST, deliberately: an operator the floor declines is not
-        // this expression's to judge, so it cannot trip this expression's chain constraint.
-        if prev_op_is_neither.as_ref() == Some(lpower) {
+        // `filter` rather than a second `if`, because `latched_at` is `Some` exactly when
+        // `prev_op_is_neither` is: both are read from that one latch inside this one cycle, the
+        // peek above under `is_some()` and the equality here. The pair therefore cannot drift, and
+        // the `Option` carries the offset rather than an assertion that it exists.
+        if let Some(at) = latched_at.filter(|_| prev_op_is_neither.as_ref() == Some(lpower)) {
           txn.rollback_abandoning_points();
-          return Err(Fault::NonAssoc { at: deciding_at });
-        }
-
-        // The report boundary again, and here it is also the recursion guard: a
-        // right-associative report admits its own power, so an inner call handed the same
-        // zero-width report re-reports it and descends again — without the check, until the
-        // stack runs out. Restore here, assert and report in the wrapper: same shape and same
-        // reason as the Postfix arm above, where the argument is written out.
-        if after_report <= committed {
-          txn.rollback_abandoning_points();
-          return Err(Fault::Stall {
-            at: after_report,
-            committed_before: committed,
-            channel: StalledChannel::Rhs,
-          });
+          return Err(Fault::NonAssoc { at });
         }
 
         let next_neither = if matches!(infix.token_ref(), PrattInfix::Neither(_)) {

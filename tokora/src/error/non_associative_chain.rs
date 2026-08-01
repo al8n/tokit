@@ -29,12 +29,21 @@ use core::marker::PhantomData;
 /// [`Left`](crate::parser::PrattInfix::Left); tolerance is a caller policy stated in grammar
 /// code, not a silent engine default.
 ///
-/// # The offset, and one documented limit of it
+/// # The offset is the position the input was handed back at
 ///
-/// [`offset`](Self::offset) is the **start** of the deciding token. The token engine reads it
-/// straight off the token it parked, so it is exactly the offending operator's start. The typed
-/// engine reads the committed span of the last token the RHS classifier consumed while deciding,
-/// which is the same thing for a one-token operator and the *final* token of a multi-token one.
+/// [`offset`](Self::offset) is the **start of the offending operator**, and that is the same
+/// number as the start of the very next token the surrounding grammar reads once the deciding read
+/// has been handed back. The two are one fact, not two that happen to agree: the operator is left
+/// on the input, so where it begins *is* where the caller resumes.
+///
+/// Both engines report it, and neither reconstructs it after the fact. The token engine reads it
+/// straight off the token it parked — its classifier sees exactly one token, so there is nothing
+/// else it could name. The typed engine's classifier holds a whole `InputRef` and may spell an
+/// operator with several tokens (`not in`, `is not`, `<>`), so it reads the position *before*
+/// running that classifier, from the token the classifier is about to consume first. Reading it
+/// afterwards instead — off the committed span, which by then holds the classifier's **last**
+/// token — named the operator's tail while the input was handed back at its head, and the two
+/// coincided only for one-token operators.
 ///
 /// # A per-operator contract, not whole-chain fixity resolution
 ///

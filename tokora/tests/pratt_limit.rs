@@ -53,7 +53,13 @@ enum LimErr {
   Unexpected,
   Eot,
   EoLhs,
-  EoRhs,
+  /// Kept whole rather than collapsed, because the **report-boundary stall** arrives through this
+  /// channel and a cell that pins it has to be able to tell it from an ordinary end of RHS: the
+  /// stall is marked terminal and names the position the offending report failed to advance past.
+  EoRhs {
+    at: usize,
+    terminal: bool,
+  },
   /// A diagnostic a grammar hook emitted on purpose, so a Verbose log can be asserted whole.
   Note(usize),
   Limit {
@@ -70,7 +76,10 @@ enum LimErr {
 /// re-raises it, and a non-associative repeat does not, so recovery may spend it.
 impl MaybeTerminal for LimErr {
   fn is_terminal(&self) -> bool {
-    matches!(self, LimErr::Limit { .. })
+    matches!(
+      self,
+      LimErr::Limit { .. } | LimErr::EoRhs { terminal: true, .. }
+    )
   }
 }
 
@@ -94,9 +103,12 @@ impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEoLhs<O, Lang, Set>> 
     LimErr::EoLhs
   }
 }
-impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEoRhs<O, Lang, Set>> for LimErr {
-  fn from(_: UnexpectedEoRhs<O, Lang, Set>) -> Self {
-    LimErr::EoRhs
+impl<Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEoRhs<usize, Lang, Set>> for LimErr {
+  fn from(e: UnexpectedEoRhs<usize, Lang, Set>) -> Self {
+    LimErr::EoRhs {
+      at: e.offset(),
+      terminal: e.is_terminal(),
+    }
   }
 }
 impl<Lang: ?Sized> From<RecursionLimitReached<usize, Lang>> for LimErr {
@@ -276,6 +288,133 @@ where
   // Fill the cache as far as it will go before a single token is consumed.
   let _ = inp.peek::<U4>()?;
   typed_probe(inp)
+}
+
+// ── A genuinely MULTI-TOKEN operator, and a zero-width one ─────────────────────
+//
+// The ladder above spells every operator with one token, and for a one-token operator "the start
+// of the operator", "the start of the last token the classifier consumed" and "where the handback
+// leaves the input" are the same number — so nothing above can tell a driver that names one of
+// them from a driver that names another. These two classifiers separate them.
+
+/// `< >` — one non-associative infix operator, spelled with **two** tokens and a gap between
+/// them, at the chain's own power.
+///
+/// A `ParsePrattRHS` holds a whole `InputRef` and may consume as much as its operator needs;
+/// `not in`, `is not` and `<>` are all real spellings. What that buys this suite is a case where
+/// the operator's first and last tokens sit at different offsets, so the offset the trip reports
+/// and the offset the surrounding grammar resumes at can be compared rather than assumed equal.
+fn two_token_rhs<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<PrattRHS<&'static str, &'static str, &'static str, &'static str, Power>, LimErr>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+{
+  match inp.next()? {
+    Some(tok) => match tok.into_data() {
+      Token::LAngle => match inp.next()? {
+        Some(second) if matches!(second.data(), Token::RAngle) => Ok(PrattRHS::Infix(
+          Precedenced::new(PrattInfix::Neither("<>"), P_CHAIN),
+        )),
+        _ => Err(LimErr::Unexpected),
+      },
+      _ => Ok(PrattRHS::End),
+    },
+    None => Ok(PrattRHS::End),
+  }
+}
+
+/// `(the offset the trip reported, the start of the token the surrounding grammar is handed)`.
+type TripAlignment = (usize, Option<usize>);
+
+fn two_token_probe<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<TripAlignment, LimErr>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+{
+  let at = match pratt(lhs, two_token_rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp) {
+    Ok(tree) => panic!("a repeated two-token `<>` must be refused; got Ok({tree})"),
+    Err(LimErr::NonAssoc { at }) => at,
+    Err(other) => panic!("expected the non-associative chain; got {other:?}"),
+  };
+  Ok((at, inp.next()?.map(|t| t.span().start())))
+}
+
+fn prefilled_two_token_probe<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<TripAlignment, LimErr>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+{
+  let _ = inp.peek::<U4>()?;
+  two_token_probe(inp)
+}
+
+thread_local! {
+  /// Cycles [`zero_width_repeat_rhs`] has been asked about. Reset by the one cell that uses it.
+  static ZERO_WIDTH_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// Reports the chain's `Neither` operator on **every** call, but consumes a token only on the
+/// first — a `ParsePrattRHS` that breaks "consume what you report", which is a grammar bug and
+/// not malformed input.
+///
+/// The first call folds a real `;` and arms the latch. The zero-width report that follows it is
+/// therefore both a same-power repeat *and* a stalled report, which is the one input that can
+/// tell the two guards' order apart.
+fn zero_width_repeat_rhs<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<PrattRHS<&'static str, &'static str, &'static str, &'static str, Power>, LimErr>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+{
+  let call = ZERO_WIDTH_CALLS.with(|c| {
+    let seen = c.get();
+    c.set(seen + 1);
+    seen
+  });
+  if call == 0 {
+    return match inp.next()? {
+      Some(tok) if matches!(tok.data(), Token::Semi) => Ok(PrattRHS::Infix(Precedenced::new(
+        PrattInfix::Neither(";"),
+        P_CHAIN,
+      ))),
+      _ => Err(LimErr::Unexpected),
+    };
+  }
+  Ok(PrattRHS::Infix(Precedenced::new(
+    PrattInfix::Neither(";"),
+    P_CHAIN,
+  )))
+}
+
+fn zero_width_probe<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<Outcome, LimErr>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+{
+  match pratt(
+    lhs,
+    zero_width_repeat_rhs,
+    fold_prefix,
+    fold_infix,
+    fold_postfix,
+  )
+  .parse_input(inp)
+  {
+    Ok(tree) => {
+      let front = inp.next()?.map(|t| t.span().start());
+      Ok(Ok((tree, front)))
+    }
+    Err(e) => Ok(Err(e)),
+  }
 }
 
 // ── The token engine over the same ladder ──────────────────────────────────────
@@ -590,6 +729,101 @@ fn the_repeat_offset_is_the_same_with_a_prefilled_cache() {
     .unwrap();
   assert_eq!(empty, prefilled);
   assert_eq!(prefilled, Err(LimErr::NonAssoc { at: 10 }));
+}
+
+/// **The offset a trip reports is the offset the handback leaves the input at — for an operator
+/// of any width.** Measured, not assumed.
+///
+/// `1 < > 2 < > 3` spells one non-associative operator with two tokens:
+///
+/// ```text
+///   1 < > 2 < > 3
+///   0 2 4 6 8 10 12
+/// ```
+///
+/// The second `<>` is the repeat. Its head is at **8** and its tail at **10**, and the deciding
+/// read is handed back whole, so the surrounding grammar's next token is the `<` at 8. The two
+/// numbers are asserted against each other as well as against their literals, because it is their
+/// *relationship* that is the contract: a driver that named the last token the classifier consumed
+/// reported 10 here while handing the input back at 8, and every one-token cell above stayed green
+/// through it — 10 and 8 coincide whenever the operator is one token wide.
+///
+/// Run twice, because a trip offset that moves with how much has been peeked has bitten this
+/// project before: the empty-cache and prefilled-cache runs must be equal, not merely both
+/// "reasonable". The peek the driver takes to learn the position *is* a cache fill, and a token's
+/// own span does not depend on when it entered the cache.
+#[test]
+fn a_multi_token_repeat_is_named_where_the_handback_leaves_the_input() {
+  const SRC: &str = "1 < > 2 < > 3";
+
+  let empty: TripAlignment = Parser::with_context(fatal_ctx())
+    .apply(two_token_probe)
+    .parse_str(SRC)
+    .unwrap();
+  let prefilled: TripAlignment = Parser::with_context(fatal_ctx())
+    .apply(prefilled_two_token_probe)
+    .parse_str(SRC)
+    .unwrap();
+
+  assert_eq!(
+    empty, prefilled,
+    "the trip offset and the handback must not move with how much has been peeked"
+  );
+  assert_eq!(
+    empty,
+    (8, Some(8)),
+    "the repeated `<>` starts at 8, and 8 is where the surrounding grammar resumes; naming the \
+     operator's tail (10) would describe a position the caller was never handed"
+  );
+  let (at, front) = empty;
+  assert_eq!(
+    Some(at),
+    front,
+    "`NonAssociativeChain::offset` names the operator that was left on the input, so it must equal \
+     the start of the very next token the surrounding grammar reads"
+  );
+}
+
+/// **A contract violation outranks a diagnosis of the input.** A `ParsePrattRHS` that re-reports
+/// the chain's own operator having consumed *nothing* is a grammar bug, and the driver says so
+/// terminally instead of describing it as a non-associative chain.
+///
+/// Both conditions hold at once on `1 ; 2` with [`zero_width_repeat_rhs`]: the first call folds a
+/// real `;` and arms the latch, and the second reports the same operator at the same power from a
+/// zero-width read. The floor admits it, so exactly two guards can claim it — the report boundary
+/// and the repeat — and only their **order** decides which.
+///
+/// The repeat is non-terminal and spendable by a recoverer, so ordering it first hands a broken
+/// parser's bug to recovery as if it were the user's bad input; recovery then spends it and
+/// re-enters a cycle that reports exactly the same thing. The stall is terminal and names the
+/// channel that broke its contract. A parser that cannot advance cannot diagnose what it is
+/// reading, so the stall wins.
+///
+/// Both profiles discriminate, and on different observables — the same shape
+/// `pratt_txn_retention.rs`'s stall cells use. **Debug**: the wrapper's "consumed nothing"
+/// assertion must fire, which the previous ordering never reached. **Release**: there is no
+/// assertion, so the returned error must be the terminal end-of-RHS at the position the report
+/// failed to advance past. Before the reorder this returned `Err(NonAssoc { at: 4 })` in both —
+/// non-terminal, and naming the start of the *previous* token, since a zero-width report leaves
+/// the committed span on whatever the last real read consumed.
+#[test]
+#[cfg_attr(debug_assertions, should_panic(expected = "consumed nothing"))]
+fn a_zero_width_same_power_report_after_a_neither_fold_is_the_stall_not_the_chain() {
+  ZERO_WIDTH_CALLS.with(|c| c.set(0));
+  let got: Outcome = Parser::with_context(fatal_ctx())
+    .apply(zero_width_probe)
+    .parse_str("1 ; 2")
+    .unwrap();
+  assert_eq!(
+    got,
+    Err(LimErr::EoRhs {
+      at: 5,
+      terminal: true
+    }),
+    "release: the zero-width repeat is the RHS channel's contract violation — terminal, at the \
+     committed frontier the report did not advance past — not a `NonAssociativeChain` a recoverer \
+     may spend"
+  );
 }
 
 /// Under a **recording** emitter the repeat still surfaces as an `Err` — a recording emitter must
