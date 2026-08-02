@@ -396,16 +396,34 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
         echo "          the head side failed to build but no diagnostic names \`$name\` —"
         echo "          the probe broke for an unrelated reason and measured nothing"
         incon=$((incon + 1)); status=2
-      elif [ -n "$said" ]; then
+      # The identical hole, on the OTHER side. This used to be `elif [ -n "$said" ]`, which
+      # accepted ANY non-no-compile head classification as `glob-ok` the moment rustc said
+      # something ambiguity-shaped ANYWHERE in the head log — `upstream-fail`,
+      # `bad-witness(...)`, or a `witness=*` these templates cannot produce all read as a pass
+      # exactly as readily as a genuine `unreached`. Every one of those means the head side
+      # never reached a normal, comparable conclusion, which is the same absence the `$b` check
+      # above exists to catch — an attributed ambiguity diagnostic sitting in the log is not
+      # evidence of a COMPLETED head-side probe. `h` is now held to the identical two-shape
+      # allowlist as `b`: `unreached` is the only shape left once `no-compile` is handled above,
+      # because `glob_name`/`glob_macro`'s `drive()` calls only `ran()` and never `reached()`
+      # (see the comment above the `$b` check) — a head that actually finished compiling and
+      # running can only ever read `unreached` here, never `witness=*`.
+      elif [ "$h" = unreached ] && [ -n "$said" ]; then
         printf "  glob-ok %-42s base=%-12s head=%s   (not rejected here; see README)\n" "$label" "$b" "$h"
         globok=$((globok + 1))
-      else
+      elif [ "$h" = unreached ]; then
         printf "  UNPROBED %-41s base=%-12s head=%s\n" "$label" "$b" "$h"
         echo "          both sides built and rustc said NOTHING about \`$name\` — so this"
         echo "          is not 'the toolchain does not reject it', it is 'no collision was"
         echo "          constructed'. Those are the same absence and must not read as green."
         unprobed=$((unprobed + 1))
         [ "$status" -lt 1 ] && status=1
+      else
+        printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+        echo "          the head side did not reach a normal compile-or-reject conclusion"
+        echo "          (head=$h), so an attributed ambiguity diagnostic left in its log cannot"
+        echo "          stand in for a completed head-side probe"
+        incon=$((incon + 1)); status=2
       fi
       continue
       ;;

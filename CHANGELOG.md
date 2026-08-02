@@ -293,6 +293,41 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   because none of the 14 real rows there naturally produce `witness=1`; only the forced case
   exercises the new branch. — *(#148, verification debt)*
 
+- **That base-side allowlist had a mirror-image hole on the head side, and it was the more
+  exploitable of the two.** After the fix above, `glob-ok`'s only remaining check was
+  `elif [ -n "$said" ]` — accept once rustc says *something* ambiguity-shaped anywhere in the
+  head log, with no check on `$h` itself. `upstream-fail`, `bad-witness(...)` and any
+  `witness=*` all read as a pass exactly as readily as a genuine `unreached`, so a head build
+  broken for a reason having nothing to do with the probed name — provided an attributed
+  ambiguity diagnostic happened to be sitting in the same log — still scored `glob-ok`. That is
+  acceptance on the absence of a completed head-side probe: the same defect class the base-side
+  fix above had just closed, on the other side of the same row.
+
+  `h` is now held to the identical two-shape allowlist as `b`: `no-compile` or `unreached`,
+  because `glob_name`/`glob_macro`'s `drive()` calls only `ran()` and never `reached()` — a head
+  that actually finishes compiling and running can only ever read `unreached` here, never
+  `witness=*`. `glob-ok` now requires `h = unreached` specifically; `upstream-fail`,
+  `bad-witness(...)` and any `witness=*` read `INCONCL`, naming the reason, instead of falling
+  through.
+
+  Proved in the failing direction against the same pre-#147 base and the same
+  `RecursionLimitReached` glob row as the prior entry: a forced `head=upstream-fail` alongside
+  the row's genuine, untouched ambiguity diagnostic moved it from `glob-ok` to `INCONCL`; forcing
+  `bad-witness(calls=2,reached=0)`, `witness=0` and `witness=1` the same way each land `INCONCL`
+  too. Reverted afterward; `git diff` confirmed clean before this fix was committed. Re-run
+  unperturbed, the same row reaches its natural `glob-err` verdict, unchanged from before this
+  fix.
+
+  Audited the rest of the file for the same asymmetry — a verdict proving one side reached a
+  conclusion without proving the other did. `new-owner`'s two witnesses already check
+  `base_unresolved` and `head_unresolved` by the same predicate, and the item-row ladder's
+  `unreached`/`upstream-fail`/`bad-witness` filter matches against `"$b$h"` concatenated, which
+  catches either side by construction; the base-only `case "$b" in witness=1*|no-compile)`
+  further down is not a shape gap of this kind; it fixes the pre-release baseline's expected
+  value, and every value `$h` can still hold past it is already handled by name in the branches
+  below. This glob-row pair was the only place in the file carrying an allowlist on one side and
+  none on the other. — *(#148, verification debt)*
+
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
 **This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**
