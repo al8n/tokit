@@ -2087,9 +2087,14 @@ fn the_trip_is_identical_with_an_empty_and_a_prefilled_cache() {
   assert_eq!(empty, prefilled);
 }
 
-/// A recoverer **may not** spend a trip: `Recover` consults `MaybeTerminal` and re-raises, so
-/// the recovery body never runs. The contrast with
+/// A recoverer **may not** spend a trip: `Recover` consults `MaybeTerminal` *and* the input's
+/// resource-trip latch and re-raises, so the recovery body never runs. The contrast with
 /// `an_explicit_recovery_may_spend_the_repeat` is the whole point of the two classifications.
+///
+/// Paired with `pratt_limit_unit_sink.rs::a_discarding_sink_cannot_let_recovery_spend_a_trip`,
+/// which runs this ladder, this limit and this input through `()`. The two must keep agreeing:
+/// that agreement is the invariance issue #148 asked for, and until it landed they disagreed —
+/// this cell re-raised and its `()` twin spent the trip.
 #[test]
 fn a_recoverer_re_raises_a_trip_instead_of_spending_it() {
   fn recovery<'inp, Ctx>(
@@ -2127,6 +2132,12 @@ fn a_recoverer_re_raises_a_trip_instead_of_spending_it() {
 
 /// `skip_then_retry` re-raises a trip too, and — the part worth pinning — it does so **before**
 /// any skipping: no amount of input clears a depth budget, so a retry would only re-trip.
+///
+/// Paired with
+/// `pratt_limit_unit_sink.rs::a_discarding_sink_cannot_let_skip_then_retry_burn_input_on_a_trip`,
+/// which runs this exact source through `()` and asserts the same `Some(0)` handback. That cell
+/// read `Some(68)` before issue #148 — the whole chain and the sync token skipped and committed —
+/// so the two files' agreement on this number is the observable the fix delivers.
 #[test]
 fn skip_then_retry_re_raises_a_trip_without_skipping() {
   fn probe<'inp, Ctx>(

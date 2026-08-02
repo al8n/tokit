@@ -14,7 +14,7 @@
 /// | Source | Terminal when | Your arm writes | How it reaches you, and what a wrong arm costs |
 /// |---|---|---|---|
 /// | [`UnexpectedEnd`](crate::error::UnexpectedEnd) | its [`is_terminal`](crate::error::UnexpectedEnd::is_terminal) flag is raised — a **scanner** stop: a scanner resource-limit trip, or the poison boundary it latches | `e.is_terminal()` | through `From<UnexpectedEnd<…>>`, as the committed form's end-of-input error, so it reads as an ordinary end of input to a caller that does not care yet stays distinguishable from a *genuine* end of input to one that does. An arm left at `false` is **spent silently**, as a recoverable failure |
-/// | [`RecursionLimitReached`](crate::error::RecursionLimitReached) | **always** — a **descent** stop: the frame budget [`InputRef::descend`](crate::InputRef::descend) enforces, which both Pratt engines enter every frame through | `e.is_terminal()` | through `From<RecursionLimitReached<…>>`, as its own type on the `Err` channel, never emitted. It latches nothing: the unwind restores the depth cell on its way out. An arm left at `false` is **spent silently** |
+/// | [`RecursionLimitReached`](crate::error::RecursionLimitReached) | **always** — a **descent** stop: the frame budget [`InputRef::descend`](crate::InputRef::descend) enforces, which both Pratt engines enter every frame through | `e.is_terminal()` | through `From<RecursionLimitReached<…>>`, as its own type on the `Err` channel, never emitted. **This is the one row whose stop does not depend on your arm**: the trip latches the input session, and the three recovery combinators read that latch beside this trait, so an arm left at `false` — `()` included — loses the *payload* and still re-raises. Write the arm anyway if you want the offset and the depth |
 /// | [`SessionRefusal`](crate::input::SessionRefusal) | **always** — a **session** stop: the cross-attempt byte budget is exhausted, or an earlier attempt latched the session shut. Both are decided before any attempt work | `true`, spelled out — this type deliberately does **not** implement `MaybeTerminal`, so there is nothing to delegate to | through `From<SessionRefusal>` inside [`PartialSession::parse`](crate::input::PartialSession::parse), which then **asserts** the converted value is terminal. That assertion is unconditional, so an arm left at `false` is a **panic in a release build**, not a silent spend — see the [coherence law](crate::input::SessionRefusal#the-coherence-law) for why it is a panic and not a returned error |
 ///
 /// Recovery is the caller that must care about the first two, and it asks *this trait* rather than
@@ -66,10 +66,13 @@
 ///
 /// A conversion that **discards** the source discards the marker with it. The converted value is
 /// non-terminal whatever the value it came from said — `()` included, since the sink stores nothing
-/// — and recovery will spend the stop rather than re-raise it. See
+/// — and recovery will spend the stop rather than re-raise it. **The one exception is the resource
+/// budget**: a [`RecursionLimitReached`](crate::error::RecursionLimitReached) trip is recorded on
+/// the input session as well as in the value, and the three recovery combinators read both, so that
+/// stop survives a discarding conversion. Every other row of the table above is yours to carry. See
 /// [`RecursionLimitReached`](crate::error::RecursionLimitReached)'s own
-/// [section on a discarding sink](crate::error::RecursionLimitReached#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound)
-/// for what that costs and what it does not.
+/// [section on the payload and the stop](crate::error::RecursionLimitReached#the-stop-does-not-travel-in-the-payload-so-a-discarding-sink-cannot-drop-it)
+/// for why exactly one row works that way and what it still costs to discard the value.
 ///
 /// # Where the set stops being closed
 ///

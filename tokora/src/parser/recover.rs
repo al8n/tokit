@@ -360,12 +360,20 @@ where
     match inp.try_attempt(|input| self.parser.parse_input(input)) {
       Ok(output) => Ok(output),
       // The never-recoverable law and its terminal dual: an `Incomplete` (more input may fix
-      // this) and a terminal scanner stop (no input ever will) both ride the `Err` channel
-      // untouched. Recovery fabricates a value from a *malformed* construct; neither an
-      // unfinished construct nor a tripped limit is that, so re-raise verbatim rather than
-      // invoking the recoverer — see [`MaybeIncomplete`](crate::error::MaybeIncomplete) and
+      // this) and a terminal stop (no input ever will) both ride the `Err` channel untouched.
+      // Recovery fabricates a value from a *malformed* construct; neither an unfinished construct
+      // nor a tripped limit is that, so re-raise verbatim rather than invoking the recoverer —
+      // see [`MaybeIncomplete`](crate::error::MaybeIncomplete) and
       // [`MaybeTerminal`](crate::error::MaybeTerminal).
-      Err(e) if e.is_incomplete() || e.is_terminal() => Err(e),
+      //
+      // Two readings of terminality, deliberately, because they store it in different places. The
+      // error's own answer covers a *scanner* stop, which the grammar's error type carries. The
+      // input's covers a **resource budget trip**, which it does not have to: a grammar error may
+      // discard `RecursionLimitReached` on conversion (`()` does), and a bound the error sink can
+      // opt out of is not a bound. `resource_trip` is set-once on the input session, so this arm
+      // answers the same way for every sink — see
+      // [`InputRef::descend`](crate::InputRef::descend). One `bool` load, on the failure arm only.
+      Err(e) if e.is_incomplete() || e.is_terminal() || inp.resource_trip() => Err(e),
       Err(e) => self.recoverer.recover_input(inp, e),
     }
   }
@@ -532,13 +540,11 @@ where
     let cursor = inp.cursor().clone();
     match self.parser.parse_input(inp) {
       Ok(output) => Ok(output),
-      // The never-recoverable law and its terminal dual: an `Incomplete` (more input may fix
-      // this) and a terminal scanner stop (no input ever will) both ride the `Err` channel
-      // untouched. Recovery fabricates a value from a *malformed* construct; neither an
-      // unfinished construct nor a tripped limit is that, so re-raise verbatim rather than
-      // invoking the recoverer — see [`MaybeIncomplete`](crate::error::MaybeIncomplete) and
-      // [`MaybeTerminal`](crate::error::MaybeTerminal).
-      Err(e) if e.is_incomplete() || e.is_terminal() => Err(e),
+      // The never-recoverable law and its terminal dual, read from both of the places terminality
+      // is stored — the error for a scanner stop, the input for a resource budget trip. See
+      // [`Recover`]'s arm above for why the second reading exists, and
+      // [`InputRef::descend`](crate::InputRef::descend) for the cell.
+      Err(e) if e.is_incomplete() || e.is_terminal() || inp.resource_trip() => Err(e),
       Err(e) => self.recoverer.inplace_recover_input(inp, cursor, e),
     }
   }

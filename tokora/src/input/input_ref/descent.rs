@@ -161,16 +161,26 @@ where
   /// consumption at frame entry — cache-independent, so a prefilled lookahead window trips at the
   /// same place an empty one does.
   ///
-  /// Recovery reads terminality off the grammar's **own** error type, so that re-raise holds for a
-  /// type that stores the value and delegates `is_terminal`, and not for one whose `From` discards
-  /// it — `()` included. A discarding sink converts the trip into an ordinary recoverable error.
-  /// The level is released before that conversion runs, so the bound and the stack are unaffected
-  /// and only the stop is lost; see
-  /// [`RecursionLimitReached`](RecursionLimitReached#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound).
+  /// **Terminality is stored on the input, not in the error payload.** The trip arm latches
+  /// `Input::resource_trip` before it builds anything the grammar can see, and the
+  /// three combinators above consult that cell **in addition to**
+  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal) on the converted value. So the
+  /// re-raise holds for a grammar error that stores the value and delegates `is_terminal`, and
+  /// equally for one whose `From` discards it — `()` included. A discarding sink loses the
+  /// *payload*; it does not lose the *stop*, because the stop was never the payload's to carry.
+  /// That is invariance, not new semantics: across those three combinators it makes every
+  /// supported sink behave the way a delegating one already did. It does **not** reach the
+  /// resilient collection loops, which swallow an element's trip for every error type alike — see
+  /// `Input::resource_trip`'s own documentation for that gap and why it is a separate decision.
   ///
-  /// Nothing is latched on the input. A scanner limit trip latches the poison boundary because
-  /// the lexer's tally is monotone in the input; descent depth is the opposite kind of fact and
-  /// is fully restored by the unwind that carries the error out. See [`RecursionLimitReached`].
+  /// What is latched is the **fact that the budget was exceeded**, and not the depth. A scanner
+  /// limit trip latches the poison boundary because the lexer's tally is monotone in the input;
+  /// descent *depth* is the opposite kind of fact and is fully restored by the unwind that carries
+  /// the error out, so it is not latched and must not be. That a budget was once exceeded is
+  /// monotone in exactly the scanner's sense — no unwind, no rollback and no further input can
+  /// un-exceed it — so it is latched, and latched for the parse's remaining life. The two latches
+  /// differ in what they record: a scanner trip has a position, so it latches *where*; a descent
+  /// trip has only a control stack, so it latches *whether*. See [`RecursionLimitReached`].
   ///
   /// # Example
   ///
@@ -219,8 +229,14 @@ where
   /// [`descending`](Self::descending) so the two spellings cannot drift apart.
   ///
   /// Returns the trip **unconverted**. The `From` that builds the caller's error therefore runs in
-  /// the caller, which is what keeps the documented ordering — decrement first, grammar code after
-  /// — true for both spellings even if that conversion panics.
+  /// the caller, which is what keeps the documented ordering — decrement first, latch second,
+  /// grammar code after — true for both spellings even if that conversion panics.
+  ///
+  /// This is the **one writer** of [`resource_trip`](Self::resource_trip), which is what makes
+  /// "grammar code cannot lower the latch" a property of the module rather than of discipline:
+  /// the cell is `pub(super)`, no method hands out a mutable route to it, and both Pratt engines
+  /// — typed and token — reach the budget only through here, so both inherit the latch by
+  /// construction rather than by each remembering to set it.
   #[inline(always)]
   fn raise_level(
     &mut self,
@@ -228,17 +244,44 @@ where
   {
     // RAISE, CHECK, ARM — and nothing else may sit between the three. `increase` and `check` are
     // const arithmetic over two `usize`s, so neither can fail and neither can panic; the trip arm
-    // lowers the depth again before it touches caller code, and the `From` that builds the error
-    // runs after that decrement. Past the `Ok`, the witness is armed and its destructor owns the
-    // level. There is therefore no window in which a level is raised and unowned.
+    // lowers the depth again and latches the trip before it touches caller code, and the `From`
+    // that builds the error runs after both. Past the `Ok`, the witness is armed and its
+    // destructor owns the level. There is therefore no window in which a level is raised and
+    // unowned, and none in which a trip has been decided and is not yet recorded.
     self.recursion.increase();
     if let Err(exceeded) = RecursionTracker::check(&*self.recursion) {
       self.recursion.decrease();
+      // LATCH, before the caller's `From` and before the offset read below — a store to a `bool`
+      // the caller cannot reach, so a conversion that panics, or a recoverer that swallows the
+      // converted value, cannot leave the session claiming its budget was never exceeded. The
+      // decrement above and this store are the two halves of one fact: the depth is what is live
+      // now, this is what happened.
+      *self.resource_trip = true;
       // Committed consumption, not the cache-front cursor: the same metric the pratt drivers'
       // stall exits report, so the offset does not move with how much lookahead is buffered.
       return Err(RecursionLimitReached::of(self.span().end(), exceeded));
     }
     Ok(Descent { input: self })
+  }
+
+  /// Whether a **resource budget was exceeded** at any point in this input session — the
+  /// input-side witness for resource terminality, and the answer to "where is resource
+  /// terminality stored".
+  ///
+  /// Set-once by [`raise_level`](Self::raise_level)'s trip arm and never lowered: a
+  /// [`Checkpoint`](crate::input::Checkpoint) does not carry it, a restore does not touch it, and
+  /// [`Descent`]'s `Drop` releases only the depth. Read by
+  /// [`Recover`](crate::parser::Recover), [`InplaceRecover`](crate::parser::InplaceRecover) and
+  /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) *beside*
+  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal), so a grammar error type that
+  /// discards [`RecursionLimitReached`] on conversion — `()` does — still cannot turn a tripped
+  /// budget into recovery.
+  ///
+  /// Costs one `bool` load on a recovery decision and nothing anywhere else: no scan, no
+  /// lookahead fill and no token commit reads or writes it.
+  #[inline(always)]
+  pub(crate) const fn resource_trip(&self) -> bool {
+    *self.resource_trip
   }
 }
 

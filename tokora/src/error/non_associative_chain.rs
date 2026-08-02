@@ -222,12 +222,16 @@ impl<O, Lang: ?Sized> crate::error::MaybeTerminal for NonAssociativeChain<O, Lan
 /// The unit error sink absorbs a repeat like every other error, so a `()`-errored grammar still
 /// drives the pratt engines.
 ///
-/// Unlike [`RecursionLimitReached`](crate::error::RecursionLimitReached)'s, this conversion is
-/// **inert** with respect to recovery: the value is already non-terminal, so a recoverer spends it
-/// either way and the sink decides nothing. `tokora/tests/pratt_limit_unit_sink.rs` runs the same
-/// recovery through `()` and through a delegating error type and gets the same answer. What is
-/// lost is the offset, and with it the ability to resume at a named position — the ordinary cost
-/// of a discarding sink, not a change of contract.
+/// This conversion is **inert** with respect to recovery: the value is already non-terminal, so a
+/// recoverer spends it either way and the sink decides nothing. `tokora/tests/pratt_limit_unit_sink.rs`
+/// runs the same recovery through `()` and through a delegating error type and gets the same
+/// answer. What is lost is the offset, and with it the ability to resume at a named position — the
+/// ordinary cost of a discarding sink, not a change of contract.
+///
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached) reaches the same
+/// sink-independence from the other side: it is always terminal, and it keeps that stop through a
+/// discarding conversion by latching the input session rather than by riding in the payload. Two
+/// classifications, two mechanisms, and neither one lets the grammar's error type decide.
 impl<O, Lang: ?Sized> From<NonAssociativeChain<O, Lang>> for () {
   #[inline(always)]
   fn from(_: NonAssociativeChain<O, Lang>) -> Self {}

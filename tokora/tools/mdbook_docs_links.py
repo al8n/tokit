@@ -267,7 +267,7 @@ DOCS_RS_MAP = {
   "crate::error::MaybeTerminal::is_terminal": "error/trait.MaybeTerminal.html#method.is_terminal",
   "crate::error::NonAssociativeChain": "error/struct.NonAssociativeChain.html",
   "crate::error::RecursionLimitReached": "error/struct.RecursionLimitReached.html",
-  "crate::error::RecursionLimitReached#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound": "error/struct.RecursionLimitReached.html#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound",
+  "crate::error::RecursionLimitReached#the-stop-does-not-travel-in-the-payload-so-a-discarding-sink-cannot-drop-it": "error/struct.RecursionLimitReached.html#the-stop-does-not-travel-in-the-payload-so-a-discarding-sink-cannot-drop-it",
   "crate::error::Unclosed": "error/struct.Unclosed.html",
   "crate::error::Unclosed::kind": "error/struct.Unclosed.html#method.kind",
   "crate::error::Unclosed::name_ref": "error/struct.Unclosed.html#method.name_ref",

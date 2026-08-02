@@ -637,6 +637,64 @@ where
   /// captures it. See [`RecursionLimiter`] for the lexer-side tracker, which is a different cell
   /// with a different subject.
   recursion: RecursionLimiter,
+  /// **Where resource terminality is stored**: `true` once a resource budget has been exceeded
+  /// anywhere in this input session.
+  ///
+  /// Set-once, and it is the *fact of the trip* that is latched here, not the depth. The two are
+  /// opposite kinds of fact and only one of them is monotone. Depth is restored by the unwind
+  /// that carries the error out — every live frame's guard decrements as it pops — so it stays
+  /// [outside the rollback set](Self::recursion) and is never latched. That a budget **was**
+  /// exceeded cannot be un-exceeded by anything: not by more input, not by an unwind, not by a
+  /// rollback. It is the same monotone shape the scanner's tally has, and it is latched for the
+  /// same reason [`poison_boundary`](Self::poison_boundary) is — the difference being that a
+  /// scanner trip has a *position*, so the scanner latches where, while a descent trip has only a
+  /// *control stack*, so this latches whether.
+  ///
+  /// # Why the grammar's error type cannot be the storage
+  ///
+  /// [`RecursionLimitReached`](crate::error::RecursionLimitReached) is terminal for every value,
+  /// but it reaches [`Recover`](crate::parser::Recover),
+  /// [`InplaceRecover`](crate::parser::InplaceRecover) and
+  /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) already converted into the grammar's
+  /// own error type, and that conversion is allowed to discard the value — `()` does. Terminality
+  /// carried only through the payload is therefore terminality the grammar can opt out of, which
+  /// made a resource bound depend on an unrelated error sink. Stored here it does not: the three
+  /// combinators read this cell **in addition to**
+  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal), so every supported sink observes
+  /// the same stop.
+  ///
+  /// # Never cleared, and what that costs
+  ///
+  /// There is no writer that lowers it — not a [`Checkpoint`] (which does not carry it), not
+  /// `rekey_offset_facts`, not the [`Descent`](InputRef::descend) guard's `Drop`.
+  ///
+  /// For the three combinators above that is free: a terminality-preserving error type already
+  /// re-raised at the first trip and carried it to the top, so "never cleared" reproduces what a
+  /// preserving type has always done rather than adding to it.
+  ///
+  /// It is **not** free where something *else* catches a trip and goes on parsing, because there
+  /// the latch is coarser than per-error terminality: every later recovery in the session is
+  /// refused, including for ordinary syntax errors that have nothing to do with the budget, where
+  /// a preserving error type would have recovered them (the later error is a different value). Two
+  /// shapes reach that state, and both are worth knowing about:
+  ///
+  /// * grammar code that catches the trip itself, rather than through a recovery combinator, and
+  ///   keeps parsing;
+  /// * the **resilient collection loops** — `repeated`, `separated` and their delimited forms —
+  ///   whose swallow sites gate on the frontier incomplete and on the *scanner*'s committed
+  ///   boundary and on neither `is_terminal()` nor this cell, so a descent trip inside an element
+  ///   is emitted as an ordinary diagnostic and the loop continues. That is a **pre-existing gap
+  ///   and is not sink-dependent**: it swallows a trip from a delegating error type exactly as it
+  ///   does from `()`. Closing it is a separate contract decision — it would change what those
+  ///   families do on a trip for every error type, not only for a discarding one — and is
+  ///   deliberately not made here. See `parser::many`'s `GATE_CENSUS`.
+  ///
+  /// The direction of the coarseness is the safe one: it refuses to synthesize, never the reverse.
+  ///
+  /// It is per **input session**, like the budget it guards: a
+  /// [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and therefore
+  /// a fresh cell, and harvests terminality by its own separate route.
+  resource_trip: bool,
   /// The **bound emitter** — the one emission log this input's parse writes, owned here for the
   /// input's whole life and paired with it at
   /// [`with_state_and_context`](Self::with_state_and_context).
@@ -803,6 +861,9 @@ where
       // deliberately walking one deeper first — and a deliberately-deep one is a caller stating
       // that this parse continues someone else's descent, which is exactly what the cell means.
       recursion,
+      // Untripped. The caller's budget can arrive pre-raised; the trip latch cannot, because it
+      // is a fact about THIS session and there is no constructor that carries one in.
+      resource_trip: false,
       emitter,
       lineage: Lineage::new(),
       #[cfg(feature = "trace")]
@@ -932,6 +993,9 @@ where
       // The recursion budget, borrowed like the ground-truth cells above rather than snapshotted
       // like `finality`: a handle's frames raise and lower it, and the value must outlive them.
       recursion: &mut self.recursion,
+      // The resource-trip latch, borrowed for the same reason: a trip raised through this handle
+      // is a fact about the session, so it has to outlive the handle that raised it.
+      resource_trip: &mut self.resource_trip,
       // The lineage memos, the emitter borrow, and the session-point stack, in one cell (see
       // `input_ref::session`): the stack starts empty and stays unallocated until the first
       // `InputRef::begin_point`, so a reference that never opens a session pays a few zeroed

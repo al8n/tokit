@@ -18,45 +18,44 @@ use crate::state::recursion_tracker::RecursionLimitExceeded;
 /// [`Recover`](crate::parser::Recover), [`InplaceRecover`](crate::parser::InplaceRecover) and
 /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) consult: a recoverer handed this
 /// value must re-raise it untouched rather than synthesize a node from input it was forbidden to
-/// read. An error type that stores this one and delegates its own `is_terminal` keeps that
-/// property; one whose `From` discards the value opts out of it, which is the pre-existing
-/// [`MaybeTerminal`](crate::error::MaybeTerminal) posture and not a hole this type introduces.
+/// read.
 ///
-/// # A discarding sink erases the stop, and does not erase the bound
+/// # The stop does not travel in the payload, so a discarding sink cannot drop it
 ///
-/// The terminality above is a property of *this* type, and recovery reads it off the type the
-/// grammar actually names. So a grammar whose error is `()` — or any type whose `From` for this
-/// one drops the value rather than delegating — gets a converted error that reports
-/// `is_terminal() == false`, and **recovery spends the trip instead of re-raising it**. That is
-/// the documented opt-out reaching a resource guard rather than a malformed-input report, and it
-/// is worth stating here rather than only at the [`From`] impl, because this is where a caller
-/// reads the terminality promise.
+/// The terminality above is a property of *this* type — and a grammar's error type is allowed to
+/// discard this type. `()` does; so does any `From` that drops the value rather than delegating.
+/// Were the stop carried only here, a resource bound would be something an unrelated error sink
+/// could opt out of, and it was: until issue #148 a `()`-errored grammar **spent** the trip,
+/// synthesized a node for a construct it was forbidden to read, and let `skip_then_retry` commit
+/// skipped input buying progress that cannot help.
 ///
-/// What is lost is exactly the *stop*, and it is worth being precise about what is not:
+/// It is stored on the **input session** instead. The trip arm of
+/// [`InputRef::descend`](crate::InputRef::descend) latches `Input::resource_trip` — set-once,
+/// outside the rollback set, with no writer that lowers it — before it builds anything the
+/// grammar can see, and the three combinators above read that latch beside `is_terminal()`. So
+/// the sink loses the *value* and every supported sink observes the same *stop*. A grammar that
+/// wants the payload (the offset, the depth, the limitation) must still store it; a grammar that
+/// only wants to not-recover gets that for free.
+///
+/// What was never at risk, and is still measured rather than assumed:
 ///
 /// * **The native stack is already back.** [`Descent`](crate::input::Descent)'s destructor
-///   releases its level on the unwind that carries this error out, so by the time any recoverer
-///   is handed the converted value, every frame the budget was protecting has returned. Measured,
-///   not assumed: on a 200-level trip the recoverer's frame sits 160 bytes from the pre-parse
-///   baseline in a debug build and 0 in a release one, against a descent that reached ~1 MiB and
-///   ~97 KiB respectively. The guard's stack-safety purpose therefore survives the sink intact.
-/// * **The budget is unchanged.** The depth cell reads back to what it was before the parse, so a
-///   recoverer that spends the trip and descends again starts from the same depth and meets the
-///   same limit. Re-tripping is bounded, not compounding.
-/// * **The retries terminate.** A spent trip is a retried trip, and the retry loops are bounded by
-///   their own zero-progress guards rather than by terminality:
-///   [`skip_then_retry`](crate::ParseInput::skip_then_retry) consumes its sync token per
-///   continuing cycle and runs out of sync points, and a repetition over a recovering element
-///   stalls on the first element that commits nothing.
+///   releases its level on the unwind that carries this error out, so by the time the error
+///   surfaces anywhere outside the engine, every frame the budget was protecting has returned. On
+///   a 200-level trip the surfacing frame sits 48 bytes from the pre-parse baseline in a debug
+///   build and 0 in a release one, against a descent that reached ~1 MiB and ~97 KiB
+///   respectively.
+/// * **The budget is unchanged.** The depth cell reads back to what it was before the parse. A
+///   caller that catches the error itself and descends again starts from the same depth and meets
+///   the same limit; re-tripping is bounded, not compounding.
 ///
-/// What *is* lost is the verdict and the input. A recoverer will synthesize a node for a
-/// construct it was never allowed to read, and `skip_then_retry` will commit skipped regions
-/// buying progress that cannot help — no quantity of skipped input makes the next descent
-/// shallower. `tokora/tests/pratt_limit_unit_sink.rs` pins each of these against the delegating
-/// counterpart in `tokora/tests/pratt_limit.rs`.
+/// `tokora/tests/pratt_limit_unit_sink.rs` drives every one of these through `()` and pins each
+/// against its delegating counterpart in `tokora/tests/pratt_limit.rs`. The two files agreeing is
+/// the property; they disagreed before #148, and the cells that recorded the disagreement were
+/// inverted rather than deleted.
 ///
-/// **A grammar that needs the stop semantics must not discard this value.** Give the grammar's
-/// error type a variant that stores this one — or at minimum a marker — and delegate:
+/// **A grammar that needs the trip's *details* must still store this value.** Give the grammar's
+/// error type a variant that holds it and delegate `is_terminal`:
 ///
 /// ```rust
 /// use tokora::error::{MaybeTerminal, RecursionLimitReached};
@@ -82,19 +81,39 @@ use crate::state::recursion_tracker::RecursionLimitExceeded;
 /// ```
 ///
 /// The `()` sink stays available for grammars that only need the `Err` channel — it is what lets a
-/// parser drive the Pratt engines without declaring an error type at all — but it is a statement
-/// that no error of any kind carries information, resource trips included.
+/// parser drive the Pratt engines without declaring an error type at all — and it now means what
+/// it says and no more: that no error carries *information*, not that no error carries a stop.
 ///
-/// # Scanner trips latch; descent trips unwind
+/// # Both trips latch; they latch different kinds of fact
 ///
-/// A scanner limit trip latches the input's poison boundary, because the lexer's tally is
-/// monotone in the input and the tripped fact survives any rollback. Descent depth is the
-/// opposite kind of fact: it is scoped to the *control stack* and is fully restored by the
-/// unwind itself, since every live frame's guard decrements as it pops. So this error latches
-/// **nothing**. By the time it reaches a driver the input holds no tripped condition at all, and
-/// latching one would poison legitimately shallow parsing of the rest of the file after an
-/// outer-level recovery — while a caller that re-enters simply re-descends and re-trips, bounded
-/// by the same limit each time. The asymmetry is deliberate.
+/// A scanner limit trip latches the input's poison boundary, because the lexer's tally is monotone
+/// in the input. A descent trip latches `resource_trip` for the same reason at one remove: *that a
+/// budget was exceeded* is monotone even though the depth is not. The **depth** is the fact that
+/// is not latched and must not be — it is scoped to the control stack and fully restored by the
+/// unwind itself, since every live frame's guard decrements as it pops. So a driver handed this
+/// error finds the depth cell exactly as it was and the session marked as having tripped.
+///
+/// The asymmetry that remains is *what* each latch records: a scanner trip has a position, so it
+/// latches **where**, and lexing stops crossing it; a descent trip has only a control stack, so it
+/// latches **whether**, and it stops recovery rather than lexing. Neither can be un-latched.
+///
+/// # Two consequences, stated rather than left to be discovered
+///
+/// **The latch is coarser than per-error terminality.** Where something catches a trip and goes on
+/// parsing anyway, every later recovery in that input session is refused too — including for
+/// ordinary syntax errors that have nothing to do with the budget, which a terminality-preserving
+/// error type would have recovered, since the later error is a different value. It fails closed:
+/// it refuses to synthesize, never the reverse.
+///
+/// **The resilient collection loops still spend a trip, for every error type.** `repeated`,
+/// `separated` and their delimited forms swallow an element's `Err` by design — emit it as a
+/// diagnostic and keep looping — and their gate re-raises the frontier incomplete and the
+/// *scanner*'s committed boundary and nothing else. A descent trip inside such an element is
+/// therefore emitted and the loop continues, and that is **not** sink-dependent: a delegating error
+/// type is swallowed there exactly as `()` is. It is a pre-existing gap, wider than the one this
+/// section describes and orthogonal to it; closing it would change those families' behaviour on a
+/// trip for every error type, which is a separate contract decision. See `parser::many`'s
+/// `GATE_CENSUS`.
 ///
 /// # The offset
 ///
@@ -201,13 +220,15 @@ impl<O, Lang: ?Sized> crate::error::MaybeTerminal for RecursionLimitReached<O, L
 }
 
 /// The unit error sink absorbs a trip like every other error, so a `()`-errored grammar still
-/// drives the pratt engines. The terminal marker is lost with the value — the documented
-/// [`MaybeTerminal`](crate::error::MaybeTerminal) opt-out, and `()` is never terminal.
+/// drives the pratt engines. The **payload** is lost with the value — the offset, the depth and
+/// the limitation — and `()` is never terminal, so the
+/// [`MaybeTerminal`](crate::error::MaybeTerminal) gate reads `false` on the converted value.
 ///
-/// A grammar that recovers therefore **spends** a trip it would otherwise re-raise. The stack is
-/// already unwound by the time it does, so what the sink erases is the stop and not the bound; see
-/// [the type's own section](RecursionLimitReached#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound)
-/// for the measurements and for what a grammar that needs the stop should do instead.
+/// The **stop** is not lost. It does not travel here: the trip latches the input session before
+/// this conversion runs, and recovery reads that latch beside `is_terminal()`, so a `()`-errored
+/// grammar re-raises a trip exactly as a delegating one does. See
+/// [the type's own section](RecursionLimitReached#the-stop-does-not-travel-in-the-payload-so-a-discarding-sink-cannot-drop-it)
+/// for the measurements and for what a grammar that needs the *details* should do instead.
 impl<O, Lang: ?Sized> From<RecursionLimitReached<O, Lang>> for () {
   #[inline(always)]
   fn from(_: RecursionLimitReached<O, Lang>) -> Self {}

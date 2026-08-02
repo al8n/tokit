@@ -150,6 +150,14 @@ where
   /// for why it is outside the rollback set. Read through [`recursion`](Self::recursion); its
   /// only writer is the [`Descent`] guard [`descend`](Self::descend) hands out.
   pub(super) recursion: &'closure mut crate::state::recursion_tracker::RecursionLimiter,
+  /// The **resource-trip latch**, borrowed from the owning [`Input`](super::Input) — see that
+  /// field for what is latched and why it is the *fact* of the trip rather than the depth.
+  ///
+  /// Read through [`resource_trip`](Self::resource_trip); its only writer is
+  /// [`raise_level`](Self::raise_level)'s trip arm, which is why grammar code cannot lower it:
+  /// no handle method exposes a mutable route to the cell, and the recursion cell it guards is
+  /// read-only too.
+  pub(super) resource_trip: &'closure mut bool,
   /// The **session cell**: the input's lineage memos (the live-checkpoint stack, the pin set, and
   /// the cache-push/checkpoint-id/savepoint counters), the handle's **emitter borrow** (the
   /// ground-truth emission log, reached through [`emitter`](Self::emitter)), and the live

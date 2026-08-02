@@ -85,12 +85,25 @@ mod gate_census {
   //! Every resilient emit-and-continue loop body in the try-driven collection families
   //! must gate on `Cmpl::is_incomplete_error` FIRST, and re-raise a terminal scanner stop
   //! (`inp.at_committed_boundary()`) alongside it, so neither a frontier `Incomplete` nor a
-  //! tripped limit from the element parser is spent as a diagnostic. The terminal witness reads
-  //! the *committed cursor* (attempt-relative: a boundary a prior lookahead already latched does
-  //! not mis-charge an ordinary element failure short of it), and rides the failure arm so a
+  //! tripped *scanner* limit from the element parser is spent as a diagnostic. The terminal witness
+  //! reads the *committed cursor* (attempt-relative: a boundary a prior lookahead already latched
+  //! does not mis-charge an ordinary element failure short of it), and rides the failure arm so a
   //! successful element does zero terminal work. One gate per swallow site; the census pins the
   //! total, the per-file placement, and the terminal re-raise so a new resilient loop cannot land
   //! ungated or without the terminal dual (extend the list, then gate it both ways).
+  //!
+  //! **Scanner, and only scanner — a known gap, recorded here rather than closed.**
+  //! `at_committed_boundary()` reads the poison boundary, which a *descent* budget trip does not
+  //! latch (it has no position to latch). So a
+  //! [`RecursionLimitReached`](crate::error::RecursionLimitReached) raised inside an element falls
+  //! to the swallow arm: it is emitted as an ordinary diagnostic and the loop continues, bounded
+  //! only by the progress guard. That is **not** the sink-dependence issue #148 closed — it is not
+  //! sink-dependent at all, and swallows a delegating error type exactly as it does `()`. The
+  //! input-side witness that would close it exists (`InputRef::resource_trip`, which `Recover`,
+  //! `InplaceRecover` and `skip_then_retry` read), but wiring it in here would change what these
+  //! four families do on a trip for **every** error type — a truncated-with-diagnostics collection
+  //! becomes a failed one — and that is a contract decision, not a bug fix. It is deliberately
+  //! left open.
 
   #[test]
   #[cfg_attr(
