@@ -1061,7 +1061,7 @@ where
   /// worse outcome rather than a softening. This method may run from a rolling-back guard's
   /// `Drop` (see the mid-unwind clause on [`Emitter::rewind`]), where a panic is a *double*
   /// panic and aborts the process — strictly worse than the violation it would report. When
-  /// [`std::thread::panicking`] is true the report is therefore suppressed, and the call
+  /// `std::thread::panicking` is true the report is therefore suppressed, and the call
   /// degrades to a **total no-op on every channel** — the same shape as the out-of-range
   /// future mark above, and for the same reason: the sink has no correct rewind to perform,
   /// so it performs none, rather than rewinding half of itself. The degradation is

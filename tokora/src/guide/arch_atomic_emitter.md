@@ -202,7 +202,7 @@ Three methods make the emitter's log rewindable in step with the cursor, and tog
   [`exit_label`](crate::Emitter::exit_label), whose pop `labelled` performs from a drop guard. The
   binding property is *never abort*, not *never panic*: an emitter that can **detect** an unpaired
   settle may report it by panicking on the normal path, so long as it checks
-  [`std::thread::panicking`] first. Two riders come with that: the report must be raised **before
+  `std::thread::panicking` first. Two riders come with that: the report must be raised **before
   the rewind mutates anything**, so a caught panic leaves the emitter whole rather than half
   rewound; and when the report is suppressed mid-unwind the emitter must **latch** the fact and
   refuse at whatever surface hands its output onward, rather than degrade in silence. The

@@ -436,7 +436,7 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// The property that actually has to hold is **"never abort the process"**, and it binds
   /// only while an unwind is in progress. An implementation that can *detect* a settle
   /// violation — a mark it never issued, or one already spent — MAY panic to report it,
-  /// provided it first checks [`std::thread::panicking`] and stays silent when that is true.
+  /// provided it first checks `std::thread::panicking` and stays silent when that is true.
   /// A detected unpaired settle is a caller bug with no correct recovery, and reporting it at
   /// the cause beats degrading into a state the caller cannot distinguish from success; a
   /// double-panic abort would be worse than either. The recording CST `Sink` is the one
