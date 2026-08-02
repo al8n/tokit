@@ -58,9 +58,12 @@
 //! So the floor is **one element** here, and **one attempt** for
 //! [`Recover`](crate::parser::Recover), [`InplaceRecover`](crate::parser::InplaceRecover) and
 //! [`skip_then_retry`](crate::ParseInput::skip_then_retry). Within that unit the verdict is
-//! "something no further input clears happened here", and it **fails closed**: an ordinary failure
-//! sharing its unit with a caught trip is re-raised, never the reverse — a real trip is never
-//! filed as a diagnostic and never recovered from.
+//! "something no further input clears happened here", and it **fails closed** at the failure,
+//! absence and real-closer chokepoints, and at those three recovery combinators: an ordinary
+//! failure sharing its unit with a caught trip is re-raised, never the reverse, and a real trip
+//! that reaches one of them is never filed as a diagnostic and never recovered from. `Accept`
+//! reaches none of these gates — see "the channel neither chokepoint closes" below for the one
+//! exit this floor does not cover.
 //!
 //! Finer granularity is reachable, but only with cooperation from whoever catches the trip: an
 //! explicit **rebaseline** — code that deliberately catches a trip declaring it settled, so the

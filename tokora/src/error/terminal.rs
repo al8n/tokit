@@ -18,9 +18,15 @@
 /// | [`SessionRefusal`](crate::input::SessionRefusal) | **always** — a **session** stop: the cross-attempt byte budget is exhausted, or an earlier attempt latched the session shut. Both are decided before any attempt work | `true`, spelled out — this type deliberately does **not** implement `MaybeTerminal`, so there is nothing to delegate to | through `From<SessionRefusal>` inside [`PartialSession::parse`](crate::input::PartialSession::parse), which then **asserts** the converted value is terminal. That assertion is unconditional, so an arm left at `false` is a **panic in a release build**, not a silent spend — see the [coherence law](crate::input::SessionRefusal#the-coherence-law) for why it is a panic and not a returned error |
 ///
 /// Recovery is the caller that must care about the first two, and it asks *this trait* rather than
-/// either type — so a grammar error that holds one of them decides the verdict by what its
-/// [`is_terminal`](Self::is_terminal) returns, not by what the value inside it would have said. The
-/// third has a stricter caller: the session gate does not consult the verdict, it *requires* it.
+/// either type. For [`UnexpectedEnd`](crate::error::UnexpectedEnd) that is the whole answer: a
+/// grammar error holding one decides the verdict by what its [`is_terminal`](Self::is_terminal)
+/// returns, not by what the value inside it would have said. For
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached) the payload arm still matters —
+/// for the details it carries (the offset, the depth) and for a value your own code fabricated
+/// rather than received from a real trip — but it no longer decides the verdict alone: an actual
+/// input-descent trip is decided by the session latch **in addition to** the trait check, so an arm
+/// left at `false` — `()` included — no longer settles the question by itself. The third has a
+/// stricter caller: the session gate does not consult the verdict, it *requires* it.
 ///
 /// No other value in this crate **reports itself** terminal. The trait's only other implementations
 /// here are [`NonAssociativeChain`](crate::error::NonAssociativeChain) and `()`, and both keep the

@@ -187,9 +187,13 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    it recovers, or is filed and looped past, exactly as an untripped parse would; that contrast is
    pinned by a test on each side of it.
 
-   The floor **fails closed**: a real trip is never recovered from and never filed as a diagnostic,
-   and the only over-charged case is an ordinary failure that shares its unit with a caught trip.
-   It cannot be lowered by reading the error, because the error type is allowed to be `()` and
+   The floor **fails closed** at the recovery, failure, absence and real-closer gates: a real trip
+   that reaches one of them is never recovered from and never filed as a diagnostic, and the only
+   over-charged case is an ordinary failure that shares its unit with a caught trip. It says nothing
+   about `Accept`, the fourth exit above: an element that catches a trip and still answers `Accept`
+   spends it, for every error type, on purpose.
+
+   The floor cannot be lowered by reading the error, because the error type is allowed to be `()` and
    discard the trip — which is why the witness is on the input in the first place. Lowering it
    needs a cooperative *rebaseline* published for code that deliberately catches a trip and wants
    the enclosing baseline moved past it. That is not in this release; no public name changes if it

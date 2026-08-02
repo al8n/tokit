@@ -345,10 +345,13 @@ where
   /// [`Recover`](crate::parser::Recover) and
   /// [`InplaceRecover`](crate::parser::InplaceRecover), one retry cycle for
   /// [`skip_then_retry`](crate::ParseInput::skip_then_retry), one *element* for the resilient
-  /// collection loops. Within that unit the verdict **fails closed**: an ordinary failure sharing
-  /// its unit with a caught trip is re-raised, never the reverse. A real trip is never recovered
-  /// from and never filed as a diagnostic. Outside the unit nothing is charged at all, which is the
-  /// whole point of taking a baseline.
+  /// collection loops. Within that unit the verdict **fails closed** at the recovery, failure,
+  /// absence and real-closer gates: an ordinary failure sharing its unit with a caught trip is
+  /// re-raised, never the reverse, and a real trip reaching one of those gates is never recovered
+  /// from and never filed as a diagnostic. It says nothing about `Accept` — an element that catches
+  /// the trip and still answers `Accept` spends it, for every error type, on purpose; see
+  /// `parser::many`'s module docs, "the channel neither chokepoint closes" section. Outside the
+  /// unit nothing is charged at all, which is the whole point of taking a baseline.
   ///
   /// **The strong form is not implementable at this layer.** Deciding whether the error in hand is
   /// the trip means interrogating its value, and the grammar's error type may be `()`, whose `From`

@@ -725,9 +725,13 @@ where
   /// [`Recover`](crate::parser::Recover) and
   /// [`InplaceRecover`](crate::parser::InplaceRecover), one retry cycle for
   /// [`skip_then_retry`](crate::ParseInput::skip_then_retry), one **element** for the collection
-  /// loops. It **fails closed** inside that unit: an ordinary failure sharing a unit with a caught
-  /// trip is re-raised, never the reverse, so no real trip is ever recovered from or filed as a
-  /// diagnostic. What is lost is emit-and-continue for one construct, not the stop.
+  /// loops. It **fails closed** inside that unit, at the recovery, failure, absence and
+  /// real-closer gates: an ordinary failure sharing a unit with a caught trip is re-raised, never
+  /// the reverse, so no real trip reaching one of those gates is ever recovered from or filed as a
+  /// diagnostic. It says nothing about `Accept` — an element that catches the trip and still
+  /// answers `Accept` spends it, for every error type, on purpose; see `parser::many`'s module
+  /// docs, "the channel neither chokepoint closes" section. What is lost is emit-and-continue for
+  /// one construct, not the stop.
   ///
   /// **A finer answer cannot be read off this cell, or off the error.** It would require deciding
   /// whether a particular error value is the trip, which means interrogating the value — and the
