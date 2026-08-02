@@ -359,6 +359,31 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
       said=""
       grep -E "(^|[^A-Za-z0-9_])$name([^A-Za-z0-9_]|$)" "$WORK/out-head.txt" 2>/dev/null \
         | grep -qiE "ambiguous|E0659" && said=yes
+      # The base side must be one of the two shapes a glob row can actually produce on an
+      # ordinary run before head's evidence means anything: `no-compile` (rustc rejected the
+      # probe outright — its own INCONCL below) or `unreached` (it compiled — `glob_name` and
+      # `glob_macro`'s `drive()` calls only `ran()`, never `reached()`, so a successful compile
+      # classifies as `unreached`, NEVER `witness=*`, on either side). `upstream-fail`,
+      # `bad-witness(...)`, and a `witness=*` these templates cannot produce all mean the base
+      # side never reached a normal, comparable conclusion — and nothing here was checking for
+      # them: this branch used to match the LITERAL STRING `no-compile` and nothing else, so any
+      # OTHER broken base classification fell straight through into the head-only checks below
+      # and let a head-side ambiguity alone decide `glob-err`/`glob-ok` with no valid
+      # before-state at all. An ALLOWLIST of the shapes that are actually evidence, not a
+      # denylist of the shapes already known to be broken — a denylist is silent about the next
+      # broken shape nobody has named yet, which is exactly how this one went unnoticed (see the
+      # `new-owner` verdict below for the same rule, stated the first time).
+      case "$b" in
+        no-compile | unreached) ;;
+        *)
+          printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+          echo "          the base side did not reach a normal compile-or-reject conclusion"
+          echo "          (base=$b), so there is no valid before-state for this glob row — a"
+          echo "          head-side ambiguity alone cannot stand in for one"
+          incon=$((incon + 1)); status=2
+          continue
+          ;;
+      esac
       if [ "$b" = no-compile ]; then
         printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
         echo "          the base side did not compile, so nothing was compared"
@@ -448,7 +473,7 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     # row onto a subject that does exist, which is the vacuous-probe defect this harness was
     # built after: `Gadget::parse_except` cannot collide with `Ident::parse_except`.
     #
-    # THREE witnesses, not two — "fine" is again being asserted by an absence and this
+    # FOUR witnesses, not three — "fine" is again being asserted by an absence and this
     # file's rule is that each such verdict must produce positive evidence:
     #
     #   * rustc must SAY, on the base side, that it cannot resolve THIS ROW'S OWNER — an
@@ -466,9 +491,18 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     #     typo elsewhere in the same generated file, say — is the sharpest case: it still sets
     #     `$h` to `no-compile`, same as the base side, and no diagnostic anywhere disagrees. This
     #     is the same defect class this whole verdict exists to catch, sitting inside the verdict
-    #     itself, and it is why the check below is an ALLOWLIST of the one shape that is actual
-    #     evidence (`witness=*`) rather than a denylist of the shapes known to be broken — a
-    #     denylist is silent about the next broken shape nobody has named yet.
+    #     itself.
+    #   * and a completed head run must show tokora's item TOOK THE CALL, not merely that SOME
+    #     call completed. `witness=N` is CONSUMER-CALLS (see the marker comment above this
+    #     loop) — attribution, not existence — and `witness=1` means the CONSUMER's own
+    #     extension item is what ran, i.e. the probed name on the new owner was never a
+    #     candidate this run. A completed run and a resolved owner are both true on a
+    #     `witness=1` row, and neither says a collision happened. Accepting any `witness=*`
+    #     here made that shape indistinguishable from the one that actually proves it, so a
+    #     future template that compiles clean while constructing no real collision would still
+    #     score `new-owner`. The check below is therefore an ALLOWLIST of the one shape that is
+    #     actual evidence (`witness=0*`) rather than a denylist of the shapes known to be broken
+    #     — a denylist is silent about the next broken shape nobody has named yet.
     #
     # What the row then means is narrow and is printed with it: no pre-existing call site can be
     # stolen. It says nothing about a consumer written AFTER the release, which is out of scope
@@ -483,13 +517,23 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
       && head_unresolved=yes
     if [ -n "$base_unresolved" ] && [ -z "$head_unresolved" ]; then
       case "$h" in
-        witness=*)
+        witness=0*)
           printf "  new-owner %-40s base=%-12s head=%s   (owner \`%s\` is new)\n" \
             "$label" "$b" "$h" "$owner"
           echo "          rustc cannot resolve \`$owner\` on the base ref and can on head, so this"
           echo "          release introduces the owner as well as the name. There is no consumer"
           echo "          call site that could predate it and nothing to steal."
           newowner=$((newowner + 1))
+          ;;
+        witness=*)
+          printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+          echo "          head completed a run and resolved \`$owner\`, but \`$h\` is"
+          echo "          CONSUMER-CALLS, not existence: a nonzero count means the CONSUMER's"
+          echo "          own item took the call, so tokora's new \`$owner\` item was never a"
+          echo "          candidate this run. This proves the probe compiles, not that a"
+          echo "          collision exists."
+          incon=$((incon + 1))
+          status=2
           ;;
         *)
           printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"

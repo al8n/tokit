@@ -267,6 +267,32 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   were ever provable, and the fix does not widen to paper over the rest. — *(#148, verification
   debt)*
 
+- **That fix's own allowlist was still too wide, and a sibling verdict had none at all.**
+  `new-owner`'s `case "$h" in witness=*)` accepts `witness=1` exactly as readily as `witness=0` —
+  but the marker is CONSUMER-CALLS, attribution rather than existence (see the comment where it is
+  assigned), and `witness=1` means the CONSUMER's own extension item took the call, i.e. the
+  probed name on the new owner was never a candidate this run. A template that compiles clean
+  while constructing no real collision would still have scored `new-owner`. The allowlist now
+  requires `witness=0*` specifically — the one shape that says tokora's item won the resolution —
+  and a `witness=1` head reads `INCONCL`, naming the reason.
+
+  Separately, the `glob-err`/`glob-ok` verdicts intercepted only the LITERAL STRING `no-compile` on
+  the base side before trusting head's evidence. A base broken for any other reason —
+  `upstream-fail` chief among them — fell through into the head-only checks and let a head-side
+  ambiguity decide the verdict alone, with no valid before-state at all. The base side is now
+  checked against an allowlist too: `no-compile` or `unreached` (the only two shapes a
+  compiling-or-rejected glob probe can produce, since `glob_name`/`glob_macro`'s `drive()` calls
+  only `ran()` and never `reached()`), anything else `INCONCL`.
+
+  Both proved in the failing direction, against a real glob collision and a real `new-owner` row,
+  then reverted — `git diff` confirmed clean before this fix was committed. A forced
+  `base=upstream-fail` alongside a genuine head-side ambiguity moved the glob row from `glob-err`
+  to `INCONCL`; a forced `witness=1` (explicit UFCS on the consumer trait, bypassing inherent-method
+  resolution) on a real `new-owner` row moved it from `new-owner` to `INCONCL`. Re-run against the
+  same pre-#147 base as the prior entry, the tally is unchanged — 5 `new-owner`, 9 `INCONCL` —
+  because none of the 14 real rows there naturally produce `witness=1`; only the forced case
+  exercises the new branch. — *(#148, verification debt)*
+
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
 **This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**
