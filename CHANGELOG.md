@@ -158,14 +158,48 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
 
    **The scope of the change, stated rather than left to be found: it is the element's own trip
    that ends the collection, not the session's.** A parse that catches a trip and goes on keeps
-   full emit-and-continue recovery for every construct after it — which is what an editor or
-   language server needs, since one deeply-nested expression must not suppress the rest of the
-   file's diagnostics. The same holds one nesting level up: an inner collection's trip that an
-   element swallows is not charged to the enclosing collection's next ordinary failure.
+   emit-and-continue recovery for the constructs after it — which is what an editor or language
+   server needs, since one deeply-nested expression must not suppress the rest of the file's
+   diagnostics. The same holds one nesting level up: an inner collection's trip that an element
+   swallows is not charged to the enclosing collection's next ordinary failure.
+
+   **The granularity floor, because "the constructs after it" has a resolution.** The witness is a
+   counter, and a counter proves that *a* trip happened during the unit being judged — not that the
+   error being judged *is* that trip. The unit is one attempt for `recover` and `inplace_recover`,
+   one retry cycle for `skip_then_retry`, and one **element** for the collections. So grammar code
+   that catches a trip itself and then fails **ordinarily inside that same unit** has the ordinary
+   failure re-raised rather than recovered or filed. Move the catch one construct further out and
+   it recovers, or is filed and looped past, exactly as an untripped parse would; that contrast is
+   pinned by a test on each side of it.
+
+   The floor **fails closed**: a real trip is never recovered from and never filed as a diagnostic,
+   and the only over-charged case is an ordinary failure that shares its unit with a caught trip.
+   It cannot be lowered by reading the error, because the error type is allowed to be `()` and
+   discard the trip — which is why the witness is on the input in the first place. Lowering it
+   needs a cooperative *rebaseline* published for code that deliberately catches a trip and wants
+   the enclosing baseline moved past it. That is not in this release; no public name changes if it
+   is ever added.
 
    — *(#148 R1)*
 
 ### Fixed
+
+- **The collection gate's own census could pass by not looking.** `parser::many`'s `GATE_CENSUS`
+  read four hard-coded sources and counted one exact spelling of the swallow beneath the gate —
+  `emit_error(Spanned::new(span,`. A swallow spelled any other way, or written in a fifth source,
+  moved neither tally, so the equality it asserted still held and the census stayed green over an
+  ungated emit-and-continue site. A census quoted as evidence that answers by not looking is worse
+  than none.
+
+  The swallow is now a single chokepoint — one `emit_error` call in the whole `many`/`fold` tree,
+  with the three never-recoverable witnesses above it — so a driver physically has nothing to spell
+  differently. The census matches the **call** rather than its arguments and asserts the count is
+  zero in every driver source; it scans the chokepoint's own body for the three witnesses ahead of
+  the emission; and a third test requires every module of the driver trees to be classified, so the
+  source list cannot fall behind the tree. Every scan panics when the thing it looks for is absent
+  instead of finding nothing to check. Shown non-vacuous by planting a swallow in a fifth source
+  with a spelling the old shape did not match — it fails, naming the file, then the plant was
+  removed. No behaviour change. — *(#148, verification debt)*
 
 - **The recursion-limit test suite's stack-address witness made every Miri job and the ASan job
   red, on `main`.** `pratt_limit_unit_sink`'s unwind cell corroborates its two depth-cell

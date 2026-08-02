@@ -179,36 +179,15 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
         }
       };
 
-      // The descent witness's baseline, taken once per ELEMENT — the attempt this cycle's gate
-      // judges. See the gate below, and `many/repeated/mod.rs` for the reasoning in full.
+      // The descent witness's baseline, taken once per ELEMENT — the attempt the chokepoint below
+      // judges. See `many::file_element_failure` for why it is per element and not per collection.
       let trips = inp.trip_snapshot();
       match parser.f.try_parse_input(inp) {
-        // The never-recoverable gate and its two terminal witnesses: a frontier `Incomplete`
-        // (const-false under `Complete`), a terminal *scanner* stop, or a *descent* budget trip from
-        // the element parser re-raises untouched — never spent as a diagnostic, since no further
-        // input clears any of the three. The scanner witness reads the *committed cursor*
-        // ([`at_committed_boundary`]), so a boundary a prior lookahead already latched does not
-        // mis-charge an ordinary element failure short of it. The descent witness compares the
-        // session trip counter against this cycle's baseline ([`tripped_during_attempt`]), the
-        // counter being bumped before the grammar's `From` runs, so a trip re-raises for a
-        // delegating error type and for a discarding one alike — `()` included. Failure-arm only —
-        // a successful element does zero terminal work; both witnesses are positional/session
-        // facts, so no `MaybeTerminal` bound needed.
-        //
-        // Per element, not per collection: the counter is monotone and never cleared, so reading it
-        // absolutely would re-raise every later element failure — ordinary syntax errors included —
-        // once anything in the parse had caught a trip and carried on.
-        Err(e)
-          if Cmpl::is_incomplete_error(&e)
-            || inp.at_committed_boundary()
-            || inp.tripped_during_attempt(trips) =>
-        {
-          return Err(e);
-        }
-        Err(e) => {
-          let span = inp.span_since(&cursor);
-          inp.emitter().emit_error(Spanned::new(span, e))?;
-        }
+        // File the failure as a diagnostic and keep looping — unless it is one of the three the
+        // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
+        // the chokepoint's, not this loop's: see `many::file_element_failure` for the three
+        // witnesses and for why `trips` is taken per ELEMENT rather than per collection.
+        Err(e) => file_element_failure(inp, e, &cursor, trips)?,
         // The decline concludes *absence*. The gate for that conclusion sits in the epilogue's
         // close-miss arms below, where a real cached closer has already been ruled out.
         Ok(Decline) => break state,

@@ -713,6 +713,31 @@ where
   /// again on the next attempt. A trip is still terminal wherever it actually happens: the change
   /// narrows *which* failures are charged to it, never whether a real one is re-raised.
   ///
+  /// # How far the narrowing goes, and no further
+  ///
+  /// A transition witnesses that **a** trip happened inside the attempt. It does not witness that
+  /// the `Err` being judged **is** that trip, and the two differ within one attempt: grammar code
+  /// that catches a trip itself, carries on, and then fails *ordinarily before that same attempt
+  /// ends* hands the site an ordinary error over a counter that has already moved, and the site
+  /// re-raises it.
+  ///
+  /// The floor is therefore **one attempt** — one speculative parse for
+  /// [`Recover`](crate::parser::Recover) and
+  /// [`InplaceRecover`](crate::parser::InplaceRecover), one retry cycle for
+  /// [`skip_then_retry`](crate::ParseInput::skip_then_retry), one **element** for the collection
+  /// loops. It **fails closed** inside that unit: an ordinary failure sharing a unit with a caught
+  /// trip is re-raised, never the reverse, so no real trip is ever recovered from or filed as a
+  /// diagnostic. What is lost is emit-and-continue for one construct, not the stop.
+  ///
+  /// **A finer answer cannot be read off this cell, or off the error.** It would require deciding
+  /// whether a particular error value is the trip, which means interrogating the value — and the
+  /// grammar's error type may be `()`, whose conversion discards
+  /// [`RecursionLimitReached`](crate::error::RecursionLimitReached). That discarding sink is the
+  /// reason terminality is stored here at all, so "read the error" is exactly the design this cell
+  /// exists to replace. The one thing that *would* work is cooperative: an explicit **rebaseline**
+  /// published for code that deliberately catches a trip, moving the enclosing baselines past it.
+  /// It is not built, because no consumer needs it yet.
+  ///
   /// It is per **input session**, like the budget it guards: a
   /// [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and therefore
   /// a fresh cell, and harvests terminality by its own separate route.

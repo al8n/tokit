@@ -1326,6 +1326,90 @@ fn a_caught_trip_does_not_disable_a_later_recovery() {
   );
 }
 
+/// **The granularity floor, pinned rather than closed.** A trip caught *inside* the attempt is
+/// charged to that attempt's ordinary failure, and the recovery does not run.
+///
+/// The cell directly above is the same probe with one thing moved: there `catch_a_trip` runs
+/// **before** `Recover`'s attempt begins, so the baseline already includes the trip and the later
+/// ordinary failure recovers. Here it runs **inside** the primary, between the attempt's baseline
+/// and the failure being judged, so the counter moved during the attempt and the ordinary failure
+/// is re-raised. Same source, same recoverer, same one trip — only where the catch sits.
+///
+/// This is a real residual and it is documented as one, on `InputRef::tripped_during_attempt`, on
+/// `Input::resource_trips` and in `parser::many`'s module docs. **The strong form is not
+/// implementable**: proving that the `Err` in hand *is* the trip means interrogating the error
+/// value, and this file's whole subject is a sink that discards it — `()` keeps no discriminant to
+/// interrogate. So the witness resolves to one *attempt*, and inside that unit it fails closed: an
+/// ordinary failure sharing an attempt with a caught trip is re-raised, never the reverse.
+///
+/// The cell asserts what the code does today. If the escape hatch — an explicit rebaseline by
+/// grammar code that deliberately catches a trip — is ever built, this is the cell that has to be
+/// re-blessed, deliberately, rather than a behaviour that drifts unobserved.
+#[test]
+fn a_caught_trip_inside_one_attempt_re_raises_that_attempts_ordinary_failure() {
+  /// The primary: catches a trip itself, carries on, and then fails **ordinarily** — the whole of
+  /// it inside the one `Recover` attempt. `catch_a_trip` consumes nothing, so the pratt parse
+  /// below sees exactly the source it would in an untripped run.
+  fn caught_then_ordinary<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  ) -> Result<String, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    catch_a_trip(inp);
+    pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp)
+  }
+
+  fn probe<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<String, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    caught_then_ordinary
+      .recover(counting_recovery)
+      .parse_input(inp)
+  }
+
+  let (tight, ran, caught) = bounded(60, || {
+    let out = Parser::with_context(limited(8))
+      .apply(probe)
+      .parse_str("; 1");
+    (out, RECOVERIES.with(Cell::get), CAUGHT.with(Cell::get))
+  });
+  assert_eq!(
+    caught, 1,
+    "the tight run must really have tripped and swallowed it inside the attempt — otherwise this \
+     cell measures nothing"
+  );
+
+  let (roomy, roomy_ran, roomy_caught) = bounded(60, || {
+    let out = Parser::with_context(limited(ROOMY))
+      .apply(probe)
+      .parse_str("; 1");
+    (out, RECOVERIES.with(Cell::get), CAUGHT.with(Cell::get))
+  });
+  assert_eq!(
+    roomy_caught, 0,
+    "the control differs in one thing only — with room, nothing trips"
+  );
+  assert_eq!(
+    (&roomy, roomy_ran),
+    (&Ok(String::from("<spent>")), 1),
+    "the control pins the fixture absolutely: the failure is an ORDINARY one — `lhs` refuses `;` \
+     one frame deep — and on its own it is recoverable"
+  );
+
+  assert_eq!(
+    (tight, ran),
+    (Err(()), 0),
+    "the ordinary failure is re-raised and the recoverer never runs, because a trip moved the \
+     counter during the same attempt. This is the residual: the witness proves that A trip \
+     happened inside the attempt, not that THIS error is it — and it cannot prove the second \
+     without reading a payload a discarding sink has already thrown away"
+  );
+}
+
 /// The same, for the non-backtracking sibling: [`inplace_recover`](tokora::ParseInput::inplace_recover)
 /// reads the same cell on the same terms and must narrow the same way.
 #[test]

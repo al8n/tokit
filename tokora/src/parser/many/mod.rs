@@ -1,3 +1,52 @@
+//! The repetition drivers: `repeated`, `separated`, their `*_while` twins, and the delimited
+//! forms of all four.
+//!
+//! # Resilience, and the granularity floor under it
+//!
+//! The four **try-driven** families are resilient by design: an element's `Err` is filed as a
+//! diagnostic and the loop goes on to the next element. Three failures must never be spent that
+//! way, because no further input clears any of them — a frontier `Incomplete`, a terminal
+//! *scanner* stop, and a *descent* budget trip. [`file_element_failure`] is the **one** place an
+//! element failure is either filed or re-raised, and it gates on all three before it files; the
+//! drivers below carry no swallow of their own.
+//!
+//! The descent witness is not carried by the error value. It is a **monotone session counter** on
+//! the input (`Input::resource_trips`), bumped by [`InputRef::descend`](crate::InputRef::descend)
+//! before the grammar's `From` runs, and the gate compares it against a baseline taken **once per
+//! element** (`InputRef::trip_snapshot` / `InputRef::tripped_during_attempt`). That is what makes
+//! the re-raise independent of the error type: a
+//! [`RecursionLimitReached`](crate::error::RecursionLimitReached) that a discarding sink erases on
+//! conversion — `()` does — still cannot be filed here.
+//!
+//! ## What a counter witnesses, and what it cannot
+//!
+//! `tripped_during_attempt` proves that **a** trip happened while the element ran. It does not
+//! prove that the `Err` in hand **is** that trip. Element code that catches a trip itself, carries
+//! on, and then fails *ordinarily inside the same element* hands the driver an ordinary error with
+//! the counter already moved — and the driver re-raises it instead of filing it and continuing.
+//! That is a real residual, and
+//! `tokora/tests/collection_resource_trip.rs::a_caught_trip_inside_one_element_re_raises_its_ordinary_failure`
+//! pins the behaviour rather than wishing it away.
+//!
+//! **The strong form — "re-raise only when this very error is the trip" — is not implementable**:
+//! deciding it means interrogating the error value, and the grammar's error type may be `()`,
+//! which discards the trip on conversion. A sink that discards is the whole premise of the change
+//! that put the witness on the input, so a design that could tell the two errors apart would be
+//! reading a payload that is not there.
+//!
+//! So the floor is **one element** here, and **one attempt** for
+//! [`Recover`](crate::parser::Recover), [`InplaceRecover`](crate::parser::InplaceRecover) and
+//! [`skip_then_retry`](crate::ParseInput::skip_then_retry). Within that unit the verdict is
+//! "something no further input clears happened here", and it **fails closed**: an ordinary failure
+//! sharing its unit with a caught trip is re-raised, never the reverse — a real trip is never
+//! filed as a diagnostic and never recovered from.
+//!
+//! Finer granularity is reachable, but only with cooperation from whoever catches the trip: an
+//! explicit **rebaseline** — code that deliberately catches a trip declaring it settled, so the
+//! enclosing baselines move past it. That is the design if a consumer ever needs it. It is not
+//! built, because the escape hatch has no consumer yet and this crate does not publish API on
+//! speculation.
+
 use crate::{
   Decision, Emitter, ParseContext, ParseInput, Window,
   container::Container as ContainerT,
@@ -78,146 +127,459 @@ where
   Ok(())
 }
 
+/// Files one element failure as a diagnostic, or re-raises it — **the single place either can
+/// happen** in the try-driven collection families.
+///
+/// The section-4 never-recoverable law, moved off the four loop bodies and into one chokepoint.
+/// It used to be four hand-written copies of a three-way match guard, pinned by a census that
+/// counted one exact spelling of the swallow beneath it; a fifth loop written with a different
+/// spelling, or written in a file the census did not name, swallowed ungated and the census stayed
+/// green. Here there is no second swallow to spell: a driver hands its element failure to this
+/// function or propagates it with `?`, and the gate is upstream of the only `emit_error` in the
+/// tree.
+///
+/// # The three witnesses, in order
+///
+/// * `Cmpl::is_incomplete_error(&err)` — the frontier `Incomplete`. A constant `false` under
+///   [`Complete`](crate::input::Complete), so the complete path keeps its codegen.
+/// * `inp.at_committed_boundary()` — the **scanner** stop. Reads the *committed* cursor, so it is
+///   attempt-relative: a boundary a prior lookahead already latched does not mis-charge an
+///   ordinary element failure short of it. Never the lex-offset `at_latched_boundary`, which a
+///   prefilled cache would make false-positive on that same ordinary failure.
+/// * `inp.tripped_during_attempt(trips)` — the **descent** budget trip, which latches no boundary
+///   (it has a control stack, not a position) and so is invisible to the witness above.
+///
+/// All three are positional/session facts read on the failure path, so a successful element does
+/// zero terminal work and none of them costs a trait bound: no `MaybeTerminal` appears in these
+/// families.
+///
+/// # `trips` is the caller's, and it must be per element
+///
+/// The baseline belongs to the *attempt this call judges*, so the caller takes
+/// `inp.trip_snapshot()` **inside its element loop**, once per element — not hoisted out beside
+/// `latch_snapshot()`, whose absence witness genuinely is per driver attempt. Hoisted, the
+/// comparison degrades into a read of the monotone session counter, and every element failure
+/// after the parse's first trip re-raises — ordinary syntax errors included. `GATE_CENSUS` pins
+/// the placement; the module docs state the granularity floor this leaves, and why the floor
+/// cannot be lowered without cooperation from whoever catches a trip.
+#[inline(always)]
+pub(super) fn file_element_failure<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>(
+  inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
+  err: <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
+  since: &Cursor<'inp, 'closure, L>,
+  trips: usize,
+) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, Lang>,
+{
+  if Cmpl::is_incomplete_error(&err)
+    || inp.at_committed_boundary()
+    || inp.tripped_during_attempt(trips)
+  {
+    return Err(err);
+  }
+  let span = inp.span_since(since);
+  inp.emitter().emit_error(Spanned::new(span, err))
+}
+
 #[cfg(test)]
 mod gate_census {
-  //! GATE_CENSUS — the section-4 never-recoverable gate sites, locked by count.
+  //! GATE_CENSUS — the section-4 never-recoverable gate, locked to one chokepoint.
   //!
-  //! Every resilient emit-and-continue loop body in the try-driven collection families must gate on
-  //! `Cmpl::is_incomplete_error` FIRST, and re-raise **both** terminal witnesses alongside it, so
-  //! none of a frontier `Incomplete`, a tripped *scanner* limit, or a tripped *descent* budget from
-  //! the element parser is spent as a diagnostic:
+  //! Every resilient emit-and-continue loop body in the try-driven collection families must refuse
+  //! to spend a frontier `Incomplete`, a tripped *scanner* limit, or a tripped *descent* budget as
+  //! a diagnostic. The three witnesses live in [`file_element_failure`](super::file_element_failure)
+  //! and are documented there; what this module pins is that **nothing can reach the swallow
+  //! without passing them**.
   //!
-  //! * `inp.at_committed_boundary()` — the **scanner** stop. Reads the *committed cursor*, so it is
-  //!   attempt-relative: a boundary a prior lookahead already latched does not mis-charge an
-  //!   ordinary element failure short of it. Never the lex-offset `at_latched_boundary`, which a
-  //!   prefilled cache would make false-positive on that same ordinary failure.
-  //! * `inp.tripped_during_attempt(trips)` — the **descent** budget trip, which latches no boundary
-  //!   (it has no position to latch, only a control stack) and so is invisible to the witness
-  //!   above. It compares the session trip counter
-  //!   [`InputRef::descend`](crate::InputRef::descend) bumps before the grammar's `From` runs
-  //!   against this element's baseline, which is what makes the re-raise independent of the error
-  //!   type: a [`RecursionLimitReached`](crate::error::RecursionLimitReached) that a discarding sink
-  //!   erases on conversion — `()` does — still cannot be emitted-and-continued here.
+  //! # What the previous shape of this census could not see
   //!
-  //! Both are positional/session facts read on the failure arm, so a successful element does zero
-  //! terminal work and neither costs a trait bound: no `MaybeTerminal` appears in these families.
+  //! It counted the literal text `emit_error(Spanned::new(span,` in four hard-coded sources and
+  //! required one gate per match. Both halves could be defeated without noticing:
   //!
-  //! **Both are attempt-relative, and the descent one is so only because of where its baseline is
-  //! taken.** The counter behind it is a monotone session fact — "this parse tripped a budget, this
-  //! many times" — and is never cleared, so a site that reads it absolutely re-raises every later
-  //! element failure once anything in the parse has caught a trip and carried on: an ordinary
-  //! syntax error in an unrelated construct then ends the collection instead of being emitted, and
-  //! one deep expression early in a document suppresses every diagnostic after it. The baseline is
-  //! therefore `inp.trip_snapshot()` taken **inside the element loop**, once per element — not
-  //! hoisted out beside `latch_snapshot()`, whose absence witness genuinely is per driver attempt.
-  //! Hoisting it would restore the defect one nesting level up: a trip inside an *inner* collection
-  //! that an element swallows would be charged to the enclosing driver's next ordinary failure.
+  //! * a swallow spelled `emit_error(Spanned::new(other_span, err))` matched nothing, so the tally
+  //!   stayed balanced and the census stayed green over an ungated site;
+  //! * a swallow in a *fifth* source was not read at all.
   //!
-  //! One gate per swallow site; the census pins the total, the per-file placement, **both**
-  //! re-raises *inside the same guard* — not merely somewhere in the same file — and the baseline's
-  //! placement inside the loop that hosts the gate. So a new resilient loop cannot land ungated,
-  //! nor land carrying only two of the three (extend the list, then gate it all three ways), nor
-  //! land with the descent witness back in its session-absolute form.
+  //! A census that answers by not looking is worse than no census, because it is quoted as
+  //! evidence. So the swallow moved: there is exactly **one** `emit_error` call in the whole
+  //! `many`/`fold` tree, it is the chokepoint's, and the gate sits above it. The three tests below
+  //! pin, in order: that no driver files a diagnostic itself *whatever the spelling*; that each
+  //! driver's per-element baseline is taken inside the loop that hosts its chokepoint call; and
+  //! that no module of the tree has been added without being classified.
+  //!
+  //! # The one thing the chokepoint cannot centralize
+  //!
+  //! `trips` is the caller's. It must be `inp.trip_snapshot()` taken **inside the element loop**,
+  //! once per element — not hoisted out beside `latch_snapshot()`, whose absence witness genuinely
+  //! is per driver attempt. The counter is a monotone session fact and is never cleared, so a
+  //! baseline hoisted above the loop is arithmetically a session-absolute read for every element
+  //! after the first: an ordinary syntax error in an unrelated construct then ends the collection
+  //! instead of being filed, and one deep expression early in a document suppresses every
+  //! diagnostic after it. Hoisting it also restores the defect one nesting level up — a trip inside
+  //! an *inner* collection that an element swallows charged to the enclosing driver's next ordinary
+  //! failure. That placement is a per-caller property, so it is scanned per caller.
 
-  /// The needle that opens a never-recoverable gate. Counting it is counting gates: none of the
-  /// four sources spells it anywhere but in the guard.
-  const GATE: &str = "if Cmpl::is_incomplete_error(&";
+  use super::end_state_census::{code_find, code_matches};
 
-  /// The two terminal re-raises the gate must carry, and the end of the guard they must sit in.
-  const WITNESSES: [&str; 2] = ["inp.at_committed_boundary()", "inp.tripped_during_attempt("];
-  const GUARD_END: &str = "=>";
+  /// The swallow itself — matched on the **call**, not on the arguments, so no spelling of the
+  /// span or the error binding can slip past. This is the needle whose count must be zero
+  /// everywhere but the chokepoint.
+  const EMIT: &str = "emit_error(";
 
-  /// The descent witness's baseline, and the loop opener it must be taken after. Scanning between
-  /// the two is what pins the baseline as per-element rather than per-collection — the difference
-  /// between "this element tripped" and "this parse has tripped".
+  /// The chokepoint: its call in a driver, and its definition in this module's own source.
+  const CHOKEPOINT: &str = "file_element_failure(";
+  const CHOKEPOINT_DEF: &str = "fn file_element_failure";
+
+  /// The three witnesses the chokepoint must consult before it reaches [`EMIT`].
+  const WITNESSES: [&str; 3] = [
+    "Cmpl::is_incomplete_error(&",
+    "inp.at_committed_boundary()",
+    "inp.tripped_during_attempt(",
+  ];
+
+  /// The element attempt whose failure a driver must route through the chokepoint, the descent
+  /// witness's baseline, and the loop opener that baseline must be taken after.
+  const ATTEMPT: &str = "try_parse_input(inp)";
   const BASELINE: &str = "inp.trip_snapshot()";
   const HOSTING_LOOP: &str = "loop {";
 
+  /// SWALLOW SCAN — every source in the `many` and `fold` trees that can reach an [`InputRef`]
+  /// inside a repetition: the eight collection drivers, the four folds, and the three tree `mod.rs`
+  /// files that could host a driver of their own. Only these are read for [`EMIT`], and
+  /// [`the_gate_census_covers_every_driver_module`] is what keeps the list from silently falling
+  /// behind the tree.
+  ///
+  /// [`InputRef`]: crate::InputRef
+  fn swallow_scan_sites() -> [(&'static str, &'static str); 15] {
+    let mut sites = [("", ""); 15];
+    let (guarded, rest) = sites.split_at_mut(12);
+    guarded.copy_from_slice(&progress_guard_sites());
+    rest.copy_from_slice(&[
+      ("many/delim/mod.rs", include_str!("delim/mod.rs")),
+      ("many/sep/mod.rs", include_str!("sep/mod.rs")),
+      ("many/sep_while/mod.rs", include_str!("sep_while/mod.rs")),
+    ]);
+    sites
+  }
+
+  /// The four try-driven families: the only drivers that swallow, and therefore the only ones that
+  /// call the chokepoint.
+  fn try_driven_sites() -> [(&'static str, &'static str); 4] {
+    [
+      ("many/repeated/mod.rs", include_str!("repeated/mod.rs")),
+      ("many/delim/repeated.rs", include_str!("delim/repeated.rs")),
+      ("many/sep/parse/mod.rs", include_str!("sep/parse/mod.rs")),
+      ("many/sep/delim/mod.rs", include_str!("sep/delim/mod.rs")),
+    ]
+  }
+
+  /// A diagnostic filed for an element failure passes the never-recoverable gate first, because
+  /// there is exactly one place a diagnostic can be filed and the gate is above it.
+  ///
+  /// This is the spelling-independent half. The needle is `emit_error(` — the call, with no
+  /// argument text — so a swallow renamed, re-spanned or re-wrapped still counts, and the
+  /// assertion is that the count is **zero** in every driver rather than that it balances against
+  /// something. There is nothing left to balance: the drivers have no swallow of their own.
   #[test]
   #[cfg_attr(
     miri,
     ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
   )]
-  fn every_resilient_swallow_site_is_gated() {
-    let sites = [
-      ("many/repeated/mod.rs", include_str!("repeated/mod.rs")),
-      ("many/delim/repeated.rs", include_str!("delim/repeated.rs")),
-      ("many/sep/parse/mod.rs", include_str!("sep/parse/mod.rs")),
-      ("many/sep/delim/mod.rs", include_str!("sep/delim/mod.rs")),
-    ];
-    let mut gates = 0;
-    for (name, src) in sites {
-      let swallows = src.matches("emit_error(Spanned::new(span,").count();
-      let gated = src.matches(GATE).count();
+  fn every_element_failure_routes_through_the_gated_chokepoint() {
+    for (name, src) in swallow_scan_sites() {
       assert_eq!(
-        swallows, gated,
-        "{name}: every emit-and-continue swallow needs exactly one incomplete gate"
+        code_matches(src, EMIT),
+        0,
+        "{name}: a driver hands its element failure to `file_element_failure` or propagates it \
+         with `?` — it never files a diagnostic itself. A swallow written here bypasses the \
+         never-recoverable gate whatever it is spelled, which is the defect this census exists to \
+         make unspellable"
+      );
+    }
+
+    // …and the one place it can be filed is the chokepoint, whose own source is read here rather
+    // than assumed. `code_matches` ignores whole-line comments, so the prose above and the
+    // chokepoint's own doc comment cannot stand in for the call.
+    let prod = super::end_state_census::many_mod_production();
+    assert_eq!(
+      code_matches(prod, EMIT),
+      1,
+      "`many/mod.rs`: the tree files element diagnostics through exactly one `emit_error` call, \
+       inside `file_element_failure`"
+    );
+
+    // The three witnesses, in the chokepoint's own body and BEFORE the emission. Scanning the
+    // region from the definition to the call — rather than counting needles over the file — is
+    // what keeps this non-vacuous: three independent tallies are equally satisfied by three
+    // witnesses scattered anywhere, and a region scan is not. Both `find`s panic rather than pass
+    // when the thing being scanned for is absent, so a chokepoint that has been renamed or gutted
+    // reports that instead of quietly finding nothing to check.
+    let def_at = code_find(prod, CHOKEPOINT_DEF).unwrap_or_else(|| {
+      panic!(
+        "`many/mod.rs`: `{CHOKEPOINT_DEF}` is gone. The swallow chokepoint has been renamed or \
+         removed; re-cut this census against whatever replaced it before trusting a green run"
+      )
+    });
+    let body = &prod[def_at..];
+    let emit_at = code_find(body, EMIT).unwrap_or_else(|| {
+      panic!("`many/mod.rs`: the one `emit_error` call is not inside `file_element_failure`")
+    });
+    let guard = &body[..emit_at];
+    for witness in WITNESSES {
+      assert_eq!(
+        code_matches(guard, witness),
+        1,
+        "`many/mod.rs`: the chokepoint must consult all three never-recoverable witnesses before \
+         it files — `{witness}` is missing from, or duplicated in, the code ahead of its \
+         `emit_error`"
+      );
+    }
+  }
+
+  /// Every driver that calls the chokepoint takes its trip baseline **inside the loop that hosts
+  /// the call**, once per element.
+  ///
+  /// The half the chokepoint cannot own: `trips` is passed in, so the caller decides whether the
+  /// comparison means "this element tripped" or "this parse has tripped". The `rfind` panics
+  /// rather than passing when a call is not inside a loop at all, so this cannot be satisfied by a
+  /// source that has stopped looking like a driver.
+  #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
+  fn every_element_loop_baselines_its_trip_witness_per_element() {
+    let mut routed = 0;
+    for (name, src) in try_driven_sites() {
+      let calls = code_matches(src, CHOKEPOINT);
+      assert_eq!(
+        calls, 1,
+        "{name}: one element loop, one chokepoint call — found {calls}"
+      );
+      assert_eq!(
+        code_matches(src, ATTEMPT),
+        calls,
+        "{name}: every element attempt's failure must reach the chokepoint. An attempt without \
+         one either swallows behind the gate's back or propagates with `?`; if the second, move \
+         it out of this list and say why"
+      );
+      assert_eq!(
+        code_matches(src, BASELINE),
+        calls,
+        "{name}: exactly one `trip_snapshot()` baseline per chokepoint call — a second, stray read \
+         of the counter is how a session-absolute test gets back in"
       );
 
-      // Exactly one baseline per gate, counted over code lines only so a prose mention of the
-      // needle cannot stand in for the binding. Paired with the region scan below, this is what
-      // rules out a second, stray read of the counter being used as a session-absolute test.
-      assert_eq!(
-        super::end_state_census::code_matches(src, BASELINE),
-        gated,
-        "{name}: exactly one `trip_snapshot()` baseline per never-recoverable gate"
-      );
-
-      // Both terminal re-raises, in the SAME guard as the incomplete gate and after it. Scanning
-      // the *guard region* — from the gate to the `=>` that closes the arm's pattern — rather than
-      // counting each needle over the whole file is what keeps this non-vacuous: three independent
-      // per-file tallies are equally satisfied by three witnesses scattered across three different
-      // arms, and this is not. It is also indentation- and wrap-independent, which matters because
-      // the three-way guard no longer fits on one line at the crate's rustfmt width.
       let mut checked = 0;
       let mut from = 0;
-      while let Some(at) = src[from..].find(GATE) {
-        let gate_at = from + at;
-        let after = &src[gate_at..];
-        let guard = &after[..after
-          .find(GUARD_END)
-          .unwrap_or_else(|| panic!("{name}: an incomplete gate with no `=>` closing its arm"))];
-        for witness in WITNESSES {
-          assert!(
-            guard.contains(witness),
-            "{name}: the incomplete gate must re-raise both terminal witnesses in the same guard — \
-             `{witness}` is missing from `{}`",
-            guard.trim()
-          );
-        }
-
-        // …and the descent witness's baseline is taken inside the loop that hosts the gate, so the
-        // comparison is per ELEMENT. A baseline hoisted above the loop — the natural place, since
-        // `latch_snapshot()`'s belongs there — is arithmetically identical to reading the monotone
-        // counter absolutely for every element after the first, which is the defect this scan
-        // exists to keep out. The `rfind` panics rather than passing when a gate is not inside a
-        // loop at all, so this cannot be satisfied by a source that has stopped looking like a
-        // driver.
-        let loop_at = src[..gate_at].rfind(HOSTING_LOOP).unwrap_or_else(|| {
-          panic!("{name}: a never-recoverable gate that is not inside a repetition loop")
+      while let Some(at) = code_find(&src[from..], CHOKEPOINT) {
+        let call_at = from + at;
+        let loop_at = src[..call_at].rfind(HOSTING_LOOP).unwrap_or_else(|| {
+          panic!("{name}: a chokepoint call that is not inside a repetition loop")
         });
         assert_eq!(
-          super::end_state_census::code_matches(&src[loop_at..gate_at], BASELINE),
+          code_matches(&src[loop_at..call_at], BASELINE),
           1,
           "{name}: the descent witness is attempt-relative — take the `trip_snapshot()` baseline \
-           INSIDE the element loop, once per element, and compare it with `tripped_during_attempt`. \
-           Hoisted out of the loop it reads the monotone session counter, and every element failure \
-           after the parse's first trip re-raises, ordinary syntax errors included"
+           INSIDE the element loop, once per element. Hoisted out of the loop it reads the \
+           monotone session counter, and every element failure after the parse's first trip \
+           re-raises, ordinary syntax errors included"
         );
-
         checked += 1;
-        from = gate_at + GATE.len();
+        from = call_at + CHOKEPOINT.len();
       }
       assert_eq!(
-        checked, gated,
-        "{name}: every gate occurrence must have been inspected"
+        checked, calls,
+        "{name}: every chokepoint call must have been inspected"
       );
-      gates += gated;
+      routed += calls;
     }
     assert_eq!(
-      gates, 4,
+      routed, 4,
       "the try-driven families carry exactly four gated loop bodies"
     );
+  }
+
+  /// The bound arrangements every driver family re-exposes, and the separator arrangements the
+  /// four separated families add. Named once: the leaves are formulaic, and the point of listing
+  /// them is that a name **not** in the pattern shows up.
+  const BOUNDS: &[&str] = &["at_least", "at_most", "bounded", "unbounded"];
+  const ARRANGEMENTS: &[&str] = &[
+    "allow_leading",
+    "allow_leading_require_trailing",
+    "allow_surrounded",
+    "allow_trailing",
+    "require_leading",
+    "require_leading_allow_trailing",
+    "require_surrounded",
+    "require_trailing",
+  ];
+
+  /// The census's own frontier, stated as data: every `mod` declaration in the `many` and `fold`
+  /// driver trees, grouped.
+  ///
+  /// One row for every source [`swallow_scan_sites`] reads, plus the three tree `mod.rs` files that
+  /// declare them. A row with no groups declares no modules today, and a `mod` added to it reds
+  /// this test rather than quietly widening the tree past the scan.
+  ///
+  /// **What this closes and what it does not.** It closes the "fifth file" hole for the trees the
+  /// drivers live in: a new module beside a driver, or a new driver family, changes a declaration
+  /// list here. It does **not** descend into `many/handler` or `many/options`, which hold no
+  /// [`InputRef`](crate::InputRef) and run no loop; if one ever does, it belongs in the swallow
+  /// scan and its parent belongs here.
+  fn driver_tree() -> [(
+    &'static str,
+    &'static str,
+    &'static [&'static [&'static str]],
+  ); 16] {
+    [
+      (
+        "many/mod.rs",
+        super::end_state_census::many_mod_production(),
+        &[&[
+          "delim",
+          "handler",
+          "macros",
+          "options",
+          "repeated",
+          "repeated_while",
+          "sep",
+          "sep_while",
+        ]],
+      ),
+      (
+        "many/delim/mod.rs",
+        include_str!("delim/mod.rs"),
+        &[&["repeated", "repeated_while"]],
+      ),
+      (
+        "many/sep/mod.rs",
+        include_str!("sep/mod.rs"),
+        &[&["delim", "parse"]],
+      ),
+      (
+        "many/sep_while/mod.rs",
+        include_str!("sep_while/mod.rs"),
+        &[&["delim", "parse"]],
+      ),
+      (
+        "fold/mod.rs",
+        include_str!("../fold/mod.rs"),
+        &[&["fold_while", "rfold", "rfold_while"]],
+      ),
+      ("fold/rfold.rs", include_str!("../fold/rfold.rs"), &[]),
+      (
+        "fold/fold_while.rs",
+        include_str!("../fold/fold_while.rs"),
+        &[],
+      ),
+      (
+        "fold/rfold_while.rs",
+        include_str!("../fold/rfold_while.rs"),
+        &[],
+      ),
+      (
+        "many/repeated/mod.rs",
+        include_str!("repeated/mod.rs"),
+        &[BOUNDS],
+      ),
+      (
+        "many/repeated_while/mod.rs",
+        include_str!("repeated_while/mod.rs"),
+        &[BOUNDS],
+      ),
+      (
+        "many/delim/repeated.rs",
+        include_str!("delim/repeated.rs"),
+        &[BOUNDS],
+      ),
+      (
+        "many/delim/repeated_while.rs",
+        include_str!("delim/repeated_while.rs"),
+        &[BOUNDS],
+      ),
+      (
+        "many/sep/parse/mod.rs",
+        include_str!("sep/parse/mod.rs"),
+        &[BOUNDS, ARRANGEMENTS],
+      ),
+      (
+        "many/sep/delim/mod.rs",
+        include_str!("sep/delim/mod.rs"),
+        &[BOUNDS, ARRANGEMENTS],
+      ),
+      (
+        "many/sep_while/parse/mod.rs",
+        include_str!("sep_while/parse/mod.rs"),
+        &[BOUNDS, ARRANGEMENTS],
+      ),
+      (
+        "many/sep_while/delim/mod.rs",
+        include_str!("sep_while/delim/mod.rs"),
+        &[BOUNDS, ARRANGEMENTS],
+      ),
+    ]
+  }
+
+  /// No module of the driver trees has landed without being classified.
+  ///
+  /// The other half of "the census cannot pass by not looking": the swallow scan reads a fixed
+  /// list of sources, and a list is only as good as the guarantee that it is complete. This reads
+  /// the `mod` declarations that *define* the tree and requires each one to be accounted for, so a
+  /// new file next to a driver cannot be invisible to the scan — it fails here first, naming
+  /// itself.
+  #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
+  fn the_gate_census_covers_every_driver_module() {
+    for (name, src, groups) in driver_tree() {
+      let mut declared = 0;
+      let mut known = 0;
+      for group in groups {
+        known += group.len();
+      }
+      for line in src.lines() {
+        let line = line.trim();
+        if line.starts_with("//") {
+          continue;
+        }
+        // Visibility first, so a `pub mod` cannot slip through a prefix test written for `mod`.
+        let line = line
+          .strip_prefix("pub(crate) ")
+          .or_else(|| line.strip_prefix("pub(super) "))
+          .or_else(|| line.strip_prefix("pub "))
+          .unwrap_or(line);
+        let rest = match line.strip_prefix("mod ") {
+          Some(rest) => rest,
+          None => continue,
+        };
+        // `mod x;` and `mod x {` alike.
+        let module = rest
+          .split(|c: char| c == ';' || c == '{' || c.is_whitespace())
+          .next()
+          .unwrap_or("");
+        assert!(
+          groups.iter().any(|group| group.contains(&module)),
+          "{name}: `mod {module};` is new to the driver tree and this census does not know it. If \
+           it can reach an `InputRef` inside a repetition, add its source to `swallow_scan_sites` \
+           so its element failures are read; if it is an `Apply`/options leaf, add its name here. \
+           Do not do neither — the swallow scan reads a fixed list, and an unlisted source is a \
+           source nothing checks"
+        );
+        declared += 1;
+      }
+      assert_eq!(
+        declared, known,
+        "{name}: this census names {known} module(s) and the source declares {declared}. A name \
+         that has been removed or renamed leaves the census scanning for something that is not \
+         there, which is how a list stops meaning anything"
+      );
+    }
   }
 
   /// Every `*_while` driver's decision-window peek is terminal-aware: it uses the
@@ -415,9 +777,31 @@ mod end_state_census {
       .sum()
   }
 
+  /// The byte offset of `needle`'s first occurrence on a line that is not a whole-line comment,
+  /// or `None` when there is none.
+  ///
+  /// The positional twin of [`code_matches`], and comment-blind for the same reason: a region scan
+  /// anchored on a needle a doc comment also spells would measure the wrong region, which is a
+  /// quieter failure than measuring nothing.
+  pub(super) fn code_find(src: &str, needle: &str) -> Option<usize> {
+    let mut at = 0;
+    for line in src.split_inclusive('\n') {
+      let hit = if line.trim_start().starts_with("//") {
+        None
+      } else {
+        line.find(needle)
+      };
+      if let Some(k) = hit {
+        return Some(at + k);
+      }
+      at += line.len();
+    }
+    None
+  }
+
   /// This module's own file with the census modules cut off the end — several needles below
   /// appear verbatim in census source and would otherwise be counted as production sites.
-  fn many_mod_production() -> &'static str {
+  pub(super) fn many_mod_production() -> &'static str {
     let src = include_str!("mod.rs");
     src
       .split_once("#[cfg(test)]")

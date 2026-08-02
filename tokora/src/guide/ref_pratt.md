@@ -191,6 +191,14 @@ draw on the same budget through
   catches a trip and parses on, and answering the second with the first would have suppressed every
   later diagnostic in the document.
 
+  The resolution of that per-attempt question is **one attempt** — one speculative parse, one
+  `skip_then_retry` cycle, one element — and no finer. Inside that unit the witness proves that *a*
+  trip happened, not that the error in hand is it, so grammar code that catches a trip itself and
+  then fails **ordinarily before the same attempt ends** has the ordinary failure re-raised rather
+  than recovered or filed. Move the catch one construct further out and it behaves exactly as an
+  untripped parse. The floor fails closed — a real trip is never spent — and it cannot be lowered
+  by inspecting the error, because the sink this whole design exists for has discarded it.
+
   This was not true before tokora 0.9. A `()`-errored grammar used to get `is_terminal() == false`
   on the converted value and **spend** the trip: `recover` synthesized a node for a construct the
   budget forbade reading, and `skip_then_retry` handed the surrounding grammar back offset 68 — a

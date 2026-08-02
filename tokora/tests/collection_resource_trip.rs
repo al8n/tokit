@@ -505,6 +505,34 @@ macro_rules! trip_suite {
         }
       }
 
+      /// An element that catches a trip **itself** and then fails ordinarily — both inside the one
+      /// element attempt the driver's gate is judging.
+      ///
+      /// The trip is taken only on the [`BAD`] element, so the parse's *only* trip and the ordinary
+      /// failure the driver sees belong to the same element. That is what makes the paired cell
+      /// below a statement about the granularity floor rather than about leakage from an earlier
+      /// element, which the per-element baseline already rules out.
+      fn caught_then_ordinary_num<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<ParseAttempt<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        let n = match inp.try_expect(|t| matches!(t.data(), Token::Num(_)))? {
+          None => return Ok(ParseAttempt::Decline),
+          Some(tok) => match tok.into_data() {
+            Token::Num(n) => n,
+            _ => unreachable!("the predicate accepted only `Num`"),
+          },
+        };
+        if n == BAD {
+          catch_a_trip(inp);
+          return Err($ordinary);
+        }
+        Ok(ParseAttempt::Accept(n))
+      }
+
       /// The inner collection's element: one `Plus`, then a descent that trips and is **caught**
       /// there. The inner collection therefore returns `Ok` with the session counter already raised
       /// — a trip that belongs to no element the *enclosing* driver is judging.
@@ -623,6 +651,17 @@ macro_rules! trip_suite {
       {
         catch_a_trip(inp);
         deep_num.repeated().collect().parse_input(inp)
+      }
+
+      fn caught_trip_inside_one_element<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_ordinary_num.repeated().collect().parse_input(inp)
       }
 
       /// Section 2, one nesting level up: the trip happens inside an *inner* collection, during the
@@ -823,6 +862,123 @@ macro_rules! trip_suite {
           collects = Ok(vec![1, 3]),
           tripped = 1
         );
+      }
+
+      // ── Section 2b: the granularity floor, pinned rather than closed ────────
+
+      /// **A trip caught inside ONE element is charged to that element's ordinary failure.** The
+      /// residual the four cells above do not reach, stated as behaviour instead of left to be
+      /// discovered.
+      ///
+      /// `a_caught_trip_leaves_repeated_emitting` is this cell with one thing moved. There the
+      /// catch happens *before* the collection starts, so the driver's per-element baseline already
+      /// includes the trip and `"1 9 3"` collects `[1, 3]` with the `9` filed as a diagnostic. Here
+      /// the catch happens *inside the element that then fails*, between the baseline this cycle
+      /// took and the failure being judged — so the counter moved during the element and the
+      /// ordinary error is re-raised. Same source, same element failure, same single trip: only
+      /// where the catch sits.
+      ///
+      /// **The strong form — "re-raise only when this very error is the trip" — cannot be built
+      /// here.** Deciding it means interrogating the error value, and the discarding `()` sink this
+      /// file runs alongside has already thrown the trip away; an error type that discards it is
+      /// the entire premise of #148 and the reason the witness lives on the input. So the floor is
+      /// one element, and inside that unit the gate **fails closed**: an ordinary failure sharing
+      /// its element with a caught trip is re-raised, never the reverse.
+      ///
+      /// Over the delegating sink the re-raised value is asserted to be the **ordinary** error and
+      /// not the trip's, which is what makes "the wrong error was charged" the thing measured
+      /// rather than merely "the parse failed". Over `()` the two are the same value, so that half
+      /// of the assertion carries no information there — which is precisely why the file runs both.
+      ///
+      /// If the escape hatch (an explicit rebaseline by code that deliberately catches a trip) is
+      /// ever built, this cell is re-blessed deliberately rather than drifting unobserved.
+      #[allow(rustdoc::private_intra_doc_links)]
+      mod same_element {
+        use super::*;
+
+        #[test]
+        fn a_caught_trip_inside_one_element_re_raises_its_ordinary_failure() {
+          reset_trips();
+          let mut tight_log = Verbose::<$err>::new();
+          let tight = {
+            let ctx: ParserContext<'_, TestLexer<'_>, &mut Verbose<$err>> =
+              ParserContext::new(&mut tight_log);
+            let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(TIGHT));
+            Parser::with_context(ctx)
+              .apply(caught_trip_inside_one_element)
+              .parse_str("1 9 3")
+          };
+          let tight_filed = filed(&tight_log);
+          let tight_trips = trips();
+
+          reset_trips();
+          let mut roomy_log = Verbose::<$err>::new();
+          let roomy = {
+            let ctx: ParserContext<'_, TestLexer<'_>, &mut Verbose<$err>> =
+              ParserContext::new(&mut roomy_log);
+            let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(ROOMY));
+            Parser::with_context(ctx)
+              .apply(caught_trip_inside_one_element)
+              .parse_str("1 9 3")
+          };
+          let roomy_filed = filed(&roomy_log);
+
+          assert_eq!(
+            tight_trips,
+            1,
+            concat!(
+              "one element caught one trip over ",
+              $sink,
+              ": exactly one, and it is the failing element's — without that this cell is \
+               comparing two untripped parses"
+            )
+          );
+          assert_eq!(
+            trips(),
+            0,
+            concat!(
+              "one element caught one trip over ",
+              $sink,
+              ": the control differs in one thing only — with room, nothing trips"
+            )
+          );
+          assert_eq!(
+            (&roomy, roomy_filed),
+            (&Ok(vec![1, 3]), 1),
+            concat!(
+              "one element caught one trip over ",
+              $sink,
+              ": the control pins the fixture absolutely — the element fails ordinarily on the \
+               `9`, the driver files that one diagnostic and loops past it, and the collection \
+               completes"
+            )
+          );
+
+          assert_eq!(
+            (&tight, tight_filed),
+            (&Err($ordinary), 0),
+            concat!(
+              "one element caught one trip over ",
+              $sink,
+              ": the element's ORDINARY failure is re-raised and nothing is filed, because a trip \
+               moved the counter during the same element. The witness proves that A trip happened \
+               inside the element, not that THIS error is it — and it cannot prove the second \
+               without reading a payload the discarding sink has thrown away. This is the \
+               granularity floor: one element, failing closed"
+            )
+          );
+          assert_ne!(
+            tight,
+            roomy,
+            concat!(
+              "one element caught one trip over ",
+              $sink,
+              ": and the two runs deliberately DISAGREE — the paired \
+               `a_caught_trip_leaves_repeated_emitting` cell is the same fixture with the catch \
+               moved outside the element, where they must agree. The contrast is the floor"
+            )
+          );
+        }
       }
 
       // ── Section 3: and the protection is still there ────────────────────────

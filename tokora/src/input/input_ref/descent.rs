@@ -334,6 +334,39 @@ where
   /// genuine trip would read as "nothing happened here" — narrowing the witness into a hole. The
   /// counter changes on every trip, so `!=` is exactly "a trip happened inside this attempt".
   ///
+  /// # The granularity floor: one attempt, and it fails closed
+  ///
+  /// This answers "**a** trip happened while the attempt ran". It does **not** answer "the `Err` I
+  /// am holding **is** that trip". The two come apart inside a single attempt: grammar code that
+  /// catches a trip itself, carries on, and then fails *ordinarily before the attempt ends* leaves
+  /// the counter moved, and the ordinary failure is re-raised as though the budget had stopped it.
+  ///
+  /// So the resolution of this witness is **one attempt** — one speculative parse for
+  /// [`Recover`](crate::parser::Recover) and
+  /// [`InplaceRecover`](crate::parser::InplaceRecover), one retry cycle for
+  /// [`skip_then_retry`](crate::ParseInput::skip_then_retry), one *element* for the resilient
+  /// collection loops. Within that unit the verdict **fails closed**: an ordinary failure sharing
+  /// its unit with a caught trip is re-raised, never the reverse. A real trip is never recovered
+  /// from and never filed as a diagnostic. Outside the unit nothing is charged at all, which is the
+  /// whole point of taking a baseline.
+  ///
+  /// **The strong form is not implementable at this layer.** Deciding whether the error in hand is
+  /// the trip means interrogating its value, and the grammar's error type may be `()`, whose `From`
+  /// discards [`RecursionLimitReached`] entirely — a sink that discards is the reason this witness
+  /// lives on the input instead of in the error. Any design claiming to tell the two apart is
+  /// either reading a payload that is not there, or is the escape hatch below wearing a different
+  /// name.
+  ///
+  /// **The escape hatch, if a consumer ever needs one:** an explicit *rebaseline* — code that
+  /// deliberately catches a trip declaring it settled, so the enclosing baselines move past it and
+  /// the attempt is judged only on what happens after. That is a cooperative operation, and it is
+  /// the design to build if the floor ever costs somebody something real. It is not built: no
+  /// consumer needs it yet, and this crate does not publish API on speculation.
+  ///
+  /// `tokora/tests/collection_resource_trip.rs` and `tokora/tests/pratt_limit_unit_sink.rs` each
+  /// pin one cell on this behaviour, paired against the cell that moves the catch outside the unit
+  /// and gets the opposite answer.
+  ///
   /// Costs one `usize` load and a comparison, on the failure arm only.
   #[inline(always)]
   pub(crate) const fn tripped_during_attempt(&self, since: usize) -> bool {

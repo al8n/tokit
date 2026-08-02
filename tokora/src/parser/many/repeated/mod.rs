@@ -265,8 +265,8 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
     let latch = inp.latch_snapshot();
 
     loop {
-      // The descent witness's baseline, taken once per ELEMENT — the attempt this cycle's gate
-      // judges. See the gate below for why it is not hoisted out of the loop beside `latch`.
+      // The descent witness's baseline, taken once per ELEMENT — the attempt the chokepoint below
+      // judges. `many::file_element_failure` says why it belongs here and not out beside `latch`.
       let trips = inp.trip_snapshot();
       match self.f.try_parse_input(inp) {
         Ok(Accept(item)) => {
@@ -274,37 +274,13 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
           push_element(&mut num, &mut full, container, item, inp, &anchor)?;
         }
         Ok(Decline) => break,
-        // The never-recoverable gate and its two terminal witnesses: the element's `Err` can be the
-        // frontier `Incomplete` (an unfinished construct, const-false under `Complete`), a terminal
-        // *scanner* stop, or a *descent* budget trip. None of the three is malformed input, and no
-        // further input clears any of them, so re-raise untouched instead of spending it as a
-        // diagnostic. The scanner witness reads the *committed cursor* ([`at_committed_boundary`]),
-        // so it is attempt-relative: a boundary a prior lookahead already latched (a prefilled cache
-        // leaving the lex offset at it) does not mis-charge an element that failed ordinarily before
-        // reaching it. The descent witness is attempt-relative by the other route — the session
-        // trip counter differing from the baseline this cycle took ([`tripped_during_attempt`]), the
-        // counter being bumped before the grammar's `From` runs, so a trip re-raises for a
-        // delegating error type and for a discarding one alike, `()` included. Both are
-        // positional/session facts, evaluated only on the failure arm, so a successful element does
-        // zero terminal work and no `MaybeTerminal` bound is needed.
-        //
-        // The baseline is per element and not per collection, which is the difference between
-        // "this element tripped" and "this parse has tripped". The latter is monotone and never
-        // cleared, so once anything caught a trip and carried on — grammar code doing its own
-        // catching, or an inner collection re-raising into an element that swallows it — every
-        // later element failure here would re-raise, ordinary syntax errors included, and the
-        // collection would stop emitting diagnostics for the rest of the document.
-        Err(err)
-          if Cmpl::is_incomplete_error(&err)
-            || inp.at_committed_boundary()
-            || inp.tripped_during_attempt(trips) =>
-        {
-          return Err(err);
-        }
-        Err(err) => {
-          let span = inp.span_since(&cursor);
-          inp.emitter().emit_error(Spanned::new(span, err))?;
-        }
+        // File the failure as a diagnostic and keep looping — unless it is one of the three the
+        // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
+        // the chokepoint's, not this loop's: see `file_element_failure` for the three witnesses and
+        // for why `trips` is taken per ELEMENT rather than per collection. `?` here propagates both
+        // a re-raise and an emitter that refused the diagnostic, exactly as the hand-written arms
+        // this replaced did.
+        Err(err) => file_element_failure(inp, err, &cursor, trips)?,
       }
 
       // A cycle that consumed nothing re-sees the same input and would retry forever. The progress
