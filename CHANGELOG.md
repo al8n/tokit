@@ -77,6 +77,36 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    that walk by node, or that assert on a rendered tree, see the run inside the node of the token
    before it. A source with *no* committed token at all is not affected.
 
+### Performance
+
+2. **`Sink::finish` replays the event log once instead of twice.** Materialization used to make
+   a full gather pass over every event before the walk that drives the builder: it validated
+   kinds and retro-wrap targets, collected the recorded lexer-error spans, and read the
+   uncovered runs off the token spans so the walk could tile a run at the token it trails. All
+   three now happen inside the walk.
+
+   The canaries move to the arm of the event they were already about. The error spans are still
+   merged into a **set** and the coverage verdict is still order-independent — it is simply
+   decided after the walk instead of before it, which it can be because
+   [`UncoveredGap`](https://docs.rs/tokora/latest/tokora/cst/enum.FinishError.html) was only
+   ever consumed at the end. The run lookahead is now a *monotone cursor*: a run's tile is armed
+   at the token that opens it and forced at the next builder-visible event, which resolves its
+   far end by scanning forward to the next token — never rescanning, and skipping outright every
+   region whose run the following token resolves for free.
+
+   Measured on a 57.7 KB GraphQL document (64,085 events): **1,727 µs → 1,663 µs, −64 µs**,
+   with the produced tree byte-identical across the clean, perturbed, hand-broken and
+   every-prefix corpora.
+
+   **One behaviour changes, and only on a malformed stream: error precedence.** Two passes meant
+   every gather-class refusal (`ReservedKind`, `StaleStartAt`, `DanglingForwardParent`,
+   `InvalidDiagnosticSpan`, `InvalidDialectKind`) outranked every walk-class refusal
+   (`OrphanFinish`, `ImproperWrap`, `MismatchedFinish`, `OverlappingSpans`, `SpanOutOfBounds`,
+   `OffsetOverflow`) whatever their buffer indices. One pass reports the **first violation in
+   buffer order**. No stream that was refused is now accepted, and none that was accepted is now
+   refused; a stream with two defects may name the other one. Within a single event the order is
+   unchanged — each fused arm runs its gather checks ahead of its walk checks.
+
 ## 0.8.0 (2026-07-31)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.

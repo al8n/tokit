@@ -3956,7 +3956,7 @@ fn ceil_log2(k: u64) -> u64 {
 /// sort became visible to its own gate.
 ///
 /// Falsified by: any n outside the two-sided law `events ≤ W ≤ 3 × (events + gap_tiles)`,
-/// any per-4×n growth ratio above 4.5, or an exact-composition mismatch against `W == 2n`.
+/// any per-4×n growth ratio above 4.5, or an exact-composition mismatch.
 /// The lower bound is not decoration — it is what catches a deleted or misplaced tick, the
 /// failure mode an instrument swap is most exposed to.
 ///
@@ -3987,10 +3987,16 @@ fn replay_work_matches_its_stated_shape_on_error_dense_input() {
     // The exact composition, derived term by term from the inventory on
     // `super::finish::w`. An exact pin means any NEW ticked iteration anywhere in `replay`
     // fails here and forces a conscious inventory update — the band alone would absorb it.
-    let expected = events            // pass 1: the gather loop, once per event
+    //
+    // The single-pass walk dropped one whole `events` term (the gather pass) and added one
+    // `tiles` term (the post-walk sweep of the tiled runs). The lookahead that replaced the
+    // gather pass contributes **nothing at all** on this payload, and that is the point of
+    // saying so here: every run in it is resolved by the token that follows it, so
+    // `tile_pending_run` is never reached.
+    let expected = events            // the walk, once per event
       + sort_term                    // the sort, charged at its real `k log k` cost
       + diags                        // the cover-merge loop, one per gathered span
-      + events                       // pass 2: the walk, once per event
+      + tiles                        // the post-walk sweep of the tiled runs, one per run
       + (2 * tiles - 1); // the shared cover cursor: one advance per retired interval
     // (n - 1 of them), plus one terminal probe per gap (n)
     assert_eq!(
@@ -4016,10 +4022,18 @@ fn replay_work_matches_its_stated_shape_on_error_dense_input() {
 }
 
 /// The exact-composition pin's second cell: a wrap-bearing payload, where `W` must
-/// equal `2 × events + chain_hops` — both passes over every event, plus one hop per
-/// retro-wrap link followed. `m` single-wrap targets: 4 events each (mark, token, `StartAt`,
-/// finish) and one chain hop each; with no diagnostics, the sort charge, the merge loop and
-/// the cover cursor all contribute nothing.
+/// equal `events + chain_hops + lookahead` — the one pass over every event, one hop per
+/// retro-wrap link followed, and the monotone lookahead that replaced the gather pass. `m`
+/// single-wrap targets: 4 events each (mark, token, `StartAt`, finish) and one chain hop
+/// each; with no diagnostics, the sort charge, the merge loop and the cover cursor all
+/// contribute nothing, and nothing is tiled.
+///
+/// This is the payload where the lookahead **does** fire, which is why it is worth pinning
+/// separately from the error-dense one where it never does: each token is followed by a
+/// `StartAt` and a finish before the next token, so the finish forces a resolution and the
+/// cursor walks to the next token — two positions each, and one terminal position for the
+/// last token, where the cursor runs off the end and the run ends at the source's end.
+/// Every one of those resolutions finds the run empty; not one gap is tiled.
 ///
 /// Falsified by: any other total. In particular the reachability bitvec's own zeroing is
 /// *justified*, not ticked (one `alloc_zeroed` of `ceil(events/64)` words, no per-event
@@ -4049,10 +4063,14 @@ fn replay_work_on_wraps_is_events_plus_chain_hops() {
 
   let events = 4 * m as u64; // mark + token + StartAt + finish
   let chain_hops = m as u64; // one StartAt per target
+  // Two lookahead positions per forced resolution (the `StartAt` and the next mark), for the
+  // first m - 1 tokens, plus the one terminal position the last token's resolution reaches.
+  let lookahead = 2 * (m as u64 - 1) + 1;
   assert_eq!(
     w,
-    2 * events + chain_hops,
-    "W must be exactly two passes over {events} events plus {chain_hops} chain hops"
+    events + chain_hops + lookahead,
+    "W must be exactly one pass over {events} events, plus {chain_hops} chain hops, plus \
+     {lookahead} monotone lookahead positions"
   );
 }
 
