@@ -10,6 +10,14 @@
 //! element failure is either filed or re-raised, and it gates on all three before it files; the
 //! drivers below carry no swallow of their own.
 //!
+//! **A stop does not need an `Err` to be spent.** An element that meets a terminal stop and answers
+//! it *itself* — catching the trip, or declining on a lookahead window the scanner truncated — hands
+//! the driver an `Ok`, and the driver reads it as "no more elements" and **succeeds**. That is the
+//! same defect through the exit the failure chokepoint does not cover: a resource-budget stop
+//! becomes an accepted absence. [`absence_after_element`] is the second chokepoint, and the **one**
+//! place a driver's non-`Err` exits consult either witness. Why the two are separate functions, and
+//! why the two witnesses take different baselines, is on it.
+//!
 //! The descent witness is not carried by the error value. It is a **monotone session counter** on
 //! the input (`Input::resource_trips`), bumped by [`InputRef::descend`](crate::InputRef::descend)
 //! before the grammar's `From` runs, and the gate compares it against a baseline taken **once per
@@ -54,7 +62,7 @@ use crate::{
   error::syntax::FullContainer,
   input::{CloseStatus, Cursor, InputRef},
   lexer::Lexer,
-  span::Spanned,
+  span::{Span as _, Spanned},
 };
 
 use super::*;
@@ -198,6 +206,97 @@ where
   inp.emitter().emit_error(Spanned::new(span, err))
 }
 
+/// Refuses an **absence** conclusion that a terminal stop produced — **the single place either
+/// witness is consulted** on the try-driven families' non-`Err` exits.
+///
+/// [`file_element_failure`] is this function's twin on the `Err` exits, and the two together are the
+/// whole of the never-recoverable law in these four drivers. They are deliberately **two**
+/// functions, not one:
+///
+/// * the failure path has an error in hand and **re-raises that value**; there is none here, so this
+///   synthesizes a terminal end-of-input instead — the same value the scanner-stop exits have always
+///   produced;
+/// * the failure path's scanner witness is positional ([`at_committed_boundary`]), because it is
+///   discriminating a *failure* that reached the poison from one that did not. An absence exit needs
+///   [`latched_during_attempt`] instead: a restore over the latch rewinds the cursor behind a
+///   boundary that survives, so every positional reading is clean there while the stop is live;
+/// * and the two scanner witnesses take different baselines — one none at all, the other a
+///   per-collection snapshot. A single helper would have to carry both and pick, which is a
+///   `match` on which caller it has, not a chokepoint.
+///
+/// [`at_committed_boundary`]: crate::InputRef::at_committed_boundary
+/// [`latched_during_attempt`]: crate::InputRef::latched_during_attempt
+///
+/// # The two witnesses, and the two granularities
+///
+/// An absence exit concludes "no more elements" from what the last element attempt did. Two facts
+/// make that attempt's evidence unrepresentative of the input, and an element that hits either can
+/// still return `Ok`, which is exactly why neither reaches the failure chokepoint:
+///
+/// * `inp.latched_during_attempt(latch)` — a terminal **scanner** stop. An element's own lookahead
+///   ([`peek`](crate::InputRef::peek) and friends) latches one and still hands back `Ok` with a
+///   short window, so the element may decline, or accept consuming nothing, on a truncated view.
+///   Its baseline is **per collection**: the latch is a position, an element that reaches it leaves
+///   it standing for every element after, and the stop genuinely ends the token stream there.
+/// * `inp.tripped_during_attempt(trips)` — a **descent** budget trip the element caught itself and
+///   answered with `Decline`, or with an `Accept` that consumed nothing. It latches no boundary — it
+///   has a control stack rather than a position — so the witness above reads `false` for one, and
+///   without this term a resource-budget stop is spent as an *accepted absence*: the collection ends
+///   clean and succeeds. Its baseline is **per element**, for the reason
+///   [`file_element_failure`] gives at length: the counter is a monotone session fact, so a
+///   collection-wide baseline would charge every later absence exit in the parse with a trip some
+///   earlier element caught and legitimately parsed past.
+///
+/// The asymmetry in the two baselines is therefore a property of the two facts, not an oversight:
+/// a latched boundary stays true of the input, a caught trip does not.
+///
+/// # Where it does **not** belong
+///
+/// Only on the exits that conclude absence *from an element attempt*. Not on an exit resting on a
+/// **real token**: the delimited drivers' `CloseStatus::Close` arms and the mid-scan closer in
+/// `sep/delim` read a committed pre-trip token, so the construct genuinely closed and stays a
+/// success — gating those turns a parse that a wider budget completes identically into a failure.
+/// Not on a separator-slot probe that runs *before* this cycle's element either: nothing between the
+/// cycle's baseline and that probe can trip, so the term would be a constant `false` there.
+///
+/// # What holds each witness in the guard
+///
+/// `GATE_CENSUS` pins that the four try-driven drivers spell neither witness themselves and that
+/// both appear in this body ahead of the stop — but a needle scan proves presence and ordering,
+/// never that a term gates. One behavioural suite per witness does, each confirmed by neutering the
+/// term in place and watching the suite go red:
+///
+/// * `inp.latched_during_attempt(latch)` — `tokora/tests/absence_terminal_stop.rs`, 10 of its 46
+///   cells.
+/// * `inp.tripped_during_attempt(trips)` — `tokora/tests/collection_resource_trip.rs`'s section 4,
+///   all 16 cells.
+///
+/// To re-check in five minutes rather than by re-deriving it: replace one term with
+/// `let _ = <that term>;` above the `if`, leaving the other in the condition, and run
+/// `cargo test -p tokora --all-features --no-fail-fast`. The suite named for that witness must go
+/// red and the census must stay green. Repeat per witness.
+#[inline(always)]
+pub(super) fn absence_after_element<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
+  inp: &InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
+  latch: &Option<L::Offset>,
+  trips: usize,
+) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Cmpl: crate::input::Completeness,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+{
+  if inp.latched_during_attempt(latch) || inp.tripped_during_attempt(trips) {
+    return Err(
+      UnexpectedEot::eot_of(inp.span().end())
+        .into_terminal()
+        .into(),
+    );
+  }
+  Ok(())
+}
+
 #[cfg(test)]
 mod gate_census {
   //! GATE_CENSUS — the section-4 never-recoverable gate, locked to one chokepoint.
@@ -223,6 +322,18 @@ mod gate_census {
   //! pin, in order: that no driver files a diagnostic itself *whatever the spelling*; that each
   //! driver's per-element baseline is taken inside the loop that hosts its chokepoint call; and
   //! that no module of the tree has been added without being classified.
+  //!
+  //! # The other half of the law: the exits that carry no error
+  //!
+  //! A stop does not need an `Err` to be spent. An element that catches a *descent* trip itself and
+  //! then declines — or that declines on a window a *scanner* stop truncated — hands the driver an
+  //! `Ok`, and the driver's absence exit reads it as "no more elements" and succeeds. The failure
+  //! chokepoint above never sees it. [`absence_after_element`](super::absence_after_element) is the
+  //! second chokepoint and holds both witnesses for those exits, and
+  //! [`every_absence_exit_carries_the_terminal_witnesses`] applies the same shape of proof to it:
+  //! the try-driven drivers spell **neither** witness themselves, so there is nothing left for them
+  //! to spell differently, and the count of chokepoint calls is pinned per source so a new absence
+  //! exit cannot land ungated.
   //!
   //! # The one thing the chokepoint cannot centralize
   //!
@@ -253,6 +364,21 @@ mod gate_census {
     "inp.at_committed_boundary()",
     "inp.tripped_during_attempt(",
   ];
+
+  /// The absence chokepoint: its call in a driver, and its definition in this module's own source.
+  const ABSENCE: &str = "absence_after_element(";
+  const ABSENCE_DEF: &str = "fn absence_after_element";
+
+  /// The terminal end-of-input the absence chokepoint produces — the needle that ends its guard
+  /// region, the way [`EMIT`] ends the failure chokepoint's.
+  const ABSENCE_STOP: &str = "into_terminal()";
+
+  /// The two witnesses the absence chokepoint must consult before it reaches [`ABSENCE_STOP`]. The
+  /// scanner half is **not** the failure path's `at_committed_boundary`: a restore over the latch
+  /// rewinds the cursor behind a boundary that survives, so every positional reading is clean at an
+  /// absence exit while the stop is live.
+  const ABSENCE_WITNESSES: [&str; 2] =
+    ["inp.latched_during_attempt(", "inp.tripped_during_attempt("];
 
   /// The element attempt whose failure a driver must route through the chokepoint, the descent
   /// witness's baseline, and the loop opener that baseline must be taken after.
@@ -725,33 +851,196 @@ mod gate_census {
     }
   }
 
-  /// Every guard-bearing driver carries the absence witness, paired with its baseline. A driver's
-  /// absence exits — the no-progress stall, the element-decline break, and a condition's
-  /// `Action::Stop` — conclude "no more elements" from what the element saw, but an element's own
-  /// lookahead latches a terminal scanner stop and still returns `Ok` with a short window, leaving
-  /// the pre-trip tokens cached, so that conclusion can rest on a truncated view (the eager decision
-  /// gate does not see it: the next window is served whole from that cache and carries no terminal
-  /// flag). `latched_during_attempt` is the witness (presence-plus-change against a per-attempt
-  /// `latch_snapshot` baseline, never a positional reading — a rollback over the latch moves the
-  /// offset back behind a boundary that survives). In the delimited drivers the gate belongs *inside*
-  /// the close probe's `WrongToken`/`Eof` arms, never ahead of the probe: the probe is cache-first, so
-  /// a `Close` verdict on a real pre-trip token is a genuine close and must keep parsing — as is a
-  /// reached bound. This pins both calls in every guard-bearing source so a new driver cannot land
-  /// with an ungated absence exit or an unbaselined witness.
+  /// The absence-exit shape of every guard-bearing driver, as data.
+  ///
+  /// The count is how many [`ABSENCE`] calls the source must carry; **0** marks the older *inline*
+  /// shape, which spells `latched_during_attempt` at each exit and consults no descent witness at
+  /// all. Index-aligned with [`progress_guard_sites`], and
+  /// [`every_absence_exit_carries_the_terminal_witnesses`] checks the two lists name the same
+  /// sources in the same order, so neither can drift.
+  ///
+  /// **The zeroes are a residual, recorded rather than blessed.** The four `*_while` drivers and the
+  /// four folds have the *same* hole the chokepoint closes for the try-driven four: their element
+  /// runs through `parse_input`/`try_parse_input` and propagates a trip with `?`, so a trip is
+  /// terminal there **unless the element catches it itself** — and an element that catches one and
+  /// then declines, or accepts consuming nothing, ends those collections cleanly and successfully,
+  /// exactly as it did in the try-driven four before this. Measured rather than inferred: `fold`
+  /// over such an element returns the same `Ok` under a budget the element exceeds as under one it
+  /// does not, and so does `repeated_while` over the stalling shape. Closing it there needs a
+  /// per-element trip baseline each of those loops does not take (two of the folds would have to
+  /// stop being `while let` loops to take one), and it is a separate change with its own
+  /// regressions. What this row does hold is that a `0` source cannot *half*-adopt: it must take no
+  /// trip baseline and read no trip witness, so the day one does, this classification goes red and
+  /// has to be re-cut.
+  fn absence_exit_shapes() -> [(&'static str, usize); 12] {
+    [
+      ("many/repeated/mod.rs", 1),
+      ("many/repeated_while/mod.rs", 0),
+      ("many/delim/repeated.rs", 4),
+      ("many/delim/repeated_while.rs", 0),
+      ("many/sep/parse/mod.rs", 2),
+      ("many/sep/delim/mod.rs", 2),
+      ("many/sep_while/parse/mod.rs", 0),
+      ("many/sep_while/delim/mod.rs", 0),
+      ("fold/mod.rs", 0),
+      ("fold/rfold.rs", 0),
+      ("fold/fold_while.rs", 0),
+      ("fold/rfold_while.rs", 0),
+    ]
+  }
+
+  /// Every guard-bearing driver's absence exits reach the never-recoverable witnesses, and the
+  /// try-driven four reach **both** of them through one chokepoint they cannot spell around.
+  ///
+  /// A driver's absence exits — the no-progress stall, the element-decline break, a condition's
+  /// `Action::Stop`, and in the delimited drivers the close probe's `WrongToken`/`Eof` arms —
+  /// conclude "no more elements" from what the last element attempt did. Two facts make that
+  /// attempt's evidence unrepresentative while it still returns `Ok`, so neither reaches
+  /// [`file_element_failure`](super::file_element_failure):
+  ///
+  /// * a terminal **scanner** stop the element's own lookahead latched, which leaves the pre-trip
+  ///   tokens cached and the window short (the eager decision gate does not see it: the next window
+  ///   is served whole from that cache and carries no terminal flag). The witness is
+  ///   `latched_during_attempt` — presence-plus-change against a per-collection `latch_snapshot`,
+  ///   never a positional reading, because a rollback over the latch moves the offset back behind a
+  ///   boundary that survives;
+  /// * a **descent** budget trip the element caught itself. It latches no boundary, so the witness
+  ///   above reads `false` for one, and the absence exit spends the stop as a *success*. The witness
+  ///   is `tripped_during_attempt` against the per-**element** baseline, for the reason
+  ///   [`every_element_loop_baselines_its_trip_witness_per_element`] gives.
+  ///
+  /// In the delimited drivers the gate belongs *inside* the close probe's `WrongToken`/`Eof` arms,
+  /// never ahead of the probe: the probe is cache-first, so a `Close` verdict on a real pre-trip
+  /// token is a genuine close and must keep parsing — as is a reached bound, and as is the mid-scan
+  /// closer in `sep/delim`. Gating those would fail a parse a wider budget completes identically.
+  ///
+  /// What this pins, per source: the baseline is taken; the source carries the shape
+  /// [`absence_exit_shapes`] classifies it as, by count; and a chokepointed source spells **neither**
+  /// witness itself, which is the "nothing left to balance" form — the strongest of these the
+  /// codebase has, and the one the swallow scan above uses. What it does not pin is that the
+  /// chokepoint's own guard *gates*, which is
+  /// [`the_absence_chokepoint_consults_both_witnesses_before_it_stops`]'s region scan for presence
+  /// and `tokora/tests/collection_resource_trip.rs`'s section 4 for behaviour.
   #[test]
-  fn every_absence_exit_carries_the_latch_witness() {
-    for (name, src) in progress_guard_sites() {
-      assert!(
-        src.contains("latched_during_attempt("),
-        "{name}: every absence exit (the no-progress stall, the element-decline break, a condition's \
-         `Action::Stop`, and in the delimited drivers the close probe's `WrongToken`/`Eof` arms) must \
-         witness a terminal stop this attempt latched (`latched_during_attempt`) before concluding \
-         the construct ended"
+  fn every_absence_exit_carries_the_terminal_witnesses() {
+    let sites = progress_guard_sites();
+    let shapes = absence_exit_shapes();
+    let mut chokepointed = 0;
+    let mut inline = 0;
+    for i in 0..sites.len() {
+      let (name, src) = sites[i];
+      let (classified, calls) = shapes[i];
+      assert_eq!(
+        name, classified,
+        "the guard-bearing source list and the absence-exit classification have drifted apart at \
+         row {i}: `{name}` against `{classified}`. They are index-aligned on purpose — a row that \
+         names a source the scan does not read is a row that checks nothing"
       );
       assert!(
         src.contains("latch_snapshot()"),
         "{name}: the absence witness is attempt-relative — take the `latch_snapshot()` baseline once \
          per attempt, or a boundary an enclosing lookahead latched is mis-charged to this driver"
+      );
+
+      if calls == 0 {
+        // The inline shape: the scanner latch at each exit, and no descent witness anywhere. It
+        // must not have half-adopted the other half — see `absence_exit_shapes`.
+        assert!(
+          src.contains("latched_during_attempt("),
+          "{name}: every absence exit must witness a terminal stop this attempt latched \
+           (`latched_during_attempt`) before concluding the construct ended"
+        );
+        assert_eq!(
+          code_matches(src, ABSENCE),
+          0,
+          "{name}: this source is classified as the inline absence shape but calls the chokepoint. \
+           Re-cut `absence_exit_shapes` with the call count, so the count is what is checked"
+        );
+        assert_eq!(
+          code_matches(src, BASELINE) + code_matches(src, "inp.tripped_during_attempt("),
+          0,
+          "{name}: this source is classified as taking NO descent-trip baseline, and now reads one. \
+           Half-adopting the trip witness is how an absence exit ends up gated on one witness and \
+           not the other — route the exits through `absence_after_element` and re-cut \
+           `absence_exit_shapes`"
+        );
+        inline += 1;
+      } else {
+        assert_eq!(
+          code_matches(src, ABSENCE),
+          calls,
+          "{name}: expected {calls} absence-exit gate(s) (`{ABSENCE}`). An exit added without one \
+           concludes the construct ended on evidence a terminal stop truncated — and an exit whose \
+           gate was removed is the same defect, which is why this is a count and not a presence test"
+        );
+        for witness in ABSENCE_WITNESSES {
+          assert_eq!(
+            code_matches(src, witness),
+            0,
+            "{name}: a chokepointed driver hands its absence exits to `absence_after_element` — it \
+             never reads `{witness}` itself. A hand-spelled gate can consult one witness and not the \
+             other, which is exactly the defect the chokepoint exists to make unspellable"
+          );
+        }
+        chokepointed += calls;
+      }
+    }
+    assert_eq!(
+      (chokepointed, inline),
+      (9, 8),
+      "the try-driven families carry exactly nine chokepointed absence exits across four sources, \
+       and eight sources still carry the inline shape. Both halves are pinned so that adopting the \
+       chokepoint in a ninth source, or losing an exit from one of the four, has to be deliberate"
+    );
+  }
+
+  /// The absence chokepoint consults **both** never-recoverable witnesses before it produces its
+  /// terminal end-of-input, and it is the only place in the tree that reads the scanner latch.
+  ///
+  /// The absence twin of the region scan in
+  /// [`every_element_failure_routes_through_the_gated_chokepoint`], and it proves exactly as much
+  /// and as little: each witness is present, named, and textually ahead of the stop. That is a
+  /// tripwire on the source — a witness dropped, renamed or duplicated reds one cheap unit test —
+  /// and **not** a proof of control-flow domination, which a body reading both into `let _ =`
+  /// bindings would satisfy with the gate gone. Verified, not reasoned about: with the descent term
+  /// so neutered this test and the whole census stayed green while
+  /// `tokora/tests/collection_resource_trip.rs` red 16 cells. What proves each gate gates is that
+  /// suite — section 4's 16 cells for the descent term, and
+  /// `tokora/tests/absence_terminal_stop.rs`'s 10 (of 46) for the scanner term. Both `find`s panic
+  /// rather than pass when what they scan for is absent.
+  #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
+  fn the_absence_chokepoint_consults_both_witnesses_before_it_stops() {
+    let prod = super::end_state_census::many_mod_production();
+    assert_eq!(
+      code_matches(prod, "inp.latched_during_attempt("),
+      1,
+      "`many/mod.rs`: the scanner latch is read once in this tree, inside `absence_after_element`"
+    );
+    let def_at = code_find(prod, ABSENCE_DEF).unwrap_or_else(|| {
+      panic!(
+        "`many/mod.rs`: `{ABSENCE_DEF}` is gone. The absence chokepoint has been renamed or \
+         removed; re-cut this census against whatever replaced it before trusting a green run"
+      )
+    });
+    let body = &prod[def_at..];
+    let stop_at = code_find(body, ABSENCE_STOP).unwrap_or_else(|| {
+      panic!(
+        "`many/mod.rs`: `absence_after_element` no longer surfaces the stop as a terminal \
+         end-of-input (`{ABSENCE_STOP}`)"
+      )
+    });
+    let guard = &body[..stop_at];
+    for witness in ABSENCE_WITNESSES {
+      assert_eq!(
+        code_matches(guard, witness),
+        1,
+        "`many/mod.rs`: the absence chokepoint must consult both never-recoverable witnesses before \
+         it stops — `{witness}` is missing from, or duplicated in, the code ahead of its terminal \
+         end-of-input. One witness alone leaves the other's stop spendable as an accepted absence"
       );
     }
   }

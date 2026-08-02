@@ -510,6 +510,50 @@ concrete public struct with no bound to reject anybody.
  normally — which is to say, every case this crate has ever exercised — renders
  byte-identically to before.
 
+7. **A recursion-limit trip an element ANSWERED was still spendable — as a successful, complete
+   collection.** Item 2 above closes the path where an element hands its trip back as `Err`: the
+   collection drivers gate that at one chokepoint and re-raise it. They gated **only** that path.
+   An element that catches [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
+   itself and then reports *no more elements* — by declining, or by accepting without consuming
+   anything — hands the driver an `Ok`, the chokepoint never runs, and the driver's **absence** exit
+   reads it as the ordinary end of the construct. `repeated()`, `separated_by(..)` and both
+   delimited forms returned `Ok` with everything collected so far, filing nothing. A resource
+   budget stopped the parse and the parse reported a complete construct — the same defect as item 2,
+   for every error type equally, reached through the exit item 2's gate does not cover.
+
+   The absence exits now consult the same session counter, at the same per-element granularity, and
+   through a second chokepoint of their own: nine exits across the four drivers — the element
+   decline, the no-progress stall, and in the delimited pair the close probe's `WrongToken` and
+   `Eof` arms — surface the stop as the terminal-marked end-of-input error those exits already
+   produced for a *scanner* stop, instead of ending the construct cleanly.
+
+   | driving an element that catches a depth trip and then reports absence | before | now |
+   |---|---|---|
+   | `repeated()`, `separated_by(..)`, and both delimited forms | `Ok` with the elements collected before the stop, nothing filed | `Err` — a terminal end-of-input, still nothing filed |
+
+   **Unchanged, and deliberately so**: an exit resting on a **real token** is a real end of
+   construct and still succeeds. A `Close` verdict from the delimited drivers' close probe, and the
+   mid-scan closer in the delimited separated driver, read a committed pre-trip token — the
+   construct genuinely closed, and a wider budget parses the identical source to the identical
+   value, so gating them would fail a parse for a stop that changed nothing. An `Accept` is
+   likewise untouched: an element that catches a trip and still produces a value has answered it.
+   And the granularity floor item 2 describes is exactly the same here — the baseline is one
+   **element**, so a trip an *earlier* element caught and parsed past does not end the collection
+   when a later one legitimately runs out of input.
+
+   The eight `*_while` drivers and folds share this hole and are **found, not fixed** — measured,
+   not inferred: `fold` over an element that catches a trip and declines returns `Ok(6)` on `"1 2 3"`
+   under a budget the element exceeds and `Ok(6)` under one it does not, and `repeated_while` over an
+   element that catches a trip and accepts consuming nothing returns `Ok([1, 2, 3, …])` under both.
+   Those drivers never file an element's `Err`, so a trip is terminal there unless the element
+   catches it — but an element that catches one and then reports absence ends the collection cleanly
+   just as it did in the try-driven four. Closing it needs a per-element trip baseline none of those
+   loops takes.
+   `parser::many`'s `GATE_CENSUS` records the classification per driver as data and requires a
+   source in that group to take **no** trip baseline and read **no** trip witness, so one cannot
+   half-adopt the gate: the day a `*_while` driver reads the counter, the classification reds and
+   has to be re-cut. — *(#148 R7)*
+
 
 ## 0.8.0 (2026-07-31)
 

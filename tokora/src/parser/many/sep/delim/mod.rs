@@ -135,7 +135,17 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     // The terminal-latch baseline for the element-absence exits below, taken AFTER the opener so the
     // opener's own scan is not charged to the element loop. One offset clone per collection.
     let latch = inp.latch_snapshot();
-    let state = loop {
+    // `(state, the last element attempt's trip baseline)`: this driver's absence exits are all in
+    // the epilogue below, past the loop, so the baseline has to be carried out by whichever break
+    // reached them. See `many::absence_after_element`.
+    let (state, elem_trips) = loop {
+      // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
+      // cycle attempts at most one. It sits above the separator-slot probe rather than beside the
+      // element attempt so that all three breaks below can carry the same value; that widens the
+      // measured window by the probe and `handle_separator`, neither of which can descend, so the
+      // reading is the one the element attempt would have given. See `many::file_element_failure`
+      // for why it is per element and not per collection.
+      let trips = inp.trip_snapshot();
       let mut ps = None;
       let peek_span = match inp.try_expect_map(|t| {
         if Sep::eval(&t.data.kind()) {
@@ -150,8 +160,10 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
           }
         }
       })? {
+        // Nothing at the separator-or-close slot: fall through to the epilogue, whose close probe
+        // classifies the position and carries this driver's only absence gates.
         None => match ps {
-          None => break state,
+          None => break (state, trips),
           Some(span) => span,
         },
         Some((is_closed, tok)) => {
@@ -163,10 +175,11 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
             // entire end-state policy was dead code, while the while-sibling
             // (`sep_while/delim/mod.rs`) ran it on the identical path.
             //
-            // No close-miss primary belongs here — the closer is present. No terminal-latch
-            // gate belongs here either: the closer was READ AND COMMITTED, so this exit rests
-            // on a real token rather than on an absence conclusion, and `latched_during_attempt`
-            // guards only absence exits.
+            // No close-miss primary belongs here — the closer is present. No absence gate belongs
+            // here either: the closer was READ AND COMMITTED, so this exit rests on a real token
+            // rather than on an absence conclusion, and `absence_after_element` guards only
+            // absence exits. Its descent term would be a constant `false` here regardless — this
+            // cycle's baseline was taken a few lines above and nothing since it can trip.
             parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
             container.on_close_delimiter(tok);
             return Ok(inp.span_since(&anchor));
@@ -179,9 +192,6 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
         }
       };
 
-      // The descent witness's baseline, taken once per ELEMENT — the attempt the chokepoint below
-      // judges. See `many::file_element_failure` for why it is per element and not per collection.
-      let trips = inp.trip_snapshot();
       match parser.f.try_parse_input(inp) {
         // File the failure as a diagnostic and keep looping — unless it is one of the three the
         // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
@@ -189,8 +199,9 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
         // witnesses and for why `trips` is taken per ELEMENT rather than per collection.
         Err(e) => file_element_failure(inp, e, &cursor, trips)?,
         // The decline concludes *absence*. The gate for that conclusion sits in the epilogue's
-        // close-miss arms below, where a real cached closer has already been ruled out.
-        Ok(Decline) => break state,
+        // close-miss arms below, where a real cached closer has already been ruled out, so this
+        // attempt's trip baseline travels there with the state.
+        Ok(Decline) => break (state, trips),
         Ok(Accept(elem)) => {
           // if the peeked token belongs to an element, check the current state
           state = parser.handle_continue(
@@ -216,7 +227,7 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       let new_committed = inp.span().end();
       let new_cursor = inp.cursor().clone();
       if new_committed <= committed {
-        break state;
+        break (state, trips);
       }
       committed = new_committed;
       cursor = new_cursor;
@@ -234,22 +245,15 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       // The closer is at hand: no close miss. Carry it out; committed by value after the
       // end-state pass. A cache-first verdict on a real pre-trip token, so the construct
       // genuinely closed and stays a success even if an element's lookahead latched a
-      // terminal stop past that closer.
+      // terminal stop past that closer, or its descent tripped a budget it caught itself —
+      // neither absence witness belongs here, see `many::absence_after_element`.
       CloseStatus::Close(ct) => close_carrier = Some(ct),
       // (b) a wrong token sits where the closer should: unexpected-token, expected-close.
       CloseStatus::WrongToken(tok) => {
-        // No closer: the loop's absence exit plus this verdict conclude "no more elements", and an
-        // element's own lookahead can latch a terminal scanner stop and still return `Ok` with a
-        // short window, so that conclusion may rest on a truncated view. Surface the stop ahead of
-        // the close-miss diagnostic; attempt-relative against the post-opener snapshot, so an
-        // inherited boundary is not mis-charged here.
-        if inp.latched_during_attempt(&latch) {
-          return Err(
-            UnexpectedEot::eot_of(inp.span().end())
-              .into_terminal()
-              .into(),
-          );
-        }
+        // No closer: the loop's absence exit plus this verdict conclude "no more elements" from
+        // what the last element attempt did, so surface a terminal stop it hit ahead of the
+        // close-miss diagnostic rather than reporting a close that never happened.
+        absence_after_element(inp, &latch, elem_trips)?;
         // One junk token, one report: emit unless the emitter already holds a live report naming
         // this very front token. See FRONT_REPORTED at the top of this body.
         if !inp.front_report_live(tok.span_ref().end_ref()) {
@@ -264,13 +268,7 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
         // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate
         // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the stop,
         // so an `Eof` verdict cannot coexist with one.
-        if inp.latched_during_attempt(&latch) {
-          return Err(
-            UnexpectedEot::eot_of(inp.span().end())
-              .into_terminal()
-              .into(),
-          );
-        }
+        absence_after_element(inp, &latch, elem_trips)?;
         if let Some(open_span) = open_span.clone() {
           inp
             .emitter()

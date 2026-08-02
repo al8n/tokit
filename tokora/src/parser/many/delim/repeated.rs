@@ -118,9 +118,13 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     // opener's own scan is not charged to the element loop. One offset clone per collection.
     let latch = inp.latch_snapshot();
 
-    loop {
+    // The trip baseline of the LAST element attempt, carried out by the stall break below for the
+    // epilogue's absence exits — the decline arm's own exits are inside the loop and read it
+    // directly. See `many::absence_after_element`.
+    let elem_trips = loop {
       // The descent witness's baseline, taken once per ELEMENT — the attempt the chokepoint below
-      // judges. See `many::file_element_failure` for why it is per element and not per collection.
+      // judges, and the one this cycle's absence exits judge too. See `many::file_element_failure`
+      // for why it is per element and not per collection.
       let trips = inp.trip_snapshot();
       match self.parser.f.try_parse_input(inp) {
         // File the failure as a diagnostic and keep looping — unless it is one of the three the
@@ -140,22 +144,15 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
             //
             // The probe is cache-first, so this verdict rests on a REAL pre-trip token: the construct
             // genuinely closed and stays a success even if the element's lookahead latched a terminal
-            // stop somewhere past that closer.
+            // stop somewhere past that closer, or its descent tripped a budget it caught itself.
+            // Neither witness belongs here — see `many::absence_after_element`.
             CloseStatus::Close(ct) => container.on_close_delimiter(inp.commit_probed(ct)),
             // A wrong token where the closer belongs: unexpected-token, expected-close.
             CloseStatus::WrongToken(tok) => {
-              // No closer: the decline plus this verdict conclude *absence*, and the element's own
-              // lookahead can latch a terminal scanner stop and still return `Ok` with a short
-              // window, so that conclusion may rest on a truncated view. Surface the stop ahead of
-              // the close-miss diagnostic; attempt-relative, so an inherited boundary is not
-              // mis-charged here.
-              if inp.latched_during_attempt(&latch) {
-                return Err(
-                  UnexpectedEot::eot_of(inp.span().end())
-                    .into_terminal()
-                    .into(),
-                );
-              }
+              // No closer: the decline plus this verdict conclude *absence* from what this element
+              // attempt did, so surface a terminal stop it hit ahead of the close-miss diagnostic
+              // rather than reporting a close that never happened.
+              absence_after_element(inp, &latch, trips)?;
               // One junk token, one report: emit unless the emitter already holds a live report
               // naming this very front token. See FRONT_REPORTED at the top of this body.
               if !inp.front_report_live(tok.span_ref().end_ref()) {
@@ -169,13 +166,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
               // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate
               // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the
               // stop, so an `Eof` verdict cannot coexist with one.
-              if inp.latched_during_attempt(&latch) {
-                return Err(
-                  UnexpectedEot::eot_of(inp.span().end())
-                    .into_terminal()
-                    .into(),
-                );
-              }
+              absence_after_element(inp, &latch, trips)?;
               if let Some(open_span) = open_span.clone() {
                 inp
                   .emitter()
@@ -210,30 +201,23 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       // `elem_cur` stays the error-span anchor.
       let new_committed = inp.span().end();
       if new_committed <= committed {
-        break;
+        break trips;
       }
       committed = new_committed;
       elem_cur = inp.cursor().clone();
-    }
+    };
 
     // No progress was made — treat as end of elements. Classify the close position
     // with the four-way probe so a terminal scanner stop is not misread as EOF.
     match inp.probe_close(|t| Delim::is_close(&t.data.kind()))? {
       // The closer is at hand: commit the carried token by value — no re-scan. A cache-first
-      // verdict on a real pre-trip token, so the construct genuinely closed and stays a success.
+      // verdict on a real pre-trip token, so the construct genuinely closed and stays a success,
+      // and neither absence witness belongs here — see `many::absence_after_element`.
       CloseStatus::Close(ct) => container.on_close_delimiter(inp.commit_probed(ct)),
       CloseStatus::WrongToken(tok) => {
-        // No closer: the stall plus this verdict conclude *absence*, and the element's own lookahead
-        // can latch a terminal scanner stop and still return `Ok` with a short window, so that
-        // conclusion may rest on a truncated view. Surface the stop ahead of the close-miss
-        // diagnostic; attempt-relative against the post-opener snapshot.
-        if inp.latched_during_attempt(&latch) {
-          return Err(
-            UnexpectedEot::eot_of(inp.span().end())
-              .into_terminal()
-              .into(),
-          );
-        }
+        // No closer: the stall plus this verdict conclude *absence* from what the last element
+        // attempt did, so surface a terminal stop it hit ahead of the close-miss diagnostic.
+        absence_after_element(inp, &latch, elem_trips)?;
         // One junk token, one report: emit unless the emitter already holds a live report naming
         // this very front token. See FRONT_REPORTED at the top of this body.
         if !inp.front_report_live(tok.span_ref().end_ref()) {
@@ -246,13 +230,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
         // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate
         // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the stop,
         // so an `Eof` verdict cannot coexist with one.
-        if inp.latched_during_attempt(&latch) {
-          return Err(
-            UnexpectedEot::eot_of(inp.span().end())
-              .into_terminal()
-              .into(),
-          );
-        }
+        absence_after_element(inp, &latch, elem_trips)?;
         // EOI — no tokens left, no close delimiter: the opener was never closed.
         if let Some(open_span) = open_span.clone() {
           inp

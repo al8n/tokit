@@ -30,6 +30,19 @@
 //! editor and language-server consumers this crate is built for. Section 2 below is that regression;
 //! section 3 pins that narrowing the witness did not put a hole in it.
 //!
+//! # The exit with no `Err` in it — section 4
+//!
+//! Everything above is about the `Err` an element hands back. An element that **answers the trip
+//! itself** hands back `Ok`, and the gate never runs: the driver takes an *absence* exit — the
+//! element declining, or a cycle that committed nothing — reads it as "no more elements", and the
+//! collection **succeeds**. Same defect, same sink-independence, reached through the exit the
+//! failure chokepoint does not cover; the resource budget stopped the parse and the parse reported
+//! a complete construct. `parser::many::absence_after_element` is the second chokepoint, and
+//! section 4 drives both absence exits of all four families through it. Its cells are the inverse
+//! of section 2's: there a caught trip must change nothing, here it must change the verdict, and
+//! the two sets of sources differ only in *where* the catch sits relative to the element the driver
+//! is judging.
+//!
 //! # Why every cell here runs twice, through two error types
 //!
 //! This is the half of #148 that was **never sink-dependent**. `Recover`, `InplaceRecover` and
@@ -196,6 +209,13 @@ const ROOMY: usize = 4_000;
 /// descent, no budget, no scanner stop — the whole point is that it is the boring kind of failure a
 /// collection is supposed to emit and loop past.
 const BAD: i64 = 9;
+
+/// The value section 4's stalling element accepts without consuming anything.
+///
+/// Nothing in any source lexes to it, so a container that ends with it says unambiguously that the
+/// zero-width element ran and the driver's no-progress guard is what ended the collection — which
+/// is the exit that cell is about.
+const ZERO_WIDTH: i64 = -1;
 
 thread_local! {
   /// How many times [`ladder`](trip_suite) actually tripped, on this test's thread.
@@ -411,14 +431,126 @@ macro_rules! attempt_cell {
   };
 }
 
+/// One **absence-exit** cell: an element that answers a trip itself and then reports *no more
+/// elements*, over a source where the driver would otherwise end the collection cleanly.
+///
+/// The shape is [`attempt_cell`]'s with the verdict inverted. There the caught trip must change
+/// nothing; here it must change everything, because the absence conclusion the driver is about to
+/// draw is one the trip produced. So the two runs are required to **disagree** — and the same two
+/// non-vacuity halves apply, for the same reason:
+///
+/// * the tight run must actually have tripped and the control must actually not have ([`TRIPS`]);
+/// * the control's value is asserted **absolutely**, so a fixture that stopped reaching the exit —
+///   an element that stopped being called, a source that stopped lexing — fails here rather than
+///   producing an `Err` for the wrong reason and reading as a pass. Through `()` that matters twice
+///   over: `Err(())` carries no discriminant, so *every* way of failing looks identical.
+///
+/// The filed counts are pinned on both runs rather than compared, because they differ by
+/// construction: the gate returns **before** the exit's own diagnostic (the close miss, the
+/// `Unclosed`), so a stopped run files strictly less than the control that ran on.
+macro_rules! absence_cell {
+  (
+    $name:ident, $err:ty, $sink:literal, $probe:ident, $what:literal, $src:literal,
+    stops = $stops:expr, tight_filed = $tight_filed:expr,
+    collects = $collects:expr, roomy_filed = $roomy_filed:expr
+  ) => {
+    #[doc = concat!("An element that catches a trip and then reports absence: ", $what)]
+    #[test]
+    fn $name() {
+      reset_trips();
+      let mut tight_log = Verbose::<$err>::new();
+      let tight = {
+        let ctx: ParserContext<'_, TestLexer<'_>, &mut Verbose<$err>> =
+          ParserContext::new(&mut tight_log);
+        let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(TIGHT));
+        Parser::with_context(ctx).apply($probe).parse_str($src)
+      };
+      let tight_filed = filed(&tight_log);
+      assert_eq!(
+        trips(),
+        1,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": the tight run must really have tripped the budget, exactly once, in the element that \
+           then reported absence — without that this cell measures nothing"
+        )
+      );
+
+      reset_trips();
+      let mut roomy_log = Verbose::<$err>::new();
+      let roomy = {
+        let ctx: ParserContext<'_, TestLexer<'_>, &mut Verbose<$err>> =
+          ParserContext::new(&mut roomy_log);
+        let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(ROOMY));
+        Parser::with_context(ctx).apply($probe).parse_str($src)
+      };
+      assert_eq!(
+        trips(),
+        0,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": the control differs from the run above in one thing only — with room, nothing trips"
+        )
+      );
+      assert_eq!(
+        (&roomy, filed(&roomy_log)),
+        (&$collects, $roomy_filed),
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": the control pins the fixture absolutely — the collection is reached, the element \
+           reports absence where it is meant to, and the driver ends the construct and succeeds"
+        )
+      );
+
+      assert_eq!(
+        (&tight, tight_filed),
+        (&Err($stops), $tight_filed),
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": a budget stop the element answered ITSELF must not be spendable as an accepted \
+           absence. The element caught the trip and reported `no more elements`, so the driver \
+           concluded the construct ended and returned `Ok` — a resource stop turned into a \
+           success, which is the same defect the element-failure chokepoint closes, reached \
+           through the exit it does not cover"
+        )
+      );
+      assert_ne!(
+        tight, roomy,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": and the two runs must DISAGREE. The paired `a_caught_trip_leaves_*_emitting` cells are \
+           the contrast: there the catch sits outside the element the driver is judging and the two \
+           runs must agree exactly"
+        )
+      );
+    }
+  };
+}
+
 /// Generates the four family cells for one grammar error type.
 ///
 /// A macro rather than a function generic over the error type: the drivers' bounds are stated per
 /// family as `Error = ...` equality constraints, and spelling them once against a substituted `$err`
 /// keeps each probe reading exactly like the grammar a user would write, with no higher-ranked
 /// `From` bound collection standing between the test and what it measures.
+///
+/// `$eot` is what this sink's `From<UnexpectedEot<..>>` produces — the value section 4's absence
+/// exits surface. It is a *separate* parameter from `$ordinary` even where the two are the same
+/// value, because they are different claims: `$ordinary` is the grammar's own malformed-input
+/// error, `$eot` is the terminal end-of-input the driver synthesizes when it refuses to conclude a
+/// construct ended.
 macro_rules! trip_suite {
-  ($suite:ident, $err:ty, $trip:expr, $ordinary:expr, $sink:literal) => {
+  ($suite:ident, $err:ty, $trip:expr, $ordinary:expr, $eot:expr, $sink:literal) => {
     mod $suite {
       use super::*;
 
@@ -531,6 +663,59 @@ macro_rules! trip_suite {
           return Err($ordinary);
         }
         Ok(ParseAttempt::Accept(n))
+      }
+
+      /// **An element that catches the trip itself and then reports `Decline`** — section 4's
+      /// subject, and the shape the element-failure chokepoint cannot see: there is no `Err` for it
+      /// to judge.
+      ///
+      /// The catch sits on the declining path only, so the parse's one trip and the absence
+      /// conclusion the driver draws from it belong to the same element attempt. The numbers ahead
+      /// of it parse normally, which is what makes the widened-budget control a *collection* rather
+      /// than an empty one.
+      fn caught_then_decline_num<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<ParseAttempt<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        match inp.try_expect(|t| matches!(t.data(), Token::Num(_)))? {
+          None => {
+            catch_a_trip(inp);
+            Ok(ParseAttempt::Decline)
+          }
+          Some(tok) => match tok.into_data() {
+            Token::Num(n) => Ok(ParseAttempt::Accept(n)),
+            _ => unreachable!("the predicate accepted only `Num`"),
+          },
+        }
+      }
+
+      /// The same catch, answered with a **zero-width `Accept`** instead of a decline — the driver's
+      /// *other* absence exit, the no-progress stall.
+      ///
+      /// `Accept` is the arm no gate consults, deliberately: an element that catches a trip and
+      /// still produces a value has answered it. What the driver may not do is read the *absence of
+      /// progress* that follows as "no more elements" — that conclusion is the trip's, not the
+      /// input's, and it reaches a different gate line in every driver than the decline does.
+      fn caught_then_zero_width_num<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<ParseAttempt<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        match inp.try_expect(|t| matches!(t.data(), Token::Num(_)))? {
+          None => {
+            catch_a_trip(inp);
+            Ok(ParseAttempt::Accept(ZERO_WIDTH))
+          }
+          Some(tok) => match tok.into_data() {
+            Token::Num(n) => Ok(ParseAttempt::Accept(n)),
+            _ => unreachable!("the predicate accepted only `Num`"),
+          },
+        }
       }
 
       /// The inner collection's element: one `Plus`, then a descent that trips and is **caught**
@@ -737,6 +922,145 @@ macro_rules! trip_suite {
           + TooManyEmitter<'inp, TestLexer<'inp>>,
       {
         deep_num
+          .separated_by_comma()
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
+      // ── Section 4's eight probes: the same four families, two absence exits each ────
+
+      fn repeated_decline_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_decline_num.repeated().collect().parse_input(inp)
+      }
+
+      fn repeated_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_zero_width_num
+          .repeated()
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn delim_repeated_decline_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_decline_num
+          .repeated()
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn delim_repeated_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_zero_width_num
+          .repeated()
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn sep_decline_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + SeparatedEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + TooFewEmitter<'inp, TestLexer<'inp>>
+          + TooManyEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_decline_num
+          .separated_by_comma()
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn sep_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + SeparatedEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + TooFewEmitter<'inp, TestLexer<'inp>>
+          + TooManyEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_zero_width_num
+          .separated_by_comma()
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn sep_delim_decline_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + SeparatedEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + TooFewEmitter<'inp, TestLexer<'inp>>
+          + TooManyEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_decline_num
+          .separated_by_comma()
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn sep_delim_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + SeparatedEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + TooFewEmitter<'inp, TestLexer<'inp>>
+          + TooManyEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_zero_width_num
           .separated_by_comma()
           .delimited::<Paren<(), (), ()>>()
           .collect()
@@ -1077,6 +1401,130 @@ macro_rules! trip_suite {
           );
         }
       }
+
+      // ── Section 4: a trip the element ANSWERS is not spendable as an absence ──
+      //
+      // Sections 1–3 are all about the `Err` the element hands back. An element that catches the
+      // trip itself hands back `Ok` instead, and the driver's element-failure chokepoint never sees
+      // it: the loop takes an absence exit — the element declining, or a cycle that committed
+      // nothing — concludes "no more elements", and the collection SUCCEEDS. A resource-budget stop
+      // becomes an accepted absence, for every sink, which is section 1's defect reached through
+      // the exit its gate does not cover.
+      //
+      // Two exits per family, because they are different gate lines in every driver: the decline
+      // and the no-progress stall. In the two delimited families both land in a close-probe arm, so
+      // each source is chosen to put a close MISS there — `WrongToken` or `Eof` — never a real
+      // closer: a `Close` verdict rests on a committed pre-trip token and is a genuine close that
+      // must keep succeeding, which is why no gate sits on that arm and why a source ending in `)`
+      // would measure nothing here.
+      #[allow(rustdoc::private_intra_doc_links)]
+      mod answered_trip {
+        use super::*;
+
+        absence_cell!(
+          a_declining_element_that_answered_a_trip_does_not_end_repeated,
+          $err,
+          $sink,
+          repeated_decline_probe,
+          "`repeated()`, element declines",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3]),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_repeated,
+          $err,
+          $sink,
+          repeated_stall_probe,
+          "`repeated()`, element accepts consuming nothing",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3, ZERO_WIDTH]),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_declining_element_that_answered_a_trip_does_not_close_delimited_repeated,
+          $err,
+          $sink,
+          delim_repeated_decline_probe,
+          "`repeated().delimited()`, element declines at the unclosed end",
+          "( 1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3]),
+          roomy_filed = 1
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_close_delimited_repeated,
+          $err,
+          $sink,
+          delim_repeated_stall_probe,
+          "`repeated().delimited()`, element accepts consuming nothing at the unclosed end",
+          "( 1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3, ZERO_WIDTH]),
+          roomy_filed = 1
+        );
+
+        absence_cell!(
+          a_declining_element_that_answered_a_trip_does_not_end_separated,
+          $err,
+          $sink,
+          sep_decline_probe,
+          "`separated_by_comma()`, element declines on a token that is not an element",
+          "1 , 2 , 3 +",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3]),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_separated,
+          $err,
+          $sink,
+          sep_stall_probe,
+          "`separated_by_comma()`, element accepts consuming nothing",
+          "1 , 2 , 3 +",
+          stops = $eot,
+          tight_filed = 1,
+          collects = Ok(vec![1, 2, 3, ZERO_WIDTH]),
+          roomy_filed = 1
+        );
+
+        absence_cell!(
+          a_declining_element_that_answered_a_trip_does_not_close_delimited_separated,
+          $err,
+          $sink,
+          sep_delim_decline_probe,
+          "`separated_by_comma().delimited()`, element declines where the closer should be",
+          "( 1 , 2 , 3 +",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3]),
+          roomy_filed = 1
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_close_delimited_separated,
+          $err,
+          $sink,
+          sep_delim_stall_probe,
+          "`separated_by_comma().delimited()`, element accepts consuming nothing",
+          "( 1 , 2 , 3 +",
+          stops = $eot,
+          tight_filed = 1,
+          collects = Ok(vec![1, 2, 3, ZERO_WIDTH]),
+          roomy_filed = 2
+        );
+      }
     }
   };
 }
@@ -1086,6 +1534,7 @@ trip_suite!(
   TripErr,
   TripErr::Depth,
   TripErr::Ordinary,
+  TripErr::Ordinary,
   "a delegating error type"
 );
-trip_suite!(discarding_sink, (), (), (), "the discarding `()` sink");
+trip_suite!(discarding_sink, (), (), (), (), "the discarding `()` sink");

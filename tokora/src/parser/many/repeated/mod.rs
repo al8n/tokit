@@ -264,16 +264,20 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
     // keeps that witness attempt-relative. One offset clone per collection, off the per-element path.
     let latch = inp.latch_snapshot();
 
-    loop {
+    // The trip baseline of the LAST element attempt, carried out by whichever break concluded
+    // absence — see `many::absence_after_element` for what the gate below does with it, and why the
+    // value has to be carried rather than re-read after the loop.
+    let elem_trips = loop {
       // The descent witness's baseline, taken once per ELEMENT — the attempt the chokepoint below
-      // judges. `many::file_element_failure` says why it belongs here and not out beside `latch`.
+      // judges, and the one the absence gate after the loop judges too.
+      // `many::file_element_failure` says why it belongs here and not out beside `latch`.
       let trips = inp.trip_snapshot();
       match self.f.try_parse_input(inp) {
         Ok(Accept(item)) => {
           rh.on_element(num, inp, &anchor)?;
           push_element(&mut num, &mut full, container, item, inp, &anchor)?;
         }
-        Ok(Decline) => break,
+        Ok(Decline) => break trips,
         // File the failure as a diagnostic and keep looping — unless it is one of the three the
         // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
         // the chokepoint's, not this loop's: see `file_element_failure` for the three witnesses and
@@ -291,25 +295,19 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
       // error-span anchor.
       let new_committed = inp.span().end();
       if new_committed <= committed {
-        break;
+        break trips;
       }
       committed = new_committed;
       cursor = inp.cursor().clone();
-    }
+    };
 
     // Both ways out of the loop above — the element declining, and a cycle that committed nothing —
-    // conclude *absence*: "no more elements". An element's own lookahead can latch a terminal
-    // scanner stop and still hand it back `Ok` with a short window, so that conclusion may rest on a
-    // truncated view. Surface the stop instead of ending cleanly. Attempt-relative against the entry
-    // snapshot, so a boundary an enclosing lookahead already latched is not mis-charged here. The
-    // end-of-input anchors on the committed end, matching the decision-window and consume gates.
-    if inp.latched_during_attempt(&latch) {
-      return Err(
-        UnexpectedEot::eot_of(inp.span().end())
-          .into_terminal()
-          .into(),
-      );
-    }
+    // conclude *absence*: "no more elements", on the strength of what the last element attempt did.
+    // The chokepoint above never sees either, because neither produced an `Err`, so the same two
+    // never-recoverable facts have to be witnessed here. `absence_after_element` holds both and says
+    // why each baseline is the granularity it is. The end-of-input anchors on the committed end,
+    // matching the decision-window and consume gates.
+    absence_after_element(inp, &latch, elem_trips)?;
 
     rh.on_stop(num, inp, &anchor)
   }
