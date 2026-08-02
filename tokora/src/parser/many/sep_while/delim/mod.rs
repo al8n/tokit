@@ -4,7 +4,6 @@ use crate::{
   container::Container as ContainerT,
   emitter::{FromUnclosed, FullContainerEmitter, SeparatedEmitter, UnclosedEmitter},
   error::Unclosed,
-  span::Span as _,
 };
 
 use super::*;

@@ -3,7 +3,6 @@ use core::marker::PhantomData;
 use crate::{
   TryParseInput,
   emitter::FullContainerEmitter,
-  span::Span as _,
   try_parse_input::{Accept, Decline},
 };
 

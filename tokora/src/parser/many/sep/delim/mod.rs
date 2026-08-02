@@ -7,7 +7,6 @@ use crate::{
   emitter::{FromUnclosed, FullContainerEmitter, SeparatedEmitter, UnclosedEmitter},
   error::Unclosed,
   punct::Punctuator,
-  span::Span as _,
   try_parse_input::{Accept, Decline},
 };
 

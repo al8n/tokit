@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use crate::{emitter::FullContainerEmitter, span::Span as _};
+use crate::emitter::FullContainerEmitter;
 
 use super::*;
 

@@ -6,7 +6,6 @@ use crate::{
   delimiter::Delimiter,
   emitter::{FromUnclosed, FullContainerEmitter, UnclosedEmitter},
   error::Unclosed,
-  span::Span as _,
   try_parse_input::{Accept, Decline},
 };
 
