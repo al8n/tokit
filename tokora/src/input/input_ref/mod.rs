@@ -1294,9 +1294,11 @@ where
   /// The ordinary settle cannot do that: `commit_token` is handed a token its caller has already
   /// popped, so its clamp necessarily runs with the token out of the stream and the position
   /// still behind it. That window is the crate's long-standing posture for the 1:1 consume
-  /// settles and is left alone; the trivia skip crosses a *run* of tokens rather than one, so it
-  /// takes this entrance and closes the window by construction rather than by a scope whose
-  /// `Drop` repairs it afterwards.
+  /// settles and is left alone; the trivia skip's **resident** run crosses a *run* of tokens
+  /// rather than one, so it takes this entrance and closes the window by construction rather than
+  /// by a scope whose `Drop` repairs it afterwards. Its **lexing** run does not reach here at all
+  /// — a token it just lexed was never in the stream, so there is no removal to clamp ahead of,
+  /// and it settles through `commit_token` like every other 1:1 consume.
   ///
   /// # Panics
   ///

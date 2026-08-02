@@ -59,10 +59,20 @@ where
   /// exit too, and it settles: no token leaves the stream, the diagnosed prefix is kept, and no
   /// emitter mark is stranded. The two routes reach that by different means, and the difference is
   /// the whole of what *Two routes, one skip* below is about — the complete-input route holds no
-  /// token out of the stream and no uncommitted position at any point where caller code runs, so
-  /// there is nothing for an unwind edge to repair; the partial-input route keeps the shared
-  /// scanner's `ScanScope`, whose `Drop` puts the in-flight token back,
-  /// commits the frontier and settles the entry mark.
+  /// uncommitted position at any point where caller code runs, and holds a token out of the stream
+  /// at exactly one call, which [`LexedFront`] owns across; the partial-input route keeps the
+  /// shared scanner's `ScanScope`, whose `Drop` puts the in-flight token back, commits the frontier
+  /// and settles the entry mark.
+  ///
+  /// That one call is the predicate, over a token the **lexing** run has just produced, and it is
+  /// worth stating why the resident run needs no such guard while this does: a resident token is
+  /// judged where it lies, so an unwinding predicate there has nothing to repair, while a lexed one
+  /// exists only in this loop's hand until it is committed or put back. Left unowned, an unwinding
+  /// predicate dropped it — the complete input then re-lexed it from the previous committed span
+  /// where the sealed-`Partial` input, whose scope holds the same token, resumed with it resident.
+  /// The two answers are within one cursor *range* of each other, which is why the panic sweep
+  /// passed over it; they are not the same observation, and
+  /// `the_two_completeness_routes_observe_the_same_unwound_skip` now compares them exactly.
   ///
   /// # Two routes, one skip
   ///
@@ -81,8 +91,9 @@ where
   ///    nothing; an acceptance consumes it through `commit_front`, the
   ///    settle that clamps the position *before* the token leaves the stream;
   /// 2. **the lexing run** — once the stream is empty, lex through
-  ///    `scan_with` exactly as the scanner does, committing each accepted token
-  ///    as it crosses it and putting the stopping token back at the front of the stream.
+  ///    `scan_with` exactly as the scanner does, holding each lexed token in a
+  ///    [`LexedFront`] across the predicate, committing it there if the predicate takes it and
+  ///    putting it back at the front of the stream if it does not.
   ///
   /// A [`Partial`](crate::input::Partial) input keeps the scanner. That is a **typestate** split,
   /// not a second fast path: the partial-input route owes an `Incomplete` exit that restores five
@@ -90,20 +101,33 @@ where
   /// what `ScanScope` exists to own, and the measured cost above is a complete-input parse.
   /// Neither route carries the other's machinery, and no route carries both.
   ///
-  /// ## Why the complete-input route needs no scan scope
+  /// ## What this route keeps of the scan scope, and what it does not
+  ///
+  /// **Not "it needs no scope".** It needs the scope's *token slot*, in the lexing run and only
+  /// there, and nothing else the scope carries — and the heading says so because the earlier one
+  /// said the opposite over a body that was already correctly qualified, which is the half a reader
+  /// retains.
   ///
   /// Under `Complete` the scope's `Drop` does exactly two things — put the in-flight token back at
   /// the front of the stream, and commit the frontier the loop accumulated — and this route makes
-  /// both unnecessary rather than skipping them:
+  /// one of them unnecessary rather than skipping it, and keeps the other where it is actually
+  /// owed:
   ///
-  /// | what the scope settles | why there is nothing to settle here |
+  /// | what the scope settles | what this route does instead |
   /// |---|---|
-  /// | the in-flight token | a resident token is judged where it lies and never leaves the stream until the settle that accounts for it; the clamp — the settle's one fallible step — runs while it is still there |
+  /// | the in-flight token, **resident run** | nothing: a resident token is judged where it lies and never leaves the stream until the settle that accounts for it; the clamp — the settle's one fallible step — runs while it is still there |
+  /// | the in-flight token, **lexing run** | [`LexedFront`], the scope's token slot and nothing else of it: a token this loop lexed is owned across the predicate and put back by the guard's `Drop`, so the stop and an unwinding predicate take the same exit |
   /// | the uncommitted frontier | there is none: every token this route crosses is committed as it crosses it, so the committed position **is** the frontier at every instant |
   /// | the entry mark | `Complete` takes none — the capture is behind `Cmpl::PARTIAL` and never monomorphizes |
   ///
   /// The scope's own `HOLDS_ENTRY = false` for `SkipWhile`, so its unwind edge always *keeps*:
   /// the disposition this route lands on by construction is the one the scope was going to choose.
+  ///
+  /// The split in the first two rows is the whole of what the measurement bought, and it is the
+  /// reason the guard is where it is. The census that motivates this route is **22,033 skips that
+  /// skip nothing** out of 39,057 — every one of them answered by the resident run, which
+  /// constructs no guard, and none of them by the lexing run, which is entered once per
+  /// non-resident token and has already paid for a lex by the time it gets there.
   ///
   /// ## Where the limit trip latches
   ///
@@ -388,8 +412,9 @@ where
   /// frontier and no take-test-put-back.
   ///
   /// Two phases, and the boundary between them is a fact rather than a choice: phase 1 runs while
-  /// a token is at the front of the stream, phase 2 runs once there is not — and nothing phase 2
-  /// does puts one back (a stop returns immediately), so the phases cannot interleave.
+  /// a token is at the front of the stream, phase 2 runs once there is not — and the one put-back
+  /// phase 2 performs is its [`LexedFront`]'s, which happens as the guard leaves the body on the
+  /// way out of the call, so the phases still cannot interleave.
   ///
   /// `#[inline(always)]` for the same reason [`skip_until`](Self::skip_until) carries it: the
   /// lexer lives in an `Option` built the moment the stream runs dry, and left out of line it
@@ -413,8 +438,9 @@ where
       // caller-supplied operations live in here — `Source::len`, an `L::Offset` comparison and an
       // `L::Span::clone` — and a panic through any of them leaves the token exactly where it is
       // and the committed position exactly where it was. That ordering is what replaces the scan
-      // scope: there is no window in which a token is out of the stream and unaccounted for, so
-      // there is nothing for a `Drop` to repair.
+      // scope FOR THIS PHASE: there is no window here in which a token is out of the stream and
+      // unaccounted for, so this loop has nothing for a `Drop` to repair. Phase 2 does — see
+      // `LexedFront` — and the claim is deliberately not made for the method as a whole.
       let clamped = self.clamped_span(front.token.span.into());
       // ── nothing fallible from here to the publish ──
       drop(self.commit_front(clamped));
@@ -444,19 +470,30 @@ where
       let scanned = self.scan_with(resume.parts_mut(), &AtCursor);
       match scanned {
         Ok(Scan::Token(tok)) => {
-          if !pred(tok.as_ref()) {
+          // The state is paired with the token HERE, above the predicate, exactly where the
+          // scanner pairs them (its `Fetched` is built at the fetch). A token without the state
+          // that lexed it is not a cache entry, so it cannot be put back — and a put-back is
+          // precisely what the guard below owes an unwind. Cloning after the predicate, as this
+          // did, made the guard unbuildable at the moment it is needed.
+          let state = resume.lexer().state().clone();
+          // The one window this route has: a token OUTSIDE the stream with caller code running
+          // over it. `LexedFront` owns it across `pred`, so a predicate that unwinds leaves it
+          // PARKED rather than dropped — the scan scope's `TokenSlot::Held` arm, narrowed to the
+          // single call that needs it and confined to the phase that already pays for a lex.
+          let mut lexed = LexedFront::new(self, CachedToken::new(tok, state));
+          if !pred(lexed.token()) {
             // The stop, on a token this loop lexed: put it back where an unconsumed token lives.
-            // Lexed, so the put-back is a genuinely new cache entry and its push is recorded —
-            // the same call, with the same origin, the scanner's `to`-shaped stop makes.
-            let state = resume.lexer().state().clone();
-            self.hold_front(CachedToken::new(tok, state), Origin::Lexer);
+            // The guard performs it as it goes out of scope, so this exit and the unwind edge are
+            // the SAME call — lexed, so the put-back is a genuinely new cache entry and its push
+            // is recorded, the same call, with the same origin, the scanner's `to`-shaped stop
+            // makes.
             return Ok(());
           }
-          let state = resume.lexer().state().clone();
-          // Nothing is resident and the committed position is this token's start, so the ordinary
-          // settle is already atomic here: a panic through its clamp drops a token the region
-          // re-lexes, against a position that never moved.
-          self.commit_token(tok.data(), tok.span_ref(), state);
+          // Accepted: the token leaves the guard for the settle, and this route's own posture
+          // takes over from the guard's. Nothing is resident and the committed position is this
+          // token's start, so the ordinary settle is already atomic here: a panic through its
+          // clamp drops a token the region re-lexes, against a position that never moved.
+          lexed.commit();
         }
         // The trip is latched and diagnosed inside `scan_with`, and the progress it keeps is
         // already committed.
@@ -480,6 +517,164 @@ where
         // already committed one by one. Nothing is left to settle.
         Err(e) => return Err(e),
       }
+    }
+  }
+}
+
+/// The freshly-lexed token, owned across the one call that can unwind while it is out of the
+/// stream.
+///
+/// # Why the complete-input route needs *this much* scope and no more
+///
+/// [`skip_while_direct`](InputRef::skip_while_direct) gave up the scan scope on the strength of one
+/// sentence: *no token is out of the stream at any point where caller code runs*. That is true of
+/// the resident run by construction — a token there is judged where it lies and removed only by the
+/// settle that accounts for it — and it was **false** of the lexing run for exactly one call.
+/// `scan_with` hands back a token into a local; `pred` then ran over it with nothing owning it, so
+/// a predicate that unwound dropped it. The complete input resumed from the previous committed span
+/// and re-lexed the token; the sealed-[`Partial`](crate::input::Partial) input, whose
+/// [`ScanScope`](super::scan::ScanScope) holds the same token in `TokenSlot::Held`, put it back at
+/// the front and resumed there. Two routes, one skip, two different resume cursors under
+/// `catch_unwind` — and the panic sweep could not see it, because a cursor *range* between the
+/// committed end and the next token's start admits both answers.
+///
+/// So the guard is the scope's token slot and **nothing else** of it. It carries no frontier (this
+/// route commits every token as it crosses it, so the committed position is the frontier at every
+/// instant), no snapshot and no mark (`Complete` takes none), and it exists only inside the lexing
+/// run — which is reached once per non-resident token and already pays for a lex. The resident run
+/// above never constructs one: putting the scope back there is what the measurement this route
+/// exists for would have paid for.
+///
+/// # Its two outcomes are one put-back and one settle
+///
+/// * **accepted** — [`commit`](Self::commit) hands the token to the ordinary settle and leaves the
+///   guard holding nothing, so the settle's own posture takes over unchanged: a panic through its
+///   clamp drops a token the region re-lexes against a position that never moved, which is the
+///   crate's standing posture for every 1:1 consume and is *not* what this guard is about;
+/// * **stopped, or unwound** — `Drop` puts the token back at the front of the stream. The normal
+///   stop and the unwind edge are therefore the same call rather than two that must be kept in
+///   step, which is the property the scanner's `Drop` has and the reason this is a guard and not an
+///   extra `if`.
+///
+/// # What it costs, measured — and it is not near zero
+///
+/// **It gives back about two fifths of this route's own win**, and the number is written here
+/// because the shape that produced it is not obvious and the next reader will otherwise assume, as
+/// this one did, that a guard on the slow path is free.
+///
+/// `benchmarks/examples/perfloop` on smear's `bench/apollo-comparison`: minimum over nine blocks,
+/// `apollo-parser` as an unchanged control, the three builds **interleaved** within each
+/// repetition so drift hits all of them equally, five repetitions, and any repetition whose
+/// control reading sat more than 2% above the floor discarded as contended.
+///
+/// | | alias (57 741 B) | supergraph (7 494 B) |
+/// |---|---|---|
+/// | `origin/main` — the shared scanner | 1600.2 µs | 159.0 µs |
+/// | this route, no guard | 1321.0 µs (−17.4%) | 133.7 µs (−15.9%) |
+/// | **this route, shipped** | **1482.5 µs (−7.4%)** | **148.1 µs (−6.9%)** |
+///
+/// So the guard is **+12.2% / +10.8%** of a whole parse, and the route is still ahead of the
+/// scanner it replaced by roughly 7%.
+///
+/// **The whole of it is the unwind cleanup region, not the guard's work.** Two measurements pin
+/// that, and together they say there is nothing left to optimize. Both come from a separate
+/// same-session shape survey whose own no-guard baseline read 1345 µs / 134.0 µs, so they are
+/// quoted as differences against that and not against the table above:
+///
+/// * the identical struct with the `Drop` impl **deleted** — same `Option`, same accessors, same
+///   moves — is free (1307 µs / 135.3 µs). So the wrapper, the `Option` and the token's round trip
+///   through it cost nothing;
+/// * the guard **with** its `Drop`, compiled `panic = "abort"`, is also free (1328 µs against 1363
+///   µs for the same build without it). So a build that cannot unwind pays nothing at all.
+///
+/// A destructor in this loop makes every call in its scope an `invoke` with a landing pad, and the
+/// lexing loop is hot: it is entered once per token that is not already resident, which on a real
+/// parse is most of them. Six shapes were built and timed, and this one — the guard owning the
+/// token across the predicate, inline, in `skip_while_direct` — is the **cheapest** of them.
+/// Against that survey's baseline: scoping the guard to the predicate call alone (+280 µs), taking
+/// its `Drop` out of line (+200 µs), moving the predicate call into an `#[inline(never)]` helper so
+/// the loop itself carries no destructor (+310 µs) and dropping `skip_while_direct` to plain
+/// `#[inline]` (+140 µs) are all worse or no better; outlining the whole lexing phase is a wash
+/// with this (+140 µs) and costs 10 µs of its own even without a guard. Removing the guard's own
+/// panicking branches (`expect` → a total `match`) changes nothing, so the region is not held open
+/// by anything this file added.
+///
+/// The correctness this buys is not optional — the two typestate routes disagreed on the resume
+/// cursor under `catch_unwind` without it — so the cost is reported rather than traded away. What
+/// is *not* paid is the thing the route was written for: the **resident run** builds no guard, so
+/// the 22,033-of-39,057 skips that skip nothing are untouched, and so is every skip whose tokens
+/// are already in the stream.
+struct LexedFront<'g, 'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Cmpl: Completeness,
+{
+  ir: &'g mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
+  /// The token, while it is still the guard's. `None` once [`commit`](Self::commit) has handed it
+  /// to the settle — which both performs the accept and disarms the put-back, so the two cannot
+  /// drift apart.
+  tok: Option<CachedTokenOf<'inp, L>>,
+}
+
+impl<'g, 'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>
+  LexedFront<'g, 'inp, 'closure, L, Ctx, Lang, Cmpl>
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Cmpl: Completeness,
+{
+  /// Takes ownership of a token the loop has just lexed. Infallible and a pure move: the pairing
+  /// with the lexer state — the one fallible step of building a cache entry — happens at the call
+  /// site, above this, so there is no window between the token existing and being owned.
+  #[inline(always)]
+  fn new(
+    ir: &'g mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
+    tok: CachedTokenOf<'inp, L>,
+  ) -> Self {
+    Self { ir, tok: Some(tok) }
+  }
+
+  /// The token, borrowed, for the one site that evaluates the predicate — the scanner's
+  /// `TokenSlot::held`, by the same name and for the same reason.
+  #[inline(always)]
+  fn token(&self) -> Spanned<&L::Token, &L::Span> {
+    self
+      .tok
+      .as_ref()
+      .expect("the predicate runs with the token held")
+      .token()
+  }
+
+  /// The accept: hand the token to the ordinary settle and disarm the put-back in the same move.
+  ///
+  /// SETTLE_CENSUS — the complete-input trivia skip's lexing-phase `commit_token`, moved onto the
+  /// guard so that "the token is the guard's" and "the token has been settled" cannot both be true.
+  /// The `take` is a move, not a removal from durable state: this token was never in the stream, so
+  /// it opens no removal window of the kind the census rails on.
+  #[inline(always)]
+  fn commit(&mut self) {
+    let (tok, state) = self
+      .tok
+      .take()
+      .expect("one settle per lexed token")
+      .into_components();
+    self.ir.commit_token(tok.data(), tok.span_ref(), state);
+  }
+}
+
+impl<'inp, L, Ctx, Lang: ?Sized, Cmpl> Drop for LexedFront<'_, 'inp, '_, L, Ctx, Lang, Cmpl>
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Cmpl: Completeness,
+{
+  fn drop(&mut self) {
+    // Armed by the token's presence and disarmed by the accept's own `take`, so the accepted path
+    // reaches here with nothing to do and the two exits that DO owe a put-back — the stop, and a
+    // predicate that unwound — perform the identical one.
+    if let Some(tok) = self.tok.take() {
+      self.ir.hold_front(tok, Origin::Lexer);
     }
   }
 }

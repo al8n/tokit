@@ -359,13 +359,13 @@ concrete public struct with no bound to reject anybody.
    at the front of the stream is judged **where it lies** and consumed there, and only once the
    stream is empty does it reach the lexer. No scan scope is built, no frontier pair is cloned,
    and a token already resident is never taken out and put back to be judged. The lexing phase
-   does keep one thing the scope carried, and entry 7 below is that.
+   does keep one thing the scope carried, and entry 11 below is that.
 
    **Measured against the previous release line: 7.4% off a whole GraphQL parse** (1600.2 µs →
    1482.5 µs on a 57 kB document; 159.0 µs → 148.1 µs, 6.9%, on a 7.5 kB one). Minimum over nine
    blocks with `apollo-parser` as an unchanged control, builds interleaved within each repetition,
    five repetitions, contended repetitions discarded. That figure is **net of** the unwind guard in
-   entry 7 below, which is the honest number for this release because the guard ships with the
+   entry 11 below, which is the honest number for this release because the guard ships with the
    route: without it the same measurement reads 17.4% and 15.9%. An earlier draft of this entry
    claimed 25%; that did not describe this measurement even before the guard existed, and it is
    replaced rather than adjusted.
@@ -383,7 +383,7 @@ concrete public struct with no bound to reject anybody.
    scanner's deferred frontier, and those are the same offset because the route commits every
    token as it crosses it. And a panic mid-skip leaves the input whole: a call interrupted at its
    `k`-th predicate consumes exactly the `k − 1` tokens the predicate accepted and every other
-   token stays reachable. The two phases reach that differently, and entry 7 below is what makes
+   token stays reachable. The two phases reach that differently, and entry 11 below is what makes
    the second half true — the resident phase runs the fallible half of each settle while the token
    is still in the stream and so needs nothing, while the lexing phase holds the token it lexed
    across the predicate and owes a put-back. One consequence is visible only to a host that catches
@@ -718,13 +718,13 @@ concrete public struct with no bound to reject anybody.
    put-back. **For an unwind out of the predicate** — at every call, over every residency and cache
    capacity swept — both routes now leave the same cursor, the same front residency and the same
    amount of re-lexing. They still part company on one other exit, an unwind inside the
-   end-of-input settle, which was left as it is on purpose; entry 5 above says why and names the
+   end-of-input settle, which was left as it is on purpose; entry 10 above says why and names the
    cell that pins it.
 
    Visible only to a host that catches an unwind out of its own `skip_while` predicate and keeps
    using the input; a predicate that returns normally, or a panic that aborts, is unaffected.
 
-   **It gives back about three fifths of entry 5's win — the two fifths that remain are what
+   **It gives back about three fifths of entry 10's win — the two fifths that remain are what
    ships — and that is stated rather than buried.** Measured on the same harness and in the same
    interleaved runs as the figure there: 1321.0 µs → 1482.5 µs on the 57 kB document and 133.7 µs →
    148.1 µs on the 7.5 kB one, so **+12.2% and +10.8%** of a whole parse. Entry 5's route was 17.4%
@@ -744,10 +744,10 @@ concrete public struct with no bound to reject anybody.
    not undefined territory: `skip_while` documents a *Panic unwind* section promising that no token
    leaves the stream, and the predicate is explicitly outside the "inert callbacks" precondition
    that scopes the rest of the fast path's guarantees. Two typestates disagreeing there falsifies a
-   documented promise, and entry 5's own claim rests on panic tests as its evidence.
+   documented promise, and entry 10's own claim rests on panic tests as its evidence.
 
    **That same reasoning is why the other divergence was not paid for.** The end-of-input settle
-   exclusion in entry 5 is reachable only through the lexer, the source, the span or the offset —
+   exclusion in entry 10 is reachable only through the lexer, the source, the span or the offset —
    all of them *inside* the inert-callbacks precondition, so no caller who meets the condition can
    provoke it — and the complete-input route's answer there is the stronger of the two, not a
    defect being tolerated. Where a promise was over-broad the promise was narrowed and the

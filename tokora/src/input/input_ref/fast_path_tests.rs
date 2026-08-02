@@ -727,14 +727,20 @@ fn a_trip_inside_a_trivia_skip_latches_where_the_scan_latches() {
 }
 
 /// **A panic mid-skip, and the state the input is left in** — the property the scan scope's
-/// `Drop` provided and this route has to provide by construction.
+/// `Drop` provided, which this route provides by construction in one phase and with a guard of its
+/// own in the other.
 ///
 /// Under `Complete` the scope settles exactly two things: it puts the in-flight token back at the
-/// front of the stream, and it commits the frontier the loop accumulated. This route holds no
-/// token out of the stream while caller code runs and accumulates no uncommitted frontier, so the
-/// claim is that neither settle has anything to do. The claim is checkable, and this checks it:
-/// a predicate that panics on its `k`-th call must leave **exactly** the `k − 1` tokens it
-/// accepted consumed, and every other token still reachable.
+/// front of the stream, and it commits the frontier the loop accumulated. This route accumulates
+/// no uncommitted frontier, so the second has nothing to do. The first splits: the **resident**
+/// run holds no token out of the stream while caller code runs, so it too has nothing to do, while
+/// the **lexing** run holds each token it lexes across the predicate and owes the put-back — which
+/// is why [`LexedFront`](super::skip_while) exists. This paragraph claimed the stronger, unsplit
+/// version for five review rounds, and the defect it was hiding sat in the half it waved away.
+///
+/// The claim is checkable either way, and this checks it: a predicate that panics on its `k`-th
+/// call must leave **exactly** the `k − 1` tokens it accepted consumed, and every other token
+/// still reachable.
 ///
 /// That is stronger than "the input looks consistent". A lost token would shorten the drain; a
 /// token consumed in silence would shorten it too; an uncommitted prefix would leave the
@@ -826,13 +832,23 @@ fn a_panic_mid_skip_consumes_exactly_what_the_predicate_accepted() {
         "the committed position after the unwind is the end of the last accepted token \
          (prefill {prefill}, panic on {panic_on})"
       );
-      // The stream and the committed position are contiguous: nothing sits between them.
-      assert!(
-        committed_end <= cursor && cursor <= all[panic_on - 1].start(),
-        "the cursor ({cursor}) must lie between the committed position ({committed_end}) and the \
-         next token's start ({}) — a cursor past it would mean a token vanished \
-         (prefill {prefill}, panic on {panic_on})",
-        all[panic_on - 1].start()
+      // …and the stream resumes AT the token the predicate never answered about — not merely
+      // somewhere between it and the committed position.
+      //
+      // This used to be the range `committed_end <= cursor && cursor <= start`, and with the gaps
+      // this fixture has on purpose that range holds two answers: the token PUT BACK (cursor at
+      // its own start) and the token DROPPED (cursor at the committed end, the token re-lexed by
+      // the next read). Both leave the drain above identical, because a re-lex reproduces the
+      // token exactly — so a range here was the whole of what a real divergence had to clear. It
+      // is an equality now, and the two routes are compared against each other, field by field, in
+      // `the_two_completeness_routes_observe_the_same_unwound_skip`.
+      assert_eq!(
+        cursor,
+        all[panic_on - 1].start(),
+        "the cursor must be the START of the token the predicate never answered about — that \
+         token is unconsumed, and an unconsumed token lives at the front of the stream whether \
+         this call found it there or lexed it a moment ago. The committed position is \
+         {committed_end} (prefill {prefill}, panic on {panic_on})"
       );
     }
   }
@@ -933,6 +949,20 @@ thread_local! {
   static CALLER_CALLS: Cell<usize> = const { Cell::new(0) };
   /// While set, the **wide** probes record too — see [`Wide`].
   static WIDE: Cell<bool> = const { Cell::new(false) };
+  /// Every token [`LedgerLexer::lex`] has produced, counted whether or not the ledger is
+  /// recording — the one observation that distinguishes a token SERVED from the stream from the
+  /// same token produced a second time. Nothing else can: a re-lex from the committed position
+  /// reproduces the token, its span and its post-token state exactly, so the values a caller reads
+  /// back are identical either way and only the work differs.
+  static TOKENS_LEXED: Cell<usize> = const { Cell::new(0) };
+}
+
+fn reset_tokens_lexed() {
+  TOKENS_LEXED.with(|c| c.set(0));
+}
+
+fn tokens_lexed() -> usize {
+  TOKENS_LEXED.with(Cell::get)
 }
 
 fn note(effect: Effect) {
@@ -1492,6 +1522,10 @@ impl<'a> crate::Lexer<'a> for LedgerLexer<'a> {
     }
 
     self.state.scanned += 1;
+    // Beside the tally, and for a different reader: `state.scanned` is COMMITTED state, restored
+    // by a rollback and re-reached by a re-lex, so it cannot say how much lexing happened. This
+    // counter is monotone for the whole test and says exactly that.
+    TOKENS_LEXED.with(|c| c.set(c.get() + 1));
     // A TRIP REPLACES THE TOKEN IT FIRED ON, which is the shape `classify` is written against: the
     // terminal condition reaches the input layer as a `Lexed::Error` carrying the tripping token's
     // span, and `check()` — asked next — agrees that the lexer has tripped. Inert unless a
@@ -2894,13 +2928,19 @@ fn an_address_reading_predicate_can_change_the_skip_decision() {
 
 // ── The clamp's ordering, measured on the one operation that can unwind inside it ─────────────
 
-/// **The settle's fallible step runs while the token is still in the stream** — measured, not
-/// argued.
+/// **The settle's fallible step runs while the token is still in the stream — in the RESIDENT
+/// run** — measured, not argued.
 ///
-/// The complete-input skip's per-token settle is a clamp
+/// The qualifier is load-bearing and belongs in the lead rather than in a clause below it. It is
+/// the resident run that clamps before the removal; the lexing run has no token in the stream to
+/// clamp against and settles through the ordinary [`commit_token`](InputRef::commit_token), whose
+/// clamp runs in the window this cell is about. That window is the crate's standing posture for
+/// every 1:1 consume and is not what this cell measures.
+///
+/// The resident run's per-token settle is a clamp
 /// ([`Source::len`](crate::Source::len), an `L::Offset` comparison and an `L::Span::clone`)
-/// followed by a removal and two moves, in that order, and the order is the whole of why this
-/// route needs no scan scope. Reverse it — clamp inside the settle, as
+/// followed by a removal and two moves, in that order, and the order is the whole of why that
+/// phase needs no scan scope. Reverse it — clamp inside the settle, as
 /// [`commit_token`](InputRef::commit_token) does for the 1:1 consume paths — and a panicking
 /// `L::Span::clone` leaves the token popped, the position behind it, and the younger cache
 /// entries resident in front of the hole.
@@ -3787,17 +3827,18 @@ where
 ///   Neither route's skip loop runs at all: the stop is the shared `front` probe itself, so the
 ///   parked token, the position and the residency are all untouched.
 ///
-/// # What this cell still cannot see
+/// # What this cell cannot see, and what does
 ///
 /// [`SkipRun`] is the caller-visible *values* a skip leaves behind; the committed-token side
-/// channel [`Emitter::commit_token`](crate::Emitter::commit_token) feeds is not one of them, and no
-/// cell in this file reads it back off the effect ledger either — it is recorded
-/// ([`Effect::CommitToken`]) but never asserted on. Measured: removing the notification from both
-/// sites a parked token's consumption can reach — the complete-input settle
-/// (`settle_committed_token`) and the scanner's skip-and-report — leaves every test in this file
-/// green, this cell included. A regression confined to that one notification, on a parked token,
-/// has no observer anywhere in this sweep family. Closing it needs a case built on the effect
-/// ledger over a parked front, not another [`SkipRun`] field.
+/// channel [`Emitter::commit_token`](crate::Emitter::commit_token) feeds is not one of them, so no
+/// field here can carry it. Measured: removing the notification from a site a parked token's
+/// consumption reaches leaves this cell green. A regression confined to that one notification, on
+/// a parked token, had no observer anywhere in this sweep family — closing it needed a case built
+/// on the effect ledger rather than another [`SkipRun`] field, and
+/// [`the_committed_token_side_channel_is_fed_over_a_parked_front`] at the foot of this file is
+/// that case. It stays a separate cell on purpose: the two ask different questions of the same
+/// residency, and folding the ledger into `SkipRun` would make every value comparison in this file
+/// depend on caller code the two routes are *entitled* to run differently.
 #[test]
 fn the_two_completeness_routes_observe_the_same_skip_over_a_parked_front() {
   // ── accepted: the parked token is trivia, and the predicate takes it ──
@@ -3888,5 +3929,586 @@ fn the_two_completeness_routes_observe_the_same_skip_over_a_parked_front() {
   assert_eq!(
     direct.live_rows, 0,
     "neither route leaves an emitter mark outstanding on the way out"
+  );
+}
+
+// ── The unwind edge: the one call this route runs with a token outside the stream ────────────────
+
+/// Committed-token notifications in one recording.
+///
+/// [`Effect::CommitToken`] has been recorded by the ledger emitter since the ledger existed and
+/// read back by nothing, which is exactly the gap the two cells at the foot of this file close: it
+/// is the one thing a `skip_while` does that no *value* a caller reads off the input carries.
+fn commit_notifications(effects: &[Effect]) -> usize {
+  effects
+    .iter()
+    .filter(|effect| **effect == Effect::CommitToken)
+    .count()
+}
+
+/// One `skip_while` interrupted by a panicking predicate, as the state the unwind left behind.
+///
+/// A second struct rather than a field on [`SkipRun`], because the three facts that matter here
+/// are meaningless for a call that returned: where the token the predicate never answered about
+/// ended up, whether the next read had to produce it a second time, and how many committed-token
+/// notifications the interrupted call had already made.
+#[derive(Debug, PartialEq)]
+struct UnwoundSkip {
+  /// The residency going IN, measured (see [`prefill_to`]). Also the sweep's discriminator: the
+  /// predicate is asked about the resident tokens first, so a panic on call `k` lands on a
+  /// **freshly-lexed** token exactly when `k` is past this and the call was reached at all.
+  depth_in: usize,
+  parked_in: bool,
+  /// Whether the armed call was reached. `false` is a legitimate outcome — a skip that stops or
+  /// exhausts before call `panic_on` — and the two routes have to agree on that too.
+  caught: bool,
+  /// What the call returned when it was NOT interrupted.
+  returned: Option<Result<(), LedgerErr>>,
+  /// The predicate's own tally, and the tokens it was handed — the panicking call included, since
+  /// it records its argument before it panics.
+  calls: usize,
+  asked: std::vec::Vec<(usize, usize)>,
+  /// **The residency the unwind left.** A stopper the unwind dropped leaves nothing here; one it
+  /// put back is the parked slot or the cache's front, depending on the capacity.
+  parked: bool,
+  depth: usize,
+  /// **The resume cursor** — the fact the old range assertion could not pin. A stopper put back
+  /// resumes at its own start; one dropped resumes at the committed end. Every fixture below has a
+  /// gap between the two, so they are different numbers and not merely different residencies.
+  cursor: usize,
+  span: (usize, usize),
+  scanned: usize,
+  latch: Option<usize>,
+  dedup: usize,
+  /// Committed-token notifications the interrupted call fed the side channel, off the effect
+  /// ledger.
+  commits: usize,
+  /// Tokens the lexer produced **during the call**, and then **during the drain after it**.
+  ///
+  /// The second is the direct measurement of *was the stopper re-lexed*, and it counts the whole
+  /// drain rather than that one token because the lexer cannot be asked about one token: a stopper
+  /// left resident is SERVED out of the stream, so the drain lexes one fewer than it yields; one
+  /// the unwind dropped is produced a second time, so the drain lexes exactly what it yields.
+  /// Nothing a caller reads back can tell those apart — a re-lex from the committed position
+  /// reproduces the token, its span and its post-token state exactly.
+  lexed: usize,
+  drain_lexed: usize,
+  drained: std::vec::Vec<(usize, usize)>,
+  drain_end: Result<(), LedgerErr>,
+  diagnostics: std::vec::Vec<Diagnostic>,
+  reports: (usize, usize),
+  live_rows: usize,
+}
+
+impl UnwoundSkip {
+  /// The half of the observation that has to be read once the handle is gone — see
+  /// [`SkipRun::record_emitter`].
+  fn record_emitter(&mut self, emitter: &LedgerEmitter) {
+    self.diagnostics = emitter.offered().to_vec();
+    self.reports = emitter.reports();
+    self.live_rows = emitter.live_rows();
+  }
+}
+
+/// One `skip_while` down one route, with the predicate armed to panic on its `panic_on`-th call.
+fn ledger_unwound_skip<'a, C, Cmpl>(
+  inp: &mut InputRef<'a, '_, LedgerLexer<'a>, (LedgerEmitter, C), (), Cmpl>,
+  prefill: usize,
+  panic_on: usize,
+) -> UnwoundSkip
+where
+  C: Cache<'a, LedgerLexer<'a>, ()>,
+  Cmpl: crate::input::SurfaceIncomplete<'a, LedgerLexer<'a>, (LedgerEmitter, C), ()>,
+{
+  let _ = prefill_to(inp, prefill);
+  let parked_in = inp.has_front_parked();
+  let depth_in = Cache::len(inp.cache()) + usize::from(parked_in);
+
+  let asked = RefCell::new(std::vec::Vec::new());
+  reset_caller_calls();
+  reset_tokens_lexed();
+  record();
+  let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    inp.skip_while(|t| {
+      caller_call();
+      asked.borrow_mut().push((t.span.start.0, t.span.end.0));
+      assert!(
+        caller_calls() != panic_on,
+        "the armed predicate call panics mid-skip"
+      );
+      t.data.is_trivia()
+    })
+  }));
+  let effects = recorded();
+  let lexed = tokens_lexed();
+  let caught = outcome.is_err();
+  let returned = outcome.ok();
+
+  let parked = inp.has_front_parked();
+  let depth = Cache::len(inp.cache()) + usize::from(parked);
+  let cursor = inp.cursor().as_inner().0;
+  let span = (inp.span().start.0, inp.span().end.0);
+  let scanned = inp.state().scanned;
+  let latch = inp.latch_snapshot().map(|at| at.0);
+  let dedup = inp.emitted_error_end.0;
+
+  reset_tokens_lexed();
+  let mut drained = std::vec::Vec::new();
+  let drain_end = loop {
+    match inp.next() {
+      Ok(Some(tok)) => drained.push((tok.span_ref().start.0, tok.span_ref().end.0)),
+      Ok(None) => break Ok(()),
+      Err(e) => break Err(e),
+    }
+  };
+  let drain_lexed = tokens_lexed();
+
+  UnwoundSkip {
+    depth_in,
+    parked_in,
+    caught,
+    returned,
+    calls: caller_calls(),
+    asked: asked.into_inner(),
+    parked,
+    depth,
+    cursor,
+    span,
+    scanned,
+    latch,
+    dedup,
+    commits: commit_notifications(&effects),
+    lexed,
+    drain_lexed,
+    drained,
+    drain_end,
+    // Filled by `record_emitter` once the handle is gone.
+    diagnostics: std::vec::Vec::new(),
+    reports: (0, 0),
+    live_rows: 0,
+  }
+}
+
+/// [`both_routes`], for a predicate armed to panic.
+fn both_routes_under_an_unwinding_predicate<K>(
+  fixture: Fixture,
+  prefill: usize,
+  panic_on: usize,
+) -> (UnwoundSkip, UnwoundSkip)
+where
+  K: Capacity,
+{
+  let src = LedgerSrc(fixture.text);
+  // In force for both runs, and gone by the time this returns — see `both_routes`.
+  let _budget = match fixture.budget {
+    Some(tokens) => Budget::of(tokens),
+    None => Budget::unlimited(),
+  };
+
+  let mut complete = ledger_input_with::<K::Cache<'_>>(&src, fixture.emitter());
+  let mut direct = {
+    let mut inp = complete.as_ref();
+    ledger_unwound_skip(&mut inp, prefill, panic_on)
+  };
+  direct.record_emitter(complete.emitter());
+
+  let mut partial = ledger_partial_input_with::<K::Cache<'_>>(&src, fixture.emitter());
+  partial.seal();
+  let mut scanned = {
+    let mut inp = partial.as_ref();
+    ledger_unwound_skip(&mut inp, prefill, panic_on)
+  };
+  scanned.record_emitter(partial.emitter());
+
+  (direct, scanned)
+}
+
+/// [`both_routes_over_a_parked_front`], for a predicate armed to panic — the same window, entered
+/// from the one residency a peek cannot build.
+fn both_routes_over_a_parked_front_under_an_unwinding_predicate<K>(
+  fixture: Fixture,
+  panic_on: usize,
+) -> (UnwoundSkip, UnwoundSkip)
+where
+  K: Capacity,
+{
+  let src = LedgerSrc(fixture.text);
+  let _budget = match fixture.budget {
+    Some(tokens) => Budget::of(tokens),
+    None => Budget::unlimited(),
+  };
+
+  let mut complete = ledger_input_with::<K::Cache<'_>>(&src, fixture.emitter());
+  let mut direct = {
+    let mut inp = complete.as_ref();
+    park_front(&mut inp);
+    ledger_unwound_skip(&mut inp, 0, panic_on)
+  };
+  direct.record_emitter(complete.emitter());
+
+  let mut partial = ledger_partial_input_with::<K::Cache<'_>>(&src, fixture.emitter());
+  partial.seal();
+  let mut scanned = {
+    let mut inp = partial.as_ref();
+    park_front(&mut inp);
+    ledger_unwound_skip(&mut inp, 0, panic_on)
+  };
+  scanned.record_emitter(partial.emitter());
+
+  (direct, scanned)
+}
+
+/// **The drift guard on the unwind edge**, and the reason it is a separate cell from
+/// [`a_panic_mid_skip_consumes_exactly_what_the_predicate_accepted`].
+///
+/// That cell asks the right question of one route: a predicate that panics on its `k`-th call must
+/// leave exactly the `k − 1` tokens it accepted consumed. Its closing check on where the stream
+/// resumes is a **range** —
+///
+/// ```text
+/// committed_end <= cursor && cursor <= all[panic_on - 1].start()
+/// ```
+///
+/// — and with an inter-token gap that range has two members. A stopper the unwind PUT BACK resumes
+/// at its own start; a stopper the unwind DROPPED resumes at the committed end and is lexed again
+/// by the next read. Both satisfy the range, both leave the drain identical (a re-lex reproduces
+/// the token, its span and its post-token state exactly), and the difference between them is
+/// precisely a typestate divergence: the sealed-[`Partial`] route's
+/// [`ScanScope`](super::scan::ScanScope) holds the token in `TokenSlot::Held` and puts it back,
+/// so the complete-input route must too.
+///
+/// So this cell compares the two routes **exactly**, on the facts a range cannot express:
+///
+/// * the resume **cursor**, over fixtures whose tokens are separated by a gap;
+/// * the **front residency** the unwind left, in both spellings — the parked slot under a cache
+///   that retains nothing, a cache entry under one that does;
+/// * whether the stopper was **re-lexed**, counted at the lexer rather than inferred, because
+///   every value a caller can read back off the input is identical either way;
+/// * the **committed-token notifications** the interrupted call had already made, off the effect
+///   ledger — the side channel no [`SkipRun`] field carries.
+///
+/// …plus the whole of [`UnwoundSkip`], as the neighbouring sweeps compare the whole of `SkipRun`.
+///
+/// Red against `a826ffe`, measured rather than asserted: `"~ ~ ab cd"` at prefill 0 with the panic
+/// on call 3 reported `cursor: 3` against `4`, `parked: false` against `true`, `depth: 0` against
+/// `1` and `drain_lexed: 2` against `1` — the complete-input route dropping the freshly-lexed
+/// stopper where the scanned route parked it. The panic sweep above stayed green throughout.
+#[test]
+fn the_two_completeness_routes_observe_the_same_unwound_skip() {
+  const UNWOUND: &[Fixture] = &[
+    // Trivia, trivia, then a word the predicate rejects, every token separated by a gap. Call 3
+    // is the case this cell exists for: the first freshly-lexed stopper after a skipped token.
+    Fixture::clean("~ ~ ab cd"),
+    // Nothing but trivia, so the run ends at end of input and a panic on the last call lands on a
+    // token the skip would have ACCEPTED rather than one it would have stopped on.
+    Fixture::clean("~ ~ ~"),
+  ];
+
+  // What the sweep reached, so a fixture edited into vacuity is red rather than green — the
+  // discriminator is `depth_in`, because the predicate is handed the resident tokens first.
+  let (mut on_lexed, mut on_resident, mut never_fired) = (0usize, 0usize, 0usize);
+  for &fixture in UNWOUND {
+    for prefill in 0..=3usize {
+      for panic_on in 1..=4usize {
+        for (capacity, (direct, scanned)) in [
+          (
+            Deque3::NAME,
+            both_routes_under_an_unwinding_predicate::<Deque3>(fixture, prefill, panic_on),
+          ),
+          (
+            Slot1::NAME,
+            both_routes_under_an_unwinding_predicate::<Slot1>(fixture, prefill, panic_on),
+          ),
+          (
+            NoCache::NAME,
+            both_routes_under_an_unwinding_predicate::<NoCache>(fixture, prefill, panic_on),
+          ),
+        ] {
+          assert_eq!(
+            direct, scanned,
+            "the complete-input route and the scanned partial route must observe the same \
+             INTERRUPTED skip over {fixture:?} at prefill width {prefill}, with the predicate \
+             panicking on call {panic_on}, under {capacity}"
+          );
+          if !direct.caught {
+            never_fired += 1;
+          } else if panic_on > direct.depth_in {
+            on_lexed += 1;
+          } else {
+            on_resident += 1;
+          }
+        }
+      }
+    }
+  }
+  assert_eq!(
+    (on_lexed, on_resident, never_fired),
+    (54, 18, 24),
+    "and the sweep must actually land the panic on a FRESHLY-LEXED token, on a RESIDENT one, and \
+     miss it altogether, exactly this many times. The first is the window this cell exists for and \
+     the only one in which the routes could ever have diverged; the other two are the control. \
+     Derived, not read off a run: both fixtures answer the predicate three times (two trivia then \
+     a rejected word; three trivia then end of input), so `panic_on == 4` never fires and that is \
+     2 fixtures x 4 widths x 3 capacities = 24. Of the three that do fire, the ones past `depth_in` \
+     land on a lexed token — `Deque3` reaches depths 0,1,2,3 (3+2+1+0 = 6 lexed, 6 resident), \
+     `Slot1` reaches 0,1,1,1 (3+2+2+2 = 9 lexed, 3 resident) and `NoCache` reaches 0 four times \
+     (12 lexed, 0 resident), for 27 and 9 per fixture. Re-derive the same way — do not adjust \
+     these to whatever came out — if you change the fixtures, the widths or the capacities."
+  );
+
+  // ── What they agree ON, at the one cell the range assertion could not separate ──
+  // `"~ ~ ab cd"` at prefill 0: two trivia tokens skipped and committed, then the word at (4, 6)
+  // freshly lexed and handed to a predicate that unwinds. Offset 3 is the committed end and offset
+  // 4 is the stopper's start, and the gap between them is the whole measurement.
+  let (direct, scanned) =
+    both_routes_under_an_unwinding_predicate::<NoCache>(Fixture::clean("~ ~ ab cd"), 0, 3);
+  assert_eq!(direct, scanned);
+  assert!(direct.caught, "the armed call was reached");
+  assert_eq!(
+    direct.asked,
+    std::vec![(0, 1), (2, 3), (4, 6)],
+    "two trivia tokens, then the word the predicate panicked on"
+  );
+  assert_eq!(
+    direct.span,
+    (2, 3),
+    "the prefix the predicate accepted is kept, committed at the last of it"
+  );
+  assert_eq!(
+    direct.cursor, 4,
+    "and the stopper is AT THE FRONT: the resume cursor is its own start (4), not the committed \
+     end (3). Both satisfied the old range check"
+  );
+  assert!(
+    direct.parked,
+    "under a cache that retains nothing the put-back is the parked slot"
+  );
+  assert_eq!(direct.depth, 1, "one token resident, and it is that one");
+  assert_eq!(
+    direct.drained,
+    std::vec![(4, 6), (7, 9)],
+    "and the drain yields the stopper first"
+  );
+  assert_eq!(
+    direct.drain_lexed, 1,
+    "…having LEXED only the token behind it. The stopper is served out of the stream; dropped, it \
+     would be produced a second time and this would be 2 — the fact a re-lex otherwise hides, \
+     because it reproduces the same token with the same span and the same post-token state"
+  );
+  assert_eq!(
+    direct.commits, 2,
+    "one committed-token notification per ACCEPTED token, and none for the stopper: an unwind is \
+     not a settle"
+  );
+  assert_eq!(direct.live_rows, 0);
+
+  // The same call under a cache that retains its front: the put-back is a cache push rather than a
+  // park, and everything a caller reads is the same either way.
+  let (direct, scanned) =
+    both_routes_under_an_unwinding_predicate::<Deque3>(Fixture::clean("~ ~ ab cd"), 0, 3);
+  assert_eq!(direct, scanned);
+  assert!(
+    !direct.parked,
+    "a cache with room takes the put-back, so nothing parks"
+  );
+  assert_eq!(direct.depth, 1, "…and it is resident there instead");
+  assert_eq!(direct.cursor, 4);
+  assert_eq!(
+    direct.drain_lexed, 1,
+    "the stopper is served out of the cache, not produced again"
+  );
+  assert_eq!(direct.commits, 2);
+
+  // ── The same window, entered from the residency only a decline can build ──
+  // `"~ ab"` with the front parked by `try_expect(|_| false)`: call 1 is the parked trivia token,
+  // which both routes consume, and call 2 is the freshly-lexed word — the first token this call
+  // ever holds outside the stream.
+  let (direct, scanned) = both_routes_over_a_parked_front_under_an_unwinding_predicate::<NoCache>(
+    Fixture::clean("~ ab"),
+    2,
+  );
+  assert_eq!(
+    direct, scanned,
+    "the two routes must observe the same INTERRUPTED skip over a parked front"
+  );
+  assert!(direct.parked_in, "the front is the parked slot going in");
+  assert!(direct.caught);
+  assert_eq!(direct.asked, std::vec![(0, 1), (2, 4)]);
+  assert_eq!(direct.span, (0, 1), "the parked trivia token is committed");
+  assert_eq!(
+    direct.cursor, 2,
+    "and the stopper is parked in its place: the resume cursor is its start, not the committed \
+     end (1)"
+  );
+  assert!(direct.parked, "one token parked going out, as going in");
+  assert_eq!(direct.depth, 1);
+  assert_eq!(
+    direct.drained,
+    std::vec![(2, 4)],
+    "the stopper is the last token, so it is the whole drain…"
+  );
+  assert_eq!(
+    direct.drain_lexed, 0,
+    "…and the drain lexes NOTHING to produce it: dropped, it would be re-lexed and this would be 1"
+  );
+  assert_eq!(direct.commits, 1);
+  assert_eq!(direct.live_rows, 0);
+}
+
+/// The committed-token notifications one route makes over a parked front, split by what made them.
+#[derive(Debug, PartialEq)]
+struct ParkedCommits {
+  /// The decline that parks the token. `unconsume` is **not** a settle, so this is zero — and it
+  /// is measured rather than assumed, because the notification is a side channel with no other
+  /// observer.
+  parking: usize,
+  /// The skip that follows it.
+  skipping: usize,
+  /// …and what was actually consumed, so a route that fires the right NUMBER of notifications
+  /// over the wrong tokens is still red.
+  span: (usize, usize),
+  cursor: usize,
+  drained: std::vec::Vec<(usize, usize)>,
+}
+
+fn ledger_parked_front_commits<'a, C, Cmpl>(
+  inp: &mut InputRef<'a, '_, LedgerLexer<'a>, (LedgerEmitter, C), (), Cmpl>,
+) -> ParkedCommits
+where
+  C: Cache<'a, LedgerLexer<'a>, ()>,
+  Cmpl: crate::input::SurfaceIncomplete<'a, LedgerLexer<'a>, (LedgerEmitter, C), ()>,
+{
+  record();
+  park_front(inp);
+  let parking = commit_notifications(&recorded());
+
+  record();
+  inp
+    .skip_while(|t| t.data.is_trivia())
+    .expect("the fixtures here lex cleanly");
+  let skipping = commit_notifications(&recorded());
+
+  let cursor = inp.cursor().as_inner().0;
+  let span = (inp.span().start.0, inp.span().end.0);
+  let mut drained = std::vec::Vec::new();
+  while let Ok(Some(tok)) = inp.next() {
+    drained.push((tok.span_ref().start.0, tok.span_ref().end.0));
+  }
+
+  ParkedCommits {
+    parking,
+    skipping,
+    span,
+    cursor,
+    drained,
+  }
+}
+
+fn both_routes_parked_front_commits<K>(fixture: Fixture) -> (ParkedCommits, ParkedCommits)
+where
+  K: Capacity,
+{
+  let src = LedgerSrc(fixture.text);
+  let _budget = Budget::unlimited();
+
+  let mut complete = ledger_input_with::<K::Cache<'_>>(&src, fixture.emitter());
+  let direct = {
+    let mut inp = complete.as_ref();
+    ledger_parked_front_commits(&mut inp)
+  };
+
+  let mut partial = ledger_partial_input_with::<K::Cache<'_>>(&src, fixture.emitter());
+  partial.seal();
+  let scanned = {
+    let mut inp = partial.as_ref();
+    ledger_parked_front_commits(&mut inp)
+  };
+
+  (direct, scanned)
+}
+
+/// **The committed-token side channel, over a parked front** — the cell
+/// [`the_two_completeness_routes_observe_the_same_skip_over_a_parked_front`] says it cannot be.
+///
+/// That cell's own closing note is the specification for this one. [`SkipRun`] is the caller-visible
+/// *values* a skip leaves behind, and [`Emitter::commit_token`](crate::Emitter::commit_token) is not
+/// one of them: it is recorded by the ledger emitter as [`Effect::CommitToken`] and read back by no
+/// cell in this file. Measured there: removing the notification from **both** sites a parked token's
+/// consumption can reach — the complete-input settle (`settle_committed_token`) and the scanner's
+/// `skip_and_report` — left every test in this file green, that cell included. A recording CST sink
+/// would have lost a token with nothing red anywhere.
+///
+/// This closes it, on the residency that needs it most: a parked token is the one head the two
+/// routes consume through **different** code — `front` + `commit_front` on the complete route, the
+/// `Origin::Parked` fetch and `AtFrontier::adopt` on the scanned one — so it is the one head whose
+/// notification could go missing on one route and not the other.
+///
+/// Three facts, and the middle one is the whole point:
+///
+/// * the **decline that parks** notifies nothing. `unconsume` is a put-back, not a settle, and
+///   SETTLE_CENSUS lists it among the non-settles; this measures that rather than restating it;
+/// * the **skip** notifies exactly once per token it consumed, on both routes;
+/// * and the tokens it consumed are the right ones, so a route that fires the right count over the
+///   wrong stream is still red.
+///
+/// Red against a deliberate breakage of **either** site, measured rather than asserted — each
+/// removal made, this cell run, and the edit reverted:
+///
+/// | the notification removed from | what this cell reports |
+/// |---|---|
+/// | `settle_committed_token` (the complete route's settle) | `skipping: 0` against `1` — the complete route stops feeding the channel and the scanned one still does |
+/// | `skip_and_report` (the scanned route's skip settle) | `skipping: 1` against `0` — the mirror image |
+///
+/// The second is the isolating one, and it is what makes the gap concrete: over that edit **every
+/// other cell in this file stays green** (25 passed, 2 failed — this cell and
+/// [`the_two_completeness_routes_observe_the_same_unwound_skip`], which reads the same channel).
+/// The first is caught more widely, and saying so is more honest than claiming it is not:
+/// `settle_committed_token` is every 1:1 consume settle in the crate, so removing it also reds
+/// twenty cells in `cst::sink`, `input_ref::tests` and the census. Neither fact is a substitute for
+/// the other — the parked-front path is reachable through both sites, and this cell is the only
+/// thing in the file that watches either of them.
+#[test]
+fn the_committed_token_side_channel_is_fed_over_a_parked_front() {
+  // ── accepted: the parked token is trivia, so the skip consumes it ──
+  let (direct, scanned) = both_routes_parked_front_commits::<NoCache>(Fixture::clean("~ ab"));
+  assert_eq!(
+    direct,
+    scanned,
+    "the complete-input route and the scanned partial route must feed the committed-token side \
+     channel identically over an ACCEPTED parked front under {}",
+    NoCache::NAME
+  );
+  assert_eq!(
+    direct,
+    ParkedCommits {
+      parking: 0,
+      skipping: 1,
+      span: (0, 1),
+      cursor: 2,
+      drained: std::vec![(2, 4)],
+    },
+    "the decline that parks the token notifies nothing — it consumed nothing — and the skip that \
+     consumes it notifies exactly once, for that one token"
+  );
+
+  // ── rejecting: the parked token is a word, so nothing is consumed and nothing is notified ──
+  let (direct, scanned) = both_routes_parked_front_commits::<NoCache>(Fixture::clean("ab cd"));
+  assert_eq!(
+    direct,
+    scanned,
+    "…and identically over a REJECTING parked front under {}",
+    NoCache::NAME
+  );
+  assert_eq!(
+    direct,
+    ParkedCommits {
+      parking: 0,
+      skipping: 0,
+      span: (0, 0),
+      cursor: 0,
+      drained: std::vec![(0, 2), (3, 5)],
+    },
+    "a skip that consumes nothing notifies nothing: the side channel is keyed on the settle, not \
+     on the call"
   );
 }
