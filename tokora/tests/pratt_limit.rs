@@ -672,6 +672,43 @@ fn limited<'inp>(limit: usize) -> ParserContext<'inp, TestLexer<'inp>, Fatal<Lim
   fatal_ctx().with_recursion_limiter(RecursionLimiter::with_limitation(limit))
 }
 
+/// The wall-clock bound [`on_a_deep_stack`] enforces, in seconds — native-calibrated, and a
+/// different number once the build is interpreted.
+///
+/// Miri does not apply a flat per-step overhead here: `-Zmiri-tree-borrows` revalidates a growing
+/// borrow tree on every access, so this file's deepest cell — the `unlimited` half of
+/// `the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it`, a 1000-level
+/// `unlimited()` chain — scales worse than linearly with depth, not by the roughly two orders of
+/// magnitude a constant per-step slowdown would predict. A 120s native budget is not "a bit tight"
+/// under Miri; it is calibrated for a different machine.
+///
+/// This is not the `frames_are_relocated` situation next door in `pratt_limit_unit_sink.rs`:
+/// there, instrumentation makes the witness's own measurement meaningless, so the assertion is
+/// skipped and the skip announces itself on real stderr — otherwise a build where the check never
+/// ran would look identical to one where it passed. Here the witness — the bound not tripping
+/// while the worker is still making progress — still runs, and still means the same thing under
+/// Miri; only the number of seconds it is willing to wait has to change. Nothing is skipped, so
+/// there is nothing to announce.
+///
+/// Measured directly with the exact command and flags `ci/miri_tb.sh` runs for the leg issue #148
+/// saw this trip on (`-Zmiri-strict-provenance -Zmiri-disable-isolation
+/// -Zmiri-symbolic-alignment-check -Zmiri-tree-borrows`), i.e. `cargo +nightly miri test --test
+/// pratt_limit the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it`:
+///
+/// | run | aarch64-apple-darwin |
+/// |---|---|
+/// | 1 | 68.56s |
+/// | 2 | 61.38s |
+///
+/// `ci`'s failing leg is `x86_64-unknown-linux-gnu` on a shared runner, a different host and
+/// architecture than the one above, and it was already landing intermittently past the *native*
+/// 120s bound — over 1.7× the slower reading here — before this fix, so a small multiple would
+/// only relocate the same flake. ×10 over the slower reading (685.6s, rounded up to 700) absorbs
+/// that cross-host gap and ordinary scheduler noise while staying a bounded timeout: a genuine
+/// hang is still caught in about 12 minutes, comfortably inside CI's job-level timeout, instead of
+/// being masked indefinitely.
+const DEEP_STACK_TIMEOUT_SECS: u64 = if cfg!(miri) { 700 } else { 120 };
+
 /// Runs `f` on a thread with a stack far larger than the harness's own and a hard wall-clock
 /// bound. A recursion-limit defect does not fail an assertion — it hangs, or aborts the process
 /// — so the bound has to live outside the code under test. The stack has to be bigger for the
@@ -684,12 +721,12 @@ fn on_a_deep_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) ->
       let _ = tx.send(f());
     })
     .expect("spawn the deep-stack worker");
-  match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+  match rx.recv_timeout(std::time::Duration::from_secs(DEEP_STACK_TIMEOUT_SECS)) {
     Ok(v) => {
       handle.join().expect("the deep-stack worker panicked");
       v
     }
-    Err(e) => panic!("the parse did not terminate within 120s: {e:?}"),
+    Err(e) => panic!("the parse did not terminate within {DEEP_STACK_TIMEOUT_SECS}s: {e:?}"),
   }
 }
 

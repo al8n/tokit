@@ -411,6 +411,27 @@ concrete public struct with no bound to reject anybody.
   `eprintln!`, which libtest swallows for a passing test — so the one build where the check does
   not run is not the one build where nobody can see that. — *(#148, verification debt)*
 
+- **`pratt_limit`'s deep-stack wall-clock bound was calibrated for the wrong machine, and it made
+  the `miri-tb-x86_64-unknown-linux-gnu` leg intermittently red on `main`.** `on_a_deep_stack`
+  bounds every deep-recursion cell to a fixed number of seconds so a recursion-limit regression
+  fails the test with a message instead of hanging the process. Under interpretation that number
+  measures the interpreter, not the parser, and not by a flat factor: `-Zmiri-tree-borrows`
+  revalidates a growing borrow tree on every access, so
+  `the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it`'s 1000-level `unlimited()`
+  chain — this file's deepest cell — scales worse than linearly with depth, not by the roughly two
+  orders of magnitude a flat per-step slowdown would predict. Measured directly, with the exact
+  command and `-tb` flags `ci/miri_tb.sh` runs: 60–69s across three runs on aarch64-apple-darwin —
+  already more than half of the native 120s bound, on a different host and architecture than the
+  `x86_64-unknown-linux-gnu` shared runner CI failed on, which is why that leg flaked instead of
+  failing outright every time.
+
+  The bound is now `cfg!(miri)`-scoped: 700 seconds under Miri — a ×10 margin over the slower
+  reading, sized for the cross-host and shared-runner gap CI had already demonstrated, not just
+  this machine's own run-to-run noise — and 120 seconds, unchanged, natively. The bound's purpose
+  is untouched: a genuine hang is still caught, on a schedule that fits the machine actually
+  running it, and the native path carries no behaviour change — an unlimited native run finishes
+  in hundredths of a second, nowhere near either number. — *(#148, verification debt)*
+
 - **The name-collision gate reported an incomplete verdict as if it were a result.**
   `gen_probe.py` had no template for the owners #147 introduced, so every row on them came back
   `FATAL`. Templates alone were not enough: a probe naming an owner the same diff introduces cannot
