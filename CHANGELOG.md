@@ -77,6 +77,54 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    that walk by node, or that assert on a rendered tree, see the run inside the node of the token
    before it. A source with *no* committed token at all is not affected.
 
+### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+**This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**
+added, measured for the first time now, and it is filed here rather than folded into the shipped
+0.8.0 section because it is news a 0.7.3 consumer needs and 0.8.0's own text does not carry it.
+
+#### `RecursionLimiter::unlimited` — measured SILENT, and it is your call site to check
+
+**You are exposed if you wrote an `unlimited()` associated function on `RecursionLimiter`.** That
+type is public in **0.7.3**, so this is not hypothetical: any consumer holding one already had
+somewhere to hang the name, and 0.8.0's
+[`RecursionLimiter::unlimited`](https://docs.rs/tokora/latest/tokora/state/recursion_tracker/struct.RecursionLimiter.html#method.unlimited)
+now competes for it by path.
+
+Reproduced two-sided by `ci/name_collision/`, base `60f27a3` against this branch:
+
+```text
+SILENT  unlimited/discarded    base=witness=1  head=witness=0
+```
+
+Both sides compile, **neither emits any diagnostic**, and the two run different functions: yours
+on 0.7.3, tokora's on 0.8.0 and later. `unlimited/used` is `loud` on the same probe, so a
+discarded return is the whole of the difference — `RecursionLimiter` carries no `#[must_use]`, and
+`unused_must_use` does not fire on a plain struct. **The remedy is UFCS**: `MyTrait::unlimited(..)`
+or `<RecursionLimiter as MyExt>::unlimited()` pins your function by name and is immune to this.
+
+`#[must_use]` was considered and rejected as the fix: it would not reach the case that matters —
+a consumer who *assigns* the result, which the harness cannot generate and which stays silent
+regardless — while firing on legitimate discards. Disclosure is the honest instrument here.
+
+Two things about *why this arrives late*, both of which are the point rather than an excuse:
+
+- 0.8.0's exposure table already lists `unlimited` under "you wrote it on `RecursionLimiter`", so
+  the *name* was disclosed. What was not disclosed is that this one is **measured silent**, in a
+  category the harness's README says a silent row "would be news" in — the first
+  `inherent_assoc_fn` row ever to score one. The probe could not construct it at the time: #147
+  introduced the owner and `gen_probe.py` had no template for it, so every row on that owner came
+  back `FATAL` — an *incomplete* verdict, which is not a clean one. #148's Stage A added the
+  templates and the `new-owner` verdict, and the finding fell out immediately.
+- It is disclosed on **this** branch and could not wait. The probe's inventory is a two-sided
+  delta: once this merges, `unlimited` exists on both sides, the row leaves every future plan, and
+  the harness can never re-litigate it. A green run after that would mean "not probed", not "not
+  colliding".
+
+Recorded in `ci/name_collision/disclosed.txt`, whose fourth-and-fifth-row split now states plainly
+that the earlier four ride a bounded receiver and **this one does not**: `RecursionLimiter` is a
+concrete public struct with no bound to reject anybody.
+
 ### Performance
 
 2. **`Sink::finish` replays the event log once instead of twice.** Materialization used to make

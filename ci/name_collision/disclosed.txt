@@ -4,11 +4,7 @@
 # also fails on a line listed here that no longer reproduces — a baseline that can rot into
 # a rubber stamp is worse than none.
 #
-# Every row below is in the CHANGELOG's "no diagnostic at the call site" section. Each rides
-# a bounded receiver — `ParseInput` / `TryParseInput` / `ParseAttempt`, whose blanket impls
-# reject non-parser receivers — rather than every `Sized` type. That distinction is what
-# decided the one removal this release made: `PinOutputs::outputs` reached every `Sized`
-# type and was cut; these do not.
+# Every row below is in the CHANGELOG's "no diagnostic at the call site" section.
 #
 # The reason each is silent rather than reported is that `unused_must_use` does not fire on
 # its discarded return. Measured, per name: `Result` is `#[must_use]` as a type
@@ -16,7 +12,49 @@
 # callables (`list_until`, `opt`); an `Option` is covered by NEITHER, and a plain adapter
 # struct by neither. So the discriminator is the lint, not a `#[must_use]` attribute — the
 # shorter statement was wrong for two of the three names it was meant to explain.
+#
+# ── 0.8.0's four: a bounded receiver ─────────────────────────────────────────────────────
+#
+# Each of the first four rides a bounded receiver — `ParseInput` / `TryParseInput` /
+# `ParseAttempt`, whose blanket impls reject non-parser receivers — rather than every `Sized`
+# type. That distinction is what decided the one removal 0.8.0 made: `PinOutputs::outputs`
+# reached every `Sized` type and was cut; these do not.
 into_option/discarded
 labelled/later_pick_discarded
 traced/later_pick_discarded
 peek_then_head/later_pick_discarded
+
+# ── `RecursionLimiter::unlimited` — a CONCRETE, PRE-EXISTING owner ───────────────────────
+#
+# This one does NOT ride a bounded receiver, and the paragraph above must not be read as
+# covering it. `RecursionLimiter` is a plain public struct that has shipped since 0.7.3, so
+# every consumer who has one already had somewhere to hang an `unlimited()` of their own —
+# and no bound rejects them, because there is no bound. It is an inherent ASSOCIATED FN, so
+# the collision is path resolution rather than a receiver walk.
+#
+# Reproduced, two-sided, base 60f27a3 (pre-#147) against this branch:
+#
+#     SILENT  unlimited/discarded    base=witness=1  head=witness=0
+#
+# Both sides compile, neither emits a diagnostic, and the two run different programs: the
+# consumer's `unlimited()` on base, tokora's on head. `unlimited/used` is `loud` on the same
+# template, so the discarded return is the whole of the difference — `RecursionLimiter` is a
+# plain struct with no `#[must_use]`, and `unused_must_use` does not fire on it. Adding
+# `#[must_use]` was considered and rejected: it would fire on tokora's own legitimate
+# `let limiter = RecursionLimiter::unlimited();` only when the value is genuinely discarded,
+# which is not this call site's shape, and it would not help a consumer who assigns the
+# result — the silent case that matters and that this harness cannot generate at all.
+#
+# This is also the FIRST silent row in the `inherent_assoc_fn` category. The README records
+# that the category's `loud` verdicts are arity verdicts about the probe rather than
+# statements about the name, and that a `silent` row there "would be news". It is news, and
+# it is recorded rather than argued away.
+#
+# WHY IT IS DISCLOSED HERE AND NOT ON THE RELEASE THAT ADDED THE NAME: `unlimited` is new in
+# 0.8.0 (#147), which shipped before the collision probe had a template for its owner — the
+# job reported FATAL, an INCOMPLETE verdict, and the row was never constructed. #148's Stage A
+# added the template and reproduced the finding. It has to be disclosed on THIS branch: the
+# inventory is a two-sided delta, so once this merges the name is no longer new, the row falls
+# out of every future plan, and the harness can never re-litigate it (README, "Staleness is
+# checked only for rows this run planned").
+unlimited/discarded
