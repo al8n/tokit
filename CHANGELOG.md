@@ -78,7 +78,22 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    before it. A source with *no* committed token at all is not affected.
 
 2. **A recursion-limit trip is now terminal for every grammar error type, `()` included — neither
-   recovery nor a collection driver can spend it.** This closes 0.8.0's [known limitation — a discarding error sink erases
+   recovery nor a collection driver's failure path can spend it.** Two more of a collection
+   driver's exits can reach a construct's end without the trip ever surfacing as an `Err`, and both
+   close later in this entry: an element's absence exit (item 7) and a real closer committed just
+   after one (item 8). A fourth exit does not close, and is not going to: an element that catches
+   the trip and still answers `Accept` spends it, for every error type, on purpose. Decline lets
+   the *driver* manufacture the construct's end from a stop the caller is never told about, which is
+   why the driver has to guard its own conclusion; `Accept` means the *element* produced the value,
+   and the driver is faithfully collecting what it was handed, not concluding anything of its own.
+   tokora cannot stop a grammar from catching an error and returning a value without diagnosing
+   it — true of every error a grammar can catch and answer, not only this one — so gating `Accept`
+   would forbid a value-producing element from ever recovering from a budget it deliberately
+   caught: a broader contract than #148 establishes. Item 7 states the exemption at the point it
+   first applies; `parser::many`'s module docs carry it as the standing contract, not an
+   afterthought.
+
+   This closes 0.8.0's [known limitation — a discarding error sink erases
    the recursion trip's stop, not its
    bound](#0.8.0-known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound),
    which recorded the behaviour rather than answering it. The answer is that a resource bound an
@@ -537,10 +552,13 @@ concrete public struct with no bound to reject anybody.
    construct ended *ahead of* any boundary a later lookahead latched and a wider scan window parses
    the identical source to the identical value. The *descent* half of it is a different kind of fact
    and does belong on those exits — item 8 below is that correction. An `Accept` is untouched either
-   way: an element that catches a trip and still produces a value has answered it. And the
-   granularity floor item 2 describes is exactly the same here — the baseline is one **element**, so
-   a trip an *earlier* element caught and parsed past does not end the collection when a later one
-   legitimately runs out of input.
+   way, and stays that way: an element that catches a trip and still returns a value has answered
+   it, not concluded absence, so the driver is faithfully collecting what it was handed rather than
+   manufacturing a stop of its own — item 2 above states this as the fourth channel a caught trip
+   can still spend, and why gating it would be a broader contract than #148 establishes. And
+   the granularity floor item 2 describes is exactly the same here — the baseline is one
+   **element**, so a trip an *earlier* element caught and parsed past does not end the collection
+   when a later one legitimately runs out of input.
 
    The eight `*_while` drivers and folds share this hole and are **found, not fixed** — measured,
    not inferred: `fold` over an element that catches a trip and declines returns `Ok(6)` on `"1 2 3"`

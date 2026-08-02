@@ -56,6 +56,25 @@
 //! stopped the parse. `parser::many::close_after_element` is the third chokepoint, holding the
 //! descent witness alone, and section 5 is section 4's delimited cells with the closer put back.
 //!
+//! # The exit that stays open, by design — section 6
+//!
+//! Sections 4 and 5 are both about an element that *answers* a trip and then concludes absence —
+//! declining, or stalling — which is a conclusion the driver draws and therefore a conclusion the
+//! driver has to guard. An element that answers a trip and reports `Accept` concludes nothing: it
+//! hands the driver a value, and the driver collects it exactly as it would from an untripped
+//! element. Neither `absence_after_element` nor `close_after_element` is reached on that path, on
+//! purpose, and section 6 is **not** a residual like the `*_while`/fold gap sections 4 and 5 name —
+//! it is the permanent shape of the design, stated by `parser::many`'s module docs and pinned here
+//! so it cannot drift silently in either direction.
+//!
+//! **THIS SECTION PINS DELIBERATE, EXISTING BEHAVIOUR.** Every cell in it is expected to pass
+//! against the code as it stands; a red here does not mean something is broken; it means the
+//! boundary moved — either narrower (an `Accept` started being gated, which would strand a grammar
+//! that deliberately recovers a value from a caught budget) or wider (a decline/stall/closer exit
+//! sections 4 or 5 gate stopped being gated, and this section's own control failed to notice). If
+//! this section goes red, the fix is almost never in this file — see `parser::many`'s module docs
+//! for the reasoning the change would have to revisit.
+//!
 //! # Why every cell here runs twice, through two error types
 //!
 //! This is the half of #148 that was **never sink-dependent**. `Recover`, `InplaceRecover` and
@@ -551,6 +570,126 @@ macro_rules! absence_cell {
   };
 }
 
+/// One **accept-exemption** cell: an element that catches a trip, consumes, and still answers
+/// `Accept`, followed by a real closer.
+///
+/// PINS DELIBERATE, EXISTING BEHAVIOUR — see section 6's module note above. It is
+/// [`absence_cell`]'s deliberate mirror, not its twin: there, a caught trip must flip the verdict,
+/// because the driver was about to manufacture "no more elements" out of a stop the caller never
+/// learns about, and the whole point of sections 4 and 5 is that it no longer may. Here the element
+/// does not report absence — it hands the driver a value — so there is nothing for either
+/// chokepoint to refuse: the value is what the grammar produced, and the driver is faithfully
+/// collecting it. The very next cycle's own trip baseline is taken *after* the accepting cycle's
+/// trip, so by the time a real closer reaches a gate, the trip the accepting element caught is
+/// already outside the window being judged. So, unlike [`absence_cell`], the two runs here are
+/// required to **agree**: the collection succeeds identically whether or not the budget actually
+/// tripped, which is the same shape [`attempt_cell`] uses for a trip caught outside the element the
+/// driver is judging — this is that shape, aimed at the one exit sections 4 and 5 deliberately
+/// leave alone.
+///
+/// The non-vacuity halves are the same ones every cell in this file needs, for the same reasons:
+///
+/// * the tight run must actually have tripped, exactly once, in the accepting element
+///   ([`TRIPS`]) — otherwise the cell is comparing two untripped parses;
+/// * the control's value and filed count are asserted **absolutely**, so a fixture that stopped
+///   reaching the accepting element, or one that stopped consuming, fails here rather than
+///   producing a result that happens to match by accident.
+macro_rules! accept_exemption_cell {
+  (
+    $name:ident, $err:ty, $sink:literal, $probe:ident, $what:literal, $src:literal,
+    collects = $collects:expr
+  ) => {
+    #[doc = concat!(
+      "PINS DELIBERATE, EXISTING BEHAVIOUR (not a regression witness — see section 6's module \
+       note): ",
+      $what
+    )]
+    #[test]
+    fn $name() {
+      reset_trips();
+      let mut tight_log = Verbose::<$err>::new();
+      let tight = {
+        let ctx: ParserContext<'_, TestLexer<'_>, &mut Verbose<$err>> =
+          ParserContext::new(&mut tight_log);
+        let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(TIGHT));
+        Parser::with_context(ctx).apply($probe).parse_str($src)
+      };
+      let tight_filed = filed(&tight_log);
+      assert_eq!(
+        trips(),
+        1,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": the tight run must really have tripped the budget, exactly once, in the element that \
+           accepted through it — without that this cell measures nothing"
+        )
+      );
+
+      reset_trips();
+      let mut roomy_log = Verbose::<$err>::new();
+      let roomy = {
+        let ctx: ParserContext<'_, TestLexer<'_>, &mut Verbose<$err>> =
+          ParserContext::new(&mut roomy_log);
+        let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(ROOMY));
+        Parser::with_context(ctx).apply($probe).parse_str($src)
+      };
+      let roomy_filed = filed(&roomy_log);
+      assert_eq!(
+        trips(),
+        0,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": the control differs from the run above in one thing only — with room, nothing trips"
+        )
+      );
+      assert_eq!(
+        (&roomy, roomy_filed),
+        (&$collects, 0),
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": the control pins the fixture absolutely — the collection is reached, the element \
+           accepts, and the real closer commits"
+        )
+      );
+
+      assert_eq!(
+        (&tight, tight_filed),
+        (&$collects, 0),
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": DELIBERATE, per `parser::many`'s module docs — an element that catches a trip and \
+           still answers `Accept` has produced a value, not concluded absence, so the driver keeps \
+           it and closes on the real closer that follows exactly as the untripped control does. \
+           Gating this would refuse a value the grammar legitimately produced, for every error a \
+           grammar can catch and answer, not only this one. If this assertion ever fails, the \
+           exemption moved — narrower if this now errors, wider if some decline/stall/closer exit \
+           sections 4 or 5 gate stopped erroring and this cell's own tight/roomy disagreement (see \
+           below) failed to catch it — and that is a design decision for a changelog entry, not a \
+           bug this file should absorb silently"
+        )
+      );
+      assert_eq!(
+        tight, roomy,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": and the two runs must AGREE — unlike `absence_cell`'s shapes, a trip an accepting \
+           element answered changes nothing about whether the collection succeeds"
+        )
+      );
+    }
+  };
+}
+
 /// Generates the four family cells for one grammar error type.
 ///
 /// A macro rather than a function generic over the error type: the drivers' bounds are stated per
@@ -761,6 +900,39 @@ macro_rules! trip_suite {
           }
           Some(tok) => match tok.into_data() {
             Token::Num(n) => Ok(ParseAttempt::Accept(n)),
+            _ => unreachable!("the predicate accepted only `Num`"),
+          },
+        }
+      }
+
+      /// Section 6's subject: the same catch, answered with a **consuming `Accept`** — the one arm
+      /// no chokepoint in `parser::many` ever inspects, by design. When it finds a `Num` it catches
+      /// the trip and still accepts, producing a value rather than concluding absence; when it does
+      /// not, it consumes a stray `Plus` out of the way (a harmless no-op where none is there) and
+      /// declines untouched by any catch, so the cycle that lets the driver conclude the construct
+      /// ended is never the one that tripped. Reused across `repeated().delimited()` — where the
+      /// closer sits directly at the next slot — and `separated_by_comma().delimited()`, where the
+      /// consumed `Plus` is what routes the real closer to the epilogue's own gate
+      /// (`parser::many::close_after_element`) rather than the mid-scan arm that never takes a
+      /// baseline at all — the same routing `caught_then_consuming_decline_num` above uses for
+      /// section 5's separated cell.
+      fn caught_then_consuming_accept_num<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<ParseAttempt<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        match inp.try_expect(|t| matches!(t.data(), Token::Num(_)))? {
+          None => {
+            let _ = inp.try_expect(|t| matches!(t.data(), Token::Plus))?;
+            Ok(ParseAttempt::Decline)
+          }
+          Some(tok) => match tok.into_data() {
+            Token::Num(n) => {
+              catch_a_trip(inp);
+              Ok(ParseAttempt::Accept(n))
+            }
             _ => unreachable!("the predicate accepted only `Num`"),
           },
         }
@@ -1132,6 +1304,48 @@ macro_rules! trip_suite {
           + TooManyEmitter<'inp, TestLexer<'inp>>,
       {
         caught_then_consuming_decline_num
+          .separated_by_comma()
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
+      /// Section 6's `repeated().delimited()` probe: the element accepts through a caught trip, and
+      /// the very next cycle's own attempt is the plain decline that reaches the real closer.
+      fn delim_repeated_accept_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_consuming_accept_num
+          .repeated()
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
+      /// Section 6's `separated_by_comma().delimited()` probe: the accepting cycle consumes the
+      /// element, and the next cycle's consumed `Plus` routes the real closer to the epilogue's
+      /// gate — the same routing `sep_delim_consuming_decline_probe` above uses.
+      fn sep_delim_accept_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + SeparatedEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + TooFewEmitter<'inp, TestLexer<'inp>>
+          + TooManyEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_consuming_accept_num
           .separated_by_comma()
           .delimited::<Paren<(), (), ()>>()
           .collect()
@@ -1668,6 +1882,58 @@ macro_rules! trip_suite {
           tight_filed = 0,
           collects = Ok(vec![1, 2, 3]),
           roomy_filed = 0
+        );
+      }
+
+      // ── Section 6: the one exit no gate closes, because closing it is not this branch's job ──
+      //
+      // Sections 4 and 5 gate every exit that concludes the collection FROM an element's absence —
+      // a decline, a stall, or a real closer arriving after either. An `Accept` concludes nothing:
+      // the element produced a value, and the driver is faithfully collecting what it was handed,
+      // not manufacturing "no more elements" out of a stop the caller never learns about. Gating
+      // this exit would need the driver to refuse a value-producing return because of a trip the
+      // grammar already caught — true of every error a grammar can catch and answer, not only this
+      // one — which is a broader contract than #148 establishes.
+      //
+      // So an element that catches a trip, consumes, and still answers `Accept` leaves the counter
+      // exactly where the trip left it, and the very next cycle's own baseline is taken AFTER
+      // that — rebaselined, in the terms `parser::many`'s module docs use. When that next cycle is
+      // the one that reaches a real closer (or, for `separated().delimited()`, consumes the
+      // non-element token that puts a real closer in the epilogue's hands), neither
+      // `close_after_element` nor anything else has a trip left to see. The collection closes and
+      // succeeds, having produced the value the accepting element built while it was over budget.
+      //
+      // THIS SECTION PINS DELIBERATE, EXISTING BEHAVIOUR. It is not a regression witness and is not
+      // expected to ever go red from correct code: it exists so a later change cannot silently
+      // narrow the contract (start gating `Accept`, which would strand a grammar's own recovery
+      // from a budget it deliberately caught) or silently widen it (stop re-raising the
+      // decline/stall/closer exits sections 4 and 5 already gate). If this section starts failing,
+      // the fix is almost never here — it means one of those two boundaries moved, and the change
+      // that moved it owes a changelog entry, not a quiet edit to this file.
+      #[allow(rustdoc::private_intra_doc_links)]
+      mod answered_trip_through_a_value {
+        use super::*;
+
+        accept_exemption_cell!(
+          an_accepting_element_that_answered_a_trip_still_commits_the_repeated_closer_by_design,
+          $err,
+          $sink,
+          delim_repeated_accept_probe,
+          "`repeated().delimited()`, element consumes and accepts through a caught trip, closer at \
+           the next slot",
+          "( 7 )",
+          collects = Ok(vec![7])
+        );
+
+        accept_exemption_cell!(
+          an_accepting_element_that_answered_a_trip_still_commits_the_separated_closer_by_design,
+          $err,
+          $sink,
+          sep_delim_accept_probe,
+          "`separated_by_comma().delimited()`, element consumes and accepts through a caught trip, \
+           closer reached through the epilogue",
+          "( 7 + )",
+          collects = Ok(vec![7])
         );
       }
     }

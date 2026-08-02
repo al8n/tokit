@@ -67,6 +67,42 @@
 //! enclosing baselines move past it. That is the design if a consumer ever needs it. It is not
 //! built, because the escape hatch has no consumer yet and this crate does not publish API on
 //! speculation.
+//!
+//! ## The channel neither chokepoint closes, by design
+//!
+//! [`absence_after_element`] and [`close_after_element`] gate every exit that concludes the
+//! collection from an element's **absence** — a decline, a no-progress stall, or a real closer
+//! committed after either. An `Accept` concludes nothing of the driver's: the element produced a
+//! value, and the driver is faithfully collecting what it was handed rather than manufacturing "no
+//! more elements" out of a stop the caller never learns about. Neither chokepoint is called on
+//! that path, and neither should be — refusing it would mean refusing a value the grammar actually
+//! produced, on the strength of a stop the grammar already answered.
+//!
+//! So an element that catches a trip, still consumes, and still answers `Accept` spends it —
+//! permanently, not only for that one element. The next cycle takes its own trip baseline
+//! ([`InputRef::trip_snapshot`](crate::InputRef::trip_snapshot)) fresh, *after* the accepting
+//! cycle's trip already happened, so by the time that next cycle's own absence or close exit runs,
+//! the counter has not moved *during it* and there is nothing left for either chokepoint to see.
+//! This is the same per-element granularity floor described above, not a special case carved out
+//! of it: an accepting cycle was never a unit either chokepoint judges in the first place, so there
+//! was never a baseline for a later cycle to inherit.
+//!
+//! **Gating `Accept` would not be a narrower version of this design; it would be a different one.**
+//! Decline and the no-progress stall are gated because the *driver* is the one concluding the
+//! construct ended, on evidence a stop may have truncated — that conclusion is the driver's to
+//! guard. `Accept` is the element's own conclusion, carrying a value the driver did not manufacture
+//! and has no independent reason to distrust. Refusing it would mean a value-producing element
+//! could never recover from a budget it deliberately caught — true of every error a grammar is
+//! free to catch and answer, not only this one, since tokora has no way to stop a grammar from
+//! catching an error and returning a value without diagnosing it. That is a broader contract than
+//! this crate makes for any other error, and nothing here proposes making it.
+//!
+//! `tokora/tests/collection_resource_trip.rs`'s section 6 pins this directly: an element that
+//! catches a trip, consumes, and answers `Accept`, followed by a real closer, and the collection
+//! succeeds identically whether or not the budget actually tripped. It exists so this boundary
+//! cannot drift silently in either direction — narrower, if `Accept` starts being gated; or wider,
+//! if the decline/stall/closer exits above stop being gated and the section's non-vacuity controls
+//! stop noticing.
 
 use crate::{
   Decision, Emitter, ParseContext, ParseInput, Window,
@@ -277,6 +313,18 @@ where
 /// Not on a separator-slot probe that runs *before* this cycle's element either: nothing between the
 /// cycle's baseline and that probe can trip, so the term would be a constant `false` there.
 ///
+/// And not, ever, on an `Accept` — the third exemption, and the one worth naming rather than
+/// leaving to be inferred from "this function is about absence exits". An `Accept` is not an
+/// absence conclusion, so there is nothing here for either witness to refuse: the element produced
+/// a value, and the driver collects it. That holds even when the element caught this very trip to
+/// produce it. The consequence is permanent, not local to that one call: the next element's own
+/// baseline is taken *after* the accepting one's trip, so no later absence exit in this collection
+/// ever sees it either. This is not a hole left open by accident — gating a value a grammar
+/// legitimately produced would forbid recovering from a caught budget, for this error alone among
+/// every error a grammar may catch and answer. See the module docs' "the channel neither
+/// chokepoint closes" section for the reasoning in full, and
+/// `tokora/tests/collection_resource_trip.rs`'s section 6 for the pin.
+///
 /// # What holds each witness in the guard
 ///
 /// `GATE_CENSUS` pins that the four try-driven drivers spell neither witness themselves and that
@@ -349,9 +397,18 @@ where
 /// hand**: `delim/repeated`'s decline arm and its stall epilogue, and `sep/delim`'s epilogue. Not on
 /// `sep/delim`'s mid-scan closer, which is reached from the top of a cycle — only an *accepting*
 /// element can precede it (a decline or a stall breaks the loop), and this cycle's baseline is taken
-/// a few lines above it, so the term would be a constant `false`. Not on an `Accept` either: an
-/// element that catches a trip and still produces a value has answered it, which is the granularity
-/// floor the module docs state.
+/// a few lines above it, so the term would be a constant `false`.
+///
+/// Not on an `Accept` either — deliberately, and permanently, not merely "not yet reached". An
+/// element that catches a trip and still produces a value has answered it, not concluded absence:
+/// the driver is faithfully collecting what it was handed, not manufacturing a stop of its own, so
+/// there is nothing here for this gate to refuse. The very next cycle's baseline is taken *after*
+/// the accepting cycle's trip, which is why this stays true even when that next cycle is the one
+/// that reaches a real closer: by then the counter has not moved *during* the cycle this call is
+/// judging, and gating it anyway would mean refusing a value the grammar legitimately produced.
+/// This is the same granularity floor the module docs state, applied to the one exit that never
+/// takes a baseline for it to apply to — see the module docs' "the channel neither chokepoint
+/// closes" section for the reasoning at length.
 ///
 /// # What holds the witness in the guard
 ///

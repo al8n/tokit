@@ -179,10 +179,21 @@ draw on the same budget through
   and the limitation; it does not lose the stop.
 
   The **resilient collection loops** — `repeated`, `separated` and their delimited forms — read the
-  same session cell, and re-raise on it rather than filing the trip among the collection's
-  diagnostics and parsing on. That one is not a discarding-sink repair: those families spent a trip
-  for *every* error type until tokora 0.9, so an element that trips now fails its collection where
-  it used to truncate it.
+  same session cell on every exit that could otherwise spend a trip without ever raising it as the
+  grammar's own error: an element's `Err` re-raises instead of filing among the collection's
+  diagnostics, and so do the two exits that would otherwise conclude the construct ended with no
+  `Err` in hand at all — the element declining (or a cycle making no progress), and a real closer
+  committed just after either. None of that is a discarding-sink repair: those families spent a
+  trip on all three exits, for *every* error type, until tokora 0.9, so an element that trips one of
+  them now fails its collection where it used to truncate it.
+
+  **One exit is not closed, and will not be.** An element that catches the trip itself and still
+  answers `Accept` has produced a value rather than concluded absence, so the driver is faithfully
+  collecting what it was handed instead of manufacturing a stop of its own — and that exit spends
+  the trip regardless of error type, exactly as it always did. Refusing it would mean a
+  value-producing element could never recover from a budget it deliberately caught, which is a
+  broader contract than this crate makes for any other error a grammar is free to catch and answer.
+  See `parser::many`'s module docs for the reasoning and the pinned boundary.
 
   Every one of those sites reads the cell **relative to the attempt it is judging** — the
   speculative parse, or the one element — by snapshotting it beforehand and asking whether it moved.
@@ -196,8 +207,11 @@ draw on the same budget through
   trip happened, not that the error in hand is it, so grammar code that catches a trip itself and
   then fails **ordinarily before the same attempt ends** has the ordinary failure re-raised rather
   than recovered or filed. Move the catch one construct further out and it behaves exactly as an
-  untripped parse. The floor fails closed — a real trip is never spent — and it cannot be lowered
-  by inspecting the error, because the sink this whole design exists for has discarded it.
+  untripped parse. The floor fails closed — a real trip reaching one of these sites as an `Err`, or
+  as an element concluding absence, is never recovered from and never filed as a diagnostic — and
+  it cannot be lowered by inspecting the error, because the sink this whole design exists for has
+  discarded it. That floor is about what a site does with a trip it is asked to judge; it says
+  nothing about the one exit above that a caught trip never reaches at all.
 
   This was not true before tokora 0.9. A `()`-errored grammar used to get `is_terminal() == false`
   on the converted value and **spend** the trip: `recover` synthesized a node for a construct the
