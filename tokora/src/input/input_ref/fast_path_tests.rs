@@ -3465,18 +3465,27 @@ fn the_two_completeness_routes_observe_the_same_skip_when_the_lexer_or_the_emitt
   ];
 
   let reached = sweep(FAULTY);
-  assert!(
-    reached.latched > 0
-      && reached.lex_diagnostics > 0
-      && reached.limit_diagnostics > 0
-      && reached.rejected > 0
-      && reached.skip_errors > 0
-      && reached.peek_errors > 0
-      && reached.drain_errors > 0,
-    "and it must actually reach every condition it exists for: a latched boundary, a non-limit \
-     lexer diagnostic, a limit one, a rejected one, a skip that returns `Err`, a prefill peek \
-     that does, and a later drain that does. A fixture set edited into a clean stream is the \
-     exact defect this cell was written to fix. Got {reached:?}"
+  assert_eq!(
+    (
+      reached.latched,
+      reached.lex_diagnostics,
+      reached.limit_diagnostics,
+      reached.rejected,
+      reached.skip_errors,
+      reached.peek_errors,
+      reached.drain_errors,
+    ),
+    (204, 408, 216, 144, 66, 66, 12),
+    "and it must actually reach every condition it exists for EXACTLY THIS MANY TIMES — a latched \
+     boundary, a non-limit lexer diagnostic, a limit one, a rejected one, a skip that returns \
+     `Err`, a prefill peek that does, and a later drain that does. Every counter here is summed \
+     over the whole fixture set, so a mere `> 0` check lets one high-risk fixture's removal hide \
+     behind the other twenty: this tuple is exact instead, so dropping ANY single fixture below \
+     changes at least one total and reds. If you added or edited a fixture on purpose and that is \
+     why this failed: confirm — by reading the diff, not by pattern-matching on this message — \
+     that the new totals reflect only your intended change, then update the tuple above to match \
+     (temporarily swap this `assert_eq!` for `dbg!(&reached);` and run with `--nocapture` to read \
+     the new numbers off). Do not paste in a new number without doing that. Got {reached:?}"
   );
 }
 
