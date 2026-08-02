@@ -77,6 +77,98 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    that walk by node, or that assert on a rendered tree, see the run inside the node of the token
    before it. A source with *no* committed token at all is not affected.
 
+2. **A recursion-limit trip is now terminal for every grammar error type, `()` included — recovery
+   can no longer spend it.** This closes 0.8.0's [known limitation — a discarding error sink erases
+   the recursion trip's stop, not its
+   bound](#known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound),
+   which recorded the behaviour rather than answering it. The answer is that a resource bound an
+   unrelated error sink can opt out of is not a bound.
+
+   [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
+   has always been terminal for every value, but
+   [`recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.recover),
+   [`inplace_recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.inplace_recover)
+   and
+   [`skip_then_retry`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.skip_then_retry)
+   read that off the **converted** value — after the grammar's `From` had run. A `From` that
+   discards the payload discards the marker with it, so a `()`-errored grammar got
+   `is_terminal() == false` back and recovery **spent** the trip.
+
+   **Where resource terminality is stored now:** on the **input session**, in a set-once cell
+   (`Input::resource_trip`, crate-internal, latched by
+   [`InputRef::descend`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.descend)'s
+   trip arm before the grammar's `From` runs, so a panicking conversion cannot skip it). The three
+   combinators read it **beside** `MaybeTerminal::is_terminal`. No conversion the grammar writes
+   can reach it, and nothing lowers it: a `Checkpoint` does not carry it and a restore does not
+   touch it. Grammar error conversion therefore cannot affect it — which is the question 0.8.0's
+   entry left open, answered here in the terms it asked for.
+
+   **What changes for you, and only if your error type discards the value:**
+
+   | your grammar's error type | before | now |
+   |---|---|---|
+   | stores it and delegates `is_terminal` | re-raised | re-raised — **unchanged** |
+   | `()`, or any `From` that drops it | recovery ran; `skip_then_retry` skipped and committed | re-raised |
+
+   Concretely, measured on one ladder and one 32-deep input: `.recover(..)` used to return
+   `Ok(<the recoverer's synthesized value>)` and now returns `Err`; `.skip_then_retry(..)` used to
+   hand the surrounding grammar back offset **68** — the whole chain and the sync token consumed
+   and committed — and now hands back **0**, which is the number a delegating error type always
+   read. Same ladder, same limit, two error types, one answer.
+
+   **If you relied on the old behaviour**, the fix is the budget, not the sink: raise it with
+   [`with_recursion_limiter`](https://docs.rs/tokora/latest/tokora/struct.ParserContext.html#method.with_recursion_limiter).
+   Recovering from an exhausted depth budget was never sound — no quantity of skipped input makes
+   the next descent shallower, so those cycles spent input for a verdict they could not change. If
+   you want the trip's *details* (offset, depth, limitation), that still requires an error type
+   that stores the value; the discarding sink loses the payload exactly as before.
+
+   **Two limits of this change, stated rather than left to be found:**
+
+   - **The latch is coarser than per-error terminality.** It is never cleared, so where something
+     catches a trip and parses on anyway, every later recovery in that input session is refused
+     too — including for ordinary syntax errors a terminality-preserving type would have recovered,
+     since the later error is a different value. It fails closed: it refuses to synthesize, never
+     the reverse.
+   - **The resilient collection loops still spend a trip, and that is not sink-dependent.**
+     `repeated`, `separated` and their delimited forms swallow an element's `Err` by design — emit
+     a diagnostic, keep looping — and their gate re-raises the frontier incomplete and the
+     *scanner*'s poison boundary and nothing else. A descent trip inside such an element is
+     therefore emitted and the loop continues, for a delegating error type exactly as for `()`.
+     That is a wider, older gap than the one closed here and orthogonal to it: closing it would
+     turn a truncated-with-diagnostics collection into a failed one for **every** error type, which
+     is a separate contract decision. It is recorded in `parser::many`'s `GATE_CENSUS` and on the
+     latch's own documentation, and left open deliberately.
+
+   — *(#148 R1)*
+
+### Fixed
+
+- **The recursion-limit test suite's stack-address witness made every Miri job and the ASan job
+  red, on `main`.** `pratt_limit_unit_sink`'s unwind cell corroborates its two depth-cell
+  assertions out-of-band by comparing the addresses of two stack locals. That comparison measures
+  frame liveness only while the addresses are native stack offsets: ASan can relocate a frame's
+  locals onto a heap-allocated fake stack and Miri hands out virtual allocation addresses. Three of
+  four instrumented hosts measured the *unwound* frame as farther from the baseline than the
+  descent it had already left — inverted operands, so no threshold rescues the comparison — while a
+  fourth (ASan on aarch64-darwin) passed on the same source. A relation whose answer changes with
+  the runner is reporting the runner, so it is now scoped to native builds via `cfg!(miri)` plus a
+  `TOKORA_SANITIZER` variable `ci/sanitizer.sh` exports for every leg it runs.
+
+  The two depth-cell assertions stay **active** under Miri and every sanitizer, and the gated one
+  is not replaced by a second library-side counter: reading the same cell twice is not
+  corroboration. A skipped assertion announces itself on the process's real stderr — not through
+  `eprintln!`, which libtest swallows for a passing test — so the one build where the check does
+  not run is not the one build where nobody can see that. — *(#148, verification debt)*
+
+- **The name-collision gate reported an incomplete verdict as if it were a result.**
+  `gen_probe.py` had no template for the owners #147 introduced, so every row on them came back
+  `FATAL`. Templates alone were not enough: a probe naming an owner the same diff introduces cannot
+  compile against the base ref, and base-no-compile was unconditionally `INCONCL`. A new
+  `new-owner` verdict says exactly that, and carries two witnesses so it cannot be manufactured —
+  rustc must name the owner as unresolved on base and must not on head. The verdict is complete
+  now: 27/27 rows probed, 0 FATAL, 0 INCONCL, 0 UNPROBED. — *(#148, verification debt)*
+
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
 **This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**
