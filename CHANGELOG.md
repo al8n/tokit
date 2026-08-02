@@ -201,6 +201,82 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
 
    — *(#148 R1)*
 
+9. **An unpaired settle in the CST `Sink` now panics in release builds too, instead of silently
+   shearing the two logs.** `<Sink as Emitter>::rewind` was already a wall against a *truncating
+   rewind to a mid-log mark no live row captured* — a mark `checkpoint()` never returned, or one
+   whose capture an earlier `rewind`/`release` already spent. That wall was
+   `debug_assertions`-only. It is now unconditional.
+
+   The reasoning it was built on had a hole. The debug-only posture deferred upward: the input
+   layer's own LIFO witness was said to reject the condition on every input-mediated path, so the
+   sink only needed a second wall for undisciplined raw use. But that witness is *itself*
+   `debug_assertions`-gated, so a release build had no wall on **either** layer. What a release
+   build did instead was keep the sink's own channels exact and leave the inner emitter untouched
+   — the event log and the diagnostic log silently out of step, with nothing recording that they
+   were. That is bounded only for as long as materialization reads the whole log in one pass at
+   the end; anything that hands part of the tree onward before the parse finishes turns it into a
+   wrong tree that no consumer can detect.
+
+   The condition is a **parser bug and cannot be provoked by input**: a malformed document
+   changes which branches run, not whether a branch settles its own capture exactly once. So
+   hardening it cannot turn a bad document into a crash — verified across the malformed and
+   truncated-prefix corpora, which produce the recovery holes and rewinds this touches and whose
+   tree hashes are unchanged.
+
+   **`release` is deliberately *not* hardened with it**, and that is the one asymmetry to be aware
+   of. Its two non-top outcomes are specified behaviour rather than violations, mirroring
+   `InputRef::commit`'s documented cost model: removing a row that is not the innermost is the
+   "linear removal" that method already promises when a younger capture is still live, and finding
+   no row at all is its "harmless no-op … (no panic, in any build)". Settles are newest-first only
+   *within* a family — guards and session points interleave by design — so an out-of-stack-order
+   release is lawful. Making either loud would convert a documented guarantee into a crash.
+
+   **The panic is raised before the rewind's first mutation.** A wall placed after the damage
+   only narrates it. The condition is decided by a read-only preflight over the unchanged mark
+   stack, ahead of the row spend, the `events.truncate`, the undo journal's reverse replay and
+   the era ledger's truncation record — every one of which the violating call used to have
+   already performed by the time the check fired. A host that `catch_unwind`s the panic therefore
+   keeps the sink it had, on every channel, instead of one whose event log was rewound and whose
+   inner emitter was not; `finish_partial` on such a sink used to return that sheared state as a
+   perfectly ordinary tree, with a `gap_kind` tile standing where the dropped token had been.
+
+   **A panic already unwinding is exempt, and this is load-bearing rather than a hedge.**
+   `Emitter::rewind` can run from a rolling-back guard's `Drop`, and a panic raised there is a
+   *double* panic: the process aborts outright — no unwinding, no `catch_unwind`, signal 6. That
+   is strictly worse than the shear being reported. The report is therefore suppressed when
+   `std::thread::panicking()` is true — but suppressing the *report* is not licence to degrade
+   invisibly, and this is where the mid-unwind path changed as well. It no longer leaves the sink
+   half-rewound. It degrades to a **total no-op on every channel** (the sink has no correct
+   rewind to perform, so it performs none, and both logs are left describing the same history)
+   and **latches** the fact. `Emitter::rewind`'s contract is amended to state the general rule:
+   what an implementation must never do is **abort**, so an emitter that can *detect* an unpaired
+   settle may report it by panicking, provided it checks `std::thread::panicking()` first, raises
+   before it mutates, and records any report it had to suppress.
+
+   **New: `FinishError::UnpairedSettle { mark, len }`.** The latch is what a caller sees. After a
+   degraded rewind, **both** materialization doors refuse — `finish` and `finish_partial` alike,
+   because a log describing a rollback that never happened is corruption, not the incompleteness
+   `finish_partial` exists to tolerate. A typed error rather than a panic, following the posture
+   the neighbouring emission-time walls already take (a detect-at-cause assert, with a typed
+   `FinishError` as the backstop at materialization) and preserving `finish`'s documented
+   never-panics guarantee. `FinishError` is `#[non_exhaustive]`, so the new variant is additive;
+   a `match` that does not name it keeps compiling.
+
+   **What to expect if you are affected.** A parser that was quietly relying on the release-build
+   degradation now panics at the cause with `Sink rewind to a mid-log mark with no captured row`.
+   The fix is always at the call site, not here: some capture is being settled twice, or a mark is
+   being rewound to after it was released. Debug builds and `cargo test` already panicked on it,
+   so a parser whose backtracking paths are exercised in tests will see no change. Note also that
+   `InputRef::restore`'s release-build promise is narrowed to match: it still makes no panic of its
+   own after an out-of-order raw restore, but the *emitter* it hands the violation to keeps its own
+   posture, and the `Sink`'s is now loud in every build. One consequence is documented rather than
+   removed: a raw restore the sink refuses is **not itself transactional**. The emitter's state is
+   untouched, but `restore` raises from the middle of its own rollback, so the checkpoint lineage
+   has been popped through the target while the position and the reporting witnesses have not been
+   restored. That is inside the "unspecified but bounded" envelope the method already documents,
+   it is reachable only through the double-settle bug being reported, and it is now pinned by a
+   test rather than assumed away.
+
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
 **This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**

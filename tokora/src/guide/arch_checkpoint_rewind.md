@@ -172,11 +172,20 @@ Three layers guard it, strongest first:
 
 Release builds without the pin trip do not check a raw non-LIFO restore, and the contract is honest
 about what that costs: the input is left **unspecified but bounded**. Even then — no undefined
-behavior, no leak, no panic originating in the crate, every scan terminates (the resource-limiter
-state travels *inside* the checkpoint, so a re-reached limit re-trips rather than rescanning without
-bound), and the input stays usable. What is *not* guaranteed is diagnostic fidelity: a diagnostic
-may go missing or be attributed to the wrong branch. That bounded-but-imperfect floor is the whole
-reason the raw triple is gated away behind a feature and the guards are the supported surface.
+behavior, no leak, no panic originating in the *input layer*, every scan terminates (the
+resource-limiter state travels *inside* the checkpoint, so a re-reached limit re-trips rather than
+rescanning without bound), and the input stays usable. What is *not* guaranteed is diagnostic
+fidelity: a diagnostic may go missing or be attributed to the wrong branch. That
+bounded-but-imperfect floor is the whole reason the raw triple is gated away behind a feature and
+the guards are the supported surface.
+
+The attached **emitter** answers for itself, and one of them is louder. A violation still arrives at
+[`Emitter::rewind`](crate::Emitter::rewind), and an emitter that can *detect* the unpaired settle it
+produces is allowed to say so. The recording CST `Sink` does — see the end of this chapter. A restore
+the emitter refuses is not rolled back either: the emitter's own state is untouched, but the raw
+restore raises from the middle of its own rollback, so the lineage is popped through the target while
+the position and the reporting witnesses are not restored. That sits inside the bounded envelope
+above, and reaching it needs the violation being reported.
 
 ## The guards are the surface; raw save/restore is the valve
 
@@ -250,10 +259,19 @@ the current length, naming a log position that does not exist yet — is a **tot
 channel**: events, the mark stack, the journal, the era ledger, and the inner alike. (Clamping it
 to the current length instead — the pre-redesign behavior — would let a future mark spend the live
 row of a real checkpoint taken at that length, desyncing the two logs.) And a truncating rewind to
-a *mid-log* mark that no live row captured has no exact inner reading anywhere; that is undisciplined
-raw use, so debug builds panic at the cause — the sink-level twin of the input's LIFO witness — and
-release builds keep the sink's own channels exact and leave the inner untouched, never fabricating a
-reading. The sink hands the inner only readings it can prove, or nothing.
+a *mid-log* mark that no live row captured has no exact inner reading anywhere — an **unpaired
+settle**, which is a parser bug rather than anything a document can provoke — so it **panics in every
+build**, release included, never fabricating a reading. It used to be a `debug_assertions`-only wall
+deferring to the input's LIFO witness above; that witness is itself debug-only, so release builds had
+no wall on either layer and the two logs sheared in silence. The verdict is a **preflight**: it is
+decided against the unchanged mark stack, before the row spend, the truncation, the journal replay
+and the ledger write, so a caught panic leaves the sink exactly as it was rather than half rewound —
+a wall raised after the damage would only be narrating it. The sole exception is a panic already
+unwinding, where reporting would abort the process instead: there the rewind degrades to a **total
+no-op** on every channel and **latches**, and `finish`/`finish_partial` then refuse with
+`FinishError::UnpairedSettle` rather than return the tree of a rollback that never ran. (Named
+without a link: this chapter is not `rowan`-gated, and the variant is.) The sink hands the inner
+only readings it can prove, or nothing.
 
 Two consequences fall out of "value-keyed". First, the inner emitter must itself be value-keyed —
 `checkpoint` a pure monotone reading, `rewind` a drop-by-value, `release` a no-op — which is exactly
