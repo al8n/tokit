@@ -126,6 +126,93 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    allocation count and the ~4 MiB of copying go regardless of what the wall clock on one
    allocator says.
 
+
+4. **A `trace`-feature preview no longer costs the entire remaining source, every time.**
+ `InputRef`'s per-event source preview (`trace_preview`, behind the `trace` feature) built
+ `format!("{rest:?}")` over the *whole* remaining source — potentially the entire input, at
+ every instrumented combinator call (`peek`, `begin`/`commit`/`rollback`, `try_expect`,
+ several per token) — then walked that string a second time to count it, just to keep the
+ first 24 characters. Θ(remaining input) per event, unconditionally, made Θ(n²) over a parse:
+ benchmarking with `--all-features` (which enables `trace`) against a ~128 KiB fixture wrote
+ 133 MB of stderr in 5 minutes without finishing the cheapest bench cell's warm-up.
+
+ A bounded `fmt::Write` sink now aborts the `Debug` call as soon as it has enough output to
+ answer the 24-character window and the ellipsis, so the preview never walks more of the
+ remaining source than a `Debug` impl's own internal batching forces. Measured against this
+ crate's own `input_scan` bench fixture shape (newline-delimited, digits and punctuation): a
+ single preview at offset 0 goes from 250µs to 208ns at 128 KiB and from 10.5ms to 958ns at
+ 8 MiB; a full traced parse over that shape scales linearly in token count on both sides of
+ the fix, at a per-token cost that no longer grows with how much input is left.
+
+ That bound is conditional, not universal: it holds for a `Debug` impl that writes
+ incrementally, and it does not hold for one that front-loads its entire output before its
+ first write. Every `Source`/`Slice` pairing this crate ships was checked against that line;
+ the guarantee is asserted for exactly these, not for `Source` in general.
+
+ A third shape is not narrow at all, and is the only one of the three reachable from outside
+ this crate. `Source`'s `Slice` associated type is public and implementable downstream, and
+ `Slice`'s own bound (`PartialEq + Eq + Debug`) puts no streaming requirement on its `Debug`
+ impl. A conforming impl may scan, escape and allocate its *entire* remaining slice into a
+ temporary and call `write_str` once; this sink cannot shorten work that already ran before
+ it was ever invoked, so the cost stays exactly the `O(remaining source)` this fix exists to
+ remove. Output is still correct even here — the window and the ellipsis decision come from a
+ genuine prefix of the untruncated dump no matter how it was produced — so this is a cost
+ gap, not a correctness one, but it is the most severe of the three: unbounded, not merely
+ narrower, and reachable with an ordinary trait implementation, no unsafe or misuse of this
+ crate required. No in-tree backing does this today; `bounded_debug`'s doc comment and its
+ `bounded_debug_is_correct_but_unbounded_for_a_front_loading_debug_impl` test carry a fixture
+ that exercises exactly this shape.
+
+ The other two remain narrower and **found, not fixed**: a `[u8]`-shaped backing (`[u8]`,
+ `HipByt`, the `smol-bytes` byte types) bounds its allocation and escaping work but still
+ iterates every remaining element, because `Formatter::debug_list` drives its iterator to
+ completion independently of write failures; and a `str`-shaped backing (`str`, `HipStr`,
+ `Utf8Bytes`) still costs `O(run)` for a run of characters with nothing escape-worthy in it,
+ because `Debug for str` accumulates such a run before its first write. Realistic text —
+ which breaks such runs at newlines, quotes, etc. — is unaffected, but a contrived input like
+ this crate's own `int_run_source`/`comma_list_source` bench fixtures (digits and spaces for
+ ~128 KiB at a stretch) is not; `bytes::Bytes` and `bstr::BStr` have neither gap, since both
+ hand-write their `Debug` loop with `?` on every write.
+
+ Output is unchanged: every trace line reads identically to before this fix, character for
+ character, ellipsis included — checked against a spread of inputs (empty, short, exactly at
+ the 24-character boundary, far longer, and content that escapes heavily: newlines, tabs,
+ both quote characters, backslashes, non-ASCII, and a multi-byte scalar straddling the cut).
+
+### Fixed
+
+
+5. **A `trace`-feature preview no longer reports a partial `Debug` rendering as the complete,
+ short value it is not.** `bounded_debug` — the bounded sink `trace_preview` (behind the
+ `trace` feature) uses to build its per-event source preview — discarded the `Result` from its
+ own `write!` call outright, so its truncation flag came from the sink's private bookkeeping
+ alone: `true` only when the sink itself had refused a write after filling its 24-character
+ window. A `Debug` impl can fail for a reason that has nothing to do with the sink —
+ `fmt::Result` is a plain `Result`, and neither the trait nor `Slice`'s bound (`PartialEq + Eq
+ + Debug`) forbids it — and that case left the flag `false`: the preview then rendered
+ whatever partial content had been written, with no ellipsis, as though it were the whole
+ value.
+
+ The single flag is replaced with a three-state outcome — `Complete`, `WindowTruncated`, or
+ `FormatFailed` — because a bool cannot carry both facts a reader needs kept apart: whether
+ there is more of the value than the window shows, and whether the value's own `Debug` impl
+ finished at all. Folding a foreign `Err` into the same flag a real truncation sets is just as
+ wrong in the other direction: a `Debug` impl can write its complete, short rendering and only
+ then fail for a reason of its own, and reporting that as truncated appends `…` to a trace
+ line for a value that has no more content, claiming a continuation that does not exist.
+
+ The sink's own bookkeeping (`sink.truncated`) is what tells the two causes apart, and does so
+ reliably: the sink has exactly one branch that ever returns `Err`, and that branch sets
+ `sink.truncated` in the same statement, so a `write!` failure the sink did not record cannot
+ be the sink's. `trace_preview` now renders each state distinctly — no marker for `Complete`,
+ `…` for `WindowTruncated`, and a separate `<fmt error>` marker for `FormatFailed` that says
+ the renderer broke without claiming missing content. This is a correctness fix, not a
+ performance one: it changes output only for a `Debug` impl that fails on its own account,
+ which no in-tree `Source`/`Slice` pairing does, so every case that already reached the sink
+ normally — which is to say, every case this crate has ever exercised — renders
+ byte-identically to before.
+
+
 ## 0.8.0 (2026-07-31)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.
