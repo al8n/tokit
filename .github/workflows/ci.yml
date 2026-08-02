@@ -53,11 +53,20 @@ jobs:
   # silently ate a `### Changed (breaking)` heading, filing six breaking changes under
   # `### Performance`. Every job below passed, because nothing reads a changelog.
   # Seconds, no toolchain, deterministic: this one is a merge-blocker, not advisory.
+  #
+  # The self-test runs FIRST, and it is not optional. That checker has twice been caught
+  # passing on a changelog that was already broken, so a green from it means nothing until
+  # something has watched it go red. The self-test injects one defect at a time into the real
+  # CHANGELOG.md and requires each to red with the diagnosis it was planted to provoke, under
+  # every awk on the runner, with byte-identical output. Running it before the gate means a
+  # broken checker reports itself by name instead of as a confusing verdict on the changelog.
   changelog:
     name: changelog structure
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: ci/changelog_structure_selftest.sh
+        run: bash ci/changelog_structure_selftest.sh
       - name: ci/changelog_structure.sh CHANGELOG.md
         run: bash ci/changelog_structure.sh CHANGELOG.md
 
