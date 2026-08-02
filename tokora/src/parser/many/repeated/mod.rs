@@ -271,15 +271,23 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
           push_element(&mut num, &mut full, container, item, inp, &anchor)?;
         }
         Ok(Decline) => break,
-        // The never-recoverable gate and its terminal dual: the element's `Err` can be the
-        // frontier `Incomplete` (an unfinished construct, const-false under `Complete`) or a
-        // terminal scanner stop (a tripped limit). Neither is malformed, so re-raise it untouched
-        // instead of spending it as a diagnostic. The terminal witness reads the *committed cursor*
-        // ([`at_committed_boundary`]), so it is attempt-relative: a boundary a prior lookahead
-        // already latched (a prefilled cache leaving the lex offset at it) does not mis-charge an
-        // element that failed ordinarily before reaching it. Evaluated only on the failure arm, so a
-        // successful element does zero terminal work.
-        Err(err) if Cmpl::is_incomplete_error(&err) || inp.at_committed_boundary() => {
+        // The never-recoverable gate and its two terminal witnesses: the element's `Err` can be the
+        // frontier `Incomplete` (an unfinished construct, const-false under `Complete`), a terminal
+        // *scanner* stop, or a *descent* budget trip. None of the three is malformed input, and no
+        // further input clears any of them, so re-raise untouched instead of spending it as a
+        // diagnostic. The scanner witness reads the *committed cursor* ([`at_committed_boundary`]),
+        // so it is attempt-relative: a boundary a prior lookahead already latched (a prefilled cache
+        // leaving the lex offset at it) does not mis-charge an element that failed ordinarily before
+        // reaching it. The descent witness is the set-once session cell ([`resource_trip`]), latched
+        // before the grammar's `From` runs, so a trip re-raises for a delegating error type and for
+        // a discarding one alike — `()` included. Both are positional/session facts, evaluated only
+        // on the failure arm, so a successful element does zero terminal work and no `MaybeTerminal`
+        // bound is needed.
+        Err(err)
+          if Cmpl::is_incomplete_error(&err)
+            || inp.at_committed_boundary()
+            || inp.resource_trip() =>
+        {
           return Err(err);
         }
         Err(err) => {

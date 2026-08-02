@@ -32,7 +32,8 @@ use crate::state::recursion_tracker::RecursionLimitExceeded;
 /// It is stored on the **input session** instead. The trip arm of
 /// [`InputRef::descend`](crate::InputRef::descend) latches `Input::resource_trip` — set-once,
 /// outside the rollback set, with no writer that lowers it — before it builds anything the
-/// grammar can see, and the three combinators above read that latch beside `is_terminal()`. So
+/// grammar can see. The three combinators above read that latch beside `is_terminal()`, and the
+/// resilient collection loops read it on its own (they carry no `MaybeTerminal` bound). So
 /// the sink loses the *value* and every supported sink observes the same *stop*. A grammar that
 /// wants the payload (the offset, the depth, the limitation) must still store it; a grammar that
 /// only wants to not-recover gets that for free.
@@ -105,15 +106,16 @@ use crate::state::recursion_tracker::RecursionLimitExceeded;
 /// error type would have recovered, since the later error is a different value. It fails closed:
 /// it refuses to synthesize, never the reverse.
 ///
-/// **The resilient collection loops still spend a trip, for every error type.** `repeated`,
+/// **The resilient collection loops re-raise a trip rather than collecting past it.** `repeated`,
 /// `separated` and their delimited forms swallow an element's `Err` by design — emit it as a
-/// diagnostic and keep looping — and their gate re-raises the frontier incomplete and the
-/// *scanner*'s committed boundary and nothing else. A descent trip inside such an element is
-/// therefore emitted and the loop continues, and that is **not** sink-dependent: a delegating error
-/// type is swallowed there exactly as `()` is. It is a pre-existing gap, wider than the one this
-/// section describes and orthogonal to it; closing it would change those families' behaviour on a
-/// trip for every error type, which is a separate contract decision. See `parser::many`'s
-/// `GATE_CENSUS`.
+/// diagnostic and keep looping — and their gate re-raises the frontier incomplete, the *scanner*'s
+/// committed boundary, and the descent trip's session latch. A trip inside such an element
+/// therefore ends the collection on the `Err` channel instead of yielding a truncated container
+/// with the trip filed among its diagnostics. That was the behaviour before #148, and it was never
+/// sink-dependent: a delegating error type was spent there exactly as `()` was. Because the latch
+/// is a session fact rather than the error's own answer, a parse that catches the trip and goes on
+/// also finds the *next* element failure in any collection re-raised rather than emitted. See
+/// `parser::many`'s `GATE_CENSUS`.
 ///
 /// # The offset
 ///

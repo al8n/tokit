@@ -658,36 +658,39 @@ where
   /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) already converted into the grammar's
   /// own error type, and that conversion is allowed to discard the value — `()` does. Terminality
   /// carried only through the payload is therefore terminality the grammar can opt out of, which
-  /// made a resource bound depend on an unrelated error sink. Stored here it does not: the three
+  /// made a resource bound depend on an unrelated error sink. Stored here it does not: those three
   /// combinators read this cell **in addition to**
   /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal), so every supported sink observes
   /// the same stop.
+  ///
+  /// The **resilient collection loops** — `repeated`, `separated` and their delimited forms — read
+  /// it too, and there it is the *only* terminality witness rather than a second one: their swallow
+  /// arms carry no `MaybeTerminal` bound at all, gating on the frontier incomplete and on
+  /// positional and session facts, so this cell is the whole of what keeps a descent trip inside an
+  /// element from being emitted as an ordinary diagnostic and looped past. See `parser::many`'s
+  /// `GATE_CENSUS`.
   ///
   /// # Never cleared, and what that costs
   ///
   /// There is no writer that lowers it — not a [`Checkpoint`] (which does not carry it), not
   /// `rekey_offset_facts`, not the [`Descent`](InputRef::descend) guard's `Drop`.
   ///
-  /// For the three combinators above that is free: a terminality-preserving error type already
+  /// For the three recovery combinators that is free: a terminality-preserving error type already
   /// re-raised at the first trip and carried it to the top, so "never cleared" reproduces what a
   /// preserving type has always done rather than adding to it.
   ///
-  /// It is **not** free where something *else* catches a trip and goes on parsing, because there
-  /// the latch is coarser than per-error terminality: every later recovery in the session is
-  /// refused, including for ordinary syntax errors that have nothing to do with the budget, where
-  /// a preserving error type would have recovered them (the later error is a different value). Two
-  /// shapes reach that state, and both are worth knowing about:
+  /// Everywhere else it is not free, because there the latch is coarser than per-error terminality:
+  /// once a session has tripped, every later recovery in it is refused, including for ordinary
+  /// syntax errors that have nothing to do with the budget, where a preserving error type would
+  /// have recovered them (the later error is a different value). Two shapes reach that state, and
+  /// both are worth knowing about:
   ///
   /// * grammar code that catches the trip itself, rather than through a recovery combinator, and
   ///   keeps parsing;
-  /// * the **resilient collection loops** — `repeated`, `separated` and their delimited forms —
-  ///   whose swallow sites gate on the frontier incomplete and on the *scanner*'s committed
-  ///   boundary and on neither `is_terminal()` nor this cell, so a descent trip inside an element
-  ///   is emitted as an ordinary diagnostic and the loop continues. That is a **pre-existing gap
-  ///   and is not sink-dependent**: it swallows a trip from a delegating error type exactly as it
-  ///   does from `()`. Closing it is a separate contract decision — it would change what those
-  ///   families do on a trip for every error type, not only for a discarding one — and is
-  ///   deliberately not made here. See `parser::many`'s `GATE_CENSUS`.
+  /// * the collection loops above, whose gate is this cell rather than the error's own answer, so
+  ///   after a trip they re-raise the *next* element failure too instead of emitting it. A parse
+  ///   that goes on past a trip therefore loses the truncated-with-diagnostics collection it used
+  ///   to get, for every error type alike.
   ///
   /// The direction of the coarseness is the safe one: it refuses to synthesize, never the reverse.
   ///

@@ -178,6 +178,12 @@ draw on the same budget through
   combinators read that latch beside `is_terminal()`. A discarding sink loses the offset, the depth
   and the limitation; it does not lose the stop.
 
+  The **resilient collection loops** — `repeated`, `separated` and their delimited forms — read the
+  same latch, and re-raise on it rather than filing the trip among the collection's diagnostics and
+  parsing on. That one is not a discarding-sink repair: those families spent a trip for *every*
+  error type until tokora 0.9, so an element that trips now fails its collection where it used to
+  truncate it.
+
   This was not true before tokora 0.9. A `()`-errored grammar used to get `is_terminal() == false`
   on the converted value and **spend** the trip: `recover` synthesized a node for a construct the
   budget forbade reading, and `skip_then_retry` handed the surrounding grammar back offset 68 — a
@@ -197,7 +203,9 @@ draw on the same budget through
   exceeded, for the same reason at one remove: that cannot be un-exceeded either. What is **not**
   latched is the *depth* — it is the opposite kind of fact and is fully restored by the unwind that
   carries the error out. So a scanner trip latches *where* and stops lexing; a descent trip latches
-  *whether* and stops recovery.
+  *whether* and stops recovery — including the emit-and-continue kind a collection driver does.
+  Being a session fact rather than a per-error one, the latter is coarse in one direction: after a
+  trip, the *next* element failure in any collection re-raises too, even an ordinary one.
 
 ### Bounding your own recursion
 

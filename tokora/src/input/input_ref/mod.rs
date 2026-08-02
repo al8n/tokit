@@ -851,6 +851,11 @@ where
   /// on it — the input-side twin of [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal),
   /// needing no terminal bound on the emitter error type. Kept on the failure arm, so a successful
   /// element does zero terminal work.
+  ///
+  /// **Scanner stops only.** A *descent* budget trip latches no boundary — it has a control stack
+  /// rather than a position — so this reads `false` for one. The loops pair it with
+  /// [`resource_trip`](Self::resource_trip), the session-latch witness for that half; neither
+  /// witness subsumes the other and both ride the same guard.
   #[inline(always)]
   pub(crate) fn at_committed_boundary(&self) -> bool {
     self.reached_boundary(self.cursor().as_inner())

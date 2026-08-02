@@ -77,8 +77,8 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    that walk by node, or that assert on a rendered tree, see the run inside the node of the token
    before it. A source with *no* committed token at all is not affected.
 
-2. **A recursion-limit trip is now terminal for every grammar error type, `()` included — recovery
-   can no longer spend it.** This closes 0.8.0's [known limitation — a discarding error sink erases
+2. **A recursion-limit trip is now terminal for every grammar error type, `()` included — neither
+   recovery nor a collection driver can spend it.** This closes 0.8.0's [known limitation — a discarding error sink erases
    the recursion trip's stop, not its
    bound](#known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound),
    which recorded the behaviour rather than answering it. The answer is that a resource bound an
@@ -123,22 +123,33 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    you want the trip's *details* (offset, depth, limitation), that still requires an error type
    that stores the value; the discarding sink loses the payload exactly as before.
 
-   **Two limits of this change, stated rather than left to be found:**
+   **The same stop now also reaches the resilient collection loops — and that half was never
+   sink-dependent.** `repeated`, `separated` and their delimited forms swallow an element's `Err`
+   by design: emit it as a diagnostic and keep looping. Their gate re-raised the frontier
+   `Incomplete` and the *scanner*'s committed boundary, and a descent trip latches neither — it has
+   a control stack rather than a position, so there is no boundary for it to latch. A trip inside
+   an element was therefore filed as an ordinary diagnostic and the loop went on to the next one,
+   bounded only by the no-progress guard. Unlike the recovery half above, that happened for **every**
+   error type: a delegating one was spent there exactly as `()` was. The gate reads the session
+   latch too now.
 
-   - **The latch is coarser than per-error terminality.** It is never cleared, so where something
-     catches a trip and parses on anyway, every later recovery in that input session is refused
-     too — including for ordinary syntax errors a terminality-preserving type would have recovered,
-     since the later error is a different value. It fails closed: it refuses to synthesize, never
-     the reverse.
-   - **The resilient collection loops still spend a trip, and that is not sink-dependent.**
-     `repeated`, `separated` and their delimited forms swallow an element's `Err` by design — emit
-     a diagnostic, keep looping — and their gate re-raises the frontier incomplete and the
-     *scanner*'s poison boundary and nothing else. A descent trip inside such an element is
-     therefore emitted and the loop continues, for a delegating error type exactly as for `()`.
-     That is a wider, older gap than the one closed here and orthogonal to it: closing it would
-     turn a truncated-with-diagnostics collection into a failed one for **every** error type, which
-     is a separate contract decision. It is recorded in `parser::many`'s `GATE_CENSUS` and on the
-     latch's own documentation, and left open deliberately.
+   | driving an element that trips the depth budget | before | now |
+   |---|---|---|
+   | `repeated()`, `separated_by(..)`, and both delimited forms | the trip filed as a diagnostic; the loop continued to the next element and returned `Ok` with whatever it collected | the collection returns `Err` at the first trip, with **nothing filed** |
+
+   **This half changes behaviour for delegating and discarding error types alike**, so a grammar
+   that used to receive a truncated-with-diagnostics container over a too-deep input now receives a
+   failed parse. The remedy is the same one as above and for the same reason: raise the budget with
+   `with_recursion_limiter`. A container assembled from elements the budget forbade reading was
+   never a description of the input, and the diagnostic that named the trip was filed against a
+   construct the parse had already been told to stop reading.
+
+   **The limit of this change, stated rather than left to be found: the latch is coarser than
+   per-error terminality.** It is never cleared, so where something catches a trip and parses on
+   anyway, every later recovery in that input session is refused too — and now so is every later
+   collection-loop swallow, including for ordinary syntax errors a terminality-preserving type
+   would have recovered, since the later error is a different value. It fails closed: it refuses to
+   synthesize, never the reverse.
 
    — *(#148 R1)*
 

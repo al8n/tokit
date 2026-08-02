@@ -169,9 +169,14 @@ where
   /// equally for one whose `From` discards it — `()` included. A discarding sink loses the
   /// *payload*; it does not lose the *stop*, because the stop was never the payload's to carry.
   /// That is invariance, not new semantics: across those three combinators it makes every
-  /// supported sink behave the way a delegating one already did. It does **not** reach the
-  /// resilient collection loops, which swallow an element's trip for every error type alike — see
-  /// `Input::resource_trip`'s own documentation for that gap and why it is a separate decision.
+  /// supported sink behave the way a delegating one already did.
+  ///
+  /// The **resilient collection loops** — `repeated`, `separated` and their delimited forms — read
+  /// the same cell, and there it is not a second opinion but the only one: those swallow arms carry
+  /// no `MaybeTerminal` bound, so the latch is the whole of what stops an element's trip being
+  /// emitted as a diagnostic and looped past. That one is not invariance — it was spent for every
+  /// error type before #148 — so it changes those families' behaviour on a trip. See
+  /// `Input::resource_trip` and `parser::many`'s `GATE_CENSUS`.
   ///
   /// What is latched is the **fact that the budget was exceeded**, and not the depth. A scanner
   /// limit trip latches the poison boundary because the lexer's tally is monotone in the input;
@@ -273,11 +278,13 @@ where
   /// [`Descent`]'s `Drop` releases only the depth. Read by
   /// [`Recover`](crate::parser::Recover), [`InplaceRecover`](crate::parser::InplaceRecover) and
   /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) *beside*
-  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal), so a grammar error type that
-  /// discards [`RecursionLimitReached`] on conversion — `()` does — still cannot turn a tripped
-  /// budget into recovery.
+  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal), and by the four resilient
+  /// collection loops (`repeated`, `separated` and their delimited forms) on its own, since those
+  /// carry no `MaybeTerminal` bound. Either way a grammar error type that discards
+  /// [`RecursionLimitReached`] on conversion — `()` does — still cannot turn a tripped budget into
+  /// recovery, nor into a diagnostic the collection keeps parsing past.
   ///
-  /// Costs one `bool` load on a recovery decision and nothing anywhere else: no scan, no
+  /// Costs one `bool` load on a recovery or swallow decision and nothing anywhere else: no scan, no
   /// lookahead fill and no token commit reads or writes it.
   #[inline(always)]
   pub(crate) const fn resource_trip(&self) -> bool {

@@ -180,13 +180,23 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       };
 
       match parser.f.try_parse_input(inp) {
-        // The never-recoverable gate and its terminal dual: a frontier `Incomplete` (const-false
-        // under `Complete`) or a terminal scanner stop from the element parser re-raises untouched —
-        // never spent as a diagnostic, since no further input clears either. The terminal witness
-        // reads the *committed cursor* ([`at_committed_boundary`]), so a boundary a prior lookahead
-        // already latched does not mis-charge an ordinary element failure short of it. Failure-arm
-        // only — a successful element does zero terminal work; no `MaybeTerminal` bound needed.
-        Err(e) if Cmpl::is_incomplete_error(&e) || inp.at_committed_boundary() => return Err(e),
+        // The never-recoverable gate and its two terminal witnesses: a frontier `Incomplete`
+        // (const-false under `Complete`), a terminal *scanner* stop, or a *descent* budget trip from
+        // the element parser re-raises untouched — never spent as a diagnostic, since no further
+        // input clears any of the three. The scanner witness reads the *committed cursor*
+        // ([`at_committed_boundary`]), so a boundary a prior lookahead already latched does not
+        // mis-charge an ordinary element failure short of it. The descent witness is the set-once
+        // session cell ([`resource_trip`]), latched before the grammar's `From` runs, so a trip
+        // re-raises for a delegating error type and for a discarding one alike — `()` included.
+        // Failure-arm only — a successful element does zero terminal work; both witnesses are
+        // positional/session facts, so no `MaybeTerminal` bound needed.
+        Err(e)
+          if Cmpl::is_incomplete_error(&e)
+            || inp.at_committed_boundary()
+            || inp.resource_trip() =>
+        {
+          return Err(e);
+        }
         Err(e) => {
           let span = inp.span_since(&cursor);
           inp.emitter().emit_error(Spanned::new(span, e))?;

@@ -82,28 +82,37 @@ where
 mod gate_census {
   //! GATE_CENSUS — the section-4 never-recoverable gate sites, locked by count.
   //!
-  //! Every resilient emit-and-continue loop body in the try-driven collection families
-  //! must gate on `Cmpl::is_incomplete_error` FIRST, and re-raise a terminal scanner stop
-  //! (`inp.at_committed_boundary()`) alongside it, so neither a frontier `Incomplete` nor a
-  //! tripped *scanner* limit from the element parser is spent as a diagnostic. The terminal witness
-  //! reads the *committed cursor* (attempt-relative: a boundary a prior lookahead already latched
-  //! does not mis-charge an ordinary element failure short of it), and rides the failure arm so a
-  //! successful element does zero terminal work. One gate per swallow site; the census pins the
-  //! total, the per-file placement, and the terminal re-raise so a new resilient loop cannot land
-  //! ungated or without the terminal dual (extend the list, then gate it both ways).
+  //! Every resilient emit-and-continue loop body in the try-driven collection families must gate on
+  //! `Cmpl::is_incomplete_error` FIRST, and re-raise **both** terminal witnesses alongside it, so
+  //! none of a frontier `Incomplete`, a tripped *scanner* limit, or a tripped *descent* budget from
+  //! the element parser is spent as a diagnostic:
   //!
-  //! **Scanner, and only scanner — a known gap, recorded here rather than closed.**
-  //! `at_committed_boundary()` reads the poison boundary, which a *descent* budget trip does not
-  //! latch (it has no position to latch). So a
-  //! [`RecursionLimitReached`](crate::error::RecursionLimitReached) raised inside an element falls
-  //! to the swallow arm: it is emitted as an ordinary diagnostic and the loop continues, bounded
-  //! only by the progress guard. That is **not** the sink-dependence issue #148 closed — it is not
-  //! sink-dependent at all, and swallows a delegating error type exactly as it does `()`. The
-  //! input-side witness that would close it exists (`InputRef::resource_trip`, which `Recover`,
-  //! `InplaceRecover` and `skip_then_retry` read), but wiring it in here would change what these
-  //! four families do on a trip for **every** error type — a truncated-with-diagnostics collection
-  //! becomes a failed one — and that is a contract decision, not a bug fix. It is deliberately
-  //! left open.
+  //! * `inp.at_committed_boundary()` — the **scanner** stop. Reads the *committed cursor*, so it is
+  //!   attempt-relative: a boundary a prior lookahead already latched does not mis-charge an
+  //!   ordinary element failure short of it. Never the lex-offset `at_latched_boundary`, which a
+  //!   prefilled cache would make false-positive on that same ordinary failure.
+  //! * `inp.resource_trip()` — the **descent** budget trip, which latches no boundary (it has no
+  //!   position to latch, only a control stack) and so is invisible to the witness above. It is the
+  //!   set-once session cell [`InputRef::descend`](crate::InputRef::descend) arms before the
+  //!   grammar's `From` runs, which is what makes the re-raise independent of the error type: a
+  //!   [`RecursionLimitReached`](crate::error::RecursionLimitReached) that a discarding sink erases
+  //!   on conversion — `()` does — still cannot be emitted-and-continued here.
+  //!
+  //! Both are positional/session facts read on the failure arm, so a successful element does zero
+  //! terminal work and neither costs a trait bound: no `MaybeTerminal` appears in these families.
+  //!
+  //! One gate per swallow site; the census pins the total, the per-file placement, and **both**
+  //! re-raises *inside the same guard* — not merely somewhere in the same file — so a new resilient
+  //! loop cannot land ungated, nor land carrying only two of the three (extend the list, then gate
+  //! it all three ways).
+
+  /// The needle that opens a never-recoverable gate. Counting it is counting gates: none of the
+  /// four sources spells it anywhere but in the guard.
+  const GATE: &str = "if Cmpl::is_incomplete_error(&";
+
+  /// The two terminal re-raises the gate must carry, and the end of the guard they must sit in.
+  const WITNESSES: [&str; 2] = ["inp.at_committed_boundary()", "inp.resource_trip()"];
+  const GUARD_END: &str = "=>";
 
   #[test]
   #[cfg_attr(
@@ -120,20 +129,39 @@ mod gate_census {
     let mut gates = 0;
     for (name, src) in sites {
       let swallows = src.matches("emit_error(Spanned::new(span,").count();
-      let gated = src.matches("if Cmpl::is_incomplete_error(&").count();
+      let gated = src.matches(GATE).count();
       assert_eq!(
         swallows, gated,
         "{name}: every emit-and-continue swallow needs exactly one incomplete gate"
       );
-      // The terminal dual: every incomplete gate carries the terminal re-raise in the same
-      // guard, so a tripped limit re-raises instead of being emitted-and-continued. The witness
-      // is the attempt-relative, committed-cursor form (never the lex-offset `at_latched_boundary`,
-      // which a prefilled cache would make false-positive on an ordinary element failure).
-      let terminal = src.matches("|| inp.at_committed_boundary()").count();
+
+      // Both terminal re-raises, in the SAME guard as the incomplete gate and after it. Scanning
+      // the *guard region* — from the gate to the `=>` that closes the arm's pattern — rather than
+      // counting each needle over the whole file is what keeps this non-vacuous: three independent
+      // per-file tallies are equally satisfied by three witnesses scattered across three different
+      // arms, and this is not. It is also indentation- and wrap-independent, which matters because
+      // the three-way guard no longer fits on one line at the crate's rustfmt width.
+      let mut rest = src;
+      let mut checked = 0;
+      while let Some(at) = rest.find(GATE) {
+        let after = &rest[at..];
+        let guard = &after[..after
+          .find(GUARD_END)
+          .unwrap_or_else(|| panic!("{name}: an incomplete gate with no `=>` closing its arm"))];
+        for witness in WITNESSES {
+          assert!(
+            guard.contains(witness),
+            "{name}: the incomplete gate must re-raise both terminal witnesses in the same guard — \
+             `{witness}` is missing from `{}`",
+            guard.trim()
+          );
+        }
+        checked += 1;
+        rest = &after[GATE.len()..];
+      }
       assert_eq!(
-        gated, terminal,
-        "{name}: every incomplete gate must re-raise a terminal stop too \
-         (`|| inp.at_committed_boundary()`)"
+        checked, gated,
+        "{name}: every gate occurrence must have been inspected"
       );
       gates += gated;
     }
