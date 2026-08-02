@@ -153,6 +153,20 @@ where
 /// zero terminal work and none of them costs a trait bound: no `MaybeTerminal` appears in these
 /// families.
 ///
+/// # What holds each witness in the guard
+///
+/// One behavioural suite per witness, each confirmed by neutering the term and watching the suite
+/// go red. `GATE_CENSUS` also scans this body for all three, but a needle scan proves presence and
+/// ordering, never that the term gates — the census says so itself, and says what it measured.
+/// Editing the guard means keeping these green:
+///
+/// * `Cmpl::is_incomplete_error(&err)` — `input::input_ref::partial_tests`, 2 cells.
+/// * `inp.at_committed_boundary()` — `tokora/tests/collection_terminal_stop.rs`, the `r1b_*` cells,
+///   5 of them. Its `r1_*` sibling pins only the negative direction (the witness must not fire on
+///   a boundary the cursor has not reached), which is why the term was for a while deletable with
+///   the whole suite still green.
+/// * `inp.tripped_during_attempt(trips)` — `tokora/tests/collection_resource_trip.rs`, 12 cells.
+///
 /// # `trips` is the caller's, and it must be per element
 ///
 /// The baseline belongs to the *attempt this call judges*, so the caller takes
@@ -311,12 +325,53 @@ mod gate_census {
        inside `file_element_failure`"
     );
 
-    // The three witnesses, in the chokepoint's own body and BEFORE the emission. Scanning the
-    // region from the definition to the call — rather than counting needles over the file — is
-    // what keeps this non-vacuous: three independent tallies are equally satisfied by three
-    // witnesses scattered anywhere, and a region scan is not. Both `find`s panic rather than pass
-    // when the thing being scanned for is absent, so a chokepoint that has been renamed or gutted
-    // reports that instead of quietly finding nothing to check.
+    // The three witnesses, in the chokepoint's own body and BEFORE the emission.
+    //
+    // WHAT THIS PROVES, EXACTLY: each witness is present, named, and textually ahead of the one
+    // `emit_error`. Scanning the region from the definition to the call — rather than counting
+    // needles over the whole file — is what makes that much true: three independent tallies are
+    // equally satisfied by three witnesses scattered anywhere, and a region scan is not. Both
+    // `find`s panic rather than pass when the thing being scanned for is absent, so a chokepoint
+    // that has been renamed or gutted reports that instead of quietly finding nothing to check.
+    //
+    // WHAT IT DOES NOT PROVE — and an earlier revision of this comment wrongly claimed it did — is
+    // that the witnesses GATE the emission. Textual presence ahead of a call is not control-flow
+    // domination. This exact body keeps the census green with the gate entirely gone:
+    //
+    //     let _ = Cmpl::is_incomplete_error(&err);
+    //     let _ = inp.at_committed_boundary();
+    //     let _ = inp.tripped_during_attempt(trips);
+    //     let span = inp.span_since(since);
+    //     inp.emitter().emit_error(Spanned::new(span, err))
+    //
+    // Verified, not reasoned about: that body was compiled and the whole `--all-features` suite run
+    // over it. This test passed. Proving domination from source text means writing a Rust parser
+    // inside a test module that must also compile under `--no-default-features` with no `String`
+    // and no `Vec`; the cost is out of proportion to a needle scan's value, and it is not what
+    // makes the runtime behaviour safe.
+    //
+    // WHAT PROVES THE GATE GATES is behaviour, one suite per witness, each one confirmed by
+    // neutering its term and watching the suite go red:
+    //
+    // * `Cmpl::is_incomplete_error(&err)` — `input::input_ref::partial_tests`
+    //   (`gate_propagates_frontier_incomplete_out_of_repeated`,
+    //   `lego_chain_runs_both_modes_to_equivalence`); 2 tests.
+    // * `inp.at_committed_boundary()` — `tokora/tests/collection_terminal_stop.rs`, the five `r1b_*`
+    //   cells; 5 tests. These were written FOR this finding: the mutation run that produced this
+    //   comment found the witness could be deleted with the entire suite still green, because R1
+    //   only pinned where it must stay quiet. R1b pins the other direction.
+    // * `inp.tripped_during_attempt(trips)` — `tokora/tests/collection_resource_trip.rs`; 12 tests.
+    //
+    // So this scan is a fast tripwire on the source — it catches a witness dropped, renamed or
+    // duplicated in one cheap unit test — and the three suites above are the proof. Delete a
+    // witness and both fire; neuter one in place and only the suite does.
+    //
+    // TO RE-CHECK, in five minutes rather than by re-deriving it: replace one term of the guard
+    // with `let _ = <that term>;` above the `if`, leaving the other two in the condition, and run
+    // `cargo test -p tokora --all-features --no-fail-fast`. The suite named for that witness must
+    // go red, and this test must stay green. Repeat per witness. Automating the loop needs
+    // `cargo-mutants` — a full rebuild-and-test per mutant across a 100-binary suite, plus a
+    // survivor baseline to triage — which is out of proportion to three terms in one function.
     let def_at = code_find(prod, CHOKEPOINT_DEF).unwrap_or_else(|| {
       panic!(
         "`many/mod.rs`: `{CHOKEPOINT_DEF}` is gone. The swallow chokepoint has been renamed or \

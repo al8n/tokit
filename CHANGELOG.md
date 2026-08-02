@@ -201,6 +201,30 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   with a spelling the old shape did not match — it fails, naming the file, then the plant was
   removed. No behaviour change. — *(#148, verification debt)*
 
+  **And the same defect, one level in: the witness scan proved presence, not gating.** The scan
+  above requires each of the three never-recoverable witnesses to appear once in the source ahead
+  of the emission. Textual presence ahead of a call is not control-flow domination — a body that
+  reads all three into `let _ =` bindings and then emits unconditionally satisfies it with the gate
+  entirely gone. Compiled and run: the census stayed green.
+
+  Answered by mutation rather than by a stronger scan, since proving domination from source text
+  means writing a Rust parser inside a test module that must also build under
+  `--no-default-features`. Each witness was neutered in turn and the whole `--all-features` suite
+  run: the frontier-`Incomplete` witness reds 2 tests, the descent-trip witness reds 12 — and
+  **`at_committed_boundary()` red nothing at all**, in the entire suite. Its only cell was negative
+  (a boundary the cursor has *not* reached must not be charged to an ordinary failure), which a
+  deleted witness also satisfies. Unguarded, a collection that runs onto a poison boundary files
+  the stop as an ordinary syntax error and returns a **silently truncated success** — `Ok` over
+  input the scanner never read.
+
+  `tokora/tests/collection_terminal_stop.rs` gains the positive direction: five `r1b_*` cells, one
+  per try-driven family plus the truncation case, each with the file's non-vacuity control (the
+  same probe run twice with only the scan limit changed, required to disagree, and required to have
+  actually tripped). All five are red under the mutation and green without it. The census now states
+  what a needle scan proves and names the suite that proves the rest, and both it and the
+  chokepoint's own docs carry the re-check procedure. No behaviour change. — *(#148, verification
+  debt)*
+
 - **The recursion-limit test suite's stack-address witness made every Miri job and the ASan job
   red, on `main`.** `pratt_limit_unit_sink`'s unwind cell corroborates its two depth-cell
   assertions out-of-band by comparing the addresses of two stack locals. That comparison measures

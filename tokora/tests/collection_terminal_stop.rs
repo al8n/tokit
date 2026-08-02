@@ -15,6 +15,11 @@
 //!   latched ahead of the cursor (a prefilled cache) must not mis-charge an element that failed
 //!   *ordinarily* while still short of it. RED with the old lex-offset witness (it re-raised the
 //!   ordinary failure instead of recovering it).
+//! * **R1b — and the gate still fires when the cursor *does* reach the boundary.** R1's twin, and
+//!   the half that was missing: it says only where the witness must stay quiet, which a witness
+//!   deleted outright also satisfies. R1b pins the positive direction, and it is what makes the
+//!   `at_committed_boundary()` term in the chokepoint's guard load-bearing under test rather than
+//!   merely present in the source. See its own section for what a mutation run measured.
 //! * **R2 — the separator-slot gate surfaces a trip** instead of folding it into a clean end.
 //! * **R3 — the while-list decision peek surfaces a mid-window trip** instead of reading its short
 //!   window as a clean stop.
@@ -28,7 +33,7 @@ use tokora::{
   Token as TokenTrait, TryParseInput,
   cache::{Peeked, PeekedTokenExt},
   emitter::{
-    FullContainerEmitter, SeparatedEmitter, Silent, TooFewEmitter, TooManyEmitter,
+    FullContainerEmitter, SeparatedEmitter, Silent, TooFewEmitter, TooManyEmitter, UnclosedEmitter,
     UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter, Verbose,
   },
   error::{
@@ -299,6 +304,21 @@ fn ordinary_diags(emitter: &Verbose<CErr>) -> usize {
     .count()
 }
 
+/// Counts the scan limiter's own trip diagnostics.
+///
+/// The non-vacuity control for every R1b cell: those cells assert that a collection re-raised
+/// instead of filing, and a fixture that quietly stopped tripping — a retuned cache, a scan the
+/// lexer no longer repeats — satisfies "filed nothing" by doing nothing. One here on the tight run
+/// and none on its widened control is what makes the pair a measurement.
+fn limit_diags(emitter: &Verbose<CErr>) -> usize {
+  emitter
+    .errors()
+    .values()
+    .flatten()
+    .filter(|e| **e == CErr::Limit)
+    .count()
+}
+
 /// Element (try-shape): accept a `Num`, decline is not used — a non-`Num` is an ordinary error.
 fn num_element<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>,
@@ -398,6 +418,345 @@ fn r1_prior_poison_does_not_recharge_an_ordinary_element_failure() {
     "the ordinary failure was emitted-and-continued (recovered), not re-raised"
   );
 }
+
+// ── R1b: an element failure AT the committed boundary is re-raised, never filed ─
+//
+// The positive half of R1, and the one the suite was missing.
+//
+// # Why this section exists
+//
+// `tokora/src/parser/many/mod.rs::file_element_failure` is the single place a collection element
+// failure is filed or re-raised, and it gates on three witnesses. A mutation run over the whole
+// `--all-features` suite, one witness neutered at a time, found that two of the three were pinned
+// by behaviour and the third was not:
+//
+// | witness                          | tests that failed when it was neutered |
+// |----------------------------------|----------------------------------------|
+// | `Cmpl::is_incomplete_error(..)`  | 2 (`input::input_ref::partial_tests`)  |
+// | `inp.at_committed_boundary()`    | **0 — nothing, anywhere**              |
+// | `inp.tripped_during_attempt(..)` | 12 (`collection_resource_trip.rs`)     |
+//
+// R1 is negative — it fails when the witness fires where it must not — so deleting the witness
+// keeps R1 green. R2 and R3 gate *other* call sites (the separator slot, the decision peek), not
+// this one. Nothing asked what happens when an element fails with the committed cursor **on** the
+// boundary, which is precisely the case the witness exists for. These cells ask it.
+//
+// # What "unguarded" looks like, measured
+//
+// With the term removed from the guard and everything else intact:
+//
+// * [`r1b_a_boundary_reached_before_the_driver_is_not_filed_as_a_diagnostic`] returns
+//   `Ok(vec![1, 2])` — a **silently truncated collection**, plus a spurious "ordinary" syntax error
+//   over input the scanner never looked at. Nothing in the result says the parse was cut short.
+//   That cell is the sharpest of the set because the boundary is latched *before* the driver
+//   starts, so the driver's sibling absence witness (`latched_during_attempt`, attempt-relative)
+//   cannot see it either: this one term is the whole defence.
+// * the four family cells return `Err(CErr::Eot)` with the element's ordinary failure filed —
+//   the stop still surfaces, from a gate further down, but the diagnostic log has gained a syntax
+//   error that describes nothing and the re-raised value is no longer the element's own.
+//
+// # Shape
+//
+// Every cell runs the identical probe twice with **only the scan limit changed**, and the two runs
+// must disagree. The tight run must really have tripped (`limit_diags == 1`) and the control must
+// really not have (`limit_diags == 0`), because "filed nothing" is otherwise satisfied by a fixture
+// that stopped reaching the collection at all. The control's value is asserted absolutely for the
+// same reason.
+
+/// An element that accepts one `Num` and fails **ordinarily** on anything else — a wrong token, a
+/// real end of input, or a poison boundary alike. `try_expect` pushes back on decline, so a failure
+/// consumes nothing.
+fn num_or_ordinary<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>,
+) -> Result<ParseAttempt<i64>, CErr>
+where
+  Ctx: ParseContext<'inp, TLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TLexer<'inp>, Error = CErr>,
+{
+  match inp.try_expect(|t| matches!(t.data, Tok::Num(_)))? {
+    Some(tok) => match tok.into_data() {
+      Tok::Num(n) => Ok(ParseAttempt::Accept(n)),
+      _ => unreachable!("the predicate accepted only `Num`"),
+    },
+    None => Err(CErr::Ordinary),
+  }
+}
+
+/// A **two-token** element: commit one `Num`, then demand a second.
+///
+/// The four family cells need the element to fail with the committed cursor *on* the boundary, and
+/// the separated drivers reach their separator slot before their element slot — a boundary sitting
+/// between two elements is therefore claimed by R2's `try_expect_or_stop` gate and never reaches
+/// the chokepoint. An element that commits its first token and then fails moves the cursor onto the
+/// boundary from *inside* the element attempt, which every family reaches the same way.
+fn pair_element<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>,
+) -> Result<ParseAttempt<i64>, CErr>
+where
+  Ctx: ParseContext<'inp, TLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TLexer<'inp>, Error = CErr>,
+{
+  let ParseAttempt::Accept(first) = num_or_ordinary(inp)? else {
+    return Ok(ParseAttempt::Decline);
+  };
+  let ParseAttempt::Accept(second) = num_or_ordinary(inp)? else {
+    return Ok(ParseAttempt::Decline);
+  };
+  Ok(ParseAttempt::Accept(first + second))
+}
+
+#[test]
+fn r1b_a_boundary_reached_before_the_driver_is_not_filed_as_a_diagnostic() {
+  // R1's fixture with one thing changed: the element. There a `comma_element` fails while still
+  // replaying cached tokens, leaving the committed cursor short of the boundary, and the failure
+  // must be filed and looped past. Here the element consumes those same cached tokens, so the third
+  // cycle fails with the cursor exactly ON the boundary — and the failure must be re-raised.
+  //
+  // The prefill is what makes this the sharpest cell in the section: the boundary is latched before
+  // `repeated` starts, so the driver's `latch_snapshot()` already holds it and the absence-exit
+  // witness (`latched_during_attempt`) reads `false` for the rest of the parse. With
+  // `at_committed_boundary()` removed from the chokepoint's guard nothing else catches the stop —
+  // the run returns `Ok(vec![1, 2])`, a truncated collection reported as a success.
+  fn r1b_parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>) -> Result<Vec<i64>, CErr>
+  where
+    Ctx: ParseContext<'inp, TLexer<'inp>>,
+    Ctx::Emitter:
+      Emitter<'inp, TLexer<'inp>, Error = CErr> + FullContainerEmitter<'inp, TLexer<'inp>>,
+  {
+    // Prefill + latch: a wide peek scans `1`(1), `2`(2), then the third scan trips.
+    let _ = inp.peek_with_emitter::<U4>()?;
+    num_or_ordinary.repeated().collect().parse_input(inp)
+  }
+
+  let mut tight_log = Verbose::<CErr>::new();
+  let tight = drive(
+    &mut tight_log,
+    ScanLimiter::with_limit(2),
+    r1b_parse,
+    "1 2 3",
+  );
+  assert_eq!(
+    limit_diags(&tight_log),
+    1,
+    "the tight run must really have tripped the scan limit — without that this cell compares two \
+     untripped parses and asserts nothing"
+  );
+  assert_eq!(
+    (&tight, ordinary_diags(&tight_log)),
+    (&Err(CErr::Ordinary), 0),
+    "an element failure with the committed cursor ON a latched boundary is re-raised untouched and \
+     files nothing. Filed instead, the driver loops, stalls, and returns `Ok(vec![1, 2])` — a \
+     collection truncated at the poison and reported as a success, carrying a syntax diagnostic \
+     over input the scanner never read"
+  );
+
+  // Non-vacuity: same probe, same source, only the scan limit changed. The swallow arm is reachable
+  // in this fixture — the control proves it by taking it, at a real end of input.
+  let mut roomy_log = Verbose::<CErr>::new();
+  let roomy = drive(
+    &mut roomy_log,
+    ScanLimiter::with_limit(1_000),
+    r1b_parse,
+    "1 2 3",
+  );
+  assert_eq!(
+    limit_diags(&roomy_log),
+    0,
+    "the control differs from the run above in one thing only — with room, nothing trips"
+  );
+  assert_eq!(
+    (&roomy, ordinary_diags(&roomy_log)),
+    (&Ok(vec![1, 2, 3]), 1),
+    "the control pins the fixture absolutely: the collection is reached, the same element fails the \
+     same way at the REAL end of input, and there the driver files that one diagnostic and loops \
+     past it. The boundary is the only difference"
+  );
+  assert_ne!(
+    tight, roomy,
+    "the two runs must disagree — a cell where they agree is measuring the scan limit, not the gate"
+  );
+}
+
+/// One R1b family cell: a boundary the element itself reaches, and its non-vacuity control.
+///
+/// `$tight` is chosen so the trip lands inside the *third* element attempt, after two have been
+/// accepted — the collection is fully under way, and the run is not a degenerate first-element
+/// failure. The scan tally it is tuned against counts re-scans as well as first reads, so the value
+/// is empirical; a change to the cache that shifts it reds the `limit_diags` assertions loudly
+/// rather than quietly turning the cell into a second copy of its control.
+macro_rules! boundary_cell {
+  ($name:ident, $probe:ident, $family:literal, $src:literal, $tight:expr, filed = $filed:expr) => {
+    /// An element failure at the committed boundary re-raises rather than being filed and looped
+    /// past, and the widened-limit control proves the boundary is what did it.
+    #[test]
+    fn $name() {
+      let mut tight_log = Verbose::<CErr>::new();
+      let tight = drive(
+        &mut tight_log,
+        ScanLimiter::with_limit($tight),
+        $probe,
+        $src,
+      );
+      assert_eq!(
+        limit_diags(&tight_log),
+        1,
+        concat!(
+          $family,
+          ": the tight run must really have tripped the scan limit — without that this cell \
+           compares two untripped parses and asserts nothing"
+        )
+      );
+      assert_eq!(
+        (&tight, ordinary_diags(&tight_log)),
+        (&Err(CErr::Ordinary), 0),
+        concat!(
+          $family,
+          ": the element committed its first token, ran onto the poison boundary, and failed \
+           there. That failure is re-raised untouched and nothing is filed. Without \
+           `at_committed_boundary()` in the chokepoint's guard it is filed as an ordinary syntax \
+           error and the loop carries on, and the stop reaches the caller from a later gate as \
+           `CErr::Eot` — a diagnostic log describing input the scanner never read"
+        )
+      );
+
+      // Non-vacuity: same probe, same source, only the scan limit changed.
+      let mut roomy_log = Verbose::<CErr>::new();
+      let roomy = drive(
+        &mut roomy_log,
+        ScanLimiter::with_limit(1_000),
+        $probe,
+        $src,
+      );
+      assert_eq!(
+        limit_diags(&roomy_log),
+        0,
+        concat!(
+          $family,
+          ": the control differs from the run above in one thing only — with room, nothing trips"
+        )
+      );
+      assert_eq!(
+        (&roomy, ordinary_diags(&roomy_log)),
+        (&Ok(vec![23, 43, 63]), $filed),
+        concat!(
+          $family,
+          ": the control pins the fixture absolutely — the collection is reached, every pair is \
+           accepted, and the construct completes"
+        )
+      );
+      assert_ne!(
+        tight,
+        roomy,
+        concat!(
+          $family,
+          ": the two runs must disagree — a cell where they agree is measuring the scan limit, not \
+           the gate"
+        )
+      );
+    }
+  };
+}
+
+fn pair_repeated<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>,
+) -> Result<Vec<i64>, CErr>
+where
+  Ctx: ParseContext<'inp, TLexer<'inp>>,
+  Ctx::Emitter:
+    Emitter<'inp, TLexer<'inp>, Error = CErr> + FullContainerEmitter<'inp, TLexer<'inp>>,
+{
+  pair_element.repeated().collect().parse_input(inp)
+}
+
+fn pair_delim_repeated<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>,
+) -> Result<Vec<i64>, CErr>
+where
+  Ctx: ParseContext<'inp, TLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TLexer<'inp>, Error = CErr>
+    + FullContainerEmitter<'inp, TLexer<'inp>>
+    + UnclosedEmitter<'inp, TLexer<'inp>>,
+{
+  pair_element
+    .repeated()
+    .delimited::<Paren<(), (), ()>>()
+    .collect()
+    .parse_input(inp)
+}
+
+fn pair_separated<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>,
+) -> Result<Vec<i64>, CErr>
+where
+  Ctx: ParseContext<'inp, TLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TLexer<'inp>, Error = CErr>
+    + FullContainerEmitter<'inp, TLexer<'inp>>
+    + SeparatedEmitter<'inp, TLexer<'inp>>
+    + UnexpectedLeadingSeparatorEmitter<'inp, TLexer<'inp>>
+    + UnexpectedTrailingSeparatorEmitter<'inp, TLexer<'inp>>,
+{
+  pair_element.separated_by_comma().collect().parse_input(inp)
+}
+
+fn pair_sep_delim<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>,
+) -> Result<Vec<i64>, CErr>
+where
+  Ctx: ParseContext<'inp, TLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TLexer<'inp>, Error = CErr>
+    + FullContainerEmitter<'inp, TLexer<'inp>>
+    + SeparatedEmitter<'inp, TLexer<'inp>>
+    + UnclosedEmitter<'inp, TLexer<'inp>>
+    + UnexpectedLeadingSeparatorEmitter<'inp, TLexer<'inp>>
+    + UnexpectedTrailingSeparatorEmitter<'inp, TLexer<'inp>>,
+{
+  pair_element
+    .separated_by_comma()
+    .delimited::<Paren<(), (), ()>>()
+    .collect()
+    .parse_input(inp)
+}
+
+// The four try-driven families — the only drivers that swallow, and so the only ones that call the
+// chokepoint. `filed` is the control's ordinary-diagnostic count: the two `repeated` families end
+// their list on a failing element at the real end of input and file it, while the separated
+// families end theirs on an absent separator and file nothing.
+
+boundary_cell!(
+  r1b_repeated_re_raises_a_boundary_element_failure,
+  pair_repeated,
+  "`repeated()`",
+  "11 12 21 22 31 32",
+  5,
+  filed = 1
+);
+
+boundary_cell!(
+  r1b_delimited_repeated_re_raises_a_boundary_element_failure,
+  pair_delim_repeated,
+  "`repeated().delimited()`",
+  "( 11 12 21 22 31 32 )",
+  7,
+  filed = 1
+);
+
+boundary_cell!(
+  r1b_separated_re_raises_a_boundary_element_failure,
+  pair_separated,
+  "`separated_by_comma()`",
+  "11 12 , 21 22 , 31 32",
+  7,
+  filed = 0
+);
+
+boundary_cell!(
+  r1b_delimited_separated_re_raises_a_boundary_element_failure,
+  pair_sep_delim,
+  "`separated_by_comma().delimited()`",
+  "( 11 12 , 21 22 , 31 32 )",
+  8,
+  filed = 0
+);
 
 // ── R2: the separator-slot decision gate surfaces a trip ──────────────────────
 
