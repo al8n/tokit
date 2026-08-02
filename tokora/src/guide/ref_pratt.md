@@ -74,7 +74,55 @@ table is the whole rule:
 |---|---|---|
 | [`PrattInfix::Left`](crate::parser::PrattInfix) | powers `> power` | equal-power operator to the right folds into the *outer* call → `a - b - c` = `(a - b) - c` |
 | [`PrattInfix::Right`](crate::parser::PrattInfix) | powers `>= power` | equal-power operator to the right is consumed by the *inner* call → `a ^ b ^ c` = `a ^ (b ^ c)` |
-| [`PrattInfix::Neither`](crate::parser::PrattInfix) | powers `> power`, then refuses a second operator of the same power | `a == b == c` is rejected |
+| [`PrattInfix::Neither`](crate::parser::PrattInfix) | powers `> power`, then refuses a second **infix** operator of the same power | `a == b == c` fails with [`NonAssociativeChain`](crate::error::NonAssociativeChain) |
+
+**What "refuses" means, exactly.** Both engines raise the *same* error and leave the second
+operator on the input, unconsumed. The offset it carries is the **handback position**, and that is
+one specific, checkable number: catch the error and
+[`InputRef::span().end()`](crate::InputRef::span) is the offset. Nothing before it is still
+available to you; everything from it onward is. That is what makes the error usable: the offset
+names a real boundary in your own input, not a position derived from something near it.
+
+It is **not** the second operator's own start, and you should not read it as a pointer at the
+operator. Anything the handback also returned sits between the two: whitespace your lexer skipped,
+trivia *tokens* a [`ParsePrattRHS`](crate::parser::ParsePrattRHS) would have skipped, the gap
+inside a multi-token spelling (`not in`, `<>`), or a region a non-fatal lexer error was reported
+over. On `1 ; 2 ; 3` the offset is 5 and the repeated `;` is at 6. If you are rendering a caret,
+skip forward from the offset the way your own grammar would; if you are resuming a parse, start
+exactly there. The AST-level driver could not report the operator's head even in principle:
+finding it means running the classifier, and the driver has to decide the repeat before it may.
+And
+[`NonAssociativeChain`](crate::error::NonAssociativeChain) is **returned** — never emitted, so a
+recording emitter cannot turn it back into a truncated success. It is *not* terminal, so a
+grammar that wants the tolerant reading asks for it explicitly, by wrapping the pratt parser in
+[`recover`](crate::ParseInput::recover) / [`skip_then_retry`](crate::ParseInput::skip_then_retry)
+or by declaring the operator [`Left`](crate::parser::PrattInfix::Left). The latch is armed by a
+`Neither` fold, cleared by folding an infix at a different power, and untouched by a postfix
+fold — so `a == b! == c` still trips.
+
+**The offset is where the handback left the input — not where a recovery combinator restarts.** Two
+of the three roll back further before they run: [`recover`](crate::ParseInput::recover) and
+[`skip_then_retry`](crate::ParseInput::skip_then_retry) speculate through
+[`try_attempt`](crate::InputRef::try_attempt), whose failure path restores the pre-attempt
+checkpoint, so what they hand a handler — or begin skipping from — is their own attempt origin. On
+`1 ; 2 ; 3` with the whole pratt parser wrapped, the error carries offset **5** and:
+
+| Path | The position it observes |
+|---|---|
+| catching the `Err` in your own grammar | **5** |
+| [`inplace_recover`](crate::ParseInput::inplace_recover) | **5** — it never backtracks; the [`Cursor`](crate::input::Cursor) it is *also* handed names where the primary parser started, 0 |
+| [`recover`](crate::ParseInput::recover) | **0** |
+| [`skip_then_retry`](crate::ParseInput::skip_then_retry) | **0**, and it scans forward from there — on this input it synchronises on the *first* `;` at 2, behind the repeat, and its first skipped region is `0..1` |
+
+So a `.recover(…)` handler may render a caret at the offset it was handed, but must not assume the
+input is positioned there. If you want a recovery that resumes at the offset, catch the `Err`
+yourself or reach for [`inplace_recover`](crate::ParseInput::inplace_recover).
+
+**Known limitation: the contract is per-operator, not whole-chain fixity resolution.** `a == b < c`
+with `==` non-associative and `<` left-associative at the same power is **rejected**, while
+`a < b == c` is **accepted** as `(a < b) == c`: the latch only exists once a `Neither` operator has
+folded. Haskell and Rust reject both. Tightening tokora to match is a semantic expansion, not a
+fix, and is deliberately out of scope for the table above.
 
 Two further knobs share the same mechanism:
 
@@ -86,6 +134,117 @@ Two further knobs share the same mechanism:
   at the same sub-floor power: `)` is invisible at the top level (below the floor, left for the
   caller) but consumable inside the recursive call a `(` prefix opens (whose floor is that same
   low power). No bracket-matching code — the precedence rule already says it.
+
+---
+
+## Recursion limits
+
+**Both engines bound their own descent, and the bound is on by default.** Each pratt frame enters
+one level of the input's shared
+[`RecursionLimiter`](crate::state::recursion_tracker::RecursionLimiter) through
+[`InputRef::descend`](crate::InputRef::descend), whose [`Descent`](crate::input::Descent) guard
+releases the level on every exit — return, `?`, or unwind, identically in `std` and `no_std`.
+Exceeding the limit fails the parse with
+[`RecursionLimitReached`](crate::error::RecursionLimitReached). Your own recursive combinators
+draw on the same budget through
+[`InputRef::descending`](crate::InputRef::descending) — see
+[Bounding your own recursion](#bounding-your-own-recursion).
+
+- **Default 64**, so an unconfigured parse of a deeply nested expression fails cleanly instead of
+  risking a native stack abort. Set your own with
+  [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter) or
+  [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter);
+  spell "no limit" as
+  [`RecursionLimiter::unlimited()`](crate::state::recursion_tracker::RecursionLimiter::unlimited).
+  The default is sized against the **tightest** of the four measured configurations, on the
+  **2 MiB** stack a spawned thread and a libtest harness thread get: release fits 3871 typed
+  frames and 4247 token frames, debug fits 384 typed and **125 token**. 64 clears that last figure
+  by about 1.9× and every other by 6× or more. It is deliberately conservative, because the two
+  failure modes are not symmetric — too low returns a catchable error telling you to raise it, too
+  high aborts the process with no diagnostic. See
+  [`RecursionLimiter`](crate::state::recursion_tracker::RecursionLimiter#default-limit) for the
+  full table. A grammar that parses deep untrusted input should still pick a limit against the
+  stack it will actually run on rather than inherit this one.
+- **One budget per input, not per parser.** Two pratt parsers composed into one grammar share the
+  depth, because what the limit protects — the native stack — is shared too. The root expression
+  counts as one level.
+- **Terminal — for a grammar error that keeps it.** No amount of further input clears a depth
+  budget, so [`recover`](crate::ParseInput::recover),
+  [`InplaceRecover`](crate::parser::InplaceRecover) and
+  [`skip_then_retry`](crate::ParseInput::skip_then_retry) re-raise a trip untouched rather than
+  synthesizing a node — guaranteed for an error type that stores the value and delegates
+  [`is_terminal`](crate::error::MaybeTerminal::is_terminal). A discarding sink such as `()` erases
+  the stop instead: the converted value reports `is_terminal() == false`, so recovery **spends**
+  the trip rather than re-raising it. What that does not undo is the limiter's own job — by the
+  time any recoverer is handed the converted value, the native stack is already fully unwound and
+  the depth budget already back to what it was before the parse. Measured over a 200-level trip:
+  the recoverer's own frame sits 160 bytes from the pre-parse baseline in a debug build and 0 in a
+  release one, against a descent that reached about 1 MiB and 97 KiB respectively. What a
+  discarding sink does cost is the stop, and the input it would otherwise have preserved: through
+  [`skip_then_retry`](crate::ParseInput::skip_then_retry) the outcome is an `Err` either way, so a
+  caller matching only on the discriminant sees no difference at all. A delegating error type
+  re-raises before any skip and hands the surrounding grammar back offset 0, nothing consumed;
+  `()` instead retries through the sync point and hands back offset 68 — a 32-deep chain and the
+  sync token committed and gone. **Same verdict, different input — the type signature alone does
+  not tell you which one you get.** See
+  [`RecursionLimitReached`](crate::error::RecursionLimitReached#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound)
+  for the measurements in full and a compiling example of an error type that keeps the stop.
+- **Nothing is latched on the input.** A *scanner* limit trip latches the poison boundary, because
+  the lexer's tally is monotone in the input; parse depth is the opposite kind of fact and is
+  fully restored by the unwind that carries the error out. Scanner trips latch; descent trips
+  unwind.
+
+### Bounding your own recursion
+
+A hand-written recursive combinator can draw on the same budget, and the way to do it is
+[`InputRef::descending`](crate::InputRef::descending) — the level is the closure:
+
+```rust,ignore
+fn nested(inp: &mut InputRef<'_, '_, L, Ctx>, remaining: usize) -> Result<usize, MyError> {
+  inp.descending(|inp| match remaining {   // one level, for exactly this body
+    0 => Ok(inp.recursion().depth()),
+    n => nested(inp, n - 1),
+  })
+}
+```
+
+`f`'s error is returned untouched, so `?` inside the body composes with everything the frame
+already returns, and the trip is built as the frame's own error type. Write the *whole* frame body
+as the closure and its `return`s keep their meaning — the closure returns the same `Result` the
+frame does. If the body panics, the level is released on the unwind.
+
+**Why a closure and not just a guard.** [`descend`](crate::InputRef::descend) is also public and
+hands the level back as an ordinary value, and then *where the level ends is your code*. The
+correct spelling is a binding held for the whole frame:
+
+```rust,ignore
+let mut frame = inp.descend()?;   // one level, for as long as `frame` lives
+let inp = &mut *frame;            // the body below is unchanged
+```
+
+and there are at least four spellings that end it one statement too early, of which the compiler
+catches exactly one:
+
+```rust,ignore
+inp.descend()?;                                  // warns: `unused_must_use`
+let _ = inp.descend()?;                          // silent
+if inp.descend().is_ok() { recurse(inp, n - 1) } // silent
+let d = inp.descend()?.recursion().depth();      // silent
+drop(inp.descend()?);                            // silent
+```
+
+All five compile, and all five were measured: against a limit of 8, 200 recursive calls return
+`Ok` with the depth cell reading 0 (or 1 for the chain), and by 4 000–5 000 levels each one aborts
+a 2 MiB thread with `fatal runtime error: stack overflow` — the failure the budget exists to
+delete. [`Descent`](crate::input::Descent) is `#[must_use]`, which is what catches the first
+line, and `tests/ui/descent_dropped_early.rs` pins that it does; the other four are not a closed
+list, because *any* expression that consumes the guard and lets it die before the recursion does
+the same. Early release cannot be made unrepresentable — a frame that finishes recursing and then
+keeps parsing shallower wants exactly it — so what closes the question for a given frame is
+choosing a shape where the level's scope and the body are the same region. `descending` is that
+shape without the discipline; the bound guard is that shape with it. Reach for `descend` when the
+body cannot be a closure — a `return` out of an enclosing function, a `break` aimed at an outer
+loop — and then bind it.
 
 ---
 
@@ -211,6 +370,8 @@ re-encoding each result as a `Digit` token.
 # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Set>> for Error { fn from(_: UnexpectedEnd<H, O, Lang, Set>) -> Self { Error } }
+# impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for Error { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Error } }
+# impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for Error { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Error } }
 # impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # #[derive(Debug, Clone, PartialEq)]
@@ -407,6 +568,8 @@ grammar. The last stanza adds
 # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
 # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
 # impl<H, O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEnd<H, O, Lang, Set>> for Error { fn from(_: UnexpectedEnd<H, O, Lang, Set>) -> Self { Error } }
+# impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for Error { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Error } }
+# impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for Error { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Error } }
 # impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for Error { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Error } }
 # impl tokora::error::MaybeIncomplete for Error {}
 # #[derive(Debug, Clone, PartialEq)]

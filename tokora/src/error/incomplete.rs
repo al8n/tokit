@@ -29,8 +29,12 @@
 /// may *forge* one:
 ///
 /// - **A terminal condition must never surface as an `Incomplete`.** An `Incomplete` promises the
-///   caller that more input may fix this. A **terminal** condition — a resource-limit trip, and the
-///   poison boundary it latches — promises the exact opposite: *no amount of input will fix this*.
+///   caller that more input may fix this. A **terminal** condition promises the exact opposite: *no
+///   amount of input will fix this*. The one that can meet an `Incomplete` is the *scanner* stop —
+///   a scanner resource-limit trip, and the poison boundary it latches; the descent budget's
+///   [`RecursionLimitReached`](crate::error::RecursionLimitReached) is terminal too but never rides
+///   the frontier, so [`MaybeTerminal`](crate::error::MaybeTerminal) rather than this section is
+///   where the full set of terminal carriers lives.
 ///   Where the two meet, on a partial-input frontier, the terminal one **wins**; the limit is probed
 ///   and latched before the frontier holdback is consulted, so a trip fires even when the tripping
 ///   token ends exactly on the buffer end. Reporting it as incomplete would send a caller parsing

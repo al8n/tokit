@@ -41,11 +41,27 @@ use std::format;
 use tokora::SimpleSpan;
 use tokora::error::token::{MissingToken, SeparatedError, SeparatorPosition, UnexpectedToken};
 use tokora::error::{
-  Unclosed, UnexpectedEot,
+  NonAssociativeChain, RecursionLimitReached, Unclosed, UnexpectedEot,
   syntax::{FullContainer, TooFew, TooMany},
 };
 use tokora::punct::Paren;
+use tokora::state::recursion_tracker::{RecursionLimiter, RecursionTracker};
 use tokora::utils::CowStr;
+
+/// The tracker's own report, built the one way a caller can build one: exceed a limiter.
+///
+/// `RecursionLimitReached` stores it whole and renders two of its numbers, so freezing the outer
+/// type's `Display` means going through this.
+fn exceeded(
+  limitation: usize,
+  depth: usize,
+) -> tokora::state::recursion_tracker::RecursionLimitExceeded {
+  let mut limiter = RecursionLimiter::with_limitation(limitation);
+  for _ in 0..depth {
+    limiter.increase();
+  }
+  RecursionTracker::check(&limiter).expect_err("the depth was walked past the limitation")
+}
 
 /// A `Display` shim for the carriers that render through an inherent `display_fmt` rather than
 /// a `Display` impl. Freezing them needs the same wrapper a consumer would write.
@@ -180,6 +196,27 @@ fn display_renders_are_frozen() {
   // The delimiter family, whose `kind` field moved a derived `Debug` this release.
   let unclosed: Unclosed<Paren, SimpleSpan> = Unclosed::paren(SimpleSpan::new(0usize, 1usize));
   assert_eq!(format!("{unclosed}"), "unclosed delimiter '()'");
+
+  // The two pratt carriers. Both are new in this release, and both were unpinned here until a
+  // review found `NonAssociativeChain` rendering `non-associative operator at 5 …` for an offset
+  // that is the **handback** position — on `1 ; 2 ; 3` the operator starts at 6, not 5. `offset()`
+  // was pinned in four suites and every one of them stayed green, which is the argument for a
+  // freeze per *type* rather than per accessor: a carrier nobody pinned is a carrier whose text
+  // can say anything.
+  let chain: NonAssociativeChain = NonAssociativeChain::of(5);
+  assert_eq!(
+    format!("{chain}"),
+    "non-associative operator cannot be chained at its own power; input handed back at 5, at or \
+     before the operator"
+  );
+
+  // The trip's number is the other kind: committed consumption at the frame that could not be
+  // entered, which is where the limit was reached and is not a claim about any construct.
+  let trip: RecursionLimitReached = RecursionLimitReached::of(15, exceeded(8, 9));
+  assert_eq!(
+    format!("{trip}"),
+    "recursion limit reached at 15: depth 9, maximum 8"
+  );
 }
 
 // ── Debug ───────────────────────────────────────────────────────────────────
@@ -223,6 +260,22 @@ fn debug_renders_are_frozen() {
     format!("{:?}", SeparatorPosition::Leading),
     "Leading",
     "the position enum's derived Debug"
+  );
+
+  // The two pratt carriers, both derived. These are the one rendered surface on either type that
+  // could not have mislabelled the offset: a derived `Debug` prints the field's declared name, so
+  // the label is `at`, and `at`'s own doc is what defines it.
+  let chain: NonAssociativeChain = NonAssociativeChain::of(5);
+  assert_eq!(
+    format!("{chain:?}"),
+    "NonAssociativeChain { at: 5, _lang: PhantomData<()> }"
+  );
+
+  let trip: RecursionLimitReached = RecursionLimitReached::of(15, exceeded(8, 9));
+  assert_eq!(
+    format!("{trip:?}"),
+    "RecursionLimitReached { at: 15, exceeded: RecursionLimitExceeded(RecursionLimiter { max: 8, \
+     current: 9 }), _lang: PhantomData<()> }"
   );
 }
 
@@ -275,5 +328,19 @@ fn the_freeze_can_fail() {
     format!("{unnamed}"),
     format!("{named}"),
     "the separator name must reach Display — that is the whole point of the channel"
+  );
+
+  // The offset on the two pratt carriers. Both renders are built from a single field, so a pin
+  // that could not see that field move would be pinning a constant.
+  assert_ne!(
+    format!("{}", NonAssociativeChain::<usize>::of(5)),
+    format!("{}", NonAssociativeChain::<usize>::of(6)),
+    "the handback offset must reach Display — it is the only thing this render carries, and \
+     naming it wrongly is exactly the defect the pin above exists for"
+  );
+  assert_ne!(
+    format!("{}", RecursionLimitReached::<usize>::of(15, exceeded(8, 9))),
+    format!("{}", RecursionLimitReached::<usize>::of(15, exceeded(4, 5))),
+    "the tracker's report must reach Display, and not only the offset in front of it"
   );
 }

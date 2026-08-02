@@ -1,8 +1,8 @@
 //! Parse context trait and implementations.
 //!
-//! A parse context bundles the error emitter and cache configuration
-//! used during parsing. This provides better type inference and a
-//! simpler API compared to configuring emitter and cache separately.
+//! A parse context bundles the error emitter, the cache configuration, and the recursion
+//! budget used during parsing. This provides better type inference and a
+//! simpler API compared to configuring them separately.
 
 use core::marker::PhantomData;
 
@@ -12,6 +12,7 @@ use crate::{
   emitter::{ComposableEmitter, Fatal, FromTokenErrors, PolicyComposableEmitter},
   input::InputContext,
   lexer::SliceOf,
+  state::recursion_tracker::RecursionLimiter,
 };
 
 /// A context that provides emitter and cache configuration for parsing.
@@ -26,7 +27,8 @@ pub trait ParseContext<'inp, L, Lang: ?Sized = ()> {
   where
     L: Lexer<'inp>;
 
-  /// Provides the emitter and cache instances for parsing.
+  /// Provides the emitter and cache instances for parsing, inside the
+  /// [`InputContext`] that also carries the recursion budget the parse descends against.
   fn provide(self) -> InputContext<Self::Emitter, Self::Cache>
   where
     L: Lexer<'inp>;
@@ -80,6 +82,10 @@ where
 {
   emitter: E,
   cache: Option<C::Options>,
+  /// The recursion budget handed to the [`Input`](crate::input::Input) at
+  /// [`provide`](ParseContext::provide) — depth 64 unless
+  /// [`with_recursion_limiter`](Self::with_recursion_limiter) says otherwise.
+  recursion: RecursionLimiter,
   _marker: PhantomData<&'inp L>,
   _lang: PhantomData<Lang>,
 }
@@ -113,9 +119,29 @@ where
     Self {
       emitter,
       cache: opts,
+      recursion: RecursionLimiter::new(),
       _marker: PhantomData,
       _lang: PhantomData,
     }
+  }
+
+  /// Sets the **recursion budget** every parse driven from this context descends against.
+  ///
+  /// Threaded straight to
+  /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
+  /// by [`provide`](ParseContext::provide); see it for what the budget covers. The default is
+  /// [`RecursionLimiter::new`] — depth 64, protection on.
+  ///
+  /// ```rust,ignore
+  /// // Deep but bounded grammar: raise the ceiling for this parse only.
+  /// let ctx = ParserContext::of(Fatal::of())
+  ///   .with_recursion_limiter(RecursionLimiter::with_limitation(4_000));
+  /// let value = Parser::with_context(ctx).apply(expr).parse_str(src)?;
+  /// ```
+  #[inline(always)]
+  pub const fn with_recursion_limiter(mut self, recursion: RecursionLimiter) -> Self {
+    self.recursion = recursion;
+    self
   }
 
   /// Creates a new parser context with the given emitter for a specific language.
@@ -149,6 +175,7 @@ where
       Some(options) => InputContext::new(self.emitter, C::with_options(options)),
       None => InputContext::new(self.emitter, C::new()),
     }
+    .with_recursion_limiter(self.recursion)
   }
 }
 

@@ -183,6 +183,18 @@ impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoRhs<
   }
 }
 
+impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for TestErr {
+  fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self {
+    Self::Unexpected
+  }
+}
+
+impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for TestErr {
+  fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self {
+    Self::Unexpected
+  }
+}
+
 impl<'inp, L, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for TestErr
 where
   L: tokora::Lexer<'inp>,
@@ -506,6 +518,8 @@ fn pratt_rhs(inp: &mut Ir<'_, '_, '_>) -> Result<PrattRHS<u8, u8, u8, (), i64>, 
     Some(tok) => match tok.data().0 {
       op @ b'+' => PrattRHS::Infix(Precedenced::new(PrattInfix::Left(op), PREC_SUM)),
       op @ b'*' => PrattRHS::Infix(Precedenced::new(PrattInfix::Left(op), PREC_PROD)),
+      // Non-associative at the sum level, so `1=2=3` is a declared chain the driver refuses.
+      op @ b'=' => PrattRHS::Infix(Precedenced::new(PrattInfix::Neither(op), PREC_SUM)),
       _ => PrattRHS::End,
     },
     None => PrattRHS::End,
@@ -530,7 +544,7 @@ fn pratt_fold_infix(
     PrattInfix::Left(op) | PrattInfix::Right(op) | PrattInfix::Neither(op) => op,
   };
   Ok(match op {
-    b'+' => left + right,
+    b'+' | b'=' => left + right,
     b'*' => left * right,
     _ => unreachable!(),
   })
@@ -586,6 +600,63 @@ fn pratt_with_cst_kinds_materializes_nested_bin_exprs() {
     inner.children().count(),
     0,
     "the inner expression is tokens only"
+  );
+}
+
+/// **A non-associative repeat records no node for the aborted cycle, and the folds before it
+/// keep theirs.**
+///
+/// `1=2=3` with `=` non-associative: the driver folds `1=2` (one `K_BIN`), then meets the second
+/// `=` at the same power and fails. The failing cycle aborts before `classify`, before the fold
+/// and before `wrap_at`, and the probe's rollback erases the events its deciding read recorded —
+/// so exactly one node exists. The already-folded cycle survives because the repeat is a
+/// *cycle-scoped* exit: the wrapper commits the expression guard rather than rolling it back.
+#[test]
+fn pratt_with_cst_kinds_records_no_node_for_a_non_associative_repeat() {
+  let mut s = sink("1=2=3");
+  let parser = pratt(
+    pratt_lhs,
+    pratt_rhs,
+    pratt_fold_prefix,
+    pratt_fold_infix,
+    pratt_fold_postfix,
+  )
+  .with_cst_kinds(bin_kinds);
+  let res =
+    Parser::with_parser_and_context(parser, (&mut s, DefaultCache::<ByteLexer<'_>>::default()))
+      .parse_str("1=2=3");
+  assert_eq!(
+    res,
+    Err(TestErr::Unexpected),
+    "the repeated `=` fails the parse"
+  );
+
+  // The unconsumed handback (`=3`) is tiled rather than reported as a gap: what this cell is
+  // about is which *nodes* exist, not who covers the tail.
+  let (green, _emitter) = s.finish_partial(K_ROOT);
+  let root = tree(green.expect("driver-held marks balance"));
+  assert_eq!(root.text().to_string(), "1=2=3");
+  let kids: Vec<_> = root.children().collect();
+  assert_eq!(
+    kids.len(),
+    1,
+    "one node for the surviving fold, none for the aborted cycle"
+  );
+  assert_eq!(kids[0].kind(), K_BIN);
+  // *A gap is tiled where it opens*: the handback's uncovered run opens the instant `2` settles,
+  // and `2` settled inside the surviving `K_BIN`, so the run tiles there and the node widens over
+  // it — `1=2=3`, not `1=2`. That is placement, not folding: the fold still covers exactly the
+  // three tokens it folded, which is what the aborted cycle recording no node means here.
+  assert_eq!(kids[0].text().to_string(), "1=2=3");
+  let folded: String = kids[0]
+    .children_with_tokens()
+    .filter_map(|el| el.into_token())
+    .filter(|t| t.kind() != K_GAP)
+    .map(|t| t.text().to_string())
+    .collect();
+  assert_eq!(
+    folded, "1=2",
+    "the surviving fold's own tokens are `1=2`; the trailing gap it houses is not one of them"
   );
 }
 

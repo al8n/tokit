@@ -135,6 +135,18 @@ impl<O, Lang: ?Sized, Set: Clone + 'static> From<tokora::error::UnexpectedEoRhs<
   }
 }
 
+impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for CalcError {
+  fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self {
+    CalcError::UnexpectedEot
+  }
+}
+
+impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for CalcError {
+  fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self {
+    CalcError::UnexpectedEot
+  }
+}
+
 // ── Unified syntax-kind space ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

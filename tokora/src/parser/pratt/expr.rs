@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 
 use crate::{
   Commit, Rollback,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs},
+  error::{NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs},
   span::Span as _,
 };
 
@@ -121,18 +121,26 @@ where
 /// never restored costs only **+39**: the clones are dead and get deleted; it is restorability
 /// across an unwind that costs the rest.
 ///
-/// **Native stack use is still O(d), and the configured recursion limiter is still not
-/// consulted by this driver.** A right-associative chain descends one native frame per
-/// operator exactly as before. Only checkpoint *retention* was narrowed — do not read the
-/// paragraph above as a depth bound.
+/// **Native stack use is still O(d), and the paragraph above is not a depth bound.** A
+/// right-associative chain descends one native frame per operator exactly as before; only
+/// checkpoint *retention* was narrowed. The depth bound is a separate mechanism and lives one
+/// layer down: the driver enters each frame through
+/// [`InputRef::descend`](crate::InputRef::descend), so every live frame holds one level of the
+/// input's shared [recursion budget](crate::state::recursion_tracker::RecursionLimiter) — depth
+/// **64** unless the context says otherwise — and a deeper expression fails with the terminal
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached) rather than exhausting the
+/// native stack. The budget belongs to the *input*, not to this parser, so nested expression
+/// parsers share it.
 ///
 /// **Rollback granularity**, which the narrowing makes two scopes rather than one:
 ///
-/// - **cycle-scoped**, for the five exits where the next operator is simply not this
-///   expression's to fold: [`PrattRHS::End`], a report the floor declines, a non-associative
-///   repeat, and either report-boundary stall (an admitted `Infix`/`Postfix` report that consumed
-///   nothing). The probe guard is still live for all five, so whatever the RHS parser consumed
-///   while deciding is handed back untouched to the surrounding grammar.
+/// - **cycle-scoped**, for the five exits where the deciding read is handed back untouched:
+///   [`PrattRHS::End`], a report the floor declines, either report-boundary stall (an admitted
+///   `Infix`/`Postfix` report that consumed nothing), and the non-associative repeat — which is
+///   the one of the five that ends the *parse* rather than the expression, with the operator left
+///   on the input and [`NonAssociativeChain`](crate::error::NonAssociativeChain) returned. The
+///   probe guard is still live for all five, so whatever the RHS parser consumed while deciding
+///   is handed back untouched to the surrounding grammar.
 /// - **expression-scoped**, for an **unwind** that crosses the driver while the guard is
 ///   undecided — through either channel, any of the three folds, the emitter, the CST seam or
 ///   the recursive operand parse that carries them — and for the foot-of-cycle refusal (a fold or
@@ -162,12 +170,13 @@ where
 /// after that — diagnostics *and* CST events alike, the left-hand side's and every already-folded
 /// cycle's included — is discarded on the two exits that restore the whole expression, and on
 /// those two only.** Those two are the ones listed above: an unwind that crosses the driver while
-/// the guard is undecided, and the foot-of-cycle refusal. Every other exit **commits**: `Ok`, and
-/// every `?`-propagation out of the LHS channel, the RHS channel or a fold, keep every emission
-/// the expression made. The cycle-scoped exits discard only what the RHS parser emitted while
-/// deciding a report this expression does not fold — an [`End`](PrattRHS::End), an operator the
-/// floor declines, a non-associative repeat, or a report that consumed nothing — which is the same
-/// narrow discard any speculative parse makes, and not this contract.
+/// the guard is undecided, and the foot-of-cycle refusal. Every other exit **commits**: `Ok`,
+/// every `?`-propagation out of the LHS channel, the RHS channel or a fold, and the
+/// non-associative repeat, keep every emission the expression made. The cycle-scoped exits
+/// discard only what the RHS parser emitted while deciding a report this expression does not fold
+/// — an [`End`](PrattRHS::End), an operator the floor declines, a non-associative repeat, or a
+/// report that consumed nothing — which is the same narrow discard any speculative parse makes,
+/// and not this contract.
 ///
 /// **Two in every build**, and that is part of the promise rather than a detail of it. The three
 /// report-boundary contract violations — a `Prefix` report that consumed nothing, and its
@@ -703,9 +712,20 @@ where
   // The stalled-report exits below surface the contract violation as the end-of-expression
   // error for the channel that broke it: the LHS one for a prefix report, the RHS one for an
   // infix/postfix report and for the foot of a cycle. Both halves of the pair `FromPrattError`
-  // already bundles.
-  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-    From<UnexpectedEoLhs<L::Offset, Lang>> + From<UnexpectedEoRhs<L::Offset, Lang>>,
+  // bundles — but this driver builds them itself rather than emitting them, so it names the two
+  // `From`s here and does not require `PrattEmitter` at all.
+  //
+  // `NonAssociativeChain` joins them for the same reason and at the same place: the wrapper
+  // builds it, after settling, from an offset the driver captured. `RecursionLimitReached` is the
+  // one conversion `parse` also carries, because the value that needs it is built by
+  // `InputRef::descend` at the frame prologue — before any posture exists to be disturbed — and
+  // not by a deferred effect. All four are *returned* by this driver, never emitted, so all four
+  // are stated as direct `From` obligations here; `FromPrattError` covers only the two an emitter
+  // body converts, and none of these four go through an emitter body.
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEoLhs<L::Offset, Lang>>
+    + From<UnexpectedEoRhs<L::Offset, Lang>>
+    + From<RecursionLimitReached<L::Offset, Lang>>
+    + From<NonAssociativeChain<L::Offset, Lang>>,
 {
   /// # The one guard that spans the recursion
   ///
@@ -898,6 +918,23 @@ where
           }
         })
       }
+      Err(Fault::NonAssoc { at }) => {
+        // COMMIT, exactly as `Stall` does and for the same reason: this is a **cycle-scoped**
+        // posture. The driver already handed the deciding read back through its own probe guard,
+        // which was still live for it, so the narrow restore the surrounding grammar is owed has
+        // happened and the expression's earlier folds, position and diagnostics are all owed to
+        // it as well. Rolling the expression back here would erase the left-hand side and every
+        // folded cycle over an error that describes *one operator* — and would take the pratt
+        // parser's own diagnostics with them.
+        //
+        // Settle first, build second, for `Stall`'s reason: the constructor below runs the
+        // grammar's `From` and clones nothing else, but a `From` is caller code, and a panic in
+        // it raised while this guard were still undecided would roll the whole expression back on
+        // the one path that decided to keep it. `commit` takes `self`, so past this line there is
+        // no guard left for any panic to settle.
+        txn.commit();
+        Err(NonAssociativeChain::of(at).into())
+      }
       Err(Fault::Rewind {
         at,
         committed_before,
@@ -943,7 +980,7 @@ where
 /// same — the offsets travel in the posture and the wrapper performs the effects once it has
 /// settled.
 ///
-/// Three variants, and the asymmetry is the point:
+/// Four variants, and the asymmetry is the point:
 ///
 /// * [`Keep`](Self::Keep) is the ordinary posture and the one every `?` out of caller code
 ///   takes. It reproduces exactly what dropping an undecided `Commit` guard did: the input keeps
@@ -957,6 +994,13 @@ where
 ///   nothing to restore. None of them may assert **or report** in place: the cycle-scoped restore
 ///   they take (or do not need) is the *narrow* one the surrounding grammar is owed, and any panic
 ///   raised before returning would replace it with the expression-scoped one.
+/// * [`NonAssoc`](Self::NonAssoc) is `Stall` with one deferred effect instead of two: no
+///   assertion (this is malformed *input*, not a grammar bug) and a **non-terminal** report,
+///   `NonAssociativeChain`. One construction site, the repeat guard in the `Infix` arm, which —
+///   like the two report-boundary stalls — has already handed the deciding read back through a
+///   still-live probe guard. It settles by committing for exactly their reason: the narrow
+///   restore is the one that was owed, and the expression's earlier folds and diagnostics are
+///   not this operator's to erase.
 /// * [`Rewind`](Self::Rewind) has exactly **one** construction site, the foot-of-cycle refusal.
 ///   It carries the two offsets so the wrapper can assert and report *after* the restore rather
 ///   than before — the ordering discipline the check has always had, moved out with it.
@@ -973,25 +1017,52 @@ where
 ///
 /// So the rule is stated once, on the payload rather than at the sites: **past the branch that
 /// decides a posture, `parse` performs no work that can fail and no work that touches parse
-/// state.** Every field of `Stall` and `Rewind` is a value that already exists at that branch, so
-/// constructing either variant is two or three moves and nothing else. Neither carries an `E`,
-/// because there is no way to build an `E` that is not caller code. [`Keep`](Self::Keep) is the
-/// exception that proves the rule: its `E` was built by caller code *before* control came back to
-/// the driver, so `map_err(Fault::Keep)` moves an error rather than making one.
+/// state.** Every field of `Stall`, `NonAssoc` and `Rewind` is a value that already exists at that
+/// branch, so constructing any of them is one to three moves and nothing else. None carries an
+/// `E`, because there is no way to build an `E` that is not caller code. [`Keep`](Self::Keep) is
+/// the exception that proves the rule: its `E` was built by caller code *before* control came back
+/// to the driver, so `map_err(Fault::Keep)` moves an error rather than making one.
+///
+/// `NonAssoc`'s offset obeys the rule with **no arrangement at all**, which is the strongest form
+/// available: it carries `committed`, the cycle's own progress watermark, and carries it by
+/// **move**. Nothing is read, cloned or peeked to build this posture, so the window the rule is
+/// about does not exist for it — not "is empty", but has no statement in it.
+///
+/// That is also, separately, what makes the value *right*. `committed` is `inp.span().end()` read
+/// at the one program point that `begin_with` snapshots into the probe's checkpoint, and
+/// `rollback_abandoning_points` — the first half of this posture — installs that snapshot back. So
+/// the offset and the position the caller is handed are one value from one read, and
+/// `inp.span().end() == at` holds after the return for every grammar shape.
+///
+/// The rule and the correctness argument used to pull against each other here, and that is worth
+/// recording because it is what a post-restore read would revive: reading the resumption position
+/// *after* the rollback is the most direct spelling of "the offset is where the input is", but it
+/// puts an `L::Offset::clone` — caller code, fallible in both profiles — between the branch that
+/// decided this posture and the return that honours it, which is exactly what the rule forbids.
+/// Taking the restore target instead needs no read, so there is nothing left to rank.
 ///
 /// The rule has the compiler behind it and not only this paragraph. `parse` does **not** carry the
-/// `From<UnexpectedEoLhs<…>> + From<UnexpectedEoRhs<…>>` bounds any more — only
-/// [`ParseInput::parse_input`] does — so `stalled_prefix_report` and `stalled_rhs_report` are not
-/// callable from the driver at all. Re-introducing a pre-settle report construction is not a
-/// subtle edit that reviews clean; it is a build error at the call site, naming the bound the
-/// driver deliberately does not have.
+/// `From<UnexpectedEoLhs<…>> + From<UnexpectedEoRhs<…>> + From<NonAssociativeChain<…>>` bounds —
+/// only [`ParseInput::parse_input`] does — so `stalled_prefix_report`, `stalled_rhs_report` and
+/// the repeat's own report are not callable from the driver at all. Re-introducing a pre-settle
+/// report construction is not a subtle edit that reviews clean; it is a build error at the call
+/// site, naming the bound the driver deliberately does not have.
+///
+/// The one conversion `parse` *does* carry is `From<RecursionLimitReached<…>>`, and it is not an
+/// exception to the rule: the value is built by
+/// [`InputRef::descend`](crate::InputRef::descend) at the **frame prologue**, before this frame
+/// has a CST mark, a watermark, a probe or a posture — so there is no decided posture for a panic
+/// in that conversion to contradict, and the exposure is the one every call into caller code
+/// inside `parse` already has (an unwind through the undecided expression guard, which restores
+/// the expression: the documented exit).
 ///
 /// What the rule does **not** reach is stated with it rather than left to be discovered. The two
-/// report-boundary stalls settle their *probe* — `rollback_abandoning_points` — after the branch
-/// and before the return, because the guard being settled is a local that cannot outlive the
-/// frame. That restore is the first half of the `Stall` posture rather than work done alongside
-/// it, and a panic inside it is the input layer's own restore failing, which is the same exposure
-/// every rollback in the crate has, including the three non-fault probe exits a few lines up.
+/// report-boundary stalls and the non-associative repeat settle their *probe* —
+/// `rollback_abandoning_points` — after the branch and before the return, because the guard being
+/// settled is a local that cannot outlive the frame. That restore is the first half of each
+/// posture rather than work done alongside it, and a panic inside it is the input layer's own
+/// restore failing, which is the same exposure every rollback in the crate has, including the
+/// non-fault probe exits a few lines up.
 ///
 /// # The settle obligation
 ///
@@ -1054,6 +1125,23 @@ enum Fault<E, Off> {
     /// Which channel broke "consume what you report": the wording the assertion takes, and which
     /// of the two report constructors the wrapper calls.
     channel: StalledChannel,
+  },
+  /// Commit, then build and report [`NonAssociativeChain`] — the [`Keep`](Self::Keep) posture
+  /// with one deferred effect and no assertion.
+  ///
+  /// The `Stall` shape minus the second offset and the channel marker: there is nothing to assert
+  /// here, because a repeated non-associative operator is malformed *input* rather than a grammar
+  /// bug, and the report it carries is correspondingly **non-terminal**. Like the two
+  /// report-boundary stalls, its own cycle-scoped restore has already happened through a probe
+  /// guard that was still live for it, so the wrapper's settle is a commit.
+  NonAssoc {
+    /// The **handback position**: the probe's own restore target, moved out of the cycle's
+    /// `committed` watermark rather than measured anywhere near it. After the rollback that
+    /// precedes this posture, `inp.span().end()` is this number. It sits at or before the repeated
+    /// operator's own start — strictly before it whenever anything the caller is also handed back
+    /// sits in between: whitespace the lexer skips, trivia tokens a `ParsePrattRHS` would skip, or
+    /// a region a non-fatal lexer error was reported over.
+    at: Off,
   },
   /// Restore the input to before the expression, then assert `at > committed_before`, then build
   /// and report the RHS terminal error.
@@ -1120,12 +1208,17 @@ enum StalledChannel {
 /// two postures the driver carried before the stalled report was named.
 ///
 /// A mirror rather than a byte count so the pin holds on every target, and a mirror rather than a
-/// comment so a fourth posture cannot widen the recursive return slot in silence: add one that
+/// comment so a new posture cannot widen the recursive return slot in silence: add one that
 /// does not fit and the crate stops compiling, here, by name. A *deliberate* change to
 /// [`Fault::Rewind`] fails it too, which is the point — the budget is then re-stated in the same
 /// commit that spends it, rather than drifting. It has been, once, and exactly that way: when the
 /// terminal report moved out to the wrapper, `Rewind`'s `error: E` went with it and this mirror
 /// dropped the same field in the same commit.
+///
+/// [`Fault::NonAssoc`] was added without touching this mirror, and that is the mechanism working
+/// rather than an omission: one `Off` field is strictly inside [`Stall`](Fault::Stall)'s three,
+/// and the discriminant still rides [`StalledChannel`]'s niche, which has 254 spare patterns and
+/// needs three. The rows below re-check it in four instantiations including the all-align-1 one.
 #[allow(dead_code, reason = "constructed nowhere: it exists to be measured")]
 enum FaultBudget<E, Off> {
   Keep(E),
@@ -1259,17 +1352,40 @@ where
   FoldPostfix: PrattFoldPostfix<'inp, Power, PostOp, L, O, Ctx, Lang>,
   Power: PrattPower,
   Cst: PrattCst<'inp, PreOp, LeftAssoc, RightAssoc, NeitherAssoc, PostOp, L, Ctx, Lang>,
-  // THE TWO BOUNDS THAT ARE NOT HERE. The stalled-report exits below surface the contract
+  // THE ONE BOUND THAT IS HERE, and why it is not the exception the three below are. The frame
+  // prologue enters a level of the input's recursion budget, and `InputRef::descend` builds its
+  // own error, so this function needs the conversion. It runs before this frame has a CST mark, a
+  // watermark, a probe or a decided posture — there is nothing for a panicking conversion to
+  // contradict, only the ordinary undecided-guard exposure every call into caller code inside
+  // this function already has.
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<RecursionLimitReached<L::Offset, Lang>>,
+  // THE THREE BOUNDS THAT ARE NOT HERE. The stalled-report exits below surface the contract
   // violation as the end-of-expression error for the channel that broke it — the LHS one for a
-  // prefix report, the RHS one for an infix/postfix report and for the foot of a cycle — but they
-  // do not *build* it. `From<UnexpectedEoLhs<…>> + From<UnexpectedEoRhs<…>>` is carried by the
-  // wrapper's impl block alone, so `stalled_prefix_report`/`stalled_rhs_report` cannot be called
-  // from this function at all. That is deliberate and it is the mechanical half of `Fault`'s "a
-  // decided posture carries data, never effects": building a report clones an `L::Offset` and runs
-  // a grammar's `From`, both caller code, and every line of this function runs inside an undecided
-  // expression-scoped `Rollback` guard. Restoring these bounds re-opens that window, so it fails
-  // to compile here rather than reviewing clean at the four sites.
+  // prefix report, the RHS one for an infix/postfix report and for the foot of a cycle — and the
+  // repeat guard surfaces `NonAssociativeChain`, but none of them *builds* its error.
+  // `From<UnexpectedEoLhs<…>> + From<UnexpectedEoRhs<…>> + From<NonAssociativeChain<…>>` is
+  // carried by the wrapper's impl block alone, so `stalled_prefix_report`/`stalled_rhs_report`
+  // and `NonAssociativeChain::of(..).into()` cannot be called from this function at all. That is
+  // deliberate and it is the mechanical half of `Fault`'s "a decided posture carries data, never
+  // effects": building a report runs a grammar's `From`, caller code, and every line of this
+  // function runs inside an undecided expression-scoped `Rollback` guard. Restoring these bounds
+  // re-opens that window, so it fails to compile here rather than reviewing clean at the five
+  // sites.
 {
+  // ONE FRAME, ONE LEVEL — ahead of the CST mark, the LHS watermark and every read, because at
+  // this line the frame owns nothing that a trip would have to restore. Every recursion site
+  // below (the prefix operand, the infix right operand) and the `parse_input` root each enter
+  // through their own prologue, so depth equals the native pratt depth it protects with no
+  // per-site bookkeeping — and a future third site inherits the bound for free. The guard
+  // releases the level on every exit of this function, unwind included, in `std` and `no_std`
+  // alike.
+  //
+  // `Fault::Keep` for the trip: nothing of *this* frame is consumed, and the enclosing
+  // expression's progress and emissions are owed to it exactly as they are on any other
+  // `?`-propagation out of caller code.
+  let mut frame = inp.descend().map_err(Fault::Keep)?;
+  let inp = &mut *frame;
+
   // The driver-held mark: minted before anything of this expression is parsed, spent once
   // per fold below. Each recursive operand parse takes its own mark, and same-target wraps
   // materialize inside-out, so nesting follows fold order for free. `None` (and every
@@ -1352,6 +1468,15 @@ where
   // metric is committed consumption (`span().end()`), never the cache-front cursor
   // ([`InputRef::cursor`]) — a lookahead fill moves that across skipped trivia without
   // consuming, reading a zero-width report as false progress.
+  //
+  // IT IS ALSO THE NON-ASSOCIATIVE TRIP'S OFFSET, and that is not a second job bolted on: this
+  // value and the probe's rollback target are the same read of the same field. `begin_with` a few
+  // lines down snapshots `inp.span()` into its checkpoint with **no statement in between** — read
+  // here on the first cycle, at the foot of the loop on every later one — and
+  // `rollback_abandoning_points` installs that snapshot back verbatim. So after any restoring exit
+  // `inp.span().end() == committed`, by identity rather than by agreement, and the offset a repeat
+  // reports is the position the caller is measurably at. See the repeat guard below, and
+  // `NonAssociativeChain`'s own documentation for why the offset is *defined* that way.
   let mut committed = inp.span().end();
   loop {
     // The operator PROBE, and nothing more. This guard used to span the whole cycle — the
@@ -1373,9 +1498,9 @@ where
     // released with the handle, not that it is a bug. An abandoned point pins its base, and that
     // base is younger than this probe's, so the CHECKED rollback would refuse to cross it: a
     // release panic, in every allocator build, raised before anything is restored. That would
-    // turn `End`, a floor decline, a non-associative repeat or a stalled report — all ordinary
-    // handbacks to the surrounding grammar — into a panic, with the deciding read still consumed
-    // for any host that catches, and with the expression guard above then taking back the whole
+    // turn `End`, a floor decline, a non-associative repeat or a stalled report — every exit that
+    // hands the deciding read back — into a panic, with the deciding read still consumed for any
+    // host that catches, and with the expression guard above then taking back the whole
     // expression rather than just this cycle's read. The reconciling verb abandons those points
     // and restores, which is the input layer's specified answer for a point an enclosing rollback
     // reaches below and exactly what the expression guard's own rolling-back drop does for
@@ -1464,7 +1589,17 @@ where
           PrattInfix::Left(_) | PrattInfix::Neither(_) => PrattFloor::Exclusive(lpower.clone()),
         };
 
-        if !min_precedence.admits(lpower) || prev_op_is_neither.as_ref() == Some(lpower) {
+        // THREE TESTS, AND THE ORDER IS THE CONTRACT: floor, then report boundary, then the
+        // chain constraint. Each one's precondition is the previous one's answer.
+        //
+        // Below the floor: this operator belongs to an enclosing expression. Hand the deciding
+        // read back and end this one — an ordinary decline, and not an error.
+        //
+        // FIRST, deliberately: an operator the floor declines is not this expression's to judge,
+        // so it can neither be held to this expression's report boundary — a declined report
+        // legitimately consumes nothing, which is `ParsePrattRHS`'s own exemption — nor trip this
+        // expression's chain constraint.
+        if !min_precedence.admits(lpower) {
           txn.rollback_abandoning_points();
           break;
         }
@@ -1474,6 +1609,17 @@ where
         // zero-width report re-reports it and descends again — without the check, until the
         // stack runs out. Restore here, assert and report in the wrapper: same shape and same
         // reason as the Postfix arm above, where the argument is written out.
+        //
+        // SECOND, and ahead of the repeat guard below rather than behind it, because the two
+        // answer questions of different rank. A report that consumed nothing is a **contract
+        // violation by the RHS classifier** — grammar code that admitted an operator and left the
+        // input where it was — and this exit is the one that says so, terminally. The repeat is a
+        // statement about the *input*: malformed, non-terminal, and spendable by a recoverer.
+        // Ordered the other way, a classifier that re-reports the chain's own operator at zero
+        // width has its bug re-described as the user's bad input and handed to recovery, which
+        // then spends it and re-enters a cycle that will report exactly the same thing — the
+        // non-terminating shape this boundary exists to refuse. A parser that cannot advance
+        // cannot produce a meaningful diagnosis of what it is reading, so the violation wins.
         if after_report <= committed {
           txn.rollback_abandoning_points();
           return Err(Fault::Stall {
@@ -1483,6 +1629,54 @@ where
           });
         }
 
+        // THE NON-ASSOCIATIVE REPEAT. This frame folded a `Neither` operator at exactly this
+        // power, and here is a second infix at the same power — any associativity, since the
+        // constraint is a property of the chain and not of the newcomer's variant. Declining it
+        // instead would destroy the only copy of that fact: the enclosing frame sees an ordinary
+        // admissible operator, folds it by its own rules, and `a = b ; c ; d` parses to
+        // completion as `((a = (b ; c)) ; d)` with nothing left over for any caller to reject.
+        //
+        // THIRD, and by the time it is reached both of the questions above are settled: the
+        // operator is this expression's, and it was really consumed. So this branch judges an
+        // operator that exists, which is what makes its offset meaningful.
+        //
+        // Restore, then return the posture; the wrapper commits and builds the report. The
+        // restore is the `End` arm's own — the same reconciling verb, handing back everything the
+        // classifier consumed while deciding, the operator included — and it is the first half of
+        // this posture rather than work done alongside it. Nothing between the branch and the
+        // return can fail: `committed` is an `L::Offset` this frame already owns, and it is
+        // **moved**, not cloned.
+        //
+        // THE OFFSET IS THE RESTORE TARGET, NOT SOMETHING MEASURED NEAR IT. `committed` is the
+        // value `begin_with` snapshotted into this probe's checkpoint (see its declaration above
+        // the loop) and the value the line above just installed back, so the number this posture
+        // carries and the position the caller is at after the handback are one value from one
+        // read — `inp.span().end() == at`, checkable by the caller and pinned that way in
+        // `pratt_limit.rs`.
+        //
+        // That is what closes the class three review rounds kept re-finding. Every earlier source
+        // was adjacent to the restore target rather than equal to it, and each one drifted on a
+        // different input: the committed span read AFTER the classifier names the classifier's
+        // last token — an operator's tail for a multi-token spelling (`not in`, `is not`, `<>`) —
+        // and a `peek_one` taken BEFORE it names the first token the scanner can produce, which
+        // skips whatever the scanner skips. Trivia the classifier would have skipped, a
+        // multi-token operator's gap and a non-fatal lexer error the peek stepped over and emitted
+        // are all bytes that sit between the restore target and that first token; each in turn was
+        // reported as a position the caller had not been handed. The restore target has no such
+        // window: nothing runs between the read and the checkpoint, and the rollback's whole job is
+        // to put that checkpoint back.
+        //
+        // What this offset does NOT claim is the offending operator's head, and that is not a
+        // shortfall the driver could close. `parse_pratt_rhs` is caller code holding a whole
+        // `InputRef` and decides for itself where its operator begins; learning how much it would
+        // skip means running it, and running it before the repeat is decided is what this scope's
+        // transaction rules forbid. `NonAssociativeChain`'s own documentation states the
+        // definition, and the token engine's park site states why the two coincide there.
+        if prev_op_is_neither.as_ref() == Some(lpower) {
+          txn.rollback_abandoning_points();
+          return Err(Fault::NonAssoc { at: committed });
+        }
+
         let next_neither = if matches!(infix.token_ref(), PrattInfix::Neither(_)) {
           Some((*lpower).clone())
         } else {
@@ -1490,8 +1684,8 @@ where
         };
         // THE NARROWING, and this arm is the one it is for: the recursive operand parse below
         // is where a right-associative chain descends, and holding this checkpoint across it
-        // is what pinned one per frame. The last restoring exit — the non-associative repeat
-        // and the floor decline above, the stall a statement up — is already behind us, so
+        // is what pinned one per frame. The last restoring exit — the floor decline and the
+        // non-associative repeat above, the stall a statement up — is already behind us, so
         // there is no decision left for this guard to serve.
         //
         // Same forfeit as the Postfix arm, and here it spans the recursion too: past this line

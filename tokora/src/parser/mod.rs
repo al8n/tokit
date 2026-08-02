@@ -261,7 +261,8 @@ pub struct WithCache<'inp, L, C> {
 #[repr(transparent)]
 pub struct WithEmitter<E: ?Sized>(E);
 
-/// A parser: a parsing function plus the context (emitter and cache) it runs against.
+/// A parser: a parsing function plus the context (emitter, cache, recursion budget) it runs
+/// against.
 ///
 /// Reach for [`parse`], [`parse_with`] or [`parse_with_state`] when the source is already in
 /// hand — they take it as a value and infer everything from it. `Parser` is the builder for
@@ -273,7 +274,8 @@ pub struct WithEmitter<E: ?Sized>(E);
 /// - `F`: the parsing function
 /// - `L`: the lexer type
 /// - `O`: the output type
-/// - `Ctx`: the [`ParseContext`] — the emitter and cache pair
+/// - `Ctx`: the [`ParseContext`] — the emitter and cache pair, plus the recursion budget its
+///   [`provide`](ParseContext::provide) hands over with them
 ///
 /// The error type is **not** a parameter. It is
 /// [`ErrorOf<'inp, L, Ctx, Lang>`](crate::ErrorOf), a projection of `Ctx`, so carrying it here

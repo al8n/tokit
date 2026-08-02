@@ -89,14 +89,15 @@ Making that refusal hold as the code grows takes a discipline, because "restore"
 *different* for each cell an input owns, and a cell added without deciding which meaning it has is
 precisely the defect that has shipped — twice (a cache-push counter, then the finality bit, each
 added *next to* the backtracking bookkeeping instead of *through* it). So every mutable cell an
-input owns is classified into exactly one of five classes, and the class **is** the restore rule:
+input owns is classified into exactly one of six classes, and the class **is** the restore rule:
 
 | Class | Cells | What restore does |
 |---|---|---|
-| **Ground truth** | lexer state, last-consumed span, token cache, the emitter's log | overwrite from the snapshot (the log by truncation to the saved mark) |
+| **Ground truth** | lexer state, last-consumed span, token cache, the parked front token, the emitter's log | overwrite from the snapshot (the log by truncation to the saved mark; the parked token is cleared, not replayed) |
 | **Lineage memos** | dedup watermark, poison boundary, cache-push count, the live-checkpoint stack, the pin set, the open session points | pure-copy the saved value — with two structural exceptions noted below |
 | **Monotone id sources** | the checkpoint-id counter, the savepoint sequence | **nothing** — rewinding a counter would reissue a live id, and a colliding id is worse than none |
 | **World facts** | the `is_final` finality bit | **nothing** — a rollback rewinds the *parse*, not the *world* (a stream cannot un-end) |
+| **Control-stack facts** | the recursion budget's descent depth | **nothing** — depth is a property of the live frames, not of input progress, so a checkpoint has nothing to save |
 | **Witness / instrumentation** | the input's identity, the `trace` nesting depth | **nothing** — neither affects scanning |
 
 The three lineage memos in the middle row are the checkpoint's `emitted_error_end`,
@@ -117,6 +118,15 @@ rollback can observe it change, so a checkpoint has nothing to save. Restoring i
 mirror bug: a rollback across a legitimate seal would un-end an ended stream, and the parser would
 wait forever for input that will never come. This is the finality law of
 [chapter 9](super::ch09_streaming), seen from the checkpoint's side.
+
+The **control-stack fact** row is that argument arriving from the other direction. A save and the
+restore that returns to it sit at the same frame depth by construction, so the recursion budget
+cannot be observed to change across the pair and there is nothing for a checkpoint to save; while
+an unwind pops frames a state-restore knows nothing about, so the only witness that can be right
+is one that pops *with* the frame. That witness is the [`Descent`](crate::input::Descent) guard's
+destructor, which behaves identically under both drop policies and in `std` and `no_std` alike.
+A depth carried in checkpoint state would instead be double-restored on a `std` unwind and leaked
+on a `no_std` one.
 
 The taxonomy is not a comment that hopes to stay true. A single crate-internal function
 destructures the input **exhaustively** — no `..` — and binds every field. Adding a cell is

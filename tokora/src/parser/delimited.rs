@@ -17,7 +17,8 @@
 //! yields the construct recovered with a synthesized closer); a wrong token where the closer
 //! belongs is the existing unexpected-token (expected-close) diagnostic, **not** `Unclosed`;
 //! and a terminal scanner stop surfaces the committed form's end-of-input error, adding no
-//! `Unclosed`. This family fires only `Unclosed`, never the
+//! `Unclosed` (a fatal emitter's rejection of the trip diagnostic still propagates from the
+//! scan itself, as that emitter's own unmarked value). This family fires only `Unclosed`, never the
 //! [`Unopened`](crate::error::Unopened)/[`Undelimited`](crate::error::Undelimited) half of the
 //! recovery vocabulary.
 //!
@@ -27,7 +28,9 @@
 //! unconsumed), or the input has genuinely ended. A **terminal stop** at the would-be
 //! opener — a resource-limit trip, fresh or already latched — is *neither*: it is not
 //! evidence the opener is absent, so the attempt does not decline; it fails with the same
-//! end-of-input error the committed form raises there.
+//! end-of-input error the committed form raises there (a fatal emitter's rejection of the
+//! trip diagnostic still propagates from the scan itself, as that emitter's own unmarked
+//! value).
 //! The moment the opener is consumed the parse is committed, and every later error
 //! propagates exactly as the committed form's. The attempt boundary is deliberately the
 //! opener alone, never the whole shape — see [`try_delimited`] for why.
@@ -392,10 +395,12 @@ pub type TryDelimitedOf<'inp, D, L, Ctx, Lang, T> = Result<
 /// genuinely ended. A **terminal stop** at the would-be opener — a resource-limit trip,
 /// fresh or already latched — is *neither*: it is not evidence the opener is absent, so
 /// the attempt does not decline. It fails instead with the same end-of-input error the
-/// committed form raises there (the trip's own diagnostic having already reached the
-/// emitter), so an optional construct can never be silently skipped because the lexer was
-/// stopped rather than satisfied. The moment the opener is consumed the parse is
-/// **committed**: `inner`'s errors and the missing/wrong-closer diagnostics behave exactly
+/// committed form raises there (the trip's own diagnostic having already been *accepted*
+/// by the emitter; a fatal emitter's rejection of it propagates from the scan itself
+/// instead, as that emitter's own unmarked value), so an optional construct can never be
+/// silently skipped because the lexer was stopped rather than satisfied. The moment the
+/// opener is consumed the parse is **committed**: `inner`'s errors and the
+/// missing/wrong-closer diagnostics behave exactly
 /// as [`delimited`]'s do — an unterminated group reports the opener as [`Unclosed`] through
 /// the emitter (a fail-fast `Err`, a recovering record), never a silent decline.
 ///
@@ -694,10 +699,12 @@ pub type TryParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// **terminal stop** at the would-be opener — a resource-limit trip, fresh or already
 /// latched — is *neither*: it is not evidence the opener is absent, so the attempt does
 /// not decline. It fails instead with the same end-of-input error the committed form
-/// raises there (the trip's own diagnostic having already reached the emitter), so an
-/// optional construct can never be silently skipped because the lexer was stopped rather
-/// than satisfied. The moment the `(` opener is consumed the parse is **committed**:
-/// `inner`'s errors and the missing/wrong `)` closer's diagnostics behave exactly as
+/// raises there (the trip's own diagnostic having already been *accepted* by the emitter;
+/// a fatal emitter's rejection of it propagates from the scan itself instead, as that
+/// emitter's own unmarked value), so an optional construct can never be silently skipped
+/// because the lexer was stopped rather than satisfied. The moment the `(` opener is
+/// consumed the parse is **committed**: `inner`'s errors and the missing/wrong `)`
+/// closer's diagnostics behave exactly as
 /// [`parens`]' do — an unterminated `( …` reports the opener as [`Unclosed`] through the
 /// emitter, never a silent decline (see [`try_delimited`] for why the attempt boundary is the
 /// opener alone).
@@ -982,10 +989,12 @@ pub type TryBracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// **terminal stop** at the would-be opener — a resource-limit trip, fresh or already
 /// latched — is *neither*: it is not evidence the opener is absent, so the attempt does
 /// not decline. It fails instead with the same end-of-input error the committed form
-/// raises there (the trip's own diagnostic having already reached the emitter), so an
-/// optional construct can never be silently skipped because the lexer was stopped rather
-/// than satisfied. The moment the `{` opener is consumed the parse is **committed**:
-/// `inner`'s errors and the missing/wrong `}` closer's diagnostics behave exactly as
+/// raises there (the trip's own diagnostic having already been *accepted* by the emitter;
+/// a fatal emitter's rejection of it propagates from the scan itself instead, as that
+/// emitter's own unmarked value), so an optional construct can never be silently skipped
+/// because the lexer was stopped rather than satisfied. The moment the `{` opener is
+/// consumed the parse is **committed**: `inner`'s errors and the missing/wrong `}`
+/// closer's diagnostics behave exactly as
 /// [`braces`]' do — an unterminated `{ …` reports the opener as [`Unclosed`] through the
 /// emitter, never a silent decline (see [`try_delimited`] for why the attempt boundary is the
 /// opener alone).
@@ -1271,10 +1280,12 @@ pub type TryBracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// **terminal stop** at the would-be opener — a resource-limit trip, fresh or already
 /// latched — is *neither*: it is not evidence the opener is absent, so the attempt does
 /// not decline. It fails instead with the same end-of-input error the committed form
-/// raises there (the trip's own diagnostic having already reached the emitter), so an
-/// optional construct can never be silently skipped because the lexer was stopped rather
-/// than satisfied. The moment the `[` opener is consumed the parse is **committed**:
-/// `inner`'s errors and the missing/wrong `]` closer's diagnostics behave exactly as
+/// raises there (the trip's own diagnostic having already been *accepted* by the emitter;
+/// a fatal emitter's rejection of it propagates from the scan itself instead, as that
+/// emitter's own unmarked value), so an optional construct can never be silently skipped
+/// because the lexer was stopped rather than satisfied. The moment the `[` opener is
+/// consumed the parse is **committed**: `inner`'s errors and the missing/wrong `]`
+/// closer's diagnostics behave exactly as
 /// [`brackets`]' do — an unterminated `[ …` reports the opener as [`Unclosed`] through the
 /// emitter, never a silent decline (see [`try_delimited`] for why the attempt boundary is the
 /// opener alone).
@@ -1561,10 +1572,12 @@ pub type TryAnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// **terminal stop** at the would-be opener — a resource-limit trip, fresh or already
 /// latched — is *neither*: it is not evidence the opener is absent, so the attempt does
 /// not decline. It fails instead with the same end-of-input error the committed form
-/// raises there (the trip's own diagnostic having already reached the emitter), so an
-/// optional construct can never be silently skipped because the lexer was stopped rather
-/// than satisfied. The moment the `<` opener is consumed the parse is **committed**:
-/// `inner`'s errors and the missing/wrong `>` closer's diagnostics behave exactly as
+/// raises there (the trip's own diagnostic having already been *accepted* by the emitter;
+/// a fatal emitter's rejection of it propagates from the scan itself instead, as that
+/// emitter's own unmarked value), so an optional construct can never be silently skipped
+/// because the lexer was stopped rather than satisfied. The moment the `<` opener is
+/// consumed the parse is **committed**: `inner`'s errors and the missing/wrong `>`
+/// closer's diagnostics behave exactly as
 /// [`angles`]' do — an unterminated `< …` reports the opener as [`Unclosed`] through the
 /// emitter, never a silent decline (see [`try_delimited`] for why the attempt boundary is the
 /// opener alone).

@@ -98,6 +98,8 @@ impl<'inp> From<tokora::error::token::UnexpectedTokenOf<'inp, CalcLexer<'inp>>> 
 impl From<tokora::error::UnexpectedEot> for CalcError { fn from(_: tokora::error::UnexpectedEot) -> Self { Self::UnexpectedEot } }
 impl From<tokora::error::UnexpectedEoLhs> for CalcError { fn from(_: tokora::error::UnexpectedEoLhs) -> Self { Self::UnexpectedEot } }
 impl From<tokora::error::UnexpectedEoRhs> for CalcError { fn from(_: tokora::error::UnexpectedEoRhs) -> Self { Self::UnexpectedEot } }
+impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for CalcError { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Self::UnexpectedEot } }
+impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for CalcError { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Self::UnexpectedEot } }
 
 assert_eq!(Token::Star.kind(), TokenKind::Star);
 assert_eq!(Token::Num(1.5).kind(), TokenKind::Num);
@@ -278,6 +280,8 @@ can even be exercised directly with `E = ()`:
 # impl From<tokora::error::UnexpectedEot> for CalcError { fn from(_: tokora::error::UnexpectedEot) -> Self { Self::UnexpectedEot } }
 # impl From<tokora::error::UnexpectedEoLhs> for CalcError { fn from(_: tokora::error::UnexpectedEoLhs) -> Self { Self::UnexpectedEot } }
 # impl From<tokora::error::UnexpectedEoRhs> for CalcError { fn from(_: tokora::error::UnexpectedEoRhs) -> Self { Self::UnexpectedEot } }
+impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for CalcError { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Self::UnexpectedEot } }
+impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for CalcError { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Self::UnexpectedEot } }
 use tokora::{SimpleSpan, parser::PrattInfix, span::Spanned};
 
 fn fold_prefix<E>(
@@ -401,6 +405,8 @@ assertions below are the maintained evaluator's behavior contract, now executabl
 # impl<'inp, L: tokora::Lexer<'inp>, Lang: ?Sized> tokora::emitter::FromUnclosed<'inp, L, Lang> for CalcError { fn from_unclosed<D>(_: tokora::error::Unclosed<D, L::Span, Lang>) -> Self { Self::UnexpectedEot } }
 # impl From<tokora::error::UnexpectedEoLhs> for CalcError { fn from(_: tokora::error::UnexpectedEoLhs) -> Self { Self::UnexpectedEot } }
 # impl From<tokora::error::UnexpectedEoRhs> for CalcError { fn from(_: tokora::error::UnexpectedEoRhs) -> Self { Self::UnexpectedEot } }
+impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for CalcError { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Self::UnexpectedEot } }
+impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for CalcError { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Self::UnexpectedEot } }
 # use tokora::parser::PrattPower;
 # #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 # struct Power(i32);

@@ -80,14 +80,17 @@ numbered entry below that carries the full reasoning.
 | A panic in caller code during `skip_until` lost the in-flight token and the skipped prefix | the stream is left consistent on the panic path too | Only observable to a host that catches a panic across a parse and keeps using the input. | [9](#changed-breaking) |
 | `Emitter::commit_token`'s observer ran before the committed position was published | runs **after** the position is published, before the replaced pair is dropped | An observer that panics no longer leaves the input naming a token the stream does not hold. | [10](#changed-breaking) |
 | An `Incomplete` scan exit committed the frontier it reached | exits as it entered | A refill driver resumed at a half-consumed position. | [12](#changed-breaking) |
-| A terminal scanner stop (resource limit, poison boundary) reached callers as an ordinary end-of-input **decline** | surfaces as a terminal error; recovery re-raises it instead of retrying | Recovery was retrying against a scanner that had already given up. | [16](#changed-breaking) |
+| A terminal scanner stop (resource limit, poison boundary) reached callers as an ordinary end-of-input **decline** | surfaces as a terminal error **when your emitter accepts the diagnostic**, and recovery re-raises it instead of retrying. A *rejecting* emitter's `Err` is built from your lexer's error value and carries no mark, so recovery can still spend that trip — `MaybeTerminal`'s doc has that path and the arm it needs | Recovery was retrying against a scanner that had already given up. | [16](#changed-breaking) |
 | Collection drivers could stall on zero progress, or mask a terminal stop as a successful end | both exits are errors | | [17](#changed-breaking) |
 | `…, expected expected '}'` in `MissingToken` and `UnexpectedToken` renders | `…, expected '}'` | `Expected`'s own `Display` already supplies the word. **Re-bless frozen renders.** | [37](#changed-breaking) |
 | `UnexpectedEnd`'s derived `Debug` / `Eq` / `Hash` | include a `terminal: bool` field | Shipped four rounds ago and disclosed nowhere until now. **Re-bless frozen renders.** | [16](#changed-breaking) |
 | `Unclosed`'s derived `Debug`; `SeparatedError` / `MissingToken` derived `Debug`, `Eq`, `Hash` | include `kind` / the name channel | See *Debug and rendered output* below for the complete list. | [20](#changed-breaking), [28](#changed-breaking) |
 | A slice-choice id out of range panicked with `index out of bounds` | `choice id {id} out of bounds for {len} branches` | Message text only; reachability is unchanged. | [35](#changed-breaking) |
 | A wrong opening delimiter produced **two** diagnostics naming the same token — once as the wrong opener, once again as a close miss | exactly one | Only under a recording emitter, and only while the first report is still live in the log. Assertions that counted diagnostics on the recovering path change. | [40](#changed-breaking) |
-| Your own `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 10 new inherent items and 6 new defaulted trait methods enter the method space. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
+| A second same-power `PrattInfix::Neither` operator in one chain folded left in silence — `7 = 1 ; 2 ; 3` returned `Ok(((7=(1;2));3))` with the **whole input consumed**, so no end-of-input check had anything to catch | the parse fails with `NonAssociativeChain`, the operator left on the input unconsumed | Handing the operator up re-associates the chain across an enclosing frame that cannot know the constraint. Not terminal: recovery may still spend it. | [41](#changed-breaking) |
+| Recursive descent was unbounded — a deep enough expression exhausted the native stack and **aborted the process** | a shared per-input depth budget, **64** by default, failing the parse with the always-terminal `RecursionLimitReached` | An abort carries no diagnostic and cannot be caught; a refusal names the knob that raises it. `RecursionLimiter::unlimited()` restores 0.7.3's behaviour. | [42](#changed-breaking) |
+| `RecursionLimiter::new` / `Default`, and `Limiter::new` / `Limiter::with_token_tracker`, defaulted to depth **500** | **64** | Reaches code with no pratt parser in it: the same type doubles as a **lexer-side** nesting tracker in a `State` / `Extras` position. | [43](#changed-breaking) |
+| Your own `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 16 new inherent items and 6 new defaulted trait methods enter the method space. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 | — | a new `warning: unused import` naming one of *your* combinator traits | That warning is the **only** breadcrumb the silent case gives you: the steal stranded the import. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 
 #### These fail to compile. Your build will point at every one.
@@ -115,12 +118,14 @@ numbered entry below that carries the full reasoning.
 | `inp.begin_point(); … inp.commit_point();` | `let p = inp.begin_point(); … inp.commit_point(p);` | Nothing tied a settle to the point it settled. Points settle newest-first; four misuse conditions panic by name. | [19](#changed-breaking) |
 | `let (o, e, m) = missing.into_components();` | `let (o, e, m, name) = …` | And `SeparatedError`'s pair becomes a triple. `..` is not available on a tuple pattern, so the compiler points at every site. | [20](#changed-breaking) |
 | An error type without `From<UnexpectedEot<…>>` on the peek / `Expect` / fold / `Repeated` surfaces | add it, or name `ComposableParseContext` | A terminal stop has to be expressible as an error. | [16](#changed-breaking), [17](#changed-breaking) |
-| An error type without `MaybeTerminal` | `impl MaybeTerminal for MyError {}` is enough | Unless the type can carry the flag itself. | [16](#changed-breaking) |
+| An error type without `MaybeTerminal` | `impl MaybeTerminal for MyError {}` is enough | Unless the type can itself carry a terminal stop, and **three** that this crate builds and marks can reach it: an `UnexpectedEnd` whose flag the scanner may raise; a `RecursionLimitReached` — new in this release, required of every pratt-driving error type — terminal for **every** value; and a `SessionRefusal`, terminal for every value too but *not* a `MaybeTerminal` implementor, so its arm is written `true` by hand. Answer for each one you store. An arm left at `false` is spent as a recoverable failure — except the refusal, which `PartialSession::parse` asserts on unconditionally, so that one panics a release build. Those three are what the crate knows it produces, **not** a proof that nothing else is terminal: a scanner trip a *rejecting* emitter refuses propagates as that emitter's `Err`, built from your lexer's error value and unmarked, so the arm holding your lexer error may need answering too — `MaybeTerminal`'s doc has that path and the rule for it. | [16](#changed-breaking), [46](#changed-breaking) |
 | `<[P; N] as ParseChoice>::Id::new(i)` (0-based) | `::new(i + 1)` (1-based) | `RangedUsize`'s bounds are inclusive, so the old id space admitted `N` and every `[P; 0]` id panicked. Tuple choices are unaffected. | [35](#changed-breaking) |
 | `match op { … }` over `fuzz::Op` without a wildcard | add an `IsExhausted` arm | `fuzz` feature only. *Found by the mechanical API diff; disclosed nowhere before.* | [38](#changed-breaking) |
 | `dyn SeparatorHandler` | no longer object-safe | `OBSERVES_SEPARATORS` is an associated const. Nothing in this crate used it. | [5](#changed-breaking) |
+| `let (e, c) = ctx.into_components();` | `let (e, c, recursion) = …` | `InputContext` carries the recursion budget now, and a decomposition that dropped it would hand the input an unconfigured one. `..` is not available on a tuple pattern, so the compiler points at every site. | [45](#changed-breaking) |
+| An error type driving either pratt engine without `From<RecursionLimitReached<…>>` and `From<NonAssociativeChain<…>>` | add both | The engines **return** these two rather than emitting them, so the entry-point bounds ask for them. Two `From` impls; every example in this repo shows the shape. | [46](#changed-breaking) |
 | `parser.labelled("x")` resolving to your own trait's method, that trait in scope | `E0034`, when yours sits at the **same pick** | Six new defaulted names on `ParseInput` / `TryParseInput`. The fix is UFCS; rustc prints the two suggestions. | [source-breaking additions that fail *loudly*](#source-breaking-additions-that-fail-loudly) |
-| `use tokora::*;` beside another glob exporting the same name | `E0659`, or `ambiguous_glob_imports` for a *macro* name on rustc ≥ 1.95 | 13 new glob-reachable names — `select!` against `tokio::select!` is the real one. Measured on three toolchains; the remedy differs by name kind. | [source-breaking additions that fail *loudly*](#source-breaking-additions-that-fail-loudly) |
+| `use tokora::*;` — or a **module** glob such as `use tokora::error::*;` / `use tokora::input::*;` — beside another glob exporting the same name | `E0659`, or `ambiguous_glob_imports` for a *macro* name on rustc ≥ 1.95 | 16 new glob-reachable names — `select!` against `tokio::select!` is the real one. Three of them reach you only through a module glob, never the root: `RecursionLimitReached` and `NonAssociativeChain` via `tokora::error`, `Descent` via `tokora::input`. Measured on three toolchains; the remedy differs by name kind. | [source-breaking additions that fail *loudly*](#source-breaking-additions-that-fail-loudly) |
 
 #### Additive — nothing to do, listed so you know it exists
 
@@ -150,13 +155,14 @@ five independently-numbered lists, so numeric cross-references written before th
 
 ### The new names, and why adding a name is still a break
 
-This release adds 13 glob-reachable root/module names, one new public module
-(`tokora::cst::kinds`, its own glob namespace), 6 trait-declared methods, and 10 inherent
-items — **8 receiver methods and 2 associated functions**, which resolve by different rules
+This release adds 16 glob-reachable root/module names, one new public module
+(`tokora::cst::kinds`, its own glob namespace), 6 trait-declared methods, and 16 inherent
+items — **13 receiver methods and 3 associated functions**, which resolve by different rules
 and are listed separately below for that reason. The items themselves are under
 [Added](#added) with the rest of the release. The lists here are generated from a
-rustdoc-JSON diff of the two sides at the `std,logos,trace,rowan` feature point; none is
-hand-maintained.
+rustdoc-JSON diff of the two sides at the `std,logos,trace,rowan` feature point; the six
+inherent items and three glob names that items [41–46](#changed-breaking) add were taken from
+the branch diff under the same criteria rather than from a separate hand audit.
 
 ### The rule for new names, stated as weakly as it can honestly be stated
 
@@ -190,9 +196,11 @@ below, on one of these receiver types:**
 
 | you wrote it on | which names |
 |---|---|
-| `InputRef` | `try_expect_take`, `try_expect_take_or_stop`, `peek_head_map`, `head_satisfies`, `peek_kind`, `attempt_parse`, `spanning` |
+| `InputRef` | `try_expect_take`, `try_expect_take_or_stop`, `peek_head_map`, `head_satisfies`, `peek_kind`, `attempt_parse`, `spanning`, `descending`, `descend`, `recursion` |
 | `ParseAttempt` | `into_option` |
 | `Ident` | `parse_except`, `try_parse_except` |
+| `InputContext`, `ParserContext` | `with_recursion_limiter` |
+| `RecursionLimiter` | `unlimited` (an associated function — see the resolution rule below) |
 | any parser-shaped type — one implementing `ParseInput` or `TryParseInput` | `labelled`, `traced`, `list_until`, `separated1_by`, `peek_then_head`, `opt` |
 
 That is a finite question you can answer about your own code, and it is the one to answer.
@@ -260,8 +268,10 @@ at all, and a plain struct is not either. It is not "returns `Result`" and not
 **There is deliberately no "full silent surface" list here.** An earlier draft gave one, of
 fourteen names — and it omitted `parse_except` and `try_parse_except`, which are exactly the
 two the paragraph above refuses to call safe. Any such list is the well-formedness problem
-again. **The names to check are the exposure table at the top of this section** — the
-sixteen this release adds; which of them go silent for *your* code depends on your
+again. **The names to check are the exposure table at the top of this section** — it lists every
+method and associated-function name this release adds, against the receiver type each one lands
+on. No count is restated here: a restated count is a second inventory that can fall behind the
+first, and this one twice did. Which of those names go silent for *your* code depends on your
 signatures, which is a thing only your code can answer.
 
 What was measured, on rustc 1.87, 1.95 stable and 1.97-nightly:
@@ -324,13 +334,14 @@ What was measured, on rustc 1.87, 1.95 stable and 1.97-nightly:
   yet. So this entry does not claim these two names are safe, and does not claim they are
   unsafe. It claims the earlier assertion of safety had nothing behind it.
 
-- **Ambiguity between two glob imports**, for the 13 new glob-reachable names — `Pinned`,
+- **Ambiguity between two glob imports**, for the 16 new glob-reachable names — `Pinned`,
   `pinned`, `WhileHead`, `WhileKind`, `while_head`, `while_kind`, `select`, `try_select`,
   `attempt`, `syntax_kinds` via `tokora`; `dispatch_take`, `try_dispatch_take` via
-  `tokora::parser`; and `kinds` via `tokora::cst`. The new module `tokora::cst::kinds` opens
-  a glob namespace of its own. `select!` against `tokio::select!` or `futures::select!` is
-  the real-world instance. **The diagnostic and its remedy differ by what kind of name
-  collides, and — for macros only — by toolchain:**
+  `tokora::parser`; `kinds` via `tokora::cst`; `RecursionLimitReached` and
+  `NonAssociativeChain` via `tokora::error`; and `Descent` via `tokora::input`. The new module
+  `tokora::cst::kinds` opens a glob namespace of its own. `select!` against `tokio::select!` or
+  `futures::select!` is the real-world instance. **The diagnostic and its remedy differ by what
+  kind of name collides, and — for macros only — by toolchain:**
 
   | Colliding name | 1.87 | 1.95 stable | 1.97 nightly |
   |---|---|---|---|
@@ -634,7 +645,22 @@ be reported as *absence* is now reported as *failure*, and the types say so.
     **This is a bound addition on the error type.** `From<UnexpectedEot<L::Offset, Lang>>` is
     now required on the committed peek and `Expect` surfaces, and a downstream error type must
     implement `MaybeTerminal` — an empty `impl MaybeTerminal for MyError {}` is enough unless
-    the type can carry the flag itself. The try-leaf surface gained the `*_or_stop` shape
+    the type can itself carry a terminal stop, in which case it delegates. This release ships a
+    **second** terminal carrier alongside the flag: `RecursionLimitReached` (item 46), which is
+    terminal for every value, so a type that stores both delegates to both. A **third** terminal
+    source ships in this same release and is easy to miss precisely because it is not a
+    `MaybeTerminal` implementor at all: `SessionRefusal`. `PartialSession::parse` converts it
+    through the consumer's `From` and then asserts the result is terminal, unconditionally — so a
+    `Refused(SessionRefusal)` arm left at `false` panics a release build rather than being spent
+    (see *A session's budget guard now holds in release builds*, under Fixed). Those three are the
+    values this crate **builds and marks**, which is not the same as a closed set of terminal
+    conditions: when a *rejecting* emitter refuses a scanner trip's diagnostic, the emitter's `Err`
+    is what propagates, built from your lexer's error value through
+    `From<<L::Token as Token>::Error>` with no marker on it — the same trip, unmarked, reaching you
+    through a different carrier. The trait's own doc carries the three-source table, that path, and
+    the rule for an arm the table does not name, including terminal carriers of your own that this
+    crate cannot enumerate.
+    The try-leaf surface gained the `*_or_stop` shape
     (`InputRef::next_or_stop`, `try_expect_map_or_stop`, `peek_with_emitter_terminal`) so a leaf
     can report the stop without inventing a decline.
 
@@ -1113,6 +1139,217 @@ rather than adding one, and only where that report was a duplicate.
 
     — *(R11, D43(b))*
 
+*The Pratt engines' recursion budget, and the non-associative contract.* Appended after item 40
+rather than renumbered into the Pratt group at 21–26, because every number in this section is a
+live cross-reference. Inside the group the breaks that do not fail to compile come first, as
+everywhere else.
+
+41. **A non-associative operator that repeats is a syntax error, where it used to fold left in
+    silence.** Once a frame has folded a `PrattInfix::Neither` operator at
+    power `p`, a second *infix* operator at exactly `p` — whatever its own associativity — now
+    fails the parse with `NonAssociativeChain`, with the offending operator left on the input
+    unconsumed. Both engines raise it, on the same trigger, with the same restored posture, and it
+    is **returned** rather than emitted, so no recording emitter and no rewind can absorb it.
+
+    Previously the repeat was simply admitted. At the top level that merely left a tail behind —
+    `1 ; 2 ; 3` folded to `(1;2)` — but nested, it had no caller-side remedy at all:
+    `7 = 1 ; 2 ; 3` returned `Ok(((7=(1;2));3))` with the **whole input consumed**, so nothing was
+    left over for an end-of-input check to catch. That shape is the reason this is an error and not
+    an ending. Non-associativity is a property of a *chain*, and the only frame that knows the
+    chain exists is the one holding the latch; hand the operator up instead and the recipient is
+    the same engine one frame up, which sees an ordinary admissible operator, folds it by its own
+    rules, and re-associates the chain across itself. It is structurally incapable of knowing the
+    constraint.
+
+    **The contract is per-operator, not whole-chain fixity resolution.** The latch is cleared by
+    folding an infix at a different power and is untouched by a postfix fold, so `a == b < c` —
+    this variant, then `Left` at the same power — is rejected while `a < b == c` is accepted.
+
+    **Not terminal**, deliberately: this is malformed input, the classic recovery target, so
+    `Recover`, `InplaceRecover` and `skip_then_retry` may spend it. A grammar that wants the old
+    fold-once-then-stop behaviour asks for it in grammar code — wrap the pratt parser in a recovery
+    combinator, or reclassify the operator `Left` — because tolerance is a caller policy and not a
+    silent engine default. Where a repeat coincides with a zero-consumption report, item 25's stall
+    outranks it: the report boundary is checked first, since a driver must not diagnose a chain
+    built out of a contract violation.
+
+    — *(R12; the two exits ranked in R13)*
+
+42. **Recursive descent is bounded, and the bound is on by default.** Both Pratt engines enter one
+    level per live frame through the new `InputRef::descend`, whose `Descent` guard releases the
+    level on **every** exit of the frame — return, `?`, or unwind, identically in `std` and
+    `no_std` — and exceeding the budget fails the parse with the always-terminal
+    `RecursionLimitReached`. It too is returned rather than emitted, so a tripped budget cannot
+    reach a caller as a truncated-but-successful parse.
+
+    Previously the descent was bounded only by the token count, which is not a bound a *machine*
+    has. The red-before probe for this item did not fail an assertion; it **aborted the test
+    process** with `fatal runtime error: stack overflow`.
+
+    The budget is per *input session* rather than per parser — two expression parsers composed into
+    one grammar draw on one depth, which is what makes it a bound on native stack use rather than
+    on any single production — and it is configured with the new
+    `InputContext::with_recursion_limiter` / `ParserContext::with_recursion_limiter`.
+    **`RecursionLimiter::unlimited()` restores 0.7.3's behaviour exactly**, at 0.7.3's risk.
+
+    **The default is 64, and it is sized against the tightest measured configuration rather than
+    the most generous one.** Bisected on this tree, one pratt frame per level, on an explicitly
+    sized **2 MiB** thread — what `std::thread::spawn` and every libtest harness thread gets, and
+    so the smallest stack a parse is likely to run on:
+
+    | build | typed driver | token driver |
+    |---|---|---|
+    | release (`opt-level = 3`) | 3871 frames | 4247 frames |
+    | debug (`opt-level = 0`) | 384 frames | **125 frames** |
+
+    The binding cell is the debug token driver at 125, not the release figures above it, and the
+    asymmetry is the whole argument: a limit that is too low returns a clean, catchable error
+    naming the knob that raises it, while one that is too high aborts the process with no
+    diagnostic and takes the suite with it. Only one of those is recoverable, so the default is set
+    where every measured configuration survives. 64 is the largest power of two leaving ~1.9×
+    margin under 125, and it clears the other three cells by 6×, 60× and 66×. A grammar parsing
+    untrusted, deeply nested input should still set its own limit against the stack the parse will
+    actually run on, rather than inherit this one.
+
+    **Your own recursive combinators draw on the same budget, and `InputRef::descending` is how.**
+    It takes the frame's body as a closure and owns the level for exactly that body:
+
+    ```rust,ignore
+    inp.descending(|inp| match remaining {
+      0 => Ok(inp.recursion().depth()),
+      n => nested(inp, n - 1),
+    })
+    ```
+
+    The closure's error is returned untouched, so `?` inside composes with whatever the frame
+    already returns and the trip is built as the frame's own error type; a body written entirely
+    as the closure keeps its `return`s; a panic releases the level on the unwind. Nothing the
+    closure can write releases it earlier — it is handed the input, never the guard, and
+    `InputRef::recursion` is read-only.
+
+    **`InputRef::descend` is also public, as the low-level escape hatch, and it is easy to write
+    wrong.** It hands the level back as an ordinary value, so *where the level ends is caller
+    code*. `Descent` is `#[must_use]`, which catches **one** spelling of getting that wrong and
+    not the others. Measured on this tree at limitation 8, over 200 recursive calls, with the
+    abort depth bisected one process per depth on a 2 MiB thread:
+
+    | frame body | diagnostic | at 200 calls | aborts by |
+    |---|---|---|---|
+    | `inp.descending(\|inp\| …)` | — | `Err(RecursionLimitReached { depth: 9, limitation: 8 })` | never |
+    | `let mut frame = inp.descend()?; let inp = &mut *frame;` | — | same | never |
+    | `inp.descend()?;` | `unused_must_use` | `Ok`, depth 0 | 5 000 |
+    | `let _ = inp.descend()?;` | none | `Ok`, depth 0 | 5 000 |
+    | `if inp.descend().is_ok() { … }` | none | `Ok`, depth 0 | 5 000 |
+    | `let d = inp.descend()?.recursion().depth();` | none | `Ok`, depth 1 | 4 000 |
+    | `drop(inp.descend()?);` | none | `Ok`, depth 0 | 5 000 |
+
+    An abort is `fatal runtime error: stack overflow` — the failure this whole item exists to
+    delete, reinstated by a line that compiles. The abort depths are a demonstration rather than
+    a constant: they are one debug build's frame size, probed at 1 000-level steps, and one row
+    moved a whole step between two builds of the same source. The four silent rows are **not a
+    closed list**:
+    any expression that consumes the guard and lets it die before the recursion behaves the same
+    way, and rustc's own `help:` on the caught row suggests the second one. Early release cannot
+    be forbidden, because it is sometimes what a frame wants, so what closes the question is the
+    *shape*: `descending` makes the level's scope and the body the same region by construction,
+    the bound guard makes them the same region by discipline. What the type system guarantees on
+    its own — for both spellings — is *balance* (every level entered is left exactly once, by the
+    destructor, unwind included) and that a **live** guard is the only route to the input.
+
+    Rails: `tests/ui/descent_dropped_early.rs` pins the attribute on the MSRV toolchain,
+    `src/input/input_ref/descent_tests.rs` pins every row of the table above at runtime on every
+    toolchain, and its `#[expect(unused_must_use, …)]` turns a deleted attribute into a hard error
+    under the crate's `deny(warnings)`.
+
+    — *(R12; the default resized against measurement in R13; the guard marked `#[must_use]` in
+    R22; `descending` added and the other three early-release shapes measured in R23)*
+
+43. **`RecursionLimiter`'s default depth drops from 500 to 64 in every constructor that supplies
+    one** — `RecursionLimiter::new` and its `Default`, and `Limiter::new` /
+    `Limiter::with_token_tracker`, which build one for you. This is the row that reaches code with
+    no pratt parser in it: the same type doubles as a **lexer-side** nesting tracker in a `State` /
+    `Extras` position, where it counts lexing nesting, costs no native stack, and where 500 was
+    never sized against anything. A lexer that inherited the default and nests deeper than 64 now
+    trips where it did not.
+
+    Spell the limit you meant with `RecursionLimiter::with_limitation`. The one `500` left standing
+    in the docs is the lexer-extras example in `Limiter`'s own documentation, and it is left
+    deliberately: there the number is the example's explicit choice rather than a default, and the
+    two subjects are worth keeping apart.
+
+    — *(R13)*
+
+44. **`NonAssociativeChain`'s offset is *defined* as the handback position** — the driver's own
+    restore target — and not a position measured anywhere near the offending operator. `1 ; 2 ; 3`
+    reports **5**, where a formulation written earlier in this campaign reported 6.
+
+    The definition is checkable rather than descriptive, and that is the point of it: catch the
+    error and **`InputRef::span().end()` *is* the offset**. Everything from that byte onward is
+    still available to the caller — including whatever the deciding read had consumed before it was
+    handed back.
+
+    That identity is about the **handback**, and it is not a statement about where a recovery
+    combinator restarts. `Recover` and `skip_then_retry` speculate through `try_attempt`, whose
+    failure path restores the pre-attempt checkpoint before the handler runs or the skip loop
+    starts, so both resume at their own attempt origin instead; `InplaceRecover` never backtracks
+    and is the one that stands where the offset names. Measured on `1 ; 2 ; 3` with the whole pratt
+    parser wrapped, where the error carries 5: catching the `Err` yourself reads 5,
+    `inplace_recover` reads 5, `recover` reads **0**, and `skip_then_retry` scans forward from
+    **0** — its first sync candidate is the `1` at 0 and its first skipped region is `0..1`.
+
+    Reading it as a pointer at the operator is wrong in four ordinary shapes, each measured:
+    whitespace the lexer skips (`1 ; 2 ; 3` — offset 5, the repeat at 6); whitespace surfaced as
+    trivia *tokens* and skipped by the classifier (offset 5, the repeat at 8); an operator spelled
+    with two tokens (offset 7, head at 8, tail at 10); and a non-fatal lexer error, reported and
+    stepped over (offset 5, the repeat at 8). Naming the operator would describe a position no
+    caller was ever left at, and would invite a recoverer resuming there to discard the region in
+    between — in the last shape, the lexer error's own bytes together with the diagnostic that was
+    rewound with the aborted probe and is due to be re-emitted. The operator's head is not
+    obtainable in general anyway: `parse_pratt_rhs` holds a whole `InputRef` and decides for itself
+    where its operator begins, so the only way to learn what it would skip is to run it — and the
+    repeat has to be decided before it may.
+
+    **`Display` names it the same way**, because the text is what a caller who never calls
+    `offset()` still has: `non-associative operator cannot be chained at its own power; input
+    handed back at 5, at or before the operator`. It does not report the operator's position,
+    for the reason above — the engine does not have it. See *Debug and rendered output*.
+
+    — *(R14 defined it, R15 made the number the restore target)*
+
+45. **`InputContext::into_components` returns `(E, C, RecursionLimiter)`** where it returned
+    `(E, C)`. The context carries the recursion budget now, and a decomposition that dropped it
+    would hand the input an unconfigured one. `InputContext::new`'s arity is unchanged — the budget
+    defaults, and `with_recursion_limiter` sets it — so only the destructuring moves, and `..` is
+    not available on a tuple pattern, so the compiler points at every site.
+
+    — *(R12)*
+
+46. **Both Pratt engines require two more conversions from a grammar's error type.** The token
+    engine's `pratt`, `pratt_with_min_precedence` and `pratt_in`, and the typed driver's
+    `ParseInput::parse_input` impl block, gain `From<RecursionLimitReached<L::Offset, Lang>>` and
+    `From<NonAssociativeChain<L::Offset, Lang>>`. Two `From` impls on your error type; every
+    example and bench in this repo carries the shape.
+
+    **`From`, and not a `FromPrattError` method, because these two never pass through an
+    emitter.** Neither has an `emit_*` counterpart on `PrattEmitter`, by design — a recording
+    emitter must not be able to swallow a resource trip or a rejected chain — so the engines
+    *return* them, and a returned error becomes the caller's type through `From`. The trip's
+    value is built and converted at `InputRef::descending` / `InputRef::descend`, the recursion
+    entry every recursive-descent grammar shares whether or not it has a pratt parser in it; the
+    repeat is built by each engine at its own exit. Neither point has an emitter in scope, so a
+    conversion method on the emitter-side bundle would be one nothing could ever call.
+    `FromPrattError`
+    keeps exactly the two conversions a `PrattEmitter` body performs, and **no hand-written
+    `FromPrattError` impl has to change.**
+
+    The choice this obligation carries is unchanged, only its spelling: an impl that *stores* the
+    trip keeps its always-terminal marker readable through `MaybeTerminal`; one that discards it
+    opts the error type out of terminal re-raise (see *Known limitation — a discarding error
+    sink…* below). Both are legitimate, and a `From` impl is the author's own code either way, so
+    neither is picked for you.
+
+    — *(R12, R21)*
+
 ### Debug and rendered output
 
 Every `Debug` / `Display` movement in this release, in one place, because a consumer who
@@ -1138,6 +1375,7 @@ what an earlier inventory of this release assumed.
 | `PartialSession`, `Budget`, `SessionRefusal` | new types | `PartialSession` hand-written (pinned field list); the other two derived | R8, #123 |
 | `MissingToken`, `UnexpectedToken` | `Display` drops the doubled word: `…, expected expected '}'` becomes `…, expected '}'` | rendering change, both carriers | R10 |
 | `SeparatedError` | gained a `Display` it never had | new rendered surface | R10 |
+| `RecursionLimitReached`, `NonAssociativeChain` | new types, so nothing frozen moves; listed because both are carriers a consumer will render — `Debug` derived, `Display` from `thiserror`. Each render names its offset the way the type's accessor does, not as a construct's location: `recursion limit reached at 15: depth 9, maximum 8` (committed consumption at the frame that could not be entered) and `non-associative operator cannot be chained at its own power; input handed back at 5, at or before the operator` (the handback of item 44 — on `1 ; 2 ; 3` the repeated operator starts at 6, and the render deliberately does not claim to name it). Both strings, and both derived `Debug`s, are pinned in `tests/render_freeze.rs` | derived | R12 |
 
 **New panic messages.** A consumer that captures panic payloads — a test harness, a supervisor
 loop, a `catch_unwind` host — sees new observable strings even though no `Debug` or `Display`
@@ -1167,7 +1405,12 @@ item that carries them, and listed here only so scanning this section does not m
 `error::MaybeTerminal` (item 16), `ValueKeyedEmitter` (item 18), `SessionPointId` (item 19),
 `MissingToken`/`SeparatedError`'s `with_name` and `name` (item 20), `PrattFloor` (item 23),
 `DelimiterKind` and `Delimiter::KIND` (item 28), `SeparatorHandler::OBSERVES_SEPARATORS`
-(item 5), `CstProfile` and `KindValidator` (item 13).
+(item 5), `CstProfile` and `KindValidator` (item 13), `error::NonAssociativeChain` (item 41),
+`error::RecursionLimitReached` with `input::Descent`, `InputRef::descending`,
+`InputRef::descend`, `InputRef::recursion`, `RecursionLimiter::unlimited`,
+`InputContext::with_recursion_limiter` and `ParserContext::with_recursion_limiter` (item 42). **`FromPrattError` is not on this list**:
+item 46's two new obligations are `From` impls on your own error type, and the trait gains no
+member, so a hand-written `FromPrattError` impl compiles unchanged.
 
 - **The logos adapter works on 0.14 and 0.15, and is tested there.** `logos_0_14` /
   `logos_0_15` / `logos_0_16` were already separate features, but `tokora::logos` (and its
@@ -1369,7 +1612,10 @@ item that carries them, and listed here only so scanning this section does not m
   `head_satisfies` and `peek_kind`. `peek_one` answers `Ok(None)` for genuine end of input
   **and** for a resource-limit trip or a latched poison boundary, so a production that
   decides on the answer reads a halt as a grammar fact. The new family reserves `Ok(None)`
-  for the real end of input and raises the terminal end-of-input error otherwise.
+  for the real end of input and raises the terminal end-of-input error otherwise — marked
+  terminal **when your emitter accepts the trip's diagnostic**. A *rejecting* emitter's `Err`
+  is built from your lexer's error value and propagates from the fill unmarked, so recovery
+  can still spend that trip — `MaybeTerminal`'s doc has that path and the arm it needs.
   `peek_one` is unchanged and is not deprecated.
   — *(W-api-B)*
 
@@ -1980,6 +2226,65 @@ parse-to-emitter contract, and it flips when `finish` starts refusing these span
 `duplicate_zero_width_tokens_are_not_yet_detected`
 
 — *(R8, #123)*
+
+### Known limitation — a discarding error sink erases the recursion trip's stop, not its bound
+
+Item 42's `RecursionLimitReached` is always terminal, and the recovery combinators decide whether
+to re-raise by asking the **converted** error — the type the grammar actually names — for
+`MaybeTerminal::is_terminal()`. So a grammar whose `From` for it discards the value, `()` included,
+gets `false` back and **recovery spends the trip** instead of re-raising it. That is the
+pre-existing `MaybeTerminal` opt-out reaching a *resource guard* rather than a malformed-input
+report. The conversion was deliberately not removed and the contract deliberately not redesigned:
+16 error types under `error::` carry a `From<…> for ()`, 14 of them before this release, so these
+are two more instances of a crate-wide design rather than a new one.
+
+**What is not lost — measured, not reasoned:**
+
+- **The native stack is already back.** `Descent`'s destructor releases every level on the unwind
+  that carries the error out, so by the time any recoverer sees the converted value, every frame
+  the budget was protecting has returned. On a 200-level trip the recoverer's frame sits **160
+  bytes** from the pre-parse baseline in a debug build and **0** in a release one, against descents
+  that reached ~1 MiB and ~97 KiB. The guard's stack-safety purpose survives the sink intact.
+- **The depth budget is unchanged.** The cell reads back to its pre-parse value, so a recoverer
+  that spends a trip and descends again starts from the same depth and meets the same limit.
+  Re-tripping is bounded, not compounding.
+- **The retries terminate**, on their own zero-progress guards rather than on terminality:
+  `skip_then_retry` consumes its sync token per continuing cycle and runs out of sync points, and a
+  repetition over a recovering element stalls on the first element that commits nothing.
+
+**What is lost is the stop, and the input it costs to discover there was one.** Measured on one
+ladder, one limit and one 32-deep input under `skip_then_retry`, the verdict is `Err` either way —
+a caller matching on the discriminant sees no difference at all. The difference is where the input
+is left:
+
+| the grammar's error type | result | input handed back to the surrounding grammar |
+|---|---|---|
+| delegating (stores the value) | `Err` | offset **0** — re-raised before any skip, nothing consumed |
+| `()` (discards it) | `Err` | offset **68** — the 32-deep chain *and* the sync token consumed and committed |
+
+Skipping is how recovery buys progress over a *malformed* construct, and a depth budget is not one:
+no quantity of skipped input makes the next descent shallower, so those cycles spend input for a
+verdict they cannot change.
+
+**If your grammar needs the stop, give the error type a variant that stores this one and delegate
+`is_terminal`** — the type's own documentation carries that as a compiling example. The `()` sink
+stays available and means exactly what it says: that no error of any kind carries information,
+resource trips included.
+
+**`NonAssociativeChain` is the control here, and it is inert.** It is `is_terminal() == false` to
+begin with, so recovery spends it through a delegating type and through `()` alike and the sink
+decides nothing; what a sink costs there is only the offset, which is the ordinary price of
+discarding a payload and not a change of contract. The two conversions items 41 and 42 add are
+therefore not one hazard — only the resource guard's is load-bearing.
+
+**And the class is older than this release.** `UnexpectedEnd` — the type behind `UnexpectedEot`,
+`UnexpectedEoLhs` and `UnexpectedEoRhs`, whose terminal values are real driver output — is the only
+other type under `error::` that overrides `is_terminal`, it carries a `From<…> for ()` of its own,
+and both have shipped since before this campaign. Whether a discarding sink should be able to erase
+terminality for a resource guard as opposed to a grammar error is a question about `MaybeTerminal`,
+not about these two types, and it is recorded here rather than answered.
+
+— *(R16)*
 
 ### Notes
 

@@ -13,7 +13,10 @@ mod common;
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext, SimpleSpan,
   emitter::{PrattEmitter, Verbose},
-  error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot, token::UnexpectedTokenOf},
+  error::{
+    NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
+    token::UnexpectedTokenOf,
+  },
   parser::{PrattInfix, PrattLHS, PrattRHS, Precedenced, pratt},
   span::Spanned,
   token::PrattToken,
@@ -46,6 +49,16 @@ impl From<UnexpectedEoLhs> for PrattError {
 
 impl From<UnexpectedEoRhs> for PrattError {
   fn from(_: UnexpectedEoRhs) -> Self {
+    PrattError
+  }
+}
+impl From<RecursionLimitReached> for PrattError {
+  fn from(_: RecursionLimitReached) -> Self {
+    PrattError
+  }
+}
+impl From<NonAssociativeChain> for PrattError {
+  fn from(_: NonAssociativeChain) -> Self {
     PrattError
   }
 }

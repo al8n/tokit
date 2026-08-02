@@ -15,15 +15,28 @@ fn dummy_context() -> InputContext<Fatal<()>, DefaultCache<'static, DummyLexer>>
 #[test]
 fn input_context_new_and_into_components() {
   let ctx = InputContext::new("emitter", 42u32);
-  let (e, c) = ctx.into_components();
+  let (e, c, r) = ctx.into_components();
   assert_eq!(e, "emitter");
   assert_eq!(c, 42u32);
+  // `new` carries the default budget: protection on, at the type's own conservative depth.
+  assert_eq!(r, crate::state::recursion_tracker::RecursionLimiter::new());
+  assert_eq!(r.limitation(), 64);
+  assert_eq!(r.depth(), 0);
+}
+
+#[test]
+fn input_context_with_recursion_limiter_replaces_the_default() {
+  let ctx = InputContext::new("emitter", 42u32)
+    .with_recursion_limiter(crate::state::recursion_tracker::RecursionLimiter::unlimited());
+  let (_, _, r) = ctx.into_components();
+  assert_eq!(r.limitation(), usize::MAX);
+  assert_eq!(r.depth(), 0);
 }
 
 #[test]
 fn input_context_different_types() {
   let ctx = InputContext::new(std::vec![1, 2, 3], Some("cache"));
-  let (e, c) = ctx.into_components();
+  let (e, c, _) = ctx.into_components();
   assert_eq!(e, std::vec![1, 2, 3]);
   assert_eq!(c, Some("cache"));
 }

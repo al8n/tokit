@@ -46,7 +46,7 @@ use tokora::{
     Verbose,
   },
   error::{
-    Unclosed, UnexpectedEoLhs, UnexpectedEoRhs,
+    NonAssociativeChain, RecursionLimitReached, Unclosed, UnexpectedEoLhs, UnexpectedEoRhs,
     syntax::{FullContainer, MissingSyntax, TooFew, TooMany},
     token::{MissingToken, SeparatedError, SeparatorPosition, UnexpectedToken},
   },
@@ -83,6 +83,11 @@ enum ConfError {
   Unclosed,
   EndOfLhs,
   EndOfRhs,
+  /// The pratt frame budget tripped — returned by the engine, never emitted, so this variant
+  /// exists only so the error type satisfies the pratt **entry points**, not the emitter bundle.
+  RecursionLimit,
+  /// A second same-power non-associative operator — likewise returned, never emitted.
+  NonAssociativeChain,
 }
 
 impl From<()> for ConfError {
@@ -159,6 +164,18 @@ impl<O, Lang: ?Sized> From<UnexpectedEoLhs<O, Lang>> for ConfError {
 impl<O, Lang: ?Sized> From<UnexpectedEoRhs<O, Lang>> for ConfError {
   fn from(_: UnexpectedEoRhs<O, Lang>) -> Self {
     ConfError::EndOfRhs
+  }
+}
+
+impl<O, Lang: ?Sized> From<RecursionLimitReached<O, Lang>> for ConfError {
+  fn from(_: RecursionLimitReached<O, Lang>) -> Self {
+    ConfError::RecursionLimit
+  }
+}
+
+impl<O, Lang: ?Sized> From<NonAssociativeChain<O, Lang>> for ConfError {
+  fn from(_: NonAssociativeChain<O, Lang>) -> Self {
+    ConfError::NonAssociativeChain
   }
 }
 

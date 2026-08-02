@@ -139,7 +139,7 @@ fn every_ui_case_file_is_registered() {
   );
 }
 
-/// Cases that pin a **bound** rather than a curated message.
+/// Cases that pin a **bound**, or a lint, rather than a curated message.
 ///
 /// No `on_unimplemented` attribute is involved, so these are compiled by the trybuild half
 /// above and are deliberately **not** in [`CASES`] — the curated-headline check below asks a
@@ -155,10 +155,20 @@ fn every_ui_case_file_is_registered() {
 /// the default-policy surface and does NOT reach `TooManyEmitter`. Its teeth are inverted from
 /// the usual shape — if someone widens bundle-1, the snippet starts compiling and the case
 /// FAILS, which is precisely when the two-tier documentation must be revisited.
+/// `descent_dropped_early` pins an **attribute**, not a bound: `Descent` is `#[must_use]`, and
+/// that lint is the only thing standing between a downstream recursive combinator and
+/// `inp.descend()?;` — a line that releases the recursion level before the frame it bounds and
+/// silently restores the unbounded descent. Its subject can be deleted by a one-line edit; the
+/// only other thing that would notice is `src/input/input_ref/descent_tests.rs`'s
+/// `#[expect(unused_must_use, …)]`, which is the same rail on every toolchain rather than only on
+/// the pinned one. That file also carries the runtime half: this attribute catches **one** of the
+/// five ways a caller can release the level early, and the recommended shape,
+/// `InputRef::descending`, cannot express any of them.
 const BOUND_CASES: &[&str] = &[
   "tests/ui/session_sink.rs",
   "tests/ui/bundle1_policy.rs",
   "tests/ui/node_brand_mismatch.rs",
+  "tests/ui/descent_dropped_early.rs",
 ];
 
 /// Per case: the ui file, the curated headline its trait's attribute must produce, and

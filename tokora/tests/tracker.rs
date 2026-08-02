@@ -88,7 +88,7 @@ fn token_tracker_trait_increase_and_check() {
 fn recursion_limiter_new_defaults() {
   let r = RecursionLimiter::new();
   assert_eq!(r.depth(), 0);
-  assert_eq!(r.limitation(), 500);
+  assert_eq!(r.limitation(), 64);
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn limiter_new_defaults() {
   assert_eq!(l.token().tokens(), 0);
   assert_eq!(l.token().limitation(), usize::MAX);
   assert_eq!(l.recursion().depth(), 0);
-  assert_eq!(l.recursion().limitation(), 500);
+  assert_eq!(l.recursion().limitation(), 64);
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn limiter_default_equals_new() {
 fn limiter_with_token_tracker() {
   let l = Limiter::with_token_tracker(TokenLimiter::with_limitation(100));
   assert_eq!(l.token().limitation(), 100);
-  assert_eq!(l.recursion().limitation(), 500);
+  assert_eq!(l.recursion().limitation(), 64);
 }
 
 #[test]

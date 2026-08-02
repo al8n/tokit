@@ -1410,7 +1410,9 @@ close-miss law the many-builders follow: end of input with the opener still open
 `Unclosed` (a fail-fast emitter turns it into `Err`, a recovering one records it and yields the
 construct recovered with a synthesized closer); a wrong token where the closer belongs stays
 the unexpected-token (expected-close) diagnostic; a terminal scanner stop surfaces the
-committed form's end-of-input error. This family fires only `Unclosed`, never the
+committed form's end-of-input error, marked terminal, once the emitter has *accepted* the
+trip's diagnostic — a fatal emitter's rejection of it propagates from the scan itself
+instead, as that emitter's own unmarked value. This family fires only `Unclosed`, never the
 `Unopened`/`Undelimited` half of the recovery vocabulary (see
 [*Error taxonomy*](#error-taxonomy)).
 
@@ -1832,9 +1834,12 @@ assert_eq!(Parser::with_parser(labelled_digit).parse_str("4").unwrap(), 4);
 
 Errors are organized by category under [`crate::error`]. A parser never dictates a concrete error
 type: it emits the leaf types below, and your error enum absorbs the ones it uses via `From`
-(exactly the `impl From<…> for Error` block hidden in every example above). Each carries a span;
-each has an `*Of` alias fixing `Lang = ()`, and [`ErrorOf<'inp, L, Ctx, Lang>`](crate::ErrorOf) is
-the shorthand for a context's error type.
+(exactly the `impl From<…> for Error` block hidden in every example above). Each carries a span.
+**Four** of them — `UnexpectedTokenOf`, `MissingTokenOf`, `SeparatedErrorOf`, `MissingSyntaxOf` —
+also have an `*Of<'inp, L, Lang>` alias that projects the lexer's associated types; the rest you
+spell with their own parameters (the
+[errors reference](super::ref_errors_emitters_context) says which and why).
+[`ErrorOf<'inp, L, Ctx, Lang>`](crate::ErrorOf) is the shorthand for a context's error type.
 
 | Category | Types (module) |
 |----------|----------------|
@@ -1843,6 +1848,7 @@ the shorthand for a context's error type.
 | **Lexer** | [`UnknownLexeme`](crate::error::UnknownLexeme), [`Malformed`](crate::error::Malformed) (+ per-literal aliases), [`Invalid`](crate::error::Invalid), hex/unicode escape errors |
 | **Syntax** | [`TooFew`](crate::error::syntax::TooFew), [`TooMany`](crate::error::syntax::TooMany), [`FullContainer`](crate::error::syntax::FullContainer), [`MissingSyntax`](crate::error::syntax::MissingSyntax), [`IncompleteSyntax`](crate::error::IncompleteSyntax) (in [`error::syntax`](crate::error::syntax)) |
 | **Delimiter** | [`Unclosed`](crate::error::Unclosed), [`Unopened`](crate::error::Unopened), [`Undelimited`](crate::error::Undelimited), [`Unterminated`](crate::error::Unterminated) |
+| **Pratt** | [`RecursionLimitReached`](crate::error::RecursionLimitReached), [`NonAssociativeChain`](crate::error::NonAssociativeChain) — the descent bound and the second same-power `Neither` operator; both are *returned* by the engines rather than emitted, so each is a required `From` on the pratt entry points rather than a member of the [`FromPrattError`](crate::emitter::FromPrattError) bundle (see the [Pratt reference](super::ref_pratt)) |
 | **Incomplete** | [`Incomplete`](crate::error::Incomplete) — the never-recoverable partial-input signal (see [chapter 9](super::ch09_streaming)) |
 
 The whole taxonomy and the emitter/context surface are covered in depth in the

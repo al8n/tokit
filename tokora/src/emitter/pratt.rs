@@ -50,6 +50,37 @@ where
 }
 
 /// A trait bound for converting pratt emitter errors into emitter errors.
+///
+/// Exactly the conversions a [`PrattEmitter`] body performs: the two end-of-expression reports
+/// the pratt drivers raise on a contract violation, one per channel. It is the bound the
+/// built-in emitters' [`PrattEmitter`] impls carry, and the blanket impl below means two `From`
+/// impls on your error type are all it takes to satisfy it.
+///
+/// # The two pratt failures that are deliberately not here
+///
+/// A pratt engine can also fail with a
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached) frame-budget trip or a
+/// [`NonAssociativeChain`](crate::error::NonAssociativeChain) repeat, and **neither is an
+/// emitter conversion**. Neither has an `emit_*` counterpart on [`PrattEmitter`], by design — a
+/// recording emitter must not be able to swallow a resource trip or a rejected chain — so
+/// neither passes through an emitter at all: the engines *return* them, and a returned error
+/// becomes the caller's type through `From`.
+///
+/// So the pratt entry points name
+/// `From<RecursionLimitReached<L::Offset, Lang>>` and
+/// `From<NonAssociativeChain<L::Offset, Lang>>` on the error type **directly**, beside this
+/// bound, and this trait has no method for either. A method here would be one nothing calls:
+/// the trip is built and converted inside
+/// [`InputRef::descend`](crate::InputRef::descend) — the recursion guard every recursive-descent
+/// grammar shares, pratt or not — and the repeat is built by each engine at its own exit. Both
+/// happen where no emitter is in scope.
+///
+/// The trip's `From` impl is the one with a consequence past its payload. One that **stores**
+/// the value keeps its always-terminal marker readable through
+/// [`MaybeTerminal`](crate::error::MaybeTerminal); one that discards it opts the error type out
+/// of terminal re-raise, which is the documented `MaybeTerminal` posture. See
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached)'s own docs for what a
+/// discarding sink costs and what it does not.
 pub trait FromPrattError<'inp, L, Lang: ?Sized = ()>: FromEmitterError<'inp, L, Lang> {
   /// Creates an emitter error from an unexpected end of left hand side error.
   fn from_unexpected_end_of_lhs(err: UnexpectedEoLhs<L::Offset, Lang>) -> Self

@@ -32,7 +32,17 @@ for free.
 
 ### Taxonomy by category
 
-Every leaf has an `…Of<'inp, L, Lang>` alias that fixes its span/offset to the lexer's, and
+Four leaves carry an `…Of<'inp, L, Lang>` alias that projects the lexer's associated types for
+you: [`UnexpectedTokenOf`](crate::error::token::UnexpectedTokenOf),
+[`MissingTokenOf`](crate::error::token::MissingTokenOf),
+[`SeparatedErrorOf`](crate::error::token::SeparatedErrorOf) and
+[`MissingSyntaxOf`](crate::error::syntax::MissingSyntaxOf) — the four that ride the emitter's own
+method signatures, where the projection would otherwise be rewritten at every impl and every
+bound. **The rest have none**, and you name their parameters yourself; for an offset-carrying
+leaf that is just `<L::Offset, Lang>`, the spelling the pratt surfaces use for
+[`UnexpectedEoLhs`](crate::error::UnexpectedEoLhs) and
+[`RecursionLimitReached`](crate::error::RecursionLimitReached) alike. The alias is a shorthand
+where a shorthand paid for itself, not a convention with exceptions.
 [`ErrorOf<'inp, L, Ctx, Lang>`](crate::ErrorOf) names a context's error type. Full type list in
 the [combinator reference](super::ref_combinators); here each category is paired with the `From`
 impl that wires it in.
@@ -44,6 +54,7 @@ impl that wires it in.
 | **End of input** | [`UnexpectedEnd`](crate::error::UnexpectedEnd) (aliases [`UnexpectedEot`](crate::error::UnexpectedEot) / `UnexpectedEof` / `UnexpectedEos`) | `From<UnexpectedEot<O, Lang, Set>>` |
 | **Syntax** | [`TooFew`](crate::error::syntax::TooFew), [`TooMany`](crate::error::syntax::TooMany), [`FullContainer`](crate::error::syntax::FullContainer), [`MissingSyntax`](crate::error::syntax::MissingSyntax) | `From<TooFew>`, `From<TooMany>`, `From<FullContainer>`, `From<MissingSyntax>` |
 | **Delimiter** | [`Unclosed`](crate::error::Unclosed), [`Unopened`](crate::error::Unopened), [`Undelimited`](crate::error::Undelimited), [`Unterminated`](crate::error::Unterminated) | [`FromUnclosed`](crate::emitter::FromUnclosed) — **one** impl for every pair; the other three are raised by your own code, so they need a `From<…>` only if you raise them |
+| **Pratt** | [`RecursionLimitReached`](crate::error::RecursionLimitReached), [`NonAssociativeChain`](crate::error::NonAssociativeChain) — the descent bound and the second same-power `Neither` operator ([Pratt reference](super::ref_pratt)) | `From<RecursionLimitReached>` + `From<NonAssociativeChain>`, **required** by the pratt entry points, not opt-in. Both errors are *returned*, never emitted, so no `emit_*` hook sees them and neither is part of [`FromPrattError`](crate::emitter::FromPrattError), which covers only what an emitter body converts |
 | **Incomplete** | [`Incomplete`](crate::error::Incomplete) — the never-recoverable partial-input signal | *no `From`*; `impl MaybeIncomplete` instead |
 
 ### The traits your error type implements
@@ -68,6 +79,28 @@ impl that wires it in.
   `From<Incomplete<L::Offset>>`, because the input layer *constructs* incompletes while the
   atom layer now also *recognizes* them (the resilient collection loops re-raise a frontier
   `Incomplete` untouched instead of spending it as a diagnostic).
+- [**`MaybeTerminal`**](crate::error::MaybeTerminal) — the same hook for the never-recoverable
+  law's **terminal dual**: a stop no amount of input clears, which recovery re-raises rather than
+  spends. Same shape (blanket `false`, empty impl to opt in), and the same three combinators
+  require it — [`recover`](crate::ParseInput::recover),
+  [`inplace_recover`](crate::ParseInput::inplace_recover),
+  [`skip_then_retry`](crate::ParseInput::skip_then_retry). Override it if your type stores any of
+  the **three** terminal sources this crate builds and marks: an
+  [`UnexpectedEnd`](crate::error::UnexpectedEnd) whose flag the
+  scanner may raise, a [`RecursionLimitReached`](crate::error::RecursionLimitReached), which is
+  terminal for every value, or a [`SessionRefusal`](crate::input::SessionRefusal), terminal for
+  every value too. A pratt grammar meets the second by default — the descent budget is on unless
+  you turn it off. The third is the odd one and the one worth reading twice: it does **not**
+  implement the trait, so there is nothing to delegate to and the arm is written `true` by hand,
+  and it is *required* rather than consulted — `PartialSession::parse` converts the refusal
+  through your `From` and then asserts the result is terminal, unconditionally, so a
+  `Refused(..)` arm left at `false` panics a release build instead of being quietly spent.
+  A `From` that discards the value discards the marker, so recovery spends a trip it was told to
+  re-raise. **Those three are what the crate knows it produces, not a proof that nothing else is
+  terminal**: a scanner trip whose diagnostic a *rejecting* emitter refuses propagates as that
+  emitter's `Err`, built from your lexer's error value with no marker on it at all, so the arm
+  holding your lexer error may be terminal too. The trait's own doc carries the table, that path,
+  and the rule for an arm the table does not name.
 - **The `Set` / `Expected` machinery.** A token mismatch does not just say "wrong" — it names
   what was wanted. [`UnexpectedToken`](crate::error::token::UnexpectedToken) carries an
   [`Expected<'a, Kind>`](crate::utils::Expected) (`One(kind)` or `OneOf(set)`); classifiers
@@ -263,7 +296,7 @@ nodes) need more than the base surface, so tokora splits each scenario into a fo
 | [`UnexpectedLeadingSeparatorEmitter`](crate::emitter::UnexpectedLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::UnexpectedTrailingSeparatorEmitter) | a stray separator | `From<SeparatedErrorOf>` | ✅ |
 | [`MissingLeadingSeparatorEmitter`](crate::emitter::MissingLeadingSeparatorEmitter) / [`…Trailing…`](crate::emitter::MissingTrailingSeparatorEmitter) | a required separator | `From<MissingTokenOf>` | — (in [`PolicyComposableEmitter`](crate::emitter::PolicyComposableEmitter)) |
 | [`UnclosedEmitter`](crate::emitter::UnclosedEmitter) | [`Unclosed`](crate::error::Unclosed) | [`FromUnclosed`](crate::emitter::FromUnclosed) | ✅ |
-| [`PrattEmitter`](crate::emitter::PrattEmitter) | end-of-LHS / end-of-RHS ([chapter 5](super::ch05_pratt)) | `From<UnexpectedEoLhs>` + `From<UnexpectedEoRhs>` | — |
+| [`PrattEmitter`](crate::emitter::PrattEmitter) | end-of-LHS / end-of-RHS ([chapter 5](super::ch05_pratt)) | `From<UnexpectedEoLhs>` + `From<UnexpectedEoRhs>` (the [`FromPrattError`](crate::emitter::FromPrattError) bundle). The engines' other two failures, `RecursionLimitReached` and `NonAssociativeChain`, are *returned* rather than emitted, so they have no `emit_*` hook and are not in this bundle — their `From`s are named by the pratt **entry points** instead | — |
 | [`CstEmitter`](crate::emitter::CstEmitter) | tree events (no error) | — (defaulted no-ops; the recording sink) | — |
 
 [`ComposableEmitter`](crate::emitter::ComposableEmitter) is the bundle the separated/repeated
@@ -468,7 +501,11 @@ assert_eq!(tiers, [Severity::Error]);
 Every parser signature in this book carries a `Ctx` type parameter, yet the tutorials never say
 what it is. A **parse context** is the bundle that supplies the two things a parse needs beyond
 the lexer: the **emitter** (above) and the lookahead **cache**. Signatures are generic over it so
-one parser can run under any emitter/cache pairing; `provide()` hands the pair to the input layer.
+one parser can run under any emitter/cache pairing. `provide()` hands that pairing to the input
+layer inside an `InputContext`, which carries one thing more — the **recursion budget** every
+[descent](super::ref_pratt) draws on, defaulted and changed with
+[`with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter). It is not a third
+associated type: the two below are the whole of what an impl chooses.
 
 ```text
 trait ParseContext<'inp, L, Lang = ()> {

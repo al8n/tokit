@@ -17,7 +17,10 @@ use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext, TryParseInput,
   cache::{DefaultCache, Peeked},
   emitter::Ignored,
-  error::{UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot, token::UnexpectedToken},
+  error::{
+    NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs, UnexpectedEot,
+    token::UnexpectedToken,
+  },
   parser::{Action, PrattInfix, PrattLHS, PrattRHS, Precedenced, expect, pratt},
   punct::{CloseParen, Comma, OpenParen, Semicolon},
   span::Spanned,
@@ -69,6 +72,16 @@ impl From<UnexpectedEoLhs> for TestError {
 
 impl From<UnexpectedEoRhs> for TestError {
   fn from(_: UnexpectedEoRhs) -> Self {
+    TestError
+  }
+}
+impl From<RecursionLimitReached> for TestError {
+  fn from(_: RecursionLimitReached) -> Self {
+    TestError
+  }
+}
+impl From<NonAssociativeChain> for TestError {
+  fn from(_: NonAssociativeChain) -> Self {
     TestError
   }
 }
@@ -304,16 +317,17 @@ fn pratt_neither_assoc_single() {
 }
 
 #[test]
-fn pratt_neither_assoc_stops_chaining() {
-  // 1 ; 2 ; 3 with Neither-assoc should stop after first ; since second ;
-  // has same precedence and associativity is Neither
-  // So it parses 1 ; 2 = 3, then stops. The "; 3" is leftover.
-  // The pratt parser should return 3 (1+2)
-  let r: i64 = Parser::new()
-    .apply(pratt_expr)
-    .parse_str("1 ; 2 ; 3")
-    .unwrap();
-  assert_eq!(r, 3);
+fn pratt_neither_assoc_rejects_chaining() {
+  // `;` is Neither at PREC_SUM, so `1 ; 2 ; 3` is a declared-non-associative chain and the
+  // second `;` is a syntax error — not a place to stop. This test used to assert the truncating
+  // reading (fold `1 ; 2`, leave `; 3`), which is unobservable in a nested position: an
+  // enclosing frame folds the leftover operator by its own rules and the chain silently
+  // re-associates across it. See `pratt_limit.rs` for the full contract.
+  let r: Result<i64, TestError> = Parser::new().apply(pratt_expr).parse_str("1 ; 2 ; 3");
+  assert!(
+    r.is_err(),
+    "a second same-power `Neither` operator must fail the parse, not truncate it"
+  );
 }
 
 // ── Pratt tests: prefix/infix/postfix/min_precedence config methods ─────────

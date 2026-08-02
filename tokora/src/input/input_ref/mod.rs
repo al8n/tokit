@@ -28,6 +28,7 @@ pub(crate) use session::Session;
 pub use session::SessionPointId;
 
 mod consume_cached;
+mod descent;
 mod drop_policy;
 mod fold;
 mod peek;
@@ -45,6 +46,7 @@ mod trace;
 mod transaction;
 mod try_expect;
 
+pub use descent::Descent;
 pub use drop_policy::{Commit, DropPolicy, Rollback};
 pub use sync_balanced::{Balance, DelimClass, Hole};
 pub use transaction::Transaction;
@@ -106,6 +108,15 @@ mod session_tests;
 ))]
 mod fast_path_tests;
 
+/// What holds a recursion level and what silently gives it back — the runtime half of the table on
+/// [`Descent`]. Needs `std` for the unwind cell's `catch_unwind`.
+#[cfg(all(
+  test,
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
+mod descent_tests;
+
 /// A reference to an `Input` instance.
 pub struct InputRef<'inp, 'closure, L, Ctx, Lang: ?Sized = (), Cmpl = Complete>
 where
@@ -135,6 +146,10 @@ where
   /// field for the invariant and the three writers that keep it inductive.
   pub(super) front_reported_end: &'closure mut Option<L::Offset>,
   pub(super) poison_boundary: &'closure mut Option<L::Offset>,
+  /// The **recursion budget**, borrowed from the owning [`Input`](super::Input) — see that field
+  /// for why it is outside the rollback set. Read through [`recursion`](Self::recursion); its
+  /// only writer is the [`Descent`] guard [`descend`](Self::descend) hands out.
+  pub(super) recursion: &'closure mut crate::state::recursion_tracker::RecursionLimiter,
   /// The **session cell**: the input's lineage memos (the live-checkpoint stack, the pin set, and
   /// the cache-push/checkpoint-id/savepoint counters), the handle's **emitter borrow** (the
   /// ground-truth emission log, reached through [`emitter`](Self::emitter)), and the live
@@ -2946,7 +2961,11 @@ where
   /// - `Err(..)` — a terminal stop (a fresh trip, or the poison boundary it latches), surfaced as the
   ///   committed form's end-of-input error already marked terminal via
   ///   [`into_terminal`](crate::error::UnexpectedEnd::into_terminal), so recovery re-raises it. A
-  ///   fatal emitter's rejection of the trip diagnostic still propagates from the scan itself.
+  ///   fatal emitter's rejection of the trip diagnostic still propagates from the scan itself —
+  ///   but as *that emitter's* value, converted from the lexer error, so it carries **no** terminal
+  ///   mark: no `UnexpectedEnd` is built on that path for `into_terminal` to raise a flag on. The
+  ///   arm of your error type holding a lexer error is what answers for it; see
+  ///   [`MaybeTerminal`](crate::error::MaybeTerminal#where-the-set-stops-being-closed).
   ///
   /// # Zero-cost on the success path
   ///

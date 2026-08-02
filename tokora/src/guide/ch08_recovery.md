@@ -379,12 +379,19 @@ use tokora::{
 };
 
 // THE NEVER-RECOVERABLE LAW AND ITS TERMINAL DUAL. `skip_then_retry` requires the emitter's error
-// type to answer two questions: *are you an `Incomplete`?* and *are you a terminal scanner stop?*
-// Either one is re-raised untouched, before any skip and from any retry — recovery synthesises
+// type to answer two questions: *are you an `Incomplete`?* and *are you a terminal stop?* Either
+// one is re-raised untouched, before any skip and from any retry — recovery synthesises
 // progress over a *malformed* construct, while an incomplete one is merely *unfinished* (skipping
 // it throws away input that has not arrived) and a terminal stop is a limit no skip can clear.
-// `CalcError` is never either (it parses whole strings with no resource limit), so the traits'
-// default answers — `false` — are the right ones.
+// `CalcError` is never either: it parses whole strings with no scanner limiter, it never descends
+// (no pratt engine, no `InputRef::descend`), and it is not driven through a `PartialSession`, so
+// no terminal stop can reach it. Note which ground does the work on the scanner side: *no limiter*,
+// not *an accepting emitter*. A limiter that could refuse would reach this type by two routes, not
+// one — the marked `UnexpectedEnd` when the emitter takes the diagnostic, and a bare lexer error
+// when it rejects it — and having no limiter at all closes both. The traits' default answers —
+// `false` — are the right ones. A grammar that *does* have a limiter, a descent budget, or a
+// session stores the value and answers for it; `MaybeTerminal` has the three sources this crate
+// builds, the arm each one needs, and the rule for a terminal condition it cannot name.
 impl MaybeIncomplete for CalcError {}
 impl MaybeTerminal for CalcError {}
 

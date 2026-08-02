@@ -55,9 +55,9 @@ own chapter.
 The engine is split in two, and the split is the load-bearing design decision of the whole layer.
 
 - The **owner** holds the ground truth: the borrowed source, the live lexer state, the span of the
-  last token, the lookahead cache, and the bookkeeping the frontier and backtracking machinery keep
-  (the finality flag, the lexer-error dedup watermark, the poison boundary, the checkpoint lineage).
-  It is a crate-internal type; a parser never sees it.
+  last token, the lookahead cache, the recursion budget every descent draws on, and the bookkeeping
+  the frontier and backtracking machinery keep (the finality flag, the lexer-error dedup watermark,
+  the poison boundary, the checkpoint lineage). It is a crate-internal type; a parser never sees it.
 - The **working handle**, [`InputRef`](crate::InputRef), is what every parser *is* handed. It is not
   a copy of the owner — it is a bundle of **borrows** into the owner, plus a borrow of the emitter.
   Every combinator, every guard, every speculative branch operates through one of these.
@@ -69,18 +69,21 @@ owner, borrows a handle out of it, and runs the parser against the handle — th
 fn parse_with_state(self, src: &'inp L::Source, state: L::State) -> Result<O, Error> {
   let Parser { mut f, ctx, .. } = self;
 
-  let (mut emitter, cache) = ctx.provide().into_components();
-  let mut input = Input::with_state_and_cache(src, state, cache);
-  let mut input_ref = input.as_ref(&mut emitter);
+  let mut input = Input::with_state_and_context(src, state, ctx.provide());
+  let mut input_ref = input.as_ref();
   f.parse_input(&mut input_ref)
 }
 ```
 
-Read it as four steps. The [`ParseContext`](crate::ParseContext) is unbundled into an emitter and a
-cache (that pair is the whole of a context — see the
-[errors, emitters & context reference](super::ref_errors_emitters_context)). The owner is built
-over the immutable source and the initial lexer state. A handle is borrowed out of the owner, wired
-to the emitter. The parser runs against the handle and returns a value or the emitter's error type.
+Read it as three steps. The [`ParseContext`](crate::ParseContext) hands over what it supplies —
+`provide()` builds an `InputContext`, which is an emitter, a lookahead cache, **and** the recursion
+budget every descent draws on
+([`with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter) is where a caller
+changes it; see the [errors, emitters & context reference](super::ref_errors_emitters_context) for
+the emitter/cache pairing). The owner is built over the immutable source, the initial lexer state
+and that context, and keeps all three for the parse's life. A handle is borrowed out of the owner —
+the emitter borrow comes with it — and the parser runs against the handle, returning a value or the
+emitter's error type.
 
 Why two objects rather than one? Because the handle being a *borrow* of the owner is what makes
 three separate guarantees hold at once, each enforced by the borrow checker rather than by
@@ -97,7 +100,7 @@ convention:
   owner ahead of the bookkeeping; the handle borrows them directly. The abbreviated shape:
 
 ```rust,ignore
-// Abbreviated: the trace/witness fields are elided.
+// Abbreviated: the parked-front-token, front-report and trace/witness fields are elided.
 pub struct InputRef<'inp, 'closure, L, Ctx, Lang: ?Sized = (), Cmpl = Complete>
 where
   L: Lexer<'inp>,
@@ -111,6 +114,7 @@ where
   finality: Cmpl::Finality,                // a read-only snapshot (see chapter 9)
   emitted_error_end: &'closure mut L::Offset,       // lexer-error dedup watermark
   poison_boundary: &'closure mut Option<L::Offset>, // sticky limit-trip frontier
+  recursion: &'closure mut RecursionLimiter,        // descent depth + its budget
   session: Session<'inp, 'closure, L, Ctx::Emitter, Lang>, // lineage + the emitter borrow
   _marker: PhantomData<Lang>,
 }
