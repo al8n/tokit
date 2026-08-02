@@ -250,6 +250,23 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   rustc must name the owner as unresolved on base and must not on head. The verdict is complete
   now: 27/27 rows probed, 0 FATAL, 0 INCONCL, 0 UNPROBED. — *(#148, verification debt)*
 
+- **That verdict proved base was broken and never checked that head ran.** Its two witnesses
+  required rustc to name the owner unresolved on base and to stay silent about it on head — but
+  silence is also what a head build broken for an unrelated reason looks like: `no-compile`,
+  `upstream-fail`, `bad-witness(...)` and `unreached` none say the owner is unresolved either, so a
+  head that failed to compile the probe for a reason having nothing to do with the owner — or that
+  never reached the call at all — still read as proof the owner is new. `new-owner` now
+  additionally requires head to show a completed run, checked by an allowlist of the one shape
+  that is evidence (`witness=*`) rather than a denylist of the shapes already known to be broken,
+  which is silent about the next one nobody has named yet. Re-run against a genuine pre-#147 base,
+  9 of the 14 `RecursionLimitReached` rows the prior entry counted turn out to have been passing on
+  exactly this hole: `map_offset` and `of`'s templates call the real method with fewer arguments
+  than it takes, and the other five methods' `used` spelling forces a `u8` return type none of them
+  have, so head never compiled on any of the nine. They now score `INCONCL`, correctly — only the
+  five methods whose `discarded` spelling silently and successfully calls the real inherent method
+  were ever provable, and the fix does not widen to paper over the rest. — *(#148, verification
+  debt)*
+
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
 **This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**

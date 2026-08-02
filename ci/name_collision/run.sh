@@ -448,8 +448,8 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     # row onto a subject that does exist, which is the vacuous-probe defect this harness was
     # built after: `Gadget::parse_except` cannot collide with `Ident::parse_except`.
     #
-    # Two witnesses, because "fine" is again being asserted by an absence and this file's rule
-    # is that each such verdict must produce positive evidence:
+    # THREE witnesses, not two — "fine" is again being asserted by an absence and this
+    # file's rule is that each such verdict must produce positive evidence:
     #
     #   * rustc must SAY, on the base side, that it cannot resolve THIS ROW'S OWNER — an
     #     unresolved import / cannot-find / failed-to-resolve diagnostic naming it. A base build
@@ -457,6 +457,18 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     #   * the head side must NOT say the same thing. Otherwise a template that misspells its
     #     owner reports `new-owner` on every run while never having compiled anywhere, which is
     #     the same shape as a probe that tests nothing.
+    #   * the head side must have COMPLETED — reached a witness, not merely stayed silent about
+    #     the base diagnostic. Silence is what `no-compile`, `upstream-fail`, `bad-witness(...)`
+    #     and `unreached` all look like from here just as much as a clean run does: none of them
+    #     say "`$owner` is unresolved", so `head_unresolved` reads empty for all of them, and
+    #     without this third check any of the four reads as proof the owner is new. A head build
+    #     that fails to compile the probe for a reason that has nothing to do with `$owner` — a
+    #     typo elsewhere in the same generated file, say — is the sharpest case: it still sets
+    #     `$h` to `no-compile`, same as the base side, and no diagnostic anywhere disagrees. This
+    #     is the same defect class this whole verdict exists to catch, sitting inside the verdict
+    #     itself, and it is why the check below is an ALLOWLIST of the one shape that is actual
+    #     evidence (`witness=*`) rather than a denylist of the shapes known to be broken — a
+    #     denylist is silent about the next broken shape nobody has named yet.
     #
     # What the row then means is narrow and is printed with it: no pre-existing call site can be
     # stolen. It says nothing about a consumer written AFTER the release, which is out of scope
@@ -470,12 +482,26 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
       | grep -qE "unresolved import|cannot find|failed to resolve|E0432|E0433|E0412" \
       && head_unresolved=yes
     if [ -n "$base_unresolved" ] && [ -z "$head_unresolved" ]; then
-      printf "  new-owner %-40s base=%-12s head=%s   (owner \`%s\` is new)\n" \
-        "$label" "$b" "$h" "$owner"
-      echo "          rustc cannot resolve \`$owner\` on the base ref and can on head, so this"
-      echo "          release introduces the owner as well as the name. There is no consumer"
-      echo "          call site that could predate it and nothing to steal."
-      newowner=$((newowner + 1))
+      case "$h" in
+        witness=*)
+          printf "  new-owner %-40s base=%-12s head=%s   (owner \`%s\` is new)\n" \
+            "$label" "$b" "$h" "$owner"
+          echo "          rustc cannot resolve \`$owner\` on the base ref and can on head, so this"
+          echo "          release introduces the owner as well as the name. There is no consumer"
+          echo "          call site that could predate it and nothing to steal."
+          newowner=$((newowner + 1))
+          ;;
+        *)
+          printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+          echo "          the owner \`$owner\` is unresolved on the BASE side and head does not"
+          echo "          repeat that diagnostic — but head never reached a completed run"
+          echo "          (head=$h), so that silence is not evidence head resolved \`$owner\` at"
+          echo "          all, let alone ran past it. This is a broken probe on the side that was"
+          echo "          supposed to prove the owner is new, not a clean result."
+          incon=$((incon + 1))
+          status=2
+          ;;
+      esac
     else
       printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
       echo "          the probe does not compile on the BASE side and no base-side diagnostic"
