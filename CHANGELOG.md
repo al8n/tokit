@@ -80,7 +80,7 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
 2. **A recursion-limit trip is now terminal for every grammar error type, `()` included — neither
    recovery nor a collection driver can spend it.** This closes 0.8.0's [known limitation — a discarding error sink erases
    the recursion trip's stop, not its
-   bound](#known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound),
+   bound](#0.8.0-known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound),
    which recorded the behaviour rather than answering it. The answer is that a resource bound an
    unrelated error sink can opt out of is not a bound.
 
@@ -2614,6 +2614,8 @@ parse-to-emitter contract, and it flips when `finish` starts refusing these span
 `duplicate_zero_width_tokens_are_not_yet_detected`
 
 — *(R8, #123)*
+
+<a id="0.8.0-known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound"></a>
 
 ### Known limitation — a discarding error sink erases the recursion trip's stop, not its bound
 
