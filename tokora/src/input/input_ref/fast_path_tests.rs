@@ -20,9 +20,13 @@
 //! * **its negation** — no prefill, so the cache is empty and the probe finds nothing; the
 //!   general path runs and must land on the same observation.
 //!
-//! Every program runs at four prefill depths and under three cache capacities, and the whole
+//! Every program runs at four prefill **widths** and under three cache capacities, and the whole
 //! observable tuple — including **which tokens the predicate was asked about, in order** — must
-//! agree across all twelve. That last column is the one a naive `skip_while` fast path fails:
+//! agree across all twelve. A width, not a repetition count, and the residency each one achieves
+//! is measured rather than assumed: `DefaultCache` is `U3`, so a sweep that issued `peek::<U3>`
+//! `n` times reached the same residency for every `n > 0`, and the four depths it reported were
+//! two states. Each capacity now asserts which residencies it reached — four, two and one
+//! respectively. That last column is the one a naive `skip_while` fast path fails:
 //! probing the head and then handing the same token to the scanner asks a stateful `FnMut` about
 //! it twice, and a predicate that answers differently the second time would skip a token the
 //! general path keeps or keep one it skips.
@@ -57,7 +61,7 @@
 //! from shipped code, over the same stream, in the same residency, with nothing varying but the
 //! entry point.
 
-use generic_arraydeque::typenum::{U1, U3};
+use generic_arraydeque::typenum::{U1, U2, U3};
 
 use crate::{
   InputRef, Token,
@@ -144,12 +148,48 @@ impl Program {
 /// start of the next are different offsets and a cursor placed at the wrong one is visible.
 const SOURCES: &[&str] = &["2 ;", "~ ~ 2 ;", "~ ~ ~", "", "~", "2", "2 ~ ~ ;"];
 
-/// The prefill depths. `0` is the negation — nothing is resident, so the probe finds no head and
-/// the general path runs.
+/// The prefill **widths**. `0` is the negation — nothing is resident, so the probe finds no head
+/// and the general path runs.
+///
+/// A width, not a repetition count. [`DefaultCache`] is `U3`, so one `peek::<U3>` saturates it and
+/// a sweep that issued that same peek `n` times left the identical residency for every `n > 0`:
+/// four "depths" that were two states. [`prefill_to_width`] issues one peek of the matching width
+/// instead, and hands back the residency it actually achieved — which the capacity sweep below
+/// asserts, per capacity, rather than assuming.
 const PREFILLS: &[usize] = &[0, 1, 2, 3];
 
-/// Runs `program` under one cache capacity and one prefill depth.
-fn observe<'a, C>(program: Program, src: &'a str, prefill: usize) -> Observed
+/// Fills the cache from a window of `width` tokens, and returns the residency that left.
+///
+/// The residency counts the parked slot as well as the cache, because under a capacity that
+/// retains nothing the front of the stream *is* the parked slot. Nothing is parked by a peek, so
+/// after a prefill the two agree; the sum is what makes the number mean "how much of the stream is
+/// resident" under every capacity rather than only under the retaining ones.
+fn prefill_to_width<'a, C>(
+  inp: &mut InputRef<'a, '_, BalLexer<'a>, (Verbose<ByValErr>, C), ()>,
+  width: usize,
+) -> usize
+where
+  C: Cache<'a, BalLexer<'a>, ()>,
+{
+  match width {
+    0 => {}
+    1 => {
+      let _ = inp.peek::<U1>().unwrap();
+    }
+    2 => {
+      let _ = inp.peek::<U2>().unwrap();
+    }
+    3 => {
+      let _ = inp.peek::<U3>().unwrap();
+    }
+    _ => unreachable!("`PREFILLS` runs 0..=3, the capacity of `DefaultCache`"),
+  }
+  Cache::len(inp.cache()) + usize::from(inp.has_front_parked())
+}
+
+/// Runs `program` under one cache capacity and one prefill width, and reports the residency the
+/// prefill actually achieved alongside the observation.
+fn observe_with_depth<'a, C>(program: Program, src: &'a str, prefill: usize) -> (Observed, usize)
 where
   C: Cache<'a, BalLexer<'a>, ()> + Default,
 {
@@ -162,12 +202,10 @@ where
   let mut asked = std::vec::Vec::new();
   let mut read = std::vec::Vec::new();
 
-  let (cursor, span, is_exhausted, drained) = {
+  let (depth, cursor, span, is_exhausted, drained) = {
     let mut inp = input.as_ref();
     // The prefill: whatever the capacity retains of it is what the probe will find.
-    for _ in 0..prefill {
-      let _ = inp.peek::<U3>().unwrap();
-    }
+    let depth = prefill_to_width(&mut inp, prefill);
     run(&mut inp, program, &mut asked, &mut read);
     let cursor = *inp.cursor().as_inner();
     let span = *inp.span();
@@ -176,7 +214,7 @@ where
     while let Some(tok) = inp.next().unwrap() {
       drained.push((*tok.span_ref(), tok.data().kind()));
     }
-    (cursor, span, is_exhausted, drained)
+    (depth, cursor, span, is_exhausted, drained)
   };
 
   let lex = input
@@ -194,15 +232,26 @@ where
     .filter(|e| **e == ByValErr::Limit)
     .count();
 
-  Observed {
-    asked,
-    read,
-    cursor,
-    span,
-    is_exhausted,
-    diagnostics: (lex, limit),
-    drained,
-  }
+  (
+    Observed {
+      asked,
+      read,
+      cursor,
+      span,
+      is_exhausted,
+      diagnostics: (lex, limit),
+      drained,
+    },
+    depth,
+  )
+}
+
+/// [`observe_with_depth`] without the residency — for the cells that pin what the sweep agrees on.
+fn observe<'a, C>(program: Program, src: &'a str, prefill: usize) -> Observed
+where
+  C: Cache<'a, BalLexer<'a>, ()> + Default,
+{
+  observe_with_depth::<C>(program, src, prefill).0
 }
 
 /// The program bodies. `asked` records every token the skip predicate saw, so the comparison
@@ -268,28 +317,47 @@ fn skip<'a, C>(
 /// which is the put-back origin the fast path has to be an identity on too.
 #[test]
 fn fast_paths_are_invisible_to_residency() {
+  // Which residencies each capacity actually reached — a sweep that stops varying the thing it
+  // varies is the defect this file has now been caught by three times, so it is asserted.
+  let mut reached = [[false; 4]; 3];
   for &program in Program::ALL {
     for &src in SOURCES {
       let reference = observe::<DefaultCache<'_, BalLexer<'_>>>(program, src, 0);
       for &prefill in PREFILLS {
-        let deque = observe::<DefaultCache<'_, BalLexer<'_>>>(program, src, prefill);
-        let one = observe::<OneSlot<'_>>(program, src, prefill);
-        let none = observe::<()>(program, src, prefill);
-        for (capacity, got) in [
+        let deque = observe_with_depth::<DefaultCache<'_, BalLexer<'_>>>(program, src, prefill);
+        let one = observe_with_depth::<OneSlot<'_>>(program, src, prefill);
+        let none = observe_with_depth::<()>(program, src, prefill);
+        for (slot, (capacity, (got, depth))) in [
           ("deque(3)", deque),
           ("option(1)", one),
           ("blackhole(0)", none),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
           assert_eq!(
             got, reference,
-            "{program:?} over {src:?} observed differently at prefill {prefill} under \
+            "{program:?} over {src:?} observed differently at prefill width {prefill} under \
              {capacity} than it does with an empty cache — a fast path that fires only when the \
              head happens to be resident has changed what the caller sees"
           );
+          reached[slot][depth] = true;
         }
       }
     }
   }
+  assert_eq!(
+    reached,
+    [
+      [true, true, true, true],
+      [true, true, false, false],
+      [true, false, false, false],
+    ],
+    "each capacity must reach exactly the residencies it can hold: four under the deque, two \
+     under the one-slot cache, and only the empty one under the cache that retains nothing. This \
+     is the assertion the old `for _ in 0..prefill {{ peek::<U3>() }}` sweep could not have made — \
+     it reached two states and reported four"
+  );
 }
 
 /// The differential test above proves agreement; this pins what it agrees *on*, so a bug that
@@ -673,9 +741,16 @@ fn a_trip_inside_a_trivia_skip_latches_where_the_scan_latches() {
 /// committed span behind the tokens the predicate accepted. All three are read off the same two
 /// values.
 ///
-/// Swept over the prefill depth, because the two phases of the loop reach a panicking predicate
-/// by different roads: at depth 0 every token is lexed inside the call, at depth 5 every token is
-/// already resident, and in between the panic lands on the phase boundary.
+/// Swept over the cache depth, because the two phases of the loop reach a panicking predicate by
+/// different roads: at depth 0 every token is lexed inside the call, at depth 3 the first three
+/// are already resident and the panic can land on either side of the phase boundary, and at 1 and
+/// 2 it lands earlier.
+///
+/// The depths are **widths**, and the residency each one leaves is measured. This sweep used to
+/// read `for _ in 0..prefill { peek::<U3>() }` over `[0, 1, 2, 5]` and call that four depths: the
+/// first of those peeks saturates the `U3` cache, so 1, 2 and 5 were one state and the claim that
+/// depth 5 left "every token already resident" was false twice over — the source has five tokens
+/// and the cache holds three.
 #[test]
 fn a_panic_mid_skip_consumes_exactly_what_the_predicate_accepted() {
   // Five tokens, with a gap between each: `(0,1) (2,3) (4,5)` trivia, then `(6,7)` and `(8,9)`.
@@ -694,14 +769,19 @@ fn a_panic_mid_skip_consumes_exactly_what_the_predicate_accepted() {
   };
   assert_eq!(all.len(), 5, "the fixture's own shape");
 
-  for prefill in [0usize, 1, 2, 5] {
+  let mut depths_reached = [false; 4];
+  for prefill in [0usize, 1, 2, 3] {
     for panic_on in 1..=4usize {
       let calls = Cell::new(0usize);
       let mut input = open_input(SRC);
       let mut inp = input.as_ref();
-      for _ in 0..prefill {
-        let _ = inp.peek::<U3>().unwrap();
-      }
+      let depth = prefill_to_width(&mut inp, prefill);
+      assert_eq!(
+        depth, prefill,
+        "the fixture has five tokens and the cache holds three, so a width of {prefill} must \
+         leave exactly {prefill} resident"
+      );
+      depths_reached[depth] = true;
       let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         inp.skip_while(|t| {
           calls.set(calls.get() + 1);
@@ -756,6 +836,10 @@ fn a_panic_mid_skip_consumes_exactly_what_the_predicate_accepted() {
       );
     }
   }
+  assert_eq!(
+    depths_reached, [true; 4],
+    "the sweep must actually reach all four cache depths"
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -996,6 +1080,54 @@ fn caller_calls() -> usize {
   CALLER_CALLS.with(Cell::get)
 }
 
+// ── The two ways the fixture is made to FAIL ──────────────────────────────────────────────────
+//
+// Everything above runs over a lexer that cannot fail: `LedgerLexer::lex` yielded ordinary tokens
+// and end of input, and its `check()` returned `Ok(())` unconditionally, so no cell could reach a
+// lexer error, a limit trip, or a rejecting emitter. Those are exactly the conditions the
+// complete-input route's unwind and latch arguments are about, so the drift guard at the foot of
+// this file needs them.
+//
+// Both faults are ADDITIVE and both are off by default. A `!`-run is a lexer error and no source
+// outside the fault sweep contains one; the trip needs a live [`Budget`] guard, without which
+// `check()` reads one thread-local and answers `Ok`. `LedgerState`'s own
+// [`LedgerNeverTrips`](LedgerNeverTrips) is left exactly as it was — it is not the switch anyway,
+// since the input layer's terminal predicate asks the LEXER.
+
+thread_local! {
+  /// While `Some(n)`, [`LedgerLexer::check`] reports a trip once the lexer's tally has passed `n`
+  /// tokens — the fixture's [`TokenLimiter`](crate::state::token_tracker::TokenLimiter).
+  ///
+  /// The budget lives beside the state rather than in it because the tally it is compared against
+  /// (`LedgerState::scanned`) is the state's, and adding a second field to `LedgerState` would
+  /// change a type six cells above measure clones and drops of.
+  static LEDGER_BUDGET: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// A token budget in force for as long as this guard lives — the [`Wide`] pattern, for the lexer's
+/// terminal predicate.
+struct Budget;
+
+impl Budget {
+  fn of(tokens: usize) -> Self {
+    LEDGER_BUDGET.with(|c| c.set(Some(tokens)));
+    Self
+  }
+
+  /// No budget at all, so the lexer cannot trip. Returned as a guard rather than as nothing, so a
+  /// caller sweeping over `Option<usize>` holds one value of one type either way.
+  fn unlimited() -> Self {
+    LEDGER_BUDGET.with(|c| c.set(None));
+    Self
+  }
+}
+
+impl Drop for Budget {
+  fn drop(&mut self) {
+    LEDGER_BUDGET.with(|c| c.set(None));
+  }
+}
+
 // ── The instrumented lexer ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, PartialEq, Eq, Hash)]
@@ -1185,6 +1317,9 @@ impl State for LedgerState {
 #[derive(Debug, Clone, PartialEq)]
 enum LedgerErr {
   Lex,
+  /// A **terminal** limit trip, as distinct from an ordinary lexer error. Only
+  /// [`LedgerLexer::check`] produces it, and only while a [`Budget`] guard is live.
+  Limit,
   Incomplete,
 }
 
@@ -1292,8 +1427,16 @@ impl<'a> crate::Lexer<'a> for LedgerLexer<'a> {
     }
   }
 
+  /// The input layer's **terminal predicate**, and the only one it has:
+  /// [`latch_if_limit_tripped`](InputRef::latch_if_limit_tripped) asks the *lexer*, never the
+  /// [`State`]. `LedgerState::check` is therefore not the trip switch its name suggests, and
+  /// leaving it [`LedgerNeverTrips`] is what keeps every cell above lexing exactly as it did:
+  /// with no [`Budget`] guard live this reads one thread-local and answers `Ok`.
   fn check(&self) -> Result<(), LedgerErr> {
-    Ok(())
+    match LEDGER_BUDGET.with(Cell::get) {
+      Some(budget) if self.state.scanned > budget => Err(LedgerErr::Limit),
+      _ => Ok(()),
+    }
   }
 
   fn state(&self) -> &LedgerState {
@@ -1339,10 +1482,25 @@ impl<'a> crate::Lexer<'a> for LedgerLexer<'a> {
       i += 1;
     }
     self.end = i;
+    let text = &bytes[self.start..self.end];
+
+    // A run of `!` is a NON-TERMINAL lexer error: it bumps no tally, `check()` stays `Ok`, so
+    // nothing latches and the scan crosses it looking for the next token. No source in this file
+    // outside the fault sweep contains one.
+    if text.iter().all(|b| *b == b'!') {
+      return Some(Err(LedgerErr::Lex));
+    }
+
     self.state.scanned += 1;
-    let trivia = self.src.0.as_bytes()[self.start..self.end]
-      .iter()
-      .all(|b| *b == b'~');
+    // A TRIP REPLACES THE TOKEN IT FIRED ON, which is the shape `classify` is written against: the
+    // terminal condition reaches the input layer as a `Lexed::Error` carrying the tripping token's
+    // span, and `check()` — asked next — agrees that the lexer has tripped. Inert unless a
+    // [`Budget`] guard is live.
+    if let Err(tripped) = crate::Lexer::check(self) {
+      return Some(Err(tripped));
+    }
+
+    let trivia = text.iter().all(|b| *b == b'~');
     Some(Ok(if trivia {
       LedgerTok::Trivia
     } else {
@@ -1357,16 +1515,53 @@ impl<'a> crate::Lexer<'a> for LedgerLexer<'a> {
 
 // ── The instrumented emitter ──────────────────────────────────────────────────────────────────
 
+/// One lexer diagnostic the emitter was offered: what it was, where, and whether it was taken.
+///
+/// The span is recorded as its `Debug` form because that is the only shape the
+/// [`Emitter`](crate::Emitter) impl below can read one in: it is generic over `L`, so `L::Span` is
+/// known only to be [`Debug`](core::fmt::Debug) and there is no way to pull a number out of a
+/// caller offset. It compares across the two routes, which is what the record is for.
+#[derive(Debug, Clone, PartialEq)]
+struct Diagnostic {
+  class: LedgerErr,
+  at: std::string::String,
+  accepted: bool,
+}
+
 #[derive(Debug, Default)]
 struct LedgerEmitter {
   next: Cell<u64>,
   live: RefCell<std::vec::Vec<u64>>,
   emissions: usize,
+  /// Every lexer diagnostic offered, in order — the observation a dedup watermark governs.
+  offered: std::vec::Vec<Diagnostic>,
+  /// `(unexpected-token reports, other errors)`. `SkipWhile` reports nothing, so both stay 0;
+  /// they are recorded so that a route which *started* reporting is red rather than invisible.
+  reports: (usize, usize),
+  /// While `Some(n)`, the `n`-th lexer diagnostic and every later one is **rejected** — the fatal
+  /// emitter the `skip_while` contract names ("a fatal emitter can abort on a malformed token").
+  reject_from: Option<usize>,
 }
 
 impl LedgerEmitter {
+  /// An emitter that rejects the `nth` lexer diagnostic it is offered, and every one after it.
+  fn rejecting_from(nth: usize) -> Self {
+    Self {
+      reject_from: Some(nth),
+      ..Self::default()
+    }
+  }
+
   fn live_rows(&self) -> usize {
     self.live.borrow().len()
+  }
+
+  fn offered(&self) -> &[Diagnostic] {
+    &self.offered
+  }
+
+  fn reports(&self) -> (usize, usize) {
+    self.reports
   }
 }
 
@@ -1379,10 +1574,20 @@ where
 
   fn emit_lexer_error(
     &mut self,
-    _err: Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
+    err: Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
   ) -> Result<(), LedgerErr> {
     self.emissions += 1;
-    Ok(())
+    let (span, err) = err.into_components();
+    let class: LedgerErr = err.into();
+    let accepted = !self
+      .reject_from
+      .is_some_and(|nth| self.offered.len() + 1 >= nth);
+    self.offered.push(Diagnostic {
+      class: class.clone(),
+      at: std::format!("{span:?}"),
+      accepted,
+    });
+    if accepted { Ok(()) } else { Err(class) }
   }
 
   fn emit_unexpected_token(
@@ -1390,11 +1595,13 @@ where
     _err: crate::error::token::UnexpectedTokenOf<'inp, L, Lang>,
   ) -> Result<(), LedgerErr> {
     self.emissions += 1;
+    self.reports.0 += 1;
     Ok(())
   }
 
   fn emit_error(&mut self, _err: Spanned<LedgerErr, L::Span>) -> Result<(), LedgerErr> {
     self.emissions += 1;
+    self.reports.1 += 1;
     Ok(())
   }
 
@@ -1524,20 +1731,43 @@ impl<'a> Cache<'a, LedgerLexer<'a>, ()> for LedgerCache<'a> {
 type LedgerCtx<'a> = (LedgerEmitter, LedgerCache<'a>);
 
 fn ledger_input<'a>(src: &'a LedgerSrc<'a>) -> Input<'a, LedgerLexer<'a>, LedgerCtx<'a>, ()> {
-  Input::with_state_and_context(
-    src,
-    LedgerState::default(),
-    InputContext::new(LedgerEmitter::default(), LedgerCache::default()),
-  )
+  ledger_input_with(src, LedgerEmitter::default())
 }
 
 fn ledger_partial_input<'a>(
   src: &'a LedgerSrc<'a>,
 ) -> Input<'a, LedgerLexer<'a>, LedgerCtx<'a>, (), Partial> {
+  ledger_partial_input_with(src, LedgerEmitter::default())
+}
+
+/// The same input under an emitter and a cache capacity the caller chose — a rejecting emitter for
+/// the fatal-emit cells, and the capacity axis for the drift sweep. Both default back to
+/// [`LedgerCtx`] by inference wherever the return type names it.
+fn ledger_input_with<'a, C>(
+  src: &'a LedgerSrc<'a>,
+  emitter: LedgerEmitter,
+) -> Input<'a, LedgerLexer<'a>, (LedgerEmitter, C), ()>
+where
+  C: Cache<'a, LedgerLexer<'a>, ()> + Default,
+{
   Input::with_state_and_context(
     src,
     LedgerState::default(),
-    InputContext::new(LedgerEmitter::default(), LedgerCache::default()),
+    InputContext::new(emitter, C::default()),
+  )
+}
+
+fn ledger_partial_input_with<'a, C>(
+  src: &'a LedgerSrc<'a>,
+  emitter: LedgerEmitter,
+) -> Input<'a, LedgerLexer<'a>, (LedgerEmitter, C), (), Partial>
+where
+  C: Cache<'a, LedgerLexer<'a>, ()> + Default,
+{
+  Input::with_state_and_context(
+    src,
+    LedgerState::default(),
+    InputContext::new(emitter, C::default()),
   )
 }
 
@@ -2729,43 +2959,370 @@ fn an_unwinding_clamp_leaves_the_token_it_was_clamping_in_the_stream() {
 
 // ── The typestate split, and the drift it could hide ──────────────────────────────────────────
 
-/// One `skip_while` sweep over an input of either completeness, as its caller-visible outcome.
+/// One fixture the drift guard sweeps: a source, and the faults the lexer and the emitter are
+/// armed with over it.
+///
+/// The faults exist because the routes' own arguments are about them. The complete-input route
+/// gave up the scan scope on the strength of two claims — that a trip latches at the same offset
+/// there as the scanner's deferred frontier latches it, and that nothing is ever half-removed when
+/// caller code unwinds — and a sweep over a lexer that cannot fail never reaches the first one at
+/// all.
+#[derive(Debug, Clone, Copy)]
+struct Fixture {
+  text: &'static str,
+  /// A token budget: the lexer trips on the `budget + 1`-th token it produces, and the trip
+  /// **replaces** that token, exactly as the Logos backend reports one.
+  budget: Option<usize>,
+  /// `Some(n)`: the emitter rejects the `n`-th lexer diagnostic it is offered, and every later
+  /// one — the fatal emitter [`skip_while`](InputRef::skip_while) documents.
+  reject_from: Option<usize>,
+}
+
+impl Fixture {
+  const fn clean(text: &'static str) -> Self {
+    Self {
+      text,
+      budget: None,
+      reject_from: None,
+    }
+  }
+
+  const fn tripping(text: &'static str, budget: usize) -> Self {
+    Self {
+      text,
+      budget: Some(budget),
+      reject_from: None,
+    }
+  }
+
+  const fn fatal(text: &'static str, reject_from: usize) -> Self {
+    Self {
+      text,
+      budget: None,
+      reject_from: Some(reject_from),
+    }
+  }
+
+  const fn tripping_and_fatal(text: &'static str, budget: usize, reject_from: usize) -> Self {
+    Self {
+      text,
+      budget: Some(budget),
+      reject_from: Some(reject_from),
+    }
+  }
+
+  fn emitter(self) -> LedgerEmitter {
+    match self.reject_from {
+      Some(nth) => LedgerEmitter::rejecting_from(nth),
+      None => LedgerEmitter::default(),
+    }
+  }
+}
+
+/// What one `skip_while` sweep observed, on an input of either completeness.
 ///
 /// Deliberately not the effect ledger: the two routes run different caller code by construction,
-/// and what has to agree is the *observation*.
-#[expect(clippy::type_complexity, reason = "one tuple, compared as a whole")]
-fn ledger_skip_run<'a, Cmpl>(
-  inp: &mut InputRef<'a, '_, LedgerLexer<'a>, LedgerCtx<'a>, (), Cmpl>,
+/// and what has to agree is the *observation*. Every field here is a fact about the token stream,
+/// the diagnostics, or the emitter's own condition — the set
+/// [`skip_while`](InputRef::skip_while) promises identical, and the whole of it, because a
+/// divergence in any one of them is a divergence. The two the fault fixtures add are the ones the
+/// route's own argument turns on: the **latch** (where a trip poisons the input) and the **dedup
+/// watermark** (which decides whether a crossed lexer error is diagnosed twice).
+#[derive(Debug, PartialEq)]
+struct SkipRun {
+  /// What the prefill peek returned, and the residency it **actually achieved** — see
+  /// [`prefill_to`] for why the second is measured rather than assumed.
+  peeked: Result<usize, LedgerErr>,
+  depth: usize,
+  parked: bool,
+  /// The tokens the predicate was asked about, in order, with the answer it gave.
+  asked: std::vec::Vec<(usize, usize, bool)>,
+  /// What each skip returned. A rejecting emitter puts an `Err` here.
+  returned: std::vec::Vec<Result<(), LedgerErr>>,
+  /// The resume cursor after the program: the stopping token's start.
+  cursor: usize,
+  /// The committed span after the program.
+  span: (usize, usize),
+  /// The committed lexer state — the token tally, which is the fact a trip is keyed on, and the
+  /// half of the position that a torn commit would leave describing a different token than
+  /// `span` does.
+  scanned: usize,
+  is_exhausted: bool,
+  /// The poison boundary a trip latched, if one did.
+  latch: Option<usize>,
+  /// The lexer-error dedup watermark.
+  dedup: usize,
+  /// The tokens a full drain then yields — the "a caller retries after the call" law — and how
+  /// that drain ended.
+  drained: std::vec::Vec<(usize, usize)>,
+  drain_end: Result<(), LedgerErr>,
+  /// Every lexer diagnostic the emitter was offered, in order, with whether it took it.
+  diagnostics: std::vec::Vec<Diagnostic>,
+  /// `(unexpected-token reports, other errors)`. A trivia skip reports nothing on either route;
+  /// recorded so that a route which *started* reporting is red rather than invisible.
+  reports: (usize, usize),
+  /// Emitter marks still outstanding: a route that took one and forgot it is red here.
+  live_rows: usize,
+}
+
+impl SkipRun {
+  /// The half of the observation that has to be read once the handle is gone.
+  fn record_emitter(&mut self, emitter: &LedgerEmitter) {
+    self.diagnostics = emitter.offered().to_vec();
+    self.reports = emitter.reports();
+    self.live_rows = emitter.live_rows();
+  }
+}
+
+/// The prefill, at a **real** cache depth.
+///
+/// [`DefaultCache`] is `U3`, so ONE `peek::<U3>` saturates it. The sweep this replaces issued that
+/// same peek `prefill` times and called the result four depths; depths 1, 2 and 3 left the
+/// identical residency, so it swept two states and reported four. A depth has to come from the
+/// **width** of the window, and it is then MEASURED — `SkipRun::depth` is what the cache actually
+/// holds afterwards, not how many peeks were issued, and it is compared across the routes like
+/// every other field.
+///
+/// A short source, a lexer error inside the window (an error is not a token and takes no slot) or
+/// a trip mid-fill all leave a depth **below** the width asked for. That is the honest number, and
+/// it is the one recorded; the sweeps below assert which depths were reached rather than assuming
+/// the width was met.
+fn prefill_to<'a, C, Cmpl>(
+  inp: &mut InputRef<'a, '_, LedgerLexer<'a>, (LedgerEmitter, C), (), Cmpl>,
+  width: usize,
+) -> Result<usize, LedgerErr>
+where
+  C: Cache<'a, LedgerLexer<'a>, ()>,
+  Cmpl: crate::input::SurfaceIncomplete<'a, LedgerLexer<'a>, (LedgerEmitter, C), ()>,
+{
+  match width {
+    0 => Ok(0),
+    1 => inp.peek::<U1>().map(|peeked| peeked.len()),
+    2 => inp.peek::<U2>().map(|peeked| peeked.len()),
+    3 => inp.peek::<U3>().map(|peeked| peeked.len()),
+    _ => unreachable!("the sweeps run widths 0..=3, the capacity of `DefaultCache`"),
+  }
+}
+
+/// One `skip_while` sweep over an input of either completeness, as its caller-visible outcome.
+fn ledger_skip_run<'a, C, Cmpl>(
+  inp: &mut InputRef<'a, '_, LedgerLexer<'a>, (LedgerEmitter, C), (), Cmpl>,
   prefill: usize,
   skips: usize,
-) -> (
-  std::vec::Vec<(usize, usize, bool)>,
-  usize,
-  (usize, usize),
-  std::vec::Vec<(usize, usize)>,
-)
+) -> SkipRun
 where
-  Cmpl: crate::input::SurfaceIncomplete<'a, LedgerLexer<'a>, LedgerCtx<'a>, ()>,
+  C: Cache<'a, LedgerLexer<'a>, ()>,
+  Cmpl: crate::input::SurfaceIncomplete<'a, LedgerLexer<'a>, (LedgerEmitter, C), ()>,
 {
+  let peeked = prefill_to(inp, prefill);
+  let parked = inp.has_front_parked();
+  // The residency, counting the parked slot: under a capacity that retains nothing the front of
+  // the stream IS that slot, so a cache-only count would report 0 for every state.
+  let depth = Cache::len(inp.cache()) + usize::from(parked);
+
   let mut asked = std::vec::Vec::new();
-  for _ in 0..prefill {
-    let _ = inp.peek::<U3>().unwrap();
-  }
+  let mut returned = std::vec::Vec::new();
   for _ in 0..skips {
-    inp
-      .skip_while(|t| {
-        asked.push((t.span.start.0, t.span.end.0, t.data.is_trivia()));
-        t.data.is_trivia()
-      })
-      .unwrap();
+    returned.push(inp.skip_while(|t| {
+      asked.push((t.span.start.0, t.span.end.0, t.data.is_trivia()));
+      t.data.is_trivia()
+    }));
   }
+
   let cursor = inp.cursor().as_inner().0;
   let span = (inp.span().start.0, inp.span().end.0);
+  let scanned = inp.state().scanned;
+  let is_exhausted = inp.is_exhausted();
+  let latch = inp.latch_snapshot().map(|at| at.0);
+  let dedup = inp.emitted_error_end.0;
+
   let mut drained = std::vec::Vec::new();
-  while let Some(tok) = inp.next().unwrap() {
-    drained.push((tok.span_ref().start.0, tok.span_ref().end.0));
+  let drain_end = loop {
+    match inp.next() {
+      Ok(Some(tok)) => drained.push((tok.span_ref().start.0, tok.span_ref().end.0)),
+      Ok(None) => break Ok(()),
+      Err(e) => break Err(e),
+    }
+  };
+
+  SkipRun {
+    peeked,
+    depth,
+    parked,
+    asked,
+    returned,
+    cursor,
+    span,
+    scanned,
+    is_exhausted,
+    latch,
+    dedup,
+    drained,
+    drain_end,
+    // Filled by `record_emitter` once the handle is gone.
+    diagnostics: std::vec::Vec::new(),
+    reports: (0, 0),
+    live_rows: 0,
   }
-  (asked, cursor, span, drained)
+}
+
+/// A cache capacity the sweep can be generic over.
+///
+/// It has to be a trait with a lifetime-generic associated type rather than a plain type
+/// parameter: the source outlives nothing outside [`both_routes`], so `C: Cache<'a, …>` cannot be
+/// named by a caller who does not have `'a`.
+trait Capacity {
+  const NAME: &'static str;
+  /// The residencies the widths 0..=3 can reach under this capacity, as a `[bool; 4]`.
+  const REACHES: [bool; 4];
+  type Cache<'a>: Cache<'a, LedgerLexer<'a>, ()> + Default;
+}
+
+/// The instrumented `U3` deque — the capacity every other cell in this file runs under.
+struct Deque3;
+
+impl Capacity for Deque3 {
+  const NAME: &'static str = "ledger-deque(3)";
+  const REACHES: [bool; 4] = [true, true, true, true];
+  type Cache<'a> = LedgerCache<'a>;
+}
+
+/// One slot: the smallest capacity that still retains a token.
+struct Slot1;
+
+impl Capacity for Slot1 {
+  const NAME: &'static str = "option(1)";
+  const REACHES: [bool; 4] = [true, true, false, false];
+  type Cache<'a> = Option<CachedTokenOf<'a, LedgerLexer<'a>>>;
+}
+
+/// No cache at all. `RETAINS_FRONT` is `false` here, so `can_park()` is **true** and the front of
+/// the stream is the parked slot — the one residency in which the two routes reach a resident head
+/// by different code (this route's `front`, the scanner's `Origin::Parked` prologue) and in which
+/// [`AtCursor`](super::AtCursor) reads the parked token's end rather than the cache's back.
+struct NoCache;
+
+impl Capacity for NoCache {
+  const NAME: &'static str = "blackhole(0)";
+  const REACHES: [bool; 4] = [true, false, false, false];
+  type Cache<'a> = ();
+}
+
+/// One fixture, at one prefill width, under one cache capacity, with `skips` skips — run down both
+/// routes.
+fn both_routes<K>(fixture: Fixture, prefill: usize, skips: usize) -> (SkipRun, SkipRun)
+where
+  K: Capacity,
+{
+  let src = LedgerSrc(fixture.text);
+  // In force for both runs, and gone by the time this returns.
+  let _budget = match fixture.budget {
+    Some(tokens) => Budget::of(tokens),
+    None => Budget::unlimited(),
+  };
+
+  let mut complete = ledger_input_with::<K::Cache<'_>>(&src, fixture.emitter());
+  let mut direct = {
+    let mut inp = complete.as_ref();
+    ledger_skip_run(&mut inp, prefill, skips)
+  };
+  direct.record_emitter(complete.emitter());
+
+  let mut partial = ledger_partial_input_with::<K::Cache<'_>>(&src, fixture.emitter());
+  partial.seal();
+  let mut scanned = {
+    let mut inp = partial.as_ref();
+    ledger_skip_run(&mut inp, prefill, skips)
+  };
+  scanned.record_emitter(partial.emitter());
+
+  (direct, scanned)
+}
+
+/// What a sweep actually reached — the guard on the guard.
+///
+/// This file's drift guard passed for a year by not looking: its lexer could not fail, its sources
+/// were words and trivia, and three of its four prefill depths were the same state. A tally that a
+/// fixture set stops exercising a condition is therefore part of the test, not a nicety: each
+/// sweep below asserts what it reached, so a fixture edited into vacuity is red rather than green.
+#[derive(Debug, Default)]
+struct Reached {
+  /// Which residencies the prefill actually achieved, per capacity, in the order the sweep runs
+  /// them: the `U3` deque, the one-slot cache, then the cache that retains nothing.
+  depths: [[bool; 4]; 3],
+  /// Cases whose input ended up poisoned.
+  latched: usize,
+  /// Non-limit lexer diagnostics offered, and limit ones.
+  lex_diagnostics: usize,
+  limit_diagnostics: usize,
+  /// Diagnostics the emitter rejected.
+  rejected: usize,
+  /// Skips that returned `Err`, and drains that did.
+  skip_errors: usize,
+  drain_errors: usize,
+  /// Cases where the prefill peek itself failed.
+  peek_errors: usize,
+}
+
+impl Reached {
+  fn record(&mut self, capacity: usize, run: &SkipRun) {
+    self.depths[capacity][run.depth] = true;
+    self.latched += usize::from(run.latch.is_some());
+    for diagnostic in &run.diagnostics {
+      match diagnostic.class {
+        LedgerErr::Limit => self.limit_diagnostics += 1,
+        _ => self.lex_diagnostics += 1,
+      }
+      self.rejected += usize::from(!diagnostic.accepted);
+    }
+    self.skip_errors += run.returned.iter().filter(|r| r.is_err()).count();
+    self.drain_errors += usize::from(run.drain_end.is_err());
+    self.peek_errors += usize::from(run.peeked.is_err());
+  }
+}
+
+/// One capacity's worth of the sweep.
+fn sweep_capacity<K>(fixtures: &[Fixture], slot: usize, reached: &mut Reached)
+where
+  K: Capacity,
+{
+  for &fixture in fixtures {
+    for prefill in 0..=3usize {
+      for skips in [1usize, 2] {
+        let (direct, scanned) = both_routes::<K>(fixture, prefill, skips);
+        assert_eq!(
+          direct,
+          scanned,
+          "the complete-input route and the scanned partial route must observe the same skip \
+           over {fixture:?} at prefill width {prefill} with {skips} skip(s) under {}",
+          K::NAME
+        );
+        assert!(
+          direct.depth <= prefill,
+          "a prefill of width {prefill} cannot leave {} tokens resident over {fixture:?} under {}",
+          direct.depth,
+          K::NAME
+        );
+        reached.record(slot, &direct);
+      }
+    }
+  }
+  assert_eq!(
+    reached.depths[slot],
+    K::REACHES,
+    "{} must reach exactly the residencies it can hold",
+    K::NAME
+  );
+}
+
+/// Runs one fixture set down both routes at every prefill width, every cache capacity and both
+/// skip counts, asserting the two observations agree, and reports what the set reached.
+fn sweep(fixtures: &[Fixture]) -> Reached {
+  let mut reached = Reached::default();
+  sweep_capacity::<Deque3>(fixtures, 0, &mut reached);
+  sweep_capacity::<Slot1>(fixtures, 1, &mut reached);
+  sweep_capacity::<NoCache>(fixtures, 2, &mut reached);
+  reached
 }
 
 /// **The drift guard for the typestate split.**
@@ -2779,57 +3336,246 @@ where
 /// What closes it here is that the split is *observable*: a **sealed** partial input takes every
 /// decision a complete one takes, because both partial-input rules are written
 /// `Cmpl::PARTIAL && !self.is_final() && …`. So the two routes must land on the same observation
-/// over the same stream, and this sweep — every source, four prefill depths, one skip and two
-/// back-to-back skips — is the assertion that they do. A change to either route that the other
-/// does not get fails here rather than in a user's streaming parse.
+/// over the same stream, and this sweep — every source, four **measured** cache depths, one skip
+/// and two back-to-back skips — is the assertion that they do. A change to either route that the
+/// other does not get fails here rather than in a user's streaming parse.
 ///
-/// The whole caller-visible tuple is compared: the tokens the predicate was asked about (in
-/// order, with the answer it gave), the resume cursor, the committed span, and the tokens a later
-/// full drain yields. The emitter's outstanding-row count is checked on each side too, so a route
-/// that took a mark and forgot it is red here as well.
+/// The whole caller-visible tuple is compared; [`SkipRun`] is the list. The depths are the
+/// [`prefill_to`] ones — a width per depth, and the depth **measured** afterwards, because
+/// `peek::<U3>` repeated is one state and not three.
+///
+/// This cell is the clean half. The conditions the routes' arguments are actually about — a lexer
+/// error crossed mid-skip, a limit trip, a rejecting emitter — are the sweep below.
 #[test]
 fn the_two_completeness_routes_observe_the_same_skip() {
-  const SOURCES: &[&str] = &[
-    "ab cd ef",
-    "~ ab cd",
-    "~ ~ ab",
-    "~ ~ ~",
-    "",
-    "~",
-    "ab ~ ~ cd",
+  const CLEAN: &[Fixture] = &[
+    Fixture::clean("ab cd ef"),
+    Fixture::clean("~ ab cd"),
+    Fixture::clean("~ ~ ab"),
+    Fixture::clean("~ ~ ~"),
+    Fixture::clean(""),
+    Fixture::clean("~"),
+    Fixture::clean("ab ~ ~ cd"),
   ];
 
-  for text in SOURCES {
-    let src = LedgerSrc(text);
-    for prefill in [0usize, 1, 2, 3] {
-      for skips in [1usize, 2] {
-        let mut complete = ledger_input(&src);
-        let direct = {
-          let mut inp = complete.as_ref();
-          ledger_skip_run(&mut inp, prefill, skips)
-        };
-        let direct_rows = complete.emitter().live_rows();
+  let reached = sweep(CLEAN);
+  assert_eq!(
+    (
+      reached.latched,
+      reached.lex_diagnostics,
+      reached.limit_diagnostics,
+      reached.skip_errors
+    ),
+    (0, 0, 0, 0),
+    "these fixtures are the CLEAN half: nothing here may latch, diagnose or fail, or the sweep \
+     below is not adding the conditions it claims to. Got {reached:?}"
+  );
+}
 
-        let mut partial = ledger_partial_input(&src);
-        partial.seal();
-        let scanned = {
-          let mut inp = partial.as_ref();
-          ledger_skip_run(&mut inp, prefill, skips)
-        };
-        let scanned_rows = partial.emitter().live_rows();
+/// **The same guard, over the conditions the two routes' arguments are about.**
+///
+/// The cell above sweeps a lexer that cannot fail. Everything the complete-input route had to
+/// re-establish when it left the scanner is about a lexer that can:
+///
+/// * **the latch.** The scanner latches a trip through its deferred
+///   [`AtFrontier`](super::AtFrontier); this route latches through
+///   [`AtCursor`](super::AtCursor), and they are the same offset only *because* this route commits
+///   every token as it crosses it. That is an argument about a trip, and the clean sweep contains
+///   none;
+/// * **the crossed error.** A non-limit lexer error moves no frontier and is diagnosed exactly
+///   once, deduplicated against a watermark that a prefill may already have raised. Which route
+///   crossed it must not decide whether it is reported twice, or where the position lands
+///   afterwards;
+/// * **the fatal exit.** A rejecting emitter turns a diagnostic into the call's `Err`. Under the
+///   scanner that exit keeps the scan's progress and settles the entry mark; on this route the
+///   progress is already committed token by token and there is no mark. Both must leave the same
+///   input behind.
+///
+/// The fixtures below arm the lexer (`!` runs lex as errors; a [`Budget`] makes it trip) and the
+/// emitter (a rejection from the `n`-th diagnostic on), and the comparison is the same whole
+/// [`SkipRun`] — including the latch and the dedup watermark, which only these cases can move.
+///
+/// Red against a broken route — **measured**, by making each break and reading the failure, not
+/// asserted:
+///
+/// | deliberate breakage of the complete-input route | what this cell reports |
+/// |---|---|
+/// | latch at a *deferred* frontier, built when the lexing phase opens and never adopted, as the scanner's `AtFrontier` is before its first `adopt` | `~ ~ ~ ab` under a 2-token budget: `latch: Some(0)` against `Some(3)` |
+/// | drop the pre-lex `reached_boundary` probe in phase 2 | the same fixture with **two** skips: `span: (0, 3)` against `(2, 3)` — the second skip rebuilds a lexer at a latched boundary and commits a span that starts where the first one did |
+/// | swallow a fatal emitter rejection (`Err(e) => return Ok(())`) | `~ !! ~ ab` with the first diagnostic refused: `returned: [Ok(())]` against `[Err(Lex)]` |
+///
+/// None of the three is caught by the clean sweep above. The first is also caught by
+/// [`a_trip_inside_a_trivia_skip_latches_where_the_scan_latches`]; the second by
+/// `input_ref::tests::cache_transparency_matrix`; for the third, the whole of
+/// `cargo test -p tokora --all-features --lib` is **green** without this cell and the next.
+///
+/// The pop-then-clamp reorder is not in the table because this cell adds nothing to it: it is
+/// caught by [`an_unwinding_clamp_leaves_the_token_it_was_clamping_in_the_stream`] and by
+/// [`an_unwinding_caller_clone_leaves_the_predicate_with_a_different_call_count`], and by those
+/// two alone, with or without these fixtures. Reordering the clamp changes nothing a
+/// non-unwinding run can see, which is the point of those cells.
+#[test]
+fn the_two_completeness_routes_observe_the_same_skip_when_the_lexer_or_the_emitter_fails() {
+  const FAULTY: &[Fixture] = &[
+    // ── A non-limit lexer error, in every position a skip can meet one ──
+    // The error is behind the stopping token, so the skip never crosses it.
+    Fixture::clean("ab !! cd"),
+    // The skip's first act is to cross one.
+    Fixture::clean("!! ab"),
+    // Crossed after a trivia token, with a token behind it to stop on.
+    Fixture::clean("~ !! ab"),
+    // INSIDE the skipped run: trivia, error, trivia — the frontier must not move onto the error.
+    Fixture::clean("~ !! ~ ab"),
+    // Two in a row, then trivia to end of input.
+    Fixture::clean("~ !! !! ~"),
+    // The last thing before end of input, so the skip's EOF settle happens past an error.
+    Fixture::clean("~ !!"),
+    // Nothing but an error.
+    Fixture::clean("!!"),
+    // An error the prefill lexes and diagnoses, which the skip then re-lexes: the dedup watermark
+    // decides whether it is reported once or twice, and it must decide the same on both routes.
+    Fixture::clean("!! !! ab cd"),
+    // ── A limit trip ──
+    // The trip fires on the third trivia token, mid-skip, with tokens already committed.
+    Fixture::tripping("~ ~ ~ ab", 2),
+    // The trip fires on the token the skip would have stopped on.
+    Fixture::tripping("~ ~ ab cd", 2),
+    // One token behind the first skip.
+    Fixture::tripping("~ ab cd", 1),
+    // The skip stops on the head; the trip is behind it and is never reached by the skip itself.
+    Fixture::tripping("ab cd ef", 1),
+    // Nothing but trivia, so the trip lands with the skip still running.
+    Fixture::tripping("~ ~ ~ ~", 2),
+    // Spent before the first token: the whole input is dead from offset 0.
+    Fixture::tripping("~ ~ ~ ab", 0),
+    // A crossed lexer error on the way to a trip — the two faults in one stream.
+    Fixture::tripping("~ !! ~ ~ ab", 2),
+    // ── A rejecting emitter ──
+    Fixture::fatal("~ !! ~ ab", 1),
+    Fixture::fatal("~ !! !! ab", 2),
+    Fixture::fatal("!! ab cd", 1),
+    // The error is BEHIND the stopping token, so the skip returns cleanly and the rejection lands
+    // on the later drain instead — the one fixture whose `drain_end` is an `Err`. At the wider
+    // prefills the peek meets it first, and that has to agree across the routes too.
+    Fixture::fatal("ab !! cd", 1),
+    // A rejected TRIP diagnostic: the boundary is latched before the verdict is even returned, so
+    // the fatal exit has to keep it.
+    Fixture::tripping_and_fatal("~ ~ ~ ab", 2, 1),
+    Fixture::tripping_and_fatal("~ !! ~ ~ ab", 2, 2),
+  ];
 
-        assert_eq!(
-          direct, scanned,
-          "the complete-input route and the scanned partial route must observe the same skip \
-           over {text:?} at prefill {prefill} with {skips} skip(s): same tokens asked about in \
-           the same order, same cursor, same committed span, same stream left behind"
-        );
-        assert_eq!(
-          (direct_rows, scanned_rows),
-          (0, 0),
-          "and neither leaves an emitter mark outstanding over {text:?} at prefill {prefill}"
-        );
-      }
-    }
-  }
+  let reached = sweep(FAULTY);
+  assert!(
+    reached.latched > 0
+      && reached.lex_diagnostics > 0
+      && reached.limit_diagnostics > 0
+      && reached.rejected > 0
+      && reached.skip_errors > 0
+      && reached.peek_errors > 0
+      && reached.drain_errors > 0,
+    "and it must actually reach every condition it exists for: a latched boundary, a non-limit \
+     lexer diagnostic, a limit one, a rejected one, a skip that returns `Err`, a prefill peek \
+     that does, and a later drain that does. A fixture set edited into a clean stream is the \
+     exact defect this cell was written to fix. Got {reached:?}"
+  );
+}
+
+/// The sweep above proves the two routes agree; this pins what they agree *on*, so a change that
+/// broke both of them in the same way could not pass unnoticed.
+///
+/// Three values, one per fault, read off the complete-input route at prefill 0 with one skip.
+#[test]
+fn the_agreed_failing_skip_observation_is_the_right_one() {
+  // ── A trip mid-skip ──
+  // `~ ~ ~ ab` under a two-token budget: the first two trivia tokens are crossed and committed,
+  // the third trips. The boundary is the DURABLE FRONTIER — the end of the last skipped token,
+  // offset 3 — not the tripping token's own span, and not the cursor the call started from.
+  let (direct, scanned) = both_routes::<Deque3>(Fixture::tripping("~ ~ ~ ab", 2), 0, 1);
+  assert_eq!(direct, scanned);
+  assert_eq!(direct.latch, Some(3), "the latch is the durable frontier");
+  assert_eq!(direct.span, (2, 3), "committed at the last skipped token");
+  assert_eq!(direct.scanned, 2, "and the state that produced it");
+  assert_eq!(direct.cursor, 3, "the cursor is the committed end");
+  assert_eq!(
+    direct.diagnostics.len(),
+    1,
+    "the trip is diagnosed exactly once. Got {:?}",
+    direct.diagnostics
+  );
+  assert_eq!(direct.diagnostics[0].class, LedgerErr::Limit);
+  assert!(direct.diagnostics[0].accepted);
+  assert_eq!(
+    direct.drained,
+    std::vec::Vec::new(),
+    "and the drain stops at the boundary"
+  );
+  assert_eq!(
+    direct.returned,
+    std::vec![Ok(())],
+    "the skip still succeeds"
+  );
+
+  // ── A crossed non-limit lexer error ──
+  // `~ !! ~ ab`: both trivia tokens are skipped and the error between them is diagnosed once. The
+  // error moves no frontier, so the committed span is the SECOND trivia token, and the watermark
+  // is the error's end.
+  let (direct, scanned) = both_routes::<Deque3>(Fixture::clean("~ !! ~ ab"), 0, 1);
+  assert_eq!(direct, scanned);
+  assert_eq!(direct.latch, None, "a plain lexer error latches nothing");
+  assert_eq!(
+    direct.span,
+    (5, 6),
+    "the frontier tracks TOKENS: it is the trivia token BEHIND the error, not the error"
+  );
+  assert_eq!(direct.dedup, 4, "the watermark is the error's end");
+  assert_eq!(
+    direct.diagnostics.len(),
+    1,
+    "one error, one diagnostic. Got {:?}",
+    direct.diagnostics
+  );
+  assert_eq!(direct.diagnostics[0].class, LedgerErr::Lex);
+  assert_eq!(
+    direct.drained,
+    std::vec![(7, 9)],
+    "and the stopping token is still there"
+  );
+
+  // The same source with the error already lexed by a wide prefill: the dedup watermark is the
+  // reason it is diagnosed once and not twice, and it is the same one either way.
+  let (deep, deep_scanned) = both_routes::<Deque3>(Fixture::clean("~ !! ~ ab"), 3, 1);
+  assert_eq!(deep, deep_scanned);
+  assert_eq!(
+    deep.diagnostics.len(),
+    1,
+    "the prefill emitted it and the skip re-lexed the same region. Got {:?}",
+    deep.diagnostics
+  );
+
+  // ── A rejecting emitter ──
+  // The same stream, with the first diagnostic refused: the skip propagates the `Err`, and the
+  // position is settled at the LEXER — the rejected item's span — rather than left mid-scan.
+  let (direct, scanned) = both_routes::<Deque3>(Fixture::fatal("~ !! ~ ab", 1), 0, 1);
+  assert_eq!(direct, scanned);
+  assert_eq!(
+    direct.returned,
+    std::vec![Err(LedgerErr::Lex)],
+    "a rejected lexer diagnostic is the call's error"
+  );
+  assert_eq!(
+    direct.diagnostics.len(),
+    1,
+    "and nothing was offered after it. Got {:?}",
+    direct.diagnostics
+  );
+  assert!(!direct.diagnostics[0].accepted);
+  assert_eq!(
+    direct.span,
+    (2, 4),
+    "the fatal exit settles at the rejected item's span"
+  );
+  assert_eq!(
+    direct.live_rows, 0,
+    "and neither route leaves an emitter mark outstanding on the way out"
+  );
 }
