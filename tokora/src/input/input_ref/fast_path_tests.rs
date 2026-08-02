@@ -4193,6 +4193,19 @@ where
 /// on call 3 reported `cursor: 3` against `4`, `parked: false` against `true`, `depth: 0` against
 /// `1` and `drain_lexed: 2` against `1` — the complete-input route dropping the freshly-lexed
 /// stopper where the scanned route parked it. The panic sweep above stayed green throughout.
+///
+/// # What this cell does not cover, and where that is pinned instead
+///
+/// **The predicate, at every call — and nothing else about the unwind edge.** The two routes are
+/// held to the same observation for a panic out of the predicate, out of the emitter, and out of
+/// the lexer, with **one** exit excluded: an unwind *inside the end-of-input settle*, where the
+/// scanner has already disarmed its scope and drops the frontier it was about to commit while the
+/// complete-input route keeps a prefix it committed token by token. That is deliberate, it is
+/// documented in `skip_while`'s *Panic unwind* section, and it is pinned as a **difference** — both
+/// columns asserted, so a run that turned it into agreement would be red too — by
+/// `the_two_completeness_routes_are_pinned_apart_on_an_interrupted_eof_settle` in
+/// `super::tests`. A green run of this cell is therefore not proof of parity across the unwind
+/// edge; it is proof of parity across the predicate's part of it.
 #[test]
 fn the_two_completeness_routes_observe_the_same_unwound_skip() {
   const UNWOUND: &[Fixture] = &[

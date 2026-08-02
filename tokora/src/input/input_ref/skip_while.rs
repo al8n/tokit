@@ -55,14 +55,14 @@ where
   ///
   /// # Panic unwind
   ///
-  /// A panic out of the predicate, the expected-tokens closure, the lexer or the emitter is an
-  /// exit too, and it settles: no token leaves the stream, the diagnosed prefix is kept, and no
-  /// emitter mark is stranded. The two routes reach that by different means, and the difference is
-  /// the whole of what *Two routes, one skip* below is about — the complete-input route holds no
-  /// uncommitted position at any point where caller code runs, and holds a token out of the stream
-  /// at exactly one call, which [`LexedFront`] owns across; the partial-input route keeps the
-  /// shared scanner's `ScanScope`, whose `Drop` puts the in-flight token back, commits the frontier
-  /// and settles the entry mark.
+  /// A panic out of the predicate, the expected-tokens closure, the emitter, or the lexer
+  /// **anywhere but the end-of-input settle** is an exit too, and it settles: no token leaves the
+  /// stream, the diagnosed prefix is kept, and no emitter mark is stranded. The two routes reach
+  /// that by different means, and the difference is the whole of what *Two routes, one skip* below
+  /// is about — the complete-input route holds no uncommitted position at any point where caller
+  /// code runs, and holds a token out of the stream at exactly one call, which `LexedFront` owns
+  /// across; the partial-input route keeps the shared scanner's `ScanScope`, whose `Drop` puts the
+  /// in-flight token back, commits the frontier and settles the entry mark.
   ///
   /// That one call is the predicate, over a token the **lexing** run has just produced, and it is
   /// worth stating why the resident run needs no such guard while this does: a resident token is
@@ -73,6 +73,52 @@ where
   /// The two answers are within one cursor *range* of each other, which is why the panic sweep
   /// passed over it; they are not the same observation, and
   /// `the_two_completeness_routes_observe_the_same_unwound_skip` now compares them exactly.
+  ///
+  /// ## The one exit the two routes answer differently: an unwind inside the end-of-input settle
+  ///
+  /// The exclusion in the first sentence above is not a hedge, and this is the whole of it. When a
+  /// skip reaches end of input both routes finish the same way — read [`Lexer::span`](crate::Lexer::span),
+  /// take [`Lexer::into_state`](crate::Lexer::into_state), write the pair — and on the scanned route
+  /// those two calls run *after* `ScanScope` has been disarmed, so the frontier the settle was
+  /// about to commit is dropped along with the unwind. This route has no frontier to drop: it
+  /// committed each token as it crossed it, and those commits stand.
+  ///
+  /// Measured over `"ab cd ef gh"` with a predicate that accepts everything and `into_state` armed
+  /// to panic —
+  /// `the_two_completeness_routes_are_pinned_apart_on_an_interrupted_eof_settle` in
+  /// `src/input/input_ref/tests.rs`, which pins **both** columns as deliberate rather than
+  /// asserting they match:
+  ///
+  /// | after the unwind | [`Complete`](crate::input::Complete), this route | sealed [`Partial`](crate::input::Partial), the scanner |
+  /// |---|---|---|
+  /// | committed span, and the tally of the state beside it | `(9, 11)`, 4 | `(0, 0)`, 0 |
+  /// | resume cursor | 11 | 0 |
+  /// | what the next reads yield | nothing; the input is spent | all four tokens, lexed again |
+  /// | [`commit_token`](crate::Emitter::commit_token) notifications the interrupted call made | 4 | 4 |
+  ///
+  /// **The claim is narrowed rather than the behaviour changed, and the last row is why.** Both
+  /// routes told the side channel that four tokens were consumed. This route's committed position
+  /// says the same thing; the scanner's says the call never happened, so a recording sink is left
+  /// holding four settles for tokens the input then serves a second time. Keeping the progress a
+  /// call actually made is the better of the two answers, and it is the one the per-token commit
+  /// produces **by construction** — the design of this route, not an accident of where the unwind
+  /// landed. Degrading it to agree would cost the whole of what *Two routes, one skip* measures,
+  /// and it would buy agreement on an unwind only a **lexer, source, span or offset** callback can
+  /// raise: exactly the code *The condition on the caller* below already requires to be inert, and
+  /// never the predicate, which is the one callback that condition does not cover. That asymmetry
+  /// is the reason the predicate divergence directly above was *fixed* and this one is *stated*.
+  ///
+  /// **And it is this window and no wider.** Measured rather than asserted, arming one step at a
+  /// time over the same source and comparing the two routes' whole residue: `Lexer::lex` at each of
+  /// its five calls, `Lexer::span` at each of its five reads *but the settle's*, the predicate at
+  /// every call, the committed-token observer, and the emitter's diagnostic path over a crossed
+  /// limit trip all leave the two routes identical — as does every run in which nothing
+  /// unwinds at all. The cell named above ships the no-unwind and emitter controls beside the
+  /// divergence; the predicate sweep is
+  /// `the_two_completeness_routes_observe_the_same_unwound_skip`. What is *not* claimed either way
+  /// is a caller `Clone` or `Drop` that unwinds: the two routes run different numbers of those by
+  /// construction, which is the first clause of the condition failing and is listed under *And for
+  /// a caller who does not meet it* below.
   ///
   /// # Two routes, one skip
   ///
@@ -92,7 +138,7 @@ where
   ///    settle that clamps the position *before* the token leaves the stream;
   /// 2. **the lexing run** — once the stream is empty, lex through
   ///    `scan_with` exactly as the scanner does, holding each lexed token in a
-  ///    [`LexedFront`] across the predicate, committing it there if the predicate takes it and
+  ///    `LexedFront` across the predicate, committing it there if the predicate takes it and
   ///    putting it back at the front of the stream if it does not.
   ///
   /// A [`Partial`](crate::input::Partial) input keeps the scanner. That is a **typestate** split,
@@ -116,7 +162,7 @@ where
   /// | what the scope settles | what this route does instead |
   /// |---|---|
   /// | the in-flight token, **resident run** | nothing: a resident token is judged where it lies and never leaves the stream until the settle that accounts for it; the clamp — the settle's one fallible step — runs while it is still there |
-  /// | the in-flight token, **lexing run** | [`LexedFront`], the scope's token slot and nothing else of it: a token this loop lexed is owned across the predicate and put back by the guard's `Drop`, so the stop and an unwinding predicate take the same exit |
+  /// | the in-flight token, **lexing run** | `LexedFront`, the scope's token slot and nothing else of it: a token this loop lexed is owned across the predicate and put back by the guard's `Drop`, so the stop and an unwinding predicate take the same exit |
   /// | the uncommitted frontier | there is none: every token this route crosses is committed as it crosses it, so the committed position **is** the frontier at every instant |
   /// | the entry mark | `Complete` takes none — the capture is behind `Cmpl::PARTIAL` and never monomorphizes |
   ///
@@ -271,7 +317,11 @@ where
   /// count**. Pinned across the typestate split as well: a **sealed**
   /// [`Partial`](crate::input::Partial) input takes every decision a
   /// [`Complete`](crate::input::Complete) one takes, so the two routes are held to the same
-  /// observation over the same program, source and cache-capacity sweep.
+  /// observation over the same program, source and cache-capacity sweep — **with one exit
+  /// excluded**, which a caller who meets the condition above cannot reach: an unwind *inside the
+  /// end-of-input settle* leaves this route holding the prefix it crossed and the scanner holding
+  /// nothing. *Panic unwind* above states that difference, measures it and bounds it; every
+  /// callback that can raise it is one the first clause requires to be inert.
   ///
   /// ### And for a caller who does not meet it
   ///
@@ -507,6 +557,13 @@ where
           // progress, at the LEXER's end rather than the last token's, so trailing bytes the
           // lexer skips are accounted for. BOTH operands are caller code and both are evaluated
           // before either half of the position is written.
+          //
+          // THE ONE EXIT THE TWO ROUTES ANSWER DIFFERENTLY, and deliberately: the scanner runs
+          // this same settle with its scope already disarmed, so an unwind through either operand
+          // drops the frontier and the whole skipped run with it, while here every token is
+          // already committed and the unwind keeps it. Stated, measured and bounded under *Panic
+          // unwind* on `skip_while`; pinned — as deliberate, not as parity — by
+          // `the_two_completeness_routes_are_pinned_apart_on_an_interrupted_eof_settle`.
           let span = lexer.span();
           let state = lexer.into_state();
           self.commit_position(span.into(), state);
@@ -558,9 +615,9 @@ where
 ///
 /// # What it costs, measured — and it is not near zero
 ///
-/// **It gives back about two fifths of this route's own win**, and the number is written here
-/// because the shape that produced it is not obvious and the next reader will otherwise assume, as
-/// this one did, that a guard on the slow path is free.
+/// **It gives back about three fifths of this route's own win — roughly two fifths is what
+/// ships**, and the number is written here because the shape that produced it is not obvious and
+/// the next reader will otherwise assume, as this one did, that a guard on the slow path is free.
 ///
 /// `benchmarks/examples/perfloop` on smear's `bench/apollo-comparison`: minimum over nine blocks,
 /// `apollo-parser` as an unchanged control, the three builds **interleaved** within each
@@ -574,7 +631,10 @@ where
 /// | **this route, shipped** | **1482.5 µs (−7.4%)** | **148.1 µs (−6.9%)** |
 ///
 /// So the guard is **+12.2% / +10.8%** of a whole parse, and the route is still ahead of the
-/// scanner it replaced by roughly 7%.
+/// scanner it replaced by roughly 7%. The fraction in the heading is that table's own arithmetic,
+/// written out because it was got backwards once: the win without the guard is 17.4 and 15.9
+/// points, the win with it is 7.4 and 6.9, so the guard hands back 10.0 of 17.4 and 9.0 of 15.9 —
+/// 57.5% and 56.6%, three fifths — and what ships is the other two.
 ///
 /// **The whole of it is the unwind cleanup region, not the guard's work.** Two measurements pin
 /// that, and together they say there is nothing left to optimize. Both come from a separate
