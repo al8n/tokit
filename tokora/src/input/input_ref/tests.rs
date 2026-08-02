@@ -8731,7 +8731,10 @@ fn r9_state_drop_inventory() {
 /// Drives a committing scan to end of input with `Lexer::into_state` armed — the caller code
 /// that `SyncTo::on_eof` used to run BETWEEN the two halves of the position write — and reports
 /// `(committed span, committed state's tally)`.
-fn eof_commit_interrupted() -> ((usize, usize), usize) {
+///
+/// `via_scan` picks the route: the shared scanner at [`SkipWhile`](super::scan::SkipWhile), or
+/// `skip_while` itself, which on a complete input runs its own loop.
+fn eof_commit_interrupted(via_scan: bool) -> ((usize, usize), usize) {
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
   let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
@@ -8742,7 +8745,11 @@ fn eof_commit_interrupted() -> ((usize, usize), usize) {
 
   arm_into_state(true);
   let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-    let _ = inp.skip_while(|_| true);
+    if via_scan {
+      let _ = inp.skip_until::<super::scan::SkipWhile, _, _>(|_| false, || None, ());
+    } else {
+      let _ = inp.skip_while(|_| true);
+    }
   }));
   arm_into_state(false);
   assert!(caught.is_err(), "the armed `into_state` must have panicked");
@@ -8762,12 +8769,32 @@ fn r9_committing_eof_commit_is_atomic_in_span_and_state() {
   // tally 0. A host that catches and resumes then lexes from offset 11 under a state that has seen
   // nothing: silent stream corruption, and only for stateful lexers, which is the population least
   // able to notice. The span and the state must move together or not at all.
+  //
+  // Both routes are pinned, because they land on DIFFERENT — and both whole — positions, and the
+  // difference is the point of the complete-input route:
+  //
+  // * the scanner accumulates the four skipped tokens in an uncommitted frontier and disarms its
+  //   scope before calling `on_eof`, so an unwind there drops the frontier and NOTHING is written;
+  // * `skip_while`'s own loop commits each token as it crosses it, so the same unwind lands on the
+  //   fourth token's span paired with the state that produced it — the progress the call actually
+  //   made, kept rather than discarded.
+  //
+  // What the cell measures is the same either way: span and state describing the same token. A
+  // tear on the second route would read ((11, 11), 4) — the lexer's end beside the last token's
+  // tally — which is exactly the shape the ordering here exists to rule out.
   assert_eq!(
-    eof_commit_interrupted(),
+    eof_commit_interrupted(true),
     ((0, 0), 0),
     "an interrupted end-of-input commit must leave the position pair WHOLE: both halves are \
      computed before either is written, so an unwind in the caller code that produces them lands \
      with nothing written at all"
+  );
+  assert_eq!(
+    eof_commit_interrupted(false),
+    ((9, 11), 4),
+    "and on the complete-input route the same unwind lands on the last token this call committed \
+     — span (9, 11) with the tally that produced it, whole — not on the lexer's end beside a \
+     stale state"
   );
 }
 

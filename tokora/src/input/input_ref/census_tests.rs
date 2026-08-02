@@ -26,23 +26,32 @@
 //!
 //! # The census (what must stay true)
 //!
-//! **Every 1:1 consume settle goes through `commit_token`** — the eighteen sites:
+//! **Every 1:1 consume settle goes through `commit_token`** — the nineteen sites:
 //! `next()`'s and `next_or_stop()`'s cached and fresh-lex arms (4), `consume_cached_one` and
 //! `consume_cached_to`'s loop body (2 — `consume_all_cached` drains *through*
 //! `consume_cached_to`, per token), the `try_expect`/`try_expect_map`/
 //! `try_expect_and_then`/`try_expect_or_stop`/`try_expect_map_or_stop` cached and accept
-//! arms (10), the by-value `commit_probed` settle of a probed closer (1), and
-//! `SyncThrough::on_stop` (1).
+//! arms (10), the by-value `commit_probed` settle of a probed closer (1),
+//! `SyncThrough::on_stop` (1), and the complete-input trivia skip's lexing phase (1).
+//!
+//! …**through one of its two entrances.** The body is a fallible clamp followed by an infallible
+//! `settle_committed_token`, and the split is load-bearing: `commit_token` is handed a token its
+//! caller already removed, so its clamp runs in the window where the token is out of the stream
+//! and the position has not moved. `commit_front` is the other entrance, for a caller that removes
+//! the token itself and can therefore clamp *first* — the trivia skip's resident phase, which
+//! crosses a run of tokens rather than one and closes that window by order instead of by a scope.
+//! Both entrances reach the side channel through the one infallible half, so the emitter hook
+//! still has a single home, and the census locks the half to exactly those two callers.
 //!
 //! **The one skip settle is `AtFrontier::adopt`**, called only by `skip_and_report`: a
 //! token a scan skips settles behind the frontier — not into the input's span — exactly
 //! once, whichever origin fed it. It is the settle surface's second (and last) member.
 //!
 //! **The span funnel is not a settle.** `set_span_after_consume` is also written by
-//! three non-token paths, and they must **never** grow a settle hook: `settle_fatal`
-//! writes a *rejected lexer error's* span; `SyncTo::on_eof` writes the lexer's span at
-//! exhaustion; `commit_at` batch-writes a whole skipped run's frontier (each skipped
-//! token already settled via `adopt`). Peeks, declines, `unconsume`/`hold_front`, the
+//! four non-token paths, and they must **never** grow a settle hook: `settle_fatal`
+//! writes a *rejected lexer error's* span; `SyncTo::on_eof` and the complete-input trivia skip's
+//! own end-of-input arm write the lexer's span at exhaustion; `commit_at` batch-writes a whole
+//! skipped run's frontier (each skipped token already settled via `adopt`). Peeks, declines, `unconsume`/`hold_front`, the
 //! front fetches (`take_front`, `take_front_if`), the peek fill's back push
 //! (`cache_append`), and the position-write surgeries (`set_state`, restores) touch no
 //! settle at all — a fetch is not a commit, and every caller of one still calls
@@ -183,6 +192,11 @@ fn settle_census_commit_token_routes_every_consume_settle() {
     // `consume_cached_one` + `consume_cached_to`'s loop body; `consume_all_cached`
     // drains through `consume_cached_to`, so every cached token settles per token.
     ("consume_cached/mod.rs", 2),
+    // The complete-input trivia skip's LEXING phase: a token it lexed and accepted is a 1:1
+    // consume like any other, and settles through the ordinary entrance. Its RESIDENT phase does
+    // not appear here — it removes the token itself, so it clamps first and calls `commit_front`,
+    // which is counted below.
+    ("skip_while.rs", 1),
   ];
 
   for (name, want) in expected {
@@ -216,6 +230,34 @@ fn settle_census_commit_token_routes_every_consume_settle() {
     count(source("mod.rs"), "fn commit_token(") == 1,
     "SETTLE_CENSUS drift: `commit_token` must be defined exactly once, in `mod.rs`"
   );
+
+  // The settle has **two entrances and one body**, and the law above only stays checkable while
+  // that is true. `commit_token` clamps and then calls the infallible half; `commit_front` — for a
+  // caller that removes the token itself and therefore clamps BEFORE the removal — calls the same
+  // half directly. Both are defined once, in `mod.rs`, and the half has exactly those two callers:
+  // a third would be a settle that reached the side channel without joining either entrance.
+  assert!(
+    count(source("mod.rs"), "fn settle_committed_token(") == 1
+      && count(source("mod.rs"), "fn commit_front(") == 1
+      && calls(source("mod.rs"), "settle_committed_token") == 2,
+    "SETTLE_CENSUS drift: the token settle's infallible half must be defined once and called \
+     exactly twice — by `commit_token` (clamp, then settle) and by `commit_front` (the caller \
+     clamped while the token was still in the stream). A third caller is a settle outside both \
+     entrances (grep SETTLE_CENSUS)."
+  );
+  // …and the pre-clamped entrance is reached only by the complete-input trivia skip's resident
+  // phase. A second caller must state why it can clamp before its own removal.
+  for (name, src) in SOURCES {
+    let want = usize::from(*name == "skip_while.rs");
+    let got = calls(src, "commit_front");
+    assert!(
+      got == want,
+      "SETTLE_CENSUS drift: `{name}` has {got} `commit_front` call site(s), expected {want}. \
+       The pre-clamped settle entrance belongs to the trivia skip's resident phase; a new caller \
+       must show that its clamp runs while the token is still in the stream, and join this census \
+       in the same commit (grep SETTLE_CENSUS)."
+    );
+  }
 }
 
 /// SETTLE_CENSUS — **the sequence, not the remedy and not the type.**
@@ -525,7 +567,9 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
   // still. Every name here has been read and carries no fallible step after its first mutation.
   const EXPECTED: &[&str] = &[
     "mod.rs::commit_position",
-    "mod.rs::commit_token",
+    // `commit_token` is deliberately ABSENT, and its departure is the change that put
+    // `settle_committed_token` here: the body is now a clamp followed by a call, and neither is a
+    // fact write, so it holds no window of its own. The window moved into the half it calls.
     // The two INFALLIBLE install halves, both lit up by classifying the state replacement as a
     // fact write. Each is nothing but moves — `mem::replace`/`take` — so neither can run caller
     // code before its last fact lands; `install_rekey`'s trailing cache clear is teardown after
@@ -544,6 +588,10 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
     // marker. That is the more dangerous form of a blind spot: an exemption is at least written
     // down and countable, while an unlisted marker leaves no trace at all.
     "mod.rs::set_state",
+    // The token settle's infallible half: `install_position`, the side-channel notification, and
+    // the trailing drop of the pair it replaced. Its region is the single `install_position` line,
+    // and everything after it is the deferral the window exists for.
+    "mod.rs::settle_committed_token",
     "mod.rs::state_mut",
     // `unwind_clear_stream` is deliberately ABSENT. It drops the parked entry and clears the
     // cache and installs nothing at all, so there is no restored branch for an interrupted drop
@@ -603,6 +651,11 @@ fn settle_census_nothing_fallible_between_a_removal_and_its_settle() {
   // slot that owns it across caller code.
   const SETTLES: &[&str] = &[
     "commit_token(",
+    // The pre-clamped entrance to the same settle. `commit_token`'s own body is a clamp followed
+    // by this call, and a caller that removes the token itself hoists the clamp above the removal
+    // and lands here directly — which is precisely a window this rail must be able to close, so
+    // the marker has to name it. (`settle_committed_token(` does not contain `commit_token(`.)
+    "settle_committed_token(",
     "unconsume(",
     "hold_front(",
     "TokenSlot::Held(",
@@ -693,9 +746,12 @@ fn settle_census_nothing_fallible_between_a_removal_and_its_settle() {
 
   // EXACT, not a floor. A floor is satisfied by a derivation that omits a window, which is the
   // defect this check itself shipped.
+  // 13 since the trivia skip left the scanner: `commit_front` is the thirteenth, and it is the
+  // one window in the crate that is closed by ORDER rather than by a scope — its clamp runs in
+  // its caller, above the removal, so the text between the removal and the settle is two moves.
   assert!(
-    inspected == 12 && exempted == EXEMPT.len(),
-    "SETTLE_CENSUS drift: {inspected} window(s) inspected and {exempted} exempt; expected 12 and \
+    inspected == 13 && exempted == EXEMPT.len(),
+    "SETTLE_CENSUS drift: {inspected} window(s) inspected and {exempted} exempt; expected 13 and \
      {}. A consume path was added, removed, or newly exempted — classify it and update these \
      numbers in the same commit. Do NOT relax this to a floor: a floor cannot tell a missing \
      window from a smaller codebase, which is how the scanner's two rails went uninspected \
@@ -792,6 +848,12 @@ fn settle_census_position_pair_writes_through_one_body() {
       1,
       "`SyncTo::on_eof` (the lexer's span and state at exhaustion)",
     ),
+    (
+      "skip_while.rs",
+      1,
+      "the complete-input trivia skip's own end-of-input settle — the lexer's span and state at \
+       exhaustion, the same pair `SyncTo::on_eof` writes for the scanned route",
+    ),
   ];
   for (name, want, who) in expected {
     let got = calls(source(name), "commit_position");
@@ -821,13 +883,14 @@ fn settle_census_position_pair_writes_through_one_body() {
   // The `#[must_use]` form, for callers doing more than a position write: they install the pair,
   // finish the rest of the restore, and only then let the replaced values' drops run.
   assert!(
-    calls(source("mod.rs"), "replace_position") == 3,
-    "SETTLE_CENSUS drift: `replace_position` has {} call sites, expected 3 — \
-     `commit_position` (the immediate-drop case), `commit_token` (which notifies the observer \
-     first) and `restore_entry` (which restores more and must drop the replaced pair last). \
-     `restore_unchecked` is deliberately NOT among them: it needs the fallible clamp and the \
-     infallible install in different phases, so it calls `clamped_span` and `install_position` \
-     separately (grep SETTLE_CENSUS).",
+    calls(source("mod.rs"), "replace_position") == 2,
+    "SETTLE_CENSUS drift: `replace_position` has {} call sites, expected 2 — \
+     `commit_position` (the immediate-drop case) and `restore_entry` (which restores more and \
+     must drop the replaced pair last). `restore_unchecked` is deliberately NOT among them: it \
+     needs the fallible clamp and the infallible install in different phases, so it calls \
+     `clamped_span` and `install_position` separately — and `commit_token` is no longer among \
+     them for the SAME reason, so that `commit_front` can hoist the clamp above its own removal \
+     (grep SETTLE_CENSUS).",
     calls(source("mod.rs"), "replace_position")
   );
   // The pair's two moves stay in ONE body even though the funnel now has two entrances: the
@@ -835,11 +898,11 @@ fn settle_census_position_pair_writes_through_one_body() {
   // clamp-then-install wrapper. Two callers, one place where the pair actually moves.
   assert!(
     count(source("mod.rs"), "fn install_position(") == 1
-      && calls(source("mod.rs"), "install_position") == 2,
-    "SETTLE_CENSUS drift: `install_position` must be defined once and called exactly twice — \
-     by `replace_position` (the clamp-then-install path) and by `restore_unchecked` (which \
-     clamps in its own earlier phase). A third caller is a position write that skipped the \
-     clamp (grep SETTLE_CENSUS)."
+      && calls(source("mod.rs"), "install_position") == 3,
+    "SETTLE_CENSUS drift: `install_position` must be defined once and called exactly three times \
+     — by `replace_position` (the clamp-then-install path), by `restore_unchecked` and by \
+     `settle_committed_token` (both of which clamp in their own earlier phase). A fourth caller \
+     is a position write that skipped the clamp (grep SETTLE_CENSUS)."
   );
 }
 
@@ -1650,6 +1713,11 @@ fn resume_census_one_pairing_site() {
       "`try_expect_or_stop`, `probe_close`, and the four `*_on_input` bodies",
     ),
     ("peek/mod.rs", 1, "the peek fill"),
+    (
+      "skip_while.rs",
+      1,
+      "the complete-input trivia skip's lexing phase",
+    ),
   ];
   let mut parts_mut_total = 0;
   for (name, want, who) in parts_mut_sites {
@@ -1662,9 +1730,9 @@ fn resume_census_one_pairing_site() {
     );
   }
   assert!(
-    parts_mut_total == 10,
+    parts_mut_total == 11,
     "RESUME_CENSUS drift: `Resume::parts_mut` has {parts_mut_total} callers across the input \
-     layer, expected 10 — the nine scan drivers and the peek fill (grep RESUME_CENSUS)."
+     layer, expected 11 — the ten scan drivers and the peek fill (grep RESUME_CENSUS)."
   );
   for (name, src) in SOURCES {
     if parts_mut_sites.iter().any(|(n, _, _)| n == name) {

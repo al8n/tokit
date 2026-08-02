@@ -351,6 +351,68 @@ concrete public struct with no bound to reject anybody.
  the 24-character boundary, far longer, and content that escapes heavily: newlines, tabs,
  both quote characters, backslashes, non-ASCII, and a multi-byte scalar straddling the cut).
 
+10. **The trivia skip no longer goes through the shared scanner on a complete input.**
+   [`skip_while`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.skip_while) —
+   the primitive behind the `padded` combinators, and the door every lossless grammar opens at
+   every decision point — now runs its own two-phase loop under
+   [`Complete`](https://docs.rs/tokora/latest/tokora/input/struct.Complete.html): a token already
+   at the front of the stream is judged **where it lies** and consumed there, and only once the
+   stream is empty does it reach the lexer. No scan scope is built, no frontier pair is cloned,
+   and a token already resident is never taken out and put back to be judged. The lexing phase
+   does keep one thing the scope carried, and entry 7 below is that.
+
+   **Measured against the previous release line: 7.4% off a whole GraphQL parse** (1600.2 µs →
+   1482.5 µs on a 57 kB document; 159.0 µs → 148.1 µs, 6.9%, on a 7.5 kB one). Minimum over nine
+   blocks with `apollo-parser` as an unchanged control, builds interleaved within each repetition,
+   five repetitions, contended repetitions discarded. That figure is **net of** the unwind guard in
+   entry 7 below, which is the honest number for this release because the guard ships with the
+   route: without it the same measurement reads 17.4% and 15.9%. An earlier draft of this entry
+   claimed 25%; that did not describe this measurement even before the guard existed, and it is
+   replaced rather than adjusted.
+
+   **No caller-visible behaviour changes**, and the guarantee is the one already documented on the
+   method: for a caller whose input-layer callbacks are inert and whose predicate answers from the
+   values it is handed, the parse result, the tokens read next, the resume cursor, the committed
+   span and lexer state, the diagnostics, the poison boundary, the dedup watermark and the
+   predicate call sequence are all identical. What the route runs *internally* differs: it clamps
+   the committed position once per skipped token where the scan clamped once per call, and it asks
+   the cache for its front where the scan popped and pushed back.
+
+   Two things it had to re-establish, both pinned by new cells in `fast_path_tests`. A resource
+   trip inside a skip latches the poison boundary at the **committed cursor** rather than at the
+   scanner's deferred frontier, and those are the same offset because the route commits every
+   token as it crosses it. And a panic mid-skip leaves the input whole: a call interrupted at its
+   `k`-th predicate consumes exactly the `k − 1` tokens the predicate accepted and every other
+   token stays reachable. The two phases reach that differently, and entry 7 below is what makes
+   the second half true — the resident phase runs the fallible half of each settle while the token
+   is still in the stream and so needs nothing, while the lexing phase holds the token it lexed
+   across the predicate and owes a put-back. One consequence is visible only to a host that catches
+   an unwind: an interrupted end-of-input commit now keeps the prefix the call had already crossed
+   (span and state describing the same token) where the scanner discarded it.
+
+   A [`Partial`](https://docs.rs/tokora/latest/tokora/input/struct.Partial.html) input keeps the
+   shared scanner, whose scope owns the five-fact `Incomplete` restore and the emitter mark a
+   streaming skip needs settled on every exit. The split is by typestate and is guarded by a
+   differential sweep: a *sealed* partial input takes every decision a complete one takes, so the
+   two routes are held to the same observation over the same programs, sources and cache
+   capacities.
+
+   **That parity claim excludes exactly one exit, and the exclusion is deliberate**: an unwind
+   *inside the end-of-input settle* — the consequence the paragraph before last already names, seen
+   from the other side. Both routes finish a skip that ran to end of input the same way — read `Lexer::span`,
+   take `Lexer::into_state`, write the pair — but the scanner reaches that settle having already
+   disarmed its scan scope, so the frontier holding the whole skipped run is dropped with the
+   unwind, while this route committed each token as it crossed it and keeps them. The complete
+   input's answer is the better one: both routes told `Emitter::commit_token` that the run's tokens
+   were consumed, and only this one's committed position agrees with what it said. Every callback
+   that can raise that unwind — the lexer, the source, the span, the offset — is one the method's
+   own precondition already requires to be inert, so the narrowed claim costs a caller who meets
+   the condition nothing. Nothing wider diverges: a panic out of the predicate, out of
+   `Emitter::commit_token`, out of the emitter's diagnostic path, out of `Lexer::lex`, or out of
+   `Lexer::span` anywhere but the settle leaves the two routes identical, as does every run in
+   which nothing unwinds. The difference is pinned — as a difference, with both columns asserted —
+   by `the_two_completeness_routes_are_pinned_apart_on_an_interrupted_eof_settle`.
+
 ### Fixed
 
 - **The collection gate's own census could pass by not looking.** `parser::many`'s `GATE_CENSUS`
@@ -638,6 +700,67 @@ concrete public struct with no bound to reject anybody.
    — the counter read, the position *not* read, since a scanner term smuggled in there is as much a
    defect as a missing descent one. — *(#148 R8)*
 
+
+11. **A trivia skip whose predicate panics no longer loses the token it was asked about.** On a
+   [`Complete`](https://docs.rs/tokora/latest/tokora/input/struct.Complete.html) input,
+   [`skip_while`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.skip_while)
+   reaches its lexer once the stream is drained, and the token it lexes was handed to the
+   predicate while nothing owned it. A predicate that unwound therefore dropped that token: the
+   call resumed from the previously committed span and the next read **re-lexed** it, where the
+   same skip on a sealed
+   [`Partial`](https://docs.rs/tokora/latest/tokora/input/struct.Partial.html) input — whose scan
+   scope holds the token for exactly this reason — put it back at the front of the stream and
+   resumed there. Two typestates, one primitive, two different resume cursors under
+   `catch_unwind`.
+
+   The token is now owned by a guard across that one call, so an unwinding predicate leaves it
+   parked rather than dropped, and the ordinary stop and the unwind edge perform the identical
+   put-back. **For an unwind out of the predicate** — at every call, over every residency and cache
+   capacity swept — both routes now leave the same cursor, the same front residency and the same
+   amount of re-lexing. They still part company on one other exit, an unwind inside the
+   end-of-input settle, which was left as it is on purpose; entry 5 above says why and names the
+   cell that pins it.
+
+   Visible only to a host that catches an unwind out of its own `skip_while` predicate and keeps
+   using the input; a predicate that returns normally, or a panic that aborts, is unaffected.
+
+   **It gives back about three fifths of entry 5's win — the two fifths that remain are what
+   ships — and that is stated rather than buried.** Measured on the same harness and in the same
+   interleaved runs as the figure there: 1321.0 µs → 1482.5 µs on the 57 kB document and 133.7 µs →
+   148.1 µs on the 7.5 kB one, so **+12.2% and +10.8%** of a whole parse. Entry 5's route was 17.4%
+   and 15.9% faster than the previous release line before this guard and is 7.4% and 6.9% faster
+   with it, so the guard hands back 10.0 of those 17.4 points and 9.0 of those 15.9 — 57.5% and
+   56.6%.
+
+   The whole of the cost is the **unwind cleanup region** a destructor opens in the lexing loop,
+   not the guard's own work: the identical wrapper with its `Drop` deleted is free, and so is the
+   guard itself compiled `panic = "abort"`. Six shapes were built and timed and this is the
+   cheapest — scoping the guard tighter, taking its `Drop` out of line, moving the predicate call
+   into a non-inlined helper, and outlining the whole lexing phase are all worse or no better. The
+   resident-token path — the 22,033-of-39,057 skips that skip nothing, and every skip over a warm
+   cache — builds no guard and is unaffected.
+
+   It was judged correct to pay because a panicking predicate is **contract-covered behaviour**,
+   not undefined territory: `skip_while` documents a *Panic unwind* section promising that no token
+   leaves the stream, and the predicate is explicitly outside the "inert callbacks" precondition
+   that scopes the rest of the fast path's guarantees. Two typestates disagreeing there falsifies a
+   documented promise, and entry 5's own claim rests on panic tests as its evidence.
+
+   **That same reasoning is why the other divergence was not paid for.** The end-of-input settle
+   exclusion in entry 5 is reachable only through the lexer, the source, the span or the offset —
+   all of them *inside* the inert-callbacks precondition, so no caller who meets the condition can
+   provoke it — and the complete-input route's answer there is the stronger of the two, not a
+   defect being tolerated. Where a promise was over-broad the promise was narrowed and the
+   behaviour pinned; where the behaviour was wrong, as it was for the predicate, it was fixed.
+
+   The differential sweep that should have caught this could not: its check on where the stream
+   resumes was a *range* between the committed position and the next token's start, and a token
+   put back and a token dropped are both inside it. It is an equality now, and a new cell compares
+   the two typestate routes field by field after a panicking predicate — cursor, front residency,
+   whether the token was re-lexed, and the committed-token notifications the interrupted call had
+   already made. That last is also a new observer for a gap noted and left open in the previous
+   round: `Emitter::commit_token` reaches no value a caller reads back off the input, so a skip
+   that consumed a **parked** token and told nobody had, until now, nothing watching it.
 
 ## 0.8.0 (2026-07-31)
 

@@ -41,6 +41,10 @@ where
   /// that is a **function of what it is handed**. It is stated in full under *What is guaranteed
   /// identical* below, and it is what makes "invisible" true rather than merely usually true.
   ///
+  /// A stopping token this call found **already in the stream** is not even removed: the
+  /// complete-input route below judges each token where it lies. "Left at the cache front" is
+  /// therefore satisfied by doing nothing at all, rather than by a pop and a matching push.
+  ///
   /// # Partial mode: an `Incomplete` exit leaves no trace
   ///
   /// Under [`Partial`](crate::input::Partial), a non-final buffer can end mid-scan and this
@@ -52,43 +56,72 @@ where
   /// # Panic unwind
   ///
   /// A panic out of the predicate, the expected-tokens closure, the lexer or the emitter is an
-  /// exit too, and it settles — this method's `to`-shaped commit posture keeps the diagnosed
-  /// prefix and puts the in-flight token back; the rewinding scans
-  /// ([`sync_through`](Self::sync_through), [`sync_balanced`](Self::sync_balanced)) restore to
-  /// the call's entry instead. Either way no token leaves the stream and no emitter mark is
-  /// stranded.
+  /// exit too, and it settles: no token leaves the stream, the diagnosed prefix is kept, and no
+  /// emitter mark is stranded. The two routes reach that by different means, and the difference is
+  /// the whole of what *Two routes, one skip* below is about — the complete-input route holds no
+  /// token out of the stream and no uncommitted position at any point where caller code runs, so
+  /// there is nothing for an unwind edge to repair; the partial-input route keeps the shared
+  /// scanner's `ScanScope`, whose `Drop` puts the in-flight token back,
+  /// commits the frontier and settles the entry mark.
   ///
-  /// # A skip that skips nothing never enters the scanner
+  /// # Two routes, one skip
   ///
   /// The grammar shape this primitive exists for — skip trivia, then look — asks for a skip at
-  /// every decision point, and most of those decision points have nothing to skip: the head is
-  /// already at the front of the stream and the predicate rejects it on sight. Measured on a
-  /// GraphQL parse, that is 22,033 of 39,057 calls.
+  /// every decision point, and on a GraphQL parse those skips are **39,057 calls** for 13,014
+  /// trivia tokens: 22,033 of them have nothing to skip at all. Routing each of them through the
+  /// shared four-mode scanner costs a `ScanScope`, a clone of the
+  /// frontier pair, a take-test-put-back of the token the skip stops on, and a commit of a
+  /// position that in the common case did not move.
   ///
-  /// So the head is asked **where it lies**, before anything is built. A rejection returns
-  /// immediately, and the general scan is what it would have run to reach the same state:
+  /// So a [`Complete`](crate::input::Complete) input does not use the scanner here. It runs a
+  /// loop of its own, in two phases:
   ///
-  /// | the general path does | and it lands on |
+  /// 1. **the resident run** — while a token is at the front of the stream, judge it **where it
+  ///    lies** through `front`. A rejection returns immediately, having removed
+  ///    nothing; an acceptance consumes it through `commit_front`, the
+  ///    settle that clamps the position *before* the token leaves the stream;
+  /// 2. **the lexing run** — once the stream is empty, lex through
+  ///    `scan_with` exactly as the scanner does, committing each accepted token
+  ///    as it crosses it and putting the stopping token back at the front of the stream.
+  ///
+  /// A [`Partial`](crate::input::Partial) input keeps the scanner. That is a **typestate** split,
+  /// not a second fast path: the partial-input route owes an `Incomplete` exit that restores five
+  /// facts and settles an emitter mark on every exit *including an unwind*, which is precisely
+  /// what `ScanScope` exists to own, and the measured cost above is a complete-input parse.
+  /// Neither route carries the other's machinery, and no route carries both.
+  ///
+  /// ## Why the complete-input route needs no scan scope
+  ///
+  /// Under `Complete` the scope's `Drop` does exactly two things — put the in-flight token back at
+  /// the front of the stream, and commit the frontier the loop accumulated — and this route makes
+  /// both unnecessary rather than skipping them:
+  ///
+  /// | what the scope settles | why there is nothing to settle here |
   /// |---|---|
-  /// | build the scan scope and clone the frontier pair (`L::Span` + `L::State`) | values it never advances — nothing is skipped |
-  /// | take the head out of the stream | …to put the very same token straight back |
-  /// | run the predicate | the same answer, on the same token |
-  /// | commit the untouched frontier | the span and state already committed |
+  /// | the in-flight token | a resident token is judged where it lies and never leaves the stream until the settle that accounts for it; the clamp — the settle's one fallible step — runs while it is still there |
+  /// | the uncommitted frontier | there is none: every token this route crosses is committed as it crosses it, so the committed position **is** the frontier at every instant |
+  /// | the entry mark | `Complete` takes none — the capture is behind `Cmpl::PARTIAL` and never monomorphizes |
   ///
-  /// Every one of those produces the **value** it started from, so — for a caller who meets the
-  /// condition spelled out below — the early return
-  /// leaves exactly the state the scan would have: the stopping token unconsumed at the front of
-  /// the stream (this call never removes it), the committed span and lexer state where they were,
-  /// and no diagnostic, no watermark move and no poison latch — a skip that skips nothing emits
-  /// nothing on either route. The put-back is an identity on **both** origins, which is why the probe does
-  /// not have to exclude a parked head: a cache pop followed by a front push restores the entry it
-  /// came from and records no push, and a cache only ever refuses a front push when it is
-  /// **full** — so the cache that parked the token in the first place refuses again and the token
-  /// re-parks, with no push recorded either.
+  /// The scope's own `HOLDS_ENTRY = false` for `SkipWhile`, so its unwind edge always *keeps*:
+  /// the disposition this route lands on by construction is the one the scope was going to choose.
   ///
-  /// The predicate still sees each token **exactly once**, which is a promise a stateful `FnMut`
-  /// can check and the cache-transparency matrix does check: a head the probe accepts is not asked
-  /// again, its answer is carried into the scan.
+  /// ## Where the limit trip latches
+  ///
+  /// A resource trip latches the poison boundary at the **durable frontier** — the offset up to
+  /// which what the scan already passed stays reproducible. The scanner latches it through
+  /// `AtFrontier`, its deferred, uncommitted frontier; this route latches it through
+  /// `AtCursor`, the committed cursor. **They are the same offset**, and for the same reason the
+  /// frontier commit disappears: this route commits each skipped token as it crosses it, so with
+  /// the stream empty — the only state in which it lexes — [`offset`](Self::offset) reads
+  /// `span().end()`, which is the end of the last skipped token, which is exactly what the
+  /// scanner's frontier holds. Everything downstream of the latch is unchanged, because it all
+  /// lives inside `scan_with`: the trip is diagnosed there, deduplicated there,
+  /// and the fatal-emitter exit is taken there. This route only decides what to do afterwards, and
+  /// the answer is *nothing* — the progress a trip keeps is already committed.
+  ///
+  /// The pre-lex probe is the other half: once the lex position has reached a latched boundary
+  /// there is no token left to scan, so this route stops without rebuilding a lexer, exactly as
+  /// the scanner does — and, again, with nothing left to commit.
   ///
   /// ## What is guaranteed identical, and the condition that makes it so
   ///
@@ -97,9 +130,10 @@ where
   /// types**, so every operation the input layer performs on one of them — clone, drop, compare,
   /// hash, format — is caller code, as are [`Emitter::checkpoint`](crate::Emitter::checkpoint) and
   /// [`release`](crate::Emitter::release), every [`Cache`](crate::cache::Cache) method, and the
-  /// [`Lexer`](crate::Lexer) with its [`Source`](crate::Source). This route runs fewer of them.
-  /// Some are measured, on the same stream in the same residency, by the effect ledger in
-  /// `fast_path_tests`:
+  /// [`Lexer`](crate::Lexer) with its [`Source`](crate::Source). This route runs a **different**
+  /// set of them. Some are measured, on the same stream in the same residency, by the effect
+  /// ledger in `fast_path_tests`, for the call that dominates the census — a skip that skips
+  /// nothing:
   ///
   /// | caller-supplied step, for one no-op skip | this route | the scan it replaces |
   /// |---|---|---|
@@ -116,32 +150,43 @@ where
   /// in-tree witness measures 2 under `Complete` and 6 under `Partial` on that shape, against 0
   /// on this route.
   ///
+  /// A skip that *does* skip goes the other way on some rows, and that is stated rather than
+  /// hidden: the scanner clones the frontier pair once and clamps once at the end, while this
+  /// route runs the clamp — a [`Source::len`](crate::Source::len), an `L::Offset` comparison and
+  /// an `L::Span::clone` — once **per token**. It also asks the cache for its front once per
+  /// token where the scan pops once per token. Fewer caller steps for the 56% of calls that skip
+  /// nothing, more for the ones that skip a run, and the condition below is what makes the
+  /// direction of the difference not matter.
+  ///
   /// **That table is a measurement, not a boundary**, and the distinction is the whole lesson of
   /// how this contract was arrived at. The table carries the steps the ledger was built to watch.
   /// The scan's closing commit also runs a [`Source::len`](crate::Source::len) and one `L::Offset`
   /// comparison — the clamp inside `commit_position`, measured once each on the scan and zero
-  /// times here — and those are simply two the table never had. Four successive readings of this
-  /// method have each found an operation the previous naming did not contain, so the condition
-  /// below is quantified over **all** caller-supplied code and every list inside it, this table
-  /// included, is illustration. What `fast_path_tests` pins is the *emptiness* of this route's
-  /// side, not an inventory of the scan's: an inventory would be one review round out of date.
+  /// times here for a no-op skip — and those are simply two the table never had. Successive
+  /// readings of this method have each found an operation the previous naming did not contain, so
+  /// the condition below is quantified over **all** caller-supplied code and every list inside it,
+  /// this table included, is illustration. What `fast_path_tests` pins is the *emptiness* of this
+  /// route's side for a no-op skip, not an inventory of the scan's: an inventory would be one
+  /// review round out of date.
   ///
   /// ### What this route does differently — the whole of it
   ///
   /// Four clauses, meant as exhaustive and not as illustration. Against the scan it replaces, for
   /// every call it answers, this route:
   ///
-  /// 1. **omits** caller-supplied steps, and never adds one. *Which* steps is deliberately not
-  ///    part of the clause: the table above measures some, the elided drops and the clamp's
-  ///    `Source::len` and `L::Offset` comparison are more, and the clause is about all of them —
-  ///    it is a subset relation, not a list;
-  /// 2. **substitutes** a single [`Cache::front`](crate::cache::Cache::front) for the
+  /// 1. runs a **different multiset** of caller-supplied steps — it may omit one, run one the scan
+  ///    never runs, or run one a different number of times. *Which* steps is deliberately not part
+  ///    of the clause: the table above measures some, the elided drops and the per-token clamp are
+  ///    more, and the clause is about all of them. It was a subset relation while this route
+  ///    answered only the skips that skip nothing; it is not one now, and saying so is cheaper
+  ///    than maintaining the list that made it true;
+  /// 2. **substitutes** a [`Cache::front`](crate::cache::Cache::front) for the
   ///    [`pop_front`](crate::cache::Cache::pop_front) +
   ///    [`push_front`](crate::cache::Cache::push_front) pair the scan uses to look at the same
   ///    head. The cache laws make that pair an identity on the entry it came from, so the two are
   ///    the same read of the same token;
-  /// 3. **reorders**: with a head the probe accepts, `pred` runs *before* the omitted steps of (1)
-  ///    rather than after them;
+  /// 3. **reorders**: `pred` runs before the steps of (1) that the scan takes ahead of it — the
+  ///    entry capture, the frontier clone — rather than after them;
   /// 4. hands `pred` the **same token and the same span**, once per token, in the same order —
   ///    which the residency matrix pins directly.
   ///
@@ -158,10 +203,11 @@ where
   /// * **your input-layer callbacks are inert.** Every caller-supplied operation this crate can
   ///   reach through the input layer does **only** what its own contract says it does, and always
   ///   returns normally: it does not unwind, and it does not diverge. Then running one, running it
-  ///   twice, and not running it at all are the same thing to everyone. *That is the clause, and
-  ///   it is not a list.* The ones you are likely to be the author of: the `Clone` and `Drop` of
-  ///   `L::Span`, `L::State` and `L::Offset`, and the `Ord` and `Hash` the bounds also ask of the
-  ///   span and the offset; [`Emitter::checkpoint`](crate::Emitter::checkpoint) and
+  ///   twice, running it a hundred times and not running it at all are the same thing to everyone.
+  ///   *That is the clause, and it is not a list.* The ones you are likely to be the author of:
+  ///   the `Clone` and `Drop` of `L::Span`, `L::State` and `L::Offset`, and the `Ord` and `Hash`
+  ///   the bounds also ask of the span and the offset;
+  ///   [`Emitter::checkpoint`](crate::Emitter::checkpoint) and
   ///   [`release`](crate::Emitter::release); every [`Cache`](crate::cache::Cache) method; the
   ///   [`Lexer`](crate::Lexer) and its [`Source`](crate::Source). Those are named because they are
   ///   the ones you are likely to write, **not because they are the boundary** — the boundary is
@@ -177,16 +223,17 @@ where
   /// **Why those two are the whole condition.** Any difference between the routes has to be
   /// produced by something. Clauses (1)–(4) say the crate's own contribution is the same values in
   /// the same order, so the only remaining producer is caller-supplied code; the first clause
-  /// covers *all* of that code and makes omitting it, running it a different number of times, and
-  /// running it in a different order produce nothing; the second says your own predicate cannot
-  /// read which route produced its argument. Nothing is left over. That closure is the point of
-  /// stating a condition rather than listing exclusions — a list has to anticipate every way a
-  /// caller might differ, and every way found so far is an instance of one clause rather than a
-  /// new entry: a `Clone` that keeps state, a `Clone` that panics, a `Drop` elided along with its
-  /// clone, the `Source::len` and `L::Offset` comparison the scan's clamp runs, and a `pred` that
-  /// reads its argument's address. The first three arrived as three separate escalations of a list
-  /// that was each time believed complete; the last two arrived after the clause replaced it, and
-  /// needed no change to it.
+  /// covers *all* of that code and makes omitting it, adding one, running it a different number of
+  /// times, and running it in a different order produce nothing; the second says your own
+  /// predicate cannot read which route produced its argument. Nothing is left over. That closure
+  /// is the point of stating a condition rather than listing exclusions — a list has to anticipate
+  /// every way a caller might differ, and every way found so far is an instance of one clause
+  /// rather than a new entry: a `Clone` that keeps state, a `Clone` that panics, a `Drop` elided
+  /// along with its clone, the `Source::len` and `L::Offset` comparison a clamp runs, and a `pred`
+  /// that reads its argument's address. The first three arrived as three separate escalations of a
+  /// list that was each time believed complete; the last two arrived after the clause replaced it,
+  /// and needed no change to it — nor did the per-token clamp, which is the first difference that
+  /// runs *more* caller code rather than less.
   ///
   /// Two things the condition does not cover, because no fast path could: **time and stack**. This
   /// route is quicker and shallower, which is the whole reason it exists.
@@ -197,8 +244,10 @@ where
   /// arrive in; the resume [`cursor`](Self::cursor); the committed span and lexer state; the
   /// diagnostics; the poison boundary and the dedup watermark; the tokens the predicate is asked
   /// about, in order, and how many times it is asked; and the emitter's **outstanding-mark
-  /// count**, which is unchanged by either route because the cycle the scan runs is empty and
-  /// balanced.
+  /// count**. Pinned across the typestate split as well: a **sealed**
+  /// [`Partial`](crate::input::Partial) input takes every decision a
+  /// [`Complete`](crate::input::Complete) one takes, so the two routes are held to the same
+  /// observation over the same program, source and cache-capacity sweep.
   ///
   /// ### And for a caller who does not meet it
   ///
@@ -218,7 +267,7 @@ where
   /// * **a `Clone` that unwinds** — the first clause, and the sharper case, because the caller
   ///   here satisfies the second one completely. A `pred` that records nothing but its **own**
   ///   calls observes no input-layer side effect at all, and still cannot be promised the same
-  ///   call sequence: with a head this route accepts, `pred` runs once and *then* the scan's
+  ///   call sequence: with a head this route accepts, `pred` runs once and *then* the clamp's
   ///   `L::Span::clone` panics, where the scan panics before asking anything — one call against
   ///   none, measured. Catch the unwind and the two routes have left your predicate in different
   ///   states. And a no-op skip that would have unwound returns `Ok(())` instead.
@@ -270,9 +319,36 @@ where
   where
     F: FnMut(Spanned<&L::Token, &L::Span>) -> bool,
   {
-    // ── The no-op skip, answered where the token already is (see the section above) ──
-    // `false` unless the probe below both ran and accepted; then the scan's first token is the
-    // head this already asked about, and its answer is carried in rather than asked twice.
+    // `Cmpl::PARTIAL` is an associated const, so exactly one of these two bodies monomorphizes
+    // per instantiation and the other is eliminated whole. See *Two routes, one skip* above for
+    // why the split is by typestate and not by anything else.
+    if Cmpl::PARTIAL {
+      return self.skip_while_scanned(&mut pred);
+    }
+    self.skip_while_direct(&mut pred)
+  }
+
+  /// The partial-input trivia skip: the shared four-mode scanner, entered through the same
+  /// resident-head probe it has always had.
+  ///
+  /// Kept on the scanner deliberately. A partial-input skip owes an
+  /// [`Incomplete`](crate::error::Incomplete) exit that restores five facts — the committed span
+  /// and state, the dedup watermark, the poison latch and every emission the aborted attempt made
+  /// — and settles an emitter mark on **every** exit including an unwind, and
+  /// [`ScanScope`](super::scan::ScanScope) is what owns exactly that. The measured cost the
+  /// complete-input route exists to remove is a complete-input parse; paying for it here would buy
+  /// a second implementation of the one thing the scope is for.
+  #[inline(always)]
+  fn skip_while_scanned<F>(
+    &mut self,
+    pred: &mut F,
+  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    F: FnMut(Spanned<&L::Token, &L::Span>) -> bool,
+  {
+    // The no-op skip, answered where the token already is. `false` unless the probe below both
+    // ran and accepted; then the scan's first token is the head this already asked about, and its
+    // answer is carried in rather than asked twice.
     let mut head_answered_skip = false;
     if let Some(front) = self.front() {
       if !pred(front.token) {
@@ -281,13 +357,12 @@ where
       head_answered_skip = true;
     }
 
-    // A trivia skip and a recovery sync are the same scan: take each token from the cache while one
-    // is there and from the lexer once it is not, settle every skipped token behind the frontier,
-    // and stop on the first token the predicate picks out — leaving it unconsumed at the cache
-    // front. They differ only in the mode ([`SkipWhile`]: report nothing, commit at end of input)
-    // and in the POLARITY of the predicate, which is this one negation: a sync stops on the token
-    // it matches, a skip stops on the first token it does not. Sharing the loop is what keeps the
-    // hot trivia path and the cold recovery path from drifting apart — the defect they twice did.
+    // A partial-input trivia skip and a recovery sync are the same scan: take each token from the
+    // cache while one is there and from the lexer once it is not, settle every skipped token
+    // behind the frontier, and stop on the first token the predicate picks out — leaving it
+    // unconsumed at the cache front. They differ only in the mode ([`SkipWhile`]: report nothing,
+    // commit at end of input) and in the POLARITY of the predicate, which is this one negation: a
+    // sync stops on the token it matches, a skip stops on the first token it does not.
     self
       .skip_until::<SkipWhile, _, _>(
         |t| {
@@ -307,5 +382,104 @@ where
         (),
       )
       .map(|_| ())
+  }
+
+  /// The complete-input trivia skip: this method's own loop, with no scan scope, no deferred
+  /// frontier and no take-test-put-back.
+  ///
+  /// Two phases, and the boundary between them is a fact rather than a choice: phase 1 runs while
+  /// a token is at the front of the stream, phase 2 runs once there is not — and nothing phase 2
+  /// does puts one back (a stop returns immediately), so the phases cannot interleave.
+  ///
+  /// `#[inline(always)]` for the same reason [`skip_until`](Self::skip_until) carries it: the
+  /// lexer lives in an `Option` built the moment the stream runs dry, and left out of line it
+  /// cannot be scalar-replaced, so it is re-loaded from the stack on every token.
+  #[inline(always)]
+  fn skip_while_direct<F>(
+    &mut self,
+    pred: &mut F,
+  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    F: FnMut(Spanned<&L::Token, &L::Span>) -> bool,
+  {
+    // ── Phase 1: the resident run — each token judged, and consumed, where it lies ──
+    while let Some(front) = self.front() {
+      if !pred(front.token) {
+        // The stop. The token was never taken out, so "an unconsumed token lives at the front of
+        // the stream" holds by having done nothing to it: no pop, no push-back, no push history.
+        return Ok(());
+      }
+      // The settle's ONE fallible step, taken while the token is still in the stream. Three
+      // caller-supplied operations live in here — `Source::len`, an `L::Offset` comparison and an
+      // `L::Span::clone` — and a panic through any of them leaves the token exactly where it is
+      // and the committed position exactly where it was. That ordering is what replaces the scan
+      // scope: there is no window in which a token is out of the stream and unaccounted for, so
+      // there is nothing for a `Drop` to repair.
+      let clamped = self.clamped_span(front.token.span.into());
+      // ── nothing fallible from here to the publish ──
+      drop(self.commit_front(clamped));
+    }
+
+    // ── Phase 2: the lexing run — the stream is empty, so the committed position IS the frontier ──
+    let mut lexing: Option<Resume<L, L::Offset>> = None;
+    loop {
+      if lexing.is_none() {
+        // A sticky limit trip latches a poison boundary at the durable frontier; once the lex
+        // position has reached it there is no token left to scan. Every token this call skipped
+        // is already committed — that commit is the scanner's `commit_at` here — so reaching the
+        // boundary leaves nothing to settle and the call simply stops.
+        if self.reached_boundary(self.span.end_ref()) {
+          return Ok(());
+        }
+        // The committed pair, read from one value, with the stream provably drained: exactly
+        // where the scanner's frontier resume would land.
+        lexing = Some(self.resume());
+      }
+      let resume = lexing.as_mut().expect("the lexer is built just above");
+      // `scan_with` centralizes the poison latch, the dedup watermark, the partial-input frontier
+      // rules and the fatal-emit discipline, handing back only the events this loop must decide.
+      // `AtCursor` is the durable frontier here BECAUSE this loop commits per token: with the
+      // stream drained, `offset()` is `span().end()`, the end of the last skipped token — the
+      // very offset the scanner's `AtFrontier` carries.
+      let scanned = self.scan_with(resume.parts_mut(), &AtCursor);
+      match scanned {
+        Ok(Scan::Token(tok)) => {
+          if !pred(tok.as_ref()) {
+            // The stop, on a token this loop lexed: put it back where an unconsumed token lives.
+            // Lexed, so the put-back is a genuinely new cache entry and its push is recorded —
+            // the same call, with the same origin, the scanner's `to`-shaped stop makes.
+            let state = resume.lexer().state().clone();
+            self.hold_front(CachedToken::new(tok, state), Origin::Lexer);
+            return Ok(());
+          }
+          let state = resume.lexer().state().clone();
+          // Nothing is resident and the committed position is this token's start, so the ordinary
+          // settle is already atomic here: a panic through its clamp drops a token the region
+          // re-lexes, against a position that never moved.
+          self.commit_token(tok.data(), tok.span_ref(), state);
+        }
+        // The trip is latched and diagnosed inside `scan_with`, and the progress it keeps is
+        // already committed.
+        Ok(Scan::Tripped) => return Ok(()),
+        Ok(Scan::Eof) => {
+          let lexer = lexing
+            .take()
+            .expect("the lexer is built just above")
+            .into_lexer();
+          // Everything from the cursor to the end of input matched and was skipped: keep that
+          // progress, at the LEXER's end rather than the last token's, so trailing bytes the
+          // lexer skips are accounted for. BOTH operands are caller code and both are evaluated
+          // before either half of the position is written.
+          let span = lexer.span();
+          let state = lexer.into_state();
+          self.commit_position(span.into(), state);
+          return Ok(());
+        }
+        // A fatal rejection of a crossed lexer error's diagnostic: `settle_fatal` already
+        // committed the position inside `scan_with`, over a prefix whose tokens this loop had
+        // already committed one by one. Nothing is left to settle.
+        Err(e) => return Err(e),
+      }
+    }
   }
 }

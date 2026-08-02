@@ -559,6 +559,205 @@ fn peek_head_map_raises_on_a_latched_boundary_with_nothing_resident() {
   );
 }
 
+// ── The two things leaving the scanner had to re-establish: the latch, and the unwind ─────────
+
+/// An input with no budget at all, for the unwind sweep below.
+fn open_input(src: &str) -> Input<'_, BalLexer<'_>, BalCtx<'_>, ()> {
+  Input::with_state_and_context(
+    src,
+    TokenLimiter::with_limitation(usize::MAX),
+    crate::input::InputContext::new(
+      Verbose::<ByValErr>::new(),
+      DefaultCache::<'_, BalLexer<'_>>::default(),
+    ),
+  )
+}
+
+/// **Where a resource trip latches when it happens inside a trivia skip.**
+///
+/// Leaving the shared scanner gave up its deferred [`AtFrontier`](super::AtFrontier), which is
+/// what a trip latches the poison boundary against. The complete-input route latches against
+/// [`AtCursor`](super::AtCursor) — the committed cursor — instead, and the two are the same offset
+/// only *because* that route commits every token it crosses as it crosses it. That is an
+/// argument, so this measures the offset rather than trusting it, on both routes over the same
+/// stream: `~ ~ 2` under a two-token budget, so the trip fires on the token the skip would have
+/// stopped on and the durable frontier is the end of the second trivia token.
+///
+/// Run cold (the skip lexes the whole run) and with the first token already resident (so the
+/// resident phase commits before the lexing phase latches), because those are the two ways the
+/// committed cursor can arrive at the frontier.
+#[test]
+fn a_trip_inside_a_trivia_skip_latches_where_the_scan_latches() {
+  /// `(latched boundary, committed span, cursor, limit diagnostics, what a later drain yields)`
+  fn trip(
+    via_scan: bool,
+    prefill: usize,
+  ) -> (
+    Option<usize>,
+    SimpleSpan,
+    usize,
+    usize,
+    std::vec::Vec<SimpleSpan>,
+  ) {
+    let mut input = tripping_input("~ ~ 2", 2);
+    let (latched, span, cursor, drained) = {
+      let mut inp = input.as_ref();
+      for _ in 0..prefill {
+        let _ = inp.peek::<U1>().unwrap();
+      }
+      if via_scan {
+        // `skip_while(is_trivia)` *is* `skip_until::<SkipWhile>(|t| !is_trivia(t))`.
+        let _ = inp
+          .skip_until::<SkipWhile, _, _>(|t| !t.data.is_trivia(), || None, ())
+          .unwrap();
+      } else {
+        inp.skip_while(|t| t.data.is_trivia()).unwrap();
+      }
+      let latched = inp.latch_snapshot();
+      let span = *inp.span();
+      let cursor = *inp.cursor().as_inner();
+      let mut drained = std::vec::Vec::new();
+      while let Some(tok) = inp.next().unwrap() {
+        drained.push(*tok.span_ref());
+      }
+      (latched, span, cursor, drained)
+    };
+    let limits = input
+      .emitter()
+      .errors()
+      .values()
+      .flatten()
+      .filter(|e| **e == ByValErr::Limit)
+      .count();
+    (latched, span, cursor, limits, drained)
+  }
+
+  for prefill in [0usize, 1] {
+    let direct = trip(false, prefill);
+    let scanned = trip(true, prefill);
+    assert_eq!(
+      direct, scanned,
+      "a trip inside a trivia skip must leave the same boundary, the same committed position, \
+       the same cursor, the same diagnostics and the same remaining stream on both routes \
+       (prefill {prefill})"
+    );
+    assert_eq!(
+      direct,
+      (
+        Some(3),
+        SimpleSpan::new(2, 3),
+        3,
+        1,
+        std::vec::Vec::<SimpleSpan>::new()
+      ),
+      "and the boundary is the DURABLE FRONTIER — the end of the last skipped token, offset 3 — \
+       not the cursor the call started from and not the tripping token's own span. The committed \
+       span is that same token, the drain stops at the boundary, and the trip is diagnosed once \
+       (prefill {prefill})"
+    );
+  }
+}
+
+/// **A panic mid-skip, and the state the input is left in** — the property the scan scope's
+/// `Drop` provided and this route has to provide by construction.
+///
+/// Under `Complete` the scope settles exactly two things: it puts the in-flight token back at the
+/// front of the stream, and it commits the frontier the loop accumulated. This route holds no
+/// token out of the stream while caller code runs and accumulates no uncommitted frontier, so the
+/// claim is that neither settle has anything to do. The claim is checkable, and this checks it:
+/// a predicate that panics on its `k`-th call must leave **exactly** the `k − 1` tokens it
+/// accepted consumed, and every other token still reachable.
+///
+/// That is stronger than "the input looks consistent". A lost token would shorten the drain; a
+/// token consumed in silence would shorten it too; an uncommitted prefix would leave the
+/// committed span behind the tokens the predicate accepted. All three are read off the same two
+/// values.
+///
+/// Swept over the prefill depth, because the two phases of the loop reach a panicking predicate
+/// by different roads: at depth 0 every token is lexed inside the call, at depth 5 every token is
+/// already resident, and in between the panic lands on the phase boundary.
+#[test]
+fn a_panic_mid_skip_consumes_exactly_what_the_predicate_accepted() {
+  // Five tokens, with a gap between each: `(0,1) (2,3) (4,5)` trivia, then `(6,7)` and `(8,9)`.
+  // The gaps matter — a cursor placed at the previous token's END rather than at the next one's
+  // START is a different number here, and both are checked below.
+  const SRC: &str = "~ ~ ~ 2 ;";
+
+  let all: std::vec::Vec<SimpleSpan> = {
+    let mut input = open_input(SRC);
+    let mut inp = input.as_ref();
+    let mut out = std::vec::Vec::new();
+    while let Some(tok) = inp.next().unwrap() {
+      out.push(*tok.span_ref());
+    }
+    out
+  };
+  assert_eq!(all.len(), 5, "the fixture's own shape");
+
+  for prefill in [0usize, 1, 2, 5] {
+    for panic_on in 1..=4usize {
+      let calls = Cell::new(0usize);
+      let mut input = open_input(SRC);
+      let mut inp = input.as_ref();
+      for _ in 0..prefill {
+        let _ = inp.peek::<U3>().unwrap();
+      }
+      let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        inp.skip_while(|t| {
+          calls.set(calls.get() + 1);
+          assert!(
+            calls.get() != panic_on,
+            "the armed predicate call panics mid-skip"
+          );
+          t.data.is_trivia()
+        })
+      }));
+      assert!(
+        caught.is_err(),
+        "call {panic_on} of the predicate must have panicked (prefill {prefill})"
+      );
+
+      let committed_end = inp.span().end();
+      let cursor = *inp.cursor().as_inner();
+      let mut drained = std::vec::Vec::new();
+      while let Some(tok) = inp.next().unwrap() {
+        drained.push(*tok.span_ref());
+      }
+
+      // The predicate accepted calls 1..panic_on-1 — every one of them trivia — and never
+      // answered about the token of call `panic_on`. So exactly that many tokens are consumed.
+      assert_eq!(
+        drained,
+        all[panic_on - 1..].to_vec(),
+        "a panic on predicate call {panic_on} must leave the {} token(s) it accepted consumed \
+         and every other token still reachable — no token lost to the unwind, and none consumed \
+         in silence (prefill {prefill})",
+        panic_on - 1
+      );
+      // …and the position accounts for them: the interrupted call kept its prefix, at the end of
+      // the last token the predicate accepted, exactly as a committing mode's unwind edge does.
+      let expected_end = if panic_on == 1 {
+        0
+      } else {
+        all[panic_on - 2].end()
+      };
+      assert_eq!(
+        committed_end, expected_end,
+        "the committed position after the unwind is the end of the last accepted token \
+         (prefill {prefill}, panic on {panic_on})"
+      );
+      // The stream and the committed position are contiguous: nothing sits between them.
+      assert!(
+        committed_end <= cursor && cursor <= all[panic_on - 1].start(),
+        "the cursor ({cursor}) must lie between the committed position ({committed_end}) and the \
+         next token's start ({}) — a cursor past it would mean a token vanished \
+         (prefill {prefill}, panic on {panic_on})",
+        all[panic_on - 1].start()
+      );
+    }
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 // The caller-code effect ledger
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -2461,4 +2660,176 @@ fn an_address_reading_predicate_can_change_the_skip_decision() {
      byte. `pred` is a function of what it is handed means the VALUES it is handed, and this is \
      the cell that makes the word load-bearing"
   );
+}
+
+// ── The clamp's ordering, measured on the one operation that can unwind inside it ─────────────
+
+/// **The settle's fallible step runs while the token is still in the stream** — measured, not
+/// argued.
+///
+/// The complete-input skip's per-token settle is a clamp
+/// ([`Source::len`](crate::Source::len), an `L::Offset` comparison and an `L::Span::clone`)
+/// followed by a removal and two moves, in that order, and the order is the whole of why this
+/// route needs no scan scope. Reverse it — clamp inside the settle, as
+/// [`commit_token`](InputRef::commit_token) does for the 1:1 consume paths — and a panicking
+/// `L::Span::clone` leaves the token popped, the position behind it, and the younger cache
+/// entries resident in front of the hole.
+///
+/// So the armed clone is fired on a head the predicate **accepts**, and what is asserted is the
+/// stream: the token is still there, the cursor has not moved, and a later drain yields every
+/// token including the one the clamp was clamping. The ledger beside it says the unwind happened
+/// where it was aimed — probe, predicate, then the clone — and not somewhere earlier.
+///
+/// This is not a claim about a supported behaviour: an unwinding `Clone` breaks the inertness
+/// clause, and the cells above measure what that costs a caller. It is a claim about the *crate's*
+/// side of the bargain — that the input this route leaves behind is whole even then, because
+/// nothing is ever half-removed.
+#[test]
+fn an_unwinding_clamp_leaves_the_token_it_was_clamping_in_the_stream() {
+  let src = LedgerSrc("~ ab cd");
+  let mut input = ledger_input(&src);
+  let mut inp = input.as_ref();
+  let _ = inp.peek::<U3>().unwrap();
+
+  record();
+  arm_bombs();
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    inp.skip_while(|t| {
+      note(Effect::Caller);
+      t.data.is_trivia()
+    })
+  }));
+  disarm_bombs();
+  let ledger = recorded();
+
+  assert!(caught.is_err() && bomb_fired(), "the armed clone panicked");
+  assert_eq!(
+    ledger,
+    std::vec![Effect::CacheFront, Effect::Caller, Effect::SpanClone],
+    "the clamp is the third step and the removal has not happened yet: probe, predicate, then \
+     the clone that unwinds"
+  );
+  assert_eq!(
+    inp.cursor().as_inner().0,
+    0,
+    "the cursor has not moved — the token the clamp was clamping is still the head"
+  );
+  assert_eq!(
+    crate::Span::end(inp.span()).0,
+    0,
+    "and nothing was committed"
+  );
+  assert_eq!(
+    drain_spans(&mut inp),
+    std::vec![(0, 1), (2, 4), (5, 7)],
+    "every token is still reachable, the accepted trivia token included: an unwinding clamp \
+     cannot lose one, because the token has not left the stream when it runs"
+  );
+}
+
+// ── The typestate split, and the drift it could hide ──────────────────────────────────────────
+
+/// One `skip_while` sweep over an input of either completeness, as its caller-visible outcome.
+///
+/// Deliberately not the effect ledger: the two routes run different caller code by construction,
+/// and what has to agree is the *observation*.
+#[expect(clippy::type_complexity, reason = "one tuple, compared as a whole")]
+fn ledger_skip_run<'a, Cmpl>(
+  inp: &mut InputRef<'a, '_, LedgerLexer<'a>, LedgerCtx<'a>, (), Cmpl>,
+  prefill: usize,
+  skips: usize,
+) -> (
+  std::vec::Vec<(usize, usize, bool)>,
+  usize,
+  (usize, usize),
+  std::vec::Vec<(usize, usize)>,
+)
+where
+  Cmpl: crate::input::SurfaceIncomplete<'a, LedgerLexer<'a>, LedgerCtx<'a>, ()>,
+{
+  let mut asked = std::vec::Vec::new();
+  for _ in 0..prefill {
+    let _ = inp.peek::<U3>().unwrap();
+  }
+  for _ in 0..skips {
+    inp
+      .skip_while(|t| {
+        asked.push((t.span.start.0, t.span.end.0, t.data.is_trivia()));
+        t.data.is_trivia()
+      })
+      .unwrap();
+  }
+  let cursor = inp.cursor().as_inner().0;
+  let span = (inp.span().start.0, inp.span().end.0);
+  let mut drained = std::vec::Vec::new();
+  while let Some(tok) = inp.next().unwrap() {
+    drained.push((tok.span_ref().start.0, tok.span_ref().end.0));
+  }
+  (asked, cursor, span, drained)
+}
+
+/// **The drift guard for the typestate split.**
+///
+/// [`skip_while`](InputRef::skip_while) runs its own loop on a [`Complete`](crate::input::Complete)
+/// input and the shared scanner on a [`Partial`](crate::input::Partial) one, and two
+/// implementations of one thing are the defect class the shared scanner exists to prevent — the
+/// cache-drain prologue and the lexing loop each implemented skip-and-stop once, and they
+/// repeatedly disagreed.
+///
+/// What closes it here is that the split is *observable*: a **sealed** partial input takes every
+/// decision a complete one takes, because both partial-input rules are written
+/// `Cmpl::PARTIAL && !self.is_final() && …`. So the two routes must land on the same observation
+/// over the same stream, and this sweep — every source, four prefill depths, one skip and two
+/// back-to-back skips — is the assertion that they do. A change to either route that the other
+/// does not get fails here rather than in a user's streaming parse.
+///
+/// The whole caller-visible tuple is compared: the tokens the predicate was asked about (in
+/// order, with the answer it gave), the resume cursor, the committed span, and the tokens a later
+/// full drain yields. The emitter's outstanding-row count is checked on each side too, so a route
+/// that took a mark and forgot it is red here as well.
+#[test]
+fn the_two_completeness_routes_observe_the_same_skip() {
+  const SOURCES: &[&str] = &[
+    "ab cd ef",
+    "~ ab cd",
+    "~ ~ ab",
+    "~ ~ ~",
+    "",
+    "~",
+    "ab ~ ~ cd",
+  ];
+
+  for text in SOURCES {
+    let src = LedgerSrc(text);
+    for prefill in [0usize, 1, 2, 3] {
+      for skips in [1usize, 2] {
+        let mut complete = ledger_input(&src);
+        let direct = {
+          let mut inp = complete.as_ref();
+          ledger_skip_run(&mut inp, prefill, skips)
+        };
+        let direct_rows = complete.emitter().live_rows();
+
+        let mut partial = ledger_partial_input(&src);
+        partial.seal();
+        let scanned = {
+          let mut inp = partial.as_ref();
+          ledger_skip_run(&mut inp, prefill, skips)
+        };
+        let scanned_rows = partial.emitter().live_rows();
+
+        assert_eq!(
+          direct, scanned,
+          "the complete-input route and the scanned partial route must observe the same skip \
+           over {text:?} at prefill {prefill} with {skips} skip(s): same tokens asked about in \
+           the same order, same cursor, same committed span, same stream left behind"
+        );
+        assert_eq!(
+          (direct_rows, scanned_rows),
+          (0, 0),
+          "and neither leaves an emitter mark outstanding over {text:?} at prefill {prefill}"
+        );
+      }
+    }
+  }
 }
