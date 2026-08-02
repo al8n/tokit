@@ -142,11 +142,18 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
             // The closer is at hand: commit the carried token by value — no re-scan,
             // and cache-independent (a blackhole `()` would drop a pushed-back closer).
             //
-            // The probe is cache-first, so this verdict rests on a REAL pre-trip token: the construct
-            // genuinely closed and stays a success even if the element's lookahead latched a terminal
-            // stop somewhere past that closer, or its descent tripped a budget it caught itself.
-            // Neither witness belongs here — see `many::absence_after_element`.
-            CloseStatus::Close(ct) => container.on_close_delimiter(inp.commit_probed(ct)),
+            // The probe is cache-first, so this verdict rests on a REAL pre-trip token — and that
+            // token settles the POSITION question, not the COUNTER one. The construct closed ahead
+            // of any boundary the element's lookahead went on to latch, so the scanner witness is
+            // genuinely not about this exit and gating on it would fail a parse a wider window
+            // completes identically. A descent trip is the other kind of fact: it happened *inside*
+            // the attempt that just declined, and a valid closer arriving after it does not unmake
+            // it — without the gate this is a closed collection that silently spent a resource-limit
+            // stop. Descent only, therefore; see `many::close_after_element`.
+            CloseStatus::Close(ct) => {
+              close_after_element(inp, trips)?;
+              container.on_close_delimiter(inp.commit_probed(ct))
+            }
             // A wrong token where the closer belongs: unexpected-token, expected-close.
             CloseStatus::WrongToken(tok) => {
               // No closer: the decline plus this verdict conclude *absence* from what this element
@@ -211,9 +218,15 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     // with the four-way probe so a terminal scanner stop is not misread as EOF.
     match inp.probe_close(|t| Delim::is_close(&t.data.kind()))? {
       // The closer is at hand: commit the carried token by value — no re-scan. A cache-first
-      // verdict on a real pre-trip token, so the construct genuinely closed and stays a success,
-      // and neither absence witness belongs here — see `many::absence_after_element`.
-      CloseStatus::Close(ct) => container.on_close_delimiter(inp.commit_probed(ct)),
+      // verdict on a real pre-trip token, so the construct genuinely closed *at that position* and
+      // the scanner witness stays off this exit — a boundary latched past the closer is not about a
+      // construct that ended before it. The counter is the other fact, and the closer settles
+      // nothing about it: the stalling attempt may have caught a budget trip, which no later token
+      // unmakes. Descent only — see `many::close_after_element`.
+      CloseStatus::Close(ct) => {
+        close_after_element(inp, elem_trips)?;
+        container.on_close_delimiter(inp.commit_probed(ct))
+      }
       CloseStatus::WrongToken(tok) => {
         // No closer: the stall plus this verdict conclude *absence* from what the last element
         // attempt did, so surface a terminal stop it hit ahead of the close-miss diagnostic.

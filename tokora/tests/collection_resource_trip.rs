@@ -43,6 +43,19 @@
 //! the two sets of sources differ only in *where* the catch sits relative to the element the driver
 //! is judging.
 //!
+//! # The exit that closes on a real token — section 5
+//!
+//! Section 4's delimited sources all end on a close MISS, so they never reach the arm where the
+//! closer is genuinely present. There the two witnesses come apart. A `CloseStatus::Close` verdict
+//! is cache-first, so it rests on a real pre-trip token: the construct ended **ahead of** any
+//! boundary the element's lookahead went on to latch, which makes the *scanner* latch simply not
+//! about it — gating on that would fail a parse a wider scan window completes to the identical
+//! value. The *descent* trip is the other kind of fact, a counter event that already happened inside
+//! the element attempt, and no later token unmakes it: an element that caught one, declined, and was
+//! then followed by a real closer closed the collection **successfully** while a resource budget had
+//! stopped the parse. `parser::many::close_after_element` is the third chokepoint, holding the
+//! descent witness alone, and section 5 is section 4's delimited cells with the closer put back.
+//!
 //! # Why every cell here runs twice, through two error types
 //!
 //! This is the half of #148 that was **never sink-dependent**. `Recover`, `InplaceRecover` and
@@ -445,9 +458,10 @@ macro_rules! attempt_cell {
 ///   producing an `Err` for the wrong reason and reading as a pass. Through `()` that matters twice
 ///   over: `Err(())` carries no discriminant, so *every* way of failing looks identical.
 ///
-/// The filed counts are pinned on both runs rather than compared, because they differ by
-/// construction: the gate returns **before** the exit's own diagnostic (the close miss, the
-/// `Unclosed`), so a stopped run files strictly less than the control that ran on.
+/// The filed counts are pinned on both runs rather than compared, because they need not agree: the
+/// gate returns **before** the exit's own diagnostic, so wherever the control emits one (a close
+/// miss, an `Unclosed`) the stopped run files strictly less. Section 5's cells close on a real token
+/// and so emit nothing on either run, which the same absolute pins state rather than assume.
 macro_rules! absence_cell {
   (
     $name:ident, $err:ty, $sink:literal, $probe:ident, $what:literal, $src:literal,
@@ -682,6 +696,40 @@ macro_rules! trip_suite {
       {
         match inp.try_expect(|t| matches!(t.data(), Token::Num(_)))? {
           None => {
+            catch_a_trip(inp);
+            Ok(ParseAttempt::Decline)
+          }
+          Some(tok) => match tok.into_data() {
+            Token::Num(n) => Ok(ParseAttempt::Accept(n)),
+            _ => unreachable!("the predicate accepted only `Num`"),
+          },
+        }
+      }
+
+      /// **The same catch, on an element that CONSUMES the token at the slot and then declines** —
+      /// section 5's `separated().delimited()` element.
+      ///
+      /// The delimited separated driver probes the separator-or-close slot *before* it attempts an
+      /// element, so a closer sitting there is committed by that probe and the element never runs.
+      /// The epilogue's close probe therefore sees a real closer only when the element attempt moved
+      /// the front onto it — which means the element consumed. That is the shape
+      /// `tokora/tests/probe_close_no_rescan.rs`'s `consume_then_decline` already uses to reach the
+      /// same arm, for the same reason.
+      ///
+      /// The catch sits on the consuming path only, so the parse's one trip and the absence
+      /// conclusion the driver draws from it belong to the same element attempt.
+      fn caught_then_consuming_decline_num<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<ParseAttempt<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        match inp.try_expect(|t| matches!(t.data(), Token::Num(_)))? {
+          None => {
+            // Take the non-element token out of the way, so the closer is what the epilogue's
+            // close probe classifies. Then catch the trip and report no more elements.
+            let _ = inp.try_expect(|t| matches!(t.data(), Token::Plus))?;
             catch_a_trip(inp);
             Ok(ParseAttempt::Decline)
           }
@@ -1067,6 +1115,29 @@ macro_rules! trip_suite {
           .parse_input(inp)
       }
 
+      /// Section 5's `separated().delimited()` probe: the consuming decline, so the epilogue's close
+      /// probe classifies a REAL closer rather than the token the element left behind.
+      fn sep_delim_consuming_decline_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + SeparatedEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + TooFewEmitter<'inp, TestLexer<'inp>>
+          + TooManyEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_consuming_decline_num
+          .separated_by_comma()
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
       // ── The four cells ──────────────────────────────────────────────────────
 
       cell!(
@@ -1413,10 +1484,10 @@ macro_rules! trip_suite {
       //
       // Two exits per family, because they are different gate lines in every driver: the decline
       // and the no-progress stall. In the two delimited families both land in a close-probe arm, so
-      // each source is chosen to put a close MISS there — `WrongToken` or `Eof` — never a real
-      // closer: a `Close` verdict rests on a committed pre-trip token and is a genuine close that
-      // must keep succeeding, which is why no gate sits on that arm and why a source ending in `)`
-      // would measure nothing here.
+      // each source here is chosen to put a close MISS there — `WrongToken` or `Eof`. The real-closer
+      // arm of the same probe is section 5's: it is a *different* gate, holding the descent witness
+      // alone, because a committed pre-trip closer settles where the construct ended and settles
+      // nothing about what the attempt before it cost.
       #[allow(rustdoc::private_intra_doc_links)]
       mod answered_trip {
         use super::*;
@@ -1523,6 +1594,80 @@ macro_rules! trip_suite {
           tight_filed = 1,
           collects = Ok(vec![1, 2, 3, ZERO_WIDTH]),
           roomy_filed = 2
+        );
+      }
+
+      // ── Section 5: the closer is genuinely there, and the trip is still spent ──
+      //
+      // Section 4's delimited sources all end on a close MISS, which is why they never touched the
+      // arm below. When the closer IS present the delimited drivers commit it and succeed — and for
+      // one of the two never-recoverable witnesses that is exactly right:
+      //
+      // * the **scanner latch** is a fact about a token POSITION. A `CloseStatus::Close` verdict is
+      //   cache-first, so it rests on a real pre-trip token: the construct ended ahead of whatever
+      //   boundary the element's lookahead went on to latch, and that boundary is not about it.
+      //   Gating a real close on the latch would fail a parse a wider scan window completes to the
+      //   identical value, so the latch stays off this arm — `absence_terminal_stop.rs` is where
+      //   that direction is pinned;
+      // * the **descent trip** is a COUNTER EVENT inside the element attempt. A valid closer
+      //   arriving afterwards does not unmake it. Before this, an element that caught a
+      //   `RecursionLimitReached`, reported *no more elements*, and was then followed by a real
+      //   closer produced a successfully closed collection that had silently spent a resource-limit
+      //   stop — section 4's defect, through the arm section 4's gate deliberately does not cover.
+      //
+      // So these cells are section 4's with one character added to the source, and the arm they
+      // reach carries the descent witness alone (`parser::many::close_after_element`).
+      //
+      // `separated().delimited()` gets ONE cell here, not two, and the missing one is a fact about
+      // that driver rather than an omission. It probes the separator-or-close slot BEFORE it
+      // attempts an element, so a closer sitting there is committed by that probe and the element
+      // never runs; the epilogue sees a real closer only when the element attempt moved the front
+      // onto it, which means the element CONSUMED. A consuming attempt cannot also be the
+      // no-progress stall — the stall is defined by having committed nothing — so the stall exit of
+      // that driver can only ever reach a close MISS, which section 4 already covers. The element
+      // below therefore consumes and declines, the same shape `probe_close_no_rescan.rs` needs to
+      // reach the same arm.
+      #[allow(rustdoc::private_intra_doc_links)]
+      mod answered_trip_at_a_real_closer {
+        use super::*;
+
+        absence_cell!(
+          a_declining_element_that_answered_a_trip_does_not_commit_the_repeated_closer,
+          $err,
+          $sink,
+          delim_repeated_decline_probe,
+          "`repeated().delimited()`, element declines with the closer at hand",
+          "( 1 2 3 )",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3]),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_commit_the_repeated_closer,
+          $err,
+          $sink,
+          delim_repeated_stall_probe,
+          "`repeated().delimited()`, element accepts consuming nothing with the closer at hand",
+          "( 1 2 3 )",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3, ZERO_WIDTH]),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_declining_element_that_answered_a_trip_does_not_commit_the_separated_closer,
+          $err,
+          $sink,
+          sep_delim_consuming_decline_probe,
+          "`separated_by_comma().delimited()`, element consumes and declines with the closer at hand",
+          "( 1 , 2 , 3 + )",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3]),
+          roomy_filed = 0
         );
       }
     }

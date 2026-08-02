@@ -175,11 +175,13 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
             // entire end-state policy was dead code, while the while-sibling
             // (`sep_while/delim/mod.rs`) ran it on the identical path.
             //
-            // No close-miss primary belongs here — the closer is present. No absence gate belongs
-            // here either: the closer was READ AND COMMITTED, so this exit rests on a real token
-            // rather than on an absence conclusion, and `absence_after_element` guards only
-            // absence exits. Its descent term would be a constant `false` here regardless — this
-            // cycle's baseline was taken a few lines above and nothing since it can trip.
+            // No close-miss primary belongs here — the closer is present. Neither gate belongs here
+            // either, and for a reason stronger than "this exit rests on a real token": this arm is
+            // reached from the TOP of a cycle, before any element attempt of its own. Only an
+            // *accepting* element can precede it — a decline and a stall each break the loop into
+            // the epilogue below — so there is no absence conclusion to refuse, and the descent
+            // term of `many::close_after_element` would be a constant `false` regardless, since
+            // this cycle's baseline was taken a few lines above and nothing since it can trip.
             parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
             container.on_close_delimiter(tok);
             return Ok(inp.span_since(&anchor));
@@ -243,11 +245,17 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     let mut close_carrier = None;
     match inp.probe_close(|tok| Delim::is_close(&tok.data.kind()))? {
       // The closer is at hand: no close miss. Carry it out; committed by value after the
-      // end-state pass. A cache-first verdict on a real pre-trip token, so the construct
-      // genuinely closed and stays a success even if an element's lookahead latched a
-      // terminal stop past that closer, or its descent tripped a budget it caught itself —
-      // neither absence witness belongs here, see `many::absence_after_element`.
-      CloseStatus::Close(ct) => close_carrier = Some(ct),
+      // end-state pass. A cache-first verdict on a real pre-trip token — which settles WHERE the
+      // construct ended and nothing else. A terminal stop an element's lookahead latched past that
+      // closer is not about a construct that closed before it, so the scanner witness stays off
+      // this exit; a descent trip the element caught is a counter event inside the attempt that
+      // just concluded "no more elements", and the closer arriving afterwards does not unmake it.
+      // Descent only — see `many::close_after_element`. The gate runs BEFORE `handle_end` below,
+      // like the close-miss arms' gate, so a stopped run files no end-state secondaries either.
+      CloseStatus::Close(ct) => {
+        close_after_element(inp, elem_trips)?;
+        close_carrier = Some(ct)
+      }
       // (b) a wrong token sits where the closer should: unexpected-token, expected-close.
       CloseStatus::WrongToken(tok) => {
         // No closer: the loop's absence exit plus this verdict conclude "no more elements" from

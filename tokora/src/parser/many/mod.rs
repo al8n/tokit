@@ -15,8 +15,21 @@
 //! the driver an `Ok`, and the driver reads it as "no more elements" and **succeeds**. That is the
 //! same defect through the exit the failure chokepoint does not cover: a resource-budget stop
 //! becomes an accepted absence. [`absence_after_element`] is the second chokepoint, and the **one**
-//! place a driver's non-`Err` exits consult either witness. Why the two are separate functions, and
+//! place a driver's *absence* exits consult either witness. Why the two are separate functions, and
 //! why the two witnesses take different baselines, is on it.
+//!
+//! **The two witnesses are not the same kind of fact, and a committed closer settles only one of
+//! them.** A scanner latch is a fact about a *token position*: a construct that closed on a real
+//! pre-trip token closed **before** the boundary, so a boundary latched past that closer says
+//! nothing about it, and gating a real close on it would fail a parse a wider window completes
+//! identically. A descent trip is a *counter event that happened during the element attempt*: a
+//! valid closer arriving afterwards does not unmake it. An element that caught one, reported *no
+//! more elements*, and was then followed by a real closer therefore yields a **successfully closed
+//! collection that silently spent a resource-limit stop** — the same defect, through the one exit
+//! the absence chokepoint deliberately does not cover. So the real-closer exits take the descent
+//! witness and **not** the scanner one, through [`close_after_element`]. Three chokepoints rather
+//! than one guard with a mode flag, because the three exits differ in what they hold: an error to
+//! re-raise, both witnesses, or the counter alone.
 //!
 //! The descent witness is not carried by the error value. It is a **monotone session counter** on
 //! the input (`Input::resource_trips`), bumped by [`InputRef::descend`](crate::InputRef::descend)
@@ -252,10 +265,15 @@ where
 ///
 /// # Where it does **not** belong
 ///
-/// Only on the exits that conclude absence *from an element attempt*. Not on an exit resting on a
-/// **real token**: the delimited drivers' `CloseStatus::Close` arms and the mid-scan closer in
-/// `sep/delim` read a committed pre-trip token, so the construct genuinely closed and stays a
-/// success — gating those turns a parse that a wider budget completes identically into a failure.
+/// Only on the exits that conclude absence *from an element attempt*. Not, **as a pair**, on an exit
+/// resting on a **real token**: the delimited drivers' `CloseStatus::Close` arms and the mid-scan
+/// closer in `sep/delim` read a committed pre-trip token. That token settles the *position*
+/// question and only the position question — the construct closed before any boundary a later
+/// lookahead latched, so the scanner term there would fail a parse a wider window completes
+/// identically. It settles nothing about the *counter*: a trip the element already caught is not
+/// unmade by a closer arriving after it. Those exits therefore take the descent witness alone,
+/// through [`close_after_element`], and this function stays off them.
+///
 /// Not on a separator-slot probe that runs *before* this cycle's element either: nothing between the
 /// cycle's baseline and that probe can trip, so the term would be a constant `false` there.
 ///
@@ -288,6 +306,76 @@ where
   <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
 {
   if inp.latched_during_attempt(latch) || inp.tripped_during_attempt(trips) {
+    return Err(
+      UnexpectedEot::eot_of(inp.span().end())
+        .into_terminal()
+        .into(),
+    );
+  }
+  Ok(())
+}
+
+/// Refuses a **close** that a descent trip the element already answered stands behind — the
+/// descent-only third chokepoint, for the delimited drivers' exits that commit a REAL closer after
+/// an element attempt.
+///
+/// [`absence_after_element`] holds both witnesses because both bear on an absence conclusion. Here
+/// exactly one of them does, and the difference is not a matter of degree — the two witnesses are
+/// facts of different kinds, and a committed pre-trip closer settles one of them and not the other:
+///
+/// * the **scanner** latch is a fact about a *token position*. A `CloseStatus::Close` verdict is
+///   cache-first, so it rests on a real token that was read before any stop; the construct closed
+///   **ahead of** whatever boundary the element's lookahead went on to latch, and that boundary is
+///   simply not about this construct. Reading it here would fail a parse that a wider scan window
+///   completes to the identical value, which is why `latched_during_attempt` is deliberately absent
+///   from this body and `GATE_CENSUS` pins its absence rather than leaving it to be noticed;
+/// * the **descent** trip is a *counter event that happened inside the element attempt*. Nothing
+///   arriving afterwards unmakes it. An element that catches a
+///   [`RecursionLimitReached`](crate::error::RecursionLimitReached), reports *no more elements*, and
+///   is then followed by a real closer produces a **successfully closed collection that silently
+///   spent a resource-limit stop** — the position was fine and the budget was not.
+///
+/// So the verdict "a real token closed this construct" is a true statement about *where* the parse
+/// is and says nothing about *what the attempt before it cost*. One gate per fact.
+///
+/// # Baseline, and the exits this is for
+///
+/// `trips` is the caller's, per **element**, exactly as [`file_element_failure`] and
+/// [`absence_after_element`] take it, and for the same reason: the counter is a monotone session
+/// fact, so a collection-wide baseline would charge every later close in the parse with a trip some
+/// earlier element caught and legitimately parsed past.
+///
+/// It belongs only where a closer is committed **after an element attempt whose baseline is still in
+/// hand**: `delim/repeated`'s decline arm and its stall epilogue, and `sep/delim`'s epilogue. Not on
+/// `sep/delim`'s mid-scan closer, which is reached from the top of a cycle — only an *accepting*
+/// element can precede it (a decline or a stall breaks the loop), and this cycle's baseline is taken
+/// a few lines above it, so the term would be a constant `false`. Not on an `Accept` either: an
+/// element that catches a trip and still produces a value has answered it, which is the granularity
+/// floor the module docs state.
+///
+/// # What holds the witness in the guard
+///
+/// `GATE_CENSUS`'s `every_real_closer_exit_after_an_element_is_trip_gated` pins that every
+/// `CloseStatus::Close` verdict in the try-driven drivers reaches this call before it commits, and
+/// `the_close_chokepoint_reads_the_counter_and_not_the_position` scans this body in **both**
+/// directions — the descent witness present, the scanner witness absent. A needle scan proves
+/// presence and ordering, never that a term gates; the behaviour is
+/// `tokora/tests/collection_resource_trip.rs`'s section 5, where an element catches a trip and then
+/// declines — or accepts consuming nothing — with the closer genuinely present, over both sinks.
+/// Neuter the term (`let _ = inp.tripped_during_attempt(trips);` above the `if`) and that section
+/// reds while the census stays green.
+#[inline(always)]
+pub(super) fn close_after_element<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
+  inp: &InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
+  trips: usize,
+) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Cmpl: crate::input::Completeness,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+{
+  if inp.tripped_during_attempt(trips) {
     return Err(
       UnexpectedEot::eot_of(inp.span().end())
         .into_terminal()
@@ -335,6 +423,22 @@ mod gate_census {
   //! to spell differently, and the count of chokepoint calls is pinned per source so a new absence
   //! exit cannot land ungated.
   //!
+  //! # The third half: the exits that close on a real token
+  //!
+  //! An exit that commits a REAL closer is not an absence exit, and for a long time that was read as
+  //! "neither witness belongs there". It is true of one of them. A committed pre-trip closer is a
+  //! fact about *position*: the construct ended ahead of whatever boundary the element's lookahead
+  //! went on to latch, so the scanner witness is not about it, and gating on it would fail a parse
+  //! that a wider scan window completes identically. It is not a fact about the *counter*: a descent
+  //! trip the element caught happened inside the attempt that concluded "no more elements", and a
+  //! valid closer arriving afterwards does not unmake it — the collection closes successfully having
+  //! silently spent a resource-limit stop. [`close_after_element`](super::close_after_element) is the
+  //! third chokepoint and holds the descent witness **alone**;
+  //! [`every_real_closer_exit_after_an_element_is_trip_gated`] pins that every close verdict reaches
+  //! it before committing, and [`the_close_chokepoint_reads_the_counter_and_not_the_position`] pins
+  //! the asymmetry in both directions, since a scanner term smuggled into that body is as much a
+  //! defect as a missing descent one.
+  //!
   //! # The one thing the chokepoint cannot centralize
   //!
   //! `trips` is the caller's. It must be `inp.trip_snapshot()` taken **inside the element loop**,
@@ -379,6 +483,29 @@ mod gate_census {
   /// absence exit while the stop is live.
   const ABSENCE_WITNESSES: [&str; 2] =
     ["inp.latched_during_attempt(", "inp.tripped_during_attempt("];
+
+  /// The descent-only close chokepoint: its call in a driver, and its definition in this module's
+  /// own source. It shares [`ABSENCE_STOP`] as the needle that ends its guard region.
+  const CLOSE_GATE: &str = "close_after_element(";
+  const CLOSE_GATE_DEF: &str = "fn close_after_element";
+
+  /// The one witness [`CLOSE_GATE`] must read, and the one it must **not**.
+  ///
+  /// The asymmetry is the whole point of there being a third chokepoint, so it is pinned in both
+  /// directions rather than only in the direction that is easy to check. A real pre-trip closer
+  /// settles the *position* fact — the construct ended ahead of any boundary a later lookahead
+  /// latched — and settles nothing about the *counter* fact, which is a trip that already happened
+  /// inside the element attempt this exit is concluding from.
+  const CLOSE_WITNESS: &str = "inp.tripped_during_attempt(";
+  const CLOSE_NON_WITNESS: &str = "inp.latched_during_attempt(";
+
+  /// A real-closer exit, in the two spellings a driver can reach one by: the probe verdict that
+  /// hands the closer over, and the by-value commit that settles it. `CLOSE_HANDOFF` is the
+  /// container call every closer of either origin passes through, so a *new* closer commit of any
+  /// shape moves its tally.
+  const CLOSE_VERDICT: &str = "CloseStatus::Close(";
+  const CLOSE_COMMIT: &str = "inp.commit_probed(";
+  const CLOSE_HANDOFF: &str = "on_close_delimiter(";
 
   /// The element attempt whose failure a driver must route through the chokepoint, the descent
   /// witness's baseline, and the loop opener that baseline must be taken after.
@@ -909,10 +1036,13 @@ mod gate_census {
   ///   is `tripped_during_attempt` against the per-**element** baseline, for the reason
   ///   [`every_element_loop_baselines_its_trip_witness_per_element`] gives.
   ///
-  /// In the delimited drivers the gate belongs *inside* the close probe's `WrongToken`/`Eof` arms,
-  /// never ahead of the probe: the probe is cache-first, so a `Close` verdict on a real pre-trip
-  /// token is a genuine close and must keep parsing — as is a reached bound, and as is the mid-scan
-  /// closer in `sep/delim`. Gating those would fail a parse a wider budget completes identically.
+  /// In the delimited drivers **this** gate belongs *inside* the close probe's `WrongToken`/`Eof`
+  /// arms, never ahead of the probe: the probe is cache-first, so a `Close` verdict rests on a real
+  /// pre-trip token, and the *scanner* half of this pair must not reach it — a boundary latched past
+  /// the closer is not about a construct that ended before it, and reading it there would fail a
+  /// parse a wider window completes identically. The *descent* half is a different kind of fact and
+  /// does reach it, through the separate [`close_after_element`](super::close_after_element) gate
+  /// that [`every_real_closer_exit_after_an_element_is_trip_gated`] counts.
   ///
   /// What this pins, per source: the baseline is taken; the source carries the shape
   /// [`absence_exit_shapes`] classifies it as, by count; and a chokepointed source spells **neither**
@@ -1043,6 +1173,200 @@ mod gate_census {
          end-of-input. One witness alone leaves the other's stop spendable as an accepted absence"
       );
     }
+  }
+
+  /// The real-closer shape of every try-driven driver, as data — index-aligned with
+  /// [`try_driven_sites`].
+  ///
+  /// `(source, probed closers, direct closers)`.
+  ///
+  /// * a **probed** closer is a `CloseStatus::Close` verdict, committed by value with
+  ///   [`CLOSE_COMMIT`]. The probe runs only where the driver has already concluded "no more
+  ///   elements" from an element attempt whose trip baseline is still in hand, so every one of
+  ///   these must carry [`CLOSE_GATE`];
+  /// * a **direct** closer is one the driver committed straight from its own scan. There is exactly
+  ///   one in the tree — `sep/delim`'s mid-scan arm — and it is exempt for a structural reason, not
+  ///   because it "rests on a real token": it is reached from the top of a cycle, so only an
+  ///   *accepting* element can precede it (a decline and a stall each break into the epilogue) and
+  ///   this cycle's baseline is taken above it, which makes the descent term a constant `false`.
+  ///
+  /// The two non-delimited drivers carry no closer at all, and that `(0, 0)` is checked rather than
+  /// skipped: it is what stops a closer landing in a source this census reads but does not expect
+  /// one in.
+  fn close_exit_shapes() -> [(&'static str, usize, usize); 4] {
+    [
+      ("many/repeated/mod.rs", 0, 0),
+      ("many/delim/repeated.rs", 2, 0),
+      ("many/sep/parse/mod.rs", 0, 0),
+      ("many/sep/delim/mod.rs", 1, 1),
+    ]
+  }
+
+  /// Every exit that commits a real closer **after an element attempt** consults the descent
+  /// witness first.
+  ///
+  /// The absence census above pins the exits that conclude the construct ended from *nothing*. This
+  /// pins the ones that conclude it from *a real token* — the shape the previous revision left
+  /// ungated on the reasoning that a committed pre-trip closer settles the question. It settles the
+  /// **position** question. The element attempt that declined, or stalled, may have caught a descent
+  /// trip on its way there, and a valid closer arriving afterwards does not unmake a counter event
+  /// that already happened: without a gate that is a successfully closed collection that spent a
+  /// resource-limit stop in silence.
+  ///
+  /// What this pins, per source: the counted shape [`close_exit_shapes`] classifies it as, in three
+  /// independent tallies — the verdict, the by-value commit, and the container handoff that closers
+  /// of *both* origins pass through — plus a **region** scan requiring each verdict to reach
+  /// [`CLOSE_GATE`] before its commit. The region scan is what makes this more than three tallies
+  /// that three needles scattered anywhere would satisfy, and its `code_find` panics rather than
+  /// passing when a verdict has no commit after it at all.
+  ///
+  /// What it does not pin is that the gate *gates* — see
+  /// [`the_close_chokepoint_reads_the_counter_and_not_the_position`] for the same limit stated at
+  /// length, and `tokora/tests/collection_resource_trip.rs`'s section 5 for the behaviour.
+  #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
+  fn every_real_closer_exit_after_an_element_is_trip_gated() {
+    let sites = try_driven_sites();
+    let shapes = close_exit_shapes();
+    let mut gated = 0;
+    let mut exempt = 0;
+    for i in 0..sites.len() {
+      let (name, src) = sites[i];
+      let (classified, probed, direct) = shapes[i];
+      assert_eq!(
+        name, classified,
+        "the try-driven source list and the real-closer classification have drifted apart at row \
+         {i}: `{name}` against `{classified}`. They are index-aligned on purpose — a row that names \
+         a source the scan does not read is a row that checks nothing"
+      );
+      assert_eq!(
+        code_matches(src, CLOSE_VERDICT),
+        probed,
+        "{name}: expected {probed} close verdict(s) (`{CLOSE_VERDICT}`). A new one is a new exit \
+         that concludes the construct ended, and it has to be classified here before it can be \
+         trusted"
+      );
+      assert_eq!(
+        code_matches(src, CLOSE_COMMIT),
+        probed,
+        "{name}: every close verdict is committed by value exactly once (`{CLOSE_COMMIT}`) — a \
+         verdict committed by re-scanning instead would leave this census measuring the wrong \
+         program point"
+      );
+      assert_eq!(
+        code_matches(src, CLOSE_HANDOFF),
+        probed + direct,
+        "{name}: expected {} closer handoff(s) (`{CLOSE_HANDOFF}`), {probed} probed and {direct} \
+         direct. A closer committed by any other route is an exit this census cannot see",
+        probed + direct
+      );
+      assert_eq!(
+        code_matches(src, CLOSE_GATE),
+        probed,
+        "{name}: every probed closer reached after an element attempt gates on the descent witness \
+         (`{CLOSE_GATE}`). An exit added without one closes the construct successfully over a \
+         resource-limit stop the element already answered — and an exit whose gate was removed is \
+         the same defect, which is why this is a count and not a presence test"
+      );
+
+      // Each verdict reaches the gate before it commits. The region is verdict → commit, so a gate
+      // sitting anywhere else in the file — including inside a close-MISS arm, where the absence
+      // chokepoint belongs instead — does not satisfy it.
+      let mut checked = 0;
+      let mut from = 0;
+      while let Some(at) = code_find(&src[from..], CLOSE_VERDICT) {
+        let verdict_at = from + at;
+        let commit_at = code_find(&src[verdict_at..], CLOSE_COMMIT).unwrap_or_else(|| {
+          panic!(
+            "{name}: a `{CLOSE_VERDICT}` verdict with no `{CLOSE_COMMIT}` after it. The driver no \
+             longer commits the probed closer by value; re-cut this census against whatever \
+             replaced it before trusting a green run"
+          )
+        });
+        assert_eq!(
+          code_matches(&src[verdict_at..verdict_at + commit_at], CLOSE_GATE),
+          1,
+          "{name}: the descent gate belongs INSIDE the close verdict's arm, ahead of the commit. \
+           Found none there, or more than one — a gate in a neighbouring arm leaves this exit \
+           closing over a trip the element answered"
+        );
+        checked += 1;
+        from = verdict_at + CLOSE_VERDICT.len();
+      }
+      assert_eq!(
+        checked, probed,
+        "{name}: every close verdict must have been inspected"
+      );
+      gated += probed;
+      exempt += direct;
+    }
+    assert_eq!(
+      (gated, exempt),
+      (3, 1),
+      "the try-driven families carry exactly three gated real-closer exits — `delim/repeated`'s \
+       decline arm and its stall epilogue, and `sep/delim`'s epilogue — and exactly one exempt \
+       direct closer, `sep/delim`'s mid-scan arm. Both halves are pinned so that exempting a fourth \
+       exit, or losing a gate from one of the three, has to be deliberate"
+    );
+  }
+
+  /// The close chokepoint reads the **counter** and not the **position**, and the census says so in
+  /// both directions.
+  ///
+  /// The third of the region scans, and it proves exactly as much and as little as its two
+  /// siblings: the witness is present, named, and textually ahead of the stop. That is a tripwire on
+  /// the source and **not** a proof of control-flow domination — a body reading the counter into a
+  /// `let _ =` binding satisfies it with the gate gone, exactly as
+  /// [`the_absence_chokepoint_consults_both_witnesses_before_it_stops`] records for its own. What
+  /// proves this one gates is `tokora/tests/collection_resource_trip.rs`'s section 5.
+  ///
+  /// The negative half has no sibling: `latched_during_attempt` must **not** appear here. A scanner
+  /// term smuggled into this body would fail every delimited parse whose element lookahead latched a
+  /// boundary past a closer that legitimately closed — a regression a wider scan window makes
+  /// invisible, and the exact reason the previous revision left the whole arm ungated. Pinning the
+  /// absence is cheap; noticing it later is not. `many/mod.rs`'s single tree-wide reading of the
+  /// latch, asserted next door, is the same claim counted globally.
+  #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
+  fn the_close_chokepoint_reads_the_counter_and_not_the_position() {
+    let prod = super::end_state_census::many_mod_production();
+    let def_at = code_find(prod, CLOSE_GATE_DEF).unwrap_or_else(|| {
+      panic!(
+        "`many/mod.rs`: `{CLOSE_GATE_DEF}` is gone. The real-closer chokepoint has been renamed or \
+         removed; re-cut this census against whatever replaced it before trusting a green run"
+      )
+    });
+    let body = &prod[def_at..];
+    let stop_at = code_find(body, ABSENCE_STOP).unwrap_or_else(|| {
+      panic!(
+        "`many/mod.rs`: `close_after_element` no longer surfaces the stop as a terminal \
+         end-of-input (`{ABSENCE_STOP}`)"
+      )
+    });
+    let guard = &body[..stop_at];
+    assert_eq!(
+      code_matches(guard, CLOSE_WITNESS),
+      1,
+      "`many/mod.rs`: the close chokepoint must consult the descent witness before it stops — \
+       `{CLOSE_WITNESS}` is missing from, or duplicated in, the code ahead of its terminal \
+       end-of-input. Without it a closer that arrives after a trip the element answered closes the \
+       collection successfully"
+    );
+    assert_eq!(
+      code_matches(guard, CLOSE_NON_WITNESS),
+      0,
+      "`many/mod.rs`: the close chokepoint must NOT read the scanner latch (`{CLOSE_NON_WITNESS}`). \
+       A committed pre-trip closer settles the position fact — the construct ended ahead of any \
+       boundary a later lookahead latched — so reading it here fails a parse a wider scan window \
+       completes to the identical value. The asymmetry between the two witnesses is why this \
+       chokepoint exists apart from `absence_after_element`"
+    );
   }
 
   /// Every no-progress guard measures committed consumption (`span().end()`), never a cache-front
