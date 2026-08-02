@@ -21,6 +21,7 @@ scope limit below before reading a green run as safety:
 | `warned` | both ran, and head gained a warning **naming the probed subject** that the base side did not emit | no — rustc reported it |
 | `silent*` | a SILENT row listed in `disclosed.txt` | no — known, and in the CHANGELOG |
 | `ok*` | both sides agree AND the row is justified in `no_collision.txt` | no |
+| `new-owner` | the base side cannot resolve the row's **owner** and the head side can — the same diff introduces the owner as well as the name | no |
 | `SILENT` | both compile, neither warns, the witness disagrees, not disclosed | **yes** |
 | `UNPROBED` | for an item row, both sides agree and it is **not** justified in `no_collision.txt`; for a glob row, rustc said nothing about the name at all. The glob form cannot be silenced by `no_collision.txt` | **yes** |
 | `INCONCL` | no before-state: the base side did not compile, its witness was not 1, or the marker was missing/duplicated | **yes** |
@@ -121,6 +122,21 @@ current PR did not re-probe was reported STALE. See the note under `disclosed.tx
 
 **It probed a different feature point than it inventoried.** See the note above that one.
 
+**It could not express a name whose OWNER the same diff introduces.** #147 added
+`RecursionLimitReached` and `NonAssociativeChain` and twelve items on them. `gen_probe.py`
+had no template for either owner, so every row was `FATAL` and the job reported an
+*incomplete* verdict rather than a finding — which is how it read as a demonstrated
+collision when it was nothing of the sort. Adding the templates is only half of it: a probe
+that names the owner cannot compile against a base ref where the owner does not exist, and
+`no-compile` on the base side was unconditionally `INCONCL`, *"a broken probe, not a clean
+result"*. That is the two-causes-one-absence pattern again, and this time the second cause
+is not reachable by a better template — a probe is byte-identical on both sides, and a
+method call needs a concrete receiver type, so a name on an owner introduced by the same
+release has **no consumer call site that could predate it**. The `new-owner` verdict says
+that, with the two witnesses listed above. Note what it does *not* say: nothing about a
+consumer written after the release. A two-sided delta harness cannot see that, on either
+side of the line.
+
 All of these are the same defect the harness exists to catch, one level up: **an instrument
 that verifies the case you already knew about.** The last four are a sharper version of it —
 an instrument that *refuses to answer* looks like a broken gate and gets routed around,
@@ -165,6 +181,7 @@ positive evidence that the probe actually constructed what it claims:
 | `glob-err` | a head diagnostic naming the subject **and** mentioning ambiguity — a build that fails for an unrelated reason measured nothing |
 | `glob-ok` | an ambiguity diagnostic naming the subject — "both sides compiled" alone cannot distinguish *this toolchain does not reject it* from *no collision was constructed* |
 | `ok*` | agreement plus a written justification in `no_collision.txt`, staleness-checked |
+| `new-owner` | a base-side unresolved-import / cannot-find / failed-to-resolve diagnostic **naming this row's owner**, *and* the absence of the same diagnostic on head — a template that misspells its owner would otherwise report `new-owner` forever while having compiled nowhere |
 | `loud` | the base side ran (`witness=1`), and cargo names **the probe crate** as what failed — so the failure is the probe's, not a dependency's. **Attribution to the collision is still not established**: in the inherent-method and associated-function categories it may be the probe's own arity — see below |
 
 The fatal verdicts — `SILENT`, `UNPROBED`, `INCONCL`, `FATAL`, `STALE` — need no witness, because

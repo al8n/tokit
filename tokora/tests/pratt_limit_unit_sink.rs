@@ -240,6 +240,64 @@ fn distance_from_base() -> usize {
   BASE.with(Cell::get).abs_diff(stack_mark())
 }
 
+/// This build's reason that a raw address distance is **not** a measure of frame liveness, if it
+/// has one.
+///
+/// [`stack_mark`] reads the address of a local, and the cell below compares two of them. That
+/// comparison means something only while the addresses are native stack offsets. Two
+/// instrumentations break that, in different ways, and neither can be tuned around:
+///
+/// * **miri** interprets the program. Its addresses are virtual allocation addresses handed out by
+///   the interpreter, not offsets into any real stack. `cfg!(miri)` is set for the interpreted
+///   build and is the stable spelling.
+/// * **A sanitizer** may relocate a frame's locals onto a heap-allocated *fake stack* — ASan's
+///   `detect_stack_use_after_return` machinery — so the address of a local is not where the frame
+///   physically sits. There is no stable `cfg` to test: `cfg(sanitize = "address")` requires
+///   `feature(cfg_sanitize)`, which a stable-compiled integration test cannot carry. So the leg
+///   announces itself instead — `ci/sanitizer.sh` exports `TOKORA_SANITIZER` for **every**
+///   sanitizer it runs, and this reads it at run time rather than through `option_env!`, so a
+///   cached build cannot carry a stale answer into an uninstrumented run or the reverse.
+fn frames_are_relocated() -> Option<String> {
+  if cfg!(miri) {
+    return Some(String::from(
+      "miri: the interpreter hands out virtual allocation addresses, so the distance between two \
+       of them is not a native stack depth",
+    ));
+  }
+  match std::env::var("TOKORA_SANITIZER") {
+    Ok(san) if !san.is_empty() => Some(std::format!(
+      "TOKORA_SANITIZER={san}: a sanitizer-instrumented build may relocate a frame's locals onto a \
+       fake stack, so the address of a local is not where its frame sits"
+    )),
+    _ => None,
+  }
+}
+
+/// Says — on the process's **real** stderr — that the address-distance witness did not run.
+///
+/// Not `eprintln!`: libtest captures a passing test's output, so the one build where the assertion
+/// is skipped would be the one build where nobody can see that it was. A skip that leaves no trace
+/// is a check that passes by not looking, which is the same defect class one level up from the one
+/// this cell measures. Writing through [`std::io::stderr`] bypasses the per-test capture buffer,
+/// so the line lands in the CI log of a green run.
+fn announce_skipped_stack_witness(why: &str, recovery_frame: usize, deepest: usize) {
+  use std::io::Write as _;
+
+  let mut err = std::io::stderr().lock();
+  let _ = writeln!(
+    err,
+    "\n\
+     !!! SKIPPED ASSERTION — pratt_limit_unit_sink\n\
+     !!!   every_level_and_every_frame_is_released_before_recovery_sees_the_trip\n\
+     !!! The stack-address witness `recovery_frame * 8 < deepest` did NOT run.\n\
+     !!! Why: {why}.\n\
+     !!! Read anyway, for the log: recovery_frame={recovery_frame}, deepest={deepest}.\n\
+     !!! The two depth-cell assertions DID run and are unaffected: this build still proves the\n\
+     !!! library released every level, it just does not corroborate that out-of-band.\n"
+  );
+  let _ = err.flush();
+}
+
 /// The recoverer every cell below shares: it records what it observed and synthesizes a value.
 fn spending_recovery<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
@@ -424,22 +482,51 @@ fn every_level_and_every_frame_is_released_before_recovery_sees_the_trip() {
     deepest > 0,
     "the descent's stack marks must have been taken; got {deepest}"
   );
-  // Measured on this tree over the 200 frames below, so the ×8 margin is nowhere near the edge:
+  // ── The machine half runs in NATIVE builds only ──────────────────────────────────────────
   //
-  // | build   | deepest   | per frame | recoverer |
-  // |---------|-----------|-----------|-----------|
-  // | debug   | 1_029_120 | ~5.1 KiB  | 160       |
-  // | release |    99_760 | ~500 B    | 0         |
+  // Measured on this tree over the 200 frames below. In a native build the ×8 margin is nowhere
+  // near the edge:
+  //
+  // | build                        | deepest   | per frame | recoverer | holds? |
+  // |------------------------------|-----------|-----------|-----------|--------|
+  // | debug                        | 1_029_120 | ~5.1 KiB  |       160 | yes    |
+  // | release                      |    99_760 | ~500 B    |         0 | yes    |
+  // | miri SB/TB, x86_64 linux     | 2_002_360 | —         | 2_148_819 | NO     |
+  // | miri SB/TB, aarch64 darwin   | 2_540_555 | —         | 3_040_618 | NO     |
+  // | ASan, x86_64 linux           |    51_648 | —         |    52_480 | NO     |
+  // | ASan, aarch64 darwin         | 1_737_952 | —         |       384 | yes    |
   //
   // Release returns the recoverer to the baseline exactly, which is why the assertion permits 0.
   // The debug per-frame figure agrees with the 4–6 KiB `RecursionLimiter`'s own docs record, so
   // the two independent measurements of this engine's frame cost corroborate each other.
-  assert!(
-    recovery_frame * 8 < deepest,
-    "the recoverer must run on an already-unwound stack: it sits {recovery_frame} bytes from the \
-     pre-parse baseline while the descent reached {deepest} — if the sink had let recovery run \
-     with the deep frames still live these two would be comparable"
-  );
+  //
+  // The four instrumented rows are why this one assertion is gated rather than widened. Under an
+  // instrumented build the addresses are not native stack offsets at all — see
+  // [`frames_are_relocated`] — and three of the four put the **recoverer farther from the
+  // baseline than the descent it has already unwound past**. The operands are inverted, so there
+  // is no threshold that turns the comparison back into a measurement: the quantity simply is not
+  // being measured. A margin of 8 and a margin of 8 000 are equally meaningless there.
+  //
+  // The last row is the one that matters most for the decision. ASan on aarch64-darwin *passes*,
+  // and that is not a reason to keep the assertion on for sanitizers — it is the reason to turn
+  // it off for all of them. The relationship is not a property of the code under test; it is a
+  // property of the host's instrumented frame layout, and it flips between two hosts running the
+  // same source. A comparison whose answer changes with the runner is reporting the runner.
+  //
+  // The two assertions above are deliberately NOT gated. They are the library's own accounting
+  // and hold under every build, so miri and the sanitizers still prove the levels came back — what
+  // they cannot supply is the second, out-of-band witness. Assertion 1 and this one are
+  // independent on purpose and are not to be collapsed into one counter: reading the same cell
+  // twice is not corroboration.
+  match frames_are_relocated() {
+    None => assert!(
+      recovery_frame * 8 < deepest,
+      "the recoverer must run on an already-unwound stack: it sits {recovery_frame} bytes from \
+       the pre-parse baseline while the descent reached {deepest} — if the sink had let recovery \
+       run with the deep frames still live these two would be comparable"
+    ),
+    Some(why) => announce_skipped_stack_witness(&why, recovery_frame, deepest),
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

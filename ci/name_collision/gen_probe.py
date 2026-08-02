@@ -378,8 +378,157 @@ def trait_scope(rec):
     return "" if not scope else f"  #[allow(unused_imports)]\n  {scope}\n"
 
 
+# ── The pratt error types, as probe subjects ─────────────────────────────────────────────
+#
+# `RecursionLimitReached` and `NonAssociativeChain` are the two error types the recursion
+# bound introduced, and they are the first owners in this harness that the SAME diff also
+# introduces. Read `run.sh`'s `new-owner` verdict before reading a row for one of them: the
+# probe below names the owner, so it cannot compile on a base ref where the owner does not
+# exist, and that absence is the finding rather than a broken probe.
+#
+# The subject is BUILT rather than obtained from a tripped parse. The receiver has to be a
+# value on the line where the call is made, and a parse that trips hands the error back
+# through the grammar's own `From` — which for the fixture's `PErr` has already discarded it.
+# Both types are plain `Copy` values with a public constructor, so building one directly is
+# both simpler and closer to what a consumer holding one would have.
+#
+# Each record answers: which concrete type the consumer's extension trait is implemented for,
+# how a path call spells it, what the probe must import, and how to build one.
+#
+# BOTH are listed even though #147's inventory routed every shared name to
+# `RecursionLimitReached`. `of`, `offset`, `offset_ref` and `map_offset` exist on both types, and
+# `inherent_owners` records ONE owner per name — so which of the two a row rides is decided by
+# rustdoc's iteration order, not by anything in this file. An entry for only the winner would be
+# a template that works until that order changes and then reports FATAL over names it has
+# already probed. The two share `error_subject_method` / `error_subject_assoc_fn`, so the second
+# entry is one record rather than a second code path, and the path that serves it is the one
+# this diff exercises.
+ERROR_SUBJECTS = {
+    "RecursionLimitReached": {
+        "ty": "RecursionLimitReached<usize, ()>",
+        "path": "RecursionLimitReached::<usize, ()>",
+        "imports": (
+            "use tokora::error::RecursionLimitReached;\n"
+            "use tokora::state::recursion_tracker::{RecursionLimiter, RecursionTracker};\n"
+        ),
+        # Two `increase`s against a limitation of 1, which is the type's own doc example.
+        "build": (
+            "  let mut limiter = RecursionLimiter::with_limitation(1);\n"
+            "  limiter.increase();\n"
+            "  limiter.increase();\n"
+            "  let exceeded = RecursionTracker::check(&limiter)\n"
+            "    .expect_err(\"a limiter two levels over its limitation must report exceeded\");\n"
+            "  let subject: RecursionLimitReached<usize, ()> =\n"
+            "    RecursionLimitReached::of(7usize, exceeded);\n"
+        ),
+    },
+    "NonAssociativeChain": {
+        "ty": "NonAssociativeChain<usize, ()>",
+        "path": "NonAssociativeChain::<usize, ()>",
+        "imports": "use tokora::error::NonAssociativeChain;\n",
+        "build": (
+            "  let subject: NonAssociativeChain<usize, ()> = NonAssociativeChain::of(6usize);\n"
+        ),
+    },
+}
+
+
+def error_subject_method(name, owner, spelling):
+    """A consumer extension trait on one of the two pratt error types.
+
+    `&self`, not `&mut self`: every method these types declare takes `&self` or `self`, and a
+    consumer's receiver has to be reachable by the same autoref step tokora's is, or the two are
+    not competing for the same pick.
+    """
+    # Unpacked into locals BEFORE the f-string, not indexed inside it. Same reason the
+    # parameter type in `trait_method` is: a quote inside an f-string expression is a
+    # SyntaxError before Python 3.12, and this file has to parse under whatever `python3` is
+    # on the runner. A gate that cannot be parsed is not a gate.
+    rec = ERROR_SUBJECTS[owner]
+    imports, ty, build = rec["imports"], rec["ty"], rec["build"]
+    call = (
+        f"let _v: u8 = subject.{name}();"
+        if spelling == "used"
+        else f"subject.{name}();"
+    )
+    return FIXTURE + f"""
+{imports}
+pub trait ConsumerExt {{
+  fn {name}(&self) -> u8;
+}}
+
+impl ConsumerExt for {ty} {{
+  fn {name}(&self) -> u8 {{
+    ran();
+    7
+  }}
+}}
+
+fn drive() {{
+{build}  reached();
+  {call}
+}}
+""" + WITNESS
+
+
+def error_subject_assoc_fn(name, owner, spelling):
+    """The path-resolved half of the same two types — `Type::name()`, no receiver."""
+    rec = ERROR_SUBJECTS[owner]
+    imports, ty, path = rec["imports"], rec["ty"], rec["path"]
+    call = (
+        f"let _v: u8 = {path}::{name}();"
+        if spelling == "used"
+        else f"{path}::{name}();"
+    )
+    return FIXTURE + f"""
+{imports}
+pub trait ConsumerAssoc {{
+  fn {name}() -> u8;
+}}
+
+impl ConsumerAssoc for {ty} {{
+  fn {name}() -> u8 {{
+    ran();
+    7
+  }}
+}}
+
+fn drive() {{
+  use ConsumerAssoc as _;
+  reached();
+  {call}
+}}
+""" + WITNESS
+
+
 def inherent_method(name, owner, spelling):
     """A consumer extension trait declaring `name` on the OWNER tokora added it to."""
+    if owner in ERROR_SUBJECTS:
+        return error_subject_method(name, owner, spelling)
+    if owner == "ParserContext":
+        # `ctx()` is the fixture's own `PCtx`, which exists on both sides — `ParserContext` is
+        # not a new type, only `with_recursion_limiter` is a new item on it. The binding is
+        # `mut` because the consumer's receiver is `&mut self`; tokora's takes `self` by value,
+        # so on the head side its candidate is found one step EARLIER in the receiver walk.
+        call = f"let _v: u8 = c.{name}();" if spelling == "used" else f"c.{name}();"
+        return FIXTURE + f"""
+pub trait ConsumerExt {{
+  fn {name}(&mut self) -> u8;
+}}
+
+impl ConsumerExt for PCtx<'_> {{
+  fn {name}(&mut self) -> u8 {{
+    ran();
+    7
+  }}
+}}
+
+fn drive() {{
+  let mut c = ctx();
+  reached();
+  {call}
+}}
+""" + WITNESS
     if owner == "InputRef":
         call = f"let _v: u8 = inp.{name}();" if spelling == "used" else f"inp.{name}();"
         return FIXTURE + f"""
@@ -425,10 +574,49 @@ fn drive() {{
   {call}
 }}
 """ + WITNESS
+    # Not a default and not a skip: an owner with no template must stop the run, because a probe
+    # that rides the wrong subject collides with nothing and reports a clean run.
+    #
+    # `Descent` deliberately has no entry. It is public and it is new, but it declares NO inherent
+    # items at all — it is `Deref`/`DerefMut`/`Drop` and nothing else — so no inherent row can be
+    # generated for it and a template here would be code no run ever executes. Its one inventory
+    # row is the glob row, which `glob_name` covers. If it ever grows an inherent item, add it to
+    # `ERROR_SUBJECTS`-style handling here rather than to the glob side.
     sys.exit(f"gen_probe: no template for inherent method owner {owner!r} (name {name!r})")
 
 
 def inherent_assoc_fn(name, owner, spelling):
+    if owner in ERROR_SUBJECTS:
+        return error_subject_assoc_fn(name, owner, spelling)
+    if owner == "RecursionLimiter":
+        # A pre-existing type gaining a new associated function, so unlike the two error types
+        # this one HAS a before-state: a consumer's `impl ConsumerAssoc for RecursionLimiter`
+        # compiles on both sides and the two rows measure which item the path call selects.
+        call = (
+            f"let _v: u8 = RecursionLimiter::{name}();"
+            if spelling == "used"
+            else f"RecursionLimiter::{name}();"
+        )
+        return FIXTURE + f'''
+use tokora::state::recursion_tracker::RecursionLimiter;
+
+pub trait ConsumerAssoc {{
+  fn {name}() -> u8;
+}}
+
+impl ConsumerAssoc for RecursionLimiter {{
+  fn {name}() -> u8 {{
+    ran();
+    7
+  }}
+}}
+
+fn drive() {{
+  use ConsumerAssoc as _;
+  reached();
+  {call}
+}}
+''' + WITNESS
     if "Ident" not in owner:
         sys.exit(f"gen_probe: no template for associated-fn owner {owner!r}")
     call = (
