@@ -114,16 +114,29 @@ use crate::state::recursion_tracker::RecursionLimitExceeded;
 /// an unrelated failure with a stop it did not cause. It still fails closed at the boundary that
 /// matters: it never synthesizes over a real trip.
 ///
-/// **The resilient collection loops re-raise a trip rather than collecting past it.** `repeated`,
-/// `separated` and their delimited forms swallow an element's `Err` by design — emit it as a
-/// diagnostic and keep looping — and their gate re-raises the frontier incomplete, the *scanner*'s
-/// committed boundary, and a descent trip the element itself caused. A trip inside such an element
-/// therefore ends the collection on the `Err` channel instead of yielding a truncated container
-/// with the trip filed among its diagnostics. That was the behaviour before #148, and it was never
-/// sink-dependent: a delegating error type was spent there exactly as `()` was. The baseline is per
-/// *element*, so an ordinary failure later in the same collection — or in the enclosing one, where
-/// an inner collection's trip was swallowed — is emitted and looped past as it always was. See
-/// `parser::many`'s `GATE_CENSUS`.
+/// **The resilient collection loops re-raise a trip on three exits, not on every path through an
+/// element.** `repeated`, `separated` and their delimited forms swallow an element's `Err` by
+/// design — emit it as a diagnostic and keep looping — but a descent trip is not spent that way
+/// through any of three exits: an element's own `Err` (the gate re-raises it there alongside a
+/// frontier `Incomplete` and the *scanner*'s committed boundary), the element declining (or a cycle
+/// making no progress), and a real closer committed just after either of those. A trip that reaches
+/// one of those three ends the collection on the `Err` channel, or is refused as the absence it
+/// would otherwise be read as, instead of yielding a truncated container with the trip filed among
+/// its diagnostics. That was the behaviour before #148, and it was never sink-dependent: a
+/// delegating error type was spent there exactly as `()` was. The baseline is per *element*, so an
+/// ordinary failure later in the same collection — or in the enclosing one, where an inner
+/// collection's trip was swallowed — is emitted and looped past as it always was. See
+/// `parser::many`'s `GATE_CENSUS` for how the three exits stay wired.
+///
+/// **A fourth path is exempt, deliberately and permanently: an element that catches the trip, still
+/// consumes, and still answers `Accept`.** The three exits above are gated because the driver is
+/// the one concluding the construct ended, manufacturing that conclusion from a stop the caller
+/// never learns about, so it has to guard its own inference. `Accept` is not that: the element
+/// produced the value, and the driver is faithfully collecting what it was handed, not concluding
+/// anything of its own. None of the three runs, and the value is collected past exactly as it would
+/// be from an element the budget never touched. See `parser::many`'s module docs, "the channel
+/// neither chokepoint closes" section, for the reasoning at length, and
+/// `tokora/tests/collection_resource_trip.rs`'s section 6 for the pin.
 ///
 /// # The offset
 ///

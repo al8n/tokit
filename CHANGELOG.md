@@ -159,7 +159,7 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    counter too now — and, like the recovery half, it reads it against a baseline taken **once per
    element**, so what re-raises is a trip *that element* caused.
 
-   | driving an element that trips the depth budget | before | now |
+   | driving an element whose own attempt hands the trip back as `Err` | before | now |
    |---|---|---|
    | `repeated()`, `separated_by(..)`, and both delimited forms | the trip filed as a diagnostic; the loop continued to the next element and returned `Ok` with whatever it collected | the collection returns `Err` at the first trip, with **nothing filed** |
    | the same, for an element that fails **ordinarily** after some earlier construct's trip was caught and parsed past | the failure filed as a diagnostic; the loop continued | unchanged — the failure filed as a diagnostic; the loop continues |
