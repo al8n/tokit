@@ -534,7 +534,7 @@ fn first_uncovered(lo: u32, hi: u32, cover: &[(u32, u32)], at: &mut usize) -> Op
   }
   let mut cursor = lo;
   while let Some(&(s, e)) = cover.get(*at) {
-    w_tick(); // W row 4
+    w_tick(); // W row 7
     if e <= cursor {
       *at += 1; // entirely behind the walk: retired for good, never rescanned
       continue;
@@ -562,54 +562,124 @@ fn ceil_log2(k: u64) -> u64 {
   }
 }
 
-/// The validating replay: **two passes — linear in events, plus one `k log k` ordering of
-/// the recorded diagnostic spans**, one pass to gather and one to walk.
+/// Tiles the uncovered run a committed token left open, at the last moment before a
+/// **builder-visible** event would move the walk out of the node the token settled in.
 ///
-/// # Why two passes, and why the second one is not enough on its own
+/// This is the lookahead the second pass used to buy with a whole first pass. A run's far end
+/// is the *next* token's start (or the source's end when no token follows), which the walk
+/// cannot read at the trailing token — so the tile is deferred across the events that are
+/// structurally silent (a `StartAt` declaration, a `Diag` slot, an unwrapped tombstone) and
+/// forced here, before the first event that opens or closes a node. Nothing between the two
+/// points touches the builder, so the run still lands in exactly the node that was open when
+/// it opened — the placement `finish`'s *Where a gap lands* note states.
 ///
-/// The obvious rewrite is a single forward pass that decides coverage from a monotone cursor
-/// as it meets each `Diag`. It is wrong on this crate's own event streams, and the reason is
-/// worth stating where the code is: **tokens are recorded at settle, lexer errors at lex**,
-/// and the input layer's lookahead routinely settles a token *after* a diagnostic whose span
-/// lies to its right. The combined stream is therefore not ordered by source position, and it
-/// is not even stable — the same parse puts the same diagnostic at a different buffer index
+/// `probe` is a **monotone** cursor into `events`: it only ever moves forward, so the total
+/// scanning over one materialization is bounded by the event count and no region is ever
+/// examined twice (the same discipline as [`first_uncovered`]'s shared cover cursor). Regions
+/// whose runs were resolved by a directly-following token are skipped outright — the cursor
+/// starts at `from + 1` whenever that is further along than the cursor itself.
+///
+/// A run whose text does not slice the source (a following token span that starts off a
+/// `char` boundary) is left untiled; the walk then refuses at that token's own index, exactly
+/// as it did when the run list was precomputed.
+///
+/// `probe` and `covered` travel **by value, in and out** rather than behind `&mut`, and that
+/// is deliberate: they are the walk's two hottest scalars, and letting their addresses escape
+/// into a call inside the loop is enough to pin them to the stack for the whole
+/// materialization. Measured on the 57.7 KB entry, the `&mut` shape gave back a third of what
+/// deleting the gather pass won.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn tile_pending_run<S>(
+  events: &[Event<S>],
+  source: &str,
+  source_len: u32,
+  gap_kind: u16,
+  from: usize,
+  probe: usize,
+  covered: u32,
+  tiled: &mut Vec<(u32, u32)>,
+  builder: &mut GreenNodeBuilder<'_>,
+) -> (usize, u32)
+where
+  S: Span,
+  S::Offset: TryInto<u32>,
+{
+  let mut at = probe.max(from + 1);
+  let run_end = loop {
+    w_tick(); // W row 2 — one monotone lookahead step
+    match events.get(at) {
+      // A span that does not fit `u32` supplies no end; the walk refuses at that token.
+      Some(Event::Token { span, .. }) => break span.start().try_into().ok(),
+      Some(_) => at += 1,
+      // No token follows: the run ends where the source does.
+      None => break Some(source_len),
+    }
+  };
+  let Some(run_end) = run_end.filter(|&end| end > covered) else {
+    return (at, covered);
+  };
+  let Some(gap) = source.get(covered as usize..run_end as usize) else {
+    return (at, covered);
+  };
+  tiled.push((covered, run_end));
+  builder.token(SyntaxKind(gap_kind), gap);
+  (at, run_end)
+}
+
+/// The validating replay: **one pass — linear in events, plus one `k log k` ordering of
+/// the recorded diagnostic spans**. Validates as it drives the builder.
+///
+/// # Why the coverage verdict is still order-independent
+///
+/// The obvious single pass is one that decides coverage from a monotone cursor as it meets
+/// each `Diag`. It is wrong on this crate's own event streams, and the reason is worth
+/// stating where the code is: **tokens are recorded at settle, lexer errors at lex**, and the
+/// input layer's lookahead routinely settles a token *after* a diagnostic whose span lies to
+/// its right. The combined stream is therefore not ordered by source position, and it is not
+/// even stable — the same parse puts the same diagnostic at a different buffer index
 /// depending on how far the caller peeked. (`input_ref`'s own cache-transparency oracle says
 /// so in as many words: the token-event stream is exactly invariant under prefill, *"stronger
 /// than diagnostics, which may hoist"*.) A cursor driven in emission order turns that skew
 /// into an `OverlappingSpans` refusal on a legal parse, and makes the materialized tree a
 /// function of the peek schedule.
 ///
-/// So the gather pass stays. It is what makes the coverage verdict a function of the **set**
-/// of recorded error spans rather than of their arrival order, which is the property that
-/// absorbs the skew — by construction, not by assumption. What the gather pass does *not* get
-/// to keep is the rescan: the merged cover is swept once by a shared cursor
-/// ([`first_uncovered`]), not from index 0 per gap.
+/// So coverage is **not** decided during the walk. The walk *gathers* every recorded
+/// lexer-error span (holding each to the token-span discipline before it is allowed to
+/// license anything) and *records the runs it tiled*; the verdict is computed once, after the
+/// walk, from the merged **set** of error spans against those runs. That is the property that
+/// absorbs the skew — by construction, not by assumption — and it is exactly the property the
+/// old gather pass supplied. Deferring it is free: the latch it produces
+/// ([`FinishError::UncoveredGap`]) was already consumed only at the *end* of the walk, after
+/// the balance and token-channel walls.
 ///
-/// # Pass 1 — gather
+/// # What the gather pass used to own, and where each half went
 ///
-/// Validates every kind against the dialect's own predicate, validates every retro-wrap
-/// target, checks the `forward_parent` canary, and collects the recorded lexer-error spans —
-/// each one held to the token-span discipline before it is allowed to license anything. Then
-/// one `sort_unstable` over **diagnostics** (see the `W` inventory for how that cost is
-/// charged and pinned) and one linear merge into sorted, non-overlapping intervals.
+/// - **the recorded error spans** and their validation: the `Diag` arm of the walk, at the
+///   same index, feeding the post-walk `sort_unstable` + linear merge;
+/// - **the uncovered runs**, read off the token spans: replaced by a *monotone lookahead*
+///   ([`tile_pending_run`]), which resolves a run's far end only when a builder-visible event
+///   is about to move the walk out of the node the run opened in. Never rescans, allocates
+///   nothing per event, and skips outright every region whose run the next token resolves;
+/// - **the integrity canaries** (`ReservedKind`, `StaleStartAt`, `DanglingForwardParent`, the
+///   debug-gated dialect-kind check): every one of them is reachable in the walk at the same
+///   index — the tombstone's `forward_parent` canary is literally the first hop of the chain
+///   the walk already follows.
 ///
-/// It also reads the **uncovered runs** off the token spans, which is what lets pass 2 tile a
-/// run at the token it trails instead of at the token that reveals it: at the trailing token
-/// only the *next* token knows where the run ends. This is bookkeeping per **gap**, not per
-/// event — a source every token covers allocates nothing — and it is derived from tokens and
-/// the source length alone, never from a diagnostic, which is what keeps the tree independent
-/// of a prefilled cache's hoisting.
+/// **The one behaviour that moved is error precedence on a malformed stream.** Two passes
+/// meant every gather-class refusal outranked every walk-class refusal whatever their
+/// indices; one pass reports the first violation *in buffer order*. Both orders are
+/// arbitrary — each variant names its own offending index either way — and no stream that
+/// was refused is now accepted, nor the reverse: the fused arms run each event's gather
+/// checks ahead of its walk checks, so a single event's own precedence is unchanged.
 ///
-/// # Pass 2 — walk
+/// # The walk
 ///
 /// Drives the builder, and recovers each target's retro-wraps from **the target's own chain**
 /// (`forward_parent` → newest `StartAt` → `prev` → …), newest-first, which is the order they
 /// open in. That replaces a `BTreeMap<target, Vec<…>>` rebuilt on every `finish`. A flat
 /// reachability bitset keeps the integrity the unconditional rebuild used to give for free: a
 /// `StartAt` no chain reaches is refused, never silently dropped.
-///
-/// The uncovered-gap latch is still consumed at the **end** of the walk, after the balance and
-/// token-channel walls, so every error precedence the old shape had is preserved exactly.
 fn replay<S>(
   events: &[Event<S>],
   root_kind: u16,
@@ -657,153 +727,24 @@ where
   let source_len =
     u32::try_from(source.len()).map_err(|_| FinishError::OffsetOverflow { index: 0 })?;
 
-  // ── Pass 1: gather ──────────────────────────────────────────────────────────
+  // The recorded lexer-error spans, gathered by the `Diag` arm below and merged into the
+  // coverage set *after* the walk — the order-independence the two-pass shape used to buy
+  // with a whole pass (see this function's own docs).
   let mut error_spans: Vec<(u32, u32)> = Vec::new();
 
-  // The uncovered runs, read off the token spans alone — see `finish`'s *Where a gap lands*.
-  // A run is tiled the moment it OPENS, immediately after the token it trails, and at that
-  // moment only the *next* token knows where it ends; this is what supplies that end. It is
-  // computed from tokens and `source_len` and from nothing else, which is what makes placement
-  // independent of where a hoisting diagnostic happens to sit.
-  //
-  // Empty for a source every token covers, which is the ordinary case: one `(u32, u32)` per
-  // gap, nothing per event.
-  let mut gaps: Vec<(u32, u32)> = Vec::new();
-  let mut scan_covered: u32 = 0;
-  // The scan refuses nothing of its own. Every condition that stops it is one pass 2 refuses
-  // below, at its own index and with its own typed error; stopping just returns tiling to the
-  // shape it had before this rule, and the walk then errors anyway.
-  let mut gap_scan_ok = true;
+  // Every uncovered run the walk actually tiled, in source order. The coverage verdict is
+  // decided against this list once the walk is done; it is empty for a source every token
+  // covers, which is the ordinary case — one `(u32, u32)` per gap, nothing per event.
+  let mut tiled: Vec<(u32, u32)> = Vec::new();
 
-  for (index, event) in events.iter().enumerate() {
-    w_tick(); // W row 1
-    let index = index as u64;
-    match event {
-      Event::StartAt { kind, target, .. } => {
-        if *kind == TOMBSTONE {
-          return Err(FinishError::ReservedKind { index });
-        }
-        if cfg!(debug_assertions) && !validator.admits(*kind) {
-          return Err(FinishError::InvalidDialectKind { index, kind: *kind });
-        }
-        let live = *target < index && events[*target as usize].is_tombstone();
-        if !live {
-          return Err(FinishError::StaleStartAt {
-            index,
-            target: *target,
-          });
-        }
-      }
-      Event::StartNode {
-        kind: TOMBSTONE,
-        forward_parent: Some(relative),
-      } => {
-        // The journal-integrity canary: a set pointer must name a StartAt of this
-        // tombstone. A dangling pointer is the un-journaled abandoned wrap, surfaced as a
-        // typed error instead of a stolen start. Under the chain the pointer is also the
-        // head of the wrap list, so this check now guards materialization, not just hygiene.
-        let target = index;
-        let named = target + u64::from(relative.get());
-        let names_this = matches!(
-          events.get(named as usize),
-          Some(Event::StartAt { target: t, .. }) if *t == target
-        );
-        if !names_this {
-          return Err(FinishError::DanglingForwardParent { index });
-        }
-      }
-      Event::StartNode { kind, .. } if *kind == TOMBSTONE => {}
-      Event::StartNode { kind, .. } => {
-        if cfg!(debug_assertions) && !validator.admits(*kind) {
-          return Err(FinishError::InvalidDialectKind { index, kind: *kind });
-        }
-      }
-      Event::Token { kind, span } => {
-        if *kind == TOMBSTONE {
-          return Err(FinishError::ReservedKind { index });
-        }
-        if cfg!(debug_assertions) && !validator.admits(*kind) {
-          return Err(FinishError::InvalidDialectKind { index, kind: *kind });
-        }
-        if gap_scan_ok {
-          let start: Result<u32, _> = span.start().try_into();
-          let end: Result<u32, _> = span.end().try_into();
-          match (start, end) {
-            // Exactly pass 2's span discipline, restated as a predicate instead of a refusal.
-            (Ok(start), Ok(end)) if start >= scan_covered && end >= start && end <= source_len => {
-              if start > scan_covered {
-                gaps.push((scan_covered, start));
-              }
-              scan_covered = end;
-            }
-            _ => gap_scan_ok = false,
-          }
-        }
-      }
-      Event::Diag {
-        error_span: Some(span),
-      } => {
-        // A lexer error's span covers the bytes it refused — and covering a byte is what
-        // *licenses* tiling it. That makes the span evidence, so it gets the token-span
-        // discipline rather than the clamp it used to get: a clamped endpoint quietly re-aims
-        // the evidence at a range the lexer never refused, excusing exactly the dropped
-        // committed token `UncoveredGap` exists to catch. The gap tile slices the source at
-        // these offsets, so they must also be char boundaries.
-        let start = diag_offset_to_u32(span.start(), index)?;
-        let end = diag_offset_to_u32(span.end(), index)?;
-        if start > end
-          || end > source_len
-          || !source.is_char_boundary(start as usize)
-          || !source.is_char_boundary(end as usize)
-        {
-          return Err(FinishError::InvalidDiagnosticSpan { index });
-        }
-        // A zero-width span covers nothing, so it licenses nothing: legal, and dropped.
-        if start < end {
-          error_spans.push((start, end));
-        }
-      }
-      Event::FinishNode { .. } | Event::Diag { error_span: None } => {}
-    }
-  }
+  // The monotone lookahead cursor into `events` — see `tile_pending_run`.
+  let mut probe: usize = 0;
+  // Whether the last committed token may have opened an uncovered run whose far end is not
+  // known yet. Resolved by the next token (for free, in the leading-run branch), or forced by
+  // the next builder-visible event, or by the end of the walk.
+  let mut pending_run = false;
 
-  // The last run, the one no token reveals. It trails the last committed token exactly as any
-  // other does, so it is not a special case in the walk — only its far end comes from the
-  // source's length rather than from a token.
-  if gap_scan_ok {
-    if scan_covered < source_len {
-      gaps.push((scan_covered, source_len));
-    }
-  } else {
-    // A partial scan must not place anything: an incomplete run list would tile a run early
-    // whose end the walk never confirmed. Dropping it restores the pre-rule tiling for the one
-    // walk that is about to refuse anyway.
-    gaps.clear();
-  }
-
-  // One sort, over DIAGNOSTICS: `O(k log k)` with `k ≤ events`. Its comparisons happen inside
-  // `std`, where the counter cannot see them, so the cost is charged to `W` explicitly — and
-  // charged at `k·⌈log₂ k⌉`, its REAL cost, not at a flat `k`.
-  //
-  // That distinction is the difference between a gate and a decoration. Charging `k` makes the
-  // charged quantity linear by construction, so the growth cell would report 4.00× for a 4×
-  // input no matter how the ordering behaved, and could never fail for the reason it exists.
-  // With `k` diagnostics per token — the error-dense payload — this term is `Θ(n log n)`, and
-  // the law below is stated in that shape rather than claiming a linearity the sort does not
-  // provide.
-  let k = error_spans.len() as u64;
-  w_tick_n(k * ceil_log2(k)); // W row 2
-  error_spans.sort_unstable();
-  let mut error_cover: Vec<(u32, u32)> = Vec::with_capacity(error_spans.len());
-  for (s, e) in error_spans {
-    w_tick(); // W row 3
-    match error_cover.last_mut() {
-      Some((_, last_end)) if s <= *last_end => *last_end = (*last_end).max(e),
-      _ => error_cover.push((s, e)),
-    }
-  }
-
-  // ── Pass 2: walk ────────────────────────────────────────────────────────────
+  // ── The walk ────────────────────────────────────────────────────────────────
   let mut builder = GreenNodeBuilder::new();
   let mut stack: Vec<Frame> = Vec::new();
   builder.start_node(SyntaxKind(root_kind));
@@ -821,21 +762,6 @@ where
   let mut saw_token = false;
   let mut saw_structure = false;
 
-  // The leftmost source run no committed token covers and no lexer error explains — the
-  // dropped-committed-token signature (see `UncoveredGap`). Recorded during tiling and
-  // refused at the end (by `finish`), so the zero-token wall keeps precedence for the
-  // all-dropped case.
-  let mut first_uncovered_gap: Option<(u32, u32)> = None;
-  // The shared monotone cursor into `error_cover` — see `first_uncovered`.
-  let mut cover_at: usize = 0;
-
-  // The monotone cursor into the runs pass 1 found. `rowan`'s builder is a stream — a closed
-  // node cannot be reopened — so a run cannot be re-parented after the fact; instead it is
-  // never mis-parented in the first place, because it is emitted at the token it trails,
-  // while that token's node is still the open one. Runs are consumed in source order and each
-  // exactly once, so the cursor only ever moves forward and never scans.
-  let mut gap_at: usize = 0;
-
   // The retro-wrap reachability set: one bit per event index, set for every `StartAt` the
   // walk opened by following a target's chain. Its purpose is the integrity the old
   // unconditional `wraps` materialization gave for free — a `StartAt` that no chain reaches
@@ -847,7 +773,7 @@ where
   let mut reached: Vec<u64> = Vec::new();
 
   for (index, event) in events.iter().enumerate() {
-    w_tick(); // W row 5
+    w_tick(); // W row 1
     let index = index as u64;
     match event {
       Event::StartNode {
@@ -857,10 +783,28 @@ where
         // An inert mark — unless retro-wraps target it. They open HERE, newest first (the
         // later wrap's finish comes later, so it is the outer node), which is exactly the
         // order the chain is threaded in.
+        //
+        // A tombstone with no wrap is structurally silent, so it does not force a pending
+        // run; one that opens wraps does — the run belongs to the node the trailing token
+        // settled in, not inside the wrap about to open around it.
+        if pending_run && forward_parent.is_some() {
+          pending_run = false;
+          (probe, covered) = tile_pending_run(
+            events,
+            source,
+            source_len,
+            gap_kind,
+            index as usize,
+            probe,
+            covered,
+            &mut tiled,
+            &mut builder,
+          );
+        }
         let mut link = *forward_parent;
         let mut previous: Option<u32> = None;
         while let Some(relative) = link {
-          w_tick(); // W row 6 — one chain hop
+          w_tick(); // W row 3 — one chain hop
           // Strictly decreasing offsets: an older `StartAt` sits at a smaller index. This
           // is what makes the chain terminating and fork-free, so a corrupt link is a
           // refusal rather than a hang.
@@ -890,11 +834,34 @@ where
         }
       }
       Event::StartNode { kind, .. } => {
+        if cfg!(debug_assertions) && !validator.admits(*kind) {
+          return Err(FinishError::InvalidDialectKind { index, kind: *kind });
+        }
+        if pending_run {
+          pending_run = false;
+          (probe, covered) = tile_pending_run(
+            events,
+            source,
+            source_len,
+            gap_kind,
+            index as usize,
+            probe,
+            covered,
+            &mut tiled,
+            &mut builder,
+          );
+        }
         saw_structure = true;
         builder.start_node(SyntaxKind(*kind));
         stack.push(Frame::Start(*kind));
       }
       Event::Token { kind, span } => {
+        if *kind == TOMBSTONE {
+          return Err(FinishError::ReservedKind { index });
+        }
+        if cfg!(debug_assertions) && !validator.admits(*kind) {
+          return Err(FinishError::InvalidDialectKind { index, kind: *kind });
+        }
         saw_token = true;
         let start = offset_to_u32(span.start(), index)?;
         let end = offset_to_u32(span.end(), index)?;
@@ -904,57 +871,47 @@ where
         if end > source_len {
           return Err(FinishError::SpanOutOfBounds { index });
         }
-        // The LEADING run — bytes before the first committed token, which no token trails —
-        // is the one case with no opening moment of its own, so it tiles where the walk first
-        // sees it: here, in the node this token is landing in. Every other run has already
-        // been tiled below, at the token it trails, so `start > covered` cannot hold for it.
+        // Whatever run was pending is resolved right here, for free: this token's own start
+        // is the far end the lookahead would have gone looking for, so the arm never consults
+        // `pending_run` — it re-arms it below either way. The same branch tiles the **leading**
+        // run — bytes before the first committed token, which no token trails, and which
+        // therefore has no opening moment of its own.
         if start > covered {
           let gap = source
             .get(covered as usize..start as usize)
             .ok_or(FinishError::SpanOutOfBounds { index })?;
-          if first_uncovered_gap.is_none() {
-            first_uncovered_gap = first_uncovered(covered, start, &error_cover, &mut cover_at);
-          }
+          tiled.push((covered, start));
           builder.token(SyntaxKind(gap_kind), gap);
-          // Retire it from the cursor: pass 1 found the same run, and it must not be tiled twice.
-          if gaps.get(gap_at).is_some_and(|&(s, _)| s == covered) {
-            gap_at += 1;
-          }
         }
         let text = source
           .get(start as usize..end as usize)
           .ok_or(FinishError::SpanOutOfBounds { index })?;
         builder.token(SyntaxKind(*kind), text);
         covered = end;
-        // The run this token OPENS, if it opens one — the bytes between it and whatever comes
-        // next that no token will ever claim. Tiling it *here*, rather than at the token that
-        // reveals it or at the end of the walk, is the whole of the placement rule: the run
-        // goes in the node the parse was in when it stopped covering the source, and it is in
-        // the tree before the next event is read, so no later event can move it. The end of
-        // the stream is not a case — a run that trails the last committed token is tiled by
-        // that token like any other.
-        //
-        // Slicing may still fail on a *following* token span that starts off a `char`
-        // boundary; leaving the run untiled then hands it back to the branch above, which
-        // refuses at the revealing token's own index, exactly as it did before this rule.
-        let opens = gaps
-          .get(gap_at)
-          .filter(|&&(gap_start, _)| gap_start == covered)
-          .and_then(|&(gap_start, gap_end)| {
-            source
-              .get(gap_start as usize..gap_end as usize)
-              .map(|gap| (gap_start, gap_end, gap))
-          });
-        if let Some((gap_start, gap_end, gap)) = opens {
-          gap_at += 1;
-          if first_uncovered_gap.is_none() {
-            first_uncovered_gap = first_uncovered(gap_start, gap_end, &error_cover, &mut cover_at);
-          }
-          builder.token(SyntaxKind(gap_kind), gap);
-          covered = gap_end;
-        }
+        // This token may have OPENED a run — the bytes between it and whatever comes next that
+        // no token will ever claim. Its far end is not knowable here, so the tile is armed and
+        // forced at the last moment that still lands it in this node: the next builder-visible
+        // event, or the end of the walk. Nothing between the two touches the builder, so the
+        // run goes in the node the parse was in when it stopped covering the source, and no
+        // later event can move it. The end of the stream is not a case — a run trailing the
+        // last committed token is tiled before the finishes that close over it.
+        pending_run = true;
       }
       Event::FinishNode { kind } => {
+        if pending_run {
+          pending_run = false;
+          (probe, covered) = tile_pending_run(
+            events,
+            source,
+            source_len,
+            gap_kind,
+            index as usize,
+            probe,
+            covered,
+            &mut tiled,
+            &mut builder,
+          );
+        }
         // Precedence is deliberate and unchanged at the top: the two STRUCTURAL walls first
         // (a finish with nothing to close; a wrap closed before it was declared), then the
         // identity check, which describes a structurally-valid close of the wrong node.
@@ -997,10 +954,24 @@ where
         // The run is now tiled at the token it trails, before this close is even read.
         builder.finish_node();
       }
-      Event::StartAt { target, .. } => {
+      Event::StartAt { kind, target, .. } => {
         // Its node was opened at the target's position (the hoist above); the declaration
         // slot itself is structural silence — except that this is the only place every
-        // `StartAt` is guaranteed to be seen, so it is where reachability is asked.
+        // `StartAt` is guaranteed to be seen, so it is where its kind, its target and its
+        // reachability are all asked.
+        if *kind == TOMBSTONE {
+          return Err(FinishError::ReservedKind { index });
+        }
+        if cfg!(debug_assertions) && !validator.admits(*kind) {
+          return Err(FinishError::InvalidDialectKind { index, kind: *kind });
+        }
+        let live = *target < index && events[*target as usize].is_tombstone();
+        if !live {
+          return Err(FinishError::StaleStartAt {
+            index,
+            target: *target,
+          });
+        }
         saw_structure = true;
         // The old shape materialized every `StartAt` from a keyed index, so an unreachable
         // one was impossible by construction. Following chains instead makes it
@@ -1013,19 +984,42 @@ where
           return Err(FinishError::DanglingForwardParent { index: *target });
         }
       }
-      Event::Diag { .. } => {
-        // A diagnostic order-slot: invisible to the tree. Its span was gathered in pass 1,
-        // where the coverage verdict is made order-independent.
+      Event::Diag {
+        error_span: Some(span),
+      } => {
+        // A diagnostic order-slot is invisible to the tree, but a **lexer error's** span
+        // covers the bytes it refused — and covering a byte is what *licenses* tiling it.
+        // That makes the span evidence, so it gets the token-span discipline rather than a
+        // clamp: a clamped endpoint quietly re-aims the evidence at a range the lexer never
+        // refused, excusing exactly the dropped committed token `UncoveredGap` exists to
+        // catch. The gap tile slices the source at these offsets, so they must also be char
+        // boundaries.
+        let start = diag_offset_to_u32(span.start(), index)?;
+        let end = diag_offset_to_u32(span.end(), index)?;
+        if start > end
+          || end > source_len
+          || !source.is_char_boundary(start as usize)
+          || !source.is_char_boundary(end as usize)
+        {
+          return Err(FinishError::InvalidDiagnosticSpan { index });
+        }
+        // A zero-width span covers nothing, so it licenses nothing: legal, and dropped. The
+        // rest are merged into the coverage set AFTER the walk, which is what keeps the
+        // verdict a function of the set rather than of the arrival order.
+        if start < end {
+          error_spans.push((start, end));
+        }
       }
+      Event::Diag { error_span: None } => {}
     }
   }
 
-  // The run that trails NO token. It is the only run left for the end of the walk to tile: a
-  // run that trails a token was tiled by that token, whether or not anything followed. So this
-  // fires on exactly one shape — a parse that committed no token at all, over a source with
-  // bytes in it. It tiles into whatever node is open here, which is the ROOT under `finish`
-  // (a balanced stream has closed everything else) and the INNERMOST OPEN node under
-  // `finish_partial` (this append deliberately precedes the close loop below). Pinned by
+  // The run that trails NO builder-visible event: the walk ran out before anything forced the
+  // pending tile, so the node open here is still the node the run opened in. This also covers
+  // the run that trails no token at all — a parse that committed nothing over a source with
+  // bytes in it — which tiles into the ROOT under `finish` (a balanced stream has closed
+  // everything else) and the INNERMOST OPEN node under `finish_partial` (this append
+  // deliberately precedes the close loop below). Pinned by
   // `a_source_with_nothing_lexable_keeps_its_gap_at_the_root_either_way` and
   // `finish_partial_trailing_gap_tiles_into_the_innermost_open_node`.
   if covered < source_len {
@@ -1034,10 +1028,46 @@ where
       .ok_or(FinishError::SpanOutOfBounds {
         index: events.len() as u64,
       })?;
-    if first_uncovered_gap.is_none() {
-      first_uncovered_gap = first_uncovered(covered, source_len, &error_cover, &mut cover_at);
-    }
+    tiled.push((covered, source_len));
     builder.token(SyntaxKind(gap_kind), gap);
+  }
+
+  // ── The coverage verdict, once, after the walk ──────────────────────────────
+  //
+  // One sort, over DIAGNOSTICS: `O(k log k)` with `k ≤ events`. Its comparisons happen inside
+  // `std`, where the counter cannot see them, so the cost is charged to `W` explicitly — and
+  // charged at `k·⌈log₂ k⌉`, its REAL cost, not at a flat `k`.
+  //
+  // That distinction is the difference between a gate and a decoration. Charging `k` makes the
+  // charged quantity linear by construction, so the growth cell would report 4.00× for a 4×
+  // input no matter how the ordering behaved, and could never fail for the reason it exists.
+  // With `k` diagnostics per token — the error-dense payload — this term is `Θ(n log n)`, and
+  // the law below is stated in that shape rather than claiming a linearity the sort does not
+  // provide.
+  let k = error_spans.len() as u64;
+  w_tick_n(k * ceil_log2(k)); // W row 4
+  error_spans.sort_unstable();
+  let mut error_cover: Vec<(u32, u32)> = Vec::with_capacity(error_spans.len());
+  for (s, e) in error_spans {
+    w_tick(); // W row 5
+    match error_cover.last_mut() {
+      Some((_, last_end)) if s <= *last_end => *last_end = (*last_end).max(e),
+      _ => error_cover.push((s, e)),
+    }
+  }
+
+  // The leftmost source run no committed token covers and no lexer error explains — the
+  // dropped-committed-token signature (see `UncoveredGap`). The tiled runs arrive in source
+  // order, so one shared monotone cursor decides them all, and the FIRST answer is the one
+  // the two-pass shape latched during the walk: the verdict is identical, only later.
+  let mut cover_at: usize = 0;
+  let mut first_uncovered_gap: Option<(u32, u32)> = None;
+  for &(lo, hi) in &tiled {
+    w_tick(); // W row 6
+    first_uncovered_gap = first_uncovered(lo, hi, &error_cover, &mut cover_at);
+    if first_uncovered_gap.is_some() {
+      break;
+    }
   }
 
   // Balance at the end: everything but the root must have closed. (The root frame is
@@ -1050,7 +1080,7 @@ where
       return Err(FinishError::UnclosedNodes { open });
     }
     for _ in 0..open {
-      w_tick(); // W row 7
+      w_tick(); // W row 8
       builder.finish_node();
     }
   } else if saw_structure && !saw_token && source_len > 0 && first_uncovered_gap.is_some() {
@@ -1115,28 +1145,33 @@ where
 ///
 /// | # | Construct in `replay` + helpers | Disposition |
 /// |---|---|---|
-/// | 1 | pass 1, the gather loop over every event | **ticked** (W row 1) |
-/// | 2 | `error_spans.sort_unstable()` | **CHARGED AT COST** (W row 2): unticked inside `std`, so `k·⌈log₂ k⌉` — its real cost, not its element count — is added to `W`. One `O(k log k)` over **diagnostics**, `k ≤ events`, once per finish. Charging the element count instead would make the charged quantity linear by construction and leave the growth cell unable to fail |
-/// | 3 | the cover-merge loop | **ticked** (W row 3) |
-/// | 4 | `first_uncovered`'s sweep of the merged cover | **ticked** (W row 4) — and bounded by `cover.len() + gaps` in total, because the cursor is shared and monotone. This is the construct the defect made quadratic |
-/// | 5 | pass 2, the walk over every event | **ticked** (W row 5) |
-/// | 6 | the retro-wrap chain hop | **ticked** (W row 6) |
-/// | 7 | the end-of-walk close `for _ in 0..open` | **ticked** (W row 7) — the loop the first instrument missed |
-/// | 8 | reachability bitset `std::vec![0u64; events.len().div_ceil(64)]` | justified: one lazy `alloc_zeroed` of `ceil(events/64)` words, no per-event iteration, no keyed structure — allocated only when a chain is actually walked |
-/// | 9 | `builder.start_node` / `token` / `finish_node`, `source.get`, `stack` push/pop | justified O(1) amortized per event |
-/// | 10 | the uncovered-run list `gaps` and its cursor `gap_at` | justified: two `u32` comparisons per token in pass 1 and one `Vec::get` per token in pass 2, both O(1) — **no iteration construct and no scan**, because the cursor is consumed in source order and advances only where a run is tiled. Storage is one `(u32, u32)` per *gap*, nothing per event, and the `Vec` is never allocated for a source every token covers |
+/// | 1 | the walk over every event — the ONE pass | **ticked** (W row 1) |
+/// | 2 | `tile_pending_run`'s lookahead for a run's far end | **ticked** (W row 2) — bounded by the event count in total, because the cursor is shared and monotone, and it starts at the forcing event whenever that is further along, so a region whose run the next token resolved is never examined at all |
+/// | 3 | the retro-wrap chain hop | **ticked** (W row 3) |
+/// | 4 | `error_spans.sort_unstable()` | **CHARGED AT COST** (W row 4): unticked inside `std`, so `k·⌈log₂ k⌉` — its real cost, not its element count — is added to `W`. One `O(k log k)` over **diagnostics**, `k ≤ events`, once per finish. Charging the element count instead would make the charged quantity linear by construction and leave the growth cell unable to fail |
+/// | 5 | the cover-merge loop | **ticked** (W row 5) |
+/// | 6 | the post-walk sweep of the tiled runs | **ticked** (W row 6) — one per tiled run, and it stops at the first uncovered one |
+/// | 7 | `first_uncovered`'s sweep of the merged cover | **ticked** (W row 7) — and bounded by `cover.len() + gaps` in total, because the cursor is shared and monotone. This is the construct the defect made quadratic |
+/// | 8 | the end-of-walk close `for _ in 0..open` | **ticked** (W row 8) — the loop the first instrument missed |
+/// | 9 | reachability bitset `std::vec![0u64; events.len().div_ceil(64)]` | justified: one lazy `alloc_zeroed` of `ceil(events/64)` words, no per-event iteration, no keyed structure — allocated only when a chain is actually walked |
+/// | 10 | `builder.start_node` / `token` / `finish_node`, `source.get`, `stack` push/pop | justified O(1) amortized per event |
+/// | 11 | the tiled-run list `tiled` | justified: one `Vec::push` per *gap*, nothing per event, and the `Vec` is never allocated for a source every token covers |
 ///
-/// Deleted by the rewrite: the per-materialization `BTreeMap<target, Vec<(u64, u16)>>` —
-/// `O(log n)` per `StartAt` plus one `Vec` allocation per target, and the last keyed structure
-/// in the walk. The one superlinear term left is the sort, `O(k log k)` in the number of
-/// *diagnostics*, and it is charged at that cost rather than at its element count — so the
-/// gate can observe it. With one recorded lexer error per token, `k` is `Θ(events)` and the
-/// whole materialization is `O(n log n)`; the law is stated in that shape rather than claiming
-/// a linearity the ordering does not provide.
+/// Deleted by the single-pass rewrite: the gather loop over every event (its former W row 1),
+/// the precomputed uncovered-run list and its cursor. Deleted by the chain rewrite before it:
+/// the per-materialization `BTreeMap<target, Vec<(u64, u16)>>` — `O(log n)` per `StartAt` plus
+/// one `Vec` allocation per target, and the last keyed structure in the walk. The one
+/// superlinear term left is the sort, `O(k log k)` in the number of *diagnostics*, and it is
+/// charged at that cost rather than at its element count — so the gate can observe it. With
+/// one recorded lexer error per token, `k` is `Θ(events)` and the whole materialization is
+/// `O(n log n)`; the law is stated in that shape rather than claiming a linearity the ordering
+/// does not provide.
 ///
-/// Measured before the rewrite, on the error-dense payload (n = 100 / 400 / 1600):
+/// Measured before the quadratic fix, on the error-dense payload (n = 100 / 400 / 1600):
 /// `W` = 5 550 / 82 200 / 1 288 800 against the bound 900 / 3 600 / 14 400, growing 14.81× /
-/// 15.68× per 4× of input. After: `8n − 1`, growing 4.00×.
+/// 15.68× per 4× of input. Two-pass, after that fix: `7n − 1 + k·⌈log₂ k⌉`. Single-pass:
+/// `6n − 1 + k·⌈log₂ k⌉` on the same payload — the gather pass gone, and the lookahead that
+/// replaced it never fired, because every run there is resolved by the token that follows it.
 #[cfg(test)]
 pub(crate) mod w {
   use core::cell::Cell;

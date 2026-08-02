@@ -142,6 +142,48 @@ struct JournalEntry {
   old_forward_parent: Option<NonZeroU32>,
 }
 
+/// The ceiling on the event-log capacity [`Sink::new`] reserves up front: **65 536 events**,
+/// which is 2 MiB at the log's 32-byte element.
+///
+/// A cap is what makes sizing from the source length safe rather than merely usual. One event
+/// per byte is the *measured* ratio for a lossless grammar (0.80–1.11 across this crate's
+/// corpora, because a trivia-surfacing lexer — the only kind that can construct a sink — has
+/// to cover every byte with a token), but it is a typical figure and not a law: a grammar
+/// whose tokens are long, one string literal per kilobyte, would reserve gigabytes for a large
+/// source without one.
+///
+/// Above the cap the reservation stops and the `Vec` resumes doubling from there, which costs
+/// at most the handful of reallocations that remain — the many small ones, the expensive part,
+/// are already gone. The over-reservation an atypical grammar still pays is address space, not
+/// memory traffic: `Vec::with_capacity` does not write the pages it asks for, so a log that
+/// never reaches the capacity never touches them.
+const EVENT_CAPACITY_CAP: usize = 1 << 16;
+
+/// The event-log capacity to reserve for a source of `len` bytes: **the capacity the `Vec`'s
+/// own doubling would have arrived at**, taken in one step.
+///
+/// Rounding up to a power of two is not slack for its own sake — it is the whole of why the
+/// reservation is free. A growing `Vec` doubles, so its *final* allocation is already a power
+/// of two ≥ the event count; asking for that up front buys the identical block and skips every
+/// intermediate copy. Reserving the raw length instead is the trap this exists to avoid:
+/// measured at 1.11 events per byte, a 57.7 KB document would reserve 1.8 MiB, overrun it, and
+/// then pay a 3.7 MiB reallocation on top — **slower than reserving nothing at all**, which is
+/// how this function came to be written this way.
+///
+/// Zero stays zero: an empty source allocates no log, exactly as `Vec::new` did.
+#[inline]
+const fn event_capacity_for(len: usize) -> usize {
+  if len == 0 {
+    return 0;
+  }
+  let capped = if len > EVENT_CAPACITY_CAP {
+    EVENT_CAPACITY_CAP
+  } else {
+    len
+  };
+  capped.next_power_of_two()
+}
+
 /// Mints a process-unique sink witness id (1-based; 0 is the inert mark's reserved id).
 ///
 /// Unconditional on purpose: the witness is the **every-build** half of mark validation —
@@ -580,9 +622,17 @@ where
          on the Lexer impl) ONLY if the lexer really surfaces trivia as tokens."
       )
     };
+    // The event log's one cheap predictor is the source it is about to describe: a
+    // trivia-surfacing lexer covers every byte with a token, so the log grows with the byte
+    // count. `event_capacity_for` turns that into the capacity the `Vec`'s own doubling would
+    // have reached, so the same block is bought once instead of copied into six times.
+    let capacity = {
+      use crate::{slice::Slice as _, source::Source as _};
+      event_capacity_for(source.as_slice().len())
+    };
     Self {
       inner,
-      events: Vec::new(),
+      events: Vec::with_capacity(capacity),
       journal: Vec::new(),
       rows: RefCell::new(Vec::new()),
       floor: MarkRow::ZERO,
@@ -1488,6 +1538,12 @@ where
   /// The event-buffer view, for shape assertions.
   pub(crate) fn events(&self) -> &[Event<L::Span>] {
     &self.events
+  }
+
+  /// The event buffer's allocated capacity — the construction-time reservation, before
+  /// anything has been appended.
+  pub(crate) fn events_capacity(&self) -> usize {
+    self.events.capacity()
   }
 
   /// The number of live undo-journal entries.

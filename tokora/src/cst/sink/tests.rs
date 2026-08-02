@@ -3956,7 +3956,7 @@ fn ceil_log2(k: u64) -> u64 {
 /// sort became visible to its own gate.
 ///
 /// Falsified by: any n outside the two-sided law `events ≤ W ≤ 3 × (events + gap_tiles)`,
-/// any per-4×n growth ratio above 4.5, or an exact-composition mismatch against `W == 2n`.
+/// any per-4×n growth ratio above 4.5, or an exact-composition mismatch.
 /// The lower bound is not decoration — it is what catches a deleted or misplaced tick, the
 /// failure mode an instrument swap is most exposed to.
 ///
@@ -3987,10 +3987,16 @@ fn replay_work_matches_its_stated_shape_on_error_dense_input() {
     // The exact composition, derived term by term from the inventory on
     // `super::finish::w`. An exact pin means any NEW ticked iteration anywhere in `replay`
     // fails here and forces a conscious inventory update — the band alone would absorb it.
-    let expected = events            // pass 1: the gather loop, once per event
+    //
+    // The single-pass walk dropped one whole `events` term (the gather pass) and added one
+    // `tiles` term (the post-walk sweep of the tiled runs). The lookahead that replaced the
+    // gather pass contributes **nothing at all** on this payload, and that is the point of
+    // saying so here: every run in it is resolved by the token that follows it, so
+    // `tile_pending_run` is never reached.
+    let expected = events            // the walk, once per event
       + sort_term                    // the sort, charged at its real `k log k` cost
       + diags                        // the cover-merge loop, one per gathered span
-      + events                       // pass 2: the walk, once per event
+      + tiles                        // the post-walk sweep of the tiled runs, one per run
       + (2 * tiles - 1); // the shared cover cursor: one advance per retired interval
     // (n - 1 of them), plus one terminal probe per gap (n)
     assert_eq!(
@@ -4016,10 +4022,18 @@ fn replay_work_matches_its_stated_shape_on_error_dense_input() {
 }
 
 /// The exact-composition pin's second cell: a wrap-bearing payload, where `W` must
-/// equal `2 × events + chain_hops` — both passes over every event, plus one hop per
-/// retro-wrap link followed. `m` single-wrap targets: 4 events each (mark, token, `StartAt`,
-/// finish) and one chain hop each; with no diagnostics, the sort charge, the merge loop and
-/// the cover cursor all contribute nothing.
+/// equal `events + chain_hops + lookahead` — the one pass over every event, one hop per
+/// retro-wrap link followed, and the monotone lookahead that replaced the gather pass. `m`
+/// single-wrap targets: 4 events each (mark, token, `StartAt`, finish) and one chain hop
+/// each; with no diagnostics, the sort charge, the merge loop and the cover cursor all
+/// contribute nothing, and nothing is tiled.
+///
+/// This is the payload where the lookahead **does** fire, which is why it is worth pinning
+/// separately from the error-dense one where it never does: each token is followed by a
+/// `StartAt` and a finish before the next token, so the finish forces a resolution and the
+/// cursor walks to the next token — two positions each, and one terminal position for the
+/// last token, where the cursor runs off the end and the run ends at the source's end.
+/// Every one of those resolutions finds the run empty; not one gap is tiled.
 ///
 /// Falsified by: any other total. In particular the reachability bitvec's own zeroing is
 /// *justified*, not ticked (one `alloc_zeroed` of `ceil(events/64)` words, no per-event
@@ -4049,10 +4063,14 @@ fn replay_work_on_wraps_is_events_plus_chain_hops() {
 
   let events = 4 * m as u64; // mark + token + StartAt + finish
   let chain_hops = m as u64; // one StartAt per target
+  // Two lookahead positions per forced resolution (the `StartAt` and the next mark), for the
+  // first m - 1 tokens, plus the one terminal position the last token's resolution reaches.
+  let lookahead = 2 * (m as u64 - 1) + 1;
   assert_eq!(
     w,
-    2 * events + chain_hops,
-    "W must be exactly two passes over {events} events plus {chain_hops} chain hops"
+    events + chain_hops + lookahead,
+    "W must be exactly one pass over {events} events, plus {chain_hops} chain hops, plus \
+     {lookahead} monotone lookahead positions"
   );
 }
 
@@ -5563,5 +5581,77 @@ fn duplicate_zero_width_tokens_are_not_yet_detected() {
     kinds,
     std::vec![K_TOK, K_TOK, K_TOK],
     "three tokens where one was real: the duplicates are indistinguishable in the tree"
+  );
+}
+
+// ── The event log's width, and the capacity reserved for it ────────────────────
+
+/// One event is **32 bytes** for a `SimpleSpan` lexer, and nothing may quietly change that.
+///
+/// The event log is the largest thing a materialization touches — a 57.7 KB GraphQL document
+/// records 64,085 of these, appended once and walked once — so the element's width is a
+/// performance property of the whole sink rather than an implementation detail, and it is the
+/// constant the construction-time reservation is sized against. A variant that widened the
+/// element would multiply both the log's memory traffic and that reservation, and no other
+/// cell in this suite would notice.
+#[test]
+fn one_event_is_thirty_two_bytes() {
+  assert_eq!(
+    core::mem::size_of::<Event<SimpleSpan>>(),
+    32,
+    "the event width moved: a variant was added or widened, and the log's memory traffic \
+     moved with it"
+  );
+}
+
+/// The construction-time reservation is **the source's length rounded up to a power of two,
+/// capped** — the capacity the `Vec`'s own doubling would have reached, bought in one step.
+///
+/// The rounding is the load-bearing half and it is pinned as a *measured* fact, not a
+/// preference: reserving the raw length instead under-reserves a lossless log (1.11 events per
+/// byte on the reference document), so the log overruns the reservation and pays a
+/// double-sized reallocation on top of a large eager one — measured **slower than reserving
+/// nothing**. A power of two is exactly the block the growth would have ended on.
+///
+/// The cap is the safety half: past it the byte count stops being evidence about the event
+/// count, and a grammar whose tokens are long must not reserve gigabytes.
+///
+/// Falsified by: a reservation that is not a power of two (the trap above), one that scales
+/// past the cap, or one that allocates for an empty source.
+#[test]
+fn the_event_log_reserves_the_doubling_chains_own_capacity() {
+  let empty = verbose_sink("");
+  assert_eq!(
+    empty.events_capacity(),
+    0,
+    "an empty source must not allocate an event log at all"
+  );
+
+  let small = "a".repeat(210);
+  let small_sink = verbose_sink(&small);
+  assert_eq!(
+    small_sink.events_capacity(),
+    256,
+    "a 210-byte source reserves 256 events — the capacity doubling would have reached, and \
+     not one allocation more"
+  );
+
+  // The reference document's ratio, restated as the property that matters: the reservation
+  // must be at or above the event count, or it buys a big allocation AND a reallocation.
+  let alias_len = 57_741usize;
+  assert!(
+    super::event_capacity_for(alias_len) >= 64_085,
+    "a source of {alias_len} bytes reserves {} events, below the 64,085 a lossless parse of \
+     it records: the log would overrun its own reservation",
+    super::event_capacity_for(alias_len)
+  );
+
+  let big = "a".repeat(super::EVENT_CAPACITY_CAP * 2);
+  let big_sink = verbose_sink(&big);
+  assert_eq!(
+    big_sink.events_capacity(),
+    super::EVENT_CAPACITY_CAP,
+    "past the cap the reservation stops: the byte count is no longer evidence about the \
+     event count, and a grammar with long tokens must not reserve gigabytes"
   );
 }
