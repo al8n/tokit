@@ -217,9 +217,18 @@ pub trait MaybeTerminal {
 }
 
 /// The unit error sink is never a terminal signal: it stores nothing, so it can carry no source's
-/// marker. Converting a terminal stop into `()` is therefore an opt-out of terminal re-raise — see
-/// [Opting in](MaybeTerminal#opting-in). It is also why this crate ships no
-/// `From<SessionRefusal>` for `()`, and why it never will: that conversion is the one the
+/// marker — `is_terminal` on `()` always answers `false`. For a stop whose only carrier is the
+/// converted value, that makes converting it into `()` an opt-out of terminal re-raise — see
+/// [Opting in](MaybeTerminal#opting-in). **The one exception is
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached)**: converting a trip to `()`
+/// still loses the *payload* — the offset, the depth, the limitation — but not the *stop*, because
+/// the trip also latches the input session, and the three recovery combinators consult that latch
+/// beside this trait. A `()`-errored grammar therefore still re-raises an actual input-descent
+/// trip, exactly as a delegating error type does. See
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached)'s own
+/// [section on the payload and the stop](crate::error::RecursionLimitReached#the-stop-does-not-travel-in-the-payload-so-a-discarding-sink-cannot-drop-it)
+/// for the detail. It is also why this crate ships no `From<SessionRefusal>` for `()`, and why it
+/// never will: that conversion is the one the
 /// [session gate](crate::input::SessionRefusal#the-coherence-law) *requires* to be terminal rather
 /// than merely consulting, and a sink that always answers `false` can never satisfy it.
 impl MaybeTerminal for () {}
