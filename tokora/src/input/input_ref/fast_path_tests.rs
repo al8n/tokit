@@ -3017,6 +3017,13 @@ impl Fixture {
       None => LedgerEmitter::default(),
     }
   }
+
+  /// A fixture's identity — its source text and constructor arguments — as distinct from its
+  /// *effects* on a sweep's tallies. Two different fixtures can land on the same effects; identity
+  /// is the part a replacement fixture cannot also reproduce.
+  fn identity(self) -> (&'static str, Option<usize>, Option<usize>) {
+    (self.text, self.budget, self.reject_from)
+  }
 }
 
 /// What one `skip_while` sweep observed, on an input of either completeness.
@@ -3395,6 +3402,15 @@ fn the_two_completeness_routes_observe_the_same_skip() {
 /// emitter (a rejection from the `n`-th diagnostic on), and the comparison is the same whole
 /// [`SkipRun`] — including the latch and the dedup watermark, which only these cases can move.
 ///
+/// This cell pins `FAULTY` two ways, and they catch different edits. `FAULTY_IDENTITIES`, right
+/// below the fixture list, pins WHICH fixtures run — each one's exact source text and constructor
+/// arguments — so a fixture swapped for a different one reds on that alone, whatever totals the
+/// replacement happens to produce; the zero-budget trip and the trip behind a crossed lexer error
+/// are each a single fixture below, with no sibling to cover for it if it were swapped out. The
+/// exact seven-tuple after the sweep pins what the surviving identities actually reached, so an
+/// edit that keeps every fixture's identity but changes its effect — a lexer or scanner change,
+/// not a fixture change — still reds there. Neither guard subsumes the other.
+///
 /// Red against a broken route — **measured**, by making each break and reading the failure, not
 /// asserted:
 ///
@@ -3464,7 +3480,62 @@ fn the_two_completeness_routes_observe_the_same_skip_when_the_lexer_or_the_emitt
     Fixture::tripping_and_fatal("~ !! ~ ~ ab", 2, 2),
   ];
 
+  // The inventory guard: what FAULTY IS, pinned independently of what it adds up to. A replacement
+  // fixture cannot reproduce another fixture's identity — only, possibly, its effects — so this is
+  // what actually closes the swap Codex's finding describes: a fixture exercising a distinct
+  // high-risk route (a zero-budget trip, a trip behind a crossed lexer error) traded for a
+  // different one that happens to land on the same seven totals below. `Fixture::identity` is a
+  // plain projection of the struct's own fields; it does not know which constructor built the
+  // fixture, so this list is not a second copy of the constructor calls above it.
+  const FAULTY_IDENTITIES: &[(&str, Option<usize>, Option<usize>)] = &[
+    ("ab !! cd", None, None),
+    ("!! ab", None, None),
+    ("~ !! ab", None, None),
+    ("~ !! ~ ab", None, None),
+    ("~ !! !! ~", None, None),
+    ("~ !!", None, None),
+    ("!!", None, None),
+    ("!! !! ab cd", None, None),
+    ("~ ~ ~ ab", Some(2), None),
+    ("~ ~ ab cd", Some(2), None),
+    ("~ ab cd", Some(1), None),
+    ("ab cd ef", Some(1), None),
+    ("~ ~ ~ ~", Some(2), None),
+    ("~ ~ ~ ab", Some(0), None),
+    ("~ !! ~ ~ ab", Some(2), None),
+    ("~ !! ~ ab", None, Some(1)),
+    ("~ !! !! ab", None, Some(2)),
+    ("!! ab cd", None, Some(1)),
+    ("ab !! cd", None, Some(1)),
+    ("~ ~ ~ ab", Some(2), Some(1)),
+    ("~ !! ~ ~ ab", Some(2), Some(2)),
+  ];
+  assert_eq!(
+    FAULTY.len(),
+    FAULTY_IDENTITIES.len(),
+    "FAULTY gained or lost a fixture: this pins the COUNT separately from the per-fixture check \
+     below, because `Iterator::zip` stops at the shorter side and would not otherwise notice one \
+     list running longer than the other. Update FAULTY_IDENTITIES to match, then treat the \
+     seven-tuple below as unverified until you have re-derived it (see its own message)."
+  );
+  for (i, (&fixture, &expected)) in FAULTY.iter().zip(FAULTY_IDENTITIES).enumerate() {
+    let got = fixture.identity();
+    assert_eq!(
+      got, expected,
+      "fixture #{i} was replaced: this sweep pins WHICH fixtures it runs, not only what they add \
+       up to, because a replacement fixture can reproduce the exact totals below while exercising \
+       a different route than the one documented above it — the zero-budget trip and the trip \
+       behind a crossed lexer error are each one fixture, with no sibling to carry their share of \
+       the totals if swapped out. If this is an intentional edit, update FAULTY_IDENTITIES to \
+       match and re-derive the seven-tuple below rather than assuming it still holds. Expected \
+       {expected:?}, found {got:?}."
+    );
+  }
+
   let reached = sweep(FAULTY);
+  // The secondary checksum: the loop above pins WHICH fixtures ran; this pins what they reached,
+  // so an edit that keeps every fixture's identity but changes its effect (a lexer or scanner
+  // change, not a fixture change) still reds here.
   assert_eq!(
     (
       reached.latched,
@@ -3481,11 +3552,13 @@ fn the_two_completeness_routes_observe_the_same_skip_when_the_lexer_or_the_emitt
      `Err`, a prefill peek that does, and a later drain that does. Every counter here is summed \
      over the whole fixture set, so a mere `> 0` check lets one high-risk fixture's removal hide \
      behind the other twenty: this tuple is exact instead, so dropping ANY single fixture below \
-     changes at least one total and reds. If you added or edited a fixture on purpose and that is \
-     why this failed: confirm — by reading the diff, not by pattern-matching on this message — \
-     that the new totals reflect only your intended change, then update the tuple above to match \
-     (temporarily swap this `assert_eq!` for `dbg!(&reached);` and run with `--nocapture` to read \
-     the new numbers off). Do not paste in a new number without doing that. Got {reached:?}"
+     changes at least one total and reds. A fixture SWAPPED for a different one is what \
+     FAULTY_IDENTITIES above catches; this tuple is the checksum on what the surviving identities \
+     produced. If you added or edited a fixture on purpose and that is why this failed: confirm — \
+     by reading the diff, not by pattern-matching on this message — that the new totals reflect \
+     only your intended change, then update the tuple above to match (temporarily swap this \
+     `assert_eq!` for `dbg!(&reached);` and run with `--nocapture` to read the new numbers off). \
+     Do not paste in a new number without doing that. Got {reached:?}"
   );
 }
 
