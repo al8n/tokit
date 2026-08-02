@@ -3661,3 +3661,232 @@ fn the_agreed_failing_skip_observation_is_the_right_one() {
     "and neither route leaves an emitter mark outstanding on the way out"
   );
 }
+
+// ── The parked front: the residency a peek cannot construct, but a decline does ─────────────────
+
+/// Parks the front token via a **declining** [`try_expect`](InputRef::try_expect), over a source
+/// neither route has touched yet.
+///
+/// [`prefill_to`] cannot reach the state this leaves. It only ever peeks, and a peek that finds
+/// nothing resident under a zero-capacity cache has no token to decline — the residency it can
+/// produce tops out at the empty one `prefill_to(_, 0)` already is. A decline does not go through
+/// the cache at all: the token that comes back `false` from `pred` goes into the pending slot
+/// [`hold_front`](super::InputRef) keeps outside it, which is exactly where ordinary parser code
+/// leaves a token every time an atom peeks ahead, does not like what it sees, and lets the next
+/// combinator have it.
+///
+/// # Panics
+///
+/// If the fixture's source does not lex cleanly, or the decline does not leave a token parked —
+/// either would mean the caller handed this a fixture it cannot do its job over.
+fn park_front<'a, C, Cmpl>(
+  inp: &mut InputRef<'a, '_, LedgerLexer<'a>, (LedgerEmitter, C), (), Cmpl>,
+) where
+  C: Cache<'a, LedgerLexer<'a>, ()>,
+  Cmpl: crate::input::SurfaceIncomplete<'a, LedgerLexer<'a>, (LedgerEmitter, C), ()>,
+{
+  let declined = inp
+    .try_expect(|_| false)
+    .expect("the fixture's source lexes cleanly, so a decline is the only outcome");
+  assert!(
+    declined.is_none(),
+    "an unconditionally declining predicate must decline"
+  );
+  assert!(
+    inp.has_front_parked(),
+    "a decline against an empty zero-capacity cache must park the token rather than lose it"
+  );
+}
+
+/// [`both_routes`], but the front is parked by [`park_front`] before the sweep runs instead of
+/// filled by [`prefill_to`] — the one residency [`prefill_to`] cannot reach under a zero-capacity
+/// cache.
+///
+/// Fixed to [`NoCache`] rather than generic the way `both_routes` is: parking is only possible
+/// where `RETAINS_FRONT` is false, so a decline against [`Slot1`] or [`Deque3`] is simply a cache
+/// push that succeeds, and `park_front`'s own assertion would fire rather than silently sweep
+/// nothing — the type parameter is kept, and misuse reported loudly, rather than the function
+/// hard-coding `NoCache` and hiding that condition.
+///
+/// Kept apart from [`sweep`] and [`Reached`] on purpose: feeding this through `Reached::depths`
+/// would credit [`prefill_to`] with a residency only a decline reaches — exactly the conflation
+/// between cache depth and the pending slot that left this state unswept.
+fn both_routes_over_a_parked_front<K>(fixture: Fixture, skips: usize) -> (SkipRun, SkipRun)
+where
+  K: Capacity,
+{
+  let src = LedgerSrc(fixture.text);
+  // In force for both runs, and gone by the time this returns — see `both_routes`.
+  let _budget = match fixture.budget {
+    Some(tokens) => Budget::of(tokens),
+    None => Budget::unlimited(),
+  };
+
+  let mut complete = ledger_input_with::<K::Cache<'_>>(&src, fixture.emitter());
+  let mut direct = {
+    let mut inp = complete.as_ref();
+    park_front(&mut inp);
+    ledger_skip_run(&mut inp, 0, skips)
+  };
+  direct.record_emitter(complete.emitter());
+
+  let mut partial = ledger_partial_input_with::<K::Cache<'_>>(&src, fixture.emitter());
+  partial.seal();
+  let mut scanned = {
+    let mut inp = partial.as_ref();
+    park_front(&mut inp);
+    ledger_skip_run(&mut inp, 0, skips)
+  };
+  scanned.record_emitter(partial.emitter());
+
+  (direct, scanned)
+}
+
+/// **The parked front — the residency [`prefill_to`] cannot reach, and the sweep above cannot
+/// see.**
+///
+/// [`NoCache::REACHES`] is `[true, false, false, false]`, and that is the whole truth about what a
+/// **peek** can fill: a zero-capacity cache has nowhere to put a second token, so every width above
+/// 0 collapses back to depth 0. But a token **declined** — not asked for again, just left behind —
+/// never goes through the cache at all, so it is not bound by that ceiling: it goes into the
+/// pending slot, and ordinary parser code reaches that constantly, through
+/// [`try_expect`](InputRef::try_expect) and every combinator built on it — so the `REACHES` tuple is
+/// honest about what a peek reaches, not about everything the pending slot can hold.
+///
+/// The sweep above does brush the REJECTING half of this by accident, and saying so is more honest
+/// than the stronger claim that it never parks anything: `skip_while`'s own lexing phase parks its
+/// stopping token exactly as a decline does (`hold_front`, off `Origin::Lexer`), so under `NoCache`
+/// the second of a fixture's two back-to-back skips can already begin parked. But that token is
+/// always the one the FIRST skip's predicate just rejected, and the second skip asks the identical,
+/// deterministic predicate — so it can only be rejected again, through the `front` probe both
+/// routes share, before either the scanner loop or a commit runs. Neither sweep tracks this as a
+/// state of its own, and neither can ever reach the ACCEPTING half this way: that needs a decline
+/// for a reason unrelated to `skip_while`'s own predicate, which only an outside caller —
+/// [`park_front`]'s `try_expect(|_| false)` here — can manufacture.
+///
+/// It matters because the two routes reach a resident head by different code **only** here. A
+/// resident cache entry (`Slot1`, `Deque3`) is popped and pushed back by both routes through the
+/// same [`Cache::front`]/`pop_front`/`push_front` calls, and under `NoCache` a peek never leaves
+/// anything to find. A **parked** front is read by both routes through the same
+/// [`front`](super::InputRef) probe first — so a REJECTING predicate stops identically on both, and
+/// that half of this state is not new — but an ACCEPTING predicate then splits: the complete-input
+/// route consumes it in place through [`commit_front`](super::InputRef), while the sealed-partial
+/// route hands it to the shared scanner, which re-fetches it as
+/// [`Origin::Parked`](super::Origin::Parked) — the one origin `Slot1` and `Deque3` never produce —
+/// and folds it into the deferred frontier through [`AtFrontier::adopt`](super::AtFrontier::adopt)
+/// rather than committing it directly.
+///
+/// Two cases, kept apart from prefill depth on purpose — see [`both_routes_over_a_parked_front`]:
+/// parking is the PENDING SLOT, not cache residency, and conflating the two is what left this route
+/// unswept in the first place.
+///
+/// * **accepted.** `"~ ab"` — the decline parks a TRIVIA token, which the skip predicate takes:
+///   both routes consume it, then meet the same freshly-lexed `"ab"`, which the predicate rejects,
+///   so it lands back at the front and the run ends parked again.
+/// * **rejecting.** `"ab cd"` — the decline parks a WORD, which the predicate refuses outright.
+///   Neither route's skip loop runs at all: the stop is the shared `front` probe itself, so the
+///   parked token, the position and the residency are all untouched.
+///
+/// # What this cell still cannot see
+///
+/// [`SkipRun`] is the caller-visible *values* a skip leaves behind; the committed-token side
+/// channel [`Emitter::commit_token`](crate::Emitter::commit_token) feeds is not one of them, and no
+/// cell in this file reads it back off the effect ledger either — it is recorded
+/// ([`Effect::CommitToken`]) but never asserted on. Measured: removing the notification from both
+/// sites a parked token's consumption can reach — the complete-input settle
+/// (`settle_committed_token`) and the scanner's skip-and-report — leaves every test in this file
+/// green, this cell included. A regression confined to that one notification, on a parked token,
+/// has no observer anywhere in this sweep family. Closing it needs a case built on the effect
+/// ledger over a parked front, not another [`SkipRun`] field.
+#[test]
+fn the_two_completeness_routes_observe_the_same_skip_over_a_parked_front() {
+  // ── accepted: the parked token is trivia, and the predicate takes it ──
+  let (direct, scanned) = both_routes_over_a_parked_front::<NoCache>(Fixture::clean("~ ab"), 1);
+  assert_eq!(
+    direct,
+    scanned,
+    "the complete-input route and the scanned partial route must observe the same skip over an \
+     ACCEPTED parked front under {}",
+    NoCache::NAME
+  );
+  assert!(
+    direct.parked,
+    "the front is the parked slot, not a cache entry, going into the skip"
+  );
+  assert_eq!(
+    direct.depth, 1,
+    "a parked token is one resident token, exactly like a cached one"
+  );
+  assert_eq!(
+    direct.asked,
+    std::vec![(0, 1, true), (2, 4, false)],
+    "the parked trivia token is asked about once — not twice — then the freshly-lexed word that \
+     stops the skip. Got {:?}",
+    direct.asked
+  );
+  assert_eq!(direct.returned, std::vec![Ok(())]);
+  assert_eq!(
+    direct.cursor, 2,
+    "resumed at the word the skip stopped on, itself now the parked token"
+  );
+  assert_eq!(
+    direct.span,
+    (0, 1),
+    "committed exactly the parked trivia token"
+  );
+  assert_eq!(
+    direct.scanned, 1,
+    "one token accounted for: the trivia the decline had already lexed"
+  );
+  assert_eq!(
+    direct.drained,
+    std::vec![(2, 4)],
+    "the word the skip put back is still there for the next call"
+  );
+  assert_eq!(
+    direct.live_rows, 0,
+    "neither route leaves an emitter mark outstanding on the way out"
+  );
+
+  // ── rejecting: the parked token is a word, and the predicate declines it outright ──
+  let (direct, scanned) = both_routes_over_a_parked_front::<NoCache>(Fixture::clean("ab cd"), 1);
+  assert_eq!(
+    direct,
+    scanned,
+    "the complete-input route and the scanned partial route must observe the same skip over a \
+     REJECTING parked front under {}",
+    NoCache::NAME
+  );
+  assert!(
+    direct.parked,
+    "the front is the parked slot going into the skip"
+  );
+  assert_eq!(
+    direct.depth, 1,
+    "a parked token is one resident token, exactly like a cached one"
+  );
+  assert_eq!(
+    direct.asked,
+    std::vec![(0, 2, false)],
+    "the parked word is asked about once, and the skip stops there without lexing anything"
+  );
+  assert_eq!(direct.returned, std::vec![Ok(())]);
+  assert_eq!(
+    direct.cursor, 0,
+    "nothing consumed: the resume cursor is exactly where it started"
+  );
+  assert_eq!(direct.span, (0, 0), "nothing committed either");
+  assert_eq!(
+    direct.scanned, 0,
+    "no token has ever been committed to the input's own state"
+  );
+  assert_eq!(
+    direct.drained,
+    std::vec![(0, 2), (3, 5)],
+    "the parked word and the one behind it are both still there for the next call"
+  );
+  assert_eq!(
+    direct.live_rows, 0,
+    "neither route leaves an emitter mark outstanding on the way out"
+  );
+}
