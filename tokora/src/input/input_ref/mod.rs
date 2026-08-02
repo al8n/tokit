@@ -150,14 +150,16 @@ where
   /// for why it is outside the rollback set. Read through [`recursion`](Self::recursion); its
   /// only writer is the [`Descent`] guard [`descend`](Self::descend) hands out.
   pub(super) recursion: &'closure mut crate::state::recursion_tracker::RecursionLimiter,
-  /// The **resource-trip latch**, borrowed from the owning [`Input`](super::Input) — see that
-  /// field for what is latched and why it is the *fact* of the trip rather than the depth.
+  /// The **resource-trip counter**, borrowed from the owning [`Input`](super::Input) — see that
+  /// field for what is recorded, why it is the *fact* of a trip rather than the depth, and why it
+  /// counts rather than latching a `bool`.
   ///
-  /// Read through [`resource_trip`](Self::resource_trip); its only writer is
+  /// Read through [`trip_snapshot`](Self::trip_snapshot) and compared through
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt); its only writer is
   /// [`raise_level`](Self::raise_level)'s trip arm, which is why grammar code cannot lower it:
   /// no handle method exposes a mutable route to the cell, and the recursion cell it guards is
   /// read-only too.
-  pub(super) resource_trip: &'closure mut bool,
+  pub(super) resource_trips: &'closure mut usize,
   /// The **session cell**: the input's lineage memos (the live-checkpoint stack, the pin set, and
   /// the cache-push/checkpoint-id/savepoint counters), the handle's **emitter borrow** (the
   /// ground-truth emission log, reached through [`emitter`](Self::emitter)), and the live
@@ -854,8 +856,11 @@ where
   ///
   /// **Scanner stops only.** A *descent* budget trip latches no boundary — it has a control stack
   /// rather than a position — so this reads `false` for one. The loops pair it with
-  /// [`resource_trip`](Self::resource_trip), the session-latch witness for that half; neither
-  /// witness subsumes the other and both ride the same guard.
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt), the session-counter witness for that
+  /// half; neither witness subsumes the other and both ride the same guard. The two are
+  /// attempt-relative by different means — this one positionally, that one against a snapshot —
+  /// but to the same end: neither may charge an ordinary element failure with a stop it did not
+  /// cause.
   #[inline(always)]
   pub(crate) fn at_committed_boundary(&self) -> bool {
     self.reached_boundary(self.cursor().as_inner())

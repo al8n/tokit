@@ -119,21 +119,29 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     let latch = inp.latch_snapshot();
 
     loop {
+      // The descent witness's baseline, taken once per ELEMENT — the attempt this cycle's gate
+      // judges. See the gate below, and `many/repeated/mod.rs` for the reasoning in full.
+      let trips = inp.trip_snapshot();
       match self.parser.f.try_parse_input(inp) {
         // The never-recoverable gate and its two terminal witnesses: a frontier `Incomplete`
         // (const-false under `Complete`), a terminal *scanner* stop, or a *descent* budget trip from
         // the element parser re-raises untouched — never spent as a diagnostic, since no further
         // input clears any of the three. The scanner witness reads the *committed cursor*
         // ([`at_committed_boundary`]), so a boundary a prior lookahead already latched does not
-        // mis-charge an ordinary element failure short of it. The descent witness is the set-once
-        // session cell ([`resource_trip`]), latched before the grammar's `From` runs, so a trip
-        // re-raises for a delegating error type and for a discarding one alike — `()` included.
-        // Failure-arm only — a successful element does zero terminal work; both witnesses are
-        // positional/session facts, so no `MaybeTerminal` bound needed.
+        // mis-charge an ordinary element failure short of it. The descent witness compares the
+        // session trip counter against this cycle's baseline ([`tripped_during_attempt`]), the
+        // counter being bumped before the grammar's `From` runs, so a trip re-raises for a
+        // delegating error type and for a discarding one alike — `()` included. Failure-arm only —
+        // a successful element does zero terminal work; both witnesses are positional/session
+        // facts, so no `MaybeTerminal` bound needed.
+        //
+        // Per element, not per collection: the counter is monotone and never cleared, so reading it
+        // absolutely would re-raise every later element failure — ordinary syntax errors included —
+        // once anything in the parse had caught a trip and carried on.
         Err(err)
           if Cmpl::is_incomplete_error(&err)
             || inp.at_committed_boundary()
-            || inp.resource_trip() =>
+            || inp.tripped_during_attempt(trips) =>
         {
           return Err(err);
         }

@@ -30,10 +30,12 @@ use crate::state::recursion_tracker::RecursionLimitExceeded;
 /// skipped input buying progress that cannot help.
 ///
 /// It is stored on the **input session** instead. The trip arm of
-/// [`InputRef::descend`](crate::InputRef::descend) latches `Input::resource_trip` — set-once,
-/// outside the rollback set, with no writer that lowers it — before it builds anything the
-/// grammar can see. The three combinators above read that latch beside `is_terminal()`, and the
-/// resilient collection loops read it on its own (they carry no `MaybeTerminal` bound). So
+/// [`InputRef::descend`](crate::InputRef::descend) counts the trip on `Input::resource_trips` —
+/// monotone, outside the rollback set, with no writer that lowers it — before it builds anything
+/// the grammar can see. The three combinators above read that counter beside `is_terminal()`, and
+/// the resilient collection loops read it on its own (they carry no `MaybeTerminal` bound). Each
+/// reads it *relative to the attempt it is judging*, by snapshotting it before that attempt and
+/// comparing after; the cell records the session fact, the comparison asks the per-attempt one. So
 /// the sink loses the *value* and every supported sink observes the same *stop*. A grammar that
 /// wants the payload (the offset, the depth, the limitation) must still store it; a grammar that
 /// only wants to not-recover gets that for free.
@@ -88,8 +90,9 @@ use crate::state::recursion_tracker::RecursionLimitExceeded;
 /// # Both trips latch; they latch different kinds of fact
 ///
 /// A scanner limit trip latches the input's poison boundary, because the lexer's tally is monotone
-/// in the input. A descent trip latches `resource_trip` for the same reason at one remove: *that a
-/// budget was exceeded* is monotone even though the depth is not. The **depth** is the fact that
+/// in the input. A descent trip counts on `resource_trips` for the same reason at one remove:
+/// *that a budget was exceeded* is monotone even though the depth is not. The **depth** is the fact
+/// that
 /// is not latched and must not be — it is scoped to the control stack and fully restored by the
 /// unwind itself, since every live frame's guard decrements as it pops. So a driver handed this
 /// error finds the depth cell exactly as it was and the session marked as having tripped.
@@ -100,21 +103,26 @@ use crate::state::recursion_tracker::RecursionLimitExceeded;
 ///
 /// # Two consequences, stated rather than left to be discovered
 ///
-/// **The latch is coarser than per-error terminality.** Where something catches a trip and goes on
-/// parsing anyway, every later recovery in that input session is refused too — including for
-/// ordinary syntax errors that have nothing to do with the budget, which a terminality-preserving
-/// error type would have recovered, since the later error is a different value. It fails closed:
-/// it refuses to synthesize, never the reverse.
+/// **What the sites test is a per-attempt transition, not the session fact.** The cell is a
+/// monotone count and is never cleared, so *reading it absolutely* would mean that once anything
+/// catches a trip and parses on, every later recovery and every later collection swallow in the
+/// session is refused — ordinary syntax errors that have nothing to do with the budget included,
+/// which a terminality-preserving error type would have recovered, since the later error is a
+/// different value. That is why each site snapshots the counter before the attempt it judges and
+/// asks whether it moved *during* it. A budget trip is still terminal wherever one actually
+/// happens, a second one after a caught first included; what the comparison rules out is charging
+/// an unrelated failure with a stop it did not cause. It still fails closed at the boundary that
+/// matters: it never synthesizes over a real trip.
 ///
 /// **The resilient collection loops re-raise a trip rather than collecting past it.** `repeated`,
 /// `separated` and their delimited forms swallow an element's `Err` by design — emit it as a
 /// diagnostic and keep looping — and their gate re-raises the frontier incomplete, the *scanner*'s
-/// committed boundary, and the descent trip's session latch. A trip inside such an element
+/// committed boundary, and a descent trip the element itself caused. A trip inside such an element
 /// therefore ends the collection on the `Err` channel instead of yielding a truncated container
 /// with the trip filed among its diagnostics. That was the behaviour before #148, and it was never
-/// sink-dependent: a delegating error type was spent there exactly as `()` was. Because the latch
-/// is a session fact rather than the error's own answer, a parse that catches the trip and goes on
-/// also finds the *next* element failure in any collection re-raised rather than emitted. See
+/// sink-dependent: a delegating error type was spent there exactly as `()` was. The baseline is per
+/// *element*, so an ordinary failure later in the same collection — or in the enclosing one, where
+/// an inner collection's trip was swallowed — is emitted and looped past as it always was. See
 /// `parser::many`'s `GATE_CENSUS`.
 ///
 /// # The offset

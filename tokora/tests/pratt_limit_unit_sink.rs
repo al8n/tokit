@@ -21,10 +21,11 @@
 //!   the sink changes nothing and never did. The cells below run the same recovery through both
 //!   error types and get the same answer.
 //! * [`RecursionLimitReached`](tokora::error::RecursionLimitReached) is terminal for every value,
-//!   and **the terminality is not carried by the payload**. The trip latches
-//!   `Input::resource_trip`, a set-once cell on the input session, and `Recover`,
-//!   `InplaceRecover` and `skip_then_retry` read that cell beside `MaybeTerminal::is_terminal`. So
-//!   the sink discards the *value* and cannot discard the *stop*.
+//!   and **the terminality is not carried by the payload**. The trip counts on
+//!   `Input::resource_trips`, a monotone cell on the input session, and `Recover`,
+//!   `InplaceRecover` and `skip_then_retry` read that cell beside `MaybeTerminal::is_terminal` —
+//!   each against a snapshot taken before its own attempt, so what re-raises is a trip *that
+//!   attempt* caused. So the sink discards the *value* and cannot discard the *stop*.
 //!
 //! # This file is the regression witness for the erasure
 //!
@@ -294,6 +295,12 @@ fn bounded<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static)
 thread_local! {
   /// How many times the recoverer ran.
   static RECOVERIES: Cell<usize> = const { Cell::new(0) };
+  /// How many times [`catch_a_trip`] actually tripped the budget and swallowed it.
+  ///
+  /// The non-vacuity control for the attempt-relative cells in section 5: they assert that a caught
+  /// trip leaves the recovery combinators behaving as they do in an untripped parse, and a fixture
+  /// that quietly stopped tripping would satisfy that by satisfying nothing.
+  static CAUGHT: Cell<usize> = const { Cell::new(0) };
   /// The stack address at the top of the probe, before the pratt parser runs.
   static BASE: Cell<usize> = const { Cell::new(0) };
   /// The largest distance from `BASE` any pratt frame reached.
@@ -1211,5 +1218,216 @@ fn the_repeat_is_still_reported_under_a_budget_that_does_not_trip() {
     out,
     Err(()),
     "the second `;` is refused; through `()` the value is gone but the `Err` channel is not"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6 — the stop belongs to the attempt that caused it, not to the session
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Everything above measures what happens to the trip *itself*. This section measures what happens
+// to everything **after** it, once grammar code has caught a trip and gone on parsing — which is
+// the other of the two shapes the session counter's documentation names, and the one that decides
+// whether an editor still gets diagnostics for the rest of the file.
+//
+// The counter these combinators read is a monotone session fact and is never cleared, so an
+// absolute reading answers "has this parse ever tripped" — true forever after the first trip. Each
+// site therefore snapshots the counter before the attempt it is judging and re-raises only when it
+// moved *during* that attempt. Section 1's cells pin that a real trip is still re-raised; these pin
+// that an unrelated failure afterwards is not charged with it.
+//
+// Each cell is the same probe over the same source, run twice with only the budget changed, and
+// requires the two runs to agree — a caught trip must change nothing. `CAUGHT` is what keeps that
+// from being an agreement between two parses that both did nothing.
+
+/// `left + 1` nested frames on the parse's shared depth budget, counting the trip on the way out.
+fn caught_ladder<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  left: usize,
+) -> Result<(), ()>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+{
+  let mut frame = inp
+    .descend()
+    .inspect_err(|_| CAUGHT.with(|c| c.set(c.get() + 1)))?;
+  let inp = &mut *frame;
+  match left {
+    0 => Ok(()),
+    n => caught_ladder(inp, n - 1),
+  }
+}
+
+/// **Grammar code that catches a trip itself and keeps parsing.** Consumes no input, so everything
+/// after it sees exactly the source an untripped parse would.
+fn catch_a_trip<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>)
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+{
+  let _ = caught_ladder(inp, 32);
+}
+
+/// `Recover` still recovers an **ordinary** failure that happens after a caught trip.
+///
+/// The regression witness for the attempt-relative comparison on `Recover`'s arm: read absolutely,
+/// the session counter refuses this recovery — and every recovery after it, for the rest of the
+/// parse — because something unrelated tripped earlier. The source here (`"; 1"`) cannot trip
+/// anything: `lhs` refuses `;` on the first token, one frame deep, which is the boring malformed
+/// input recovery exists for.
+#[test]
+fn a_caught_trip_does_not_disable_a_later_recovery() {
+  fn probe<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<String, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    catch_a_trip(inp);
+    pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix)
+      .recover(counting_recovery)
+      .parse_input(inp)
+  }
+
+  let (tight, ran, caught) = bounded(60, || {
+    let out = Parser::with_context(limited(8))
+      .apply(probe)
+      .parse_str("; 1");
+    (out, RECOVERIES.with(Cell::get), CAUGHT.with(Cell::get))
+  });
+  assert_eq!(
+    caught, 1,
+    "the tight run must really have tripped and swallowed it — otherwise this cell compares two \
+     untripped parses"
+  );
+
+  let (roomy, roomy_ran, roomy_caught) = bounded(60, || {
+    let out = Parser::with_context(limited(ROOMY))
+      .apply(probe)
+      .parse_str("; 1");
+    (out, RECOVERIES.with(Cell::get), CAUGHT.with(Cell::get))
+  });
+  assert_eq!(
+    roomy_caught, 0,
+    "the control differs in one thing only — with room, nothing trips"
+  );
+  assert_eq!(
+    (&roomy, roomy_ran),
+    (&Ok(String::from("<spent>")), 1),
+    "the control pins the fixture absolutely: the primary fails ordinarily and the recoverer runs"
+  );
+
+  assert_eq!(
+    (tight, ran),
+    (roomy, roomy_ran),
+    "a trip the grammar caught and parsed past must not refuse the recoveries after it. The \
+     counter is monotone and stays raised for the rest of the parse; what the arm tests is whether \
+     it moved during THIS attempt"
+  );
+}
+
+/// The same, for the non-backtracking sibling: [`inplace_recover`](tokora::ParseInput::inplace_recover)
+/// reads the same cell on the same terms and must narrow the same way.
+#[test]
+fn a_caught_trip_does_not_disable_a_later_inplace_recovery() {
+  fn probe<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<String, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    catch_a_trip(inp);
+    pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix)
+      .inplace_recover(
+        |inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+         _cursor: tokora::input::Cursor<'inp, '_, TestLexer<'inp>>,
+         _err: ()| { counting_recovery(inp, ()) },
+      )
+      .parse_input(inp)
+  }
+
+  let (tight, ran, caught) = bounded(60, || {
+    let out = Parser::with_context(limited(8))
+      .apply(probe)
+      .parse_str("; 1");
+    (out, RECOVERIES.with(Cell::get), CAUGHT.with(Cell::get))
+  });
+  assert_eq!(caught, 1, "the tight run must really have tripped");
+
+  let (roomy, roomy_ran, roomy_caught) = bounded(60, || {
+    let out = Parser::with_context(limited(ROOMY))
+      .apply(probe)
+      .parse_str("; 1");
+    (out, RECOVERIES.with(Cell::get), CAUGHT.with(Cell::get))
+  });
+  assert_eq!(roomy_caught, 0, "and the control must really not have");
+  assert_eq!(
+    (&roomy, roomy_ran),
+    (&Ok(String::from("<spent>")), 1),
+    "the control pins the fixture absolutely: the primary fails ordinarily and the recoverer runs"
+  );
+
+  assert_eq!(
+    (tight, ran),
+    (roomy, roomy_ran),
+    "an earlier caught trip must not refuse a later in-place recovery either"
+  );
+}
+
+/// And `skip_then_retry` still skips for an ordinary failure after a caught trip.
+///
+/// Measured on the **input** rather than on the outcome, exactly as
+/// `a_discarding_sink_cannot_let_skip_then_retry_burn_input_on_a_trip` is: both runs end on the
+/// `Err` channel here — nothing in `"+ ; 1"` parses — so the discriminating observation is how far
+/// the sync cycles got. Re-raising on the session counter would return before any skip, leaving the
+/// input where it started; the two runs would then disagree.
+#[test]
+fn a_caught_trip_does_not_disable_a_later_skip_then_retry() {
+  type Probed = (Result<String, ()>, Option<usize>);
+
+  fn probe<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<Probed, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    catch_a_trip(inp);
+    let out = pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix)
+      .skip_then_retry(
+        |_: &common::TokenKind| tokora::input::Balance::<char>::Neutral,
+        |tok: tokora::span::Spanned<&Token, &tokora::SimpleSpan>| matches!(tok.data(), Token::Semi),
+      )
+      .parse_input(inp);
+    let front = inp.next()?.map(|t| tokora::span::Span::start(t.span_ref()));
+    Ok((out, front))
+  }
+
+  let (tight, caught) = bounded(60, || {
+    let out = Parser::with_context(limited(8))
+      .apply(probe)
+      .parse_str("+ ; 1")
+      .unwrap();
+    (out, CAUGHT.with(Cell::get))
+  });
+  assert_eq!(caught, 1, "the tight run must really have tripped");
+
+  let (roomy, roomy_caught) = bounded(60, || {
+    let out = Parser::with_context(limited(ROOMY))
+      .apply(probe)
+      .parse_str("+ ; 1")
+      .unwrap();
+    (out, CAUGHT.with(Cell::get))
+  });
+  assert_eq!(roomy_caught, 0, "and the control must really not have");
+  assert_ne!(
+    roomy.1,
+    Some(0),
+    "the control pins the fixture absolutely: an ordinary failure makes the sync cycles run and \
+     commit skipped input, so the front is no longer the token the parse started on"
+  );
+
+  assert_eq!(
+    tight, roomy,
+    "an earlier caught trip must not turn a later ordinary failure into an immediate re-raise: \
+     both the outcome and the input the surrounding grammar is handed back must be the ones an \
+     untripped parse produces"
   );
 }

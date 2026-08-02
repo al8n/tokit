@@ -179,10 +179,17 @@ draw on the same budget through
   and the limitation; it does not lose the stop.
 
   The **resilient collection loops** — `repeated`, `separated` and their delimited forms — read the
-  same latch, and re-raise on it rather than filing the trip among the collection's diagnostics and
-  parsing on. That one is not a discarding-sink repair: those families spent a trip for *every*
-  error type until tokora 0.9, so an element that trips now fails its collection where it used to
-  truncate it.
+  same session cell, and re-raise on it rather than filing the trip among the collection's
+  diagnostics and parsing on. That one is not a discarding-sink repair: those families spent a trip
+  for *every* error type until tokora 0.9, so an element that trips now fails its collection where
+  it used to truncate it.
+
+  Every one of those sites reads the cell **relative to the attempt it is judging** — the
+  speculative parse, or the one element — by snapshotting it beforehand and asking whether it moved.
+  What the cell records is a monotone session fact ("this parse tripped a budget"); what a site asks
+  is a per-attempt one ("did *this* fail because of a trip"). They differ exactly where grammar code
+  catches a trip and parses on, and answering the second with the first would have suppressed every
+  later diagnostic in the document.
 
   This was not true before tokora 0.9. A `()`-errored grammar used to get `is_terminal() == false`
   on the converted value and **spend** the trip: `recover` synthesized a node for a construct the
@@ -204,8 +211,9 @@ draw on the same budget through
   latched is the *depth* — it is the opposite kind of fact and is fully restored by the unwind that
   carries the error out. So a scanner trip latches *where* and stops lexing; a descent trip latches
   *whether* and stops recovery — including the emit-and-continue kind a collection driver does.
-  Being a session fact rather than a per-error one, the latter is coarse in one direction: after a
-  trip, the *next* element failure in any collection re-raises too, even an ordinary one.
+  Because the second is a session fact rather than a per-error one, it is counted rather than
+  flagged and consulted as a difference across one attempt: a failure is charged to the budget only
+  where the count moved while that attempt ran.
 
 ### Bounding your own recursion
 

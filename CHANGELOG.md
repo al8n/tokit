@@ -94,14 +94,24 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    discards the payload discards the marker with it, so a `()`-errored grammar got
    `is_terminal() == false` back and recovery **spent** the trip.
 
-   **Where resource terminality is stored now:** on the **input session**, in a set-once cell
-   (`Input::resource_trip`, crate-internal, latched by
+   **Where resource terminality is stored now:** on the **input session**, in a monotone counter
+   (`Input::resource_trips`, crate-internal, bumped by
    [`InputRef::descend`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.descend)'s
    trip arm before the grammar's `From` runs, so a panicking conversion cannot skip it). The three
    combinators read it **beside** `MaybeTerminal::is_terminal`. No conversion the grammar writes
    can reach it, and nothing lowers it: a `Checkpoint` does not carry it and a restore does not
    touch it. Grammar error conversion therefore cannot affect it — which is the question 0.8.0's
    entry left open, answered here in the terms it asked for.
+
+   **What the cell records and what the combinators test are different questions, deliberately.**
+   The cell is a session fact — *this parse exceeded a budget, this many times* — and it is never
+   cleared, because nothing can un-exceed a budget. Every site that consults it is judging **one
+   attempt**, so it snapshots the counter before that attempt and re-raises only when the count
+   moved *during* it. The two answers come apart exactly where grammar code catches a trip itself
+   and parses on: the session has tripped forever after, while the next attempt is an ordinary one.
+   Reading the session fact there would refuse recovery — and, below, emit-and-continue — for every
+   later failure in the document, ordinary syntax errors included. A real trip is still re-raised
+   wherever one happens, a second trip after a caught first one included.
 
    **What changes for you, and only if your error type discards the value:**
 
@@ -131,11 +141,13 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    an element was therefore filed as an ordinary diagnostic and the loop went on to the next one,
    bounded only by the no-progress guard. Unlike the recovery half above, that happened for **every**
    error type: a delegating one was spent there exactly as `()` was. The gate reads the session
-   latch too now.
+   counter too now — and, like the recovery half, it reads it against a baseline taken **once per
+   element**, so what re-raises is a trip *that element* caused.
 
    | driving an element that trips the depth budget | before | now |
    |---|---|---|
    | `repeated()`, `separated_by(..)`, and both delimited forms | the trip filed as a diagnostic; the loop continued to the next element and returned `Ok` with whatever it collected | the collection returns `Err` at the first trip, with **nothing filed** |
+   | the same, for an element that fails **ordinarily** after some earlier construct's trip was caught and parsed past | the failure filed as a diagnostic; the loop continued | unchanged — the failure filed as a diagnostic; the loop continues |
 
    **This half changes behaviour for delegating and discarding error types alike**, so a grammar
    that used to receive a truncated-with-diagnostics container over a too-deep input now receives a
@@ -144,12 +156,12 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    never a description of the input, and the diagnostic that named the trip was filed against a
    construct the parse had already been told to stop reading.
 
-   **The limit of this change, stated rather than left to be found: the latch is coarser than
-   per-error terminality.** It is never cleared, so where something catches a trip and parses on
-   anyway, every later recovery in that input session is refused too — and now so is every later
-   collection-loop swallow, including for ordinary syntax errors a terminality-preserving type
-   would have recovered, since the later error is a different value. It fails closed: it refuses to
-   synthesize, never the reverse.
+   **The scope of the change, stated rather than left to be found: it is the element's own trip
+   that ends the collection, not the session's.** A parse that catches a trip and goes on keeps
+   full emit-and-continue recovery for every construct after it — which is what an editor or
+   language server needs, since one deeply-nested expression must not suppress the rest of the
+   file's diagnostics. The same holds one nesting level up: an inner collection's trip that an
+   element swallows is not charged to the enclosing collection's next ordinary failure.
 
    — *(#148 R1)*
 

@@ -91,28 +91,47 @@ mod gate_census {
   //!   attempt-relative: a boundary a prior lookahead already latched does not mis-charge an
   //!   ordinary element failure short of it. Never the lex-offset `at_latched_boundary`, which a
   //!   prefilled cache would make false-positive on that same ordinary failure.
-  //! * `inp.resource_trip()` — the **descent** budget trip, which latches no boundary (it has no
-  //!   position to latch, only a control stack) and so is invisible to the witness above. It is the
-  //!   set-once session cell [`InputRef::descend`](crate::InputRef::descend) arms before the
-  //!   grammar's `From` runs, which is what makes the re-raise independent of the error type: a
-  //!   [`RecursionLimitReached`](crate::error::RecursionLimitReached) that a discarding sink erases
-  //!   on conversion — `()` does — still cannot be emitted-and-continued here.
+  //! * `inp.tripped_during_attempt(trips)` — the **descent** budget trip, which latches no boundary
+  //!   (it has no position to latch, only a control stack) and so is invisible to the witness
+  //!   above. It compares the session trip counter
+  //!   [`InputRef::descend`](crate::InputRef::descend) bumps before the grammar's `From` runs
+  //!   against this element's baseline, which is what makes the re-raise independent of the error
+  //!   type: a [`RecursionLimitReached`](crate::error::RecursionLimitReached) that a discarding sink
+  //!   erases on conversion — `()` does — still cannot be emitted-and-continued here.
   //!
   //! Both are positional/session facts read on the failure arm, so a successful element does zero
   //! terminal work and neither costs a trait bound: no `MaybeTerminal` appears in these families.
   //!
-  //! One gate per swallow site; the census pins the total, the per-file placement, and **both**
-  //! re-raises *inside the same guard* — not merely somewhere in the same file — so a new resilient
-  //! loop cannot land ungated, nor land carrying only two of the three (extend the list, then gate
-  //! it all three ways).
+  //! **Both are attempt-relative, and the descent one is so only because of where its baseline is
+  //! taken.** The counter behind it is a monotone session fact — "this parse tripped a budget, this
+  //! many times" — and is never cleared, so a site that reads it absolutely re-raises every later
+  //! element failure once anything in the parse has caught a trip and carried on: an ordinary
+  //! syntax error in an unrelated construct then ends the collection instead of being emitted, and
+  //! one deep expression early in a document suppresses every diagnostic after it. The baseline is
+  //! therefore `inp.trip_snapshot()` taken **inside the element loop**, once per element — not
+  //! hoisted out beside `latch_snapshot()`, whose absence witness genuinely is per driver attempt.
+  //! Hoisting it would restore the defect one nesting level up: a trip inside an *inner* collection
+  //! that an element swallows would be charged to the enclosing driver's next ordinary failure.
+  //!
+  //! One gate per swallow site; the census pins the total, the per-file placement, **both**
+  //! re-raises *inside the same guard* — not merely somewhere in the same file — and the baseline's
+  //! placement inside the loop that hosts the gate. So a new resilient loop cannot land ungated,
+  //! nor land carrying only two of the three (extend the list, then gate it all three ways), nor
+  //! land with the descent witness back in its session-absolute form.
 
   /// The needle that opens a never-recoverable gate. Counting it is counting gates: none of the
   /// four sources spells it anywhere but in the guard.
   const GATE: &str = "if Cmpl::is_incomplete_error(&";
 
   /// The two terminal re-raises the gate must carry, and the end of the guard they must sit in.
-  const WITNESSES: [&str; 2] = ["inp.at_committed_boundary()", "inp.resource_trip()"];
+  const WITNESSES: [&str; 2] = ["inp.at_committed_boundary()", "inp.tripped_during_attempt("];
   const GUARD_END: &str = "=>";
+
+  /// The descent witness's baseline, and the loop opener it must be taken after. Scanning between
+  /// the two is what pins the baseline as per-element rather than per-collection — the difference
+  /// between "this element tripped" and "this parse has tripped".
+  const BASELINE: &str = "inp.trip_snapshot()";
+  const HOSTING_LOOP: &str = "loop {";
 
   #[test]
   #[cfg_attr(
@@ -135,16 +154,26 @@ mod gate_census {
         "{name}: every emit-and-continue swallow needs exactly one incomplete gate"
       );
 
+      // Exactly one baseline per gate, counted over code lines only so a prose mention of the
+      // needle cannot stand in for the binding. Paired with the region scan below, this is what
+      // rules out a second, stray read of the counter being used as a session-absolute test.
+      assert_eq!(
+        super::end_state_census::code_matches(src, BASELINE),
+        gated,
+        "{name}: exactly one `trip_snapshot()` baseline per never-recoverable gate"
+      );
+
       // Both terminal re-raises, in the SAME guard as the incomplete gate and after it. Scanning
       // the *guard region* — from the gate to the `=>` that closes the arm's pattern — rather than
       // counting each needle over the whole file is what keeps this non-vacuous: three independent
       // per-file tallies are equally satisfied by three witnesses scattered across three different
       // arms, and this is not. It is also indentation- and wrap-independent, which matters because
       // the three-way guard no longer fits on one line at the crate's rustfmt width.
-      let mut rest = src;
       let mut checked = 0;
-      while let Some(at) = rest.find(GATE) {
-        let after = &rest[at..];
+      let mut from = 0;
+      while let Some(at) = src[from..].find(GATE) {
+        let gate_at = from + at;
+        let after = &src[gate_at..];
         let guard = &after[..after
           .find(GUARD_END)
           .unwrap_or_else(|| panic!("{name}: an incomplete gate with no `=>` closing its arm"))];
@@ -156,8 +185,28 @@ mod gate_census {
             guard.trim()
           );
         }
+
+        // …and the descent witness's baseline is taken inside the loop that hosts the gate, so the
+        // comparison is per ELEMENT. A baseline hoisted above the loop — the natural place, since
+        // `latch_snapshot()`'s belongs there — is arithmetically identical to reading the monotone
+        // counter absolutely for every element after the first, which is the defect this scan
+        // exists to keep out. The `rfind` panics rather than passing when a gate is not inside a
+        // loop at all, so this cannot be satisfied by a source that has stopped looking like a
+        // driver.
+        let loop_at = src[..gate_at].rfind(HOSTING_LOOP).unwrap_or_else(|| {
+          panic!("{name}: a never-recoverable gate that is not inside a repetition loop")
+        });
+        assert_eq!(
+          super::end_state_census::code_matches(&src[loop_at..gate_at], BASELINE),
+          1,
+          "{name}: the descent witness is attempt-relative — take the `trip_snapshot()` baseline \
+           INSIDE the element loop, once per element, and compare it with `tripped_during_attempt`. \
+           Hoisted out of the loop it reads the monotone session counter, and every element failure \
+           after the parse's first trip re-raises, ordinary syntax errors included"
+        );
+
         checked += 1;
-        rest = &after[GATE.len()..];
+        from = gate_at + GATE.len();
       }
       assert_eq!(
         checked, gated,
@@ -355,7 +404,10 @@ mod end_state_census {
 
   /// Counts occurrences of `needle` on lines that are not whole-line comments, so prose
   /// mentions of a counted name do not skew a tally.
-  fn code_matches(src: &str, needle: &str) -> usize {
+  ///
+  /// Shared with [`gate_census`](super::gate_census), whose baseline tallies need the same
+  /// comment-blindness for the same reason.
+  pub(super) fn code_matches(src: &str, needle: &str) -> usize {
     src
       .lines()
       .filter(|line| !line.trim_start().starts_with("//"))

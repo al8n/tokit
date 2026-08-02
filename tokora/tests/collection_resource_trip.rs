@@ -11,8 +11,24 @@
 //! conditions. The third, a [`RecursionLimitReached`], latches no boundary — it has a control stack
 //! rather than a position — so `inp.at_committed_boundary()` reads `false` for one and the trip fell
 //! through to the swallow arm: emitted as an ordinary diagnostic, with the loop continuing to the
-//! next element. The gate now also reads `inp.resource_trip()`, the set-once session latch the trip
-//! arm arms before the grammar's `From` runs.
+//! next element. The gate now also reads the session's **resource-trip counter**, which the trip arm
+//! bumps before the grammar's `From` runs.
+//!
+//! # Attempt-relative, and why half this file is about that
+//!
+//! The counter is a **monotone session fact**: it says a budget was exceeded somewhere in this
+//! parse, and it is never cleared, because nothing can un-exceed a budget. That is not the question
+//! the gate has. The gate is judging **one element**, so it snapshots the counter before the element
+//! runs (`inp.trip_snapshot()`) and re-raises only when the count moved *during* it
+//! (`inp.tripped_during_attempt(..)`) — the same baseline-and-compare shape the sibling absence
+//! witness already uses through `latch_snapshot`/`latched_during_attempt`.
+//!
+//! Read absolutely the two answers come apart exactly where grammar code catches a trip itself and
+//! parses on: the session has tripped forever after, so every later element failure in every later
+//! collection re-raises, ordinary syntax errors included. One deeply-nested expression early in a
+//! document would then suppress every diagnostic after it — which is precisely wrong for the
+//! editor and language-server consumers this crate is built for. Section 2 below is that regression;
+//! section 3 pins that narrowing the witness did not put a hole in it.
 //!
 //! # Why every cell here runs twice, through two error types
 //!
@@ -49,6 +65,8 @@
 //! families under a *scanner* limiter and no descent at all.
 
 mod common;
+
+use core::cell::Cell;
 
 use tokora::{
   Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext,
@@ -174,6 +192,37 @@ const TIGHT: usize = 8;
 /// The budget it does not — the non-vacuity control's only difference from the cell above it.
 const ROOMY: usize = 4_000;
 
+/// The number an ordinary element rejects as malformed input. Nothing terminal about it: no
+/// descent, no budget, no scanner stop — the whole point is that it is the boring kind of failure a
+/// collection is supposed to emit and loop past.
+const BAD: i64 = 9;
+
+thread_local! {
+  /// How many times [`ladder`](trip_suite) actually tripped, on this test's thread.
+  ///
+  /// The non-vacuity control for every cell in sections 2 and 3: they assert that a *caught* trip
+  /// leaves the collections behaving exactly as an untripped parse does, and a fixture that quietly
+  /// stopped tripping would satisfy that by satisfying nothing. Each cell requires this to be
+  /// nonzero on the tight-budget run and zero on its widened control, so "the two runs agree" is
+  /// only ever asserted between a run that tripped and a run that did not.
+  ///
+  /// Thread-local rather than a `static`: libtest runs each `#[test]` on its own thread, so the
+  /// two sink suites cannot see each other's count.
+  static TRIPS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn note_trip() {
+  TRIPS.with(|c| c.set(c.get() + 1));
+}
+
+fn trips() -> usize {
+  TRIPS.with(Cell::get)
+}
+
+fn reset_trips() {
+  TRIPS.with(|c| c.set(0));
+}
+
 /// The diagnostics an emitter actually filed. Zero on every trip cell: the gate re-raises *before*
 /// the swallow arm reaches `emit_error`, so a re-raised trip leaves the log untouched. This is the
 /// assertion that distinguishes "re-raised" from "emitted, and then the parse failed for some other
@@ -260,6 +309,108 @@ macro_rules! cell {
   };
 }
 
+/// One attempt-relative cell: a **caught** trip, and the collection that runs after it.
+///
+/// The property is that the caught trip changes *nothing* — so the cell runs the identical probe
+/// over the identical source twice, once under a budget the ladder exceeds and once under one it
+/// does not, and requires the two runs to agree on both the value and the diagnostic count. That
+/// formulation is what lets these cells cover the separated families without predicting how many
+/// separator-state diagnostics a failed element leaves behind: whatever that number is, the trip may
+/// not change it.
+///
+/// Non-vacuity has two halves here, because "the two runs agree" is satisfiable by two runs that
+/// both did nothing:
+///
+/// * the tight run must actually have tripped and the control must actually not have
+///   ([`TRIPS`]) — otherwise the cell is comparing two untripped parses;
+/// * the control's value is asserted **absolutely**, so a fixture that stopped reaching the
+///   collection, or one whose element stopped failing, fails here rather than agreeing quietly.
+macro_rules! attempt_cell {
+  (
+    $name:ident, $err:ty, $sink:literal, $probe:ident, $what:literal, $src:literal,
+    collects = $collects:expr, tripped = $tripped:expr
+  ) => {
+    #[doc = concat!("Attempt-relative: ", $what)]
+    #[test]
+    fn $name() {
+      reset_trips();
+      let mut tight_log = Verbose::<$err>::new();
+      let tight = {
+        let ctx: ParserContext<'_, TestLexer<'_>, &mut Verbose<$err>> =
+          ParserContext::new(&mut tight_log);
+        let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(TIGHT));
+        Parser::with_context(ctx).apply($probe).parse_str($src)
+      };
+      let tight_filed = filed(&tight_log);
+      assert_eq!(
+        trips(),
+        $tripped,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": the tight run must really have tripped the budget — without that this cell compares \
+           two untripped parses and asserts nothing"
+        )
+      );
+
+      reset_trips();
+      let mut roomy_log = Verbose::<$err>::new();
+      let roomy = {
+        let ctx: ParserContext<'_, TestLexer<'_>, &mut Verbose<$err>> =
+          ParserContext::new(&mut roomy_log);
+        let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(ROOMY));
+        Parser::with_context(ctx).apply($probe).parse_str($src)
+      };
+      let roomy_filed = filed(&roomy_log);
+      assert_eq!(
+        trips(),
+        0,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": the control differs from the run above in one thing only — with room, nothing trips"
+        )
+      );
+      assert_eq!(
+        roomy,
+        $collects,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": the control pins the fixture absolutely — the collection is reached, the element fails \
+           where it is meant to, and the driver emits and loops past it"
+        )
+      );
+
+      assert_eq!(
+        tight, roomy,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": a trip the grammar caught and parsed past must change nothing here. The session \
+           counter is monotone and stays raised for the rest of the parse; what the gate tests is \
+           whether it moved during THIS element. Reading it absolutely re-raises every later \
+           element failure in the document, ordinary syntax errors included"
+        )
+      );
+      assert_eq!(
+        tight_filed, roomy_filed,
+        concat!(
+          $what,
+          " over ",
+          $sink,
+          ": and the diagnostics are the same ones — a caught trip must not silence the collection \
+           either"
+        )
+      );
+    }
+  };
+}
+
 /// Generates the four family cells for one grammar error type.
 ///
 /// A macro rather than a function generic over the error type: the drivers' bounds are stated per
@@ -267,7 +418,7 @@ macro_rules! cell {
 /// keeps each probe reading exactly like the grammar a user would write, with no higher-ranked
 /// `From` bound collection standing between the test and what it measures.
 macro_rules! trip_suite {
-  ($suite:ident, $err:ty, $trip:expr, $sink:literal) => {
+  ($suite:ident, $err:ty, $trip:expr, $ordinary:expr, $sink:literal) => {
     mod $suite {
       use super::*;
 
@@ -297,6 +448,10 @@ macro_rules! trip_suite {
       }
 
       /// `left + 1` nested frames on the parse's shared depth budget, released on the way out.
+      ///
+      /// The trip is counted on the way out — exactly once per tripping call, since the frames above
+      /// it only propagate. [`TRIPS`] is what every attempt-relative cell's non-vacuity control
+      /// reads; the cells in section 1 do not consult it, so counting here costs them nothing.
       fn ladder<'inp, Ctx>(
         inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
         left: usize,
@@ -305,12 +460,182 @@ macro_rules! trip_suite {
         Ctx: ParseContext<'inp, TestLexer<'inp>>,
         Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
       {
-        let mut frame = inp.descend()?;
+        let mut frame = inp.descend().inspect_err(|_| note_trip())?;
         let inp = &mut *frame;
         match left {
           0 => Ok(()),
           n => ladder(inp, n - 1),
         }
+      }
+
+      // ── Section 2 and 3 material: a caught trip, and ordinary failures after it ──
+
+      /// **Grammar code that catches the trip itself and keeps parsing** — the first of the two
+      /// shapes the session counter's own documentation names, and the one this file's section 2
+      /// is about. Under `ROOMY` the same call returns `Ok` and the session never trips at all,
+      /// which is what makes the widened-budget run a control rather than a second copy.
+      fn catch_a_trip<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>)
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        let _ = ladder(inp, LADDER);
+      }
+
+      /// An element that commits one `Num` and then fails **ordinarily** on [`BAD`]: no descent, no
+      /// budget, no scanner stop. Committing first is what lets the swallow arm make progress, so
+      /// the driver reaches the elements after it.
+      fn ordinary_num<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<ParseAttempt<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        let n = match inp.try_expect(|t| matches!(t.data(), Token::Num(_)))? {
+          None => return Ok(ParseAttempt::Decline),
+          Some(tok) => match tok.into_data() {
+            Token::Num(n) => n,
+            _ => unreachable!("the predicate accepted only `Num`"),
+          },
+        };
+        match n {
+          BAD => Err($ordinary),
+          n => Ok(ParseAttempt::Accept(n)),
+        }
+      }
+
+      /// The inner collection's element: one `Plus`, then a descent that trips and is **caught**
+      /// there. The inner collection therefore returns `Ok` with the session counter already raised
+      /// — a trip that belongs to no element the *enclosing* driver is judging.
+      fn catching_plus<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<ParseAttempt<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        if inp
+          .try_expect(|t| matches!(t.data(), Token::Plus))?
+          .is_none()
+        {
+          return Ok(ParseAttempt::Decline);
+        }
+        let _ = ladder(inp, LADDER);
+        Ok(ParseAttempt::Accept(0))
+      }
+
+      /// The **enclosing** collection's element: an inner `repeated()` of [`catching_plus`], then
+      /// one number that may fail ordinarily. On the first element the inner collection consumes the
+      /// `+` and trips inside it; on every element after that the inner collection is empty, so the
+      /// only thing that can fail is the number.
+      fn plusses_then_num<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<ParseAttempt<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>,
+      {
+        let _inner: Vec<i64> = catching_plus.repeated().collect().parse_input(inp)?;
+        ordinary_num(inp)
+      }
+
+      // ── The probes for sections 2 and 3 ─────────────────────────────────────
+
+      fn caught_trip_then_repeated<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>,
+      {
+        catch_a_trip(inp);
+        ordinary_num.repeated().collect().parse_input(inp)
+      }
+
+      fn caught_trip_then_delim_repeated<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>,
+      {
+        catch_a_trip(inp);
+        ordinary_num
+          .repeated()
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn caught_trip_then_sep<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + SeparatedEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + TooFewEmitter<'inp, TestLexer<'inp>>
+          + TooManyEmitter<'inp, TestLexer<'inp>>,
+      {
+        catch_a_trip(inp);
+        ordinary_num.separated_by_comma().collect().parse_input(inp)
+      }
+
+      fn caught_trip_then_sep_delim<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + SeparatedEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + TooFewEmitter<'inp, TestLexer<'inp>>
+          + TooManyEmitter<'inp, TestLexer<'inp>>,
+      {
+        catch_a_trip(inp);
+        ordinary_num
+          .separated_by_comma()
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
+      /// Section 3: the protection this narrowing must not remove. The budget is tripped, caught and
+      /// parsed past — and then a *second* trip happens, inside a collection element this time.
+      fn caught_trip_then_a_second_one<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>,
+      {
+        catch_a_trip(inp);
+        deep_num.repeated().collect().parse_input(inp)
+      }
+
+      /// Section 2, one nesting level up: the trip happens inside an *inner* collection, during the
+      /// enclosing collection's first element, and is swallowed there.
+      fn nested_collections<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>,
+      {
+        plusses_then_num.repeated().collect().parse_input(inp)
       }
 
       // ── The four probes ─────────────────────────────────────────────────────
@@ -420,6 +745,182 @@ macro_rules! trip_suite {
         "`separated_by_comma().delimited()`",
         "( 1 , 2 , 3 )"
       );
+
+      // ── Section 2: a caught trip does not disable the collections after it ──
+      //
+      // Each cell parses one construct that trips and is caught by grammar code, and then drives one
+      // family over an element that fails ORDINARILY. That failure is emitted and looped past, as it
+      // is in a parse that never tripped — which is what the paired widened-budget run measures.
+      //
+      // These four are the regression witnesses for the attempt-relative comparison: against a
+      // session-absolute reading each returns `Err` from the tight run while its control returns
+      // `Ok`, and the equality below is what fails.
+
+      attempt_cell!(
+        a_caught_trip_leaves_repeated_emitting,
+        $err,
+        $sink,
+        caught_trip_then_repeated,
+        "`repeated()` after a caught trip",
+        "1 9 3",
+        collects = Ok(vec![1, 3]),
+        tripped = 1
+      );
+
+      attempt_cell!(
+        a_caught_trip_leaves_delimited_repeated_emitting,
+        $err,
+        $sink,
+        caught_trip_then_delim_repeated,
+        "`repeated().delimited()` after a caught trip",
+        "( 1 9 3 )",
+        collects = Ok(vec![1, 3]),
+        tripped = 1
+      );
+
+      attempt_cell!(
+        a_caught_trip_leaves_separated_emitting,
+        $err,
+        $sink,
+        caught_trip_then_sep,
+        "`separated_by_comma()` after a caught trip",
+        "1 , 9 , 3",
+        collects = Ok(vec![1, 3]),
+        tripped = 1
+      );
+
+      attempt_cell!(
+        a_caught_trip_leaves_delimited_separated_emitting,
+        $err,
+        $sink,
+        caught_trip_then_sep_delim,
+        "`separated_by_comma().delimited()` after a caught trip",
+        "( 1 , 9 , 3 )",
+        collects = Ok(vec![1, 3]),
+        tripped = 1
+      );
+
+      /// One nesting level up: the trip happens inside an **inner** collection, during the enclosing
+      /// collection's first element, and is swallowed there. The enclosing driver's later ordinary
+      /// failure must not be charged with it.
+      ///
+      /// This is the cell that discriminates a per-ELEMENT baseline from a per-COLLECTION one. Both
+      /// pass the four cells above, because there the trip happens before the driver starts and is
+      /// therefore in either baseline; here it happens *inside the driver's own first element*, so a
+      /// baseline taken once at the top of the driver has already been overtaken by the time the
+      /// second element fails.
+      #[allow(rustdoc::private_intra_doc_links)]
+      mod nested {
+        use super::*;
+
+        attempt_cell!(
+          an_inner_collections_trip_is_not_charged_to_the_enclosing_one,
+          $err,
+          $sink,
+          nested_collections,
+          "an enclosing `repeated()` over an inner `repeated()` that trips",
+          "+ 1 9 3",
+          collects = Ok(vec![1, 3]),
+          tripped = 1
+        );
+      }
+
+      // ── Section 3: and the protection is still there ────────────────────────
+
+      /// Narrowing the witness must not put a hole in it: a trip in a *later* collection re-raises
+      /// even though an earlier one already raised the session counter.
+      ///
+      /// This is the cell that requires the counter to be a **count**. A set-once `bool` snapshot
+      /// compares equal to a baseline taken after the first, caught trip, so the second trip would
+      /// read as "nothing happened during this element" and the collection would file it and loop
+      /// past — the very behaviour section 1 closed, reintroduced by the fix for section 2.
+      #[allow(rustdoc::private_intra_doc_links)]
+      mod second_trip {
+        use super::*;
+
+        #[test]
+        fn a_later_collections_own_trip_still_re_raises() {
+          reset_trips();
+          let mut log = Verbose::<$err>::new();
+          let tripped = {
+            let ctx: ParserContext<'_, TestLexer<'_>, &mut Verbose<$err>> =
+              ParserContext::new(&mut log);
+            let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(TIGHT));
+            Parser::with_context(ctx)
+              .apply(caught_trip_then_a_second_one)
+              .parse_str("1 2 3")
+          };
+          assert_eq!(
+            tripped,
+            Err($trip),
+            concat!(
+              "a second trip over ",
+              $sink,
+              ": the element's own trip re-raises, even though the session counter was already \
+               raised by the caught one before the collection started"
+            )
+          );
+          assert_eq!(
+            filed(&log),
+            0,
+            concat!(
+              "a second trip over ",
+              $sink,
+              ": the gate re-raises before the swallow arm emits, so nothing is filed"
+            )
+          );
+          assert_eq!(
+            trips(),
+            2,
+            concat!(
+              "a second trip over ",
+              $sink,
+              ": both trips must really have happened — the caught one, then the element's own. \
+               One would mean the fixture stopped exercising the second"
+            )
+          );
+
+          // Non-vacuity: same probe, same source, only the recursion budget changed.
+          reset_trips();
+          let mut log = Verbose::<$err>::new();
+          let roomy = {
+            let ctx: ParserContext<'_, TestLexer<'_>, &mut Verbose<$err>> =
+              ParserContext::new(&mut log);
+            let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(ROOMY));
+            Parser::with_context(ctx)
+              .apply(caught_trip_then_a_second_one)
+              .parse_str("1 2 3")
+          };
+          assert_eq!(
+            roomy,
+            Ok(vec![1, 2, 3]),
+            concat!(
+              "a second trip over ",
+              $sink,
+              ": the budget is what failed the run above — with room the same source parses and \
+               collects"
+            )
+          );
+          assert_eq!(
+            trips(),
+            0,
+            concat!(
+              "a second trip over ",
+              $sink,
+              ": and the control tripped nothing at all"
+            )
+          );
+          assert_eq!(
+            filed(&log),
+            0,
+            concat!(
+              "a second trip over ",
+              $sink,
+              ": the control is a clean parse, so it files nothing either"
+            )
+          );
+        }
+      }
     }
   };
 }
@@ -428,6 +929,7 @@ trip_suite!(
   delegating_sink,
   TripErr,
   TripErr::Depth,
+  TripErr::Ordinary,
   "a delegating error type"
 );
-trip_suite!(discarding_sink, (), (), "the discarding `()` sink");
+trip_suite!(discarding_sink, (), (), (), "the discarding `()` sink");

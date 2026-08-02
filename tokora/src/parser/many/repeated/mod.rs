@@ -265,6 +265,9 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
     let latch = inp.latch_snapshot();
 
     loop {
+      // The descent witness's baseline, taken once per ELEMENT — the attempt this cycle's gate
+      // judges. See the gate below for why it is not hoisted out of the loop beside `latch`.
+      let trips = inp.trip_snapshot();
       match self.f.try_parse_input(inp) {
         Ok(Accept(item)) => {
           rh.on_element(num, inp, &anchor)?;
@@ -278,15 +281,23 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
         // diagnostic. The scanner witness reads the *committed cursor* ([`at_committed_boundary`]),
         // so it is attempt-relative: a boundary a prior lookahead already latched (a prefilled cache
         // leaving the lex offset at it) does not mis-charge an element that failed ordinarily before
-        // reaching it. The descent witness is the set-once session cell ([`resource_trip`]), latched
-        // before the grammar's `From` runs, so a trip re-raises for a delegating error type and for
-        // a discarding one alike — `()` included. Both are positional/session facts, evaluated only
-        // on the failure arm, so a successful element does zero terminal work and no `MaybeTerminal`
-        // bound is needed.
+        // reaching it. The descent witness is attempt-relative by the other route — the session
+        // trip counter differing from the baseline this cycle took ([`tripped_during_attempt`]), the
+        // counter being bumped before the grammar's `From` runs, so a trip re-raises for a
+        // delegating error type and for a discarding one alike, `()` included. Both are
+        // positional/session facts, evaluated only on the failure arm, so a successful element does
+        // zero terminal work and no `MaybeTerminal` bound is needed.
+        //
+        // The baseline is per element and not per collection, which is the difference between
+        // "this element tripped" and "this parse has tripped". The latter is monotone and never
+        // cleared, so once anything caught a trip and carried on — grammar code doing its own
+        // catching, or an inner collection re-raising into an element that swallows it — every
+        // later element failure here would re-raise, ordinary syntax errors included, and the
+        // collection would stop emitting diagnostics for the rest of the document.
         Err(err)
           if Cmpl::is_incomplete_error(&err)
             || inp.at_committed_boundary()
-            || inp.resource_trip() =>
+            || inp.tripped_during_attempt(trips) =>
         {
           return Err(err);
         }
