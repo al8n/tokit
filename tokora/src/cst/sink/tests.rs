@@ -5583,3 +5583,75 @@ fn duplicate_zero_width_tokens_are_not_yet_detected() {
     "three tokens where one was real: the duplicates are indistinguishable in the tree"
   );
 }
+
+// ── The event log's width, and the capacity reserved for it ────────────────────
+
+/// One event is **32 bytes** for a `SimpleSpan` lexer, and nothing may quietly change that.
+///
+/// The event log is the largest thing a materialization touches — a 57.7 KB GraphQL document
+/// records 64,085 of these, appended once and walked once — so the element's width is a
+/// performance property of the whole sink rather than an implementation detail, and it is the
+/// constant the construction-time reservation is sized against. A variant that widened the
+/// element would multiply both the log's memory traffic and that reservation, and no other
+/// cell in this suite would notice.
+#[test]
+fn one_event_is_thirty_two_bytes() {
+  assert_eq!(
+    core::mem::size_of::<Event<SimpleSpan>>(),
+    32,
+    "the event width moved: a variant was added or widened, and the log's memory traffic \
+     moved with it"
+  );
+}
+
+/// The construction-time reservation is **the source's length rounded up to a power of two,
+/// capped** — the capacity the `Vec`'s own doubling would have reached, bought in one step.
+///
+/// The rounding is the load-bearing half and it is pinned as a *measured* fact, not a
+/// preference: reserving the raw length instead under-reserves a lossless log (1.11 events per
+/// byte on the reference document), so the log overruns the reservation and pays a
+/// double-sized reallocation on top of a large eager one — measured **slower than reserving
+/// nothing**. A power of two is exactly the block the growth would have ended on.
+///
+/// The cap is the safety half: past it the byte count stops being evidence about the event
+/// count, and a grammar whose tokens are long must not reserve gigabytes.
+///
+/// Falsified by: a reservation that is not a power of two (the trap above), one that scales
+/// past the cap, or one that allocates for an empty source.
+#[test]
+fn the_event_log_reserves_the_doubling_chains_own_capacity() {
+  let empty = verbose_sink("");
+  assert_eq!(
+    empty.events_capacity(),
+    0,
+    "an empty source must not allocate an event log at all"
+  );
+
+  let small = "a".repeat(210);
+  let small_sink = verbose_sink(&small);
+  assert_eq!(
+    small_sink.events_capacity(),
+    256,
+    "a 210-byte source reserves 256 events — the capacity doubling would have reached, and \
+     not one allocation more"
+  );
+
+  // The reference document's ratio, restated as the property that matters: the reservation
+  // must be at or above the event count, or it buys a big allocation AND a reallocation.
+  let alias_len = 57_741usize;
+  assert!(
+    super::event_capacity_for(alias_len) >= 64_085,
+    "a source of {alias_len} bytes reserves {} events, below the 64,085 a lossless parse of \
+     it records: the log would overrun its own reservation",
+    super::event_capacity_for(alias_len)
+  );
+
+  let big = "a".repeat(super::EVENT_CAPACITY_CAP * 2);
+  let big_sink = verbose_sink(&big);
+  assert_eq!(
+    big_sink.events_capacity(),
+    super::EVENT_CAPACITY_CAP,
+    "past the cap the reservation stops: the byte count is no longer evidence about the \
+     event count, and a grammar with long tokens must not reserve gigabytes"
+  );
+}

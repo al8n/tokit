@@ -107,6 +107,25 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    refused; a stream with two defects may name the other one. Within a single event the order is
    unchanged — each fused arm runs its gather checks ahead of its walk checks.
 
+3. **A `Sink` reserves its event log at construction, from the source's length.** The log used
+   to grow from empty, doubling about sixteen times over a 57.7 KB document and copying roughly
+   4 MiB in the process. `Sink::new` now asks for the capacity that doubling would have arrived
+   at — the source's byte length rounded up to a power of two, capped at 65,536 events (2 MiB) —
+   so the same final block is bought once.
+
+   The predictor is sound only because a sink is compile-time restricted to trivia-surfacing
+   lexers: every source byte reaches it as a token or a reported lexer error, so the event count
+   tracks the byte count (0.80–1.11 events per byte across this crate's corpora). The **cap** is
+   what keeps that from being a liability for a grammar whose tokens are long — past it the byte
+   count stops being evidence and the `Vec` resumes doubling — and the **rounding** is what keeps
+   the reservation from backfiring: reserving the raw length under-reserves a lossless log, which
+   buys a large eager allocation *and* a double-sized reallocation on top, and measured slower
+   than reserving nothing at all. An empty source still allocates nothing.
+
+   Measured on the same 57.7 KB document, paired over fourteen rounds: **−5 µs (σ 8)**. The
+   allocation count and the ~4 MiB of copying go regardless of what the wall clock on one
+   allocator says.
+
 ## 0.8.0 (2026-07-31)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.
