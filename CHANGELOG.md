@@ -3,6 +3,29 @@
 All notable changes to this crate are documented here. The project follows semantic
 versioning; before 1.0, a minor bump (0.x → 0.(x+1)) signals a breaking change.
 
+<!--
+Cross-references inside this file NEVER use a bare GitHub heading slug. Six headings here
+are spelled `### Changed (breaking)` and seven `### Added`; GitHub numbers duplicate slugs in
+document order, so `#changed-breaking` means "whichever one comes first today" and prepending
+a section silently re-points every link that used it. It has happened: 53 references into
+0.8.0 came to point at a one-item stub the moment `## Unreleased` was opened above them.
+
+So a link target is an explicit anchor, declared on its own line one blank line above the
+heading it names, and named `<section-key>-<heading-slug>`:
+
+    <a id="0.8.0-changed-breaking"></a>
+
+    ### Changed (breaking)
+
+and referenced as `[16](#0.8.0-changed-breaking)`. The blank line is required. CommonMark
+reads `<a id="…"></a>` as a paragraph of inline HTML, and a renderer that instead reads a
+lone tag on its own line as an HTML *block* would swallow the line below it — the blank line
+is correct under both readings, and it gives the gate one deterministic place to look.
+
+When `## Unreleased` becomes `## 0.9.0 (date)`, its anchors and the links to them change key
+with it. `ci/changelog_structure.sh` enforces every clause above and will red until they do.
+-->
+
 ## Unreleased
 
 ### Changed (breaking)
@@ -69,63 +92,63 @@ numbered entry below that carries the full reasoning.
 
 | Old behaviour | New behaviour | Why, in one line | Item |
 |---|---|---|---|
-| A `SimpleSpan` const mutator silently published an inverted or wrapped span — `with_end_const(2)` on `(5, 15)` gave `(5, 2)`; `bump_start_const` at `(MAX-1, MAX)` gave `(0, usize::MAX)` in release | panics: `end must be greater than or equal to start` / `span bump overflows usize` | The span was **already corrupt** and the program was carrying it. The panic is the bug becoming visible, not a new refusal. | [36](#changed-breaking) |
-| A properly closed `separated_by_*().delimited()` list ignored `at_least` / `at_most` / `bounded` and the separator policy | the policy runs: a recovering emitter records the diagnostic, a fail-fast one returns `Err` where it returned `Ok` | The end-state pass was dead code on that exit only. | [1](#changed-breaking) |
-| `TooMany` carried the running count, or the limit itself (`found 2 … exceeds … 2`) | `limit() + 1`, emitted once per construct | Payloads that contradicted themselves. | [2](#changed-breaking) |
-| `FullContainer` re-emitted per dropped element, counting past its own capacity | once per construct, on the whole-construct span | | [3](#changed-breaking) |
-| Bounded containers turned a satisfied `at_least` into `TooFew`, and swallowed a violated `at_most` | bounds judge the elements **parsed**, not the ones stored | Only bounded-capacity containers were affected. | [4](#changed-breaking) |
-| `SeparatorHandler::on_separator` received only leading and duplicate separators | receives every separator in source order | It received the exact complement of its documented contract. Opt out with `OBSERVES_SEPARATORS`. | [5](#changed-breaking) |
-| Delimited separated drivers returned a span measured from the first element on some exits | the whole construct's span, opener through closer, on every success exit | | [6](#changed-breaking) |
-| A dialect mapper returning an out-of-language kind reached `finish` as `Err(InvalidDialectKind)` | panics at the emit site, in every build | It is a dialect bug, not an input condition; no parse input can provoke it. | [14](#changed-breaking) |
-| A panic in caller code during `skip_until` lost the in-flight token and the skipped prefix | the stream is left consistent on the panic path too | Only observable to a host that catches a panic across a parse and keeps using the input. | [9](#changed-breaking) |
-| `Emitter::commit_token`'s observer ran before the committed position was published | runs **after** the position is published, before the replaced pair is dropped | An observer that panics no longer leaves the input naming a token the stream does not hold. | [10](#changed-breaking) |
-| An `Incomplete` scan exit committed the frontier it reached | exits as it entered | A refill driver resumed at a half-consumed position. | [12](#changed-breaking) |
-| A terminal scanner stop (resource limit, poison boundary) reached callers as an ordinary end-of-input **decline** | surfaces as a terminal error **when your emitter accepts the diagnostic**, and recovery re-raises it instead of retrying. A *rejecting* emitter's `Err` is built from your lexer's error value and carries no mark, so recovery can still spend that trip — `MaybeTerminal`'s doc has that path and the arm it needs | Recovery was retrying against a scanner that had already given up. | [16](#changed-breaking) |
-| Collection drivers could stall on zero progress, or mask a terminal stop as a successful end | both exits are errors | | [17](#changed-breaking) |
-| `…, expected expected '}'` in `MissingToken` and `UnexpectedToken` renders | `…, expected '}'` | `Expected`'s own `Display` already supplies the word. **Re-bless frozen renders.** | [37](#changed-breaking) |
-| `UnexpectedEnd`'s derived `Debug` / `Eq` / `Hash` | include a `terminal: bool` field | Shipped four rounds ago and disclosed nowhere until now. **Re-bless frozen renders.** | [16](#changed-breaking) |
-| `Unclosed`'s derived `Debug`; `SeparatedError` / `MissingToken` derived `Debug`, `Eq`, `Hash` | include `kind` / the name channel | See *Debug and rendered output* below for the complete list. | [20](#changed-breaking), [28](#changed-breaking) |
-| A slice-choice id out of range panicked with `index out of bounds` | `choice id {id} out of bounds for {len} branches` | Message text only; reachability is unchanged. | [35](#changed-breaking) |
-| A wrong opening delimiter produced **two** diagnostics naming the same token — once as the wrong opener, once again as a close miss | exactly one | Only under a recording emitter, and only while the first report is still live in the log. Assertions that counted diagnostics on the recovering path change. | [40](#changed-breaking) |
-| A second same-power `PrattInfix::Neither` operator in one chain folded left in silence — `7 = 1 ; 2 ; 3` returned `Ok(((7=(1;2));3))` with the **whole input consumed**, so no end-of-input check had anything to catch | the parse fails with `NonAssociativeChain`, the operator left on the input unconsumed | Handing the operator up re-associates the chain across an enclosing frame that cannot know the constraint. Not terminal: recovery may still spend it. | [41](#changed-breaking) |
-| Recursive descent was unbounded — a deep enough expression exhausted the native stack and **aborted the process** | a shared per-input depth budget, **64** by default, failing the parse with the always-terminal `RecursionLimitReached` | An abort carries no diagnostic and cannot be caught; a refusal names the knob that raises it. `RecursionLimiter::unlimited()` restores 0.7.3's behaviour. | [42](#changed-breaking) |
-| `RecursionLimiter::new` / `Default`, and `Limiter::new` / `Limiter::with_token_tracker`, defaulted to depth **500** | **64** | Reaches code with no pratt parser in it: the same type doubles as a **lexer-side** nesting tracker in a `State` / `Extras` position. | [43](#changed-breaking) |
-| Your own `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 16 new inherent items and 6 new defaulted trait methods enter the method space. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
-| — | a new `warning: unused import` naming one of *your* combinator traits | That warning is the **only** breadcrumb the silent case gives you: the steal stranded the import. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
+| A `SimpleSpan` const mutator silently published an inverted or wrapped span — `with_end_const(2)` on `(5, 15)` gave `(5, 2)`; `bump_start_const` at `(MAX-1, MAX)` gave `(0, usize::MAX)` in release | panics: `end must be greater than or equal to start` / `span bump overflows usize` | The span was **already corrupt** and the program was carrying it. The panic is the bug becoming visible, not a new refusal. | [36](#0.8.0-changed-breaking) |
+| A properly closed `separated_by_*().delimited()` list ignored `at_least` / `at_most` / `bounded` and the separator policy | the policy runs: a recovering emitter records the diagnostic, a fail-fast one returns `Err` where it returned `Ok` | The end-state pass was dead code on that exit only. | [1](#0.8.0-changed-breaking) |
+| `TooMany` carried the running count, or the limit itself (`found 2 … exceeds … 2`) | `limit() + 1`, emitted once per construct | Payloads that contradicted themselves. | [2](#0.8.0-changed-breaking) |
+| `FullContainer` re-emitted per dropped element, counting past its own capacity | once per construct, on the whole-construct span | | [3](#0.8.0-changed-breaking) |
+| Bounded containers turned a satisfied `at_least` into `TooFew`, and swallowed a violated `at_most` | bounds judge the elements **parsed**, not the ones stored | Only bounded-capacity containers were affected. | [4](#0.8.0-changed-breaking) |
+| `SeparatorHandler::on_separator` received only leading and duplicate separators | receives every separator in source order | It received the exact complement of its documented contract. Opt out with `OBSERVES_SEPARATORS`. | [5](#0.8.0-changed-breaking) |
+| Delimited separated drivers returned a span measured from the first element on some exits | the whole construct's span, opener through closer, on every success exit | | [6](#0.8.0-changed-breaking) |
+| A dialect mapper returning an out-of-language kind reached `finish` as `Err(InvalidDialectKind)` | panics at the emit site, in every build | It is a dialect bug, not an input condition; no parse input can provoke it. | [14](#0.8.0-changed-breaking) |
+| A panic in caller code during `skip_until` lost the in-flight token and the skipped prefix | the stream is left consistent on the panic path too | Only observable to a host that catches a panic across a parse and keeps using the input. | [9](#0.8.0-changed-breaking) |
+| `Emitter::commit_token`'s observer ran before the committed position was published | runs **after** the position is published, before the replaced pair is dropped | An observer that panics no longer leaves the input naming a token the stream does not hold. | [10](#0.8.0-changed-breaking) |
+| An `Incomplete` scan exit committed the frontier it reached | exits as it entered | A refill driver resumed at a half-consumed position. | [12](#0.8.0-changed-breaking) |
+| A terminal scanner stop (resource limit, poison boundary) reached callers as an ordinary end-of-input **decline** | surfaces as a terminal error **when your emitter accepts the diagnostic**, and recovery re-raises it instead of retrying. A *rejecting* emitter's `Err` is built from your lexer's error value and carries no mark, so recovery can still spend that trip — `MaybeTerminal`'s doc has that path and the arm it needs | Recovery was retrying against a scanner that had already given up. | [16](#0.8.0-changed-breaking) |
+| Collection drivers could stall on zero progress, or mask a terminal stop as a successful end | both exits are errors | | [17](#0.8.0-changed-breaking) |
+| `…, expected expected '}'` in `MissingToken` and `UnexpectedToken` renders | `…, expected '}'` | `Expected`'s own `Display` already supplies the word. **Re-bless frozen renders.** | [37](#0.8.0-changed-breaking) |
+| `UnexpectedEnd`'s derived `Debug` / `Eq` / `Hash` | include a `terminal: bool` field | Shipped four rounds ago and disclosed nowhere until now. **Re-bless frozen renders.** | [16](#0.8.0-changed-breaking) |
+| `Unclosed`'s derived `Debug`; `SeparatedError` / `MissingToken` derived `Debug`, `Eq`, `Hash` | include `kind` / the name channel | See *Debug and rendered output* below for the complete list. | [20](#0.8.0-changed-breaking), [28](#0.8.0-changed-breaking) |
+| A slice-choice id out of range panicked with `index out of bounds` | `choice id {id} out of bounds for {len} branches` | Message text only; reachability is unchanged. | [35](#0.8.0-changed-breaking) |
+| A wrong opening delimiter produced **two** diagnostics naming the same token — once as the wrong opener, once again as a close miss | exactly one | Only under a recording emitter, and only while the first report is still live in the log. Assertions that counted diagnostics on the recovering path change. | [40](#0.8.0-changed-breaking) |
+| A second same-power `PrattInfix::Neither` operator in one chain folded left in silence — `7 = 1 ; 2 ; 3` returned `Ok(((7=(1;2));3))` with the **whole input consumed**, so no end-of-input check had anything to catch | the parse fails with `NonAssociativeChain`, the operator left on the input unconsumed | Handing the operator up re-associates the chain across an enclosing frame that cannot know the constraint. Not terminal: recovery may still spend it. | [41](#0.8.0-changed-breaking) |
+| Recursive descent was unbounded — a deep enough expression exhausted the native stack and **aborted the process** | a shared per-input depth budget, **64** by default, failing the parse with the always-terminal `RecursionLimitReached` | An abort carries no diagnostic and cannot be caught; a refusal names the knob that raises it. `RecursionLimiter::unlimited()` restores 0.7.3's behaviour. | [42](#0.8.0-changed-breaking) |
+| `RecursionLimiter::new` / `Default`, and `Limiter::new` / `Limiter::with_token_tracker`, defaulted to depth **500** | **64** | Reaches code with no pratt parser in it: the same type doubles as a **lexer-side** nesting tracker in a `State` / `Extras` position. | [43](#0.8.0-changed-breaking) |
+| Your own `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 16 new inherent items and 6 new defaulted trait methods enter the method space. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
+| — | a new `warning: unused import` naming one of *your* combinator traits | That warning is the **only** breadcrumb the silent case gives you: the steal stranded the import. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 
 #### These fail to compile. Your build will point at every one.
 
 | Old spelling | New spelling | Why, in one line | Item |
 |---|---|---|---|
-| `ParseCtx` | `ComposableParseContext` | Renamed and completed with `FromTokenErrors`, so one bound elaborates to the whole leaf surface. | [27](#changed-breaking) |
-| `X::parse_of`, `X::try_parse_of`, `list_of`, … (167 items) | `X::parse`, `X::try_parse`, `list`, … | `Lang` is inferred from the input. A call site that spelled its generics gains one argument in last position; `_` is almost always enough. | [29](#changed-breaking) |
-| `Parser<…, Error, …>` with eight constructors | `Parser` without the `Error` phantom; four constructors | | [32](#changed-breaking) |
-| `E: From<Unclosed<Paren, …>> + From<Unclosed<Brace, …>> + …` | `E: FromUnclosed<'inp, L, Lang>` | One bound covers every pair. A residual per-delimiter bound now fails as a bare `E0277` — `From` is foreign and cannot be annotated. | [28](#changed-breaking) |
-| `match err.name_ref() { "[]" => … }` | `match err.kind() { DelimiterKind::Bracket { .. } => … }` | A display name was never a dispatch key: `"[]"` is correct for *any* bracket-shaped pair. Custom pairs declare `DelimiterKind::Custom`. | [28](#changed-breaking) |
-| `impl Delimiter for MyPair` | `const KIND: DelimiterKind = DelimiterKind::Custom("…")` required | No default: a defaulted identity is one the author never chose. | [28](#changed-breaking) |
-| `Unclosed::new(span, name)` | `Unclosed::new(span, kind, name)` | Or reach for `Unclosed::paren` and siblings. | [28](#changed-breaking) |
-| `Paren<(), (), LangA>` satisfying `Delimiter<'_, L, LangB>` | marker brand **is** the context language | A pair or separator copy-pasted out of a sibling dialect used to type-check silently. | [30](#changed-breaking), [33](#changed-breaking) |
-| `UnclosedParen<S, Lang>` = `Unclosed<Paren<(),(),()>, S, Lang>` | `Unclosed<Paren<(),(),Lang>, S, Lang>` | Unchanged at `Lang = ()`. | [33](#changed-breaking) |
-| `T::Kind: 'static` restated at five projections | hoisted to the `Token` trait | | [31](#changed-breaking) |
-| `match rhs { … }` over `PrattRHS` | add an `End` arm | Deliberately not `#[non_exhaustive]`: a wildcard arm is the silent end-swallowing this removes. | [21](#changed-breaking) |
-| `PrattPower::next` / `prev` | removed | They were the arithmetic that made the floor bugs expressible. Breaks callers **and** implementors. | [24](#changed-breaking) |
-| `impl Cache { fn rewind(…) }` | delete it | Rollback had two possible owners and they disagreed. No caller loses a capability. | [7](#changed-breaking) |
-| A `Cache` whose `push_front` can panic | must not panic on the restore path | Vacuously conforming before; not now. | [8](#changed-breaking) |
-| A `Lexer` whose `Span`/`Offset` ops can panic on the settle path | must not panic | The one window in the consume path that cannot be closed by reordering. `Clone`, not `Copy`, is still the bound. | [11](#changed-breaking) |
-| `Sink::new(emitter, map, ERR, GAP)` then `sink.finish(ROOT, source)` | `Sink::new(source, emitter, CstProfile::new(map, ERR, GAP))` then `sink.finish(ROOT)` | The source is bound once, at construction. | [13](#changed-breaking) |
-| `emitter.cst_finish()` | `emitter.cst_finish(KIND)` | The kind the matching `cst_start` used. It is a **defaulted** method, so only callers and overriding implementors are affected. *Found by the mechanical API diff; disclosed nowhere before.* | [15](#changed-breaking) |
-| `Sink<'_, L, Sink<…>>` | a compile error — the inner emitter must be `ValueKeyedEmitter` | Two mark spaces claiming the same keys. | [18](#changed-breaking) |
-| `inp.begin_point(); … inp.commit_point();` | `let p = inp.begin_point(); … inp.commit_point(p);` | Nothing tied a settle to the point it settled. Points settle newest-first; four misuse conditions panic by name. | [19](#changed-breaking) |
-| `let (o, e, m) = missing.into_components();` | `let (o, e, m, name) = …` | And `SeparatedError`'s pair becomes a triple. `..` is not available on a tuple pattern, so the compiler points at every site. | [20](#changed-breaking) |
-| An error type without `From<UnexpectedEot<…>>` on the peek / `Expect` / fold / `Repeated` surfaces | add it, or name `ComposableParseContext` | A terminal stop has to be expressible as an error. | [16](#changed-breaking), [17](#changed-breaking) |
-| An error type without `MaybeTerminal` | `impl MaybeTerminal for MyError {}` is enough | Unless the type can itself carry a terminal stop, and **three** that this crate builds and marks can reach it: an `UnexpectedEnd` whose flag the scanner may raise; a `RecursionLimitReached` — new in this release, required of every pratt-driving error type — terminal for **every** value; and a `SessionRefusal`, terminal for every value too but *not* a `MaybeTerminal` implementor, so its arm is written `true` by hand. Answer for each one you store. An arm left at `false` is spent as a recoverable failure — except the refusal, which `PartialSession::parse` asserts on unconditionally, so that one panics a release build. Those three are what the crate knows it produces, **not** a proof that nothing else is terminal: a scanner trip a *rejecting* emitter refuses propagates as that emitter's `Err`, built from your lexer's error value and unmarked, so the arm holding your lexer error may need answering too — `MaybeTerminal`'s doc has that path and the rule for it. | [16](#changed-breaking), [46](#changed-breaking) |
-| `<[P; N] as ParseChoice>::Id::new(i)` (0-based) | `::new(i + 1)` (1-based) | `RangedUsize`'s bounds are inclusive, so the old id space admitted `N` and every `[P; 0]` id panicked. Tuple choices are unaffected. | [35](#changed-breaking) |
-| `match op { … }` over `fuzz::Op` without a wildcard | add an `IsExhausted` arm | `fuzz` feature only. *Found by the mechanical API diff; disclosed nowhere before.* | [38](#changed-breaking) |
-| `dyn SeparatorHandler` | no longer object-safe | `OBSERVES_SEPARATORS` is an associated const. Nothing in this crate used it. | [5](#changed-breaking) |
-| `let (e, c) = ctx.into_components();` | `let (e, c, recursion) = …` | `InputContext` carries the recursion budget now, and a decomposition that dropped it would hand the input an unconfigured one. `..` is not available on a tuple pattern, so the compiler points at every site. | [45](#changed-breaking) |
-| An error type driving either pratt engine without `From<RecursionLimitReached<…>>` and `From<NonAssociativeChain<…>>` | add both | The engines **return** these two rather than emitting them, so the entry-point bounds ask for them. Two `From` impls; every example in this repo shows the shape. | [46](#changed-breaking) |
-| `parser.labelled("x")` resolving to your own trait's method, that trait in scope | `E0034`, when yours sits at the **same pick** | Six new defaulted names on `ParseInput` / `TryParseInput`. The fix is UFCS; rustc prints the two suggestions. | [source-breaking additions that fail *loudly*](#source-breaking-additions-that-fail-loudly) |
-| `use tokora::*;` — or a **module** glob such as `use tokora::error::*;` / `use tokora::input::*;` — beside another glob exporting the same name | `E0659`, or `ambiguous_glob_imports` for a *macro* name on rustc ≥ 1.95 | 16 new glob-reachable names — `select!` against `tokio::select!` is the real one. Three of them reach you only through a module glob, never the root: `RecursionLimitReached` and `NonAssociativeChain` via `tokora::error`, `Descent` via `tokora::input`. Measured on three toolchains; the remedy differs by name kind. | [source-breaking additions that fail *loudly*](#source-breaking-additions-that-fail-loudly) |
+| `ParseCtx` | `ComposableParseContext` | Renamed and completed with `FromTokenErrors`, so one bound elaborates to the whole leaf surface. | [27](#0.8.0-changed-breaking) |
+| `X::parse_of`, `X::try_parse_of`, `list_of`, … (167 items) | `X::parse`, `X::try_parse`, `list`, … | `Lang` is inferred from the input. A call site that spelled its generics gains one argument in last position; `_` is almost always enough. | [29](#0.8.0-changed-breaking) |
+| `Parser<…, Error, …>` with eight constructors | `Parser` without the `Error` phantom; four constructors | | [32](#0.8.0-changed-breaking) |
+| `E: From<Unclosed<Paren, …>> + From<Unclosed<Brace, …>> + …` | `E: FromUnclosed<'inp, L, Lang>` | One bound covers every pair. A residual per-delimiter bound now fails as a bare `E0277` — `From` is foreign and cannot be annotated. | [28](#0.8.0-changed-breaking) |
+| `match err.name_ref() { "[]" => … }` | `match err.kind() { DelimiterKind::Bracket { .. } => … }` | A display name was never a dispatch key: `"[]"` is correct for *any* bracket-shaped pair. Custom pairs declare `DelimiterKind::Custom`. | [28](#0.8.0-changed-breaking) |
+| `impl Delimiter for MyPair` | `const KIND: DelimiterKind = DelimiterKind::Custom("…")` required | No default: a defaulted identity is one the author never chose. | [28](#0.8.0-changed-breaking) |
+| `Unclosed::new(span, name)` | `Unclosed::new(span, kind, name)` | Or reach for `Unclosed::paren` and siblings. | [28](#0.8.0-changed-breaking) |
+| `Paren<(), (), LangA>` satisfying `Delimiter<'_, L, LangB>` | marker brand **is** the context language | A pair or separator copy-pasted out of a sibling dialect used to type-check silently. | [30](#0.8.0-changed-breaking), [33](#0.8.0-changed-breaking) |
+| `UnclosedParen<S, Lang>` = `Unclosed<Paren<(),(),()>, S, Lang>` | `Unclosed<Paren<(),(),Lang>, S, Lang>` | Unchanged at `Lang = ()`. | [33](#0.8.0-changed-breaking) |
+| `T::Kind: 'static` restated at five projections | hoisted to the `Token` trait | | [31](#0.8.0-changed-breaking) |
+| `match rhs { … }` over `PrattRHS` | add an `End` arm | Deliberately not `#[non_exhaustive]`: a wildcard arm is the silent end-swallowing this removes. | [21](#0.8.0-changed-breaking) |
+| `PrattPower::next` / `prev` | removed | They were the arithmetic that made the floor bugs expressible. Breaks callers **and** implementors. | [24](#0.8.0-changed-breaking) |
+| `impl Cache { fn rewind(…) }` | delete it | Rollback had two possible owners and they disagreed. No caller loses a capability. | [7](#0.8.0-changed-breaking) |
+| A `Cache` whose `push_front` can panic | must not panic on the restore path | Vacuously conforming before; not now. | [8](#0.8.0-changed-breaking) |
+| A `Lexer` whose `Span`/`Offset` ops can panic on the settle path | must not panic | The one window in the consume path that cannot be closed by reordering. `Clone`, not `Copy`, is still the bound. | [11](#0.8.0-changed-breaking) |
+| `Sink::new(emitter, map, ERR, GAP)` then `sink.finish(ROOT, source)` | `Sink::new(source, emitter, CstProfile::new(map, ERR, GAP))` then `sink.finish(ROOT)` | The source is bound once, at construction. | [13](#0.8.0-changed-breaking) |
+| `emitter.cst_finish()` | `emitter.cst_finish(KIND)` | The kind the matching `cst_start` used. It is a **defaulted** method, so only callers and overriding implementors are affected. *Found by the mechanical API diff; disclosed nowhere before.* | [15](#0.8.0-changed-breaking) |
+| `Sink<'_, L, Sink<…>>` | a compile error — the inner emitter must be `ValueKeyedEmitter` | Two mark spaces claiming the same keys. | [18](#0.8.0-changed-breaking) |
+| `inp.begin_point(); … inp.commit_point();` | `let p = inp.begin_point(); … inp.commit_point(p);` | Nothing tied a settle to the point it settled. Points settle newest-first; four misuse conditions panic by name. | [19](#0.8.0-changed-breaking) |
+| `let (o, e, m) = missing.into_components();` | `let (o, e, m, name) = …` | And `SeparatedError`'s pair becomes a triple. `..` is not available on a tuple pattern, so the compiler points at every site. | [20](#0.8.0-changed-breaking) |
+| An error type without `From<UnexpectedEot<…>>` on the peek / `Expect` / fold / `Repeated` surfaces | add it, or name `ComposableParseContext` | A terminal stop has to be expressible as an error. | [16](#0.8.0-changed-breaking), [17](#0.8.0-changed-breaking) |
+| An error type without `MaybeTerminal` | `impl MaybeTerminal for MyError {}` is enough | Unless the type can itself carry a terminal stop, and **three** that this crate builds and marks can reach it: an `UnexpectedEnd` whose flag the scanner may raise; a `RecursionLimitReached` — new in this release, required of every pratt-driving error type — terminal for **every** value; and a `SessionRefusal`, terminal for every value too but *not* a `MaybeTerminal` implementor, so its arm is written `true` by hand. Answer for each one you store. An arm left at `false` is spent as a recoverable failure — except the refusal, which `PartialSession::parse` asserts on unconditionally, so that one panics a release build. Those three are what the crate knows it produces, **not** a proof that nothing else is terminal: a scanner trip a *rejecting* emitter refuses propagates as that emitter's `Err`, built from your lexer's error value and unmarked, so the arm holding your lexer error may need answering too — `MaybeTerminal`'s doc has that path and the rule for it. | [16](#0.8.0-changed-breaking), [46](#0.8.0-changed-breaking) |
+| `<[P; N] as ParseChoice>::Id::new(i)` (0-based) | `::new(i + 1)` (1-based) | `RangedUsize`'s bounds are inclusive, so the old id space admitted `N` and every `[P; 0]` id panicked. Tuple choices are unaffected. | [35](#0.8.0-changed-breaking) |
+| `match op { … }` over `fuzz::Op` without a wildcard | add an `IsExhausted` arm | `fuzz` feature only. *Found by the mechanical API diff; disclosed nowhere before.* | [38](#0.8.0-changed-breaking) |
+| `dyn SeparatorHandler` | no longer object-safe | `OBSERVES_SEPARATORS` is an associated const. Nothing in this crate used it. | [5](#0.8.0-changed-breaking) |
+| `let (e, c) = ctx.into_components();` | `let (e, c, recursion) = …` | `InputContext` carries the recursion budget now, and a decomposition that dropped it would hand the input an unconfigured one. `..` is not available on a tuple pattern, so the compiler points at every site. | [45](#0.8.0-changed-breaking) |
+| An error type driving either pratt engine without `From<RecursionLimitReached<…>>` and `From<NonAssociativeChain<…>>` | add both | The engines **return** these two rather than emitting them, so the entry-point bounds ask for them. Two `From` impls; every example in this repo shows the shape. | [46](#0.8.0-changed-breaking) |
+| `parser.labelled("x")` resolving to your own trait's method, that trait in scope | `E0034`, when yours sits at the **same pick** | Six new defaulted names on `ParseInput` / `TryParseInput`. The fix is UFCS; rustc prints the two suggestions. | [source-breaking additions that fail *loudly*](#0.8.0-source-breaking-additions-that-fail-loudly) |
+| `use tokora::*;` — or a **module** glob such as `use tokora::error::*;` / `use tokora::input::*;` — beside another glob exporting the same name | `E0659`, or `ambiguous_glob_imports` for a *macro* name on rustc ≥ 1.95 | 16 new glob-reachable names — `select!` against `tokio::select!` is the real one. Three of them reach you only through a module glob, never the root: `RecursionLimitReached` and `NonAssociativeChain` via `tokora::error`, `Descent` via `tokora::input`. Measured on three toolchains; the remedy differs by name kind. | [source-breaking additions that fail *loudly*](#0.8.0-source-breaking-additions-that-fail-loudly) |
 
 #### Additive — nothing to do, listed so you know it exists
 
@@ -159,9 +182,9 @@ This release adds 16 glob-reachable root/module names, one new public module
 (`tokora::cst::kinds`, its own glob namespace), 6 trait-declared methods, and 16 inherent
 items — **13 receiver methods and 3 associated functions**, which resolve by different rules
 and are listed separately below for that reason. The items themselves are under
-[Added](#added) with the rest of the release. The lists here are generated from a
+[Added](#0.8.0-added) with the rest of the release. The lists here are generated from a
 rustdoc-JSON diff of the two sides at the `std,logos,trace,rowan` feature point; the six
-inherent items and three glob names that items [41–46](#changed-breaking) add were taken from
+inherent items and three glob names that items [41–46](#0.8.0-changed-breaking) add were taken from
 the branch diff under the same criteria rather than from a separate hand audit.
 
 ### The rule for new names, stated as weakly as it can honestly be stated
@@ -186,6 +209,8 @@ So the rule above is the only form of it worth relying on, and the practical adv
 Everything after this point is *what was measured*, on the toolchains named. It is useful
 for debugging an actual collision. It is not a guarantee, and a spelling not listed here is
 not thereby safe.
+
+<a id="0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site"></a>
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
@@ -301,6 +326,8 @@ What was measured, on rustc 1.87, 1.95 stable and 1.97-nightly:
   its methods was re-resolved. If the trait is declared in the same file, you get nothing
   at all. The remedy either way is UFCS: `MyTrait::labelled(parser, "name")`.
 
+<a id="0.8.0-source-breaking-additions-that-fail-loudly"></a>
+
 ### Source-breaking additions that fail *loudly*
 
 - **`E0034`, "multiple applicable items in scope"**, when one of the 6 new defaulted method
@@ -354,7 +381,7 @@ What was measured, on rustc 1.87, 1.95 stable and 1.97-nightly:
 
 **Why the names were not changed instead.** 0.8.0 is a breaking release and these are the
 right names. One name *was* removed rather than disclosed — see `pinned` under
-[Added](#added) — because it was the only addition that planted a candidate on every
+[Added](#0.8.0-added) — because it was the only addition that planted a candidate on every
 `Sized` type in your program, and the argument for accepting that was the loudness
 guarantee the turbofish spelling refuted. A source census of the known consumer, run
 during development, found zero declarations of any of these names and zero
@@ -362,6 +389,8 @@ during development, found zero declarations of any of these names and zero
 its script is not shipped here — so treat it as a development note rather than a check you
 can repeat.** It also saw one consumer at one commit. The disclosure above is the control;
 the census was never more than corroboration.
+
+<a id="0.8.0-changed-breaking"></a>
 
 ### Changed (breaking)
 
@@ -1397,6 +1426,8 @@ source-identity refusals — only where an unequal reference *proves* an unequal
 the emitter is bound to a strictly shorter slice of that source than the parse reads. Neither is
 something a correct program produces: the second refuses only the direction that can smuggle
 structure, and leaves the longer-bound streaming direction alone.
+
+<a id="0.8.0-added"></a>
 
 ### Added
 
