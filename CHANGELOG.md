@@ -182,6 +182,156 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
 
    — *(#148 R1)*
 
+### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+**This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**
+added, measured for the first time now, and it is filed here rather than folded into the shipped
+0.8.0 section because it is news a 0.7.3 consumer needs and 0.8.0's own text does not carry it.
+
+#### `RecursionLimiter::unlimited` — measured SILENT, and it is your call site to check
+
+**You are exposed if you wrote an `unlimited()` associated function on `RecursionLimiter`.** That
+type is public in **0.7.3**, so this is not hypothetical: any consumer holding one already had
+somewhere to hang the name, and 0.8.0's
+[`RecursionLimiter::unlimited`](https://docs.rs/tokora/latest/tokora/state/recursion_tracker/struct.RecursionLimiter.html#method.unlimited)
+now competes for it by path.
+
+Reproduced two-sided by `ci/name_collision/`, base `60f27a3` against this branch:
+
+```text
+SILENT  unlimited/discarded    base=witness=1  head=witness=0
+```
+
+Both sides compile, **neither emits any diagnostic**, and the two run different functions: yours
+on 0.7.3, tokora's on 0.8.0 and later. `unlimited/used` is `loud` on the same probe, so a
+discarded return is the whole of the difference — `RecursionLimiter` carries no `#[must_use]`, and
+`unused_must_use` does not fire on a plain struct. **The remedy is UFCS**: `MyTrait::unlimited(..)`
+or `<RecursionLimiter as MyExt>::unlimited()` pins your function by name and is immune to this.
+
+`#[must_use]` was considered and rejected as the fix: it would not reach the case that matters —
+a consumer who *assigns* the result, which the harness cannot generate and which stays silent
+regardless — while firing on legitimate discards. Disclosure is the honest instrument here.
+
+Two things about *why this arrives late*, both of which are the point rather than an excuse:
+
+- 0.8.0's exposure table already lists `unlimited` under "you wrote it on `RecursionLimiter`", so
+  the *name* was disclosed. What was not disclosed is that this one is **measured silent**, in a
+  category the harness's README says a silent row "would be news" in — the first
+  `inherent_assoc_fn` row ever to score one. The probe could not construct it at the time: #147
+  introduced the owner and `gen_probe.py` had no template for it, so every row on that owner came
+  back `FATAL` — an *incomplete* verdict, which is not a clean one. #148's Stage A added the
+  templates and the `new-owner` verdict, and the finding fell out immediately.
+- It is disclosed on **this** branch and could not wait. The probe's inventory is a two-sided
+  delta: once this merges, `unlimited` exists on both sides, the row leaves every future plan, and
+  the harness can never re-litigate it. A green run after that would mean "not probed", not "not
+  colliding".
+
+Recorded in `ci/name_collision/disclosed.txt`, whose fourth-and-fifth-row split now states plainly
+that the earlier four ride a bounded receiver and **this one does not**: `RecursionLimiter` is a
+concrete public struct with no bound to reject anybody.
+
+### Performance
+
+3. **`Sink::finish` replays the event log once instead of twice.** Materialization used to make
+   a full gather pass over every event before the walk that drives the builder: it validated
+   kinds and retro-wrap targets, collected the recorded lexer-error spans, and read the
+   uncovered runs off the token spans so the walk could tile a run at the token it trails. All
+   three now happen inside the walk.
+
+   The canaries move to the arm of the event they were already about. The error spans are still
+   merged into a **set** and the coverage verdict is still order-independent — it is simply
+   decided after the walk instead of before it, which it can be because
+   [`UncoveredGap`](https://docs.rs/tokora/latest/tokora/cst/enum.FinishError.html) was only
+   ever consumed at the end. The run lookahead is now a *monotone cursor*: a run's tile is armed
+   at the token that opens it and forced at the next builder-visible event, which resolves its
+   far end by scanning forward to the next token — never rescanning, and skipping outright every
+   region whose run the following token resolves for free.
+
+   Measured on a 57.7 KB GraphQL document (64,085 events): **1,727 µs → 1,663 µs, −64 µs**,
+   with the produced tree byte-identical across the clean, perturbed, hand-broken and
+   every-prefix corpora.
+
+   **One behaviour changes, and only on a malformed stream: error precedence.** Two passes meant
+   every gather-class refusal (`ReservedKind`, `StaleStartAt`, `DanglingForwardParent`,
+   `InvalidDiagnosticSpan`, `InvalidDialectKind`) outranked every walk-class refusal
+   (`OrphanFinish`, `ImproperWrap`, `MismatchedFinish`, `OverlappingSpans`, `SpanOutOfBounds`,
+   `OffsetOverflow`) whatever their buffer indices. One pass reports the **first violation in
+   buffer order**. No stream that was refused is now accepted, and none that was accepted is now
+   refused; a stream with two defects may name the other one. Within a single event the order is
+   unchanged — each fused arm runs its gather checks ahead of its walk checks.
+
+4. **A `Sink` reserves its event log at construction, from the source's length.** The log used
+   to grow from empty, doubling about sixteen times over a 57.7 KB document and copying roughly
+   4 MiB in the process. `Sink::new` now asks for the capacity that doubling would have arrived
+   at — the source's byte length rounded up to a power of two, capped at 65,536 events (2 MiB) —
+   so the same final block is bought once.
+
+   The predictor is sound only because a sink is compile-time restricted to trivia-surfacing
+   lexers: every source byte reaches it as a token or a reported lexer error, so the event count
+   tracks the byte count (0.80–1.11 events per byte across this crate's corpora). The **cap** is
+   what keeps that from being a liability for a grammar whose tokens are long — past it the byte
+   count stops being evidence and the `Vec` resumes doubling — and the **rounding** is what keeps
+   the reservation from backfiring: reserving the raw length under-reserves a lossless log, which
+   buys a large eager allocation *and* a double-sized reallocation on top, and measured slower
+   than reserving nothing at all. An empty source still allocates nothing.
+
+   Measured on the same 57.7 KB document, paired over fourteen rounds: **−5 µs (σ 8)**. The
+   allocation count and the ~4 MiB of copying go regardless of what the wall clock on one
+   allocator says.
+
+
+5. **A `trace`-feature preview no longer costs the entire remaining source, every time.**
+ `InputRef`'s per-event source preview (`trace_preview`, behind the `trace` feature) built
+ `format!("{rest:?}")` over the *whole* remaining source — potentially the entire input, at
+ every instrumented combinator call (`peek`, `begin`/`commit`/`rollback`, `try_expect`,
+ several per token) — then walked that string a second time to count it, just to keep the
+ first 24 characters. Θ(remaining input) per event, unconditionally, made Θ(n²) over a parse:
+ benchmarking with `--all-features` (which enables `trace`) against a ~128 KiB fixture wrote
+ 133 MB of stderr in 5 minutes without finishing the cheapest bench cell's warm-up.
+
+ A bounded `fmt::Write` sink now aborts the `Debug` call as soon as it has enough output to
+ answer the 24-character window and the ellipsis, so the preview never walks more of the
+ remaining source than a `Debug` impl's own internal batching forces. Measured against this
+ crate's own `input_scan` bench fixture shape (newline-delimited, digits and punctuation): a
+ single preview at offset 0 goes from 250µs to 208ns at 128 KiB and from 10.5ms to 958ns at
+ 8 MiB; a full traced parse over that shape scales linearly in token count on both sides of
+ the fix, at a per-token cost that no longer grows with how much input is left.
+
+ That bound is conditional, not universal: it holds for a `Debug` impl that writes
+ incrementally, and it does not hold for one that front-loads its entire output before its
+ first write. Every `Source`/`Slice` pairing this crate ships was checked against that line;
+ the guarantee is asserted for exactly these, not for `Source` in general.
+
+ A third shape is not narrow at all, and is the only one of the three reachable from outside
+ this crate. `Source`'s `Slice` associated type is public and implementable downstream, and
+ `Slice`'s own bound (`PartialEq + Eq + Debug`) puts no streaming requirement on its `Debug`
+ impl. A conforming impl may scan, escape and allocate its *entire* remaining slice into a
+ temporary and call `write_str` once; this sink cannot shorten work that already ran before
+ it was ever invoked, so the cost stays exactly the `O(remaining source)` this fix exists to
+ remove. Output is still correct even here — the window and the ellipsis decision come from a
+ genuine prefix of the untruncated dump no matter how it was produced — so this is a cost
+ gap, not a correctness one, but it is the most severe of the three: unbounded, not merely
+ narrower, and reachable with an ordinary trait implementation, no unsafe or misuse of this
+ crate required. No in-tree backing does this today; `bounded_debug`'s doc comment and its
+ `bounded_debug_is_correct_but_unbounded_for_a_front_loading_debug_impl` test carry a fixture
+ that exercises exactly this shape.
+
+ The other two remain narrower and **found, not fixed**: a `[u8]`-shaped backing (`[u8]`,
+ `HipByt`, the `smol-bytes` byte types) bounds its allocation and escaping work but still
+ iterates every remaining element, because `Formatter::debug_list` drives its iterator to
+ completion independently of write failures; and a `str`-shaped backing (`str`, `HipStr`,
+ `Utf8Bytes`) still costs `O(run)` for a run of characters with nothing escape-worthy in it,
+ because `Debug for str` accumulates such a run before its first write. Realistic text —
+ which breaks such runs at newlines, quotes, etc. — is unaffected, but a contrived input like
+ this crate's own `int_run_source`/`comma_list_source` bench fixtures (digits and spaces for
+ ~128 KiB at a stretch) is not; `bytes::Bytes` and `bstr::BStr` have neither gap, since both
+ hand-write their `Debug` loop with `?` on every write.
+
+ Output is unchanged: every trace line reads identically to before this fix, character for
+ character, ellipsis included — checked against a spread of inputs (empty, short, exactly at
+ the 24-character boundary, far longer, and content that escapes heavily: newlines, tabs,
+ both quote characters, backslashes, non-ASCII, and a multi-byte scalar straddling the cut).
+
 ### Fixed
 
 - **The collection gate's own census could pass by not looking.** `parser::many`'s `GATE_CENSUS`
@@ -328,160 +478,9 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   below. This glob-row pair was the only place in the file carrying an allowlist on one side and
   none on the other. — *(#148, verification debt)*
 
-### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
-
-**This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**
-added, measured for the first time now, and it is filed here rather than folded into the shipped
-0.8.0 section because it is news a 0.7.3 consumer needs and 0.8.0's own text does not carry it.
-
-#### `RecursionLimiter::unlimited` — measured SILENT, and it is your call site to check
-
-**You are exposed if you wrote an `unlimited()` associated function on `RecursionLimiter`.** That
-type is public in **0.7.3**, so this is not hypothetical: any consumer holding one already had
-somewhere to hang the name, and 0.8.0's
-[`RecursionLimiter::unlimited`](https://docs.rs/tokora/latest/tokora/state/recursion_tracker/struct.RecursionLimiter.html#method.unlimited)
-now competes for it by path.
-
-Reproduced two-sided by `ci/name_collision/`, base `60f27a3` against this branch:
-
-```text
-SILENT  unlimited/discarded    base=witness=1  head=witness=0
-```
-
-Both sides compile, **neither emits any diagnostic**, and the two run different functions: yours
-on 0.7.3, tokora's on 0.8.0 and later. `unlimited/used` is `loud` on the same probe, so a
-discarded return is the whole of the difference — `RecursionLimiter` carries no `#[must_use]`, and
-`unused_must_use` does not fire on a plain struct. **The remedy is UFCS**: `MyTrait::unlimited(..)`
-or `<RecursionLimiter as MyExt>::unlimited()` pins your function by name and is immune to this.
-
-`#[must_use]` was considered and rejected as the fix: it would not reach the case that matters —
-a consumer who *assigns* the result, which the harness cannot generate and which stays silent
-regardless — while firing on legitimate discards. Disclosure is the honest instrument here.
-
-Two things about *why this arrives late*, both of which are the point rather than an excuse:
-
-- 0.8.0's exposure table already lists `unlimited` under "you wrote it on `RecursionLimiter`", so
-  the *name* was disclosed. What was not disclosed is that this one is **measured silent**, in a
-  category the harness's README says a silent row "would be news" in — the first
-  `inherent_assoc_fn` row ever to score one. The probe could not construct it at the time: #147
-  introduced the owner and `gen_probe.py` had no template for it, so every row on that owner came
-  back `FATAL` — an *incomplete* verdict, which is not a clean one. #148's Stage A added the
-  templates and the `new-owner` verdict, and the finding fell out immediately.
-- It is disclosed on **this** branch and could not wait. The probe's inventory is a two-sided
-  delta: once this merges, `unlimited` exists on both sides, the row leaves every future plan, and
-  the harness can never re-litigate it. A green run after that would mean "not probed", not "not
-  colliding".
-
-Recorded in `ci/name_collision/disclosed.txt`, whose fourth-and-fifth-row split now states plainly
-that the earlier four ride a bounded receiver and **this one does not**: `RecursionLimiter` is a
-concrete public struct with no bound to reject anybody.
-
-### Performance
-
-2. **`Sink::finish` replays the event log once instead of twice.** Materialization used to make
-   a full gather pass over every event before the walk that drives the builder: it validated
-   kinds and retro-wrap targets, collected the recorded lexer-error spans, and read the
-   uncovered runs off the token spans so the walk could tile a run at the token it trails. All
-   three now happen inside the walk.
-
-   The canaries move to the arm of the event they were already about. The error spans are still
-   merged into a **set** and the coverage verdict is still order-independent — it is simply
-   decided after the walk instead of before it, which it can be because
-   [`UncoveredGap`](https://docs.rs/tokora/latest/tokora/cst/enum.FinishError.html) was only
-   ever consumed at the end. The run lookahead is now a *monotone cursor*: a run's tile is armed
-   at the token that opens it and forced at the next builder-visible event, which resolves its
-   far end by scanning forward to the next token — never rescanning, and skipping outright every
-   region whose run the following token resolves for free.
-
-   Measured on a 57.7 KB GraphQL document (64,085 events): **1,727 µs → 1,663 µs, −64 µs**,
-   with the produced tree byte-identical across the clean, perturbed, hand-broken and
-   every-prefix corpora.
-
-   **One behaviour changes, and only on a malformed stream: error precedence.** Two passes meant
-   every gather-class refusal (`ReservedKind`, `StaleStartAt`, `DanglingForwardParent`,
-   `InvalidDiagnosticSpan`, `InvalidDialectKind`) outranked every walk-class refusal
-   (`OrphanFinish`, `ImproperWrap`, `MismatchedFinish`, `OverlappingSpans`, `SpanOutOfBounds`,
-   `OffsetOverflow`) whatever their buffer indices. One pass reports the **first violation in
-   buffer order**. No stream that was refused is now accepted, and none that was accepted is now
-   refused; a stream with two defects may name the other one. Within a single event the order is
-   unchanged — each fused arm runs its gather checks ahead of its walk checks.
-
-3. **A `Sink` reserves its event log at construction, from the source's length.** The log used
-   to grow from empty, doubling about sixteen times over a 57.7 KB document and copying roughly
-   4 MiB in the process. `Sink::new` now asks for the capacity that doubling would have arrived
-   at — the source's byte length rounded up to a power of two, capped at 65,536 events (2 MiB) —
-   so the same final block is bought once.
-
-   The predictor is sound only because a sink is compile-time restricted to trivia-surfacing
-   lexers: every source byte reaches it as a token or a reported lexer error, so the event count
-   tracks the byte count (0.80–1.11 events per byte across this crate's corpora). The **cap** is
-   what keeps that from being a liability for a grammar whose tokens are long — past it the byte
-   count stops being evidence and the `Vec` resumes doubling — and the **rounding** is what keeps
-   the reservation from backfiring: reserving the raw length under-reserves a lossless log, which
-   buys a large eager allocation *and* a double-sized reallocation on top, and measured slower
-   than reserving nothing at all. An empty source still allocates nothing.
-
-   Measured on the same 57.7 KB document, paired over fourteen rounds: **−5 µs (σ 8)**. The
-   allocation count and the ~4 MiB of copying go regardless of what the wall clock on one
-   allocator says.
 
 
-4. **A `trace`-feature preview no longer costs the entire remaining source, every time.**
- `InputRef`'s per-event source preview (`trace_preview`, behind the `trace` feature) built
- `format!("{rest:?}")` over the *whole* remaining source — potentially the entire input, at
- every instrumented combinator call (`peek`, `begin`/`commit`/`rollback`, `try_expect`,
- several per token) — then walked that string a second time to count it, just to keep the
- first 24 characters. Θ(remaining input) per event, unconditionally, made Θ(n²) over a parse:
- benchmarking with `--all-features` (which enables `trace`) against a ~128 KiB fixture wrote
- 133 MB of stderr in 5 minutes without finishing the cheapest bench cell's warm-up.
-
- A bounded `fmt::Write` sink now aborts the `Debug` call as soon as it has enough output to
- answer the 24-character window and the ellipsis, so the preview never walks more of the
- remaining source than a `Debug` impl's own internal batching forces. Measured against this
- crate's own `input_scan` bench fixture shape (newline-delimited, digits and punctuation): a
- single preview at offset 0 goes from 250µs to 208ns at 128 KiB and from 10.5ms to 958ns at
- 8 MiB; a full traced parse over that shape scales linearly in token count on both sides of
- the fix, at a per-token cost that no longer grows with how much input is left.
-
- That bound is conditional, not universal: it holds for a `Debug` impl that writes
- incrementally, and it does not hold for one that front-loads its entire output before its
- first write. Every `Source`/`Slice` pairing this crate ships was checked against that line;
- the guarantee is asserted for exactly these, not for `Source` in general.
-
- A third shape is not narrow at all, and is the only one of the three reachable from outside
- this crate. `Source`'s `Slice` associated type is public and implementable downstream, and
- `Slice`'s own bound (`PartialEq + Eq + Debug`) puts no streaming requirement on its `Debug`
- impl. A conforming impl may scan, escape and allocate its *entire* remaining slice into a
- temporary and call `write_str` once; this sink cannot shorten work that already ran before
- it was ever invoked, so the cost stays exactly the `O(remaining source)` this fix exists to
- remove. Output is still correct even here — the window and the ellipsis decision come from a
- genuine prefix of the untruncated dump no matter how it was produced — so this is a cost
- gap, not a correctness one, but it is the most severe of the three: unbounded, not merely
- narrower, and reachable with an ordinary trait implementation, no unsafe or misuse of this
- crate required. No in-tree backing does this today; `bounded_debug`'s doc comment and its
- `bounded_debug_is_correct_but_unbounded_for_a_front_loading_debug_impl` test carry a fixture
- that exercises exactly this shape.
-
- The other two remain narrower and **found, not fixed**: a `[u8]`-shaped backing (`[u8]`,
- `HipByt`, the `smol-bytes` byte types) bounds its allocation and escaping work but still
- iterates every remaining element, because `Formatter::debug_list` drives its iterator to
- completion independently of write failures; and a `str`-shaped backing (`str`, `HipStr`,
- `Utf8Bytes`) still costs `O(run)` for a run of characters with nothing escape-worthy in it,
- because `Debug for str` accumulates such a run before its first write. Realistic text —
- which breaks such runs at newlines, quotes, etc. — is unaffected, but a contrived input like
- this crate's own `int_run_source`/`comma_list_source` bench fixtures (digits and spaces for
- ~128 KiB at a stretch) is not; `bytes::Bytes` and `bstr::BStr` have neither gap, since both
- hand-write their `Debug` loop with `?` on every write.
-
- Output is unchanged: every trace line reads identically to before this fix, character for
- character, ellipsis included — checked against a spread of inputs (empty, short, exactly at
- the 24-character boundary, far longer, and content that escapes heavily: newlines, tabs,
- both quote characters, backslashes, non-ASCII, and a multi-byte scalar straddling the cut).
-
-### Fixed
-
-
-5. **A `trace`-feature preview no longer reports a partial `Debug` rendering as the complete,
+6. **A `trace`-feature preview no longer reports a partial `Debug` rendering as the complete,
  short value it is not.** `bounded_debug` — the bounded sink `trace_preview` (behind the
  `trace` feature) uses to build its per-event source preview — discarded the `Result` from its
  own `write!` call outright, so its truncation flag came from the sink's private bookkeeping
