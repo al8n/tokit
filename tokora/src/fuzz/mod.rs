@@ -2,9 +2,9 @@
 //!
 //! A fuzz case drives arbitrary token streams through the crate's public input operations — consume
 //! and look-ahead, the `sync` family, `attempt`/`try_attempt`, the
-//! [`Transaction`](crate::Transaction) and
-//! [`StackedTransaction`](crate::StackedTransaction) guards with their savepoints, the
-//! the [`InputRef`](crate::InputRef) session points, and the [`Partial`](crate::input::Partial)
+//! [`Transaction`] and
+//! [`StackedTransaction`] guards with their savepoints, the
+//! the [`InputRef`] session points, and the [`Partial`]
 //! chunking surface — and checks the machinery's **documented laws** after every operation (see the
 //! oracle list below). It is a public, feature-gated module that runs as ordinary `#[test]`s on
 //! stable Rust; there is no dependency on a nightly fuzzer.

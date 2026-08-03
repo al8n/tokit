@@ -15,7 +15,7 @@
 //! # Architecture
 //!
 //! Tree support is a **flat event stream that rides the emitter**: the parser records events
-//! (through the [`CstEmitter`](crate::emitter::CstEmitter) capability subtrait), and the tree
+//! (through the [`CstEmitter`] capability subtrait), and the tree
 //! is *derived* from the surviving events exactly once — never mutated mid-parse. Because the
 //! events live in the emitter's rewindable channel, backtracking rewinds the tree for free:
 //! the same mark that unwinds diagnostics unwinds tree events.

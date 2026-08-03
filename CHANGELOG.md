@@ -111,7 +111,7 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
 
    **Where resource terminality is stored now:** on the **input session**, in a monotone counter
    (`Input::resource_trips`, crate-internal, bumped by
-   [`InputRef::descend`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.descend)'s
+   [`InputRef::descend`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.descend)'s
    trip arm before the grammar's `From` runs, so a panicking conversion cannot skip it). The three
    combinators read it **beside** `MaybeTerminal::is_terminal`. No conversion the grammar writes
    can reach it, and nothing lowers it: a `Checkpoint` does not carry it and a restore does not
@@ -455,7 +455,7 @@ concrete public struct with no bound to reject anybody.
  both quote characters, backslashes, non-ASCII, and a multi-byte scalar straddling the cut).
 
 10. **The trivia skip no longer goes through the shared scanner on a complete input.**
-   [`skip_while`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.skip_while) —
+   [`skip_while`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.skip_while) —
    the primitive behind the `padded` combinators, and the door every lossless grammar opens at
    every decision point — now runs its own two-phase loop under
    [`Complete`](https://docs.rs/tokora/latest/tokora/input/struct.Complete.html): a token already
@@ -864,7 +864,7 @@ concrete public struct with no bound to reject anybody.
 
 11. **A trivia skip whose predicate panics no longer loses the token it was asked about.** On a
    [`Complete`](https://docs.rs/tokora/latest/tokora/input/struct.Complete.html) input,
-   [`skip_while`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.skip_while)
+   [`skip_while`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.skip_while)
    reaches its lexer once the stream is drained, and the token it lexes was handed to the
    predicate while nothing owned it. A predicate that unwound therefore dropped that token: the
    call resumed from the previously committed span and the next read **re-lexed** it, where the
@@ -974,13 +974,13 @@ concrete public struct with no bound to reject anybody.
 
    One trip, one position, one committed leaf, two emitters, two verdicts. An **accepting** emitter
    files the trip's diagnostic and the committed leaf
-   ([`next_or_stop`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.next_or_stop),
-   [`try_expect_or_stop`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.try_expect_or_stop))
+   ([`next_or_stop`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.next_or_stop),
+   [`try_expect_or_stop`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.try_expect_or_stop))
    builds an
    [`UnexpectedEot`](https://docs.rs/tokora/latest/tokora/error/struct.UnexpectedEot.html) through
    `into_terminal`, so `is_terminal()` is `true` and recovery re-raises. A **rejecting** emitter
    reports the same trip by returning `Err` from
-   [`emit_lexer_error`](https://docs.rs/tokora/latest/tokora/trait.Emitter.html#method.emit_lexer_error) —
+   [`emit_lexer_error`](https://docs.rs/tokora/latest/tokora/emitter/trait.Emitter.html#method.emit_lexer_error) —
    which is not a refusal to report, it *is* the report — and the scanner propagates that value
    straight out of its trip arm. It was built by `FromEmitterError::from_lexer_error` from the
    lexer's own `Token::Error`; no `UnexpectedEnd` exists on that path, so nothing calls
@@ -1149,7 +1149,7 @@ concrete public struct with no bound to reject anybody.
    one module over: the boundary is a lineage memo, and a driver's read of it sits outside every
    rollback the elements below it may perform.
 
-   An element is entitled to open an [`attempt`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.attempt)
+   An element is entitled to open an [`attempt`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.attempt)
    of its **own**, meet a scanner resource trip inside it, catch the stop, and decline that attempt.
    The inner restore then rewinds the cursor, the cache, the emissions **and** the poison boundary
    together — back to the value the *driver* snapshotted before its element loop. Every witness the

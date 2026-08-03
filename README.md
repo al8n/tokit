@@ -201,7 +201,8 @@ and Pages output stay aligned.
 `tokora` is under the terms of both the MIT license and the
 Apache License (Version 2.0).
 
-See [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) for details.
+See the [Apache License, Version 2.0](LICENSE-APACHE) and the [MIT license](LICENSE-MIT) text
+for details.
 
 Copyright (c) 2026 Al Liu.
 

@@ -108,7 +108,7 @@
 //! discipline, and that ownership is precisely what makes a commit-and-carry
 //! [`PartialSession`](crate::input::PartialSession) possible, because a driver-owned transaction would roll back the very
 //! progress a session exists to keep. What [`parse_partial`] does is drive any
-//! [`ParseInput`](crate::ParseInput)`<…, `[`Partial`]`>` — a typed fn item like the one below, a
+//! [`ParseInput`]`<…, `[`Partial`]`>` — a typed fn item like the one below, a
 //! named combinator, or a parser written generic over its completeness. The only requirements
 //! partial mode adds are that the emitter error implement `From<Incomplete<L::Offset>>` (the
 //! construction side of the frontier rules) and [`MaybeIncomplete`](crate::error::MaybeIncomplete)

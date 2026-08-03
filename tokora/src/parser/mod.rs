@@ -6,7 +6,7 @@
 //!    the lexer without buffering, eliminating allocation overhead
 //! 2. **Deterministic LALR-Style Parsing**: Explicit lookahead with compile-time buffer capacity, no hidden backtracking
 //! 3. **Flexible Error Handling**: Same parser adapts for fail-fast runtime ([`Fatal`](crate::emitter::Fatal))
-//!    or greedy compiler diagnostics (via custom [`Emitter`](crate::Emitter))
+//!    or greedy compiler diagnostics (via custom [`Emitter`])
 //!
 //! # Architecture
 //!
@@ -60,7 +60,7 @@
 //!
 //! ## Flexible Error Handling via Emitter
 //!
-//! The [`Emitter`](crate::Emitter) trait decouples parsing logic from error handling strategy:
+//! The [`Emitter`] trait decouples parsing logic from error handling strategy:
 //!
 //! ```ignore
 //! // Fail-fast for runtime/REPL (stop on first error)

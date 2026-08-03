@@ -15,7 +15,7 @@
 //! 1. **Replay identity** — two fresh `L::new(src)` runs produce the identical
 //!    token/error + span + slice sequence, to exhaustion.
 //! 2. **State-resume faithfulness** — for *every* position `k`, capturing the lexer
-//!    [`State`](crate::State) there and resuming with
+//!    [`State`] there and resuming with
 //!    `L::with_state(src, saved)` + [`bump`](crate::Lexer::bump) to `k`'s offset
 //!    reproduces the original suffix from `k`. This is the prefix-replay assumption
 //!    verbatim (position is threaded via `bump`, not encoded in `State`).
@@ -43,7 +43,7 @@
 //!
 //! **Partial-input tier** (`run_partial`, a separate entry point for
 //! `usize`-offset `str` / `[u8]` sources) — driving the input in
-//! [`Partial`](crate::input::Partial) mode over **every split point** and requiring
+//! [`Partial`] mode over **every split point** and requiring
 //! chunked-equivalence under the frontier rules: a non-final drain of each prefix yields exactly
 //! the complete-parse tokens before the cut and always ends incomplete, while a final drain of the
 //! whole source reproduces the complete parse. Catches lexers that are unfaithful under truncation
