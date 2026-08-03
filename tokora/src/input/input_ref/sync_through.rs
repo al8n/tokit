@@ -54,12 +54,43 @@ where
   ///
   /// # Panic unwind
   ///
-  /// A panic out of the predicate, the expected-tokens closure, the lexer or the emitter is an
-  /// exit too, and it settles — this method's `to`-shaped commit posture keeps the diagnosed
-  /// prefix and puts the in-flight token back; the rewinding scans
-  /// ([`sync_through`](Self::sync_through), [`sync_balanced`](Self::sync_balanced)) restore to
-  /// the call's entry instead. Either way no token leaves the stream and no emitter mark is
-  /// stranded.
+  /// A panic out of the predicate, the expected-tokens closure, the lexer or the emitter
+  /// **anywhere but the end-of-input settle** is an exit too, and it settles with **this method's
+  /// own posture** — which is *not* [`sync_to`](Self::sync_to)'s `to`-shaped commit. This scan
+  /// **consumes the stopping token**, committing at its own span, and **rewinds the full pre-call
+  /// state at a no-match end of input**, and its unwind edge follows that same split, decided by
+  /// the exit reached rather than by the method:
+  ///
+  /// - **before the predicate has answered stop** — the whole of the scan, in practice — an unwind
+  ///   takes the no-match exit's posture: the retained stream is cleared and the position, the
+  ///   lexer state, the dedup watermark and every emission the abandoned scan made are restored to
+  ///   the call's entry. `sync_through_unwind_restores_emissions`
+  ///   (`src/input/input_ref/tests.rs`) reads a resume cursor of `0` with all four tokens of
+  ///   `"ab cd ef gh"` still reachable and `0` emissions surviving. Restoring at the panic edge
+  ///   carries a price a true end of input does not — there the cache is empty by construction,
+  ///   here it can still hold an untouched suffix, which re-lexes — and that price is pinned rather
+  ///   than left as prose, at seven scans of the four-token source, by
+  ///   `sync_through_warm_unwind_prices_its_re_lex`;
+  /// - **once it has**, which is inside the stop settle itself, the scan keeps: the diagnosed
+  ///   prefix is committed at the frontier — the end of the last *skipped* token, since the commit
+  ///   at the matching token's own span is the very step the unwind interrupted — and the stream is
+  ///   cleared against it. Cleared rather than put back, because by then the token has been handed
+  ///   to that settle: [`sync_to`](Self::sync_to) states the held-versus-handed-over split in full,
+  ///   and this method reaches its keeping arm only on the handed-over side of it.
+  ///
+  /// Either way the committed position never advances past a token nothing recorded, so no token is
+  /// lost and no emitter mark is stranded.
+  ///
+  /// The exclusion is the one [`skip_while`](Self::skip_while) states, and it costs this method
+  /// nothing: the scope is disarmed before the end-of-input settle runs, but for a rewinding scan
+  /// that settle **is** the restore, and the scan holds every byte of its progress in an
+  /// uncommitted frontier — the position was never advanced off the call's entry for a dropped
+  /// frontier to strand it away from. What remains at stake there is the *rest* of the restore, and
+  /// it is measured rather than argued: `r9_restore_entry_is_atomic_at_every_offset_clone`
+  /// (`src/input/input_ref/tests.rs`) sweeps every [`L::Offset`](crate::Lexer::Offset) clone the
+  /// exit performs, panicking at each in turn, and demands the same three readings at all — the
+  /// entry position, no stranded emitter mark, and the abandoned scan's diagnostics **rewound**
+  /// away rather than merely released.
   #[inline(always)]
   #[allow(clippy::type_complexity)]
   pub fn sync_through<F, Exp>(

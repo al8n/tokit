@@ -131,12 +131,18 @@ use crate::state::recursion_tracker::RecursionLimitExceeded;
 /// **A fourth path is exempt, deliberately and permanently: an element that catches the trip, still
 /// consumes, and still answers `Accept`.** The three exits above are gated because the driver is
 /// the one concluding the construct ended, manufacturing that conclusion from a stop the caller
-/// never learns about, so it has to guard its own inference. `Accept` is not that: the element
-/// produced the value, and the driver is faithfully collecting what it was handed, not concluding
-/// anything of its own. None of the three runs, and the value is collected past exactly as it would
-/// be from an element the budget never touched. See `parser::many`'s module docs, "the channel
-/// neither chokepoint closes" section, for the reasoning at length, and
-/// `tokora/tests/collection_resource_trip.rs`'s section 6 for the pin.
+/// never learns about, so it has to guard its own inference. A *consuming* `Accept` is not that:
+/// the element produced the value and moved the parse, and the driver is faithfully collecting what
+/// it was handed, not concluding anything of its own. None of the three runs, and the value is
+/// collected past exactly as it would be from an element the budget never touched. **Consuming is
+/// the whole of the exemption**: an `Accept` that consumes nothing is the no-progress cycle named
+/// in the second exit above, and is gated there like any other absence. The same boundary, and the
+/// same limit on it, holds for the *scanner* witnesses beside this one, stated once for all of them
+/// under
+/// [the channel no witness is consulted on](crate::error::MaybeTerminal#the-channel-no-witness-is-consulted-on-a-value-the-grammar-consumed-input-to-produce);
+/// `parser::many`'s module docs, "the channel neither chokepoint closes" section, carry the
+/// crate-internal reasoning at length, and `tokora/tests/collection_resource_trip.rs` is the pin —
+/// its section 6 for the consuming `Accept`, its sections 4 and 7 for the zero-width one.
 ///
 /// # The offset
 ///

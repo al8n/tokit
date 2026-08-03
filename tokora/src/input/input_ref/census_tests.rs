@@ -2078,3 +2078,592 @@ fn peek_footprint_census_the_fill_owns_no_store() {
      (grep PEEK_FOOTPRINT)."
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// POSTURE_CENSUS — the scan family's `# Panic unwind` sections, which are documentation and
+// therefore invisible to every other gate in this repository.
+//
+// These paragraphs were once held together by a **byte-identity** requirement: edit one, copy it
+// to the other two, confirm the three hash the same. That requirement was itself the defect. The
+// paragraph it propagated was written for `sync_to` and opens "this method's `to`-shaped commit
+// posture keeps the diagnosed prefix" — which is true of `sync_to` and false of the other two,
+// whose own `ScanMode`s the very same sentence goes on to call *the rewinding scans*.
+// `sync_through` consumes on a stop and rewinds at a no-match end of input; `sync_balanced`
+// crosses the axes, keeping on a stop like the first and rewinding at end of input like the
+// second. Three different postures cannot share one true sentence, so identity could only ever
+// have been kept by making two of the three wrong.
+//
+// What byte-identity was really buying is anti-drift, and that survives the split as three checks:
+//
+//   (a) the ONE clause every member must share — the end-of-input-settle exclusion, which is a
+//       property of the shared `ScanScope` (it disarms before the settle runs) and therefore
+//       genuinely common. Dropping it from one file while editing another is the drift that
+//       identity used to catch, and this is the half that still catches it;
+//   (b) the three sections must stay pairwise DISTINCT, and no member may carry the retired
+//       sentence. Re-unifying them is not a merge conflict, it produces no warning, and it is
+//       exactly how the false claim spread the first time;
+//   (c) each section must state the posture its own `ScanMode` ACTUALLY has, derived from that
+//       mode's associated constants as they are written in `scan.rs`.
+//
+// (c) is not optional garnish, and (a) + (b) alone were a check that answers without looking:
+// three paragraphs can carry the shared exclusion, avoid the retired sentence, and be pairwise
+// different while every one of them describes the wrong method — permuting the three sections
+// passes (a) and (b) outright. Distinctness is not correctness. (c) closes that by keying each
+// file's required AND forbidden phrases to `HOLDS_ENTRY`, `COMMITS_FRONTIER_ON_STOP` and
+// `REPORT_SKIPPED`, whose value triples are pairwise different across the three modes — so every
+// permutation trips at least one phrase, and a future change to a constant forces the prose to
+// change with it rather than silently outliving it.
+//
+// Both halves of (c) read TEXT, and text that talks about code reads like code — so both are read
+// against the thing itself rather than against something that resembles it. On the source side,
+// `scan.rs` is blanked of comments and of string, byte-string and character literals before any
+// constant is taken from it, and the impl is brace-matched to its own top level: a comment spelling
+// `const HOLDS_ENTRY: bool = true;`, a panic message quoting one, a neighbouring impl's constant and
+// one declared inside a method body are all invisible to the reader. On the doc side a required
+// phrase counts only where nothing negates it, because a substring survives its own denial —
+// "**never** stops *before* the sync token" contains "stops *before* the sync token". A census a
+// sentence can satisfy is the same unchecked claim this one exists to catch, one level up.
+//
+// The residual bounds worth naming:
+//
+//   - the constants are read from `scan.rs`'s SOURCE, because `ScanMode`'s constants cannot be
+//     named without instantiating `L`/`Ctx`/`Cmpl`, and the only concrete lexers in this crate live
+//     behind the logos features that this census module deliberately does not require. So the
+//     coupling is textual: adding a FOURTH posture axis to `ScanMode`, or changing
+//     `ScanScope::keeps_on_unwind`'s formula, is not caught by the reader itself — the
+//     `keeps_on_unwind` pin in (c) covers the second, and the first is what the `POSTURE_PHRASES`
+//     doc comment asks the next editor to extend. Blanking and brace-matching close what a
+//     substring reader can be *fed*; what it can be *shown* — a `cfg`-gated second arm, a
+//     macro-generated impl — is closed only by parsing `scan.rs` as Rust, and that is deliberately
+//     not here;
+//   - negation is scoped to the phrase's own clause (back to the nearest comma, semicolon or
+//     sentence end), so a denial on the far side of one does not disqualify an occurrence. And only
+//     the REQUIRED side is negation-aware: a forbidden phrase trips the census however it is
+//     worded, including inside a true contrast ("this does not consume the stopping token"). Both
+//     of those are the conservative direction — a section may not lean on a negated requirement,
+//     and a forbidden posture is reworded rather than denied.
+//
+// Prose is compared with `///` stripped and whitespace collapsed, so rewrapping a paragraph is
+// not drift and does not fail this. A new scan mode with a `# Panic unwind` section joins the
+// list below in the same commit (grep POSTURE_CENSUS).
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/// The three sync scans, each paired with the [`ScanMode`](super::scan::ScanMode) whose constants
+/// decide its posture. The postures are pairwise different and each is stated on its own method.
+const SYNC_POSTURE_SOURCES: &[(&str, &str)] = &[
+  ("sync_to.rs", "SyncTo"),
+  ("sync_through.rs", "SyncThrough"),
+  ("sync_balanced.rs", "SyncBalanced"),
+];
+
+/// The posture vocabulary: one canonical phrase per [`ScanMode`](super::scan::ScanMode) constant
+/// per value — `(constant, phrase when true, phrase when false)`.
+///
+/// A method **requires** the phrase for the value its own mode declares and is **forbidden** the
+/// phrase for the other, so no two of the three sections can be swapped: the triples
+/// `SyncTo (false, true, true)`, `SyncThrough (true, false, true)` and
+/// `SyncBalanced (true, true, false)` differ pairwise in at least one axis, and every permutation
+/// therefore trips at least one required-or-forbidden phrase. Distinctness alone could not do
+/// this — three paragraphs can be pairwise different and all three wrong.
+///
+/// What each axis means on the unwind edge, which is what the sections describe:
+///
+/// - `HOLDS_ENTRY` — whether the mode holds a pre-call snapshot. `false` makes
+///   `ScanScope::keeps_on_unwind` fold to `true`, so **every** unwind keeps and there is no
+///   abandon arm; `true` gives the split, whose abandoning half is the mode's own no-match
+///   end-of-input rewind;
+/// - `COMMITS_FRONTIER_ON_STOP` — whether a stop settles *before* the token (leaving the frontier
+///   as what a stop commits) or consumes it (committing at its own span instead);
+/// - `REPORT_SKIPPED` — whether the prefix whose fate an unwind decides was diagnosed per token
+///   or merely skipped.
+const POSTURE_PHRASES: &[(&str, &str, &str)] = &[
+  (
+    "HOLDS_ENTRY",
+    "rewinds the full pre-call state at a no-match end of input",
+    "every unwind keeps",
+  ),
+  (
+    "COMMITS_FRONTIER_ON_STOP",
+    "stops *before* the sync token",
+    "consumes the stopping token",
+  ),
+  (
+    "REPORT_SKIPPED",
+    "diagnosed prefix",
+    "skipped, not diagnosed",
+  ),
+];
+
+/// `hay` with every comment and every string, byte-string and character literal blanked to spaces,
+/// newlines kept so line structure survives.
+///
+/// The posture census reads `scan.rs`'s associated constants textually, and text *about* code reads
+/// exactly like code to a substring search: a comment spelling `const HOLDS_ENTRY: bool = true;`, or
+/// a panic message quoting one, would answer the reader before the declaration does. A census a
+/// sentence can satisfy is the same unchecked claim this module exists to catch, one level up — so
+/// the prose goes first and the reader sees only what the compiler sees.
+///
+/// A scanner for the forms that can *contain* something mistakable for code, and nothing else — not
+/// a Rust parse (grep POSTURE_CENSUS).
+fn without_prose(hay: &str) -> std::string::String {
+  let src = hay.as_bytes();
+  let mut out = std::vec::Vec::with_capacity(src.len());
+  let mut i = 0;
+  while i < src.len() {
+    let rest = &src[i..];
+
+    // `//`, `///` and `//!` alike, to the end of the line — the newline itself left in place.
+    if rest.starts_with(b"//") {
+      while i < src.len() && src[i] != b'\n' {
+        out.push(b' ');
+        i += 1;
+      }
+      continue;
+    }
+
+    // `/* .. */`, nesting the way Rust's do.
+    if rest.starts_with(b"/*") {
+      let mut depth = 0usize;
+      while i < src.len() {
+        if src[i..].starts_with(b"/*") {
+          depth += 1;
+          out.extend_from_slice(b"  ");
+          i += 2;
+        } else if src[i..].starts_with(b"*/") {
+          depth = depth.saturating_sub(1);
+          out.extend_from_slice(b"  ");
+          i += 2;
+          if depth == 0 {
+            break;
+          }
+        } else {
+          out.push(if src[i] == b'\n' { b'\n' } else { b' ' });
+          i += 1;
+        }
+      }
+      continue;
+    }
+
+    // `r"…"`, `r#"…"#` and the byte forms — but only where the `r` starts a token, so the `r` that
+    // ends `for` or `ptr` cannot open a literal that swallows the rest of the file.
+    let raw = if rest.starts_with(b"br") {
+      2
+    } else if rest.starts_with(b"r") {
+      1
+    } else {
+      0
+    };
+    if raw > 0 && (i == 0 || !(src[i - 1].is_ascii_alphanumeric() || src[i - 1] == b'_')) {
+      let hashes = rest[raw..].iter().take_while(|c| **c == b'#').count();
+      if rest.get(raw + hashes) == Some(&b'"') {
+        out.resize(out.len() + raw + hashes + 1, b' ');
+        i += raw + hashes + 1;
+        while i < src.len() {
+          let closes = src[i] == b'"'
+            && src[i + 1..]
+              .iter()
+              .take(hashes)
+              .filter(|c| **c == b'#')
+              .count()
+              == hashes;
+          if closes {
+            out.resize(out.len() + hashes + 1, b' ');
+            i += hashes + 1;
+            break;
+          }
+          out.push(if src[i] == b'\n' { b'\n' } else { b' ' });
+          i += 1;
+        }
+        continue;
+      }
+    }
+
+    // `"…"`, and `b"…"` too since the `b` is copied as the ordinary identifier byte it is.
+    if src[i] == b'"' {
+      out.push(b' ');
+      i += 1;
+      while i < src.len() && src[i] != b'"' {
+        // A backslash takes the byte after it with it, so `\"` does not close the literal.
+        if src[i] == b'\\' {
+          out.push(b' ');
+          i += 1;
+        }
+        if i < src.len() {
+          out.push(if src[i] == b'\n' { b'\n' } else { b' ' });
+          i += 1;
+        }
+      }
+      if i < src.len() {
+        out.push(b' ');
+        i += 1;
+      }
+      continue;
+    }
+
+    // A `'` opens a character literal or a lifetime, and this file is mostly the latter (`'inp`,
+    // `'_`): consuming a lifetime as a literal would blank live code. A literal is one escape or one
+    // ASCII character between quotes; anything else falls through and only the quote is copied. A
+    // non-ASCII character literal falls through too, and safely — no delimiter this reader cares
+    // about is non-ASCII.
+    if src[i] == b'\'' {
+      let end = if src.get(i + 1) == Some(&b'\\') {
+        // `'\n'`, `'\''`, `'\u{7f}'` — past the escaped byte, or past the `}` that closes a `\u`.
+        let mut j = i + 2;
+        if src.get(j) == Some(&b'u') {
+          while j < src.len() && src[j] != b'}' {
+            j += 1;
+          }
+        }
+        Some(j + 1).filter(|j| src.get(*j) == Some(&b'\''))
+      } else {
+        Some(i + 2).filter(|j| src.get(*j) == Some(&b'\''))
+      };
+      if let Some(end) = end {
+        while i <= end {
+          out.push(b' ');
+          i += 1;
+        }
+        continue;
+      }
+    }
+
+    out.push(src[i]);
+    i += 1;
+  }
+  // Every byte is either copied verbatim from a region whose bounds are ASCII, or an ASCII space or
+  // newline put in a blanked one, so no multi-byte sequence is ever split.
+  std::string::String::from_utf8(out).expect("blanking ASCII-delimited regions preserves UTF-8")
+}
+
+/// The **top level** of `mode`'s `ScanMode` impl in already-blanked `code`: what sits directly
+/// inside the impl's own braces, every nested body dropped.
+///
+/// Brace-matched rather than cut at the next line-initial `impl`, and taken at depth one rather than
+/// over the whole block, so neither a neighbouring impl's constant nor one declared inside a method
+/// body can answer for this one. An associated constant of *this* impl is what the posture is
+/// derived from, and depth one is exactly where those live (grep POSTURE_CENSUS).
+fn scan_mode_impl_top_level(code: &str, mode: &str) -> std::string::String {
+  let header = std::format!("ScanMode<'inp, L, Ctx, Lang, Cmpl> for {mode}\n");
+  let at = code.find(header.as_str()).unwrap_or_else(|| {
+    panic!(
+      "POSTURE_CENSUS: `scan.rs` has no `impl .. ScanMode<'inp, L, Ctx, Lang, Cmpl> for {mode}` \
+       ending its header line. If the impl's generic parameters were renamed or rewrapped, teach \
+       this reader the new spelling (grep POSTURE_CENSUS)."
+    )
+  });
+  let open = at
+    + code[at..].find('{').unwrap_or_else(|| {
+      panic!(
+        "POSTURE_CENSUS: `{mode}`'s `ScanMode` impl header opens no body (grep POSTURE_CENSUS)"
+      )
+    });
+  let mut depth = 0usize;
+  let mut top = std::vec::Vec::new();
+  for &byte in &code.as_bytes()[open..] {
+    match byte {
+      b'{' => depth += 1,
+      b'}' => {
+        depth -= 1;
+        if depth == 0 {
+          return std::string::String::from_utf8(top)
+            .expect("brace bounds are ASCII, so the slices between them stay whole");
+        }
+      }
+      _ if depth == 1 => top.push(byte),
+      _ => {}
+    }
+  }
+  panic!(
+    "POSTURE_CENSUS: `{mode}`'s `ScanMode` impl body never closes. The reader brace-matches it, so \
+     an unbalanced brace inside a construct it blanks — a literal form it does not know — would \
+     read like this (grep POSTURE_CENSUS)."
+  )
+}
+
+/// Reads one of [`ScanMode`](super::scan::ScanMode)'s associated constants out of `scan.rs` — the
+/// implementation, not the prose — resolving the delegating form
+/// (`<SyncTo as ScanMode<..>>::CONST`) that the composed modes are written with.
+///
+/// This is what makes the posture census derived rather than self-confirming: flip a constant in
+/// `scan.rs` and the phrases the three `# Panic unwind` sections are held to flip with it, so the
+/// doc fails until it is rewritten (grep POSTURE_CENSUS).
+fn scan_mode_const(mode: &str, name: &str, depth: usize) -> bool {
+  assert!(
+    depth < 4,
+    "POSTURE_CENSUS: resolving `{mode}::{name}` went four delegations deep — a cycle, or a \
+     restructure this reader has to be taught (grep POSTURE_CENSUS)."
+  );
+  let code = without_prose(source("scan.rs"));
+  let flat = scan_mode_impl_top_level(&code, mode)
+    .split_whitespace()
+    .collect::<std::vec::Vec<_>>()
+    .join(" ");
+  let needle = std::format!("const {name}: bool =");
+  let value_at = flat.find(needle.as_str()).unwrap_or_else(|| {
+    panic!(
+      "POSTURE_CENSUS: `{mode}`'s `ScanMode` impl declares no `{name}`. The posture each \
+       `# Panic unwind` section is checked against is derived from this constant, so renaming or \
+       removing it has to reach `POSTURE_PHRASES` in `census_tests.rs` too (grep POSTURE_CENSUS)."
+    )
+  });
+  let rest = &flat[value_at + needle.len()..];
+  let end = rest
+    .find(';')
+    .expect("a `const` declaration ends in a semicolon");
+  match rest[..end].trim() {
+    "true" => true,
+    "false" => false,
+    // The composed modes delegate: `<SyncTo as ScanMode<'inp, L, Ctx, Lang, Cmpl>>::CONST`.
+    delegated => {
+      let target = delegated
+        .strip_prefix('<')
+        .and_then(|d| d.split_once(" as "))
+        .map(|(target, _)| target.trim())
+        .unwrap_or_else(|| {
+          panic!(
+            "POSTURE_CENSUS: `{mode}::{name}` is neither a `bool` literal nor a \
+             `<Mode as ScanMode<..>>::{name}` delegation, but `{delegated}`. This census derives \
+             the documented posture from these constants, so a third spelling has to be taught \
+             here (grep POSTURE_CENSUS)."
+          )
+        });
+      assert!(
+        delegated.ends_with(std::format!("::{name}").as_str()),
+        "POSTURE_CENSUS: `{mode}::{name}` delegates to a DIFFERENT constant (`{delegated}`). \
+         Cross-wiring two posture axes would leave the doc census checking the wrong fact about \
+         this method (grep POSTURE_CENSUS)."
+      );
+      scan_mode_const(target, name, depth + 1)
+    }
+  }
+}
+
+/// A censused file's `# Panic unwind` doc section as prose: `///` markers stripped and every run
+/// of whitespace collapsed to one space, so the check is about what the section *says* and not
+/// about where its lines happen to wrap.
+fn panic_unwind_prose(name: &str) -> std::string::String {
+  let lines: std::vec::Vec<&str> = source(name).lines().collect();
+  let start = lines
+    .iter()
+    .position(|line| line.trim_start() == "/// # Panic unwind")
+    .unwrap_or_else(|| {
+      panic!("POSTURE_CENSUS: `{name}` has no `/// # Panic unwind` section (grep POSTURE_CENSUS)")
+    });
+  // To the next level-one heading, or out of the doc block — whichever comes first. A `## `
+  // subsection belongs to this section and is kept.
+  let end = lines[start + 1..]
+    .iter()
+    .position(|line| {
+      let t = line.trim_start();
+      !t.starts_with("///") || t.starts_with("/// # ")
+    })
+    .map_or(lines.len(), |offset| start + 1 + offset);
+  lines[start..end]
+    .iter()
+    .map(|line| line.trim_start().trim_start_matches("///"))
+    .collect::<std::vec::Vec<_>>()
+    .join(" ")
+    .split_whitespace()
+    .collect::<std::vec::Vec<_>>()
+    .join(" ")
+}
+
+/// The words that reverse the claim they stand in front of. Grammatical negators only: *rather*,
+/// *instead* and *unlike* draw a contrast without denying the verb they precede, and reading them as
+/// denials would reject sentences that are true.
+const NEGATORS: &[&str] = &[
+  "cannot", "neither", "never", "no", "none", "nor", "not", "nothing",
+];
+
+/// Whether `prose` **states** `phrase` — carries it at least once with nothing negating it.
+///
+/// A required phrase is checked with this rather than with `contains`, because a substring survives
+/// its own denial: "**never** stops *before* the sync token" contains "stops *before* the sync
+/// token", and a census satisfied by the sentence that contradicts it is not a census. The forbidden
+/// side deliberately stays a plain `contains` — see POSTURE_CENSUS on why that direction is the
+/// conservative one (grep POSTURE_CENSUS).
+fn states(prose: &str, phrase: &str) -> bool {
+  prose
+    .match_indices(phrase)
+    .any(|(at, _)| negator_before(prose, at).is_none())
+}
+
+/// The negator governing an occurrence at byte `at`: the first negating word between the start of
+/// that occurrence's own clause and the occurrence itself.
+///
+/// A clause runs back to the nearest comma or semicolon, or to the end of the previous sentence. The
+/// prose is whitespace-collapsed before it gets here, so a sentence ender is always a `.`, `!` or
+/// `?` followed by exactly one space — which `tests.rs` and `Self::sync_to` never look like.
+fn negator_before(prose: &str, at: usize) -> Option<&str> {
+  let bytes = prose.as_bytes();
+  let mut start = 0;
+  let mut i = at;
+  while i > 0 {
+    i -= 1;
+    let ends_sentence = matches!(bytes[i], b'.' | b'!' | b'?') && bytes.get(i + 1) == Some(&b' ');
+    if matches!(bytes[i], b',' | b';') || ends_sentence {
+      start = i + 1;
+      break;
+    }
+  }
+  prose[start..at].split_whitespace().find(|word| {
+    // Markdown emphasis and backticks are part of the sentence, not of the word: `**not**` and
+    // `*not*` negate exactly as `not` does. Trimming only the ENDS keeps `no-match` one word.
+    let word = word
+      .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '\'')
+      .to_ascii_lowercase();
+    NEGATORS.contains(&word.as_str()) || word.ends_with("n't")
+  })
+}
+
+/// The tail a required-phrase failure adds when the section does carry the words but every
+/// occurrence of them is negated — the case a plain `contains` used to pass.
+fn negation_note(prose: &str, phrase: &str) -> std::string::String {
+  prose
+    .match_indices(phrase)
+    .find_map(|(at, _)| negator_before(prose, at))
+    .map_or_else(std::string::String::new, |negator| {
+      std::format!(
+        " (the words are there, but every occurrence of them is governed by \"{negator}\", which \
+         states the opposite)"
+      )
+    })
+}
+
+/// POSTURE_CENSUS — the shared half: every scan that documents a panic unwind carves out the same
+/// window, because the reason is the shared scope's, not any one mode's.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
+fn posture_census_every_scan_carries_the_end_of_input_exclusion() {
+  const EXCLUSION: &str = "**anywhere but the end-of-input settle**";
+  for name in [
+    "sync_to.rs",
+    "sync_through.rs",
+    "sync_balanced.rs",
+    "skip_while.rs",
+  ] {
+    let prose = panic_unwind_prose(name);
+    assert!(
+      states(&prose, EXCLUSION),
+      "POSTURE_CENSUS drift: `{name}`'s `# Panic unwind` section no longer carries the \
+       exclusion `{EXCLUSION}`{}. `ScanScope` is disarmed by the end-of-input exit BEFORE that \
+       exit's settle runs, so an unwind inside the settle is not an exit the scope handles — \
+       true of every mode, which is why this clause is the one part of these sections that must \
+       stay common. Restore it, or, if the scope's disarm ordering changed, change it in all \
+       four and here (grep POSTURE_CENSUS).",
+      negation_note(&prose, EXCLUSION)
+    );
+  }
+}
+
+/// POSTURE_CENSUS — the split half: each sync method states its **own** posture, and no two of
+/// them state the same one. This is the replacement for the byte-identity requirement described
+/// above, and it fails on precisely what identity used to require.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
+fn posture_census_each_sync_states_its_own_unwind_posture() {
+  // The retired sentence. True of `sync_to` alone, copied verbatim onto the two methods it names
+  // in its own next clause as the rewinding scans, and load-bearing once the section around it
+  // was narrowed. It is spelled out here so its return is a red test rather than a re-review.
+  const RETIRED: &str = "this method's `to`-shaped commit posture";
+
+  let prose: std::vec::Vec<(&str, std::string::String)> = SYNC_POSTURE_SOURCES
+    .iter()
+    .map(|(name, _)| (*name, panic_unwind_prose(name)))
+    .collect();
+
+  for (name, section) in &prose {
+    const OWN: &str = "this method's own posture";
+    assert!(
+      states(section, OWN),
+      "POSTURE_CENSUS drift: `{name}`'s `# Panic unwind` section no longer says it is stating \
+       THIS method's own posture{}. The three scans settle an unwind differently — `sync_to` \
+       commits, `sync_through` consumes on a stop and rewinds at a no-match end of input, \
+       `sync_balanced` does one of each — so a section that describes the family rather than its \
+       own method is describing two other methods wrongly (grep POSTURE_CENSUS).",
+      negation_note(section, OWN)
+    );
+    assert!(
+      !section.contains(RETIRED),
+      "POSTURE_CENSUS drift: `{name}`'s `# Panic unwind` section carries the retired claim \
+       \"{RETIRED}\". It is true of `sync_to` only; `sync_through` and `sync_balanced` are the \
+       rewinding scans that same sentence names. State the method's own posture instead \
+       (grep POSTURE_CENSUS)."
+    );
+  }
+
+  for (i, (name, section)) in prose.iter().enumerate() {
+    for (other, other_section) in &prose[i + 1..] {
+      assert!(
+        section != other_section,
+        "POSTURE_CENSUS drift: `{name}` and `{other}` now carry the SAME `# Panic unwind` \
+         section. These three used to be required to match byte for byte, and that requirement \
+         is what put `sync_to`'s commit posture on two methods that do not have it. Their \
+         postures differ, so their paragraphs must (grep POSTURE_CENSUS)."
+      );
+    }
+  }
+}
+
+/// POSTURE_CENSUS — the binding half: each section must state the posture its own `ScanMode`
+/// **actually has**, read out of `scan.rs`.
+///
+/// The two checks above answer without looking at behaviour. "Says `this method's own posture`",
+/// "does not carry the retired sentence" and "pairwise distinct" are all satisfied by three
+/// paragraphs that are different from one another and wrong about all three methods — which is
+/// exactly the failure mode this family kept producing. Distinctness is not correctness. This
+/// check is the one that looks (grep POSTURE_CENSUS).
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
+fn posture_census_each_sync_states_the_posture_its_scan_mode_has() {
+  // The derivation the `HOLDS_ENTRY` axis rests on, pinned in place. `HOLDS_ENTRY = false` means
+  // "every unwind keeps" only because THIS formula folds to `true` when it is; rewrite
+  // `keeps_on_unwind` and the mapping below would go on demanding a sentence the scope no longer
+  // implements, which is the same shape of unchecked claim this census exists to close.
+  const KEEPS_ON_UNWIND: &str = "!M::HOLDS_ENTRY || (self.stop_decided && self.frontier.is_some())";
+  assert!(
+    without_prose(source("scan.rs")).contains(KEEPS_ON_UNWIND),
+    "POSTURE_CENSUS drift: `ScanScope::keeps_on_unwind` is no longer \
+     `{KEEPS_ON_UNWIND}`. The posture phrases keyed on `HOLDS_ENTRY` are derived from that \
+     formula — `false` folds it to `true`, which is what \"every unwind keeps\" states — so a \
+     change here invalidates `POSTURE_PHRASES` and every `# Panic unwind` section keyed on it \
+     (grep POSTURE_CENSUS)."
+  );
+
+  for &(file, mode) in SYNC_POSTURE_SOURCES {
+    let section = panic_unwind_prose(file);
+    for &(constant, when_true, when_false) in POSTURE_PHRASES {
+      let value = scan_mode_const(mode, constant, 0);
+      let other = !value;
+      let (required, forbidden) = if value {
+        (when_true, when_false)
+      } else {
+        (when_false, when_true)
+      };
+      assert!(
+        states(&section, required),
+        "POSTURE_CENSUS drift: `{mode}::{constant}` is `{value}` in `scan.rs`, but `{file}`'s \
+         `# Panic unwind` section never says so — it is missing \"{required}\"{}. Either the \
+         section drifted off the behaviour, or the constant changed and the doc did not follow \
+         it. Fix whichever is wrong; do not relax the phrase (grep POSTURE_CENSUS).",
+        negation_note(&section, required)
+      );
+      assert!(
+        !section.contains(forbidden),
+        "POSTURE_CENSUS drift: `{file}`'s `# Panic unwind` section carries \"{forbidden}\", the \
+         phrase for `{constant} = {other}` — and `{mode}::{constant}` is `{value}`. This is a \
+         section describing a posture its own method does not have, which is precisely how the \
+         `to`-shaped claim reached the two rewinding scans (grep POSTURE_CENSUS)."
+      );
+    }
+  }
+}

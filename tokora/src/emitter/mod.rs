@@ -457,6 +457,19 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   ///   output onward. Otherwise a caller that catches the *original* panic can go on to collect
   ///   a result that is indistinguishable from one no violation ever touched.
   ///
+  /// **The first rider buys the emitter, and only the emitter.** A compliant preflight leaves
+  /// *your* state exactly as the caller left it; it does not make the crate's rollback whole.
+  /// This method is called from the middle of an [`InputRef`](crate::InputRef) checkpoint
+  /// restore — below the point where that restore has already popped the target off its live
+  /// checkpoint lineage and released the marks of any session points open above it, and above
+  /// the point where it installs the restored position, the error-reporting witnesses and the
+  /// cache-push counter. A report raised here therefore tears that restore in half whatever the
+  /// emitter does: the input handle is left on neither branch. That is inside the
+  /// unspecified-but-bounded envelope `InputRef::restore` documents (the `unstable-raw` valve),
+  /// and it is the price of being told at all. A host that catches the report must treat the
+  /// **parse** as over rather than resume on that handle — what survives is the emitter and its
+  /// accumulated output, which is what the second rider exists to keep honest.
+  ///
   /// The condition an implementation is allowed to report this way is a caller bug, never an
   /// input-dependent one. Detecting something a malformed document can provoke and panicking on
   /// it is outside this permission entirely.
