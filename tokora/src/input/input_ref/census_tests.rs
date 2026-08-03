@@ -2671,3 +2671,56 @@ fn posture_census_each_sync_states_the_posture_its_scan_mode_has() {
     }
   }
 }
+
+/// POSTURE_CENSUS — the callback/source vocabulary, not just the posture phrases.
+///
+/// The three checks above read what a section says about ITS OWN POSTURE — commit-vs-rewind,
+/// stop-before-vs-consume, diagnosed-vs-skipped — and never look at the *list of callbacks* the
+/// opening sentence blames a panic on. A section can pass every posture phrase and still name a
+/// source its own method cannot produce: `skip_while` named "the expected-tokens closure" while
+/// its only route to one passes an internal `|| None` that is never even called, because
+/// `skip_and_report`'s sole `exp()` call site — `M::REPORT_SKIPPED.then(|| .. exp() ..)` — sits
+/// behind a bool that is `false` for `SkipWhile`. `REPORT_SKIPPED` is exactly that gate, read out
+/// of `scan.rs` as the other checks do, so this closes the gap with the same derivation rather
+/// than a hand-authored per-file list: flip `REPORT_SKIPPED` on a mode and the requirement on its
+/// section's callback list flips with it.
+///
+/// This does not attempt the general case (an arbitrary callback/source named in arbitrary prose).
+/// It closes the one vocabulary item this finding was about, the way it can actually be closed —
+/// derived from a real source-level gate, not asserted by fiat. `sync_balanced`'s "the classifier"
+/// is a real, method-specific panic source with no `ScanMode` constant to derive a requirement
+/// from (the classifier is `sync_balanced`'s own parameter, not part of the `ScanMode` trait), so
+/// it is out of scope for a derived check and is not asserted here.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
+fn posture_census_expected_tokens_closure_is_named_only_where_report_skipped() {
+  const PHRASE: &str = "the expected-tokens closure";
+  for &(file, mode) in SYNC_POSTURE_SOURCES {
+    let section = panic_unwind_prose(file);
+    let report_skipped = scan_mode_const(mode, "REPORT_SKIPPED", 0);
+    if report_skipped {
+      assert!(
+        states(&section, PHRASE),
+        "POSTURE_CENSUS drift: `{mode}::REPORT_SKIPPED` is `true` in `scan.rs`, so \
+         `skip_and_report` calls `exp` on every token this method skips, but `{file}`'s \
+         `# Panic unwind` section never names \"{PHRASE}\" as a panic source{}. A caller-supplied \
+         `exp` that actually runs is a real panic source and belongs in the list \
+         (grep POSTURE_CENSUS).",
+        negation_note(&section, PHRASE)
+      );
+    } else {
+      assert!(
+        !section.contains(PHRASE),
+        "POSTURE_CENSUS drift: `{file}`'s `# Panic unwind` section names \"{PHRASE}\" as a panic \
+         source, but `{mode}::REPORT_SKIPPED` is `false` in `scan.rs` — `skip_and_report`'s one \
+         call to `exp` sits inside `M::REPORT_SKIPPED.then(..)` and is never reached for this \
+         mode, so this method has no such source to panic out of. This is the exact shape of the \
+         inherited defect this census closes: a section naming a callback its own method cannot \
+         invoke (grep POSTURE_CENSUS)."
+      );
+    }
+  }
+}

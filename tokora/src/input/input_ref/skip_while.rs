@@ -55,7 +55,7 @@ where
   ///
   /// # Panic unwind
   ///
-  /// A panic out of the predicate, the expected-tokens closure, the emitter, or the lexer
+  /// A panic out of the predicate, the emitter, or the lexer
   /// **anywhere but the end-of-input settle** is an exit too, and it settles with **this method's
   /// own posture**: [`sync_to`](Self::sync_to)'s commit-and-keep, reporting nothing. This mode
   /// holds no pre-call snapshot, so **every unwind keeps** — there is no earlier state left to
