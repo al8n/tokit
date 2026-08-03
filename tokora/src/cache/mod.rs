@@ -70,17 +70,22 @@ pub type DefaultCache<'a, L> =
 /// observe — the cache conformance kit checks each one:
 ///
 /// - **FIFO append.** [`push_back`](Cache::push_back) places the token after every resident
-///   entry; [`push_front`](Cache::push_front) places it before every resident entry. A refused
+///   entry; [`push_front`](Cache::push_front) places it before every resident entry. A push is
+///   refused **only when the cache is full** — both arms, not just `push_back`'s — and a refused
 ///   push returns the token **unchanged** and leaves the cache exactly as it was.
 /// - **Order.** [`pop_front`](Cache::pop_front) removes the **oldest** resident entry and
 ///   [`pop_back`](Cache::pop_back) the **newest**; [`front`](Cache::front) and
 ///   [`back`](Cache::back) view those same two entries without removing them.
 /// - **Exact length.** [`len`](Cache::len) is exactly the resident count, and
 ///   [`remaining`](Cache::remaining) is exactly how many more `push_back`s will be accepted.
-/// - **Bounded, pure peek.** [`peek`](Cache::peek) appends exactly `min(len(), buffer capacity)`
-///   entries to the buffer, oldest first, once each. It is logically pure: it takes `&self`,
-///   calling it twice yields the same sequence, and it changes no observable. Borrowed and owned
-///   results denote the same tokens.
+/// - **Bounded, pure peek.** [`peek`](Cache::peek) appends exactly
+///   `min(len(), buf`'s **remaining** capacity at call time`)` entries to the buffer, oldest
+///   first, once each, leaving whatever `buf` already held untouched. The bound is the room the
+///   buffer has **left** — `buf.remaining_capacity()`, not `buf.capacity()`; the two agree only
+///   for a buffer that arrives empty, and the peek fill hands over both shapes — empty on a
+///   cache hit or an overflow-free fill, already holding the parked token or staged overflow
+///   otherwise. It is logically pure: it takes `&self`, calling it twice yields the same
+///   sequence, and it changes no observable. Borrowed and owned results denote the same tokens.
 /// - **The restore path must not panic.** [`pop_front`](Cache::pop_front),
 ///   [`pop_back`](Cache::pop_back), [`clear`](Cache::clear), [`front`](Cache::front),
 ///   [`front_span`](Cache::front_span), [`len`](Cache::len) — **and
@@ -144,6 +149,13 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// declares `true` and then refuses a front push into an empty cache is a contract violation
   /// and panics at the refusal site rather than losing the token.
   ///
+  /// The declaration is not a licence to refuse. Either way, a push is refused only by a **full**
+  /// cache — see [`push_front`](Cache::push_front) — so a cache with any capacity at all accepts a
+  /// front push into an empty one, and the conformance kit checks that at every nonzero capacity
+  /// whatever this says. What the declaration decides is what a refusal would **cost**: a parked
+  /// slot where it is `false`, a lost token where it is `true`. Declaring `false` buys back the
+  /// fallback, not the right to refuse.
+  ///
   /// Conservative default: `false` (the parked slot stays live; only performance is affected).
   const RETAINS_FRONT: bool = false;
 
@@ -177,8 +189,9 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// [`peek`](Cache::peek) into the room that is left. A `len` that is not the resident count
   /// therefore mis-sizes that copy — under-report and it is clipped mid-run with the
   /// later-lexed tokens closing the gap behind it, over-report and the window comes back short
-  /// while the input still has more. The fill checks the copy it gets and **panics** rather
-  /// than hand back a window that is wrong about the stream; see that method's `# Panics`.
+  /// while the input still has more. On the fill path that reaches the lexer, the fill checks
+  /// the copy it gets and **panics** rather than hand back a window that is wrong about the
+  /// stream; see that method's `# Panics`.
   ///
   /// An upper bound, a capacity, or a count that lags a push is not a `len`.
   fn len(&self) -> usize;
@@ -195,6 +208,13 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// If successful, returns `Ok` with a reference to the cached token.
   /// If the cache is full, returns `Err` with the token so the caller can handle it
   /// (e.g., by processing it immediately without caching).
+  ///
+  /// Full is the *only* licence to refuse, here as on [`push_back`](Cache::push_back): with room
+  /// left the push must succeed. A refusal with room to spare costs the caller something real —
+  /// the input layer's put-back parks the token in the fallback slot it keeps for exactly this,
+  /// or panics outright where [`RETAINS_FRONT`](Cache::RETAINS_FRONT) declared the refusal could
+  /// not happen — so it is a violation, not a permitted conservatism, and the conformance kit
+  /// fails it.
   ///
   /// # Example
   ///
@@ -336,21 +356,31 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   ///
   /// # The law
   ///
-  /// Append **exactly `min(len(), buf`'s remaining capacity`)`** entries, oldest first, each
-  /// resident token once. The call is logically **pure**: it takes `&self`, it changes no
-  /// observable of the cache, and calling it twice on an unchanged cache appends the same
-  /// sequence both times. A borrowed entry and an owned one denote the same token, so a caller
-  /// cannot tell which a cache chose to hand back.
+  /// Append **exactly `min(len(), buf`'s remaining capacity at call time`)`** entries, oldest
+  /// first, each resident token once, **behind** whatever `buf` already holds and without
+  /// disturbing it. The call is logically **pure**: it takes `&self`, it changes no observable of
+  /// the cache, and calling it twice on an unchanged cache appends the same sequence both times.
+  /// A borrowed entry and an owned one denote the same token, so a caller cannot tell which a
+  /// cache chose to hand back.
+  ///
+  /// The bound is `buf.remaining_capacity()`, **not** `buf.capacity()`. Those two are the same
+  /// number only for a buffer that arrives empty, which happens on a cache hit or an
+  /// overflow-free fill; otherwise the peek fill has already pushed the parked token, and on the
+  /// path that lexed past the cache the staged overflow too, before it calls in.
   ///
   /// Given room for `len()` entries this must therefore deliver the resident run **entire**,
   /// [`front`](Cache::front) through [`back`](Cache::back). The one place a copy may stop short
-  /// of `back` is where the buffer's own capacity stopped it. The peek fill leaves exactly the
+  /// of `back` is where the room left in the buffer ran out. The peek fill leaves exactly the
   /// room [`len`](Cache::len) claimed and checks what comes back — see that method for the
   /// consequences of the two directions a wrong `len` can take.
   ///
   /// # Parameters
   ///
-  /// - `buf`: the destination deque, appended to (not overwritten); its capacity is the bound.
+  /// - `buf`: the destination deque, appended to (not overwritten); the bound is the room it has
+  ///   **left** when the call is made — `buf.remaining_capacity()` — which is less than
+  ///   `buf.capacity()` on the paths that reach this call already holding the parked token or
+  ///   staged overflow, and equal to it on a cache hit or an overflow-free fill, where `buf`
+  ///   arrives empty.
   fn peek<'p, W>(
     &'p self,
     buf: &mut GenericArrayDeque<MaybeRefCachedTokenOf<'p, 'a, L>, W::CAPACITY>,
