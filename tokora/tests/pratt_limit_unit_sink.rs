@@ -258,6 +258,56 @@ fn right_chain(depth: usize) -> String {
   src
 }
 
+/// The seconds [`bounded`] allows when the build is **interpreted**, replacing whatever native
+/// figure the call site passed.
+///
+/// Every cell here calls `bounded(60, …)`, and 60 seconds is generous for a compiled build: this
+/// file's slowest cell — the section 3 unwind cell, which descends 64 prefix levels under a 4,000
+/// budget and unwinds a panic back out of them — runs in **9.8–10.4 ms** natively, and no other
+/// cell reaches a millisecond. Under Miri that same cell is four orders of magnitude slower, and
+/// 60 seconds stops being a generous bound and becomes a coin flip.
+///
+/// Measured directly with the exact command and flags `ci/miri_tb.sh` runs for the leg that went
+/// red (`-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbolic-alignment-check
+/// -Zmiri-tree-borrows`, `RUSTFLAGS=--cfg test_all_tests`), timing the interval `bounded` itself
+/// bounds rather than the cargo invocation around it:
+///
+/// | run | aarch64-apple-darwin | slowdown vs native |
+/// |---|---|---|
+/// | 1, cell alone | 49.72s | ×4,800 |
+/// | 2, cell alone | 48.61s | ×4,700 |
+/// | 3, whole file | 49.32s | ×4,800 |
+///
+/// The whole file is 58.0s under Miri against 49.3s for this one cell, so the cell is essentially
+/// the file and the other fifteen contribute under nine seconds between them — which is why CI
+/// reported `15 passed; 1 failed` rather than a general slowness.
+///
+/// The borrow model is where the cost is, and that is measured too rather than asserted: the same
+/// cell under the `-sb` leg's flags — `ci/miri_sb.sh`, identical but for dropping
+/// `-Zmiri-tree-borrows` — is **6.94s**, a seventh of the tree-borrows figure. That is why only
+/// the `-tb` leg went red, and why the single figure below has to be sized for the slower model
+/// even though both legs read it.
+///
+/// **The margin, and why it is sized off CI rather than off the table.** CI's failing leg is
+/// `x86_64-unknown-linux-gnu` on a shared runner: a different architecture, a slower core, and a
+/// noisy neighbour. That gap is not a guess here, because the failure itself measures it — the
+/// same cell that reads 49.7s above exceeded **60s** there, so the runner is at least ×1.21
+/// slower on this exact workload, and the true figure is only bounded from below because a
+/// tripped deadline reports "over the budget", never by how much. A shared x86 runner at ×3 of
+/// this machine, on a bad draw, would put the cell near 150s.
+///
+/// 500 is ×10 over the slowest reading — the same multiple, from the same reasoning, that
+/// `pratt_limit.rs`'s `DEEP_STACK_BUDGET` chose for the other bound — which leaves ×3.3 over that
+/// pessimistic 150s, and ×8 over the one figure CI did establish, that the cell needs more than
+/// 60 seconds there.
+///
+/// It is deliberately not larger. A budget is also a bill the job pays if a termination
+/// regression ever does land, because every cell that hangs spends its own wall before the next
+/// one starts: sixteen cells at 500s is 2h13, inside the six-hour job timeout, and that is the
+/// unrealistic case where *every* cell hangs rather than the handful a real regression reaches.
+/// Ten minutes per cell is still a bound; an hour per cell would be a way of never finding out.
+const INTERPRETED_TIMEOUT_SECS: u64 = 500;
+
 /// Runs `f` on a worker with a large stack and a **hard wall-clock bound**.
 ///
 /// The bound is the load-bearing half here. Were the sink ever to erase terminality again a
@@ -268,21 +318,20 @@ fn right_chain(depth: usize) -> String {
 /// The fresh thread is doing a second job: every observation below is a thread-local, so one
 /// worker per cell is what keeps the cells from reading each other's marks under the harness's
 /// parallel runner.
+///
+/// Both jobs, and the choice between the two budgets, belong to [`common::bounded_wait`] — the
+/// tree's single bounded wait. This wrapper only supplies this file's stack size and its pair of
+/// allowances. `secs` is the native one, so the thirty-one call sites keep meaning exactly what
+/// they say on a compiled build; [`INTERPRETED_TIMEOUT_SECS`] replaces it under Miri.
 fn bounded<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
-  let (tx, rx) = std::sync::mpsc::channel();
-  let handle = std::thread::Builder::new()
-    .stack_size(64 * 1024 * 1024)
-    .spawn(move || {
-      let _ = tx.send(f());
-    })
-    .expect("spawn the bounded worker");
-  match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
-    Ok(v) => {
-      handle.join().expect("the bounded worker panicked");
-      v
-    }
-    Err(e) => panic!("the parse did not terminate within {secs}s: {e:?}"),
-  }
+  common::bounded_wait(
+    64 * 1024 * 1024,
+    common::WallClock {
+      native_secs: secs,
+      interpreted_secs: INTERPRETED_TIMEOUT_SECS,
+    },
+    f,
+  )
 }
 
 // ── Observation ────────────────────────────────────────────────────────────────

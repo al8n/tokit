@@ -672,8 +672,8 @@ fn limited<'inp>(limit: usize) -> ParserContext<'inp, TestLexer<'inp>, Fatal<Lim
   fatal_ctx().with_recursion_limiter(RecursionLimiter::with_limitation(limit))
 }
 
-/// The wall-clock bound [`on_a_deep_stack`] enforces, in seconds — native-calibrated, and a
-/// different number once the build is interpreted.
+/// The wall-clock bound [`on_a_deep_stack`] enforces — one figure for a compiled build and a
+/// different one once the build is interpreted, because those are two different machines.
 ///
 /// Miri does not apply a flat per-step overhead here: `-Zmiri-tree-borrows` revalidates a growing
 /// borrow tree on every access, so this file's deepest cell — the `unlimited` half of
@@ -707,27 +707,32 @@ fn limited<'inp>(limit: usize) -> ParserContext<'inp, TestLexer<'inp>, Fatal<Lim
 /// that cross-host gap and ordinary scheduler noise while staying a bounded timeout: a genuine
 /// hang is still caught in about 12 minutes, comfortably inside CI's job-level timeout, instead of
 /// being masked indefinitely.
-const DEEP_STACK_TIMEOUT_SECS: u64 = if cfg!(miri) { 700 } else { 120 };
+///
+/// **Cross-checked once the same defect turned up next door.** `pratt_limit_unit_sink.rs` carried
+/// the identical bug — the fix above corrected this bound and did not sweep for siblings — and
+/// its cell gives the cross-host factor a *measured* lower edge this one never had: 49.7s on this
+/// machine against a trip of a 60s wall on the `x86_64-unknown-linux-gnu` runner, so that runner
+/// is at least ×1.21 slower on an interpreted workload of this shape. A deadline that trips
+/// reports only "over the budget", never by how much, so ×1.21 is a floor rather than an
+/// estimate; ×10 over the reading above leaves the same order of headroom over it either way, and
+/// 700 stands. Re-read under Miri with this refactor in place, on a quiet machine: 67.15s and
+/// 66.65s, inside the range the table already records. The whole 37-cell file is 90s under Miri,
+/// so this one cell is very nearly all of it — the ×10 buys margin on the only cell that needs
+/// any.
+const DEEP_STACK_BUDGET: common::WallClock = common::WallClock {
+  native_secs: 120,
+  interpreted_secs: 700,
+};
 
 /// Runs `f` on a thread with a stack far larger than the harness's own and a hard wall-clock
 /// bound. A recursion-limit defect does not fail an assertion — it hangs, or aborts the process
 /// — so the bound has to live outside the code under test. The stack has to be bigger for the
 /// **unlimited** cells, which by construction run deeper than the harness's 2 MiB allows.
+///
+/// The wall itself is [`common::bounded_wait`], the tree's single bounded wait; this wrapper
+/// supplies only the stack size and [`DEEP_STACK_BUDGET`].
 fn on_a_deep_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-  let (tx, rx) = std::sync::mpsc::channel();
-  let handle = std::thread::Builder::new()
-    .stack_size(256 * 1024 * 1024)
-    .spawn(move || {
-      let _ = tx.send(f());
-    })
-    .expect("spawn the deep-stack worker");
-  match rx.recv_timeout(std::time::Duration::from_secs(DEEP_STACK_TIMEOUT_SECS)) {
-    Ok(v) => {
-      handle.join().expect("the deep-stack worker panicked");
-      v
-    }
-    Err(e) => panic!("the parse did not terminate within {DEEP_STACK_TIMEOUT_SECS}s: {e:?}"),
-  }
+  common::bounded_wait(256 * 1024 * 1024, DEEP_STACK_BUDGET, f)
 }
 
 /// `- - - … 1`, one prefix operator per level.
