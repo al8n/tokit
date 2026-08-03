@@ -1445,9 +1445,9 @@ everywhere else.
    first applies; `parser::many`'s module docs carry it as the standing contract, not an
    afterthought.
 
-   This closes 0.8.0's [known limitation — a discarding error sink erases
+   This closes 0.8.0's [known limitation — a discarding error sink erased
    the recursion trip's stop, not its
-   bound](#0.8.0-known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound),
+   bound](#0.8.0-known-limitation-recorded-and-closed-before-release--a-discarding-error-sink-erased-the-recursion-trips-stop-not-its-bound),
    which recorded the behaviour rather than answering it. The answer is that a resource bound an
    unrelated error sink can opt out of is not a bound.
 
@@ -3654,17 +3654,20 @@ parse-to-emitter contract, and it flips when `finish` starts refusing these span
 
 — *(R8, #123)*
 
-<a id="0.8.0-known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound"></a>
+<a id="0.8.0-known-limitation-recorded-and-closed-before-release--a-discarding-error-sink-erased-the-recursion-trips-stop-not-its-bound"></a>
 
-### Known limitation — a discarding error sink erases the recursion trip's stop, not its bound
+### Known limitation recorded and closed before release — a discarding error sink erased the recursion trip's stop, not its bound
 
 **This limitation was closed before release and does not ship in 0.8.0.** It was recorded when the
 recursion budget landed and answered later in the same release by [48](#0.8.0-changed-breaking),
 which moved the resource-trip witness off the grammar's error value and onto the input session,
-where no `From` the grammar writes can reach it. The heading above and its anchor are kept because
-both are linked — from item 48, and from design documents written while the limitation was open —
-so what follows is the record of what it was, in the past tense, and not a caveat a 0.8.0 consumer
-has to act on.
+where no `From` the grammar writes can reach it. The heading above originally read as a live
+caveat despite this paragraph, so it was rewritten to state the closure directly; the anchor
+changed with it, since this file names an anchor for the heading text it sits above, and the
+in-document link from item 48 was updated to match. Design documents written while the
+limitation was open still cite the old anchor and are outside this file's reach. What follows
+is kept as the record of what it was, in the past tense, and not a caveat a 0.8.0 consumer has
+to act on.
 
 **What it was.** Item 42's `RecursionLimitReached` is always terminal, and the recovery combinators
 decided whether to re-raise by asking the **converted** error — the type the grammar actually
