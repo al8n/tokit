@@ -3247,6 +3247,62 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    never reads it. The bound now sits on the always-compiled trait contract that grants the panic
    door in the first place.
 
+67. **Three corrections to the `Cache` trait's own contract, and the conformance kit made
+   falsifiable against two of the three.** A third-party implementor has only the trait docs to
+   go on, and two of its load-bearing sentences said something the law stated elsewhere in the
+   same doc comment contradicted.
+
+   **`peek`'s bound was corrected from the buffer's total capacity to what it has left.** The
+   trait's contract bullet and `peek`'s own `# Parameters` note both said `peek` appends
+   `min(len(), buffer capacity)`; `peek`'s `# The law` section, in the same doc comment, already
+   said *remaining* capacity. A `peek` written to the wrong half of that contradiction — reading
+   `buf.capacity()` where it should read `buf.remaining_capacity()` — computes the same bound as a
+   conforming one whenever `buf` arrives empty, and a different one as soon as the caller hands it
+   a buffer already holding a parked token or staged overflow, which is the shape `InputRef`'s own
+   peek fill produces on the paths that reach this call. Whether that wrong bound is ever *visible*
+   is a separate question, and the answer is the uneven coverage described below: an implementation
+   that clobbers or reorders what `buf` already holds leaves a trace and is caught, while one that
+   simply drops the surplus leaves none. All three summaries now agree: the bound
+   is `buf`'s **remaining** capacity *at call time*, and `peek` appends *behind* whatever `buf`
+   already holds, never over it.
+
+   **`Cache::len`'s panic clause is qualified to the fill path that reaches the lexer.** It read
+   as an unconditional "the fill checks the copy it gets and panics"; the check only ever runs on
+   the path that reaches the lexer, matching what `InputRef::peek`'s own `# Panics` already
+   scoped it to. The trait doc now says so too, instead of promising a check the cache-hit exit
+   never performs.
+
+   **A law that was only implied is now stated outright: a push is refused only when the cache is
+   full, on both arms, not just `push_back`'s.** `push_front`'s own doc said "if the cache is
+   full, returns `Err`," which reads as one licence among possibly others; it is the only one.
+   The trait's contract bullet, `push_front`'s own doc and `RETAINS_FRONT`'s doc all say so now:
+   declaring `RETAINS_FRONT = false` buys back the input layer's parked-slot fallback, it is not
+   a licence to refuse a `push_front` into an empty, non-full cache.
+
+   The conformance kit is what changed underneath all three, though not evenly, and the uneven
+   part is worth stating rather than rounding off. The refusal law it now enforces outright. The
+   `peek` bound it enforces only where a violation is *observable*: a `peek` that clobbers or
+   misorders what `buf` already holds is caught, at every residency and every prefill depth, but a
+   silent total-capacity `peek` — one that computes the wrong bound and drops the surplus without
+   trace — is **provably invisible** from outside, because a full `GenericArrayDeque::push_back`
+   returns the value and leaves the deque untouched, and `min(min(len, W), R)` equals `min(len, R)`
+   for every width and prefill. That one is not rejected; it is *pinned*, by a test asserting the
+   kit accepts it, which fails the day the blind spot closes. And `len`'s panic clause the kit
+   cannot reach at all, for a structural reason rather than a hard one: the check runs inside
+   `InputRef`'s peek fill, and the kit drives a `Cache`'s own methods directly without ever
+   building an input to reach that fill through — the panic is perfectly catchable, the kit
+   catches twenty of them, what is missing is the call path.
+   `tokora::conformance::cache` now
+   drives `peek` at every residency and every buffer-prefill depth instead of one fixed shape,
+   and drives the empty-cache refusal law at every nonzero capacity regardless of what
+   `RETAINS_FRONT` declares — so a `Cache` certified with `CacheHarness` after this change
+   carries a materially stronger guarantee than one certified before it. The kit's module docs
+   also gained a section naming what it still does not check; the sharpest entry in it belongs to
+   the same audience as the three corrections above: every oracle in the kit compares **spans
+   only** — never the token or the `L::State` beside it in the same `CachedToken` — so a cache
+   that returns the right spans while corrupting either one still passes in full.
+   — *(#172)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,
