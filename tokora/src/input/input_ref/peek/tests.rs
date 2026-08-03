@@ -1602,7 +1602,7 @@ fn successful_overflow_peek_frees_every_staged_token_exactly_once() {
 //
 // `Token`, `State` and `Span` are unconstrained in size, so every `W`-slot store a
 // peek builds costs `W::CAPACITY × (Token + State + Span)` of stack. It must build
-// exactly one — the window it hands back. Through 0.8.0 the fill built a second one
+// exactly one — the window it hands back. Through 0.7.3 the fill built a second one
 // on a cache miss (a `W::CAPACITY`-slot `MaybeUninit` array staging the tokens lexed
 // past the cache until the cache region had been copied out), so a large token
 // payload or a large lexer state cost twice what the caller asked for. On the widest

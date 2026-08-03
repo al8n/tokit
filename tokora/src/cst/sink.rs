@@ -1041,7 +1041,7 @@ where
   /// whether a branch settles its own capture exactly once — so hardening it cannot turn a
   /// bad document into a crash.
   ///
-  /// It was a `debug_assertions`-only wall through 0.8, on the reasoning that the input
+  /// It was a `debug_assertions`-only wall through 0.7.3, on the reasoning that the input
   /// layer's LIFO witness already rejected it upstream. That witness is *itself* debug-only
   /// (`InputRef::restore`, the `unstable-raw` valve), so a release build had no wall on
   /// either layer: the two logs silently sheared, the sink's own channels exact and the

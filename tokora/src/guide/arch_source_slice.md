@@ -246,7 +246,7 @@ The feature graph layers up from there:
   window width: single-entry temporaries, one clone of the lexer (`size_of::<L>()`, which
   contains `State`), and a small fixed part.
 
-  The coefficient is **one**, not two, and that is recent: through 0.8.0 a peek that looked
+  The coefficient is **one**, not two, and that is recent: through 0.7.3 a peek that looked
   past the cache staged the extra tokens in a *second* `W::CAPACITY`-slot array, so a cache
   miss cost twice the figure above. At `U32` over a 1 KiB token beside a 1 KiB lexer state —
   2,072 bytes an entry — that second array was 66,312 bytes of stack nobody asked for, and the
