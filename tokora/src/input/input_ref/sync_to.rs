@@ -40,7 +40,7 @@ where
   /// pre-call snapshot — its end of input commits at the lexer's end rather than rewinding to one
   /// — so an unwind has nothing to restore *to*, and the diagnosed prefix simply stands,
   /// committed at the frontier, the end of the last skipped token. Its stop settle stops *before*
-  /// the sync token, which is why the frontier is what an interrupted stop still has to commit.
+  /// the stopping token, which is why the frontier is what an interrupted stop still has to commit.
   /// That is what makes this the one member of the family whose unwind **disposition** needs no
   /// case analysis; the two rewinding scans settle by their own postures, which are not this one,
   /// and each states its own — see [`sync_through`](Self::sync_through) and

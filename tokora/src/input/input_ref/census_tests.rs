@@ -2099,18 +2099,18 @@ fn peek_footprint_census_the_fill_owns_no_store() {
 //       property of the shared `ScanScope` (it disarms before the settle runs) and therefore
 //       genuinely common. Dropping it from one file while editing another is the drift that
 //       identity used to catch, and this is the half that still catches it;
-//   (b) the three sections must stay pairwise DISTINCT, and no member may carry the retired
+//   (b) the four sections must stay pairwise DISTINCT, and no member may carry the retired
 //       sentence. Re-unifying them is not a merge conflict, it produces no warning, and it is
 //       exactly how the false claim spread the first time;
 //   (c) each section must state the posture its own `ScanMode` ACTUALLY has, derived from that
 //       mode's associated constants as they are written in `scan.rs`.
 //
 // (c) is not optional garnish, and (a) + (b) alone were a check that answers without looking:
-// three paragraphs can carry the shared exclusion, avoid the retired sentence, and be pairwise
-// different while every one of them describes the wrong method — permuting the three sections
+// four paragraphs can carry the shared exclusion, avoid the retired sentence, and be pairwise
+// different while every one of them describes the wrong method — permuting the four sections
 // passes (a) and (b) outright. Distinctness is not correctness. (c) closes that by keying each
 // file's required AND forbidden phrases to `HOLDS_ENTRY`, `COMMITS_FRONTIER_ON_STOP` and
-// `REPORT_SKIPPED`, whose value triples are pairwise different across the three modes — so every
+// `REPORT_SKIPPED`, whose value triples are pairwise different across the four modes — so every
 // permutation trips at least one phrase, and a future change to a constant forces the prose to
 // change with it rather than silently outliving it.
 //
@@ -2121,8 +2121,8 @@ fn peek_footprint_census_the_fill_owns_no_store() {
 // `const HOLDS_ENTRY: bool = true;`, a panic message quoting one, a neighbouring impl's constant and
 // one declared inside a method body are all invisible to the reader. On the doc side a required
 // phrase counts only where nothing negates it, because a substring survives its own denial —
-// "**never** stops *before* the sync token" contains "stops *before* the sync token". A census a
-// sentence can satisfy is the same unchecked claim this one exists to catch, one level up.
+// "**never** stops *before* the stopping token" contains "stops *before* the stopping token". A
+// census a sentence can satisfy is the same unchecked claim this one exists to catch, one level up.
 //
 // The residual bounds worth naming:
 //
@@ -2148,23 +2148,26 @@ fn peek_footprint_census_the_fill_owns_no_store() {
 // list below in the same commit (grep POSTURE_CENSUS).
 // ─────────────────────────────────────────────────────────────────────────────────────
 
-/// The three sync scans, each paired with the [`ScanMode`](super::scan::ScanMode) whose constants
-/// decide its posture. The postures are pairwise different and each is stated on its own method.
+/// The four scan-family members censused for posture, each paired with the
+/// [`ScanMode`](super::scan::ScanMode) whose constants decide its posture. The postures are
+/// pairwise different and each is stated on its own method.
 const SYNC_POSTURE_SOURCES: &[(&str, &str)] = &[
   ("sync_to.rs", "SyncTo"),
   ("sync_through.rs", "SyncThrough"),
   ("sync_balanced.rs", "SyncBalanced"),
+  ("skip_while.rs", "SkipWhile"),
 ];
 
 /// The posture vocabulary: one canonical phrase per [`ScanMode`](super::scan::ScanMode) constant
 /// per value — `(constant, phrase when true, phrase when false)`.
 ///
 /// A method **requires** the phrase for the value its own mode declares and is **forbidden** the
-/// phrase for the other, so no two of the three sections can be swapped: the triples
-/// `SyncTo (false, true, true)`, `SyncThrough (true, false, true)` and
-/// `SyncBalanced (true, true, false)` differ pairwise in at least one axis, and every permutation
-/// therefore trips at least one required-or-forbidden phrase. Distinctness alone could not do
-/// this — three paragraphs can be pairwise different and all three wrong.
+/// phrase for the other, so no two of the four sections can be swapped: the triples
+/// `SyncTo (false, true, true)`, `SyncThrough (true, false, true)`,
+/// `SyncBalanced (true, true, false)` and `SkipWhile (false, true, false)` differ pairwise in at
+/// least one axis, and every permutation therefore trips at least one required-or-forbidden
+/// phrase. Distinctness alone could not do this — four paragraphs can be pairwise different and
+/// all four wrong.
 ///
 /// What each axis means on the unwind edge, which is what the sections describe:
 ///
@@ -2184,7 +2187,7 @@ const POSTURE_PHRASES: &[(&str, &str, &str)] = &[
   ),
   (
     "COMMITS_FRONTIER_ON_STOP",
-    "stops *before* the sync token",
+    "stops *before* the stopping token",
     "consumes the stopping token",
   ),
   (
@@ -2385,7 +2388,7 @@ fn scan_mode_impl_top_level(code: &str, mode: &str) -> std::string::String {
 /// (`<SyncTo as ScanMode<..>>::CONST`) that the composed modes are written with.
 ///
 /// This is what makes the posture census derived rather than self-confirming: flip a constant in
-/// `scan.rs` and the phrases the three `# Panic unwind` sections are held to flip with it, so the
+/// `scan.rs` and the phrases the four `# Panic unwind` sections are held to flip with it, so the
 /// doc fails until it is rewritten (grep POSTURE_CENSUS).
 fn scan_mode_const(mode: &str, name: &str, depth: usize) -> bool {
   assert!(
@@ -2477,11 +2480,11 @@ const NEGATORS: &[&str] = &[
 
 /// Whether `prose` **states** `phrase` — carries it at least once with nothing negating it.
 ///
-/// A required phrase is checked with this rather than with `contains`, because a substring survives
-/// its own denial: "**never** stops *before* the sync token" contains "stops *before* the sync
-/// token", and a census satisfied by the sentence that contradicts it is not a census. The forbidden
-/// side deliberately stays a plain `contains` — see POSTURE_CENSUS on why that direction is the
-/// conservative one (grep POSTURE_CENSUS).
+/// A required phrase is checked with this rather than with `contains`, because a substring
+/// survives its own denial: "**never** stops *before* the stopping token" contains "stops
+/// *before* the stopping token", and a census satisfied by the sentence that contradicts it is
+/// not a census. The forbidden side deliberately stays a plain `contains` — see POSTURE_CENSUS on
+/// why that direction is the conservative one (grep POSTURE_CENSUS).
 fn states(prose: &str, phrase: &str) -> bool {
   prose
     .match_indices(phrase)
@@ -2583,10 +2586,11 @@ fn posture_census_each_sync_states_its_own_unwind_posture() {
     assert!(
       states(section, OWN),
       "POSTURE_CENSUS drift: `{name}`'s `# Panic unwind` section no longer says it is stating \
-       THIS method's own posture{}. The three scans settle an unwind differently — `sync_to` \
+       THIS method's own posture{}. The four scans settle an unwind differently — `sync_to` \
        commits, `sync_through` consumes on a stop and rewinds at a no-match end of input, \
-       `sync_balanced` does one of each — so a section that describes the family rather than its \
-       own method is describing two other methods wrongly (grep POSTURE_CENSUS).",
+       `sync_balanced` does one of each, `skip_while` does `sync_to`'s but reports nothing — so \
+       a section that describes the family rather than its own method is describing the other \
+       methods wrongly (grep POSTURE_CENSUS).",
       negation_note(section, OWN)
     );
     assert!(
@@ -2615,8 +2619,8 @@ fn posture_census_each_sync_states_its_own_unwind_posture() {
 /// **actually has**, read out of `scan.rs`.
 ///
 /// The two checks above answer without looking at behaviour. "Says `this method's own posture`",
-/// "does not carry the retired sentence" and "pairwise distinct" are all satisfied by three
-/// paragraphs that are different from one another and wrong about all three methods — which is
+/// "does not carry the retired sentence" and "pairwise distinct" are all satisfied by four
+/// paragraphs that are different from one another and wrong about all four methods — which is
 /// exactly the failure mode this family kept producing. Distinctness is not correctness. This
 /// check is the one that looks (grep POSTURE_CENSUS).
 #[test]

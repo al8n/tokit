@@ -56,11 +56,20 @@ where
   /// # Panic unwind
   ///
   /// A panic out of the predicate, the expected-tokens closure, the emitter, or the lexer
-  /// **anywhere but the end-of-input settle** is an exit too, and it settles: no token leaves the
-  /// stream, the diagnosed prefix is kept, and no emitter mark is stranded. The two routes reach
-  /// that by different means, and the difference is the whole of what *Two routes, one skip* below
-  /// is about — the complete-input route holds no uncommitted position at any point where caller
-  /// code runs, and holds a token out of the stream at exactly one call, which `LexedFront` owns
+  /// **anywhere but the end-of-input settle** is an exit too, and it settles with **this method's
+  /// own posture**: [`sync_to`](Self::sync_to)'s commit-and-keep, reporting nothing. This mode
+  /// holds no pre-call snapshot, so **every unwind keeps** — there is no earlier state left to
+  /// restore *to*, only the progress already committed — and its settle stops *before* the
+  /// stopping token, exactly as `sync_to`'s does, which is why the frontier is what an interrupted
+  /// stop still has to commit. `REPORT_SKIPPED` is `false` for this mode, so the prefix an unwind
+  /// keeps is **skipped, not diagnosed**: no unexpected-token report is ever built for a token
+  /// this call skips, so a panic has nothing to lose on that axis — only the genuine lexer errors
+  /// crossed along the way are ever reported, and those settle and unwind exactly as any other
+  /// committed emission does. No token leaves the stream, and no emitter mark is stranded. The
+  /// two routes reach that by different means, and the difference is the whole of what *Two
+  /// routes, one skip* below is about — the complete-input route holds no uncommitted position at
+  /// any point where caller code runs, and holds a token out of the stream at exactly one call,
+  /// which `LexedFront` owns
   /// across; the partial-input route keeps the shared scanner's `ScanScope`, whose `Drop` puts the
   /// in-flight token back, commits the frontier and settles the entry mark.
   ///
