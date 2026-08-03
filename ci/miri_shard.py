@@ -1,0 +1,703 @@
+#!/usr/bin/env python3
+"""The shard plan for the Miri jobs — the single source of truth for how the suite is split.
+
+Miri set the pull request's wall clock on its own. One completed run measured the worst cell,
+`miri-tb-x86_64-unknown-linux-gnu`, at 116.9 minutes against 9 minutes for the next-longest job
+in the workflow; the six Miri cells together were 437 of the run's ~490 minutes. Nothing else
+was close, so nothing else was worth splitting.
+
+The split is by integration test target, and the target list is ENUMERATED AT RUN TIME from
+`cargo metadata`. A hardcoded list would mean a newly added `tokora/tests/*.rs` is silently
+never interpreted under Miri, and nothing would ever say so — the shards would stay green while
+covering less every month. Index-modulo over the live list makes coverage exhaustive by
+construction: target `i` goes to shard `i % SHARD_TOTAL`, so a new file joins some shard the
+moment it exists, without anyone remembering to add it.
+
+Three units cannot be split by test target and are each PINNED to exactly one shard so they are
+paid once instead of `SHARD_TOTAL` times:
+
+    lib unit tests, `--features logos`                 → shard 0
+    doctests                                           → shard 0
+    lib unit tests, `--features logos,unstable-raw`    → shard 1 (`1 % SHARD_TOTAL`)
+
+The two lib runs are deliberately on DIFFERENT shards. They are the largest indivisible units in
+the job — 31.6 and 32.1 minutes on the worst cell, 55% of it between them — so putting both on
+one shard would leave that shard at ~64 minutes and cap the whole exercise there. Split across
+two shards they overlap, and the cell's critical path becomes one lib run plus one integration
+slice. `1 % SHARD_TOTAL` rather than a bare `1` keeps the pinning total: at `SHARD_TOTAL = 1`
+the raw lib run lands back on shard 0 rather than on a shard that does not exist.
+
+──────────────────────────────────────────────────────────────────────────────────────────────
+THE GUARD, and why it is written the way it is
+──────────────────────────────────────────────────────────────────────────────────────────────
+
+Read `ci/changelog_structure.sh`'s header first. It records two production failures in this
+repository that were one defect wearing two hats: a check whose answer depended on where
+something sat, so it examined nothing and reported success. Sharding is a fresh place for that
+same defect, and a worse one — a shard that enumerates no targets does not merely check less,
+it checks nothing, and a green tick from it is indistinguishable from a green tick from a shard
+that did the work.
+
+So every assertion below is a HARD FAILURE, run in every mode, on every shard, before a single
+test is interpreted. "Enumerated nothing" exits non-zero. It is never a quiet skip, an empty
+flag list, or a shard that finishes early and passes.
+
+  (1) `cargo metadata` ran, exited zero, and parsed. A failed enumeration is not an empty
+      enumeration.
+
+  (2) Exactly one workspace package is named `tokora`. Zero means the filter is stale — a
+      rename would otherwise produce an empty target list that looks exactly like a package
+      with no tests.
+
+  (3) The enumerated count is greater than zero. The positive control: without it, "the query
+      matched nothing" and "the crate has no integration tests" are the same green.
+
+  (4) The enumerated set equals the set cargo's own autodiscovery implies from `tokora/tests/`
+      — `*.rs` files plus `*/main.rs` directories. This is the assertion that (3) cannot make.
+      A count of 101 is not evidence of anything if 140 files exist; only an INDEPENDENT second
+      source of truth can catch the metadata query silently narrowing (an `autotests = false`,
+      a `[[test]]` block with a custom path, a future workspace layout change). When these two
+      disagree the correct outcome is red, not a quiet majority vote, and the message says
+      which side is missing what.
+
+  (5) Names agreeing is not files agreeing. A `[[test]]` block can keep an existing target's
+      NAME while pointing its `path` at a different file; the set comparison in (4) sees two
+      equal sets of names and cannot tell the difference. So every metadata target's `src_path`
+      is compared against the file `tokora/tests/` implies for that same name — or, for a
+      declared `PATH_EXCEPTIONS` entry, against the approved override — and a HARD FAILURE
+      names the target and both paths on any mismatch, any name claimed by two metadata targets
+      at once, or any unrecognised custom path. Without this, (4) proves the right names exist
+      and nothing about whether they still mean what they say.
+
+  (6) `1 <= SHARD_TOTAL <= len(targets)`, so no shard can be empty by arithmetic.
+
+  (7) The partition is verified against the enumerated list on every invocation: every shard
+      non-empty, the shards pairwise disjoint, and their union equal to the full list. Each
+      shard re-proves the whole partition rather than trusting its own slice, so a broken split
+      reddens all of them at once instead of silently dropping the one nobody looks at.
+
+  (8) Every target name matches `[A-Za-z0-9_-]+`. The emitted flags are word-split unquoted by
+      the calling shell — that is intentional, it is how a variable becomes many arguments — and
+      this assertion is what keeps that split from ever producing a shell metacharacter or an
+      empty word. It does NOT, on its own, stop a target named e.g. `--help` from being read as
+      a flag instead of a value: two bare words, `--test` then `--help`, let cargo's own arg
+      parser treat `--help` as the global help flag and exit 0 having run nothing — a green
+      shard that did no work. So the flag and the name are joined into one word, `--test=name`,
+      which is always a single value no matter what it starts with; this regex is defense in
+      depth underneath that join, not the thing that makes it safe.
+
+Point (7) has a second reason to be strict that is specific to `cargo test`: an EMPTY selector
+list is not "run nothing", it is "run everything". `cargo miri test --target T --features logos`
+with no `--test` flag interprets all 102 targets. A shard whose slice came back empty would
+therefore not fail fast and would not run fast — it would quietly do the entire suite, four
+times over, and pass. Refusing an empty slice is the only thing standing between a plan bug and
+a four-fold increase in the wall clock this file exists to reduce.
+
+`SHARD_TOTAL` lives here and nowhere else. The workflow does not spell out `[0, 1, 2, 3]`; the
+`miri-shard-plan` job asks this file for the shard list and the Miri matrices are built from
+that output. A shard list and a shard count that are written down twice can disagree, and the
+disagreement that matters — a shard dropped from the list while the count stays — removes a
+quarter of the suite from CI without reddening anything.
+
+Sorting is Python's, not the shell's: `sort(1)` is locale-dependent and the runners are not all
+the same OS, so a shell sort could hand two runners different partitions for the same list.
+
+Modes:
+
+    plan                    validate, print the partition, and emit `shards=[…]` to
+                            `$GITHUB_OUTPUT` for the Miri matrices to consume.
+    flags <shard> logos     `[--lib ]--test=a --test=b …` for the `logos` pass.
+    flags <shard> raw       `[--lib ]--test=a --test=b …` for the `logos,unstable-raw` pass.
+    flags <shard> doc       `--doc` if this shard owns the doctests, else the literal `SKIP`.
+    selftest                exercise guard (5) and guard (8)/`emit_flags` against mocked
+                            `cargo metadata` JSON and a throwaway `tests/` tree — no real cargo
+                            invocation, no edit to the real manifest. Exits non-zero if any
+                            case fails.
+
+`doc` reports `SKIP` rather than printing nothing because an empty string and a crashed helper
+look identical to a shell, and one of them must not be read as "no doctests to run".
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+# The number of shards. Changing this number is the whole knob: the matrices, the pinning and
+# the partition all follow from it. See the header for why it is not also written in the
+# workflow.
+#
+# 4 is the knee. The integration work is ~50 minutes on the worst cell and divides cleanly, but
+# the indivisible lib runs are ~32 minutes each, so the cell cannot go below ~33 minutes however
+# far this is pushed: 3 shards give ~50 minutes, 4 give ~46, 6 give ~42, 8 give ~40. Past 4 each
+# extra shard buys a couple of minutes on Linux and costs two more macOS jobs, and macOS is the
+# scarce resource — GitHub caps macOS at 5 concurrent jobs per account on the Free, Pro and Team
+# plans, and every Miri cell but two runs there.
+SHARD_TOTAL = 4
+
+PACKAGE = "tokora"
+
+# The pinned units. See the header for why the two lib runs are on different shards.
+LIB_LOGOS_SHARD = 0
+DOC_SHARD = 0
+LIB_RAW_SHARD = 1 % SHARD_TOTAL
+
+NAME_RE = re.compile(r"\A[A-Za-z0-9_-]+\Z")
+
+# Guard (5)'s escape hatch: a target name intentionally served from a path other than the one
+# `tokora/tests/` implies (a `[[test]]` block with a deliberate custom `path`). Empty today —
+# there is no `[[test]]` block in `tokora/Cargo.toml` — and every entry here is a standing claim
+# that a human, not this script, checked the target still covers what its name promises. Keys
+# are target names; values are the approved source path, relative to the repository root.
+PATH_EXCEPTIONS: dict[str, str] = {}
+
+
+def die(msg: str) -> None:
+    """Every failure in this file goes through here: one prefix, and always exit 1."""
+    print(f"miri_shard: FAIL: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def note(msg: str) -> None:
+    print(f"miri_shard: {msg}", file=sys.stderr)
+
+
+def repo_root() -> Path:
+    """Derived from this file's location, never from the working directory.
+
+    Same reason `ci/changelog_structure.sh` refuses position-dependent answers: a helper that
+    resolves its inputs relative to wherever it happened to be invoked from is a helper that
+    can be made to find nothing.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
+def autodiscovered_paths(root: Path) -> dict[str, Path]:
+    """The integration test target name -> canonical source file cargo's autodiscovery implies.
+
+    `tests/*.rs` is one target per file, named for the stem; `tests/<dir>/main.rs` is one
+    target named for the directory. A directory without a `main.rs` — `tests/common/`, which is
+    a shared module — is not a target. This mirrors cargo's documented rules and exists only to
+    disagree with `cargo metadata` when something has gone wrong.
+
+    Returns a name -> path map rather than just names, because a name by itself does not prove
+    which file it covers — see guard (5) in `verify_targets`, which is the reason this keeps
+    the path instead of throwing it away the way a bare set of names would.
+    """
+    tests_dir = root / PACKAGE / "tests"
+    if not tests_dir.is_dir():
+        die(f"`{tests_dir}` is not a directory; the integration suite has moved or vanished")
+    paths: dict[str, Path] = {}
+    for entry in sorted(tests_dir.iterdir()):
+        if entry.is_file() and entry.suffix == ".rs":
+            name, found = entry.stem, entry
+        elif entry.is_dir() and (entry / "main.rs").is_file():
+            name, found = entry.name, entry / "main.rs"
+        else:
+            continue
+        if name in paths:
+            die(
+                f"`tokora/tests/` implies target `{name}` from two different sources: "
+                f"{paths[name]} and {found}. cargo cannot give both the same target name, so "
+                "this file cannot pick a canonical path for either — rename one."
+            )
+        paths[name] = found
+    return paths
+
+
+def autodiscovered_names(root: Path) -> set[str]:
+    """The integration test target names cargo's autodiscovery implies from the source tree.
+
+    A thin wrapper over `autodiscovered_paths` so guard (4)'s name-only comparison and guard
+    (5)'s path comparison share one source of truth instead of two trees that can drift apart.
+    """
+    return set(autodiscovered_paths(root))
+
+
+def enumerate_targets() -> list[str]:
+    """Guard (1): runs `cargo metadata`, parses it, and hands off to `verify_targets` for
+    guards (2)-(5) and (8). Returns the sorted integration test target names.
+    """
+    root = repo_root()
+    manifest = root / "Cargo.toml"
+
+    try:
+        proc = subprocess.run(
+            [
+                "cargo",
+                "metadata",
+                "--no-deps",
+                "--format-version",
+                "1",
+                "--manifest-path",
+                str(manifest),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:  # cargo missing entirely
+        die(f"could not run `cargo metadata`: {exc}")
+
+    # (1) A failed enumeration is not an empty enumeration.
+    if proc.returncode != 0:
+        die(
+            f"`cargo metadata` exited {proc.returncode} for {manifest}\n"
+            f"--- stderr ---\n{proc.stderr.strip()}"
+        )
+    try:
+        meta = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        die(f"`cargo metadata` did not emit parseable JSON: {exc}")
+
+    return verify_targets(meta, root)
+
+
+def verify_targets(meta: dict, root: Path) -> list[str]:
+    """Guards (2)-(5) and (8), given already-parsed `cargo metadata` JSON and a repo root.
+    Returns the sorted integration test target names.
+
+    Split out from `enumerate_targets` so `mode_selftest` can drive these guards with mocked
+    metadata and a throwaway `tests/` tree — never a real `cargo metadata` invocation, never a
+    write to the real manifest.
+    """
+    # (2) A stale package filter must not read as a package with no tests.
+    pkgs = [p for p in meta.get("packages", []) if p.get("name") == PACKAGE]
+    if len(pkgs) != 1:
+        found = sorted(p.get("name", "?") for p in meta.get("packages", []))
+        die(
+            f"expected exactly one workspace package named `{PACKAGE}`, found {len(pkgs)}; "
+            f"workspace packages: {found}"
+        )
+
+    test_targets = [t for t in pkgs[0].get("targets", []) if t.get("kind") == ["test"]]
+    names = sorted(t["name"] for t in test_targets)
+
+    # (3) The positive control.
+    if not names:
+        die(
+            f"`cargo metadata` reported ZERO integration test targets for `{PACKAGE}`. "
+            "That is a broken query, not an empty suite — refusing to report success on a "
+            "shard that would interpret nothing."
+        )
+
+    # (4) The independent second source of truth: names.
+    expected_paths = autodiscovered_paths(root)
+    expected = set(expected_paths)
+    if set(names) != expected:
+        missing = sorted(expected - set(names))
+        extra = sorted(set(names) - expected)
+        die(
+            "`cargo metadata` and `tokora/tests/` disagree about the integration suite.\n"
+            f"  metadata reports {len(names)}, the tests directory implies {len(expected)}\n"
+            f"  in tokora/tests/ but NOT in metadata (these would go uninterpreted): {missing}\n"
+            f"  in metadata but NOT in tokora/tests/: {extra}\n"
+            "If a `[[test]]` block with a custom path was added on purpose, teach "
+            "`autodiscovered_names` about it — do not delete this check, it is the only thing "
+            "that notices the shards quietly covering less than the tree contains."
+        )
+
+    # (5) Names agreeing is not files agreeing — see the header. Reject a duplicate metadata
+    # name outright: silently keying a dict by `name` would keep only the last one and hide
+    # exactly the kind of collision this guard exists to catch.
+    meta_paths: dict[str, Path] = {}
+    dup_names: set[str] = set()
+    for t in test_targets:
+        n = t["name"]
+        if n in meta_paths:
+            dup_names.add(n)
+        else:
+            meta_paths[n] = Path(t["src_path"])
+    if dup_names:
+        die(
+            "`cargo metadata` reports more than one `test` target named the same: "
+            f"{sorted(dup_names)}. Two targets cannot share a name in real cargo output, and "
+            "this file cannot pick a canonical `src_path` for either — fix the manifest before "
+            "trusting the shard plan."
+        )
+
+    mismatches = []
+    for name, src_path in sorted(meta_paths.items()):
+        resolved = src_path.resolve()
+        exception = PATH_EXCEPTIONS.get(name)
+        if exception is not None:
+            allowed = (root / exception).resolve()
+            if resolved == allowed:
+                continue
+            mismatches.append(
+                f"  `{name}`: cargo metadata says {resolved}, but PATH_EXCEPTIONS says "
+                f"{allowed} — the exception is stale"
+            )
+            continue
+        want = expected_paths[name].resolve()
+        if resolved != want:
+            mismatches.append(
+                f"  `{name}`: cargo metadata says {resolved}, tokora/tests/ implies {want}"
+            )
+    if mismatches:
+        die(
+            "`cargo metadata` and `tokora/tests/` agree on target NAMES but disagree on which "
+            "FILE at least one of them builds from. A `[[test]]` block can keep an existing "
+            "name while pointing `path` at a different file, and the name-only check in (4) "
+            "cannot see that — the coverage the matching name implies would be silently "
+            "false:\n" + "\n".join(mismatches) + "\n"
+            "If a custom path is intentional, add the target to PATH_EXCEPTIONS with its "
+            "approved path — do not delete this check, it is the only thing that notices a "
+            "target's content moving out from under its name."
+        )
+
+    # (8) The emitted flags are word-split unquoted by the caller.
+    bad = [n for n in names if not NAME_RE.match(n)]
+    if bad:
+        die(
+            f"target names outside [A-Za-z0-9_-]: {bad}. The shard flags are word-split by the "
+            "calling shell, so these cannot be passed through safely."
+        )
+
+    return names
+
+
+def partition(names: list[str]) -> list[list[str]]:
+    """Guard (6)-(7). Returns the shards, having re-proved the whole partition."""
+    # (6) No shard can be empty by arithmetic.
+    if SHARD_TOTAL < 1:
+        die(f"SHARD_TOTAL must be >= 1, got {SHARD_TOTAL}")
+    if SHARD_TOTAL > len(names):
+        die(
+            f"SHARD_TOTAL is {SHARD_TOTAL} but only {len(names)} integration test targets "
+            "exist; some shard would interpret nothing and pass."
+        )
+
+    shards = [
+        [n for i, n in enumerate(names) if i % SHARD_TOTAL == s] for s in range(SHARD_TOTAL)
+    ]
+
+    # (7) Every shard re-proves the whole partition, not just its own slice.
+    for s, shard in enumerate(shards):
+        if not shard:
+            die(f"shard {s} of {SHARD_TOTAL} enumerated zero targets")
+
+    flat = [n for shard in shards for n in shard]
+    if len(flat) != len(names):
+        die(
+            f"partition size {len(flat)} != enumerated size {len(names)}: the shards do not "
+            "account for the suite exactly once"
+        )
+    dupes = sorted({n for n in flat if flat.count(n) > 1})
+    if dupes:
+        die(f"targets assigned to more than one shard: {dupes}")
+    if sorted(flat) != names:
+        omitted = sorted(set(names) - set(flat))
+        die(f"the union of the shards is not the enumerated list; omitted: {omitted}")
+
+    return shards
+
+
+def emit_flags(shard: int, unit: str, shards: list[list[str]]) -> None:
+    if unit == "doc":
+        if shard == DOC_SHARD:
+            note(f"shard {shard}/{SHARD_TOTAL} owns the doctests")
+            print("--doc")
+        else:
+            note(f"shard {shard}/{SHARD_TOTAL} does not own the doctests")
+            print("SKIP")
+        return
+
+    if unit == "logos":
+        lib = shard == LIB_LOGOS_SHARD
+    elif unit == "raw":
+        lib = shard == LIB_RAW_SHARD
+    else:
+        die(f"unknown unit `{unit}`; expected one of: logos, raw, doc")
+
+    slice_ = shards[shard]
+    # Guard (8) already proved every name matches `[A-Za-z0-9_-]+`, but a name starting with
+    # `-` — e.g. a target literally named `--help` — is still a legal match for that regex. If
+    # `--test` and the name were emitted as two separate words, the calling shell's word-split
+    # hands cargo `--test --help` as two argv entries; clap reads the bare `--help` as its own
+    # global flag rather than as `--test`'s value, and cargo prints help and exits 0 — a shard
+    # that ran nothing, green. Joining them into one word, `--test=<name>`, removes the
+    # ambiguity entirely: clap always treats the text after `=` as the value, whatever it
+    # starts with.
+    flags = (["--lib"] if lib else []) + [f"--test={n}" for n in slice_]
+    note(
+        f"shard {shard}/{SHARD_TOTAL} unit={unit}: {len(slice_)} integration targets, "
+        f"lib={'yes' if lib else 'no'}"
+    )
+    print(" ".join(flags))
+
+
+def mode_plan(names: list[str], shards: list[list[str]]) -> None:
+    print(f"integration test targets enumerated: {len(names)}")
+    print(f"shards: {SHARD_TOTAL}")
+    print(
+        f"pinned: lib(logos)=shard {LIB_LOGOS_SHARD}, doctests=shard {DOC_SHARD}, "
+        f"lib(logos,unstable-raw)=shard {LIB_RAW_SHARD}"
+    )
+    for s, shard in enumerate(shards):
+        pinned = []
+        if s == LIB_LOGOS_SHARD:
+            pinned.append("lib(logos)")
+        if s == DOC_SHARD:
+            pinned.append("doc")
+        if s == LIB_RAW_SHARD:
+            pinned.append("lib(raw)")
+        extra = f"  + {', '.join(pinned)}" if pinned else ""
+        print(f"  shard {s}: {len(shard):3d} targets{extra}")
+    print(f"union verified: {sum(len(s) for s in shards)} == {len(names)}, no duplicates")
+
+    out = os.environ.get("GITHUB_OUTPUT")
+    payload = json.dumps(list(range(SHARD_TOTAL)))
+    if out:
+        with open(out, "a", encoding="utf-8") as fh:
+            fh.write(f"shards={payload}\n")
+        note(f"emitted shards={payload} to $GITHUB_OUTPUT")
+    else:
+        note(f"$GITHUB_OUTPUT unset; shards would be {payload}")
+
+
+def mode_selftest() -> None:
+    """Regression tests for guard (5) and guard (8)/`emit_flags`, run against mocked `cargo
+    metadata` JSON and a throwaway `tests/` tree. Never shells out to cargo, never touches the
+    real manifest or the real `tokora/tests/`.
+
+    In the spirit of `ci/changelog_structure_selftest.sh`: a green case proves the guard does
+    not refuse by default, and each red case proves the SPECIFIC guard fires — not just that
+    something, somewhere, died. Exits non-zero if any case fails.
+    """
+    import shutil
+    import tempfile
+    from io import StringIO
+
+    results: list[tuple[str, bool, str]] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        results.append((name, ok, detail))
+
+    def run(fn, *args) -> tuple[int, str]:
+        """Calls `fn`, trapping the `die()` exit path. Returns (exit_code, stderr)."""
+        old_err = sys.stderr
+        sys.stderr = captured = StringIO()
+        try:
+            fn(*args)
+            code = 0
+        except SystemExit as exc:
+            code = 1 if exc.code else 0
+        finally:
+            sys.stderr = old_err
+        return code, captured.getvalue()
+
+    def run_stdout(fn, *args) -> tuple[int, str, str]:
+        """Like `run`, but also captures stdout."""
+        old_out = sys.stdout
+        sys.stdout = captured_out = StringIO()
+        try:
+            code, err = run(fn, *args)
+        finally:
+            sys.stdout = old_out
+        return code, captured_out.getvalue(), err
+
+    # A throwaway `<tmp>/tokora/tests/` tree — never the real one — resolved up front so every
+    # path compared against it later is already canonical and string-identical.
+    tmp = Path(tempfile.mkdtemp(prefix="miri_shard_selftest_")).resolve()
+    try:
+        tests_dir = tmp / PACKAGE / "tests"
+        tests_dir.mkdir(parents=True)
+        # A subdirectory with no `main.rs` is invisible to `autodiscovered_paths` — exactly
+        # like the real `tokora/tests/common/` — so a `[[test]]` block can point here without
+        # ever changing the autodiscovered name set. This is what makes the Finding-1 exploit
+        # invisible to guard (4) and visible only to guard (5).
+        support_dir = tests_dir / "support"
+        support_dir.mkdir()
+        foo = tests_dir / "foo.rs"
+        bar = tests_dir / "bar.rs"
+        decoy = support_dir / "decoy.rs"
+        for f in (foo, bar, decoy):
+            f.write_text("// miri_shard selftest fixture\n", encoding="utf-8")
+
+        def meta_with_foo_at(foo_src: Path) -> dict:
+            return {
+                "packages": [
+                    {
+                        "name": PACKAGE,
+                        "targets": [
+                            {"name": "foo", "kind": ["test"], "src_path": str(foo_src)},
+                            {"name": "bar", "kind": ["test"], "src_path": str(bar)},
+                        ],
+                    }
+                ]
+            }
+
+        # GREEN — names AND paths agree with tokora/tests/: guard (5) must not refuse this.
+        code, err = run(verify_targets, meta_with_foo_at(foo), tmp)
+        check("guard(5) green: matching src_path is accepted", code == 0, err)
+
+        # RED — Finding 1: `foo`'s metadata name is unchanged but its `src_path` now points at
+        # `support/decoy.rs`. Guard (4)'s name-set comparison alone cannot see this (both sides
+        # still say just {foo, bar}); guard (5) must refuse it, naming the target and both
+        # paths.
+        code, err = run(verify_targets, meta_with_foo_at(decoy), tmp)
+        check(
+            "guard(5) red: src_path mismatch under an unchanged name is refused",
+            code != 0 and "foo" in err and str(decoy) in err,
+            err,
+        )
+
+        # RED: two metadata targets sharing one name. Keying a dict by name would silently keep
+        # only the last and hide the collision; this must be refused instead.
+        dup_meta = {
+            "packages": [
+                {
+                    "name": PACKAGE,
+                    "targets": [
+                        {"name": "foo", "kind": ["test"], "src_path": str(foo)},
+                        {"name": "foo", "kind": ["test"], "src_path": str(decoy)},
+                        {"name": "bar", "kind": ["test"], "src_path": str(bar)},
+                    ],
+                }
+            ]
+        }
+        code, err = run(verify_targets, dup_meta, tmp)
+        check(
+            "guard(5) red: duplicate metadata target name is refused",
+            code != 0 and "foo" in err and "more than one" in err,
+            err,
+        )
+
+        # GREEN: a declared PATH_EXCEPTIONS entry — and only that — makes a real path
+        # difference pass, and it is undone immediately after so it cannot leak into any other
+        # case, or worse, into a real `plan`/`flags` invocation later in the same process.
+        saved = dict(PATH_EXCEPTIONS)
+        try:
+            PATH_EXCEPTIONS.clear()
+            PATH_EXCEPTIONS["foo"] = str(decoy.relative_to(tmp))
+            code, err = run(verify_targets, meta_with_foo_at(decoy), tmp)
+            check("guard(5) green: a declared PATH_EXCEPTIONS entry is honoured", code == 0, err)
+        finally:
+            PATH_EXCEPTIONS.clear()
+            PATH_EXCEPTIONS.update(saved)
+
+        # RED — this finding (Codex round 2): every case above drives guard (8) only through
+        # `emit_flags`, with mocked shard slices it invents itself — never through
+        # `verify_targets`, the only place guard (8) actually runs. A name can satisfy guards
+        # (4) and (5) — cargo metadata's name matches the tree, and the tree's file is the one
+        # metadata claims to be building — and still be shell-significant text that must never
+        # reach a word-split shell as a bare word; guard (8) is the only thing that refuses it.
+        # A fresh tree is used so these bad names never join `expected`/`meta_with_foo_at` for
+        # the guard(5) cases above.
+        badname_tmp = Path(tempfile.mkdtemp(prefix="miri_shard_selftest_badname_")).resolve()
+        try:
+            badname_tests_dir = badname_tmp / PACKAGE / "tests"
+            badname_tests_dir.mkdir(parents=True)
+
+            def meta_with_only(name: str, src: Path) -> dict:
+                return {
+                    "packages": [
+                        {
+                            "name": PACKAGE,
+                            "targets": [{"name": name, "kind": ["test"], "src_path": str(src)}],
+                        }
+                    ]
+                }
+
+            # Whitespace and a glob character: word-splitting and globbing are the two shell
+            # behaviours guard (8) exists to keep an unquoted `--test=<name>` safe against. Each
+            # is written as its own file and removed before the next so the tree — and therefore
+            # `expected` — only ever contains the one name under test.
+            for bad_name in ("foo bar", "foo*bar"):
+                bad_file = badname_tests_dir / f"{bad_name}.rs"
+                bad_file.write_text("// miri_shard selftest fixture\n", encoding="utf-8")
+                try:
+                    code, err = run(verify_targets, meta_with_only(bad_name, bad_file), badname_tmp)
+                    check(
+                        f"guard(8) red: verify_targets refuses name {bad_name!r} even though "
+                        "guards (4) and (5) both agree it is the tree's real name",
+                        code != 0 and "outside [A-Za-z0-9_-]" in err and bad_name in err,
+                        err,
+                    )
+                finally:
+                    bad_file.unlink()
+        finally:
+            shutil.rmtree(badname_tmp, ignore_errors=True)
+
+        # RED — Finding 2: a target named `--help` must never reach the shell as `--test`
+        # followed by a bare word starting with `-`; that bare word is cargo's own help flag
+        # and would exit 0 having run nothing.
+        _, out, _ = run_stdout(emit_flags, 0, "raw", [["--help"]])
+        check(
+            "emit_flags red: a leading-dash name is fused to --test=, not a bare word",
+            "--test --help" not in out and "--test=--help" in out,
+            out,
+        )
+
+        # GREEN: ordinary names still join the way cargo expects — no regression from the
+        # `--test=<name>` change.
+        _, out, _ = run_stdout(emit_flags, 0, "raw", [["alpha", "beta"]])
+        check(
+            "emit_flags green: ordinary names still join as --test=<name>",
+            out.split() == ["--test=alpha", "--test=beta"],
+            out,
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    failed = [name for name, ok, _ in results if not ok]
+    for name, ok, detail in results:
+        note(f"selftest: {'OK  ' if ok else 'FAIL'} {name}")
+        if not ok and detail:
+            note(f"selftest:      {detail.strip()[:400]}")
+
+    if failed:
+        die(f"selftest: {len(failed)}/{len(results)} case(s) failed: {failed}")
+    note(f"selftest: {len(results)}/{len(results)} case(s) passed")
+
+
+def main(argv: list[str]) -> None:
+    if len(argv) < 2:
+        die(
+            "usage: miri_shard.py plan | miri_shard.py flags <shard> <logos|raw|doc> | "
+            "miri_shard.py selftest"
+        )
+
+    mode = argv[1]
+
+    if mode == "selftest":
+        if len(argv) != 2:
+            die("usage: miri_shard.py selftest")
+        mode_selftest()
+        return
+
+    # The guard runs in every remaining mode, before anything is emitted. There is no path
+    # through `plan` or `flags` that reaches a cargo invocation without it. `selftest` is
+    # exempt on purpose: it supplies its own mocked metadata and must not depend on — or
+    # perturb — the real repository's `cargo metadata` output.
+    names = enumerate_targets()
+    shards = partition(names)
+
+    if mode == "plan":
+        if len(argv) != 2:
+            die("usage: miri_shard.py plan")
+        mode_plan(names, shards)
+        return
+
+    if mode == "flags":
+        if len(argv) != 4:
+            die("usage: miri_shard.py flags <shard> <logos|raw|doc>")
+        try:
+            shard = int(argv[2])
+        except ValueError:
+            die(f"shard index `{argv[2]}` is not an integer")
+        if not 0 <= shard < SHARD_TOTAL:
+            die(f"shard index {shard} outside 0..{SHARD_TOTAL - 1}")
+        emit_flags(shard, argv[3], shards)
+        return
+
+    die(f"unknown mode `{mode}`; expected `plan`, `flags`, or `selftest`")
+
+
+if __name__ == "__main__":
+    main(sys.argv)
