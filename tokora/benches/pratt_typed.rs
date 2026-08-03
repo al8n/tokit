@@ -48,18 +48,16 @@
 //! one measurement.
 //!
 //! * `bare_operand` — expressions with **zero** operators (`1234 ;`). One `parse_input` call,
-//!   one LHS parse, one probe that reports `End` and is rolled back. This is the worst case
-//!   for a per-expression cost: there is no operator to amortise it against, and it is the
-//!   only cell that can answer "what does the expression-scoped guard cost when it buys
-//!   nothing?". `parser_combinators.rs`'s `expr_source()` emits ~9 operator cycles per
-//!   expression, which would hide a per-expression delta behind a 9:1 amortisation — this
-//!   cell exists precisely so that cannot happen here. It has no pair and is read as an
-//!   absolute figure for that one question, never against a chain cell — with one bound stated
-//!   rather than left implicit. The per-expression cost it exposes is not the guard's alone:
-//!   [`typed_pratt_drain`] runs a `peek_one` and a `try_expect` per expression *outside* the
-//!   combinator, and this cell carries one expression per seven bytes where depth 64 carries one
-//!   per 455, so it is also where that harness-side per-expression cost is least amortised. The
-//!   figure bounds the guard from above; it does not isolate it.
+//!   one LHS parse, one probe that reports `End` and is rolled back. This is the worst case for
+//!   a per-expression cost — nothing amortises it — and the only cell that can answer "what does
+//!   the expression-scoped guard cost when it buys nothing?". It needs its own cell because
+//!   `parser_combinators.rs`'s `expr_source()` writes `d ^ 3 + a * b - ( c / 2 ) + -a ;`, whose
+//!   several operators per expression would hide such a delta. It has no pair and is read as an
+//!   absolute figure for that one question, never against a chain cell — and the figure **bounds
+//!   the guard from above rather than isolating it**, because [`typed_pratt_drain`] runs a
+//!   `peek_one` and a `try_expect` per expression *outside* the combinator and this cell has the
+//!   group's highest expression density, so the harness-side per-expression cost is least
+//!   amortised here too.
 //! * `right_chain/{1,2,8,32,64}` — right-associative `^` chains of exactly that many operators
 //!   per expression. Right-associativity is what makes the driver *descend*: the right
 //!   operand admits the operator's own power (`Inclusive`), so `a ^ b ^ c` recurses rather
@@ -83,172 +81,80 @@
 //!
 //! # What is and is not comparable
 //!
-//! Every fixture is ~128 KiB (the repository's bench convention) and every one of them spends
-//! exactly **7 bytes per operand** — `"1234 ;\n"` for the bare cell, `" ^ 1234"` for each link
-//! of a chain. Sources are generated from a counter: no randomness, no clock, byte-identical
-//! between runs and machines.
+//! **The fixture facts are asserted, not described.** [`Cell::check_invariants`] and
+//! [`check_pair`] run over every generated cell before the group is registered — on the criterion
+//! path and the fixed-iteration path alike — and a fixture that stops satisfying them fails the
+//! bench. The numbers are in the code; this section is what they mean.
 //!
-//! That fixed width pins the **source-token** density per byte and nothing else — not *lexer*
-//! work per byte, which is counted in scans and so includes the probe re-lexes below. Operand
-//! density is `1/7` and token density `2/7` in every cell of the group, bare and chained alike.
-//! It does *not* make the depth cells comparable to one another, and an earlier revision of this
-//! header claimed it did — "the cells carry the same operand and operator density per byte and
-//! their per-byte throughputs are directly comparable". That claim was false and is withdrawn.
-//! A depth-`d` expression is `7d + 7` bytes carrying `d` operators, `d` folds and one
-//! `parse_input` call, so per byte:
+//! Every fixture is ~128 KiB (the repository's bench convention), is generated from a counter (no
+//! randomness, no clock, byte-identical between runs and machines), and spends exactly
+//! [`BYTES_PER_OPERAND`] bytes per operand — `"1234 ;\n"` for the bare cell, `" ^ 1234"` for each
+//! link of a chain. So operand and token density **per byte** are one constant across the whole
+//! group.
 //!
-//! | cell           | operands | tokens | operators = folds | expressions |
-//! |----------------|----------|--------|-------------------|-------------|
-//! | `bare_operand` | 1/7      | 2/7    | 0                 | 1/7         |
-//! | depth 1        | 1/7      | 2/7    | 1/14              | 1/14        |
-//! | depth 2        | 1/7      | 2/7    | 2/21              | 1/21        |
-//! | depth 8        | 1/7      | 2/7    | 8/63              | 1/63        |
-//! | depth 32       | 1/7      | 2/7    | 32/231            | 1/231       |
-//! | depth 64       | 1/7      | 2/7    | 64/455            | 1/455       |
+//! That fixed width pins the **source-token** density and nothing else — not *lexer* work per
+//! byte, which is counted in scans and so includes the probe re-lexes below. In particular it
+//! does **not** make the depth cells comparable to one another, though an earlier revision of
+//! this header claimed it did. A depth-`d` expression is `BYTES_PER_OPERAND * (d + 1)` bytes
+//! carrying `d` operators, `d` folds and one `parse_input` call, so folds per byte rise with
+//! depth while expressions per byte fall — between depths 1 and 64 the first very nearly doubles
+//! and the second falls by a factor of 32. That mix shift **is** the depth axis, so a throughput
+//! trend read along it is a trend in the fixture mix and says nothing about retention.
 //!
-//! Folds per byte very nearly double between depth 1 and depth 64 while expressions per byte
-//! falls by a factor of 32. A cell at one depth runs a *different mix of work* per byte than a
-//! cell at another — that mix shift **is** the depth axis. So a throughput trend read along that
-//! axis is a trend in the fixture mix and says nothing about retention on its own.
+//! What is comparable is the pair at a **single** depth. [`check_pair`] asserts that
+//! `right_chain/d` and `left_chain/d` are equal in length and equal byte for byte except at
+//! exactly [`Cell::operators`] positions, each holding `^` against `+` — which makes identical
+//! operand values in identical positions, identical token count, identical operator count and
+//! identical fold count facts of the built fixture rather than claims about it. Identical fold
+//! *arithmetic* is [`fold_infix`] being associativity-blind on purpose; identical `parse_input`
+//! call count follows from the equal expression count.
 //!
-//! What is comparable is the pair at a **single** depth. `right_chain/d` and `left_chain/d` come
-//! out of one generator over one operand sequence and differ in exactly one byte per operator
-//! (`^` against `+`): identical length to the byte, identical operand values in identical
-//! positions, identical token count, identical operator count, identical fold count, identical
-//! fold arithmetic (`fold_infix` is associativity-blind on purpose), identical `parse_input`
-//! call count, identical `parse` frame count (`d + 1` — the right chain nests them, the left
-//! chain re-enters at depth 2) and identical operator-probe count (`2d + 1`). The last two were
-//! **counted once, not reasoned**: while developing this file, temporary counters in
-//! [`parse_lhs`] and [`parse_rhs`] — not part of the committed code, and not run by it — reported
-//! exactly `d + 1` frames and `2d + 1` probes per expression on **both** sides at all five depths.
-//! Take that as a historical record of how the pair was matched when this file was written, not
-//! as an invariant the committed benchmark checks: nothing here re-derives either count, and the
-//! per-cell checksum does not stand in for them — `bare_operand`'s expected value, for instance,
-//! is just a sum of operands, so a change that skipped or cheapened the RHS `End` probe would
-//! still consume every terminator and match it. A future change to the driver's recursion shape
-//! that altered either count would not be caught by anything in this file. Everything else the
-//! mix could confound is held fixed by construction. What differs is the *shape* of the
-//! recursion: the right chain nests `d + 1` frames, the left chain re-enters at depth 2.
+//! Two quantities are **not** checked by anything here, because they are properties of the driver
+//! rather than of the fixture: the `parse` frame count (`d + 1`) and the operator-probe count
+//! (`2d + 1`). They were counted once and are recorded under *Recorded measurements*. The
+//! per-cell checksum does not stand in for them — `bare_operand`'s expected value is just a sum
+//! of operands, so a change that skipped or cheapened the RHS `End` probe would still consume
+//! every terminator and match it.
 //!
 //! Be exact about what that makes the paired ratio. It is a **matched right-associative
 //! stress-and-control signal**, and it is **not** a measurement of `O(d)` live probe checkpoints
 //! against `O(1)`: the driver as it stands commits each probe *before* it recurses, so the right
 //! half keeps `O(1)` of them live too and there is no `O(d)` retention here to measure. What the
-//! pair is, is **regression-sensitive** to that retention — it is built so that undoing the
-//! narrowing puts `d` live checkpoints on the right against one on the left and changes nothing
-//! else in the pair. *What the sweep measured* below states that consequence, and it is also why
-//! the null there is unsurprising rather than mysterious: the quantity the pair is built to
-//! expose is absent from the code the pair was run against. What the ratio does carry as it
-//! stands are two known residuals — the probe-kind asymmetry immediately below, and the
-//! recursion-shape difference itself — so a ratio a percent or two off 1.0 is within reach of the
-//! fixture.
+//! pair is, is **regression-sensitive** to that retention — undoing the narrowing puts `d` live
+//! checkpoints on the right against one on the left and changes nothing else in the pair.
 //!
-//! One asymmetry survives the pairing and is stated rather than glossed: the `2d + 1` probes are
-//! not of the same *kinds*. The right chain's are `d` accepts and `d + 1` `End` declines, all of
-//! the latter re-lexing the same `;`; the left chain's are `d` accepts, `d - 1` floor declines
-//! each re-lexing a distinct `+`, and two `End` declines. Both sides therefore roll back the same
-//! number of times over the same 64-byte state, but not at the same positions. A paired residual
-//! of a percent or two is within reach of that difference and should not be attributed to
-//! retention.
+//! Two residuals survive the pairing, so a ratio a percent or two off 1.0 is not read as
+//! retention. The **probe kinds** differ: the right chain's `2d + 1` probes are `d` accepts and
+//! `d + 1` `End` declines all re-lexing the same `;`, the left chain's are `d` accepts, `d - 1`
+//! floor declines each re-lexing a distinct `+`, and two `End` declines — the same number of
+//! rollbacks over the same 64-byte state, at different positions. And the **recursion shape**
+//! differs, which is the point of the pair rather than a defect in it.
 //!
-//! # What the sweep measured, and the null it found
+//! # The drain is measured with the driver, and what that does to the ratio
 //!
-//! Criterion — this file's own harness — at `--warm-up-time 1 --measurement-time 3`, eleven reps
-//! on an Apple-silicon laptop with unrelated work running throughout. **Two reps discarded** as
-//! visibly contended, under the rule "any cell more than 10% above its own median across reps":
-//! one had four cells 20–70% high while the machine's one-minute load average ran 4.2 → 9.4, the
-//! other two cells 25–29% high at 4.7 → 6.0. Nine reps kept. Neither discarded rep supplied the
-//! minimum for any cell, so the discards moved no figure below. Per-cell spread across the kept
-//! reps, slowest over fastest, was +0.95% to +4.46% (`bare_operand` the worst).
+//! The measured parser is [`typed_pratt_drain`], whose loop lexes on **both** sides of the
+//! combinator — a `peek_one` exhaustion test before each `parse_input`, a `try_expect(Semi)` for
+//! the terminator after it — so the first operand's scan and the `;` are charged to the harness
+//! rather than to `Pratt::parse_input`. Every absolute throughput figure here is therefore
+//! drain-inclusive; isolating the driver would take a harness that does neither, which this file
+//! does not build.
 //!
-//! The **primary** figure below is the per-rep paired ratio: `right_chain/d` and `left_chain/d`
-//! run back to back within one rep, so right-time-over-left-time computed *within that rep* holds
-//! everything but the driver shape fixed and is a genuine paired comparison. The table also lists
-//! the minimum `right_chain` and minimum `left_chain` time independently over the nine kept reps,
-//! for scale — but the fastest right-chain rep and the fastest left-chain rep need not be the same
-//! rep, so a difference between those two minima is **not** a paired statistic and is not reported
-//! as one here.
+//! The pairing is what makes that acceptable, though not for the reason it is tempting to give.
+//! The drain is **matched**: both halves run the identical loop over the identical number of
+//! expressions, so it adds no unequal right-versus-left work and cannot create, reverse or
+//! conceal the *direction* of a difference. Matched is not absent, though. The measured quantity
+//! is `(driver_right + drain) / (driver_left + drain)`, and a matched additive term pulls a ratio
+//! *toward* 1.0 rather than dropping out of it — for `R < L`, `(R + D) / (L + D)` is greater than
+//! `R / L`, though both stay below 1.0. So the ratio's side of 1.0 is exact and only its distance
+//! from 1.0 is not: a recorded delta is a **lower bound** on the driver-only effect in the same
+//! direction, "no retention penalty" holds a fortiori, and where a range straddles 1.0 the true
+//! driver-only spread is wider in *both* directions. What the drain dilutes is **magnitude**, and
+//! this file makes no magnitude claim. Measuring one would need the driver isolated from the peek
+//! and the terminator, or a difference model in place of a ratio — the shape the fixed-iteration
+//! harness below already uses, where a common additive term genuinely does subtract out.
 //!
-//! | depth | paired ratio (median, 9 reps) | as a delta | ratio range (9 kept reps)        | `right_chain` min | `left_chain` min |
-//! |-------|--------------------------------|------------|------------------------------------|--------------------|--------------------|
-//! | 1     | **0.9999**                     | −0.01%     | 0.9835 … 1.0042 (straddles 1.0)   | 1031.1 µs          | 1033.0 µs          |
-//! | 2     | **0.9876**                     | −1.24%     | 0.9839 … 0.9949                   | 1010.8 µs          | 1023.1 µs          |
-//! | 8     | **0.9743**                     | −2.57%     | 0.9624 … 0.9965                   |  981.6 µs          | 1006.0 µs          |
-//! | 32    | **0.9687**                     | −3.13%     | 0.9608 … 0.9810                   |  961.7 µs          |  992.7 µs          |
-//! | 64    | **0.9916**                     | −0.84%     | 0.9811 … 1.0053 (straddles 1.0)   |  981.4 µs          |  990.8 µs          |
-//!
-//! `bare_operand`, which has no pair: 1081.8 µs.
-//!
-//! **On the paired per-rep ratio, the retention penalty is not measurable at depths 2, 8 and
-//! 32.** Every one of the nine kept reps put the right-associative side at or below its control
-//! at those three depths — median ratio 0.9876, 0.9743 and 0.9687 — the deep-recursion side
-//! marginally **faster**, by roughly 1% to 3%, and slower in not one kept rep. **Depths 1 and 64
-//! do not support that statement.** Their median ratio is also at or near 1.0 (0.9999 and
-//! 0.9916), but the range straddles it — up to 1.0042 at depth 1 and 1.0053 at depth 64 — so at
-//! least one kept rep at each of those two depths *did* run the right-associative side slower
-//! than its matched control. An `O(d)` cost would appear as a ratio climbing above 1.0 with depth;
-//! nothing here does that, and the median is not monotone in depth either (it moves furthest
-//! below 1.0 around depth 32 and back toward it at 64), so it does not read as a retention curve
-//! either.
-//!
-//! That is the finding, and it is a real one: a bound on the trade this file was written to
-//! price, read off the statistic that is actually paired. It is **not** a proof that retention is
-//! free. A heavier `L::State`, a deeper chain, or a machine with a smaller cache could all move
-//! it, and the small residual in the right side's favour at the middle depths is itself
-//! unexplained by this fixture pair — the probe-kind asymmetry noted above is large enough to
-//! account for a residual that size, in either direction.
-//!
-//! One more thing the null does *not* say, and the reason it is unsurprising: the driver in
-//! `src/parser/pratt/expr.rs` today is already the **narrowed** shape. Its `Infix` arm calls
-//! `txn.commit()` *before* the recursive operand parse, so a right-associative descent still
-//! creates one probe checkpoint per frame but keeps only `O(1)` of them live. Measured against
-//! that driver, the paired ratio is consistent with the null the narrowing predicts — and this
-//! file is what turns "predicts" into "measured", at least at depths 2, 8 and 32. What it would
-//! catch is the narrowing being undone: move that `commit()` back below the recursion and
-//! `right_chain/d` retains `d` live checkpoints while `left_chain/d` still retains one, which
-//! should push the paired ratio above 1.0 by a growing margin and leave every other quantity in
-//! the pair untouched. That sensitivity is reasoned from the fixture design and **has not been
-//! measured** — no run of the wide shape exists to compare against. It is the obvious next
-//! measurement and the honest limit of what the null above establishes.
-//!
-//! # What this file is for, given that null
-//!
-//! Two things, both independent of how the sweep came out:
-//!
-//! * It is the only coverage the **typed** driver has. Before it, `Pratt::parse_input` was
-//!   reachable from no benchmark in this repository and a rewrite of `src/parser/pratt/expr.rs`
-//!   could not move a number. What it prices is the **drain**, not the driver in isolation: the
-//!   measured parser is [`typed_pratt_drain`], whose loop lexes on both sides of the combinator —
-//!   a `peek_one` exhaustion test before each `parse_input`, a `try_expect(Semi)` for the
-//!   terminator after it — so the first operand's scan and the `;` are charged to the harness
-//!   rather than to `Pratt::parse_input`. Read ~116 MiB/s on operator-free input and ~121–130
-//!   MiB/s on chains as drain-with-typed-`Pratt` throughput for this grammar on this machine, not
-//!   as isolated driver cost. Isolating it would take a harness that does neither, which this
-//!   file does not build — and the pairing is what makes that acceptable, though not for the
-//!   reason it is tempting to give. The drain is **matched** across a pair: both halves run the
-//!   identical loop over the identical number of expressions, so it adds no unequal
-//!   right-versus-left work and cannot create, reverse or conceal the *direction* of a
-//!   difference. Matched is not absent, though, and the arithmetic matters. The measured quantity
-//!   is `(driver_right + drain) / (driver_left + drain)`, and a matched additive term pulls a
-//!   ratio *toward* 1.0 rather than dropping out of it — for `R < L`, `(R + D) / (L + D)` is
-//!   greater than `R / L`, though both stay below 1.0, so the ratio's side of 1.0 is exact and
-//!   only its distance from 1.0 is not. The deltas in the table above are therefore a **lower
-//!   bound** on the driver-only effect, in the same direction: "no retention penalty" holds a
-//!   fortiori, and at depths 1 and 64, where the range straddles 1.0, the true driver-only spread
-//!   is wider than reported in *both* directions. What the drain dilutes is **magnitude**, and
-//!   this file makes no magnitude claim. Measuring one would need the driver isolated from the
-//!   peek and the terminator, or a difference model in place of a ratio: the shape the
-//!   fixed-iteration harness below already uses, where a common additive term genuinely does
-//!   subtract out.
-//! * With the per-fixture expected accumulator below, every cell is also a semantic check on the
-//!   driver's fold count and fold arithmetic at that depth, run on every measured iteration. It
-//!   is a check on fold order too, except on the right chain: see [`expected_expression`] for the
-//!   leading-operand-permutation gap that check does not close.
-//!
-//! Those figures came from criterion, which is adequate for this file's purpose: on this
-//! workload it agreed with the fixed-iteration harness below to within 1–2%. They are **not**
-//! comparable to the `perfloop`-derived figures elsewhere in this project — different harness,
-//! different accounting, different machine conditions.
+//! The same argument covers [`State::check`]'s per-scan tax, matched the same way and cancelling
+//! no better.
 //!
 //! # Every measured parse is checked against a value the parser did not produce
 //!
@@ -262,37 +168,22 @@
 //! parser, which would agree with any driver including a broken one. [`parse_once`] compares
 //! every parse against it, on the criterion path and the fixed-iteration path alike.
 //!
-//! It has been shown to fail. Two mutations of `src/parser/pratt/expr.rs`, both reverted:
+//! The check has two known structural blind spots, and both are pinned rather than described:
 //!
-//! * replacing the infix fold with `lhs = rhs` — every fold skipped, every token still consumed
-//!   — failed every cell that has an operator (exit 101) and correctly left `bare_operand`,
-//!   which has none, passing;
-//! * giving `PrattInfix::Right` the `Exclusive` floor — a right-associative chain parsed
-//!   left-associatively: same tokens, same fold count, *shallower* recursion, so a **faster**
-//!   wrong answer — failed `right_chain/{2,8,32,64}` under the fixed harness and under
-//!   criterion, and correctly left `left_chain/*` and `bare_operand` untouched.
+//! * **depth 1 cannot verify associativity.** A single fold is the same value under either
+//!   order, so `right_chain/1` and `left_chain/1` must have the *same* expected accumulator
+//!   while every deeper pair must differ. [`check_pair`] asserts exactly that, both directions,
+//!   so a change to [`expected_fold`] that made it associative — and silently deleted the
+//!   associativity check from every depth — fails the bench.
+//! * **the right chain is blind to a permutation of its leading operands.** See
+//!   [`expected_expression`]; the left half of each pair is not blind to it, so the pair as a
+//!   whole still catches such a reordering at `d >= 2`.
 //!
-//! The second mutation also left `right_chain/1` passing, which is a structural blind spot in
-//! this check and the reason it is written down: a single fold is the same value under either
-//! associativity, so depth 1 verifies fold count and fold arithmetic but cannot verify
-//! associativity. Depths 2 and up can and do. It is one of two structural blind spots this
-//! checksum has, not the only one — see [`expected_expression`] for the other: the right chain's
-//! blindness to a permutation of its leading operands, which no depth closes *on that half*. The
-//! left half is not blind to it — its Horner form gives every operand a distinct power of 31 by
-//! position — so the pair as a whole still catches such a reordering at `d >= 2`, on the control
-//! rather than on the cell whose fold order it would corrupt.
-//!
-//! Cost of the check: **two instructions**. It compiles to a `cmp`/`b.ne` at the tail of
-//! `parse_once`, after the parse and outside every loop in it, branching to the `#[cold]
-//! #[inline(never)]` [`mismatch`]. A wall-clock A/B on the fixed-iteration harness could not
-//! resolve it, which is what two instructions against a ~1 ms parse should look like: the
-//! checked build measured 1.5% *faster* than an unchecked one, against a 1.7% spread between two
-//! separate builds of the same checked code. Upper bound from measurement, 1.7%; actual cost
-//! from the emitted code, two instructions per 131 000 bytes.
+//! That the check *fires* was established by mutation, once — see *Recorded measurements*.
 //!
 //! # The measurement knobs are deliberately left live
 //!
-//! Three of the four pre-existing bench files pin `measurement_time(3s)` and `warm_up_time(1s)`
+//! The other bench files in this directory pin `measurement_time(3s)` and `warm_up_time(1s)`
 //! **in code**, which makes `--measurement-time` / `--warm-up-time` inert and pins the
 //! iteration count near whatever three seconds happens to buy. That is fine for a file whose
 //! job is trend detection; it is fatal for a file whose job is pricing a *small* per-expression
@@ -317,6 +208,124 @@
 //! without having to model any of it — which is what makes a counter-based A/B of a
 //! sub-percent change tractable. Same fixtures, same driver, same binary as the criterion
 //! path: there is no second copy of anything to drift.
+//!
+//! # Recorded measurements
+//!
+//! **Everything numeric below is a dated record of a run that happened, not a claim this file
+//! checks.** Nothing here is re-derived by the committed code, by CI, or by any assertion; a
+//! change to the driver, the fixture or the machine invalidates it silently. Read a figure here
+//! as "this was measured, then, there" and re-run before relying on one. Every *structural*
+//! claim about the fixtures has been moved out of this section and into
+//! [`Cell::check_invariants`] and [`check_pair`], which do fail when they stop holding.
+//!
+//! Recorded **2026-08-03**, in the commit that introduced this file (`49e1a8d`, "perf(bench):
+//! cover the typed pratt driver (#155)"), on an Apple-silicon laptop with unrelated work running
+//! throughout. The toolchain was not recorded. Reproduce the sweep with:
+//!
+//! ```text
+//! cargo bench --bench pratt_typed --features logos -- --warm-up-time 1 --measurement-time 3
+//! ```
+//!
+//! ## The retention sweep, and the null it found
+//!
+//! Eleven reps at those knobs. **Two reps discarded** as visibly contended, under the rule "any
+//! cell more than 10% above its own median across reps": one had four cells 20–70% high while
+//! the machine's one-minute load average ran 4.2 → 9.4, the other two cells 25–29% high at
+//! 4.7 → 6.0. Nine reps kept. Neither discarded rep supplied the minimum for any cell, so the
+//! discards moved no figure below. Per-cell spread across the kept reps, slowest over fastest,
+//! was +0.95% to +4.46% (`bare_operand` the worst).
+//!
+//! The **primary** figure is the per-rep paired ratio: the two halves run back to back within one
+//! rep, so right-time-over-left-time computed *within that rep* holds everything but the driver
+//! shape fixed. The two minimum columns are independent over the nine kept reps and are there for
+//! scale only — the fastest right rep and the fastest left rep need not be the same rep, so their
+//! difference is **not** a paired statistic.
+//!
+//! | depth | paired ratio (median, 9 reps) | as a delta | ratio range (9 kept reps)        | `right_chain` min | `left_chain` min |
+//! |-------|--------------------------------|------------|------------------------------------|--------------------|--------------------|
+//! | 1     | **0.9999**                     | −0.01%     | 0.9835 … 1.0042 (straddles 1.0)   | 1031.1 µs          | 1033.0 µs          |
+//! | 2     | **0.9876**                     | −1.24%     | 0.9839 … 0.9949                   | 1010.8 µs          | 1023.1 µs          |
+//! | 8     | **0.9743**                     | −2.57%     | 0.9624 … 0.9965                   |  981.6 µs          | 1006.0 µs          |
+//! | 32    | **0.9687**                     | −3.13%     | 0.9608 … 0.9810                   |  961.7 µs          |  992.7 µs          |
+//! | 64    | **0.9916**                     | −0.84%     | 0.9811 … 1.0053 (straddles 1.0)   |  981.4 µs          |  990.8 µs          |
+//!
+//! `bare_operand`, which has no pair: 1081.8 µs. As drain-inclusive throughput that is ~116 MiB/s
+//! on operator-free input and ~121–130 MiB/s on chains — for this grammar, on that machine, and
+//! **not** comparable to the `perfloop`-derived figures elsewhere in this project (different
+//! harness, different accounting, different machine conditions). Criterion agreed with the
+//! fixed-iteration harness to within 1–2% on this workload.
+//!
+//! **On the paired per-rep ratio, the retention penalty was not measurable at depths 2, 8 and
+//! 32.** Every one of the nine kept reps put the right-associative side at or below its control
+//! at those three depths — the deep-recursion side marginally **faster**, by roughly 1% to 3%,
+//! and slower in not one kept rep. **Depths 1 and 64 do not support that statement.** Their
+//! median ratio is also at or near 1.0, but the range straddles it, so at least one kept rep at
+//! each of those two depths *did* run the right-associative side slower than its matched control.
+//! An `O(d)` cost would appear as a ratio climbing above 1.0 with depth; nothing here does that,
+//! and the median is not monotone in depth either (furthest below 1.0 around depth 32, back
+//! toward it at 64), so it does not read as a retention curve either.
+//!
+//! That was a real finding — a bound on the trade this file was written to price, read off the
+//! statistic that is actually paired. It is **not** a proof that retention is free: a heavier
+//! `L::State`, a deeper chain, or a machine with a smaller cache could all move it, and the small
+//! residual in the right side's favour at the middle depths is itself unexplained (the probe-kind
+//! asymmetry above is large enough to account for it, in either direction).
+//!
+//! The null is unsurprising rather than mysterious, because the driver in
+//! `src/parser/pratt/expr.rs` is already the **narrowed** shape: its `Infix` arm calls
+//! `txn.commit()` *before* the recursive operand parse, so the quantity the pair is built to
+//! expose is absent from the code the pair was run against. What the pair would catch is the
+//! narrowing being undone — move that `commit()` back below the recursion and `right_chain/d`
+//! retains `d` live checkpoints against the left chain's one, which should push the ratio above
+//! 1.0 by a growing margin and leave every other quantity in the pair untouched. That sensitivity
+//! is reasoned from the fixture design and **has not been measured**; no run of the wide shape
+//! exists to compare against. It is the obvious next measurement and the honest limit of what the
+//! null establishes.
+//!
+//! ## Counted once, with instrumentation that is not committed
+//!
+//! Temporary counters in [`parse_lhs`] and [`parse_rhs`] reported exactly `d + 1` `parse` frames
+//! and `2d + 1` operator probes per expression on **both** halves of the pair, at all five
+//! depths. That is how the pair was matched when this file was written. A future change to the
+//! driver's recursion shape that altered either count would not be caught by anything here.
+//!
+//! ## The checksum has been shown to fire
+//!
+//! Two mutations of `src/parser/pratt/expr.rs`, both reverted:
+//!
+//! * replacing the infix fold with `lhs = rhs` — every fold skipped, every token still consumed
+//!   — failed every cell that has an operator (exit 101) and correctly left `bare_operand`,
+//!   which has none, passing;
+//! * giving `PrattInfix::Right` the `Exclusive` floor — a right-associative chain parsed
+//!   left-associatively: same tokens, same fold count, *shallower* recursion, so a **faster**
+//!   wrong answer — failed `right_chain/{2,8,32,64}` under the fixed harness and under
+//!   criterion, and correctly left `left_chain/*`, `right_chain/1` and `bare_operand` untouched.
+//!
+//! `right_chain/1` surviving the second mutation is the depth-1 associativity blind spot above,
+//! observed rather than predicted; [`check_pair`] now pins it so it cannot widen unnoticed.
+//!
+//! ## Emitted code, read off a disassembly once
+//!
+//! Read from the `bench` profile on `aarch64-apple-darwin`, on both feature sets this bench
+//! builds under. Nothing in the committed code re-verifies any of it.
+//!
+//! * [`parse_once`]'s accumulator check is **two instructions** — a `cmp`/`b.ne` at the tail,
+//!   after the parse and outside every loop in it, branching to the `#[cold] #[inline(never)]`
+//!   [`mismatch`]. A wall-clock A/B on the fixed-iteration harness could not resolve it: the
+//!   checked build measured 1.5% *faster* than an unchecked one, against a 1.7% spread between
+//!   two separate builds of the same checked code. Upper bound from measurement, 1.7%.
+//! * [`note_operand`] inlines into `<ExprTok as Logos>::lex::state2` and nowhere else, and emits
+//!   five stores and three loads to memory on the operand path — `indents[indent_top % 16]` via
+//!   an `strh` through an address formed with `and #0xf`, `modes[mode_top % 29]`
+//!   read-modify-written by an `ldrb`/`strb` pair through the magic-multiply `msub`, and three
+//!   `strb`s for the two cursors and `last_kind`. Neither array is scalarized into registers and
+//!   neither index is a constant the optimizer can bound.
+//! * [`State::check`]'s two indexed loads are emitted unconditionally per scan **because of the
+//!   `black_box`**, not because the veto is unreachable. A revision without the barrier had LLVM
+//!   reorder the `indents` compare to the front and sink the `modes` load into the block that
+//!   compare guards, so the `modes` array was read exactly *zero* times per parse at all four
+//!   inlined `check` sites while the comment claimed two loads per token. See
+//!   [`check`](State::check) for the whole argument.
 //!
 //! [`Pratt`]: tokora::parser::Pratt
 //! [pratt]: tokora::parser::pratt
@@ -424,8 +433,7 @@ impl State for ExprState {
   /// Both loads are through a runtime index (`indent_top` / `mode_top` are `u8` cursors the
   /// lexer advances), which is what makes them un-forwardable: an array indexed by a value the
   /// optimizer cannot bound has to exist in memory, be cloned in full by a checkpoint, and be
-  /// written back in full by a restore. Two loads and two compares **per scan**, plus the barrier
-  /// the next section explains — a handful of instructions above a real limiter's own cost.
+  /// written back in full by a restore.
   ///
   /// Per *scan*, not per source token. `lex` runs this after every successful scan, and a probe
   /// that declines rolls back a token that is then lexed again, so the fixture's source-token
@@ -433,27 +441,21 @@ impl State for ExprState {
   /// tax by that density ("exactly two tokens per seven bytes"), which is the wrong quantity and
   /// is withdrawn. What the **pairing** buys, and it is not a per-byte rate, is that the tax is
   /// *matched*: `right_chain/d` and `left_chain/d` agree on both quantities that drive the scan
-  /// count — the same source tokens, and the same `2d + 1` operator probes, of which the same
-  /// `d + 1` are declines that roll back ("both sides therefore roll back the same number of
-  /// times", in the header's probe-kind paragraph). So it falls equally on the two halves of every
+  /// count — the same source tokens (asserted, see [`check_pair`]) and the same operator-probe
+  /// count, of which the same number are declines that roll back (counted once, not asserted;
+  /// see the header's *Recorded measurements*). So it falls equally on the two halves of every
   /// pair and adds no unequal right-versus-left work. It does **not** cancel: like the drain, it
   /// is a common additive cost, and a common additive cost pulls a ratio toward 1.0 rather than
-  /// dropping out of it — see the header's *What this file is for*. That claim inherits those
-  /// counts' standing exactly: counted once when this file was written, not re-derived by anything
-  /// committed.
+  /// dropping out of it.
   ///
   /// # Why [`black_box`], and not the condition alone
   ///
   /// An earlier revision loaded both values and spelled the veto as
   /// `mode == MODE_POISON && indent == u16::MAX` with no barrier, on the theory that a
   /// condition the optimizer cannot fold is a condition it has to evaluate — and therefore two
-  /// loads per token. The bench profile's own disassembly refutes that. LLVM kept the
-  /// `indents` load, reordered its compare to the front, and **sank the `modes` load into the
-  /// block that compare guards**; since `indent == u16::MAX` never holds, the `modes` array was
-  /// read exactly *zero* times per parse at all four inlined `check` sites, while this comment
-  /// claimed two loads per token. `&&` short-circuits, and the optimizer picks which side to
-  /// short-circuit on — so "unreachable by construction" is not a property that keeps a load
-  /// alive, it is a property the optimizer exploits.
+  /// loads per token. A disassembly refuted that (recorded in the header); `&&` short-circuits,
+  /// and the optimizer picks which side to short-circuit on, so "unreachable by construction" is
+  /// not a property that keeps a load alive — it is a property the optimizer exploits.
   ///
   /// The observation is therefore explicit. `black_box` is an opaque barrier: each loaded value
   /// must be materialized before it and nothing downstream may reason about it, so both indexed
@@ -489,16 +491,9 @@ impl State for ExprState {
 /// opened at, push the mode it was read in, remember its class — and returns its value.
 ///
 /// This is the **write** half of what keeps [`ExprState`] live; [`State::check`] is the read
-/// half. Both index through the `u8` cursors, and — as with the read half — the write half is
-/// checked against emitted code rather than asserted. In the bench profile this body inlines into
-/// `<ExprTok as Logos>::lex::state2` and nowhere else; that function stays out of line and every
-/// scan site calls it. At that one site it emits, straight-line on the operand path, five stores
-/// and three loads to memory: `indents[indent_top % 16]` written by an `strh` through an address
-/// formed with `and #0xf`, `modes[mode_top % 29]` read-modify-written by an `ldrb`/`strb` pair
-/// through the magic-multiply `msub` for `% 29`, and three `strb`s for the two cursors and
-/// `last_kind`. Neither array is scalarized into registers, and neither index is a constant the
-/// optimizer can bound. Read off the disassembly once, on both feature sets this bench builds
-/// under; nothing in the committed code re-verifies it.
+/// half. Both index through the `u8` cursors, and — as with the read half — the write half was
+/// checked against emitted code rather than asserted. What that disassembly showed, and when, is
+/// in the header's *Recorded measurements*; nothing in the committed code re-verifies it.
 ///
 /// Mutating `extras` mid-scan is legal and deterministic under tokora's lexer contract: a
 /// restore puts the saved state back with the saved position, so re-lexing from a restored
@@ -765,17 +760,13 @@ where
 /// symbols in `src/parser/pratt/expr.rs` reachable from nowhere else are how a compiled binary
 /// can be shown to contain it.
 ///
-/// It is not, however, the only thing under the clock, and the header's absolute figures say so.
-/// This loop lexes on **both** sides of the combinator — [`peek_one`](InputRef::peek_one) for the
-/// exhaustion test before each `parse_input`, `try_expect(Semi)` for the terminator after it — so
-/// the first operand's scan and the `;` are charged here rather than to `Pratt::parse_input`.
-/// Every absolute throughput figure this file reports is therefore drain-inclusive. The paired
-/// ratio is not *free* of it either: both halves run this identical loop over the identical
-/// number of expressions, so the drain adds no unequal right-versus-left work — but a matched
-/// additive cost pulls a ratio toward 1.0 instead of dropping out of it, so it dilutes the
-/// magnitude of whatever driver-only difference exists. The header's *What this file is for*
-/// works that through; the short form is that the reported deltas bound the driver-only effect
-/// rather than measuring it.
+/// It is not, however, the only thing under the clock. This loop lexes on **both** sides of the
+/// combinator — [`peek_one`](InputRef::peek_one) for the exhaustion test before each
+/// `parse_input`, `try_expect(Semi)` for the terminator after it — so the first operand's scan
+/// and the `;` are charged here rather than to `Pratt::parse_input`. The header's *The drain is
+/// measured with the driver* works through what that does to an absolute figure and to the
+/// paired ratio; the short form is that a recorded delta bounds the driver-only effect rather
+/// than measuring it.
 ///
 /// # Why a missing terminator is an error and not an exit
 ///
@@ -833,15 +824,59 @@ where
 /// fixed per-parse setup.
 const TARGET: usize = 128 * 1024;
 
-/// A four-digit operand, from a counter. Fixed width is what pins the **source-token** density
-/// per byte: every operand costs the same seven bytes in every fixture, so operand density is
-/// `1/7` and token density `2/7` everywhere in the group. Lexer *scans* are a different and
-/// larger count — a declined probe re-lexes; see [`check`](State::check) — so this does not pin
-/// lexer work per byte. That is all the byte normalisation buys — it does *not* make the depth
-/// cells comparable to each other, and the header's "What is and is not comparable" section is
-/// the statement of what it does and does not support.
+/// The byte width of one operand **and its punctuation**, in every fixture in this group:
+/// `"1234 ;\n"` for the bare cell, `" ^ 1234"` for each link of a chain. This is the whole of
+/// the byte normalisation the header's *What is and is not comparable* is written on top of, so
+/// it is pinned per cell by [`Cell::check_invariants`] rather than stated in prose.
+const BYTES_PER_OPERAND: usize = 7;
+
+/// A four-digit operand, from a counter. The fixed width is what makes
+/// [`BYTES_PER_OPERAND`] a constant rather than an average. Lexer *scans* are a different and
+/// larger count — a declined probe re-lexes; see [`check`](State::check) — so it does not pin
+/// lexer work per byte.
 fn operand(i: u32) -> u32 {
   1000 + i.wrapping_mul(2654435761) % 9000
+}
+
+/// What a generated fixture's bytes actually contain, counted **from the bytes**.
+///
+/// The point of counting rather than deriving is that the generator's loop bounds and the bytes
+/// it emitted are two different things, and the header's comparability argument rests on the
+/// second. A generator change that emitted a different shape while keeping its counters would
+/// pass a derived check and fail this one.
+struct Census {
+  /// Maximal runs of ASCII digits.
+  operands: usize,
+  /// `^` plus `+` bytes. This grammar has no other use for either.
+  operators: usize,
+  /// `;` bytes — one per expression, since every expression is terminated.
+  expressions: usize,
+}
+
+impl Census {
+  fn of(src: &str) -> Self {
+    let mut operands = 0usize;
+    let mut operators = 0usize;
+    let mut expressions = 0usize;
+    let mut in_operand = false;
+    for b in src.bytes() {
+      let digit = b.is_ascii_digit();
+      if digit && !in_operand {
+        operands += 1;
+      }
+      in_operand = digit;
+      match b {
+        b'^' | b'+' => operators += 1,
+        b';' => expressions += 1,
+        _ => {}
+      }
+    }
+    Self {
+      operands,
+      operators,
+      expressions,
+    }
+  }
 }
 
 /// Which operator a chain fixture is built from, and therefore which shape the driver must fold
@@ -900,7 +935,9 @@ fn expected_fold(left: i64, right: i64) -> i64 {
 /// This is where a flipped associativity is caught: for `d >= 2` the two orders give different
 /// values over the same operands, because [`expected_fold`] is not associative. At `d == 1` there
 /// is a single fold and the two orders coincide, so depth 1 checks fold *count* and fold
-/// arithmetic but cannot check associativity — the deeper cells are what do that.
+/// arithmetic but cannot check associativity — the deeper cells are what do that. Both halves of
+/// that sentence are asserted in [`check_pair`], so a change here that made the fold associative
+/// cannot silently disable the check at every depth.
 ///
 /// The **right**-chain form has a second, structural blind spot, distinct from the one above and
 /// stated where the fold shape makes it visible: the tree collapses to
@@ -939,8 +976,9 @@ fn expected_expression(operands: &[i64], assoc: Assoc) -> i64 {
   }
 }
 
-/// One benchmark cell: the criterion id, the generated source, and the accumulator
-/// [`typed_pratt_drain`] **must** return over it.
+/// One benchmark cell: the criterion id, the generated source, the accumulator
+/// [`typed_pratt_drain`] **must** return over it, and the shape facts
+/// [`check_invariants`](Cell::check_invariants) holds it to.
 ///
 /// # Why an expected value, when the parse already returns `Ok`
 ///
@@ -962,6 +1000,166 @@ struct Cell {
   src: String,
   /// The fold checksum the drain must return, computed without the parser.
   expected: i64,
+  /// Operators per expression: `0` for `bare_operand`, `d` for a chain cell.
+  depth: usize,
+  /// Expressions the generator emitted, as its own loop counted them.
+  /// [`check_invariants`](Cell::check_invariants) cross-checks it against the bytes.
+  expressions: usize,
+  /// The associativity the chain was written with; `None` for the operator-free cell.
+  assoc: Option<Assoc>,
+}
+
+impl Cell {
+  /// One operand per operator, plus the head of the expression.
+  fn operands(&self) -> usize {
+    self.expressions * (self.depth + 1)
+  }
+
+  /// One operator per link — and, since [`fold_infix`] runs once per operator, one fold.
+  fn operators(&self) -> usize {
+    self.expressions * self.depth
+  }
+
+  /// Source tokens: every operand, every operator, and every terminator.
+  fn tokens(&self) -> usize {
+    self.operands() + self.operators() + self.expressions
+  }
+
+  /// The fixture facts the header's *What is and is not comparable* is written on top of,
+  /// asserted against the generated bytes.
+  ///
+  /// Run from [`cells`], so both the criterion path and the fixed-iteration path get it. Cheap:
+  /// one linear pass over ~128 KiB per cell, once per process.
+  fn check_invariants(&self) {
+    let seen = Census::of(&self.src);
+    assert_eq!(
+      seen.expressions, self.expressions,
+      "pratt_typed: {}: the generator counted {} expressions but wrote {} terminators",
+      self.name, self.expressions, seen.expressions
+    );
+    assert_eq!(
+      seen.operands,
+      self.operands(),
+      "pratt_typed: {}: a depth-{} fixture over {} expressions must carry {} operands, not {}",
+      self.name,
+      self.depth,
+      self.expressions,
+      self.operands(),
+      seen.operands
+    );
+    assert_eq!(
+      seen.operators,
+      self.operators(),
+      "pratt_typed: {}: a depth-{} fixture over {} expressions must carry {} operators, not {}",
+      self.name,
+      self.depth,
+      self.expressions,
+      self.operators(),
+      seen.operators
+    );
+    // The byte normalisation itself, which is what makes operand and token density per byte one
+    // constant across the whole group rather than a per-cell number.
+    assert_eq!(
+      self.src.len(),
+      BYTES_PER_OPERAND * self.operands(),
+      "pratt_typed: {}: {} bytes over {} operands is not {BYTES_PER_OPERAND} bytes an operand, \
+       so the cells no longer share a token density and the header's comparability section does \
+       not hold",
+      self.name,
+      self.src.len(),
+      self.operands()
+    );
+    assert_eq!(
+      self.tokens(),
+      2 * self.operands(),
+      "pratt_typed: {}: token count is no longer twice the operand count",
+      self.name
+    );
+    // "~128 KiB": the generator stops at the first expression that reaches TARGET, so the
+    // fixture overshoots by less than one expression and never undershoots.
+    let expression_bytes = BYTES_PER_OPERAND * (self.depth + 1);
+    assert!(
+      self.src.len() >= TARGET && self.src.len() < TARGET + expression_bytes,
+      "pratt_typed: {}: {} bytes is not within one expression of the {TARGET}-byte target every \
+       fixture in this repository is generated to",
+      self.name,
+      self.src.len()
+    );
+  }
+}
+
+/// The pair at one depth, asserted to differ in exactly the one way the header claims.
+///
+/// `right_chain/d` and `left_chain/d` are the unit of result in this group, and the whole of that
+/// claim is that they are the same fixture with one byte per operator changed. Everything the
+/// header lists as "identical" — length, operand values and positions, token count, operator
+/// count, fold count — follows from the two assertions below and is therefore a fact of the built
+/// fixture rather than a description of it.
+///
+/// The last assertion pins the checksum's **depth-1 blind spot** in both directions: a single
+/// fold is the same value under either associativity, so the depth-1 pair must agree and every
+/// deeper pair must not. A change to [`expected_fold`] that made it associative would delete the
+/// associativity check from every depth at once and pass every other check in this file.
+fn check_pair(right: &Cell, left: &Cell) {
+  assert_eq!(
+    right.src.len(),
+    left.src.len(),
+    "pratt_typed: {} and {} are different lengths, so they are not a pair",
+    right.name,
+    left.name
+  );
+  assert_eq!(
+    right.depth, left.depth,
+    "pratt_typed: {} and {} are not at the same depth",
+    right.name, left.name
+  );
+
+  let mut differing = 0usize;
+  for (i, (r, l)) in right
+    .src
+    .as_bytes()
+    .iter()
+    .zip(left.src.as_bytes())
+    .enumerate()
+  {
+    if r != l {
+      differing += 1;
+      assert!(
+        *r == b'^' && *l == b'+',
+        "pratt_typed: {} and {} differ at byte {i} by something other than the operator \
+         ({:?} against {:?}), so the pair is not byte-matched",
+        right.name,
+        left.name,
+        *r as char,
+        *l as char
+      );
+    }
+  }
+  assert_eq!(
+    differing,
+    right.operators(),
+    "pratt_typed: {} and {} differ at {differing} bytes where the fixture has {} operators",
+    right.name,
+    left.name,
+    right.operators()
+  );
+
+  if right.depth >= 2 {
+    assert_ne!(
+      right.expected, left.expected,
+      "pratt_typed: {} and {} predict the same accumulator, so the checksum cannot tell a \
+       flipped associativity from a correct parse at this depth",
+      right.name, left.name
+    );
+  } else {
+    assert_eq!(
+      right.expected, left.expected,
+      "pratt_typed: {} and {} predict different accumulators at depth {}, where one fold makes \
+       the two orders coincide — so one of the two generators is not folding the way its \
+       associativity says",
+      right.name, left.name, right.depth
+    );
+  }
 }
 
 /// `1234 ;` — **zero** operators. Seven bytes per operand, one `parse_input` call per operand,
@@ -969,17 +1167,22 @@ struct Cell {
 ///
 /// The drain sums the per-expression results, and with no operator there is no fold: the expected
 /// accumulator is the wrapping sum of the operands themselves.
-fn bare_operand_source() -> (String, i64) {
+///
+/// Returns the source, its expected accumulator, and the number of expressions the loop emitted —
+/// which [`Cell::check_invariants`] then checks against the bytes.
+fn bare_operand_source() -> (String, i64, usize) {
   let mut s = String::with_capacity(TARGET + 64);
   let mut i = 0u32;
   let mut expected = 0i64;
+  let mut expressions = 0usize;
   while s.len() < TARGET {
     let value = operand(i);
     let _ = writeln!(s, "{value} ;");
     expected = expected.wrapping_add(i64::from(value));
+    expressions += 1;
     i = i.wrapping_add(1);
   }
-  (s, expected)
+  (s, expected, expressions)
 }
 
 /// `1234 OP 5678 OP … ;` with exactly `depth` operators per expression, and the accumulator the
@@ -992,12 +1195,13 @@ fn bare_operand_source() -> (String, i64) {
 /// The expected accumulator is built in the same loop as the bytes, from the same operand values,
 /// before any of them is lexed: the source and its prediction cannot drift because there is only
 /// one place either is produced.
-fn chain_source(assoc: Assoc, depth: usize) -> (String, i64) {
+fn chain_source(assoc: Assoc, depth: usize) -> (String, i64, usize) {
   let op = assoc.op();
   let mut s = String::with_capacity(TARGET + 64);
   let mut operands: Vec<i64> = Vec::with_capacity(depth + 1);
   let mut i = 0u32;
   let mut expected = 0i64;
+  let mut expressions = 0usize;
   while s.len() < TARGET {
     operands.clear();
     let head = operand(i);
@@ -1012,8 +1216,9 @@ fn chain_source(assoc: Assoc, depth: usize) -> (String, i64) {
     }
     let _ = writeln!(s, " ;");
     expected = expected.wrapping_add(expected_expression(&operands, assoc));
+    expressions += 1;
   }
-  (s, expected)
+  (s, expected, expressions)
 }
 
 /// The depths the right/left pair is measured at.
@@ -1030,23 +1235,63 @@ const DEPTHS: [usize; 5] = [1, 2, 8, 32, 64];
 /// The chain cells are emitted **pair-adjacent** — `right_chain/d` immediately followed by
 /// `left_chain/d` — because the pair at one depth is the unit of result here, and criterion prints
 /// cells in the order they are registered. Two adjacent lines of its output are one measurement.
+///
+/// Every cell is put through [`Cell::check_invariants`] and every pair through [`check_pair`]
+/// before this returns, so no path in this file — criterion or fixed-iteration — can measure a
+/// fixture the header's comparability argument does not describe.
 fn cells() -> Vec<Cell> {
-  let (src, expected) = bare_operand_source();
+  let (src, expected, expressions) = bare_operand_source();
   let mut out = vec![Cell {
     name: "bare_operand".to_string(),
     src,
     expected,
+    depth: 0,
+    expressions,
+    assoc: None,
   }];
   for depth in DEPTHS {
     for assoc in [Assoc::Right, Assoc::Left] {
-      let (src, expected) = chain_source(assoc, depth);
+      let (src, expected, expressions) = chain_source(assoc, depth);
       out.push(Cell {
         name: format!("{}/{depth}", assoc.cell_prefix()),
         src,
         expected,
+        depth,
+        expressions,
+        assoc: Some(assoc),
       });
     }
   }
+
+  for cell in &out {
+    cell.check_invariants();
+  }
+  // The chain cells are laid down right-then-left at each depth, so the pairs are the adjacent
+  // windows after the lone `bare_operand`. Asserted rather than assumed: a reordering here would
+  // otherwise silently compare a right chain against the wrong control.
+  for pair in out[1..].chunks(2) {
+    let [right, left] = pair else {
+      unreachable!("pratt_typed: a chain depth was registered without its control")
+    };
+    assert_eq!(
+      (right.assoc, left.assoc),
+      (Some(Assoc::Right), Some(Assoc::Left)),
+      "pratt_typed: {} and {} are not a right/left pair in that order",
+      right.name,
+      left.name
+    );
+    check_pair(right, left);
+  }
+
+  // The deepest right chain is the cell `BENCH_RECURSION_LIMIT` exists for, so it is the one both
+  // halves of that constant's justification are run against.
+  let deepest = out
+    .iter()
+    .filter(|cell| cell.assoc == Some(Assoc::Right))
+    .max_by_key(|cell| cell.depth)
+    .expect("pratt_typed: no right chain was generated");
+  check_recursion_budget(deepest);
+
   out
 }
 
@@ -1056,17 +1301,17 @@ fn cells() -> Vec<Cell> {
 // binary, so the ceiling gets its own named constant and configuration site rather than being
 // buried in `parse_once`.
 
-/// The recursion ceiling every parse in this file runs against, in place of the library default
-/// of **64** ([`RecursionLimiter::new`]).
+/// The recursion ceiling every parse in this file runs against, in place of the one a default
+/// [`Parser`] installs.
 ///
 /// # Why the default is not enough
 ///
 /// The typed Pratt driver's private `parse` (`src/parser/pratt/expr.rs`) takes one level of the
-/// recursion budget per call — `InputRef::descend` at its frame prologue (`:1386`) — and its
-/// `Infix` arm recurses into `parse` again for a right-associative operator's right operand
-/// (`:1698`). So a chain of `d` right-associative operators reaches depth `d + 1`, and
-/// `right_chain/64`, this file's deepest fixture, reaches depth **65** — one past the default
-/// ceiling of 64. Left uncorrected, the very first `right_chain/64` iteration returns
+/// recursion budget per call — an `InputRef::descend` in its frame prologue — and its `Infix` arm
+/// recurses into `parse` again for a right-associative operator's right operand. So a chain of
+/// `d` right-associative operators reaches depth `d + 1`, and `right_chain/64`, this file's
+/// deepest fixture, is one past the ceiling `ParserContext` and the input layer install for a
+/// Pratt-driven parse. Left uncorrected, the very first `right_chain/64` iteration returns
 /// `RecursionLimitReached` (absorbed into `BenchError` by the `From` impl above), criterion's
 /// `.unwrap()` on that `Err` panics during warm-up, and the panic takes the whole bench binary
 /// down — every other cell included, measured or not. `left_chain/*` never approaches this at
@@ -1074,27 +1319,89 @@ fn cells() -> Vec<Cell> {
 /// floor, which declines the equal-power operator immediately, so the loop runs `d` times at a
 /// constant depth of 2 rather than descending.
 ///
+/// **That whole paragraph is a claim about another crate's default, so it is checked and not
+/// asserted** — see [`check_recursion_budget`], which runs the deepest fixture under a default
+/// [`Parser`] and requires it to fail, then under this ceiling and requires it to produce the
+/// right accumulator. The figure the library actually installs is deliberately not named here:
+/// it is `RecursionLimiter::PARSE_DEFAULT_DEPTH`, crate-private, and an earlier revision of this
+/// comment named `RecursionLimiter::new` for it — which is a *different* default, and a larger
+/// one.
+///
 /// # Why the fix is here, not in the fixture
 ///
 /// This file's job is to time the drain around that driver; enforcing its recursion limit is
 /// `tokora/tests/pratt_limit.rs`'s job. Shrinking the fixture to `right_chain/63` would sit
-/// *exactly* on the default ceiling (depth 64 against a limit of 64) and re-break on any future
-/// change to how frames are counted — e.g. one more `descend()` added to a shared prologue. So
-/// the ceiling is raised instead, once, here.
+/// *exactly* on the ceiling and re-break on any future change to how frames are counted — e.g.
+/// one more `descend()` added to a shared prologue. So the ceiling is raised instead, once, here.
 ///
 /// # Why a bound and not `unlimited`
 ///
 /// [`RecursionLimiter::unlimited`] would also fix `right_chain/64`, but this file prefers an
-/// explicit ceiling: nothing here ever needs more than depth 65, and keeping a finite (if
-/// generous) bound means a future regression that makes the driver recurse without limit still
-/// fails with a catchable, reported `RecursionLimitReached` — not a raw native stack overflow
-/// with no diagnosis. `2048` is comfortably above the 65 this file will ever reach and,
-/// per the measurements in [`RecursionLimiter`]'s own `Default Limit` section, comfortably
+/// explicit ceiling: nothing here ever needs more than `max(DEPTHS) + 1`, and keeping a finite
+/// (if generous) bound means a future regression that makes the driver recurse without limit
+/// still fails with a catchable, reported `RecursionLimitReached` — not a raw native stack
+/// overflow with no diagnosis. The headroom over the depth this file reaches is a `const`
+/// assertion below rather than arithmetic in a sentence. At the other end, `2048` is comfortably
 /// under the ~3871 frames the *typed* driver measured on a 2 MiB thread stack in a **release**
-/// build — the row that applies here, since `[profile.bench]` in the workspace `Cargo.toml` sets
-/// `opt-level = 3` and `debug-assertions = false`. The backstop this constant buys therefore
-/// holds even on a constrained thread, not only on a generously sized one.
+/// build, per [`RecursionLimiter`]'s own `Default Limit` section — the row that applies here,
+/// since `[profile.bench]` in the workspace `Cargo.toml` sets `opt-level = 3` and
+/// `debug-assertions = false`. That upper figure is another crate's recorded measurement and is
+/// not re-derived here; the backstop it buys holds on a constrained thread, not only on a
+/// generously sized one.
 const BENCH_RECURSION_LIMIT: usize = 2_048;
+
+// The headroom, as a compile-time fact rather than a sentence: the deepest fixture descends
+// `max(DEPTHS) + 1` frames, and the ceiling has to be above that or every measured iteration of
+// the deepest cell returns `RecursionLimitReached` instead of a parse.
+const _: () = {
+  let mut deepest = 0;
+  let mut i = 0;
+  while i < DEPTHS.len() {
+    if DEPTHS[i] > deepest {
+      deepest = DEPTHS[i];
+    }
+    i += 1;
+  }
+  assert!(
+    BENCH_RECURSION_LIMIT > deepest + 1,
+    "pratt_typed: BENCH_RECURSION_LIMIT is at or below the depth this file's deepest right \
+     chain descends to. Raise it, or drop the depth from DEPTHS."
+  );
+};
+
+/// The [`BENCH_RECURSION_LIMIT`] rationale, run rather than argued.
+///
+/// Its whole justification is "the default budget is not enough for the deepest cell, and this
+/// one is" — two statements about a library default this file cannot name (it is crate-private)
+/// and must not guess at. So both are executed once, at fixture-construction time, against the
+/// real deepest fixture:
+///
+/// * under a default [`Parser`] the parse must **fail**. If it ever stops failing, the whole
+///   constant is unnecessary and the paragraph explaining it is stale — which is exactly the
+///   state an earlier revision of that paragraph was already in.
+/// * under [`bench_parser`] it must succeed **and** produce the generator's accumulator, so a
+///   ceiling that merely stops the panic without letting the fixture parse is not mistaken for
+///   a fix.
+fn check_recursion_budget(deepest: &Cell) {
+  assert!(
+    Parser::new()
+      .apply(typed_pratt_drain)
+      .parse_str(deepest.src.as_str())
+      .is_err(),
+    "pratt_typed: {} now parses under the default recursion budget, so BENCH_RECURSION_LIMIT \
+     and everything its comment says about needing it are stale",
+    deepest.name
+  );
+  assert_eq!(
+    bench_parser()
+      .apply(typed_pratt_drain)
+      .parse_str(deepest.src.as_str())
+      .ok(),
+    Some(deepest.expected),
+    "pratt_typed: {} does not parse to its expected accumulator under BENCH_RECURSION_LIMIT",
+    deepest.name
+  );
+}
 
 /// This file's `Parser`, built fresh per call exactly as `Parser::new()` was before it — the
 /// only change is [`BENCH_RECURSION_LIMIT`] in place of the library's default budget. See that
@@ -1119,7 +1426,8 @@ fn bench_parser<'inp>()
 /// frame count or a probe count, so a driver that skipped or cheapened the RHS `End` probe would
 /// consume every terminator and match every accumulator (module header, *What is and is not
 /// comparable*), and the accumulator has two blind spots of its own inside fold semantics — depth
-/// 1's associativity, and the leading-operand permutation in [`expected_expression`].
+/// 1's associativity, and the leading-operand permutation in [`expected_expression`]. Both are
+/// pinned by [`check_pair`] so they cannot widen without failing the bench.
 ///
 /// # The two checks, and why one was not enough
 ///
@@ -1209,6 +1517,7 @@ fn run_fixed(cell: &str, iters: u64) -> Result<(), String> {
     name,
     src,
     expected,
+    ..
   } = cells()
     .into_iter()
     .find(|candidate| candidate.name == cell)
