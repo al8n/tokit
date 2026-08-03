@@ -6,6 +6,9 @@ enum TK {
   Root,
   Ident,
   Plus,
+  Str,
+  BlockStr,
+  Group,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -19,6 +22,9 @@ impl Language for TLang {
       0 => TK::Root,
       1 => TK::Ident,
       2 => TK::Plus,
+      3 => TK::Str,
+      4 => TK::BlockStr,
+      5 => TK::Group,
       _ => panic!("unknown"),
     }
   }
@@ -28,6 +34,9 @@ impl Language for TLang {
       TK::Root => SyntaxKind(0),
       TK::Ident => SyntaxKind(1),
       TK::Plus => SyntaxKind(2),
+      TK::Str => SyntaxKind(3),
+      TK::BlockStr => SyntaxKind(4),
+      TK::Group => SyntaxKind(5),
     }
   }
 }
@@ -134,4 +143,127 @@ fn node_children_iterates_a_cast_node_only_type() {
   assert!(iter.next().is_some());
   assert!(iter.next().is_some());
   assert!(iter.next().is_none());
+}
+
+// ── `token_any` and `tokens` ──────────────────────────────────────────────────
+
+/// `Root` over four direct *tokens* of four different kinds: `Ident("a")`, `Str("s")`,
+/// `Plus("+")`, `BlockStr("bs")`. `Str` precedes `BlockStr`, which is what makes the
+/// kinds-order-independence assertion meaningful.
+fn make_two_kind_tree() -> SyntaxNode<TLang> {
+  let mut builder = GreenNodeBuilder::new();
+  builder.start_node(TLang::kind_to_raw(TK::Root));
+  builder.token(TLang::kind_to_raw(TK::Ident), "a");
+  builder.token(TLang::kind_to_raw(TK::Str), "s");
+  builder.token(TLang::kind_to_raw(TK::Plus), "+");
+  builder.token(TLang::kind_to_raw(TK::BlockStr), "bs");
+  builder.finish_node();
+  SyntaxNode::new_root(builder.finish())
+}
+
+/// `Root` over three direct `Ident` tokens, interleaved with `Plus`: `"a" "+" "b" "+" "c"`.
+fn make_repeated_kind_tree() -> SyntaxNode<TLang> {
+  let mut builder = GreenNodeBuilder::new();
+  builder.start_node(TLang::kind_to_raw(TK::Root));
+  for (kind, text) in [
+    (TK::Ident, "a"),
+    (TK::Plus, "+"),
+    (TK::Ident, "b"),
+    (TK::Plus, "+"),
+    (TK::Ident, "c"),
+  ] {
+    builder.token(TLang::kind_to_raw(kind), text);
+  }
+  builder.finish_node();
+  SyntaxNode::new_root(builder.finish())
+}
+
+/// `Root[Ident("first") Group[Ident("nested")] Ident("second")]`. `"nested"` is an `Ident`
+/// *token*, but it is a direct child of `Group`, not of `Root` — exactly the shape that
+/// distinguishes a direct-children scan from a recursive one.
+fn make_tree_with_nested_token() -> SyntaxNode<TLang> {
+  let mut builder = GreenNodeBuilder::new();
+  builder.start_node(TLang::kind_to_raw(TK::Root));
+  builder.token(TLang::kind_to_raw(TK::Ident), "first");
+  builder.start_node(TLang::kind_to_raw(TK::Group));
+  builder.token(TLang::kind_to_raw(TK::Ident), "nested");
+  builder.finish_node();
+  builder.token(TLang::kind_to_raw(TK::Ident), "second");
+  builder.finish_node();
+  SyntaxNode::new_root(builder.finish())
+}
+
+#[test]
+fn token_any_finds_the_document_order_first_match() {
+  let root = make_two_kind_tree();
+  let found = token_any(&root, &[TK::Str, TK::BlockStr]);
+  assert_eq!(found.map(|t| t.text().to_string()), Some("s".to_string()));
+}
+
+#[test]
+fn token_any_answer_does_not_depend_on_the_order_of_kinds() {
+  // `Str` precedes `BlockStr` in the tree, so both orderings of the slice must answer `Str`.
+  // A "try kinds[0], then kinds[1]" implementation answers `BlockStr` for the reversed slice
+  // and fails this.
+  let root = make_two_kind_tree();
+
+  let forward = token_any(&root, &[TK::Str, TK::BlockStr]);
+  let reversed = token_any(&root, &[TK::BlockStr, TK::Str]);
+
+  assert_eq!(forward, reversed);
+  assert_eq!(forward.map(|t| t.text().to_string()), Some("s".to_string()));
+}
+
+#[test]
+fn token_any_with_empty_kinds_finds_nothing() {
+  let root = make_two_kind_tree();
+  assert_eq!(token_any(&root, &[]), None);
+}
+
+#[test]
+fn token_any_with_unmatched_kinds_finds_nothing() {
+  let root = make_tree();
+  assert_eq!(token_any(&root, &[TK::Str, TK::BlockStr]), None);
+}
+
+#[test]
+fn token_any_only_sees_direct_token_children() {
+  let root = make_tree_with_nested_token();
+  // `Group`'s own `Ident` must not answer for `Root`: only `"first"` is a direct child, and it
+  // precedes `"second"`, the other direct child.
+  let found = token_any(&root, &[TK::Ident]);
+  assert_eq!(
+    found.map(|t| t.text().to_string()),
+    Some("first".to_string())
+  );
+}
+
+#[test]
+fn tokens_yields_every_match_in_document_order() {
+  let root = make_repeated_kind_tree();
+  let texts: Vec<String> = tokens(&root, &TK::Ident)
+    .map(|t| t.text().to_string())
+    .collect();
+  assert_eq!(
+    texts,
+    vec!["a".to_string(), "b".to_string(), "c".to_string()]
+  );
+}
+
+#[test]
+fn tokens_yields_nothing_when_there_are_no_matches() {
+  let root = make_repeated_kind_tree();
+  let mut iter = tokens(&root, &TK::BlockStr);
+  assert!(iter.next().is_none());
+}
+
+#[test]
+fn tokens_only_sees_direct_token_children() {
+  let root = make_tree_with_nested_token();
+  let texts: Vec<String> = tokens(&root, &TK::Ident)
+    .map(|t| t.text().to_string())
+    .collect();
+  // "nested" lives inside the `Group` child node, not directly under `Root`. A recursive scan
+  // would answer three matches instead of two.
+  assert_eq!(texts, vec!["first".to_string(), "second".to_string()]);
 }

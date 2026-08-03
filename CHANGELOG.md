@@ -939,6 +939,29 @@ concrete public struct with no bound to reject anybody.
    path is untouched: every cell here finishes in single-digit milliseconds, nowhere near either
    figure. — *(#148, verification debt)*
 
+### Added
+
+17. **`cast::token_any` and `cast::tokens` close the two gaps in the cast module's token
+   helpers.** `token` answers one kind, first match, and that was the whole vocabulary: a node
+   whose grammar puts more than one token kind in the same slot, or repeats one token kind under
+   a parent that gives it no node kind of its own, had nothing to reach for and had to hand-roll
+   the same `children_with_tokens` filter at the call site.
+
+   `token_any` is the first direct token child whose kind is one of several, scanned in
+   **document order, not `kinds` order**: trying `kinds[0]` and falling back to `kinds[1]` would
+   answer the wrong token for a node carrying both, which is a difference no caller should have
+   to know about. `tokens` is every direct token child of one kind, in document order, returned
+   through the new `cast::TokenChildren` iterator — `cast::children`'s `NodeChildren` is an
+   alias for an upstream rowan type, and rowan has no ready-made iterator over one token kind,
+   so this crate now provides one.
+
+   Both are generic over `Language` and take their kind(s) by reference, matching `token`'s own
+   shape; `token_any` takes `&[L::Kind]` rather than a predicate closure because callers pass a
+   fixed, short, statically-known set of alternatives, not an open-ended rule. Both also see
+   only *direct* token children, exactly like `token`: a token belonging to a child node is that
+   node's, and neither helper reaches into it — covered alongside the document-order and
+   empty/no-match cases in `cst::cast`'s test suite.
+
 ## 0.8.0 (2026-07-31)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.

@@ -719,7 +719,8 @@ where
 /// is the only thing they ask of it, and a navigation-only typed CST layer can use them without
 /// ever naming the parser's [`Syntax`] model. Every [`Node`] still qualifies, through the
 /// blanket impl. [`token`](cast::token) is not node-typed at all — it matches on a
-/// [`Lang::Kind`](Language::Kind) value and needs no bound beyond the language.
+/// [`Lang::Kind`](Language::Kind) value and needs no bound beyond the language, and neither do
+/// its multi-kind and plural forms, [`token_any`](cast::token_any) and [`tokens`](cast::tokens).
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
 pub mod cast;
