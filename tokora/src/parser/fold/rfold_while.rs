@@ -73,7 +73,15 @@ where
     // against it keeps that witness attempt-relative. One offset clone per fold.
     let latch = inp.latch_snapshot();
 
-    loop {
+    // The trip baseline of the LAST element attempt, carried out by whichever break concluded
+    // absence — see `many::absence_after_element`.
+    let elem_trips = loop {
+      // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
+      // cycle runs at most one. It sits at the top of the body so that both breaks carry the same
+      // value; that widens the measured window by the decision peek and `decide`, neither of which
+      // can descend, so the reading is the one the element attempt would have given. See
+      // `many::file_element_failure` for why it is per element and not per fold.
+      let trips = inp.trip_snapshot();
       // A short decision window can be a genuine end of input (Stop), but one truncated by a
       // terminal scanner stop is not: surface the committed end-of-input error rather than
       // reading the stop as a legitimate end of the fold.
@@ -87,7 +95,10 @@ where
         );
       }
       match self.condition.decide(peeked, emitter)? {
-        Action::Stop => break,
+        // A stop concludes absence before this cycle's element has run, so the element that could
+        // have caught a trip is the PREVIOUS cycle's *accepting* one — which `many`'s module docs
+        // exempt — and the descent term the gate below reads is a constant `false` on this break.
+        Action::Stop => break trips,
         Action::Continue => {
           buf.push(self.parser.parse_input(inp)?);
         }
@@ -100,26 +111,21 @@ where
       // within a cycle, so anything not strictly ahead is a stall.
       let new_committed = inp.span().end();
       if new_committed <= committed {
-        break;
+        break trips;
       }
       committed = new_committed;
-    }
+    };
 
     // Both ways out of the loop — the condition's `Stop` and the no-progress stall — conclude
     // *absence*: "no more elements". The element's own lookahead can latch a terminal scanner stop
     // and still return `Ok` with a short window, leaving the pre-trip tokens cached, so a stall may
     // rest on a truncated view; and the next decision window is then served whole from that cache,
-    // with no terminal flag for the gate above to see, so a `Stop` on it may too. Checked here, ahead
-    // of the buffered reverse fold — the loop's only successor and the single success path, so
-    // neither break can bypass it. Attempt-relative, so an inherited boundary is not mis-charged
-    // here.
-    if inp.latched_during_attempt(&latch) {
-      return Err(
-        crate::error::UnexpectedEot::eot_of(inp.span().end())
-          .into_terminal()
-          .into(),
-      );
-    }
+    // with no terminal flag for the gate above to see, so a `Stop` on it may too. A descent budget
+    // trip the element caught ITSELF latches no boundary at all, and reaches the stall break the
+    // same way. Chokepointed here, ahead of the buffered reverse fold — the loop's only successor
+    // and the single success path, so neither break can bypass it;
+    // `many::absence_after_element` holds both witnesses.
+    absence_after_element(inp, &latch, elem_trips)?;
 
     let output = buf.into_iter().rfold((self.init)(), &mut self.acc);
     Ok(output)

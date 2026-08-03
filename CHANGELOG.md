@@ -723,18 +723,8 @@ concrete public struct with no bound to reject anybody.
    **element**, so a trip an *earlier* element caught and parsed past does not end the collection
    when a later one legitimately runs out of input.
 
-   The eight `*_while` drivers and folds share this hole and are **found, not fixed** — measured,
-   not inferred: `fold` over an element that catches a trip and declines returns `Ok(6)` on `"1 2 3"`
-   under a budget the element exceeds and `Ok(6)` under one it does not, and `repeated_while` over an
-   element that catches a trip and accepts consuming nothing returns `Ok([1, 2, 3, …])` under both.
-   Those drivers never file an element's `Err`, so a trip is terminal there unless the element
-   catches it — but an element that catches one and then reports absence ends the collection cleanly
-   just as it did in the try-driven four. Closing it needs a per-element trip baseline none of those
-   loops takes.
-   `parser::many`'s `GATE_CENSUS` records the classification per driver as data and requires a
-   source in that group to take **no** trip baseline and read **no** trip witness, so one cannot
-   half-adopt the gate: the day a `*_while` driver reads the counter, the classification reds and
-   has to be re-cut. — *(#148 R7)*
+   The eight `*_while` drivers and folds shared this hole; **item 12 below closes it** for them, and
+   the measurement that found it is recorded there. — *(#148 R7)*
 
 8. **A closer that arrives after the trip does not unmake it.** Item 7 gated the delimited drivers'
    *absence* exits and left the arm where the closer is genuinely present ungated, on the reasoning
@@ -768,13 +758,59 @@ concrete public struct with no bound to reject anybody.
    into the epilogue — and the cycle's baseline is taken above it, which makes the term a constant
    `false` there. An `Accept` remains untouched everywhere, for the reason item 7 gives.
 
-   **Found and not fixed**, in the same terms as item 7's residual: the `*_while` drivers and the
-   folds have real-closer exits too, and they take no trip baseline at all, so this correction cannot
-   reach them until the per-element baseline item 7 describes is added. `parser::many`'s
-   `GATE_CENSUS` gains a per-source count of real-closer exits with a region scan requiring each
-   close verdict to reach the gate before it commits, plus a two-directional scan of the gate itself
-   — the counter read, the position *not* read, since a scanner term smuggled in there is as much a
-   defect as a missing descent one. — *(#148 R8)*
+   The two delimited `*_while` drivers have real-closer exits too, and **item 12 below** brings them
+   under the same gate. `parser::many`'s `GATE_CENSUS` gains a per-source count of real-closer exits
+   with a region scan requiring each close verdict to reach the gate before it commits, plus a
+   two-directional scan of the gate itself — the counter read, the position *not* read, since a
+   scanner term smuggled in there is as much a defect as a missing descent one. — *(#148 R8)*
+
+12. **The same trip, through the same absence exits, in the other eight drivers.** Items 7 and 8
+   closed this for the four **try-driven** collection families and recorded the other eight
+   guard-bearing sources — `repeated_while()`, `separated_by_*_while()`, both of their delimited
+   forms, and the fold sources behind `fold`/`try_fold`/`try_fold_with`/`rfold` and their four
+   `*_while` twins — as *found, not fixed*. They are fixed now.
+
+   Their exposure was **narrower** than the four's, not different: none of them files an element's
+   `Err`, so a trip an element *hands back* propagates untouched and was already terminal there. The
+   hole was the exit with no `Err` in it — an element that catches
+   [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
+   itself and then reports *no more elements*. Measured rather than inferred, on the code as it
+   stood:
+
+   | driving an element that catches a depth trip and then reports absence | before | now |
+   |---|---|---|
+   | `fold(..)` over `"1 2 3"`, element declines | `Ok(6)` under a budget the element exceeds — identical to `Ok(6)` under one it does not | `Err` — a terminal end-of-input, still nothing filed |
+   | `repeated_while(..)` over `"1 2 3"`, element accepts consuming nothing | `Ok([1, 2, 3, -1])` under both budgets | `Err` — likewise |
+
+   Closing it needed a per-**element** trip baseline none of those loops took, which is a shape
+   change rather than a gate addition: three of the folds were `while let Accept(..) = element(..)`
+   loops, and a `while let`'s condition *is* the element attempt, so there is nowhere in one to
+   snapshot the counter before it. Those three are now `loop { let trips = …; match … }`. The
+   remaining five take the baseline at the top of the cycle, which is once per element, since a
+   cycle attempts at most one.
+
+   Thirty absence exits across all twelve sources now route through `absence_after_element`, and
+   eight real-closer exits through `close_after_element` — every `CloseStatus::Close` verdict in the
+   tree, with **no per-site exemption**. Where a probe sits at the top of a cycle its descent term is
+   a constant `false`, and the call is kept anyway: a `usize` comparison costs less than an
+   exemption table, it fails closed if a later refactor moves an element attempt above the probe,
+   and it is what lets the census scan each verdict's own arm instead of comparing tallies. The two
+   **direct** closers — `separated_by_*(..).delimited()`'s and `separated_by_*_while(..).delimited()`'s
+   mid-scan arms, which commit from the driver's own scan with no probe verdict — stay exempt for
+   the structural reason item 8 gives, and are counted as such.
+
+   **Unchanged, and deliberately so**: an `Accept` is still never gated, in any of the twelve, for
+   the reason item 7 states. So is each `*_while` driver's `Action::Stop` exit in practice — it is
+   reached before that cycle's element runs, so the element that could have caught a trip is the
+   previous cycle's *accepting* one, and the term there is a constant `false` by construction rather
+   than by exemption.
+
+   `parser::many`'s `GATE_CENSUS` loses its two-shape classification: `absence_exit_shapes` has no
+   zeroes left, every source is required to spell **neither** witness itself, and a new
+   `every_driver_baselines_its_trip_witness_inside_its_element_loop` pins one `trip_snapshot()` per
+   element loop in all twelve — matched against the loop openers as a second, independent needle —
+   and requires every one of the forty-two chokepoint calls to read a baseline taken inside the loop
+   that hosts it. — *(#148 R9)*
 
 
 11. **A trivia skip whose predicate panics no longer loses the token it was asked about.** On a

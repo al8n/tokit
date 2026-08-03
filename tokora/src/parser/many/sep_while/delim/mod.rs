@@ -130,6 +130,13 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     // own scan is not charged to the element loop. One offset clone per collection.
     let latch = inp.latch_snapshot();
     loop {
+      // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
+      // cycle runs at most one, inside `handle_continue`. It sits above the separator-or-close scan
+      // so that every exit of this cycle can read the same value; that widens the measured window
+      // by that scan, the decision peek and `handle_separator`, none of which can descend, so the
+      // reading is the one the element attempt would have given. See
+      // `many::absence_after_element` for why it is per element and not per collection.
+      let trips = inp.trip_snapshot();
       let mut is_sep = false;
       match inp.try_expect(|tok| {
         if Sep::eval(&tok.data.kind()) {
@@ -146,6 +153,13 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
             continue;
           }
 
+          // A closer committed straight from this scan — a DIRECT closer, not a probe verdict, and
+          // the one exit of this driver neither chokepoint covers. Not because it "rests on a real
+          // token", but structurally: it is reached from the TOP of a cycle, before any element
+          // attempt of its own, so only an *accepting* element can precede it (a stall stays inside
+          // the `Action::Continue` arm below and returns from there) and there is no absence
+          // conclusion to refuse. `sep/delim`'s mid-scan closer is exempt for the identical reason;
+          // `GATE_CENSUS` counts both as `direct` rather than leaving the exemption implicit.
           parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
           container.on_close_delimiter(tok);
           return Ok(inp.span_since(&anchor));
@@ -176,10 +190,21 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
               // `handle_end`'s TooFew/trailing emission would otherwise short-circuit
               // before an unterminated list could surface as `Unclosed`.
               match inp.probe_close(|t| Delim::is_close(&t.data.kind()))? {
-                // The closer is at hand: commit the carried token by value — no re-scan.
-                CloseStatus::Close(ct) => container.on_close_delimiter(inp.commit_probed(ct)),
+                // The closer is at hand: commit the carried token by value — no re-scan. Reached
+                // from the TOP of a cycle, so the descent term is a constant `false` here, exactly
+                // as at the direct closer above; the call stays so that "every probed closer passes
+                // through `many::close_after_element`" needs no per-site exemption.
+                CloseStatus::Close(ct) => {
+                  close_after_element(inp, trips)?;
+                  container.on_close_delimiter(inp.commit_probed(ct))
+                }
                 // (b) a wrong token was seen where the closer should be.
                 CloseStatus::WrongToken(tok) => {
+                  // An absence conclusion, so both witnesses are the chokepoint's — a constant
+                  // `false` pair at this exit (the eager terminal gate above already refused a
+                  // latched boundary, and this cycle's element has not run), routed through it so
+                  // no close-miss arm of this driver spells a gate of its own.
+                  absence_after_element(inp, &latch, trips)?;
                   // One junk token, one report: a close expectation names a different token or
                   // nothing. Nothing committed since the wrong opener was flagged ⇒ the cache
                   // front still holds that same token (FIFO), so this probe is re-seeing it.
@@ -192,6 +217,8 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                 // (a) end of input with the opener still open: the opener was never
                 // closed.
                 CloseStatus::Eof => {
+                  // Same absence conclusion as the wrong-token arm above, so the same gate.
+                  absence_after_element(inp, &latch, trips)?;
                   if let Some(open_span) = open_span.clone() {
                     inp
                       .emitter()
@@ -240,23 +267,21 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                 // The closer is at hand: carry it out; committed by value below. The probe is
                 // cache-first, so this verdict rests on a REAL pre-trip token: the list genuinely
                 // closed and stays a success even if the element's lookahead latched a terminal stop
-                // somewhere past that closer.
-                CloseStatus::Close(ct) => close_carrier = Some(ct),
+                // somewhere past that closer. Reached from the TOP of a cycle, so the descent term is
+                // a constant `false` here too; the call stays for the same uniformity reason.
+                CloseStatus::Close(ct) => {
+                  close_after_element(inp, trips)?;
+                  close_carrier = Some(ct)
+                }
                 // (b) a wrong token sits where the closer should be.
                 CloseStatus::WrongToken(tok) => {
                   // No closer: the stop plus this verdict conclude *absence*, and the element's own
                   // lookahead can latch a terminal scanner stop and still return `Ok` with a short
                   // window, leaving the pre-trip tokens cached — the decision window above is then
                   // served whole from that cache, so it carries no terminal flag, and the same cached
-                  // token reads as a spurious wrong closer here. Surface the stop ahead of the
-                  // close-miss diagnostic; attempt-relative against the post-opener snapshot.
-                  if inp.latched_during_attempt(&latch) {
-                    return Err(
-                      UnexpectedEot::eot_of(inp.span().end())
-                        .into_terminal()
-                        .into(),
-                    );
-                  }
+                  // token reads as a spurious wrong closer here. Both witnesses are the chokepoint's;
+                  // the scanner half is attempt-relative against the post-opener snapshot.
+                  absence_after_element(inp, &latch, trips)?;
                   // One junk token, one report: a close expectation names a different token or
                   // nothing. Nothing committed since the wrong opener was flagged ⇒ the cache
                   // front still holds that same token (FIFO), so this probe is re-seeing it.
@@ -271,13 +296,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                   // Same absence conclusion as the wrong-token arm above, so the same gate. No
                   // legitimate `Unclosed` is lost: a scan that reaches a live boundary stops there and
                   // reports the stop, so an `Eof` verdict cannot coexist with one.
-                  if inp.latched_during_attempt(&latch) {
-                    return Err(
-                      UnexpectedEot::eot_of(inp.span().end())
-                        .into_terminal()
-                        .into(),
-                    );
-                  }
+                  absence_after_element(inp, &latch, trips)?;
                   if let Some(open_span) = open_span.clone() {
                     inp
                       .emitter()
@@ -333,23 +352,25 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                 let mut close_carrier = None;
                 match inp.probe_close(|tok| Delim::is_close(&tok.data.kind()))? {
                   // The closer is at hand: carry it out; committed by value below. A cache-first
-                  // verdict on a real pre-trip token, so the construct genuinely closed and stays a
-                  // success.
-                  CloseStatus::Close(ct) => close_carrier = Some(ct),
+                  // verdict on a real pre-trip token, so the construct genuinely closed *at that
+                  // position* and the scanner witness stays off this exit. The counter is the other
+                  // fact and the closer settles nothing about it: the stalling attempt this cycle
+                  // just ran may have caught a budget trip, which no later token unmakes. Descent
+                  // only — see `many::close_after_element`. This is the driver's one real-closer
+                  // exit that follows an element attempt of its own.
+                  CloseStatus::Close(ct) => {
+                    close_after_element(inp, trips)?;
+                    close_carrier = Some(ct)
+                  }
                   // (b) a wrong token sits where the closer should be.
                   CloseStatus::WrongToken(tok) => {
-                    // No closer: the stall plus this verdict conclude *absence*, and the element's
-                    // own lookahead can latch a terminal scanner stop after the decision gate ran and
-                    // still return `Ok` with a short window, so that conclusion may rest on a
-                    // truncated view. Surface the stop ahead of the close-miss diagnostic;
+                    // No closer: the stall plus this verdict conclude *absence* from the element
+                    // attempt this cycle just ran, and that attempt can hit either
+                    // never-recoverable stop and still return `Ok` — a terminal scanner stop its
+                    // own lookahead latched after the decision gate ran, or a descent budget trip
+                    // it caught itself. Both are the chokepoint's; the scanner half is
                     // attempt-relative against the post-opener snapshot.
-                    if inp.latched_during_attempt(&latch) {
-                      return Err(
-                        UnexpectedEot::eot_of(inp.span().end())
-                          .into_terminal()
-                          .into(),
-                      );
-                    }
+                    absence_after_element(inp, &latch, trips)?;
                     // One junk token, one report: a close expectation names a different token
                     // or nothing. Nothing committed since the wrong opener was flagged ⇒ the
                     // cache front still holds that same token (FIFO), so this probe is
@@ -365,13 +386,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                     // Same absence conclusion as the wrong-token arm above, so the same gate. No
                     // legitimate `Unclosed` is lost: a scan that reaches a live boundary stops there
                     // and reports the stop, so an `Eof` verdict cannot coexist with one.
-                    if inp.latched_during_attempt(&latch) {
-                      return Err(
-                        UnexpectedEot::eot_of(inp.span().end())
-                          .into_terminal()
-                          .into(),
-                      );
-                    }
+                    absence_after_element(inp, &latch, trips)?;
                     if let Some(open_span) = open_span.clone() {
                       inp
                         .emitter()

@@ -63,9 +63,21 @@
 //! driver has to guard. An element that answers a trip and reports `Accept` concludes nothing: it
 //! hands the driver a value, and the driver collects it exactly as it would from an untripped
 //! element. Neither `absence_after_element` nor `close_after_element` is reached on that path, on
-//! purpose, and section 6 is **not** a residual like the `*_while`/fold gap sections 4 and 5 name —
-//! it is the permanent shape of the design, stated by `parser::many`'s module docs and pinned here
-//! so it cannot drift silently in either direction.
+//! purpose, and section 6 is **not** a residual — it is the permanent shape of the design, stated
+//! by `parser::many`'s module docs and pinned here so it cannot drift silently in either direction.
+//! Section 7 is the contrast that makes the distinction legible: the gap it closes *was* a residual,
+//! recorded as one, and is now gone.
+//!
+//! # The other eight drivers — section 7
+//!
+//! Sections 4 and 5 cover the four try-driven families. The other eight guard-bearing sources — the
+//! four `*_while` collection drivers and the four fold sources — had the same hole, for a reason
+//! narrower than the four's rather than different: they never file an element's `Err`, so a trip an
+//! element *hands back* propagates untouched and is terminal there with no gate at all. What they
+//! could not see is the same `Ok` sections 4 and 5 are about. Closing it needed the per-element trip
+//! baseline none of those loops took — which is why three of the folds stopped being `while let`
+//! loops, a `while let` having nowhere to snapshot the counter before the element attempt its own
+//! condition runs. Section 7 drives every one of the eight.
 //!
 //! **THIS SECTION PINS DELIBERATE, EXISTING BEHAVIOUR.** Every cell in it is expected to pass
 //! against the code as it stands; a red here does not mean something is broken; it means the
@@ -113,9 +125,11 @@ mod common;
 
 use core::cell::Cell;
 
+use generic_arraydeque::typenum::U1;
 use tokora::{
   Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext,
   TryParseInput,
+  cache::Peeked,
   emitter::{
     FromUnclosed, FullContainerEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter,
     UnclosedEmitter, UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
@@ -126,6 +140,7 @@ use tokora::{
     syntax::{FullContainer, MissingSyntax, TooFew, TooMany},
     token::{MissingToken, SeparatedError, UnexpectedToken},
   },
+  parser::Action,
   punct::Paren,
   state::recursion_tracker::RecursionLimiter,
   try_parse_input::ParseAttempt,
@@ -905,6 +920,56 @@ macro_rules! trip_suite {
         }
       }
 
+      /// Section 7's element for the six drivers whose element is a plain
+      /// [`ParseInput`](tokora::ParseInput): the same catch as
+      /// [`caught_then_zero_width_num`], answered with a **value** rather than a
+      /// [`ParseAttempt`].
+      ///
+      /// The `*_while` collection drivers and the `*_while` folds take their element through
+      /// `parse_input`, which has no decline channel at all — the *only* way an element of theirs
+      /// can report absence is by returning a value while consuming nothing, which the driver's
+      /// no-progress guard then reads as "no more elements". So this is the one shape section 7 can
+      /// drive those six with, and it is the shape the measurement in `parser::many`'s changelog
+      /// entry used.
+      fn caught_then_zero_width_plain<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        match inp.try_expect(|t| matches!(t.data(), Token::Num(_)))? {
+          None => {
+            catch_a_trip(inp);
+            Ok(ZERO_WIDTH)
+          }
+          Some(tok) => match tok.into_data() {
+            Token::Num(n) => Ok(n),
+            _ => unreachable!("the predicate accepted only `Num`"),
+          },
+        }
+      }
+
+      /// The decision every section 7 `*_while` probe drives its driver with: **always continue**.
+      ///
+      /// A condition that stops on a non-`Num` front would take the driver's *`Action::Stop`* exit,
+      /// which sits at the TOP of a cycle — before that cycle's element has run — so the element
+      /// that caught the trip is the *previous* cycle's, an accepting one, and the exemption the
+      /// module docs state for `Accept` applies. That exit is therefore not where the defect lives
+      /// and gating it would contradict section 6. Continuing unconditionally hands the cycle to the
+      /// element, which catches the trip and consumes nothing, and the driver's **no-progress
+      /// stall** — an absence conclusion drawn after that very attempt — is what ends the
+      /// collection.
+      fn always_continue<'inp, Ctx>(
+        _peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
+        _emitter: &mut Ctx::Emitter,
+      ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+      {
+        Ok(Action::Continue)
+      }
+
       /// Section 6's subject: the same catch, answered with a **consuming `Accept`** — the one arm
       /// no chokepoint in `parser::many` ever inspects, by design. When it finds a `Num` it catches
       /// the trip and still accepts, producing a value rather than concluding absence; when it does
@@ -913,9 +978,9 @@ macro_rules! trip_suite {
       /// ended is never the one that tripped. Reused across `repeated().delimited()` — where the
       /// closer sits directly at the next slot — and `separated_by_comma().delimited()`, where the
       /// consumed `Plus` is what routes the real closer to the epilogue's own gate
-      /// (`parser::many::close_after_element`) rather than the mid-scan arm that never takes a
-      /// baseline at all — the same routing `caught_then_consuming_decline_num` above uses for
-      /// section 5's separated cell.
+      /// (`parser::many::close_after_element`) rather than the mid-scan arm, which is a DIRECT
+      /// closer the census exempts because only an accepting element can precede it — the same
+      /// routing `caught_then_consuming_decline_num` above uses for section 5's separated cell.
       fn caught_then_consuming_accept_num<'inp, Ctx>(
         inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
       ) -> Result<ParseAttempt<i64>, $err>
@@ -1349,6 +1414,226 @@ macro_rules! trip_suite {
           .separated_by_comma()
           .delimited::<Paren<(), (), ()>>()
           .collect()
+          .parse_input(inp)
+      }
+
+      // ── Section 7's probes: the four `*_while` collections and the eight folds ──
+
+      fn repeated_while_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_zero_width_plain
+          .repeated_while::<_, U1>(always_continue::<Ctx>)
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn delim_repeated_while_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_zero_width_plain
+          .repeated_while::<_, U1>(always_continue::<Ctx>)
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn sep_while_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + SeparatedEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + TooFewEmitter<'inp, TestLexer<'inp>>
+          + TooManyEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_zero_width_plain
+          .separated_by_comma_while::<_, U1>(always_continue::<Ctx>)
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn sep_while_delim_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<Vec<i64>, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>
+          + FullContainerEmitter<'inp, TestLexer<'inp>>
+          + SeparatedEmitter<'inp, TestLexer<'inp>>
+          + UnclosedEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+          + TooFewEmitter<'inp, TestLexer<'inp>>
+          + TooManyEmitter<'inp, TestLexer<'inp>>,
+      {
+        caught_then_zero_width_plain
+          .separated_by_comma_while::<_, U1>(always_continue::<Ctx>)
+          .delimited::<Paren<(), (), ()>>()
+          .collect()
+          .parse_input(inp)
+      }
+
+      fn fold_decline_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_decline_num
+          .fold(|| 0i64, |acc, x| acc + x)
+          .parse_input(inp)
+      }
+
+      fn fold_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_zero_width_num
+          .fold(|| 0i64, |acc, x| acc + x)
+          .parse_input(inp)
+      }
+
+      fn try_fold_decline_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_decline_num
+          .try_fold(|| 0i64, |acc, x| Ok(acc + x))
+          .parse_input(inp)
+      }
+
+      fn try_fold_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_zero_width_num
+          .try_fold(|| 0i64, |acc, x| Ok(acc + x))
+          .parse_input(inp)
+      }
+
+      fn try_fold_with_decline_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_decline_num
+          .try_fold_with(|| 0i64, |acc, x, _state| Ok(acc + x))
+          .parse_input(inp)
+      }
+
+      fn try_fold_with_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_zero_width_num
+          .try_fold_with(|| 0i64, |acc, x, _state| Ok(acc + x))
+          .parse_input(inp)
+      }
+
+      fn rfold_decline_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_decline_num
+          .rfold(|| 0i64, |acc, x| acc + x)
+          .parse_input(inp)
+      }
+
+      fn rfold_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_zero_width_num
+          .rfold(|| 0i64, |acc, x| acc + x)
+          .parse_input(inp)
+      }
+
+      fn fold_while_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_zero_width_plain
+          .fold_while::<_, _, _, U1>(always_continue::<Ctx>, || 0i64, |acc, x| acc + x)
+          .parse_input(inp)
+      }
+
+      fn try_fold_while_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_zero_width_plain
+          .try_fold_while::<_, _, _, U1>(always_continue::<Ctx>, || 0i64, |acc, x| Ok(acc + x))
+          .parse_input(inp)
+      }
+
+      fn try_fold_while_with_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_zero_width_plain
+          .try_fold_while_with::<_, _, _, U1>(
+            always_continue::<Ctx>,
+            || 0i64,
+            |acc, x, _state| Ok(acc + x),
+          )
+          .parse_input(inp)
+      }
+
+      fn rfold_while_stall_probe<'inp, Ctx>(
+        inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+      ) -> Result<i64, $err>
+      where
+        Ctx: ParseContext<'inp, TestLexer<'inp>>,
+        Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = $err>,
+      {
+        caught_then_zero_width_plain
+          .rfold_while::<_, _, _, U1>(always_continue::<Ctx>, || 0i64, |acc, x| acc + x)
           .parse_input(inp)
       }
 
@@ -1934,6 +2219,247 @@ macro_rules! trip_suite {
            closer reached through the epilogue",
           "( 7 + )",
           collects = Ok(vec![7])
+        );
+      }
+
+      // ── Section 7: the same absence exits in the `*_while` drivers and the folds ──
+      //
+      // Sections 4 and 5 close the hole for the four TRY-DRIVEN families. The other eight
+      // guard-bearing sources — the four `*_while` collection drivers and the four fold sources —
+      // had it too, and for a reason that is *narrower* than the try-driven four's rather than
+      // different: they never file an element's `Err`, so a trip an element hands back propagates
+      // untouched and IS terminal there. What they could not see is the same `Ok` sections 4 and 5
+      // are about — the element answering the trip itself, and the driver then concluding *absence*
+      // from an attempt a resource budget stopped.
+      //
+      // The element shape differs by family, because the two groups' elements differ:
+      //
+      // * the four plain folds take a [`TryParseInput`](tokora::TryParseInput) element, so both
+      //   absence exits are reachable — the decline and the no-progress stall. Both are driven;
+      // * the four `*_while` collections and the four `*_while` folds take a plain
+      //   [`ParseInput`](tokora::ParseInput) element, which has no decline channel at all. Their
+      //   only element-driven absence exit is the stall, and [`always_continue`] is what routes
+      //   every cycle to the element so the stall is what ends the collection. Their *other* exit,
+      //   the condition's `Action::Stop`, sits at the TOP of a cycle — the element that could have
+      //   caught a trip is then the PREVIOUS cycle's accepting one, which section 6 exempts by
+      //   design, so the descent witness there is a constant `false` and there is nothing for a cell
+      //   to measure.
+      //
+      // Measured before it was fixed, with a throwaway probe and then with these cells: `fold` over
+      // a declining element returned `Ok(6)` on `"1 2 3"` under a budget the element exceeded and
+      // `Ok(6)` under one it did not, and `repeated_while` over the stalling element returned
+      // `Ok([1, 2, 3, -1])` under both. Every cell below is that comparison, and every one of them
+      // failed on `tight == roomy` before the per-element baseline was added.
+      #[allow(rustdoc::private_intra_doc_links)]
+      mod answered_trip_in_a_while_or_fold {
+        use super::*;
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_repeated_while,
+          $err,
+          $sink,
+          repeated_while_stall_probe,
+          "`repeated_while()`, element accepts consuming nothing",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3, ZERO_WIDTH]),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_close_delimited_repeated_while,
+          $err,
+          $sink,
+          delim_repeated_while_stall_probe,
+          "`repeated_while().delimited()`, element accepts consuming nothing at the unclosed end",
+          "( 1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(vec![1, 2, 3, ZERO_WIDTH]),
+          roomy_filed = 1
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_separated_while,
+          $err,
+          $sink,
+          sep_while_stall_probe,
+          "`separated_by_comma_while()`, element accepts consuming nothing",
+          "1 , 2 , 3 +",
+          stops = $eot,
+          tight_filed = 1,
+          collects = Ok(vec![1, 2, 3, ZERO_WIDTH]),
+          roomy_filed = 1
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_close_delimited_separated_while,
+          $err,
+          $sink,
+          sep_while_delim_stall_probe,
+          "`separated_by_comma_while().delimited()`, element accepts consuming nothing",
+          "( 1 , 2 , 3 +",
+          stops = $eot,
+          tight_filed = 1,
+          collects = Ok(vec![1, 2, 3, ZERO_WIDTH]),
+          roomy_filed = 2
+        );
+
+        absence_cell!(
+          a_declining_element_that_answered_a_trip_does_not_end_fold,
+          $err,
+          $sink,
+          fold_decline_probe,
+          "`fold()`, element declines",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(6i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_fold,
+          $err,
+          $sink,
+          fold_stall_probe,
+          "`fold()`, element accepts consuming nothing",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(5i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_declining_element_that_answered_a_trip_does_not_end_try_fold,
+          $err,
+          $sink,
+          try_fold_decline_probe,
+          "`try_fold()`, element declines",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(6i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_try_fold,
+          $err,
+          $sink,
+          try_fold_stall_probe,
+          "`try_fold()`, element accepts consuming nothing",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(5i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_declining_element_that_answered_a_trip_does_not_end_try_fold_with,
+          $err,
+          $sink,
+          try_fold_with_decline_probe,
+          "`try_fold_with()`, element declines",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(6i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_try_fold_with,
+          $err,
+          $sink,
+          try_fold_with_stall_probe,
+          "`try_fold_with()`, element accepts consuming nothing",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(5i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_declining_element_that_answered_a_trip_does_not_end_rfold,
+          $err,
+          $sink,
+          rfold_decline_probe,
+          "`rfold()`, element declines",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(6i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_rfold,
+          $err,
+          $sink,
+          rfold_stall_probe,
+          "`rfold()`, element accepts consuming nothing",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(5i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_fold_while,
+          $err,
+          $sink,
+          fold_while_stall_probe,
+          "`fold_while()`, element accepts consuming nothing",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(5i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_try_fold_while,
+          $err,
+          $sink,
+          try_fold_while_stall_probe,
+          "`try_fold_while()`, element accepts consuming nothing",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(5i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_try_fold_while_with,
+          $err,
+          $sink,
+          try_fold_while_with_stall_probe,
+          "`try_fold_while_with()`, element accepts consuming nothing",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(5i64),
+          roomy_filed = 0
+        );
+
+        absence_cell!(
+          a_stalling_element_that_answered_a_trip_does_not_end_rfold_while,
+          $err,
+          $sink,
+          rfold_while_stall_probe,
+          "`rfold_while()`, element accepts consuming nothing",
+          "1 2 3",
+          stops = $eot,
+          tight_filed = 0,
+          collects = Ok(5i64),
+          roomy_filed = 0
         );
       }
     }
