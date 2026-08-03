@@ -3262,22 +3262,60 @@ its own measurement.
   — *(R8, #123)*
 
 - A nested rollback is **linear in lineage depth** rather than quadratic.
-- **The scan path costs measurably more, and the wall-clock figure is not yet trustworthy.**
-  The ownership that closes item 9 is the cost. It cannot be relocated: the benched path
-  lexes with no peek, so there is no stream slot to borrow the token from, and tracking each
-  handover separately — which is what makes the unwind edge correct — is state the scan must
-  carry.
+- **The scan path costs measurably more: `next_drain` is +2.7% against 0.7.3.** The ownership
+  that closes item 9 is the cost. It cannot be relocated: the benched path lexes with no peek,
+  so there is no stream slot to borrow the token from, and tracking each handover separately —
+  which is what makes the unwind edge correct — is state the scan must carry.
 
   What is measured and solid is code size: the `input_scan` bench closure grows **+560 bytes
   against 0.7.3**, and a **356-byte `drop_glue::<ScanScope>`** symbol now exists where every
   earlier revision of this round measured none. Two mitigations were tried and both reverted
   on measurement — outlining the whole `Drop` as cold made a second bench worse.
 
-  An earlier revision of this round disclosed **+1.5%** on `skip_trivia_next`. **That figure
-  is stale** — it was taken when the symbol above was 1 680 bytes and it is now 2 100 — and
-  it is deliberately not restated here rather than reprinted at a precision it no longer has.
-  A replacement is owed on a quiet machine before release; it may be materially larger.
-  Against this, `failed_sync_through_over_8` improved 1.4–2.5% when last measured cleanly.
+  The wall-clock figure earlier revisions of this round left owed is measured, and the whole
+  `input/scan` group is given rather than the one id, because the group does not move together:
+
+  | `input/scan` id     | 0.7.3    | 0.8.0    | change     | null control | separation       |
+  |---------------------|----------|----------|------------|--------------|------------------|
+  | `next_drain`        | 333.1 µs | 342.1 µs | **+2.7%**  | 0.08%        | disjoint         |
+  | `try_expect_hits`   | 216.3 µs | 219.1 µs | +1.3%      | 0.63%        | inside the floor |
+  | `peek1_then_next`   | 530.4 µs | 527.9 µs | −0.5%      | 1.55%        | inside the floor |
+  | `skip_trivia_next`  | 338.9 µs | 279.3 µs | **−17.6%** | 0.25%        | disjoint         |
+  | `try_expect_misses` | 523.2 µs | 427.5 µs | **−18.3%** | 0.02%        | disjoint         |
+
+  Two `[profile.bench]` builds — `468f7aa` (0.7.3) and this release — resolved from one shared
+  `Cargo.lock`, so every dependency version including criterion is identical and only tokora's
+  own source differs. The drivers and the `synthetic_source` fixture are byte-identical at both
+  revisions. Arms were interleaved within each round rather than run in blocks, across three
+  campaigns: 28 runs per id on 0.8.0 against 14 on 0.7.3 for the first three, 12 against 6 for
+  the rest.
+
+  **The noise floor is 0.6%, with one excursion to 1.55%**, and it was established before any
+  delta was believed: a null control of two builds of *identical* source in separate target
+  directories — which came out byte-identical, same SHA-256 — carried through every campaign as
+  a third arm. Its two halves differ by 0.02–0.63% on five of the six ids. On the sixth they
+  differ by 1.55%, because a single run of `peek1_then_next` returned 622.8 µs against a ~525 µs
+  population. That is a machine event, and it is why nothing here under ~1.5% is called a
+  result. `next_drain`'s +2.7% is 34× its own control, the two populations do not overlap at
+  all, and it reproduced independently at +2.8% and +2.5% in two campaigns.
+
+  This was **not** a quiet machine and nothing above depends on it having been one: an M4 Pro at
+  a 1-minute load average of 2.7–4.8 across 14 cores, with unrelated work resident throughout.
+  Interleaving plus the null control is what makes that survivable, since drift lands on all
+  three arms alike — and the one event that did occur is the 1.55% row rather than something
+  folded into an average.
+
+  Two limits on reading it. It is the **release-level** delta, 0.7.3 → 0.8.0 over 54 commits,
+  not item 9's ownership in isolation: `ScanScope` is what makes the unwind edge correct, so
+  there is no build with it reverted to difference against, and a narrower attribution is a
+  patch release's job for the same reason `finish_clean`'s residual above is. And earlier
+  revisions disclosed **+1.5% on `skip_trivia_next`** and then withheld it as stale; withholding
+  it was right for a stronger reason than staleness, because against 0.7.3 that figure is
+  **wrong in sign**. #154 took the trivia skip off the shared scanner after item 9 landed, and
+  the id is now 17.6% *faster*. `failed_sync_through_over_8`, offered here before as the
+  counterweight at 1.4–2.5%, measures −0.8% against 0.7.3 on this harness — inside the floor, so
+  it is withdrawn as one. The counterweight that survives measurement is `try_expect_misses`, at
+  −18.3%.
 
   — *(R9)*
 
