@@ -1,9 +1,17 @@
 //! Tests that prove the cache conformance kit: the four built-in caches pass every check, a
 //! correct third-party queue passes too, and each deliberately-broken queue trips exactly the
-//! check that owns its defect.
+//! check that owns its defect — with the two exceptions below, which are labelled rather than
+//! left to look like the rest.
 //!
 //! The broken fixtures are one `Queue` type with a const-selected defect, so the defects sit side
 //! by side and adding one is three lines rather than a new file.
+//!
+//! Two fixtures are not defects-under-test and say so at their definitions. `OVERFILL_TRIPWIRE`
+//! asserts on the **kit's** driver rather than on a cache, pinning the fact that `peek` is
+//! reached with a buffer that is not empty. `TOTAL_CAPACITY_PEEK` is a defect the kit provably
+//! cannot see, and its test asserts the kit **accepts** it — an inverted test that keeps the
+//! module docs' "what it deliberately does not check" section honest by failing if that ever
+//! stops being true.
 
 use core::cell::Cell;
 use std::collections::VecDeque;
@@ -76,9 +84,11 @@ impl Token<'_> for CTok {
 
 type CLex<'a> = LogosLexer<'a, CTok>;
 
-/// The corpus every cell runs over: ten items, one past the widest capacity the cells use, so
-/// every cache here fills and then refuses.
-const SRC: &str = "a b c d e f g h i j";
+/// The corpus every cell runs over: twelve items — the widest capacity the cells use (8) plus a
+/// full 4-slot peek window behind it. The capacity is what makes every cache here fill and then
+/// refuse; the window is what the kit's peek prefill draws on, at every depth up to a buffer with
+/// no room left, from tokens the cache under test is not itself holding.
+const SRC: &str = "a b c d e f g h i j k l";
 
 // ── The built-ins ───────────────────────────────────────────────────────────────────
 
@@ -133,6 +143,98 @@ const IMPURE_PEEK: u8 = 6;
 const APPENDING_PUSH_FRONT: u8 = 7;
 /// A refused push hands back a *different* token than the one offered.
 const SWAPPING_REFUSAL: u8 = 8;
+/// `peek` writes over the entries the destination buffer already held instead of appending
+/// behind them — the buffer read as an output slot to fill rather than a queue to extend.
+/// Invisible against an empty buffer, where clearing it is a no-op.
+const CLOBBERING_PEEK: u8 = 9;
+/// `peek` bounds itself by the destination buffer's TOTAL capacity rather than what `push_back`
+/// can still accept (its REMAINING capacity), and discards the refused surplus in silence, as a
+/// real cache written against the wrong bound would.
+///
+/// **The kit cannot see this**, and [`cache_kit_cannot_see_a_silent_total_capacity_peek`] asserts
+/// so. It is here as the executable form of that limitation, not as a defect under test.
+const TOTAL_CAPACITY_PEEK: u8 = 10;
+/// Not a defect: a tripwire on the **kit's own driver**. `peek` bounds itself by the buffer's
+/// total capacity and then asserts that every push it makes was accepted, which can only fail
+/// where the kit hands `peek` a buffer with less room left than it has slots.
+const OVERFILL_TRIPWIRE: u8 = 11;
+/// `peek` answers correctly but drops an entry from its own residency — on the **non-empty
+/// buffer path only**. Latched through a `Cell` rather than an actual drain, since a `VecDeque`
+/// behind `&self` cannot be drained; `len()` is where the kit sees residency either way.
+const PREFILL_DRAINS_RESIDENCY: u8 = 12;
+/// `peek` is pure against an empty buffer and impure against a prefilled one: the first
+/// non-empty-buffer call latches, and every call after it appends one entry fewer.
+const PREFILL_IMPURE_PEEK: u8 = 13;
+/// Refuses the **first-ever** `push_front` into a fresh cache and accepts one afterwards — a
+/// front slot a `push_back` has to establish first. Declares `RETAINS_FRONT`.
+const COLD_START_PUSH_FRONT: u8 = 14;
+/// Accepts one `push_front` and refuses every later one **while the cache still has room** — a
+/// refusal a full cache would have earned and this one has not.
+///
+/// It satisfies everything a refusal is otherwise asked for: the token comes back unchanged, the
+/// residency does not move, and one front push *was* accepted, so the prepend law is observed
+/// once. Only "a refusal means the cache is FULL" separates it from a conforming cache.
+const EARLY_REFUSING_PUSH_FRONT: u8 = 15;
+/// [`CLOBBERING_PEEK`] keyed on the prefix depth: `peek` appends correctly behind a **one-entry**
+/// prefix and clobbers behind any deeper one.
+///
+/// A prefilled driver pinned at a single depth of 1 cannot tell this from a conforming cache —
+/// which is what it was, so this fixture is the executable form of that gap.
+const DEEP_PREFILL_CLOBBERING_PEEK: u8 = 16;
+/// [`CLOBBERING_PEEK`] keyed on the other end of the depth sweep: `peek` conforms while the
+/// buffer has room and clobbers when it has **none**.
+///
+/// The full buffer is the only shape in which the bound `min(len, remaining)` is asked to come
+/// out zero, and the only one in which "append nothing" and "append what fits" stop being the
+/// same instruction. This fixture is what keeps the top of the sweep from being a depth nothing
+/// would miss.
+const FULL_BUFFER_CLOBBERING_PEEK: u8 = 17;
+/// `push_front` places its token at the front and **permutes what is behind it**: the two entries
+/// after the head swap places, and only where the second of them is not the tail, so neither end
+/// of the queue ever moves.
+///
+/// Every observable the kit reads at a *point* is correct after each push — the front is the
+/// token just pushed, the back is the one `push_back` left there, `len` and `remaining` count —
+/// so at capacity 4 it builds `[d,b,c,a]` where `[d,c,b,a]` was promised and says nothing about
+/// it. Only an oracle that reads the WHOLE resident sequence separates it from a conforming
+/// cache.
+const REORDERING_PUSH_FRONT: u8 = 18;
+/// `peek` bounds itself by the cache's BACKING store rather than by its current length, and what
+/// it reads past the live run are entries the cache has already handed out.
+///
+/// Modelled with a graveyard that `pop_front` fills, since a `VecDeque` that really removes its
+/// front leaves no stale slot to read: a fixed-array or ring cache does not remove, it moves an
+/// index, and a `peek` that walks the array rather than the live run reads what the index moved
+/// past. The bound `min(capacity, room)` equals the correct `min(len, room)` at exactly one
+/// residency — a full cache — which is the only one `filled` alone ever builds.
+const STALE_RESIDENCY_PEEK: u8 = 19;
+/// Refuses a `push_front` into an **empty** cache, with every slot free, and accepts one as soon
+/// as the cache holds anything. Declares `RETAINS_FRONT = false`.
+///
+/// The declaration is the whole of its cover. Check 2 returns at its first line for a cache that
+/// declares `false`, and check 5 seeds the cache with a `push_back` before its first front push,
+/// so the empty cache is never the state a front push meets there. The refusal is a violation
+/// whatever the declaration says — a push is refused only by a FULL cache — and declaring `false`
+/// changes only what the refusal costs the input layer.
+const EMPTY_REFUSING_PUSH_FRONT: u8 = 20;
+/// [`STALE_RESIDENCY_PEEK`] at the other end of the queue: `peek` is again bounded by the cache's
+/// BACKING store rather than by its current length, but what it runs past the live run into are
+/// the entries **`pop_back`** handed out.
+///
+/// This is the restore path's shape, and that is why it is worth its own cell. The input layer
+/// drops an abandoned continuation's entries with a run of `pop_back` calls, so a ring or array
+/// cache that moves its tail index back over slots it does not clear serves that abandoned
+/// lookahead to the next `peek` — on a live rollback, not in a state nothing drives.
+///
+/// A residency sweep that only pops the FRONT cannot see it. Nothing fills the graveyard on that
+/// path under this cell, so the bound `min(cap, room)` is applied to a store holding only the
+/// shorter live run, `take` saturates on it, and the count and order that come out are the ones a
+/// conforming cache would land. Only a state reached by `pop_back` puts entries behind the live
+/// run for the wrong bound to reach.
+///
+/// Modelled with a graveyard for the same reason the front one is: a `VecDeque` that really
+/// removes leaves no stale slot to read, so the defect could not exist in it at all.
+const STALE_TAIL_RESIDENCY_PEEK: u8 = 21;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -140,17 +242,34 @@ where
   L: Lexer<'a>,
 {
   items: VecDeque<CachedTokenOf<'a, L>>,
+  /// Entries a pop has already handed out and the store still holds — the slots a ring cache does
+  /// not clear when an index moves past them. Filled by `pop_front` under
+  /// [`STALE_RESIDENCY_PEEK`] and by `pop_back` under [`STALE_TAIL_RESIDENCY_PEEK`], and in both
+  /// cases ordered as a walk from the head would meet them — behind the live run — so that
+  /// `items` chained with it reads as the backing store a ring walks past its own length.
+  graveyard: VecDeque<CachedTokenOf<'a, L>>,
   cap: usize,
   peeks: Cell<usize>,
+  /// Set by the first `peek` that is handed a buffer which already holds entries.
+  prefilled: Cell<bool>,
+  /// Set by the first `push_back`.
+  warmed: Cell<bool>,
+  /// Counts the `push_front` calls this cache has accepted.
+  front_pushes: Cell<usize>,
 }
 
+// `L::Token: Clone` is what the two stale-residency cells cost: `STALE_RESIDENCY_PEEK`'s
+// `pop_front` and `STALE_TAIL_RESIDENCY_PEEK`'s `pop_back` each keep a copy of the entry they hand
+// back, so that `peek` has something stale to read. `L::Span` and `L::State` are already `Clone`
+// from `Lexer`/`State`, so this is the whole of the extra bound.
 impl<'a, L, Lang: ?Sized, const D: u8> Cache<'a, L, Lang> for Queue<'a, L, D>
 where
   L: Lexer<'a>,
+  L::Token: Clone,
 {
   type Options = usize;
 
-  const RETAINS_FRONT: bool = D != APPENDING_PUSH_FRONT;
+  const RETAINS_FRONT: bool = D != APPENDING_PUSH_FRONT && D != EMPTY_REFUSING_PUSH_FRONT;
 
   fn new() -> Self {
     <Self as Cache<'a, L, Lang>>::with_options(4)
@@ -159,13 +278,20 @@ where
   fn with_options(cap: usize) -> Self {
     Self {
       items: VecDeque::with_capacity(cap),
+      graveyard: VecDeque::new(),
       cap,
       peeks: Cell::new(0),
+      prefilled: Cell::new(false),
+      warmed: Cell::new(false),
+      front_pushes: Cell::new(0),
     }
   }
 
   fn len(&self) -> usize {
     if D == SHORT_LEN {
+      return self.items.len().saturating_sub(1);
+    }
+    if D == PREFILL_DRAINS_RESIDENCY && self.prefilled.get() {
       return self.items.len().saturating_sub(1);
     }
     self.items.len()
@@ -182,11 +308,34 @@ where
     if D == LYING_RETAINS_FRONT || self.items.len() == self.cap {
       return Err(self.refuse(tok));
     }
+    if D == COLD_START_PUSH_FRONT && !self.warmed.get() {
+      return Err(self.refuse(tok));
+    }
+    // A refusal by an EMPTY cache with every slot free — reached only after the full check
+    // above, so nothing about the refusal's shape is wrong; what is missing is the fullness that
+    // would have warranted it, at the one state check 5 has to seed its way past.
+    if D == EMPTY_REFUSING_PUSH_FRONT && self.items.is_empty() {
+      return Err(self.refuse(tok));
+    }
+    // A refusal with room to spare. Reached only after the full check above, so the *shape* of
+    // the refusal — token back unchanged, residency untouched — is a conforming one; what is
+    // missing is the fullness that would have warranted it.
+    if D == EARLY_REFUSING_PUSH_FRONT && self.front_pushes.get() > 0 {
+      return Err(self.refuse(tok));
+    }
+    self.front_pushes.set(self.front_pushes.get() + 1);
     if D == APPENDING_PUSH_FRONT {
       self.items.push_back(tok);
       return Ok(self.items.back().expect("just pushed").as_ref());
     }
     self.items.push_front(tok);
+    if D == REORDERING_PUSH_FRONT && self.items.len() > 3 {
+      // The interior, and only the interior: index 2 is the tail while there are three resident,
+      // so the swap waits for a fourth. Neither the head this push just established nor the tail
+      // `push_back` left there ever moves, which is what makes every point observable the kit
+      // reads — front, back, len, remaining — agree with a conforming cache.
+      self.items.swap(1, 2);
+    }
     Ok(self.items.front().expect("just pushed").as_ref())
   }
 
@@ -197,6 +346,7 @@ where
     if self.items.len() == self.cap {
       return Err(self.refuse(tok));
     }
+    self.warmed.set(true);
     self.items.push_back(tok);
     Ok(self.items.back().expect("just pushed").as_ref())
   }
@@ -205,18 +355,39 @@ where
     if D == LIFO_POP_FRONT {
       return self.items.pop_back();
     }
-    self.items.pop_front()
+    let popped = self.items.pop_front();
+    if D == STALE_RESIDENCY_PEEK {
+      // The entry leaves the live run and stays in the store — a ring's head moving past a slot
+      // it does not clear. Nothing but `peek` reads it, so `len`, `front`, `back` and `remaining`
+      // all keep answering for the live run alone.
+      if let Some(tok) = popped.as_ref() {
+        self.graveyard.push_back(tok.clone());
+      }
+    }
+    popped
   }
 
   fn pop_back(&mut self) -> Option<CachedTokenOf<'a, L>> {
     if D == FIFO_POP_BACK {
       return self.items.pop_front();
     }
-    self.items.pop_back()
+    let popped = self.items.pop_back();
+    if D == STALE_TAIL_RESIDENCY_PEEK {
+      // The newest entry leaves the live run and stays in the store — a ring's tail index moving
+      // back over a slot it does not clear, which is what the input layer's restore path drives.
+      // Pushed to the FRONT of the graveyard because the pops arrive newest-first: this keeps the
+      // graveyard in append order, so `items` chained with it is the run a ring reads from its
+      // head when the bound lets it walk past the live length. Nothing but `peek` reads it.
+      if let Some(tok) = popped.as_ref() {
+        self.graveyard.push_front(tok.clone());
+      }
+    }
+    popped
   }
 
   fn clear(&mut self) {
     self.items.clear();
+    self.graveyard.clear();
   }
 
   fn peek<'p, W>(
@@ -227,13 +398,92 @@ where
   {
     let seen = self.peeks.get();
     self.peeks.set(seen + 1);
+    // Read before the latch is armed, so the FIRST non-empty-buffer call still answers
+    // correctly and only the calls after it do not: a defect that needs the prefilled path to be
+    // driven more than once to show, which is why the kit now drives it twice.
+    let tainted = self.prefilled.get();
+    if !buf.is_empty() {
+      self.prefilled.set(true);
+    }
     let mut fill = buf.remaining_capacity().min(self.items.len());
     if D == IMPURE_PEEK && seen > 0 {
+      fill = fill.saturating_sub(1);
+    }
+    if D == PREFILL_IMPURE_PEEK && tainted {
       fill = fill.saturating_sub(1);
     }
     if D == REVERSED_PEEK {
       for tok in self.items.iter().rev().take(fill) {
         buf.push_back(Maybe::Ref(tok.as_ref()));
+      }
+      return;
+    }
+    if D == CLOBBERING_PEEK
+      || (D == DEEP_PREFILL_CLOBBERING_PEEK && buf.len() > 1)
+      || (D == FULL_BUFFER_CLOBBERING_PEEK && buf.remaining_capacity() == 0)
+    {
+      // The defect: the destination is read as an output buffer to fill rather than a queue to
+      // append behind. Against an empty buffer `clear` is a no-op and the run that follows is
+      // byte-for-byte a correct `peek`, so only a prefilled buffer can see it — and it reports
+      // nothing about itself: the kit's own assertions are what catch it.
+      //
+      // Under `DEEP_PREFILL_CLOBBERING_PEEK` the same defect is gated on the prefix being deeper
+      // than one entry, and under `FULL_BUFFER_CLOBBERING_PEEK` on the buffer having no room
+      // left at all — one gate per end of the depth sweep, each invisible to a driver that does
+      // not reach that end.
+      buf.clear();
+      let refill = buf.remaining_capacity().min(self.items.len());
+      for tok in self.items.iter().take(refill) {
+        buf.push_back(Maybe::Ref(tok.as_ref()));
+      }
+      return;
+    }
+    if D == STALE_RESIDENCY_PEEK || D == STALE_TAIL_RESIDENCY_PEEK {
+      // The bound read off the backing store instead of the live run. `min(cap, room)` is
+      // `min(len, room)` exactly while `len == cap`, so a cache the kit only ever fills answers
+      // this correctly; below capacity it runs off the end of `items` and into the entries it
+      // has already handed out, which is what a ring reading its array rather than its length
+      // does. The count is what gives it away — the surplus is real lookahead to nobody.
+      //
+      // Which pop leaves those entries behind is the whole difference between the two cells, and
+      // it is a difference in the DRIVER, not here: the graveyard is filled by `pop_front` under
+      // `STALE_RESIDENCY_PEEK` and by `pop_back` under `STALE_TAIL_RESIDENCY_PEEK`, so each is
+      // reachable only from the residency sweep that drains that end. Under the other sweep the
+      // graveyard stays empty and `take` saturates on the live run, which is a conforming answer.
+      let stale_fill = buf.remaining_capacity().min(self.cap);
+      let store = self.items.iter().chain(self.graveyard.iter());
+      for tok in store.take(stale_fill) {
+        buf.push_back(Maybe::Ref(tok.as_ref()));
+      }
+      return;
+    }
+    if D == TOTAL_CAPACITY_PEEK {
+      // Bounded by `buf.capacity()` (the buffer's TOTAL capacity) instead of
+      // `buf.remaining_capacity()` (used everywhere else in this method), discarding the
+      // surplus `push_back` refuses — the shape a real cache written against the wrong bound
+      // has. `min(min(len, W), W - P) == min(len, W - P)`, and a refused `push_back` leaves the
+      // deque untouched, so the entries this lands are exactly the entries a correct `peek`
+      // would land, in every configuration. Nothing here or in the kit can tell the difference;
+      // see `cache_kit_cannot_see_a_silent_total_capacity_peek`.
+      let over_fill = buf.capacity().min(self.items.len());
+      for tok in self.items.iter().take(over_fill) {
+        let _ = buf.push_back(Maybe::Ref(tok.as_ref()));
+      }
+      return;
+    }
+    if D == OVERFILL_TRIPWIRE {
+      // Not a cache defect under test — an assertion pointed the other way, at the kit. It
+      // fires only if the kit hands `peek` a buffer whose remaining capacity is below its total
+      // AND a residency long enough to run past what is left, which is exactly the driver shape
+      // check 6 needs and which nothing in the kit's output would otherwise reveal.
+      let remaining = buf.remaining_capacity();
+      let over_fill = buf.capacity().min(self.items.len());
+      for tok in self.items.iter().take(over_fill) {
+        assert!(
+          buf.push_back(Maybe::Ref(tok.as_ref())).is_none(),
+          "conformance-kit driver tripwire: a peek bounded by the destination buffer's TOTAL capacity ({}) rather than its REMAINING capacity ({remaining}) ran past the room left, so the kit did hand `peek` a buffer that was not empty",
+          buf.capacity()
+        );
       }
       return;
     }
@@ -327,4 +577,147 @@ fn cache_kit_catches_an_appending_push_front() {
 #[should_panic(expected = "refusal-round-trip")]
 fn cache_kit_catches_a_swapping_refusal() {
   run_queue::<SWAPPING_REFUSAL>();
+}
+
+#[test]
+#[should_panic(expected = "bounded-peek/prefilled")]
+fn cache_kit_catches_a_clobbering_peek() {
+  run_queue::<CLOBBERING_PEEK>();
+}
+
+/// The kit's driver, not a cache, is what this pins: `peek` must be called at least once with a
+/// buffer whose remaining capacity is below its total and a residency long enough to overrun it.
+///
+/// The fixture arms an assertion inside its own `peek` that can only fire in that situation, so
+/// this test failing means the kit went back to peeking exclusively into fresh, empty buffers —
+/// the state in which the bound the trait states (`min(len, REMAINING capacity)`) and the bound
+/// it does not (`min(len, TOTAL capacity)`) are the same number and check 6 evaluates both to
+/// the same verdict.
+#[test]
+#[should_panic(expected = "driver tripwire")]
+fn cache_kit_drives_peek_with_less_room_than_the_buffer_has_slots() {
+  run_queue::<OVERFILL_TRIPWIRE>();
+}
+
+/// A defect the kit provably **cannot** catch, asserted as such so the claim stays honest.
+///
+/// `TOTAL_CAPACITY_PEEK` reads the bound off `buf.capacity()` instead of
+/// `buf.remaining_capacity()` — the exact violation check 6 exists to reject — and then discards
+/// what `push_back` refuses, which is what a cache written against the wrong bound actually
+/// does. It passes every check, and must: with `W` the buffer's capacity and `P` what it already
+/// holds, it lands `min(min(len, W), W - P)` entries, and that is `min(len, W - P)`, the correct
+/// count, for every `len`, `W` and `P`. `GenericArrayDeque::push_back` returns the value and
+/// leaves the deque unmodified when full, so the overflow attempts leave no trace either.
+///
+/// This test is therefore an inverted one: it passes while the kit is blind and fails the moment
+/// the kit — or the deque's overflow behaviour underneath it — gains a way to see this. Either
+/// way the module docs' "what it deliberately does not check" section needs revisiting, which is
+/// why the failure is worth having.
+#[test]
+fn cache_kit_cannot_see_a_silent_total_capacity_peek() {
+  run_queue::<TOTAL_CAPACITY_PEEK>();
+}
+
+#[test]
+#[should_panic(expected = "after prefilled peek()")]
+fn cache_kit_catches_a_peek_that_drains_only_on_the_prefilled_path() {
+  run_queue::<PREFILL_DRAINS_RESIDENCY>();
+}
+
+#[test]
+#[should_panic(expected = "pure-peek/prefilled")]
+fn cache_kit_catches_a_peek_that_is_impure_only_on_the_prefilled_path() {
+  run_queue::<PREFILL_IMPURE_PEEK>();
+}
+
+#[test]
+#[should_panic(expected = "FIRST operation on a fresh cache")]
+fn cache_kit_catches_a_cold_start_push_front() {
+  run_queue::<COLD_START_PUSH_FRONT>();
+}
+
+/// A refusal is only ever warranted by a **full** cache, and that is checked on the `push_front`
+/// arm as it always was on the `push_back` one.
+///
+/// The expected message names the *second* front push: the fixture accepts the first, so a check
+/// that only asked whether some front push was ever accepted — which is all the closing
+/// `resident.len() > 1` assertion asks — is satisfied and this one is not.
+#[test]
+#[should_panic(expected = "push_front #1 was REFUSED")]
+fn cache_kit_catches_a_push_front_refused_with_room_to_spare() {
+  run_queue::<EARLY_REFUSING_PUSH_FRONT>();
+}
+
+/// The prefilled peek is driven at every depth the window has room for, not only at one entry.
+///
+/// The expected message names **depth 2**: the fixture is conforming behind a one-entry prefix,
+/// so this test failing means the kit went back to prefilling a single entry, where a
+/// depth-sensitive `peek` and a correct one agree.
+#[test]
+#[should_panic(expected = "bounded-peek/prefilled at depth 2")]
+fn cache_kit_catches_a_peek_that_clobbers_only_a_deeper_prefix() {
+  run_queue::<DEEP_PREFILL_CLOBBERING_PEEK>();
+}
+
+/// The other end of the same sweep: the prefill reaches a buffer with **no room left**.
+///
+/// The expected message names depth 4, the peek window's full capacity. That depth is the only
+/// one at which the bound is zero, so this test failing means the sweep stops short of a full
+/// buffer and "append nothing" is no longer a case the kit puts to a cache.
+#[test]
+#[should_panic(expected = "bounded-peek/prefilled at depth 4")]
+fn cache_kit_catches_a_peek_that_clobbers_a_buffer_with_no_room_left() {
+  run_queue::<FULL_BUFFER_CLOBBERING_PEEK>();
+}
+
+/// The prepend law is read over the **whole** resident sequence, not at its two ends.
+///
+/// The expected message names **depth 3**: the fixture leaves the queue alone until there are
+/// four resident, since below that the pair it swaps includes the tail. So this test failing
+/// means the drain either stopped short of the deepest accepted prefix or went back to comparing
+/// only `front`, `back` and `len` — every one of which this fixture answers correctly at every
+/// step.
+#[test]
+#[should_panic(expected = "push-front/full-order at depth 3")]
+fn cache_kit_catches_a_push_front_that_reorders_the_interior() {
+  run_queue::<REORDERING_PUSH_FRONT>();
+}
+
+/// `peek` is driven at residencies **below** the capacity, not only at a cache that has been
+/// filled and never popped.
+///
+/// The expected message names the first partly drained state. A cache filled to capacity is the
+/// one residency where a bound read off the backing store and a bound read off the live run are
+/// the same number, so this test failing means the sweep went back to that single state — where a
+/// `peek` serving already-consumed entries is indistinguishable from a conforming one.
+#[test]
+#[should_panic(expected = "after 1 pop_front(s) off a full one")]
+fn cache_kit_catches_a_peek_bounded_by_the_backing_store() {
+  run_queue::<STALE_RESIDENCY_PEEK>();
+}
+
+/// The residency sweep drains from the **back** as well as the front — the restore path's shape.
+///
+/// The expected message names the first state reached with `pop_back`. This fixture is
+/// conforming under every `pop_front` residency, since the entries it fails to clear sit behind
+/// the live run and the bound saturates before reaching them, so this test failing means the
+/// mirrored sweep is gone and the kit is back to asking about stale entries at one end of the
+/// queue only — the end the input layer's rollback does *not* remove from.
+#[test]
+#[should_panic(expected = "after 1 pop_back(s) off a full one")]
+fn cache_kit_catches_a_peek_bounded_by_the_backing_store_after_a_tail_drain() {
+  run_queue::<STALE_TAIL_RESIDENCY_PEEK>();
+}
+
+/// The full-only refusal law is asserted at the empty cache for **every** nonzero capacity, not
+/// only where `RETAINS_FRONT` is declared.
+///
+/// The fixture declares `false`, which is what kept it invisible: the declaration check returns
+/// immediately for such a cache, and the prepend check seeds the cache with a `push_back` before
+/// its first front push. This test failing means the queue law and the declaration have been
+/// folded back together.
+#[test]
+#[should_panic(expected = "push-front/into-empty")]
+fn cache_kit_catches_a_push_front_refused_by_an_empty_cache() {
+  run_queue::<EMPTY_REFUSING_PUSH_FRONT>();
 }
