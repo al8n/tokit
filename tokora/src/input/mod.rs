@@ -333,14 +333,16 @@ pub struct InputContext<E, C> {
 impl<E, C> InputContext<E, C> {
   /// Creates a new `InputContext` with the given emitter and cache.
   ///
-  /// The recursion budget defaults to [`RecursionLimiter::new`] — depth **64**, protection on
-  /// — and is changed with [`with_recursion_limiter`](Self::with_recursion_limiter).
+  /// The recursion budget defaults to depth **64**, protection on — the native-stack-safe
+  /// figure tokora's own parser wiring requests explicitly, NOT
+  /// [`RecursionLimiter::new`]'s own (unrelated) general-purpose default of 500 — and is
+  /// changed with [`with_recursion_limiter`](Self::with_recursion_limiter).
   #[inline(always)]
   pub const fn new(emitter: E, cache: C) -> Self {
     Self {
       emitter,
       cache,
-      recursion: RecursionLimiter::new(),
+      recursion: RecursionLimiter::with_limitation(RecursionLimiter::PARSE_DEFAULT_DEPTH),
     }
   }
 

@@ -4828,6 +4828,43 @@ fn out_of_language_kind_refused() {
   );
 }
 
+/// The root kind has no door in front of it the way a node, token, or retro-wrap kind does:
+/// `finish`/`finish_partial` take it as a bare `u16` argument, so it cannot be walled off at an
+/// emit site the way `cst_start` walls off node kinds. It is instead checked right here,
+/// unconditionally, in every build — the one `InvalidDialectKind` construction site a caller
+/// outside this crate can reach, through the entirely ordinary public door (no raw event
+/// injection, unlike [`out_of_language_kind_refused`]).
+///
+/// Falsified by: an `Ok` tree, `ReservedRootKind` (the chosen kind is not the tombstone), or an
+/// `InvalidDialectKind` naming the wrong index or kind. Unlike the debug-only cell above, this
+/// one carries no `cfg!(debug_assertions)` gate, because the root-kind check it pins does not
+/// either — the refusal it asserts must reproduce identically under `cargo test --release`.
+#[test]
+fn out_of_space_root_kind_refused_through_the_public_door() {
+  const BAD_ROOT: u16 = 9_999;
+
+  let sink = verbose_sink("a");
+  let (green, _emitter) = sink.finish(BAD_ROOT);
+  assert_eq!(
+    green.expect_err("a root kind outside the dialect's space is not a tree"),
+    FinishError::InvalidDialectKind {
+      index: 0,
+      kind: BAD_ROOT
+    }
+  );
+
+  // `finish_partial` replays through the same `replay` call, so it refuses the same way.
+  let sink = verbose_sink("a");
+  let (green, _emitter) = sink.finish_partial(BAD_ROOT);
+  assert_eq!(
+    green.expect_err("finish_partial refuses the same out-of-space root kind"),
+    FinishError::InvalidDialectKind {
+      index: 0,
+      kind: BAD_ROOT
+    }
+  );
+}
+
 /// A diagnostic span is evidence — it is the one thing that licenses a gap tile — so a span
 /// that does not slice the source is refused rather than clamped into range, through **both**
 /// doors. The old clamp turned `0..99` over `"abc"` into `0..3`, which covered the dropped

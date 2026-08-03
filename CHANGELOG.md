@@ -277,6 +277,33 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    it is reachable only through the double-settle bug being reported, and it is now pinned by a
    test rather than assumed away.
 
+18. **`RecursionLimiter::new` and the combined `Limiter`'s defaults return to 500 too — only
+    `ParserContext` and the input layer keep 64.** The 500 → 64 drop above landed on one constant
+    shared by more subjects than it should have. `RecursionLimiter::new` (and `Default`) is the
+    tracker's own general-purpose depth, with no assumption about what a level costs.
+    `ParserContext` and the input layer are the only two places a level IS a live native-stack
+    frame: each holds its own `RecursionLimiter`, sized against a measured debug-build ceiling,
+    for the budget a Pratt-driven parse actually descends against. `Limiter::new` and
+    `Limiter::with_token_tracker` requested that same 64 by construction, but fed neither one —
+    `Limiter` is not part of tokora's own parser wiring anywhere in this crate. Like bare
+    `RecursionLimiter`, it is documented as usable directly as a lexer's `State`/`Extras` nesting
+    tracker, where a level costs no native stack at all, and both of those lexer-facing paths
+    inherited 64 anyway, tripping on a number chosen for a reason that does not apply to either.
+
+    `RecursionLimiter::new`/`Default`, `Limiter::new`/`Default`, and `Limiter::with_token_tracker`
+    all give back 500, unconditionally. Only `ParserContext` and the input layer still request
+    the native-stack-safe 64 explicitly, from the crate-private
+    `RecursionLimiter::PARSE_DEFAULT_DEPTH` — neither one holds a `Limiter` or calls
+    `RecursionLimiter::new`, so neither can silently fall back to the general-purpose default,
+    and a Pratt-driven parse still gets exactly the protection it had. Everywhere else changes: a
+    tracker built through `RecursionLimiter::new`, `Limiter::new`, `Limiter::with_token_tracker`,
+    or `#[derive(Default)]` over either type, with no parser anywhere near it, trips at 500
+    again, not 64. That includes the depth 0.8.0 shipped for `Limiter::new` and
+    `Limiter::with_token_tracker` ([43](#0.8.0-changed-breaking)) — the same lexer-side reasoning
+    that moved bare `RecursionLimiter::new` applies to them equally, and was missed there the
+    first time. Spell the limit you meant with `RecursionLimiter::with_limitation` if 500 is
+    still wrong for your grammar or your lexer.
+
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
 **This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**
