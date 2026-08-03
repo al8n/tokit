@@ -18,9 +18,15 @@ fn input_context_new_and_into_components() {
   let (e, c, r) = ctx.into_components();
   assert_eq!(e, "emitter");
   assert_eq!(c, 42u32);
-  // `new` carries the default budget: protection on, at the type's own conservative depth.
-  assert_eq!(r, crate::state::recursion_tracker::RecursionLimiter::new());
+  // `new` carries the default budget: protection on, at tokora's own native-stack-safe depth —
+  // NOT `RecursionLimiter::new()`'s own general-purpose default, which is a different number for
+  // a different subject (see `RecursionLimiter`'s `Two Defaults, Two Subjects` docs).
   assert_eq!(r.limitation(), 64);
+  assert_ne!(
+    r.limitation(),
+    crate::state::recursion_tracker::RecursionLimiter::new().limitation(),
+    "InputContext's parser-facing default must not equal RecursionLimiter::new()'s general one"
+  );
   assert_eq!(r.depth(), 0);
 }
 

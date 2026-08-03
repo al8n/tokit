@@ -106,15 +106,29 @@ pub enum LimitExceeded {
 /// # Default Configuration
 ///
 /// - **Token limit**: Unlimited (`usize::MAX`)
-/// - **Recursion limit**: 64
+/// - **Recursion limit**: 500 — [`RecursionLimiter::new`]'s own general-purpose ceiling, with no
+///   assumption about what one level of recursion costs. This is deliberately NOT the 64
+///   tokora's own Pratt-parser wiring uses internally; see `Integration with tokora` below.
 ///
 /// You typically want to configure at least the token limit using
-/// [`with_token_tracker`](Self::with_token_tracker) or set both limits explicitly.
+/// [`with_token_tracker`](Self::with_token_tracker), and the recursion limit using
+/// [`with_recursion_tracker`](Self::with_recursion_tracker) or
+/// [`with_trackers`](Self::with_trackers) if 500 does not suit what a level of your own
+/// recursion costs.
 ///
 /// # Integration with tokora
 ///
-/// `Limiter` implements the [`State`] trait and can be used directly
-/// as a Logos lexer's `Extras` state, providing automatic limit checking during lexing.
+/// `Limiter` implements the [`State`] trait and can be used directly as a Logos lexer's
+/// `Extras` state, providing automatic limit checking during lexing — a position where nesting
+/// costs no native stack. That is exactly why its recursion component defaults to the
+/// general-purpose **500** and not the **64** tokora's own Pratt-parser wiring uses: tokora's
+/// [`ParserContext`](crate::ParserContext) and [`InputContext`](crate::input::InputContext)
+/// never build their recursion budget through `Limiter` — each holds a [`RecursionLimiter`]
+/// directly and requests 64 explicitly instead of inheriting either type's default — so
+/// `Limiter` does not presume a caller reaching for it directly is on that path. If you
+/// assemble your own recursive-descent parser around `Limiter` and a level of it does cost a
+/// native stack frame, size the recursion component for that cost yourself with
+/// [`with_recursion_tracker`](Self::with_recursion_tracker) rather than inherit 500.
 ///
 /// # Examples
 ///
@@ -269,7 +283,8 @@ impl Limiter {
   /// Creates a new tracker with default limits.
   ///
   /// - Token limit: Unlimited (`usize::MAX`)
-  /// - Recursion limit: 64
+  /// - Recursion limit: 500 — [`RecursionLimiter::new`]'s general-purpose ceiling, NOT tokora's
+  ///   parser-facing 64; see the type's `Default Configuration` docs.
   ///
   /// # Example
   ///
@@ -277,7 +292,7 @@ impl Limiter {
   /// use tokora::state::tracker::Limiter;
   ///
   /// let tracker = Limiter::new();
-  /// assert_eq!(tracker.recursion().limitation(), 64);
+  /// assert_eq!(tracker.recursion().limitation(), 500);
   /// assert_eq!(tracker.token().limitation(), usize::MAX);
   /// ```
   #[inline(always)]
@@ -285,7 +300,8 @@ impl Limiter {
     Self::with_trackers(TokenLimiter::new(), RecursionLimiter::new())
   }
 
-  /// Creates a new tracker with the given token limiter and default recursion limiter.
+  /// Creates a new tracker with the given token limiter and default (general-purpose, 500)
+  /// recursion limiter — see the type's `Default Configuration` docs.
   ///
   /// # Example
   ///
@@ -298,7 +314,7 @@ impl Limiter {
   /// );
   ///
   /// assert_eq!(tracker.token().limitation(), 10000);
-  /// assert_eq!(tracker.recursion().limitation(), 64);
+  /// assert_eq!(tracker.recursion().limitation(), 500);
   /// ```
   #[inline(always)]
   pub const fn with_token_tracker(token_tracker: TokenLimiter) -> Self {

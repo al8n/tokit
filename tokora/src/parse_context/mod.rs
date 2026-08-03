@@ -119,7 +119,7 @@ where
     Self {
       emitter,
       cache: opts,
-      recursion: RecursionLimiter::new(),
+      recursion: RecursionLimiter::with_limitation(RecursionLimiter::PARSE_DEFAULT_DEPTH),
       _marker: PhantomData,
       _lang: PhantomData,
     }
@@ -130,7 +130,8 @@ where
   /// Threaded straight to
   /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
   /// by [`provide`](ParseContext::provide); see it for what the budget covers. The default is
-  /// [`RecursionLimiter::new`] — depth 64, protection on.
+  /// depth 64, protection on — the native-stack-safe figure requested explicitly, not
+  /// [`RecursionLimiter::new`]'s own (unrelated) general-purpose default of 500.
   ///
   /// ```rust,ignore
   /// // Deep but bounded grammar: raise the ceiling for this parse only.

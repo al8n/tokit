@@ -71,16 +71,28 @@ impl RecursionLimitExceeded {
 /// that use recursive descent, as deeply nested or circular grammar rules can easily
 /// cause stack overflow.
 ///
-/// # Default Limit
+/// # Two Defaults, Two Subjects
 ///
-/// The default maximum depth is **64**, and it is sized against the **tightest measured
-/// configuration**, not the most generous one.
+/// [`new`](Self::new) and [`Default`] give this type its own general-purpose depth, **500**: a
+/// generous, unmeasured ceiling that assumes nothing about what one level of "recursion" costs.
+/// That is what a caller reaching for this type directly gets — including a lexer's `State`/
+/// `Extras` nesting tracker (see `Integration with tokora` below), where a level costs no native
+/// stack at all, so no stack-safety math applies to it.
+///
+/// **tokora's own Pratt-parser wiring does not use that default.**
+/// [`ParserContext`](crate::ParserContext) and the input layer each request **64** explicitly
+/// instead of inheriting [`new`](Self::new)'s, because on that path a level IS a live
+/// native-stack frame, and 500 of those is not safe everywhere a parse runs. The combined
+/// [`Limiter`](crate::state::tracker::Limiter) is not part of that wiring — tokora's own parser
+/// never builds its recursion budget through it — so its constructors inherit this same
+/// general-purpose 500 rather than requesting 64 of their own. 64 is sized against the
+/// **tightest measured configuration**, not the most generous one:
 ///
 /// Measured on this tree, one pratt frame per level of nesting, bisected to the last depth that
 /// completes on an explicitly sized **2 MiB** thread — the stack Rust gives every
 /// `std::thread::spawn` and every libtest harness thread, and so the smallest stack a parse is
 /// likely to get — before the native stack aborts the process. All four cells were measured, and
-/// all four are what the default has to clear:
+/// all four are what 64 has to clear:
 ///
 /// | build | typed driver | token driver |
 /// |---|---|---|
@@ -88,23 +100,30 @@ impl RecursionLimitExceeded {
 /// | debug (`opt-level = 0`), 2 MiB thread | **384** frames, ~5.3 KiB each | **125** frames, ~16.4 KiB each |
 ///
 /// The binding cell is the **debug token driver at 125**, not the release figures above it. Sizing
-/// a default against the release ceiling was the mistake this number corrects: an unconfigured
-/// parse in a debug build — which is what every test suite runs — reached the native stack before
-/// the limiter, and the two failure modes are not symmetric. A limit that is too *low* returns a
-/// clean, catchable, documented [`RecursionLimitReached`](crate::error::RecursionLimitReached)
-/// telling the caller to raise it. A limit that is too *high* aborts the process with no
-/// diagnostic at all and takes the whole suite with it. Only one of those can be recovered from,
-/// so the default is set where **every** measured configuration survives.
+/// the parser's default against the release ceiling was the mistake this number corrects: an
+/// unconfigured parse in a debug build — which is what every test suite runs — reached the native
+/// stack before the limiter, and the two failure modes are not symmetric. A limit that is too
+/// *low* returns a clean, catchable, documented
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached) telling the caller to raise it.
+/// A limit that is too *high* aborts the process with no diagnostic at all and takes the whole
+/// suite with it. Only one of those can be recovered from, so the parser's own default is set
+/// where **every** measured configuration survives.
 ///
 /// 64 is the largest power of two leaving roughly **1.9×** margin under 125, and it clears the
 /// debug typed driver by 6×, the release typed driver by 60× and the release token driver by 66×.
 /// It also sits far above any realistic nesting depth in a GraphQL document or an arithmetic
 /// expression, so raising it is a deliberate act rather than a routine one.
 ///
+/// This type's own 500 was never sized against anything, and that is not an oversight: nothing
+/// about tallying lexer nesting, or an arbitrary caller's own notion of "depth", implies a
+/// native-stack cost for this type to protect against, so there is no stack ceiling for 500 to
+/// clear. It only has to stay out of the way of ordinary use while still refusing a runaway
+/// count eventually, and it did exactly that for this type before the measurement above existed.
+///
 /// **A grammar that parses untrusted, deeply nested input should still set its own limit** with
-/// [`with_limitation`](Self::with_limitation) rather than inherit this default — especially on a
-/// worker thread, where the stack is 2 MiB and not the main thread's 8 MiB. The figures above are
-/// this crate's pratt frames on one platform and one toolchain; a grammar whose own recursive
+/// [`with_limitation`](Self::with_limitation) rather than inherit either default — especially on
+/// a worker thread, where the stack is 2 MiB and not the main thread's 8 MiB. The figures above
+/// are this crate's pratt frames on one platform and one toolchain; a grammar whose own recursive
 /// combinators sit between them spends more per level, and a build with overflow checks, extra
 /// debuginfo or a different codegen unit count spends more again. Pick the limit against the
 /// stack the parse will actually run on.
@@ -122,13 +141,14 @@ impl RecursionLimitExceeded {
 /// configured through
 /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
 /// (or [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter))
-/// and defaulting to [`new`](Self::new) — depth **64**, on by default. Both Pratt engines enter
-/// one level per live frame through [`InputRef::descend`](crate::InputRef::descend), whose
-/// [`Descent`](crate::input::Descent) guard releases the level on every exit including an
-/// unwind; exceeding the limit fails the parse with the always-terminal
-/// [`RecursionLimitReached`](crate::error::RecursionLimitReached). The budget is *per input*,
-/// not per parser, so two pratt parsers composed into one grammar share one depth budget. A
-/// hand-written recursive combinator draws on the same cell through
+/// and defaulting to depth **64** — the native-stack-safe figure derived in `Two Defaults, Two
+/// Subjects` above, requested explicitly by that wiring, and NOT [`new`](Self::new)'s own 500.
+/// Both Pratt engines enter one level per live frame through
+/// [`InputRef::descend`](crate::InputRef::descend), whose [`Descent`](crate::input::Descent)
+/// guard releases the level on every exit including an unwind; exceeding the limit fails the
+/// parse with the always-terminal [`RecursionLimitReached`](crate::error::RecursionLimitReached).
+/// The budget is *per input*, not per parser, so two pratt parsers composed into one grammar
+/// share one depth budget. A hand-written recursive combinator draws on the same cell through
 /// [`InputRef::descending`](crate::InputRef::descending), which is the guard's scoped form and
 /// the one to prefer.
 ///
@@ -138,7 +158,11 @@ impl RecursionLimitExceeded {
 /// Separately, `RecursionLimiter` can also be used as part of a Logos lexer's `Extras` state by
 /// implementing the [`State`] trait, allowing you to track nesting during *lexing*. That is a
 /// different cell with a different subject: the lexer's tally is monotone in the input and its
-/// trip latches the poison boundary, while the parse's descent unwinds.
+/// trip latches the poison boundary, while the parse's descent unwinds — and it is exactly why a
+/// tracker built through [`new`](Self::new) (or `#[derive(Default)]`, as the example below does)
+/// gets 500 rather than 64: lexing spends no native-stack frame per nesting level, so the
+/// stack-safety derivation above has nothing to say about it, and this type does not presume a
+/// caller reaching for it directly is on the parser's path.
 ///
 /// # Examples
 ///
@@ -254,14 +278,26 @@ impl Default for RecursionLimiter {
 }
 
 impl RecursionLimiter {
+  /// tokora's own recursion budget for a Pratt-driven parse — native-stack-safety-derived, and
+  /// requested explicitly by `ParserContext` and the input layer instead of inherited from
+  /// [`new`](Self::new). See the type's `Two Defaults, Two Subjects` docs for the measurement
+  /// behind this number and why it does not belong to [`new`](Self::new) itself — nor to the
+  /// combined [`Limiter`](crate::state::tracker::Limiter), which tokora's own parser never
+  /// builds its budget through.
+  ///
+  /// Not public: the figures behind it are this crate's own pratt frame sizes on one platform
+  /// and one toolchain, not a number another caller's recursion should be measured against.
+  pub(crate) const PARSE_DEFAULT_DEPTH: usize = 64;
+
   /// Creates a new recursion tracker.
   ///
-  /// Defaults to a maximum depth of 64 — see the type's `Default Limit` section for why that
-  /// number and not a larger one.
+  /// Defaults to a maximum depth of 500 — this type's own general-purpose ceiling, with no
+  /// assumption about what one level costs. tokora's Pratt-parser wiring does not inherit this
+  /// default; see the type's `Two Defaults, Two Subjects` docs.
   #[inline(always)]
   pub const fn new() -> Self {
     Self {
-      max: 64,
+      max: 500,
       current: 0,
     }
   }

@@ -86,9 +86,36 @@ fn token_tracker_trait_increase_and_check() {
 
 #[test]
 fn recursion_limiter_new_defaults() {
+  // `RecursionLimiter::new`'s own default is 500 — the type's general-purpose, no-native-stack-
+  // assumption ceiling (suitable for a lexer's `Extras` nesting tracker, among other uses). It
+  // is deliberately NOT 64, tokora's own Pratt-parser stack-safety figure: see
+  // `recursion_limiter_new_is_not_governed_by_the_parser_default` for the cell that pins the
+  // two apart.
   let r = RecursionLimiter::new();
   assert_eq!(r.depth(), 0);
-  assert_eq!(r.limitation(), 64);
+  assert_eq!(r.limitation(), 500);
+}
+
+#[test]
+fn recursion_limiter_new_is_not_governed_by_the_parser_default() {
+  // `RecursionLimiter::new` carries the type's own general-purpose depth. Only `ParserContext`'s
+  // and the input layer's *internal* construction requests the stack-safety-derived one
+  // (`RecursionLimiter::PARSE_DEFAULT_DEPTH`, not public) — bare `RecursionLimiter::new` never
+  // does, because it is also reachable as a lexer-side `State`/`Extras` nesting tracker with no
+  // pratt parser anywhere near it.
+  //
+  // `Limiter::new` composes a `RecursionLimiter` too, and is reachable the very same way
+  // (`Limiter` also implements `State` and is documented as usable directly as a lexer's
+  // `Extras`), so it must carry the very same general-purpose depth rather than borrow the
+  // parser's number either.
+  assert_eq!(RecursionLimiter::new().limitation(), 500);
+  assert_eq!(
+    Limiter::new().recursion().limitation(),
+    RecursionLimiter::new().limitation(),
+    "Limiter::new's recursion component must not be silently governed by the parser's \
+     stack-safety number — Limiter is reachable as a lexer-side tracker just like bare \
+     RecursionLimiter"
+  );
 }
 
 #[test]
@@ -195,7 +222,7 @@ fn limiter_new_defaults() {
   assert_eq!(l.token().tokens(), 0);
   assert_eq!(l.token().limitation(), usize::MAX);
   assert_eq!(l.recursion().depth(), 0);
-  assert_eq!(l.recursion().limitation(), 64);
+  assert_eq!(l.recursion().limitation(), 500);
 }
 
 #[test]
@@ -209,7 +236,7 @@ fn limiter_default_equals_new() {
 fn limiter_with_token_tracker() {
   let l = Limiter::with_token_tracker(TokenLimiter::with_limitation(100));
   assert_eq!(l.token().limitation(), 100);
-  assert_eq!(l.recursion().limitation(), 64);
+  assert_eq!(l.recursion().limitation(), 500);
 }
 
 #[test]

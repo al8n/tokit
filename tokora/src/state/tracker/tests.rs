@@ -101,7 +101,7 @@ fn limiter_default() {
 fn limiter_with_token_tracker() {
   let limiter = Limiter::with_token_tracker(TokenLimiter::with_limitation(100));
   assert_eq!(limiter.token().limitation(), 100);
-  assert_eq!(limiter.recursion().limitation(), 64); // default
+  assert_eq!(limiter.recursion().limitation(), 500); // default
 }
 
 #[test]

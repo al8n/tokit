@@ -237,6 +237,23 @@ pub enum FinishError {
   /// band specifically (the floor no validator can lift). Without this wall a stray kind
   /// reaches `rowan`, where the next authority is a `kind_from_raw` panic at query time —
   /// arbitrarily far from the parse that produced it, and not a typed error at all.
+  ///
+  /// # Which callers actually see this
+  ///
+  /// At `index: 0` this names the **root kind** `finish`/`finish_partial` were called with — a
+  /// bare `u16` argument with no door in front of it, checked right here, unconditionally, in
+  /// every build. That is the one construction site a caller outside this crate can reach: pass
+  /// a root kind the dialect's own validator rejects and this is what comes back, in a release
+  /// binary exactly as in a debug one.
+  ///
+  /// At every other index this names a node, token, or retro-wrap kind, and none of those ever
+  /// arrive here from outside this crate. `cst_start`, `cst_start_at`, and the `record_token`
+  /// body behind both token doors each assert the identical admission, unconditionally, in
+  /// every build, before the event is ever buffered — so a bad kind panics there, at the emit
+  /// site, and this walk never sees it. The per-event check downstream of those doors exists
+  /// only to backstop the crate's own `pub(crate)` raw-injection test hook, the sole route that
+  /// bypasses them, and it is `cfg!(debug_assertions)`-gated because that route is reachable
+  /// only from this crate's own tests, never from a dependent crate, in either profile.
   #[error("event at index {index} carries kind {kind}, which the dialect's validator rejects")]
   InvalidDialectKind {
     /// The buffer index of the offending event.
