@@ -86,7 +86,7 @@ pub use trace::traced;
 /// Concrete Syntax Tree (CST) representations and utilities.
 ///
 /// The rowan-free front half — the [`cst::event`] vocabulary, the era-branded marks, and the
-/// [`emitter::CstEmitter`](crate::emitter::CstEmitter) capability they ride — is available in
+/// [`emitter::CstEmitter`] capability they ride — is available in
 /// every build, so one parser assembly can bound its context on the event channel and run
 /// tree-less at zero cost. The `rowan` feature adds the back half: the recording sink and the
 /// typed lossless-tree layer (preserving all source information including whitespace and
@@ -277,9 +277,9 @@ pub mod conformance;
 /// scriptable synthetic lexer, checking the documented laws (no-trace failure paths, LIFO
 /// rollback discipline, committed-stream faithfulness, chunked equivalence, termination, no
 /// panic) after every operation. The operation alphabet is enumerated in one place
-/// ([`fuzz::Op`](crate::fuzz::Op)) with a compile-time exhaustiveness prod and a corpus coverage
+/// ([`fuzz::Op`]) with a compile-time exhaustiveness prod and a corpus coverage
 /// test so it cannot silently lag the real surface. Runs on stable Rust as ordinary tests;
-/// requires the `fuzz` feature (which implies `std`). See [`fuzz`](crate::fuzz) for the seed
+/// requires the `fuzz` feature (which implies `std`). See [`fuzz`] for the seed
 /// workflow.
 #[cfg(feature = "fuzz")]
 #[cfg_attr(docsrs, doc(cfg(feature = "fuzz")))]
@@ -292,7 +292,7 @@ pub mod fuzz;
 /// diagnostics, recovery, partial input, and testing. The applied-parser section then explains
 /// the maintained calculator, S-expression, JSON, and C-expression examples. An optional Rowan
 /// chapter covers lossless CSTs. Every non-ignored Rust fence is a doctest, so the guide cannot
-/// drift quietly from the API. Start at [`guide::ch01_tokens`](guide::ch01_tokens).
+/// drift quietly from the API. Start at [`guide::ch01_tokens`].
 ///
 /// Documentation-only: the module defines no items. It requires the `std` and `logos`
 /// features (the same set the repository's `examples/` build with).

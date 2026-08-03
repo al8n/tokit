@@ -230,8 +230,18 @@ generate() {
 
   g12-anchor-above-h2)
     # Keeps the `## ` arm of the anchor-name rule alive: above a level-2 heading the expected
-    # id is the section key itself. No anchor in the real file exercises it.
-    inject '<a id="0.9.0"></a>\n\n## 0.9.0 (2026-09-09)\n\n### Added\n\nan entry' "$2" "$3" ;;
+    # id is the section key itself. No anchor in the real file exercises it. Appended at EOF
+    # instead of going through the shared `inject()` helper above: `inject()` splices right
+    # after the live file's first `### ` heading, but this payload OPENS a `## ` section of its
+    # own, and a `## ` heading re-sections everything below the splice point — down to the next
+    # real `## ` — into it. Spliced after `### Changed (breaking)` under `## Unreleased`, that
+    # swallowed the rest of Unreleased, including its own later `### Added`, colliding the two
+    # into one duplicate-heading red — so a real content addition (the `cast::token_any` /
+    # `cast::tokens` entry, #160) turned this pass-case red on a document it never touched. At
+    # EOF the synthetic section has nothing following it to swallow, so it can only ever
+    # exercise the anchor-above-h2 rule it exists to test.
+    cp "$2" "$3"
+    printf '\n<a id="0.9.0"></a>\n\n## 0.9.0 (2026-09-09)\n\n### Added\n\nan entry\n' >> "$3" ;;
 
   g13-inline-comment-html)
     # MANDATORY GUARD. An inline comment is stripped by GitHub — `text <!-- <div id="x"> --> m`
