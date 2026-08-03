@@ -785,7 +785,8 @@ where
   // +4.4% on ordinary materialization (an indirect call per event inside a tight builder
   // loop), which is the whole of it. So the honest trade, stated rather than hidden: a
   // RELEASE build whose event log was assembled by raw in-crate injection can materialize an
-  // out-of-language kind. Every test run and every CI build refuses it.
+  // out-of-language kind. Debug-assertions test runs, and the CI profiles that run this cell,
+  // refuse it; release-profile test runs do not exercise that wall.
   //
   // The +4.4% is this walk as it ships against the same tree with `cfg!(debug_assertions) &&`
   // deleted from exactly the three sites below: `finish_clean` (8 192 tokens), median of

@@ -633,8 +633,9 @@ not when it is finished, and the materialization walk no longer rescans.
     validates in every build, so for external callers the wall is absolute. The one route with
     no door is `push_raw_event_for_tests`, which is `pub(crate)`. So: a **release** build whose
     event log was assembled by raw in-crate injection can materialize an out-of-language kind.
-    Every test run and every CI build refuses it. `ReservedKind` is not gated — the tombstone
-    band is a plain comparison and was a release wall before this round.
+    Debug-assertions test runs, and the CI profiles that run this cell, refuse it;
+    release-profile test runs do not exercise that wall. `ReservedKind` is not gated — the
+    tombstone band is a plain comparison and was a release wall before this round.
 
     **That +4.4% is measured on the shipped fused walk, and it withdraws a +8.3%.** The
     withdrawn figure was taken on the two-pass gather+walk shape item 51 superseded, where

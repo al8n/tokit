@@ -4781,8 +4781,8 @@ fn tombstone_error_kind_refused_at_construction() {
 /// route a caller outside this crate can take — `cst_start`, `cst_start_at`, and the single
 /// `record_token` body behind both token doors — validates in every build and panics at the
 /// cause. This wall is the in-crate backstop for the raw route, and it is
-/// `debug_assertions`-gated: it has teeth in every test run and in CI, and a release build
-/// pays nothing for it.
+/// `debug_assertions`-gated: it has teeth in debug-assertions test runs and the CI profiles
+/// that run this cell; release-profile test runs do not exercise that wall.
 ///
 /// **Debug-only, and deliberately so.** The wall this exercises is `cfg!(debug_assertions)`-
 /// gated in the walk, because keeping it per-event in release costs a measured 4.4% on ordinary
