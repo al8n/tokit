@@ -18,6 +18,17 @@
 //! place a driver's *absence* exits consult either witness. Why the two are separate functions, and
 //! why the two witnesses take different baselines, is on it.
 //!
+//! **The absence and real-closer chokepoints are not confined to the try-driven four.** The other
+//! eight guard-bearing sources — the four `*_while` collection drivers and the four fold sources —
+//! never file an element's `Err` at all, so a trip an element *hands back* propagates untouched and
+//! is terminal there without any gate. What they could not see is the same `Ok`: an element that
+//! answers the trip itself and then declines, or accepts consuming nothing, ended those collections
+//! cleanly and successfully. All twelve now take the per-element trip baseline and route every
+//! absence exit through [`absence_after_element`] and every probed closer through
+//! [`close_after_element`]; `GATE_CENSUS`'s
+//! `every_driver_baselines_its_trip_witness_inside_its_element_loop` is what keeps the baseline in
+//! the loop that hosts each call, in all twelve.
+//!
 //! **The two witnesses are not the same kind of fact, and a committed closer settles only one of
 //! them.** A scanner latch is a fact about a *token position*: a construct that closed on a real
 //! pre-trip token closed **before** the boundary, so a boundary latched past that closer says
@@ -259,11 +270,14 @@ where
 }
 
 /// Refuses an **absence** conclusion that a terminal stop produced — **the single place either
-/// witness is consulted** on the try-driven families' non-`Err` exits.
+/// witness is consulted** on every guard-bearing driver's non-`Err` exits.
 ///
-/// [`file_element_failure`] is this function's twin on the `Err` exits, and the two together are the
-/// whole of the never-recoverable law in these four drivers. They are deliberately **two**
-/// functions, not one:
+/// All twelve reach it: the four try-driven collection families, the four `*_while` ones, and the
+/// four fold sources. [`file_element_failure`] is this function's twin on the `Err` exits, and it
+/// is the narrower of the two — only the try-driven four swallow an element failure, so only they
+/// need a gate above the swallow. The other eight propagate an element's `Err` with `?`, which
+/// makes a trip they are *handed* terminal without any gate; what they needed was this one, for the
+/// trip an element answers and hands back as `Ok`. They are deliberately **two** functions, not one:
 ///
 /// * the failure path has an error in hand and **re-raises that value**; there is none here, so this
 ///   synthesizes a terminal end-of-input instead — the same value the scanner-stop exits have always
@@ -330,15 +344,15 @@ where
 ///
 /// # What holds each witness in the guard
 ///
-/// `GATE_CENSUS` pins that the four try-driven drivers spell neither witness themselves and that
-/// both appear in this body ahead of the stop — but a needle scan proves presence and ordering,
+/// `GATE_CENSUS` pins that all twelve guard-bearing drivers spell neither witness themselves and
+/// that both appear in this body ahead of the stop — but a needle scan proves presence and ordering,
 /// never that a term gates. One behavioural suite per witness does, each confirmed by neutering the
 /// term in place and watching the suite go red:
 ///
 /// * `inp.latched_during_attempt(latch)` — `tokora/tests/absence_terminal_stop.rs`, 10 of its 46
 ///   cells.
 /// * `inp.tripped_during_attempt(trips)` — `tokora/tests/collection_resource_trip.rs`'s section 4,
-///   all 16 cells.
+///   all 16 cells, and its section 7, all 32.
 ///
 /// To re-check in five minutes rather than by re-deriving it: replace one term with
 /// `let _ = <that term>;` above the `if`, leaving the other in the condition, and run
@@ -396,11 +410,23 @@ where
 /// fact, so a collection-wide baseline would charge every later close in the parse with a trip some
 /// earlier element caught and legitimately parsed past.
 ///
-/// It belongs only where a closer is committed **after an element attempt whose baseline is still in
-/// hand**: `delim/repeated`'s decline arm and its stall epilogue, and `sep/delim`'s epilogue. Not on
-/// `sep/delim`'s mid-scan closer, which is reached from the top of a cycle — only an *accepting*
-/// element can precede it (a decline or a stall breaks the loop), and this cycle's baseline is taken
-/// a few lines above it, so the term would be a constant `false`.
+/// It belongs on **every probed closer** — every `CloseStatus::Close` verdict in the tree — and the
+/// rule is deliberately that flat, with no per-site exemption. Where the probe follows an element
+/// attempt whose baseline is still in hand the term is the whole point of this function:
+/// `delim/repeated`'s decline arm and its stall epilogue, `delim/repeated_while`'s epilogue,
+/// `sep/delim`'s epilogue, and `sep_while/delim`'s stall arm. Where a probe instead sits at the TOP
+/// of a cycle — `delim/repeated_while`'s mid-scan arm, and `sep_while/delim`'s front-empty and
+/// `Action::Stop` arms — only an *accepting* element can precede it, this cycle's baseline is taken
+/// a few lines above, and the term is a constant `false`; the call stays anyway, because a `usize`
+/// comparison costs less than an exemption table, and because it lets `GATE_CENSUS` scan the
+/// verdict→commit region **per verdict** rather than compare tallies that any arrangement of
+/// needles would satisfy. It also fails closed if a later refactor moves an element attempt above
+/// one of those probes.
+///
+/// The two exempt exits are **direct** closers, committed straight from a driver's own scan with no
+/// probe verdict at all: `sep/delim`'s and `sep_while/delim`'s mid-scan arms. They are exempt for
+/// the same structural reason, and are counted by the census as `direct` so a third cannot land
+/// unnoticed.
 ///
 /// Not on an `Accept` either — deliberately, and permanently, not merely "not yet reached". An
 /// element that catches a trip and still produces a value has answered it, not concluded absence:
@@ -416,7 +442,7 @@ where
 /// # What holds the witness in the guard
 ///
 /// `GATE_CENSUS`'s `every_real_closer_exit_after_an_element_is_trip_gated` pins that every
-/// `CloseStatus::Close` verdict in the try-driven drivers reaches this call before it commits, and
+/// `CloseStatus::Close` verdict in the tree reaches this call before it commits, and
 /// `the_close_chokepoint_reads_the_counter_and_not_the_position` scans this body in **both**
 /// directions — the descent witness present, the scanner witness absent. A needle scan proves
 /// presence and ordering, never that a term gates; the behaviour is
@@ -479,9 +505,18 @@ mod gate_census {
   //! chokepoint above never sees it. [`absence_after_element`](super::absence_after_element) is the
   //! second chokepoint and holds both witnesses for those exits, and
   //! [`every_absence_exit_carries_the_terminal_witnesses`] applies the same shape of proof to it:
-  //! the try-driven drivers spell **neither** witness themselves, so there is nothing left for them
-  //! to spell differently, and the count of chokepoint calls is pinned per source so a new absence
-  //! exit cannot land ungated.
+  //! **all twelve** guard-bearing drivers spell **neither** witness themselves, so there is nothing
+  //! left for them to spell differently, and the count of chokepoint calls is pinned per source so a
+  //! new absence exit cannot land ungated.
+  //!
+  //! This half reaches further than the swallow scan does, and deliberately so. Only the try-driven
+  //! four can spend an element's `Err`, so only they need a gate above a swallow; the four `*_while`
+  //! drivers and the four fold sources propagate an element failure with `?` and are terminal on
+  //! that path for free. What they shared with the four was the exit with no `Err` in it — the
+  //! element answering the trip itself and then reporting absence — and until the per-element
+  //! baseline [`every_driver_baselines_its_trip_witness_inside_its_element_loop`] pins, those eight
+  //! could not even ask the question. [`absence_exit_shapes`] records what that cost and how it was
+  //! measured.
   //!
   //! # The third half: the exits that close on a real token
   //!
@@ -494,10 +529,13 @@ mod gate_census {
   //! valid closer arriving afterwards does not unmake it — the collection closes successfully having
   //! silently spent a resource-limit stop. [`close_after_element`](super::close_after_element) is the
   //! third chokepoint and holds the descent witness **alone**;
-  //! [`every_real_closer_exit_after_an_element_is_trip_gated`] pins that every close verdict reaches
-  //! it before committing, and [`the_close_chokepoint_reads_the_counter_and_not_the_position`] pins
-  //! the asymmetry in both directions, since a scanner term smuggled into that body is as much a
-  //! defect as a missing descent one.
+  //! [`every_real_closer_exit_after_an_element_is_trip_gated`] pins that every close verdict in the
+  //! tree reaches it before committing — **every** one, with no per-site exemption, which is what
+  //! lets that test scan the verdict→commit region per verdict instead of comparing tallies — and
+  //! [`the_close_chokepoint_reads_the_counter_and_not_the_position`] pins the asymmetry in both
+  //! directions, since a scanner term smuggled into that body is as much a defect as a missing
+  //! descent one. The only exits it exempts are the two **direct** closers, committed from a
+  //! driver's own scan with no probe verdict at all, and it counts those rather than ignoring them.
   //!
   //! # The one thing the chokepoint cannot centralize
   //!
@@ -771,6 +809,116 @@ mod gate_census {
     );
   }
 
+  /// How many element loops each guard-bearing source runs — and therefore how many per-element
+  /// trip baselines it takes. Index-aligned with [`progress_guard_sites`].
+  ///
+  /// One row per source rather than a bare total, because the two fold sources that host three
+  /// driver impls each are exactly where a fourth impl could land without one. The count is
+  /// asserted against **two** independent needles — the `loop {` openers and the
+  /// `trip_snapshot()` calls — so a loop added without a baseline, or a baseline added outside a
+  /// loop, breaks the equality rather than being absorbed by it.
+  fn element_loop_counts() -> [(&'static str, usize); 12] {
+    [
+      ("many/repeated/mod.rs", 1),
+      ("many/repeated_while/mod.rs", 1),
+      ("many/delim/repeated.rs", 1),
+      ("many/delim/repeated_while.rs", 1),
+      ("many/sep/parse/mod.rs", 1),
+      ("many/sep/delim/mod.rs", 1),
+      ("many/sep_while/parse/mod.rs", 1),
+      ("many/sep_while/delim/mod.rs", 1),
+      ("fold/mod.rs", 3),
+      ("fold/rfold.rs", 1),
+      ("fold/fold_while.rs", 3),
+      ("fold/rfold_while.rs", 1),
+    ]
+  }
+
+  /// **All twelve** guard-bearing drivers take their trip baseline inside the element loop, once per
+  /// element, and every call to any of the three chokepoints reads one taken there.
+  ///
+  /// [`every_element_loop_baselines_its_trip_witness_per_element`] is this test's narrower sibling:
+  /// it pins the *failure* chokepoint's placement in the four try-driven sources, where the extra
+  /// `try_parse_input`-per-chokepoint pairing is meaningful. This one covers the other two
+  /// chokepoints and the other eight sources, which is where the baseline was missing entirely
+  /// until the `*_while` drivers and the folds adopted it.
+  ///
+  /// The half the chokepoints cannot own is the same one stated on
+  /// [`file_element_failure`](super::file_element_failure): `trips` is the caller's, so the caller
+  /// decides whether the comparison means "this element tripped" or "this parse has tripped". The
+  /// counter is a monotone session fact, never cleared, so a baseline hoisted above the loop is
+  /// arithmetically a session-absolute read for every element after the first — and an absence exit
+  /// reading that would end every later collection in the document over a trip some earlier element
+  /// legitimately caught and parsed past.
+  ///
+  /// The `rfind` panics rather than passing when a chokepoint call is not inside a loop at all, so
+  /// this cannot be satisfied by a source that has stopped looking like a driver.
+  #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
+  fn every_driver_baselines_its_trip_witness_inside_its_element_loop() {
+    let sites = progress_guard_sites();
+    let counts = element_loop_counts();
+    let mut baselines = 0;
+    let mut gates = 0;
+    for i in 0..sites.len() {
+      let (name, src) = sites[i];
+      let (classified, loops) = counts[i];
+      assert_eq!(
+        name, classified,
+        "the guard-bearing source list and the element-loop classification have drifted apart at \
+         row {i}: `{name}` against `{classified}`. They are index-aligned on purpose — a row that \
+         names a source the scan does not read is a row that checks nothing"
+      );
+      assert_eq!(
+        code_matches(src, HOSTING_LOOP),
+        loops,
+        "{name}: expected {loops} element loop(s). A driver impl added to this source needs its own \
+         baseline and its own classification row before it can be trusted"
+      );
+      assert_eq!(
+        code_matches(src, BASELINE),
+        loops,
+        "{name}: exactly one `trip_snapshot()` baseline per element loop — a loop without one leaves \
+         its exits ungated, and a second, stray read of the counter is how a session-absolute test \
+         gets back in"
+      );
+
+      // Every chokepoint call, of all three kinds, reads a baseline taken inside the loop that
+      // hosts it. The region is `loop {` → call, so a baseline hoisted above the loop leaves the
+      // region empty and fails here.
+      for needle in [CHOKEPOINT, ABSENCE, CLOSE_GATE] {
+        let mut from = 0;
+        while let Some(at) = code_find(&src[from..], needle) {
+          let call_at = from + at;
+          let loop_at = src[..call_at].rfind(HOSTING_LOOP).unwrap_or_else(|| {
+            panic!("{name}: a `{needle}` call that is not inside a repetition loop")
+          });
+          assert_eq!(
+            code_matches(&src[loop_at..call_at], BASELINE),
+            1,
+            "{name}: the descent witness is attempt-relative — take the `trip_snapshot()` baseline \
+             INSIDE the element loop, once per element. Hoisted out of it the comparison degrades \
+             into a read of the monotone session counter, and every absence exit after the parse's \
+             first trip refuses, ordinary ends of construct included"
+          );
+          gates += 1;
+          from = call_at + needle.len();
+        }
+      }
+      baselines += loops;
+    }
+    assert_eq!(
+      (baselines, gates),
+      (16, 42),
+      "sixteen element loops across the twelve sources, each with its own baseline, and \
+       forty-two chokepoint calls reading one: four failure gates, thirty absence gates and eight \
+       real-closer gates. The totals are pinned so a gate cannot move between sources unnoticed"
+    );
+  }
+
   /// The bound arrangements every driver family re-exposes, and the separator arrangements the
   /// four separated families add. Named once: the leaves are formulaic, and the point of listing
   /// them is that a name **not** in the pattern shows up.
@@ -1038,46 +1186,47 @@ mod gate_census {
     }
   }
 
-  /// The absence-exit shape of every guard-bearing driver, as data.
+  /// The absence-exit shape of every guard-bearing driver, as data: how many [`ABSENCE`] calls the
+  /// source must carry.
   ///
-  /// The count is how many [`ABSENCE`] calls the source must carry; **0** marks the older *inline*
-  /// shape, which spells `latched_during_attempt` at each exit and consults no descent witness at
-  /// all. Index-aligned with [`progress_guard_sites`], and
+  /// Index-aligned with [`progress_guard_sites`], and
   /// [`every_absence_exit_carries_the_terminal_witnesses`] checks the two lists name the same
   /// sources in the same order, so neither can drift.
   ///
-  /// **The zeroes are a residual, recorded rather than blessed.** The four `*_while` drivers and the
-  /// four folds have the *same* hole the chokepoint closes for the try-driven four: their element
-  /// runs through `parse_input`/`try_parse_input` and propagates a trip with `?`, so a trip is
-  /// terminal there **unless the element catches it itself** — and an element that catches one and
-  /// then declines, or accepts consuming nothing, ends those collections cleanly and successfully,
-  /// exactly as it did in the try-driven four before this. Measured rather than inferred: `fold`
-  /// over such an element returns the same `Ok` under a budget the element exceeds as under one it
-  /// does not, and so does `repeated_while` over the stalling shape. Closing it there needs a
-  /// per-element trip baseline each of those loops does not take (two of the folds would have to
-  /// stop being `while let` loops to take one), and it is a separate change with its own
-  /// regressions. What this row does hold is that a `0` source cannot *half*-adopt: it must take no
-  /// trip baseline and read no trip witness, so the day one does, this classification goes red and
-  /// has to be re-cut.
+  /// **Every row is nonzero, and that is the property.** This table used to carry eight zeroes,
+  /// marking an older *inline* shape that spelled `latched_during_attempt` at each exit and read no
+  /// descent witness at all — the four `*_while` drivers and the four fold sources. They had the
+  /// same hole the chokepoint closes for the try-driven four, reached the same way: an element that
+  /// catches a trip itself and then declines, or accepts consuming nothing, ends the collection
+  /// cleanly and successfully. Measured rather than inferred, before and after: `fold` over such an
+  /// element returned the same `Ok(6)` on `"1 2 3"` under a budget the element exceeded as under one
+  /// it did not, and `repeated_while` returned the same `Ok([1, 2, 3, -1])` over the stalling shape.
+  /// Closing it needed the per-element trip baseline
+  /// [`every_driver_baselines_its_trip_witness_inside_its_element_loop`] now pins in all twelve
+  /// sources — which is why three of the folds stopped being `while let` loops, a `while let` having
+  /// nowhere to snapshot the counter before the element attempt its own condition runs.
+  ///
+  /// So there is no longer a two-shape classification here, and re-introducing one means adding a
+  /// zero, which fails the per-row assertion rather than passing quietly.
   fn absence_exit_shapes() -> [(&'static str, usize); 12] {
     [
       ("many/repeated/mod.rs", 1),
-      ("many/repeated_while/mod.rs", 0),
+      ("many/repeated_while/mod.rs", 2),
       ("many/delim/repeated.rs", 4),
-      ("many/delim/repeated_while.rs", 0),
+      ("many/delim/repeated_while.rs", 3),
       ("many/sep/parse/mod.rs", 2),
       ("many/sep/delim/mod.rs", 2),
-      ("many/sep_while/parse/mod.rs", 0),
-      ("many/sep_while/delim/mod.rs", 0),
-      ("fold/mod.rs", 0),
-      ("fold/rfold.rs", 0),
-      ("fold/fold_while.rs", 0),
-      ("fold/rfold_while.rs", 0),
+      ("many/sep_while/parse/mod.rs", 2),
+      ("many/sep_while/delim/mod.rs", 6),
+      ("fold/mod.rs", 3),
+      ("fold/rfold.rs", 1),
+      ("fold/fold_while.rs", 3),
+      ("fold/rfold_while.rs", 1),
     ]
   }
 
-  /// Every guard-bearing driver's absence exits reach the never-recoverable witnesses, and the
-  /// try-driven four reach **both** of them through one chokepoint they cannot spell around.
+  /// Every guard-bearing driver's absence exits reach **both** never-recoverable witnesses, through
+  /// one chokepoint no driver can spell around.
   ///
   /// A driver's absence exits — the no-progress stall, the element-decline break, a condition's
   /// `Action::Stop`, and in the delimited drivers the close probe's `WrongToken`/`Eof` arms —
@@ -1104,19 +1253,18 @@ mod gate_census {
   /// does reach it, through the separate [`close_after_element`](super::close_after_element) gate
   /// that [`every_real_closer_exit_after_an_element_is_trip_gated`] counts.
   ///
-  /// What this pins, per source: the baseline is taken; the source carries the shape
-  /// [`absence_exit_shapes`] classifies it as, by count; and a chokepointed source spells **neither**
-  /// witness itself, which is the "nothing left to balance" form — the strongest of these the
-  /// codebase has, and the one the swallow scan above uses. What it does not pin is that the
-  /// chokepoint's own guard *gates*, which is
+  /// What this pins, per source: the baseline is taken; the source carries the count
+  /// [`absence_exit_shapes`] classifies it with; and the source spells **neither** witness itself,
+  /// which is the "nothing left to balance" form — the strongest of these the codebase has, and the
+  /// one the swallow scan above uses. What it does not pin is that the chokepoint's own guard
+  /// *gates*, which is
   /// [`the_absence_chokepoint_consults_both_witnesses_before_it_stops`]'s region scan for presence
-  /// and `tokora/tests/collection_resource_trip.rs`'s section 4 for behaviour.
+  /// and `tokora/tests/collection_resource_trip.rs`'s sections 4 and 7 for behaviour.
   #[test]
   fn every_absence_exit_carries_the_terminal_witnesses() {
     let sites = progress_guard_sites();
     let shapes = absence_exit_shapes();
     let mut chokepointed = 0;
-    let mut inline = 0;
     for i in 0..sites.len() {
       let (name, src) = sites[i];
       let (classified, calls) = shapes[i];
@@ -1131,56 +1279,35 @@ mod gate_census {
         "{name}: the absence witness is attempt-relative — take the `latch_snapshot()` baseline once \
          per attempt, or a boundary an enclosing lookahead latched is mis-charged to this driver"
       );
-
-      if calls == 0 {
-        // The inline shape: the scanner latch at each exit, and no descent witness anywhere. It
-        // must not have half-adopted the other half — see `absence_exit_shapes`.
-        assert!(
-          src.contains("latched_during_attempt("),
-          "{name}: every absence exit must witness a terminal stop this attempt latched \
-           (`latched_during_attempt`) before concluding the construct ended"
-        );
+      assert!(
+        calls > 0,
+        "{name}: a repetition driver concludes the construct ended somewhere, and every such exit \
+         goes through `absence_after_element`. A zero here is the old inline shape coming back — see \
+         `absence_exit_shapes` for what that shape spent, and how it was measured"
+      );
+      assert_eq!(
+        code_matches(src, ABSENCE),
+        calls,
+        "{name}: expected {calls} absence-exit gate(s) (`{ABSENCE}`). An exit added without one \
+         concludes the construct ended on evidence a terminal stop truncated — and an exit whose \
+         gate was removed is the same defect, which is why this is a count and not a presence test"
+      );
+      for witness in ABSENCE_WITNESSES {
         assert_eq!(
-          code_matches(src, ABSENCE),
+          code_matches(src, witness),
           0,
-          "{name}: this source is classified as the inline absence shape but calls the chokepoint. \
-           Re-cut `absence_exit_shapes` with the call count, so the count is what is checked"
+          "{name}: a driver hands its absence exits to `absence_after_element` — it never reads \
+           `{witness}` itself. A hand-spelled gate can consult one witness and not the other, which \
+           is exactly the defect the chokepoint exists to make unspellable"
         );
-        assert_eq!(
-          code_matches(src, BASELINE) + code_matches(src, "inp.tripped_during_attempt("),
-          0,
-          "{name}: this source is classified as taking NO descent-trip baseline, and now reads one. \
-           Half-adopting the trip witness is how an absence exit ends up gated on one witness and \
-           not the other — route the exits through `absence_after_element` and re-cut \
-           `absence_exit_shapes`"
-        );
-        inline += 1;
-      } else {
-        assert_eq!(
-          code_matches(src, ABSENCE),
-          calls,
-          "{name}: expected {calls} absence-exit gate(s) (`{ABSENCE}`). An exit added without one \
-           concludes the construct ended on evidence a terminal stop truncated — and an exit whose \
-           gate was removed is the same defect, which is why this is a count and not a presence test"
-        );
-        for witness in ABSENCE_WITNESSES {
-          assert_eq!(
-            code_matches(src, witness),
-            0,
-            "{name}: a chokepointed driver hands its absence exits to `absence_after_element` — it \
-             never reads `{witness}` itself. A hand-spelled gate can consult one witness and not the \
-             other, which is exactly the defect the chokepoint exists to make unspellable"
-          );
-        }
-        chokepointed += calls;
       }
+      chokepointed += calls;
     }
     assert_eq!(
-      (chokepointed, inline),
-      (9, 8),
-      "the try-driven families carry exactly nine chokepointed absence exits across four sources, \
-       and eight sources still carry the inline shape. Both halves are pinned so that adopting the \
-       chokepoint in a ninth source, or losing an exit from one of the four, has to be deliberate"
+      chokepointed, 30,
+      "the twelve guard-bearing sources carry exactly thirty chokepointed absence exits between \
+       them. The total is pinned so that adding an exit, or losing one, has to be deliberate — and \
+       so that a source re-cut to a smaller count cannot be balanced by a larger one next door"
     );
   }
 
@@ -1235,30 +1362,44 @@ mod gate_census {
     }
   }
 
-  /// The real-closer shape of every try-driven driver, as data — index-aligned with
-  /// [`try_driven_sites`].
+  /// The real-closer shape of every guard-bearing driver, as data — index-aligned with
+  /// [`progress_guard_sites`].
   ///
   /// `(source, probed closers, direct closers)`.
   ///
   /// * a **probed** closer is a `CloseStatus::Close` verdict, committed by value with
-  ///   [`CLOSE_COMMIT`]. The probe runs only where the driver has already concluded "no more
-  ///   elements" from an element attempt whose trip baseline is still in hand, so every one of
-  ///   these must carry [`CLOSE_GATE`];
-  /// * a **direct** closer is one the driver committed straight from its own scan. There is exactly
-  ///   one in the tree — `sep/delim`'s mid-scan arm — and it is exempt for a structural reason, not
-  ///   because it "rests on a real token": it is reached from the top of a cycle, so only an
-  ///   *accepting* element can precede it (a decline and a stall each break into the epilogue) and
-  ///   this cycle's baseline is taken above it, which makes the descent term a constant `false`.
+  ///   [`CLOSE_COMMIT`]. **Every one of them carries [`CLOSE_GATE`]**, with no per-site exemption —
+  ///   which is what lets [`every_real_closer_exit_after_an_element_is_trip_gated`] scan the
+  ///   verdict→commit region *per verdict* instead of comparing two tallies that any arrangement of
+  ///   needles would satisfy. Where a probe sits at the TOP of a cycle the gate is a constant
+  ///   `false` (this cycle's baseline is taken a few lines above it and nothing since can trip), and
+  ///   it is kept anyway: a `usize` comparison is cheaper than an exemption table, and it fails
+  ///   closed if a later refactor moves an element attempt above it;
+  /// * a **direct** closer is one the driver committed straight from its own scan, with no probe
+  ///   verdict at all. There are exactly two in the tree — `sep/delim`'s and `sep_while/delim`'s
+  ///   mid-scan arms — and they are exempt for a structural reason, not because they "rest on a real
+  ///   token": each is reached from the top of a cycle, so only an *accepting* element can precede
+  ///   it (a decline and a stall each leave for an exit that gates) and the descent term would be
+  ///   the same constant `false`. They are counted rather than ignored, so a third one cannot land
+  ///   unnoticed.
   ///
-  /// The two non-delimited drivers carry no closer at all, and that `(0, 0)` is checked rather than
-  /// skipped: it is what stops a closer landing in a source this census reads but does not expect
-  /// one in.
-  fn close_exit_shapes() -> [(&'static str, usize, usize); 4] {
+  /// The eight non-delimited sources carry no closer at all, and that `(0, 0)` is checked rather
+  /// than skipped: it is what stops a closer landing in a source this census reads but does not
+  /// expect one in.
+  fn close_exit_shapes() -> [(&'static str, usize, usize); 12] {
     [
       ("many/repeated/mod.rs", 0, 0),
+      ("many/repeated_while/mod.rs", 0, 0),
       ("many/delim/repeated.rs", 2, 0),
+      ("many/delim/repeated_while.rs", 2, 0),
       ("many/sep/parse/mod.rs", 0, 0),
       ("many/sep/delim/mod.rs", 1, 1),
+      ("many/sep_while/parse/mod.rs", 0, 0),
+      ("many/sep_while/delim/mod.rs", 3, 1),
+      ("fold/mod.rs", 0, 0),
+      ("fold/rfold.rs", 0, 0),
+      ("fold/fold_while.rs", 0, 0),
+      ("fold/rfold_while.rs", 0, 0),
     ]
   }
 
@@ -1289,7 +1430,7 @@ mod gate_census {
     ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
   )]
   fn every_real_closer_exit_after_an_element_is_trip_gated() {
-    let sites = try_driven_sites();
+    let sites = progress_guard_sites();
     let shapes = close_exit_shapes();
     let mut gated = 0;
     let mut exempt = 0;
@@ -1298,7 +1439,7 @@ mod gate_census {
       let (classified, probed, direct) = shapes[i];
       assert_eq!(
         name, classified,
-        "the try-driven source list and the real-closer classification have drifted apart at row \
+        "the guard-bearing source list and the real-closer classification have drifted apart at row \
          {i}: `{name}` against `{classified}`. They are index-aligned on purpose — a row that names \
          a source the scan does not read is a row that checks nothing"
       );
@@ -1365,11 +1506,12 @@ mod gate_census {
     }
     assert_eq!(
       (gated, exempt),
-      (3, 1),
-      "the try-driven families carry exactly three gated real-closer exits — `delim/repeated`'s \
-       decline arm and its stall epilogue, and `sep/delim`'s epilogue — and exactly one exempt \
-       direct closer, `sep/delim`'s mid-scan arm. Both halves are pinned so that exempting a fourth \
-       exit, or losing a gate from one of the three, has to be deliberate"
+      (8, 2),
+      "the four delimited families carry exactly eight gated real-closer exits — every \
+       `CloseStatus::Close` verdict in the tree, whether or not its own descent term can be nonzero \
+       — and exactly two exempt DIRECT closers, `sep/delim`'s and `sep_while/delim`'s mid-scan arms, \
+       which commit from their own scan with no probe verdict at all. Both halves are pinned so that \
+       exempting a third direct closer, or losing a gate from one of the eight, has to be deliberate"
     );
   }
 

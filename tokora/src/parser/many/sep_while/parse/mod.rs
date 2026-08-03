@@ -60,6 +60,13 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
     let mut full = false;
 
     loop {
+      // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
+      // cycle runs at most one, inside `handle_continue`. It sits above the separator-slot probe so
+      // that both of this cycle's absence exits can read the same value; that widens the measured
+      // window by the probe, the decision peek and `handle_separator`, none of which can descend,
+      // so the reading is the one the element attempt would have given. See
+      // `many::absence_after_element` for why it is per element and not per collection.
+      let trips = inp.trip_snapshot();
       // Separator-slot decision gate: `try_expect_or_stop` (not `try_expect`) so a terminal scanner
       // stop at the separator slot surfaces as its terminal-marked end-of-input error rather than
       // folding into `Ok(None)` and ending the list cleanly. Attempt-relative (the boundary is
@@ -86,6 +93,12 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
           let front_span = match peeked.front() {
             None => {
               drop(peeked);
+              // An empty decision window with no terminal flag: a genuine end of the token stream,
+              // concluded from THIS peek rather than from any element attempt. No absence gate
+              // belongs here — the scanner half is the eager terminal gate's, above, and the
+              // descent half would be a constant `false`, since nothing between the top of this
+              // cycle and this peek can trip. The same classification `sep/parse`'s empty
+              // separator-slot return carries; see `many::absence_after_element`.
               return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
             }
             Some(front) => front
@@ -102,15 +115,12 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
               // a terminal scanner stop and still return `Ok` with a short window, leaving the
               // pre-trip tokens cached — this window is then served whole from that cache, so it
               // carries no terminal flag for the gate above to see and the condition reads a truncated
-              // view as the end of the list. Attempt-relative, so an inherited boundary is not
-              // mis-charged here.
-              if inp.latched_during_attempt(&latch) {
-                return Err(
-                  UnexpectedEot::eot_of(inp.span().end())
-                    .into_terminal()
-                    .into(),
-                );
-              }
+              // view as the end of the list. Both witnesses are the chokepoint's; the scanner half is
+              // attempt-relative, so an inherited boundary is not mis-charged here, and the descent
+              // half is a constant `false` at this exit — it is reached before this cycle's element
+              // runs, so the element that could have caught a trip is the PREVIOUS cycle's
+              // *accepting* one, which `many`'s module docs exempt.
+              absence_after_element(inp, &latch, trips)?;
               return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
             }
             Action::Continue => {
@@ -135,18 +145,13 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
           // cannot regress within a cycle, so anything not strictly ahead is a stall.
           let new_committed = inp.span().end();
           if new_committed <= committed {
-            // A stall concludes *absence*: "no more elements". The element's own lookahead can latch
-            // a terminal scanner stop and still return `Ok` with a short window, so that conclusion
-            // may rest on a truncated view — a case neither the separator-slot gate nor the decision
-            // gate above can see, since the latch happens after both. Attempt-relative, so an
-            // inherited boundary is not mis-charged here.
-            if inp.latched_during_attempt(&latch) {
-              return Err(
-                UnexpectedEot::eot_of(inp.span().end())
-                  .into_terminal()
-                  .into(),
-              );
-            }
+            // A stall concludes *absence*: "no more elements", on the strength of the element
+            // attempt this cycle just ran inside `handle_continue`. That attempt can hit either
+            // never-recoverable stop and still return `Ok` — a terminal scanner stop its own
+            // lookahead latched (which neither the separator-slot gate nor the decision gate above
+            // can see, since the latch happens after both), or a descent budget trip it caught
+            // itself and answered with a value it consumed nothing for. Both are the chokepoint's.
+            absence_after_element(inp, &latch, trips)?;
             return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
           }
           committed = new_committed;

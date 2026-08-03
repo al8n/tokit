@@ -3,6 +3,12 @@ use core::marker::PhantomData;
 use crate::{TryParseInput, span::Span as _, try_parse_input::ParseAttempt};
 
 use super::*;
+// The absence chokepoint the `many` drivers route their "no more elements" exits through. The folds
+// are the same shape of driver and take the same gate, rather than each spelling a witness pair of
+// its own — `many::absence_after_element` is where the reasoning for both witnesses lives, and
+// `many`'s `GATE_CENSUS` requires every guard-bearing source, these four included, to hand its
+// absence exits to it.
+use super::many::absence_after_element;
 
 pub use fold_while::*;
 
@@ -80,7 +86,19 @@ where
     // The terminal-latch baseline for the absence exit below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per fold, off the per-element path.
     let latch = inp.latch_snapshot();
-    while let ParseAttempt::Accept(value) = self.parser.try_parse_input(inp)? {
+    // The trip baseline of the LAST element attempt, carried out by whichever break concluded
+    // absence — see `many::absence_after_element` for what the gate below does with it. Taking it
+    // per element is why this is a `loop` rather than the `while let` it used to be: the condition
+    // of a `while let` runs the element attempt, leaving nowhere to snapshot the counter before it.
+    let elem_trips = loop {
+      // The descent witness's baseline, taken once per ELEMENT — the attempt the absence gate after
+      // the loop judges. `many::file_element_failure` says why it belongs here and not out beside
+      // `latch`.
+      let trips = inp.trip_snapshot();
+      let value = match self.parser.try_parse_input(inp)? {
+        ParseAttempt::Accept(value) => value,
+        ParseAttempt::Decline => break trips,
+      };
       output = (self.acc)(output, value);
 
       // A cycle that consumed nothing re-sees the same input and would accept forever. The progress
@@ -90,21 +108,17 @@ where
       // strictly ahead is a stall.
       let new_committed = inp.span().end();
       if new_committed <= committed {
-        break;
+        break trips;
       }
       committed = new_committed;
-    }
+    };
     // Both ways out of the loop — the element declining, and a cycle that committed nothing —
-    // conclude *absence*: "no more elements". An element's own lookahead can latch a terminal scanner
-    // stop and still hand it back `Ok` with a short window, so that conclusion may rest on a
-    // truncated view. Attempt-relative, so an inherited boundary is not mis-charged here.
-    if inp.latched_during_attempt(&latch) {
-      return Err(
-        crate::error::UnexpectedEot::eot_of(inp.span().end())
-          .into_terminal()
-          .into(),
-      );
-    }
+    // conclude *absence*: "no more elements", on the strength of what the last element attempt did.
+    // That attempt can hit either never-recoverable stop and still hand back `Ok`: a terminal
+    // scanner stop its own lookahead latched, leaving a short window, or a descent budget trip it
+    // caught itself. `many::absence_after_element` holds both and says why each baseline is the
+    // granularity it is.
+    absence_after_element(inp, &latch, elem_trips)?;
     Ok(output)
   }
 }
@@ -165,7 +179,17 @@ where
     // The terminal-latch baseline for the absence exit below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per fold, off the per-element path.
     let latch = inp.latch_snapshot();
-    while let ParseAttempt::Accept(value) = self.parser.try_parse_input(inp)? {
+    // The trip baseline of the LAST element attempt, carried out by whichever break concluded
+    // absence. Taking it per element is why this is a `loop` rather than the `while let` it used to
+    // be — see [`Fold`]'s body above.
+    let elem_trips = loop {
+      // The descent witness's baseline, taken once per ELEMENT — the attempt the absence gate after
+      // the loop judges. See `many::file_element_failure`.
+      let trips = inp.trip_snapshot();
+      let value = match self.parser.try_parse_input(inp)? {
+        ParseAttempt::Accept(value) => value,
+        ParseAttempt::Decline => break trips,
+      };
       output = (self.acc)(output, value)?;
 
       // A cycle that consumed nothing re-sees the same input and would accept forever. The progress
@@ -175,21 +199,15 @@ where
       // strictly ahead is a stall.
       let new_committed = inp.span().end();
       if new_committed <= committed {
-        break;
+        break trips;
       }
       committed = new_committed;
-    }
+    };
     // Both ways out of the loop — the element declining, and a cycle that committed nothing —
-    // conclude *absence*: "no more elements". An element's own lookahead can latch a terminal scanner
-    // stop and still hand it back `Ok` with a short window, so that conclusion may rest on a
-    // truncated view. Attempt-relative, so an inherited boundary is not mis-charged here.
-    if inp.latched_during_attempt(&latch) {
-      return Err(
-        crate::error::UnexpectedEot::eot_of(inp.span().end())
-          .into_terminal()
-          .into(),
-      );
-    }
+    // conclude *absence*: "no more elements", on the strength of what the last element attempt did.
+    // A terminal scanner stop its own lookahead latched, and a descent budget trip it caught itself,
+    // both leave it returning `Ok`; `many::absence_after_element` holds both witnesses.
+    absence_after_element(inp, &latch, elem_trips)?;
     Ok(output)
   }
 }
@@ -253,7 +271,12 @@ where
     // The terminal-latch baseline for the absence exit below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per fold, off the per-element path.
     let latch = inp.latch_snapshot();
-    loop {
+    // The trip baseline of the LAST element attempt, carried out by whichever break concluded
+    // absence. See `many::absence_after_element`.
+    let elem_trips = loop {
+      // The descent witness's baseline, taken once per ELEMENT — the attempt the absence gate after
+      // the loop judges. See `many::file_element_failure`.
+      let trips = inp.trip_snapshot();
       let cursor = inp.cursor().clone();
       let entry_committed = inp.span().end();
       match self.parser.try_parse_input(inp)? {
@@ -268,23 +291,17 @@ where
           // A cycle that consumed nothing re-sees the same input and would accept forever; no
           // progress means no more elements — stop, same as a decline.
           if !advanced {
-            break;
+            break trips;
           }
         }
-        ParseAttempt::Decline => break,
+        ParseAttempt::Decline => break trips,
       }
-    }
+    };
     // Both ways out of the loop — the element declining, and a cycle that committed nothing —
-    // conclude *absence*: "no more elements". An element's own lookahead can latch a terminal scanner
-    // stop and still hand it back `Ok` with a short window, so that conclusion may rest on a
-    // truncated view. Attempt-relative, so an inherited boundary is not mis-charged here.
-    if inp.latched_during_attempt(&latch) {
-      return Err(
-        crate::error::UnexpectedEot::eot_of(inp.span().end())
-          .into_terminal()
-          .into(),
-      );
-    }
+    // conclude *absence*: "no more elements", on the strength of what the last element attempt did.
+    // A terminal scanner stop its own lookahead latched, and a descent budget trip it caught itself,
+    // both leave it returning `Ok`; `many::absence_after_element` holds both witnesses.
+    absence_after_element(inp, &latch, elem_trips)?;
     Ok(output)
   }
 }

@@ -309,6 +309,16 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
     let mut full = false;
 
     loop {
+      // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
+      // cycle runs at most one. It sits at the top of the body rather than beside the element
+      // attempt so that BOTH of this cycle's absence exits can read the same value; that widens the
+      // measured window by the decision peek and `decide`, neither of which can descend, so the
+      // reading is the one the element attempt would have given. See `many::absence_after_element`
+      // for why it is per element and not per collection, and why the `Action::Stop` exit — reached
+      // before this cycle's element runs — is a constant `false` here by construction: the element
+      // that could have caught a trip is then the PREVIOUS cycle's *accepting* one, which the
+      // module docs exempt.
+      let trips = inp.trip_snapshot();
       // A short decision window can be a genuine end of input, but one truncated by a terminal
       // scanner stop is not: surface the committed end-of-input error before anything else. `decide`
       // is fallible and emitting, and a zero-width element makes no progress that would re-lex the
@@ -326,14 +336,10 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
           // terminal scanner stop and still return `Ok` with a short window, leaving the pre-trip
           // tokens cached — this window is then served whole from that cache, so it carries no
           // terminal flag for the gate above to see and the condition reads a truncated view as the
-          // end of the construct. Attempt-relative, so an inherited boundary is not mis-charged here.
-          if inp.latched_during_attempt(&latch) {
-            return Err(
-              UnexpectedEot::eot_of(inp.span().end())
-                .into_terminal()
-                .into(),
-            );
-          }
+          // end of the construct. Both never-recoverable witnesses are the chokepoint's, not this
+          // loop's; the scanner half is attempt-relative against the entry snapshot, so an inherited
+          // boundary is not mis-charged here.
+          absence_after_element(inp, &latch, trips)?;
           let span = inp.span_since(&anchor);
           return rh.on_stop(nums, inp, &anchor).map(|_| span);
         }
@@ -359,18 +365,13 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
       // within a cycle, so anything not strictly ahead is a stall.
       let new_committed = inp.span().end();
       if new_committed <= committed {
-        // A stall concludes *absence*: "no more elements". The element's own lookahead can latch a
-        // terminal scanner stop and still return `Ok` with a short window, so that conclusion may
-        // rest on a truncated view — the decision gate above cannot see it, because the latch happens
-        // after it. Surface the stop instead of ending cleanly; attempt-relative against the entry
-        // snapshot, so an inherited boundary is not mis-charged here.
-        if inp.latched_during_attempt(&latch) {
-          return Err(
-            UnexpectedEot::eot_of(inp.span().end())
-              .into_terminal()
-              .into(),
-          );
-        }
+        // A stall concludes *absence*: "no more elements", on the strength of the element attempt
+        // this cycle just ran. That attempt can hit either never-recoverable stop and still return
+        // `Ok` — a terminal scanner stop its own lookahead latched (which the decision gate above
+        // cannot see, because the latch happens after it), or a descent budget trip it caught
+        // itself and answered with a value it consumed nothing for. Both are the chokepoint's; this
+        // is the exit the measurement in `many`'s docs found spending the second of them.
+        absence_after_element(inp, &latch, trips)?;
         let span = inp.span_since(&anchor);
         return rh.on_stop(nums, inp, &anchor).map(|_| span);
       }
