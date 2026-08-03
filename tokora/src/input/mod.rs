@@ -637,6 +637,115 @@ where
   /// captures it. See [`RecursionLimiter`] for the lexer-side tracker, which is a different cell
   /// with a different subject.
   recursion: RecursionLimiter,
+  /// **Where resource terminality is stored**: how many times a resource budget has been exceeded
+  /// in this input session. Nonzero once any trip has happened, and monotone — it only ever counts
+  /// up.
+  ///
+  /// What is recorded is the *fact of a trip*, not the depth. The two are
+  /// opposite kinds of fact and only one of them is monotone. Depth is restored by the unwind
+  /// that carries the error out — every live frame's guard decrements as it pops — so it stays
+  /// [outside the rollback set](Self::recursion) and is never latched. That a budget **was**
+  /// exceeded cannot be un-exceeded by anything: not by more input, not by an unwind, not by a
+  /// rollback. It is the same monotone shape the scanner's tally has, and it is latched for the
+  /// same reason [`poison_boundary`](Self::poison_boundary) is — the difference being that a
+  /// scanner trip has a *position*, so the scanner latches where, while a descent trip has only a
+  /// *control stack*, so this latches whether.
+  ///
+  /// # A count, and not a flag: what the cell means versus what the combinators test
+  ///
+  /// The cell is a **monotone session fact** — "a budget was exceeded, this many times, somewhere
+  /// in this parse". Read absolutely (`!= 0`) that is a true statement about the session and it is
+  /// the answer to "did this parse hit its budget at all".
+  ///
+  /// It is *not* the question any consulting site asks. Every one of them is judging **one
+  /// attempt** — a speculative parse, or one element of a collection — and needs "did a budget trip
+  /// happen *inside the attempt I am judging*". Those two questions come apart exactly when
+  /// grammar code catches a trip itself and parses on: the session fact stays true forever, while
+  /// the next attempt is an ordinary one that tripped nothing. Answering the second question with
+  /// the first is what made a single deep expression early in a document disable emit-and-continue
+  /// recovery for everything after it.
+  ///
+  /// So the sites snapshot this counter before the attempt
+  /// ([`InputRef::trip_snapshot`](InputRef::trip_snapshot)) and compare after
+  /// ([`InputRef::tripped_during_attempt`](InputRef::tripped_during_attempt)) — the same
+  /// baseline-and-compare shape [`poison_boundary`](Self::poison_boundary) already uses through
+  /// `latch_snapshot`/`latched_during_attempt`. A **count** rather than a `bool` is what makes that
+  /// comparison work twice: a second trip after a caught first one changes the value, where a
+  /// set-once flag would compare equal and let the second trip through.
+  ///
+  /// # Why the grammar's error type cannot be the storage
+  ///
+  /// [`RecursionLimitReached`](crate::error::RecursionLimitReached) is terminal for every value,
+  /// but it reaches [`Recover`](crate::parser::Recover),
+  /// [`InplaceRecover`](crate::parser::InplaceRecover) and
+  /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) already converted into the grammar's
+  /// own error type, and that conversion is allowed to discard the value — `()` does. Terminality
+  /// carried only through the payload is therefore terminality the grammar can opt out of, which
+  /// made a resource bound depend on an unrelated error sink. Stored here it does not: those three
+  /// combinators read this cell **in addition to**
+  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal), so every supported sink observes
+  /// the same stop.
+  ///
+  /// The **resilient collection loops** — `repeated`, `separated` and their delimited forms — read
+  /// it too, and there it is the *only* terminality witness rather than a second one: their swallow
+  /// arms carry no `MaybeTerminal` bound at all, gating on the frontier incomplete and on
+  /// positional and session facts, so this cell is the whole of what keeps a descent trip inside an
+  /// element from being emitted as an ordinary diagnostic and looped past. See `parser::many`'s
+  /// `GATE_CENSUS`.
+  ///
+  /// # Never cleared, and why that costs nothing now
+  ///
+  /// There is no writer that lowers it — not a [`Checkpoint`] (which does not carry it), not
+  /// `rekey_offset_facts`, not the [`Descent`](InputRef::descend) guard's `Drop`. A rollback
+  /// rewinds *input progress*; it cannot un-exceed a budget.
+  ///
+  /// Monotone storage used to imply a monotone *verdict*, because the sites read the cell
+  /// absolutely: once a session had tripped anywhere, every later recovery and every later
+  /// collection swallow in it was refused — including for ordinary syntax errors that have nothing
+  /// to do with the budget, which a terminality-preserving error type would have recovered, since
+  /// the later error is a different value. One deeply-nested expression early in a document
+  /// therefore suppressed every diagnostic after it, which is precisely wrong for the editor and
+  /// language-server consumers this crate is built for.
+  ///
+  /// The attempt-relative comparison above separates the two. The cell keeps its monotone meaning,
+  /// so "did this parse trip at all" is still answerable and still cannot be rewound; what the
+  /// sites test is a **transition during one attempt**, which is a per-attempt fact and is false
+  /// again on the next attempt. A trip is still terminal wherever it actually happens: the change
+  /// narrows *which* failures are charged to it, never whether a real one is re-raised.
+  ///
+  /// # How far the narrowing goes, and no further
+  ///
+  /// A transition witnesses that **a** trip happened inside the attempt. It does not witness that
+  /// the `Err` being judged **is** that trip, and the two differ within one attempt: grammar code
+  /// that catches a trip itself, carries on, and then fails *ordinarily before that same attempt
+  /// ends* hands the site an ordinary error over a counter that has already moved, and the site
+  /// re-raises it.
+  ///
+  /// The floor is therefore **one attempt** — one speculative parse for
+  /// [`Recover`](crate::parser::Recover) and
+  /// [`InplaceRecover`](crate::parser::InplaceRecover), one retry cycle for
+  /// [`skip_then_retry`](crate::ParseInput::skip_then_retry), one **element** for the collection
+  /// loops. It **fails closed** inside that unit, at the recovery, failure, absence and
+  /// real-closer gates: an ordinary failure sharing a unit with a caught trip is re-raised, never
+  /// the reverse, so no real trip reaching one of those gates is ever recovered from or filed as a
+  /// diagnostic. It says nothing about `Accept` — an element that catches the trip and still
+  /// answers `Accept` spends it, for every error type, on purpose; see `parser::many`'s module
+  /// docs, "the channel neither chokepoint closes" section. What is lost is emit-and-continue for
+  /// one construct, not the stop.
+  ///
+  /// **A finer answer cannot be read off this cell, or off the error.** It would require deciding
+  /// whether a particular error value is the trip, which means interrogating the value — and the
+  /// grammar's error type may be `()`, whose conversion discards
+  /// [`RecursionLimitReached`](crate::error::RecursionLimitReached). That discarding sink is the
+  /// reason terminality is stored here at all, so "read the error" is exactly the design this cell
+  /// exists to replace. The one thing that *would* work is cooperative: an explicit **rebaseline**
+  /// published for code that deliberately catches a trip, moving the enclosing baselines past it.
+  /// It is not built, because no consumer needs it yet.
+  ///
+  /// It is per **input session**, like the budget it guards: a
+  /// [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and therefore
+  /// a fresh cell, and harvests terminality by its own separate route.
+  resource_trips: usize,
   /// The **bound emitter** — the one emission log this input's parse writes, owned here for the
   /// input's whole life and paired with it at
   /// [`with_state_and_context`](Self::with_state_and_context).
@@ -803,6 +912,11 @@ where
       // deliberately walking one deeper first — and a deliberately-deep one is a caller stating
       // that this parse continues someone else's descent, which is exactly what the cell means.
       recursion,
+      // Untripped. The caller's budget can arrive pre-raised; the trip count cannot, because it
+      // is a fact about THIS session and there is no constructor that carries one in. Starting at
+      // zero is also what makes an attempt baseline taken before the first descent mean "no trip
+      // yet" rather than "some trip, inherited".
+      resource_trips: 0,
       emitter,
       lineage: Lineage::new(),
       #[cfg(feature = "trace")]
@@ -932,6 +1046,9 @@ where
       // The recursion budget, borrowed like the ground-truth cells above rather than snapshotted
       // like `finality`: a handle's frames raise and lower it, and the value must outlive them.
       recursion: &mut self.recursion,
+      // The resource-trip counter, borrowed for the same reason: a trip raised through this handle
+      // is a fact about the session, so it has to outlive the handle that raised it.
+      resource_trips: &mut self.resource_trips,
       // The lineage memos, the emitter borrow, and the session-point stack, in one cell (see
       // `input_ref::session`): the stack starts empty and stays unallocated until the first
       // `InputRef::begin_point`, so a reference that never opens a session pays a few zeroed

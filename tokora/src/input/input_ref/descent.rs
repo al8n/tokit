@@ -161,16 +161,40 @@ where
   /// consumption at frame entry — cache-independent, so a prefilled lookahead window trips at the
   /// same place an empty one does.
   ///
-  /// Recovery reads terminality off the grammar's **own** error type, so that re-raise holds for a
-  /// type that stores the value and delegates `is_terminal`, and not for one whose `From` discards
-  /// it — `()` included. A discarding sink converts the trip into an ordinary recoverable error.
-  /// The level is released before that conversion runs, so the bound and the stack are unaffected
-  /// and only the stop is lost; see
-  /// [`RecursionLimitReached`](RecursionLimitReached#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound).
+  /// **Terminality is stored on the input, not in the error payload.** The trip arm counts the trip
+  /// on `Input::resource_trips` before it builds anything the grammar can see, and the
+  /// three combinators above consult that cell **in addition to**
+  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal) on the converted value. So the
+  /// re-raise holds for a grammar error that stores the value and delegates `is_terminal`, and
+  /// equally for one whose `From` discards it — `()` included. A discarding sink loses the
+  /// *payload*; it does not lose the *stop*, because the stop was never the payload's to carry.
+  /// That is invariance, not new semantics: across those three combinators it makes every
+  /// supported sink behave the way a delegating one already did.
   ///
-  /// Nothing is latched on the input. A scanner limit trip latches the poison boundary because
-  /// the lexer's tally is monotone in the input; descent depth is the opposite kind of fact and
-  /// is fully restored by the unwind that carries the error out. See [`RecursionLimitReached`].
+  /// The **resilient collection loops** — `repeated`, `separated` and their delimited forms — read
+  /// the same cell, and there it is not a second opinion but the only one: those swallow arms carry
+  /// no `MaybeTerminal` bound, so it is the whole of what stops an element's trip being
+  /// emitted as a diagnostic and looped past. That one is not invariance — it was spent for every
+  /// error type before #148 — so it changes those families' behaviour on a trip. See
+  /// `Input::resource_trips` and `parser::many`'s `GATE_CENSUS`.
+  ///
+  /// **What every one of those sites tests is a per-attempt transition, not the session fact.**
+  /// The cell is monotone and is never cleared, so reading it absolutely would say "this parse has
+  /// tripped" forever after the first trip — and refuse recovery, and refuse emit-and-continue, for
+  /// every later failure including ordinary syntax errors in unrelated constructs. Each site
+  /// therefore takes a `trip_snapshot` before the attempt it is judging and
+  /// asks `tripped_during_attempt` after it (both crate-internal). A real trip is still
+  /// re-raised wherever it actually happens, including a second one after grammar code caught the
+  /// first.
+  ///
+  /// What is recorded is the **fact that the budget was exceeded**, and not the depth. A scanner
+  /// limit trip latches the poison boundary because the lexer's tally is monotone in the input;
+  /// descent *depth* is the opposite kind of fact and is fully restored by the unwind that carries
+  /// the error out, so it is not latched and must not be. That a budget was once exceeded is
+  /// monotone in exactly the scanner's sense — no unwind, no rollback and no further input can
+  /// un-exceed it — so it is latched, and latched for the parse's remaining life. The two latches
+  /// differ in what they record: a scanner trip has a position, so it latches *where*; a descent
+  /// trip has only a control stack, so it latches *whether*. See [`RecursionLimitReached`].
   ///
   /// # Example
   ///
@@ -219,8 +243,14 @@ where
   /// [`descending`](Self::descending) so the two spellings cannot drift apart.
   ///
   /// Returns the trip **unconverted**. The `From` that builds the caller's error therefore runs in
-  /// the caller, which is what keeps the documented ordering — decrement first, grammar code after
-  /// — true for both spellings even if that conversion panics.
+  /// the caller, which is what keeps the documented ordering — decrement first, latch second,
+  /// grammar code after — true for both spellings even if that conversion panics.
+  ///
+  /// This is the **one writer** of the session's resource-trip counter, which is what makes
+  /// "grammar code cannot lower the latch" a property of the module rather than of discipline:
+  /// the cell is `pub(super)`, no method hands out a mutable route to it, and both Pratt engines
+  /// — typed and token — reach the budget only through here, so both inherit the latch by
+  /// construction rather than by each remembering to set it.
   #[inline(always)]
   fn raise_level(
     &mut self,
@@ -228,17 +258,122 @@ where
   {
     // RAISE, CHECK, ARM — and nothing else may sit between the three. `increase` and `check` are
     // const arithmetic over two `usize`s, so neither can fail and neither can panic; the trip arm
-    // lowers the depth again before it touches caller code, and the `From` that builds the error
-    // runs after that decrement. Past the `Ok`, the witness is armed and its destructor owns the
-    // level. There is therefore no window in which a level is raised and unowned.
+    // lowers the depth again and latches the trip before it touches caller code, and the `From`
+    // that builds the error runs after both. Past the `Ok`, the witness is armed and its
+    // destructor owns the level. There is therefore no window in which a level is raised and
+    // unowned, and none in which a trip has been decided and is not yet recorded.
     self.recursion.increase();
     if let Err(exceeded) = RecursionTracker::check(&*self.recursion) {
       self.recursion.decrease();
+      // LATCH, before the caller's `From` and before the offset read below — a bump of a counter
+      // the caller cannot reach, so a conversion that panics, or a recoverer that swallows the
+      // converted value, cannot leave the session claiming its budget was never exceeded. The
+      // decrement above and this store are the two halves of one fact: the depth is what is live
+      // now, this is what happened.
+      //
+      // Counting rather than latching a `bool` is what makes the reading attempt-relative: a
+      // consulting site compares the value against the one its attempt started with, and a second
+      // trip after a caught first one must not compare equal to it. `wrapping_add` for the same
+      // reason — the comparison is an inequality, and wrapping is the one overflow behaviour under
+      // which consecutive values always differ (a saturating counter would silently stop reporting
+      // new trips at its ceiling). Reaching the wrap needs `usize::MAX` calls of this function.
+      *self.resource_trips = self.resource_trips.wrapping_add(1);
       // Committed consumption, not the cache-front cursor: the same metric the pratt drivers'
       // stall exits report, so the offset does not move with how much lookahead is buffered.
       return Err(RecursionLimitReached::of(self.span().end(), exceeded));
     }
     Ok(Descent { input: self })
+  }
+
+  /// Snapshots the session's **resource-trip counter** — how many times a resource budget has been
+  /// exceeded in this input session so far — for an attempt-relative terminality witness.
+  ///
+  /// The descent twin of [`latch_snapshot`](Self::latch_snapshot), and used the same way: take the
+  /// baseline once per attempt, hand it back to
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt) when judging that attempt's failure.
+  ///
+  /// The counter itself is a **monotone session fact**, counted up by
+  /// [`raise_level`](Self::raise_level)'s trip arm and never lowered: a
+  /// [`Checkpoint`](crate::input::Checkpoint) does not carry it, a restore does not touch it, and
+  /// [`Descent`]'s `Drop` releases only the depth. Read absolutely, `trip_snapshot() != 0` is the
+  /// answer to "did this parse exceed a budget at all" — a true statement about the session, and
+  /// deliberately *not* the question any consulting site asks. See the
+  /// [field's documentation](crate::input::Input) for why the two come apart.
+  ///
+  /// Costs one `usize` load per attempt and nothing anywhere else: no scan, no lookahead fill and
+  /// no token commit reads or writes it.
+  #[inline(always)]
+  pub(crate) const fn trip_snapshot(&self) -> usize {
+    *self.resource_trips
+  }
+
+  /// Whether a **resource budget was exceeded during the attempt** that took `since` as its
+  /// [`trip_snapshot`](Self::trip_snapshot) baseline.
+  ///
+  /// The input-side witness for resource terminality, and the answer to "did the failure I am
+  /// judging come from a tripped budget". Read by [`Recover`](crate::parser::Recover),
+  /// [`InplaceRecover`](crate::parser::InplaceRecover) and
+  /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) *beside*
+  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal), and by the four resilient
+  /// collection loops (`repeated`, `separated` and their delimited forms) on its own, since those
+  /// carry no `MaybeTerminal` bound. Either way a grammar error type that discards
+  /// [`RecursionLimitReached`] on conversion — `()` does — still cannot turn a tripped budget into
+  /// recovery, nor into a diagnostic the collection keeps parsing past.
+  ///
+  /// **Attempt-relative, not session-absolute** — the same discipline
+  /// [`latched_during_attempt`](Self::latched_during_attempt) applies to the scanner's latch, and
+  /// for the same reason. The cell it reads is monotone, so an absolute reading answers "has this
+  /// *parse* ever tripped", which is true forever once grammar code catches a trip and carries on.
+  /// Every later failure in the session — an ordinary syntax error in an unrelated construct
+  /// included — would then be re-raised as though the budget had stopped it, and a single deep
+  /// expression early in a document would suppress every diagnostic after it. Comparing against
+  /// the baseline asks the question the site actually has: *this* attempt, not this parse.
+  ///
+  /// A **count** rather than a `bool` is what makes the comparison hold up a second time. A
+  /// set-once flag compares equal to a baseline taken after an earlier caught trip, so the next
+  /// genuine trip would read as "nothing happened here" — narrowing the witness into a hole. The
+  /// counter changes on every trip, so `!=` is exactly "a trip happened inside this attempt".
+  ///
+  /// # The granularity floor: one attempt, and it fails closed
+  ///
+  /// This answers "**a** trip happened while the attempt ran". It does **not** answer "the `Err` I
+  /// am holding **is** that trip". The two come apart inside a single attempt: grammar code that
+  /// catches a trip itself, carries on, and then fails *ordinarily before the attempt ends* leaves
+  /// the counter moved, and the ordinary failure is re-raised as though the budget had stopped it.
+  ///
+  /// So the resolution of this witness is **one attempt** — one speculative parse for
+  /// [`Recover`](crate::parser::Recover) and
+  /// [`InplaceRecover`](crate::parser::InplaceRecover), one retry cycle for
+  /// [`skip_then_retry`](crate::ParseInput::skip_then_retry), one *element* for the resilient
+  /// collection loops. Within that unit the verdict **fails closed** at the recovery, failure,
+  /// absence and real-closer gates: an ordinary failure sharing its unit with a caught trip is
+  /// re-raised, never the reverse, and a real trip reaching one of those gates is never recovered
+  /// from and never filed as a diagnostic. It says nothing about `Accept` — an element that catches
+  /// the trip and still answers `Accept` spends it, for every error type, on purpose; see
+  /// `parser::many`'s module docs, "the channel neither chokepoint closes" section. Outside the
+  /// unit nothing is charged at all, which is the whole point of taking a baseline.
+  ///
+  /// **The strong form is not implementable at this layer.** Deciding whether the error in hand is
+  /// the trip means interrogating its value, and the grammar's error type may be `()`, whose `From`
+  /// discards [`RecursionLimitReached`] entirely — a sink that discards is the reason this witness
+  /// lives on the input instead of in the error. Any design claiming to tell the two apart is
+  /// either reading a payload that is not there, or is the escape hatch below wearing a different
+  /// name.
+  ///
+  /// **The escape hatch, if a consumer ever needs one:** an explicit *rebaseline* — code that
+  /// deliberately catches a trip declaring it settled, so the enclosing baselines move past it and
+  /// the attempt is judged only on what happens after. That is a cooperative operation, and it is
+  /// the design to build if the floor ever costs somebody something real. It is not built: no
+  /// consumer needs it yet, and this crate does not publish API on speculation.
+  ///
+  /// `tokora/tests/collection_resource_trip.rs` and `tokora/tests/pratt_limit_unit_sink.rs` each
+  /// pin one cell on this behaviour, paired against the cell that moves the catch outside the unit
+  /// and gets the opposite answer.
+  ///
+  /// Costs one `usize` load and a comparison, on the failure arm only.
+  #[inline(always)]
+  pub(crate) const fn tripped_during_attempt(&self, since: usize) -> bool {
+    *self.resource_trips != since
   }
 }
 

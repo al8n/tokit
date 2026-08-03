@@ -125,6 +125,7 @@
 //! | [`savepoint_seq`](Lineage) | `Lineage` | monotone id source | **nothing** — same |
 //! | `finality` (`is_final`) | `Input` (snapshot on `InputRef`) | **world fact** | **nothing** — and it cannot change while a handle lives |
 //! | `recursion` (the descent budget) | `Input` (borrowed through `InputRef`) | **control-stack fact** | **nothing** — a checkpoint does not carry it; the `Descent` guard's drop balances it with the frame it counts |
+//! | `resource_trips` (how many budget trips) | `Input` (borrowed through `InputRef`) | **monotone session fact** | **nothing** — it only counts up, and there is no writer that lowers it. A rollback rewinds *input progress*; it cannot un-exceed a budget, so restoring this cell would erase a stop that has already been decided. Sites that need a *per-attempt* answer snapshot it and compare rather than reading it absolutely |
 //! | `witness` (input identity) | `Input` | witness | nothing (identity is fixed for the input's life) |
 //! | `depth` (trace nesting) | `Input` | instrumentation | nothing (trace events are out of band) |
 
@@ -188,6 +189,14 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     //   guard's destructor, which pops with the frame in `std` and `no_std` alike — the one
     //   witness whose behaviour does not fork on the unwind edge. Not in `Checkpoint`.
     recursion: _,
+    // — MONOTONE SESSION FACT: restore does NOT touch it, and must not. It is the sibling of the
+    //   cell above and the opposite kind of fact from it: the *depth* is restored by the unwind
+    //   because frames genuinely came back, while *that the budget was exceeded* is a thing that
+    //   happened and cannot stop having happened. Rolling it back would hand recovery a session
+    //   claiming a stop it has already been given. Counted up by `raise_level`'s trip arm; no
+    //   lowering writer exists. Not in `Checkpoint`. The recovery combinators and the collection
+    //   drivers read it as a per-attempt *difference*, never absolutely — see the field's doc.
+    resource_trips: _,
     // — GROUND TRUTH, and the aggregate's anchor: the emission log itself, bound at construction
     //   and owned for the input's whole life. Restore truncates it to the saved mark — the same
     //   action as when it was borrowed per handle. What changed is that the two watermarks above
@@ -236,6 +245,9 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     // — CONTROL-STACK FACT (borrowed): raised by `descend`, lowered by the `Descent` guard's
     //   drop, never restored. Same class as the `Input` field above it.
     recursion: _,
+    // — MONOTONE SESSION FACT (borrowed): counted up by `raise_level`'s trip arm, never lowered
+    //   and never restored. Same class as the `Input` field above it.
+    resource_trips: _,
     // — WORLD FACT, as a read-only `Copy` snapshot: no mutator, and the handle's borrow of the
     //   input locks out the seal, so it is CONSTANT for this handle's life.
     finality: _,

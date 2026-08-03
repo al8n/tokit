@@ -77,9 +77,181 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    that walk by node, or that assert on a rendered tree, see the run inside the node of the token
    before it. A source with *no* committed token at all is not affected.
 
+2. **A recursion-limit trip is now terminal for every grammar error type, `()` included — neither
+   recovery nor a collection driver's failure path can spend it.** Two more of a collection
+   driver's exits can reach a construct's end without the trip ever surfacing as an `Err`, and both
+   close later in this entry: an element's absence exit (item 7) and a real closer committed just
+   after one (item 8). A fourth exit does not close, and is not going to: an element that catches
+   the trip and still answers `Accept` spends it, for every error type, on purpose. Decline lets
+   the *driver* manufacture the construct's end from a stop the caller is never told about, which is
+   why the driver has to guard its own conclusion; `Accept` means the *element* produced the value,
+   and the driver is faithfully collecting what it was handed, not concluding anything of its own.
+   tokora cannot stop a grammar from catching an error and returning a value without diagnosing
+   it — true of every error a grammar can catch and answer, not only this one — so gating `Accept`
+   would forbid a value-producing element from ever recovering from a budget it deliberately
+   caught: a broader contract than #148 establishes. Item 7 states the exemption at the point it
+   first applies; `parser::many`'s module docs carry it as the standing contract, not an
+   afterthought.
+
+   This closes 0.8.0's [known limitation — a discarding error sink erases
+   the recursion trip's stop, not its
+   bound](#0.8.0-known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound),
+   which recorded the behaviour rather than answering it. The answer is that a resource bound an
+   unrelated error sink can opt out of is not a bound.
+
+   [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
+   has always been terminal for every value, but
+   [`recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.recover),
+   [`inplace_recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.inplace_recover)
+   and
+   [`skip_then_retry`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.skip_then_retry)
+   read that off the **converted** value — after the grammar's `From` had run. A `From` that
+   discards the payload discards the marker with it, so a `()`-errored grammar got
+   `is_terminal() == false` back and recovery **spent** the trip.
+
+   **Where resource terminality is stored now:** on the **input session**, in a monotone counter
+   (`Input::resource_trips`, crate-internal, bumped by
+   [`InputRef::descend`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.descend)'s
+   trip arm before the grammar's `From` runs, so a panicking conversion cannot skip it). The three
+   combinators read it **beside** `MaybeTerminal::is_terminal`. No conversion the grammar writes
+   can reach it, and nothing lowers it: a `Checkpoint` does not carry it and a restore does not
+   touch it. Grammar error conversion therefore cannot affect it — which is the question 0.8.0's
+   entry left open, answered here in the terms it asked for.
+
+   **What the cell records and what the combinators test are different questions, deliberately.**
+   The cell is a session fact — *this parse exceeded a budget, this many times* — and it is never
+   cleared, because nothing can un-exceed a budget. Every site that consults it is judging **one
+   attempt**, so it snapshots the counter before that attempt and re-raises only when the count
+   moved *during* it. The two answers come apart exactly where grammar code catches a trip itself
+   and parses on: the session has tripped forever after, while the next attempt is an ordinary one.
+   Reading the session fact there would refuse recovery — and, below, emit-and-continue — for every
+   later failure in the document, ordinary syntax errors included. A real trip is still re-raised
+   wherever one happens, a second trip after a caught first one included.
+
+   **What changes for you, and only if your error type discards the value:**
+
+   | your grammar's error type | before | now |
+   |---|---|---|
+   | stores it and delegates `is_terminal` | re-raised | re-raised — **unchanged** |
+   | `()`, or any `From` that drops it | recovery ran; `skip_then_retry` skipped and committed | re-raised |
+
+   Concretely, measured on one ladder and one 32-deep input: `.recover(..)` used to return
+   `Ok(<the recoverer's synthesized value>)` and now returns `Err`; `.skip_then_retry(..)` used to
+   hand the surrounding grammar back offset **68** — the whole chain and the sync token consumed
+   and committed — and now hands back **0**, which is the number a delegating error type always
+   read. Same ladder, same limit, two error types, one answer.
+
+   **If you relied on the old behaviour**, the fix is the budget, not the sink: raise it with
+   [`with_recursion_limiter`](https://docs.rs/tokora/latest/tokora/struct.ParserContext.html#method.with_recursion_limiter).
+   Recovering from an exhausted depth budget was never sound — no quantity of skipped input makes
+   the next descent shallower, so those cycles spent input for a verdict they could not change. If
+   you want the trip's *details* (offset, depth, limitation), that still requires an error type
+   that stores the value; the discarding sink loses the payload exactly as before.
+
+   **The same stop now also reaches the resilient collection loops — and that half was never
+   sink-dependent.** `repeated`, `separated` and their delimited forms swallow an element's `Err`
+   by design: emit it as a diagnostic and keep looping. Their gate re-raised the frontier
+   `Incomplete` and the *scanner*'s committed boundary, and a descent trip latches neither — it has
+   a control stack rather than a position, so there is no boundary for it to latch. A trip inside
+   an element was therefore filed as an ordinary diagnostic and the loop went on to the next one,
+   bounded only by the no-progress guard. Unlike the recovery half above, that happened for **every**
+   error type: a delegating one was spent there exactly as `()` was. The gate reads the session
+   counter too now — and, like the recovery half, it reads it against a baseline taken **once per
+   element**, so what re-raises is a trip *that element* caused.
+
+   | driving an element whose own attempt hands the trip back as `Err` | before | now |
+   |---|---|---|
+   | `repeated()`, `separated_by(..)`, and both delimited forms | the trip filed as a diagnostic; the loop continued to the next element and returned `Ok` with whatever it collected | the collection returns `Err` at the first trip, with **nothing filed** |
+   | the same, for an element that fails **ordinarily** after some earlier construct's trip was caught and parsed past | the failure filed as a diagnostic; the loop continued | unchanged — the failure filed as a diagnostic; the loop continues |
+
+   **This half changes behaviour for delegating and discarding error types alike**, so a grammar
+   that used to receive a truncated-with-diagnostics container over a too-deep input now receives a
+   failed parse. The remedy is the same one as above and for the same reason: raise the budget with
+   `with_recursion_limiter`. A container assembled from elements the budget forbade reading was
+   never a description of the input, and the diagnostic that named the trip was filed against a
+   construct the parse had already been told to stop reading.
+
+   **The scope of the change, stated rather than left to be found: it is the element's own trip
+   that ends the collection, not the session's.** A parse that catches a trip and goes on keeps
+   emit-and-continue recovery for the constructs after it — which is what an editor or language
+   server needs, since one deeply-nested expression must not suppress the rest of the file's
+   diagnostics. The same holds one nesting level up: an inner collection's trip that an element
+   swallows is not charged to the enclosing collection's next ordinary failure.
+
+   **The granularity floor, because "the constructs after it" has a resolution.** The witness is a
+   counter, and a counter proves that *a* trip happened during the unit being judged — not that the
+   error being judged *is* that trip. The unit is one attempt for `recover` and `inplace_recover`,
+   one retry cycle for `skip_then_retry`, and one **element** for the collections. So grammar code
+   that catches a trip itself and then fails **ordinarily inside that same unit** has the ordinary
+   failure re-raised rather than recovered or filed. Move the catch one construct further out and
+   it recovers, or is filed and looped past, exactly as an untripped parse would; that contrast is
+   pinned by a test on each side of it.
+
+   The floor **fails closed** at the recovery, failure, absence and real-closer gates: a real trip
+   that reaches one of them is never recovered from and never filed as a diagnostic, and the only
+   over-charged case is an ordinary failure that shares its unit with a caught trip. It says nothing
+   about `Accept`, the fourth exit above: an element that catches a trip and still answers `Accept`
+   spends it, for every error type, on purpose.
+
+   The floor cannot be lowered by reading the error, because the error type is allowed to be `()` and
+   discard the trip — which is why the witness is on the input in the first place. Lowering it
+   needs a cooperative *rebaseline* published for code that deliberately catches a trip and wants
+   the enclosing baseline moved past it. That is not in this release; no public name changes if it
+   is ever added.
+
+   — *(#148 R1)*
+
+### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+**This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**
+added, measured for the first time now, and it is filed here rather than folded into the shipped
+0.8.0 section because it is news a 0.7.3 consumer needs and 0.8.0's own text does not carry it.
+
+#### `RecursionLimiter::unlimited` — measured SILENT, and it is your call site to check
+
+**You are exposed if you wrote an `unlimited()` associated function on `RecursionLimiter`.** That
+type is public in **0.7.3**, so this is not hypothetical: any consumer holding one already had
+somewhere to hang the name, and 0.8.0's
+[`RecursionLimiter::unlimited`](https://docs.rs/tokora/latest/tokora/state/recursion_tracker/struct.RecursionLimiter.html#method.unlimited)
+now competes for it by path.
+
+Reproduced two-sided by `ci/name_collision/`, base `60f27a3` against this branch:
+
+```text
+SILENT  unlimited/discarded    base=witness=1  head=witness=0
+```
+
+Both sides compile, **neither emits any diagnostic**, and the two run different functions: yours
+on 0.7.3, tokora's on 0.8.0 and later. `unlimited/used` is `loud` on the same probe, so a
+discarded return is the whole of the difference — `RecursionLimiter` carries no `#[must_use]`, and
+`unused_must_use` does not fire on a plain struct. **The remedy is UFCS**: `MyTrait::unlimited(..)`
+or `<RecursionLimiter as MyExt>::unlimited()` pins your function by name and is immune to this.
+
+`#[must_use]` was considered and rejected as the fix: it would not reach the case that matters —
+a consumer who *assigns* the result, which the harness cannot generate and which stays silent
+regardless — while firing on legitimate discards. Disclosure is the honest instrument here.
+
+Two things about *why this arrives late*, both of which are the point rather than an excuse:
+
+- 0.8.0's exposure table already lists `unlimited` under "you wrote it on `RecursionLimiter`", so
+  the *name* was disclosed. What was not disclosed is that this one is **measured silent**, in a
+  category the harness's README says a silent row "would be news" in — the first
+  `inherent_assoc_fn` row ever to score one. The probe could not construct it at the time: #147
+  introduced the owner and `gen_probe.py` had no template for it, so every row on that owner came
+  back `FATAL` — an *incomplete* verdict, which is not a clean one. #148's Stage A added the
+  templates and the `new-owner` verdict, and the finding fell out immediately.
+- It is disclosed on **this** branch and could not wait. The probe's inventory is a two-sided
+  delta: once this merges, `unlimited` exists on both sides, the row leaves every future plan, and
+  the harness can never re-litigate it. A green run after that would mean "not probed", not "not
+  colliding".
+
+Recorded in `ci/name_collision/disclosed.txt`, whose fourth-and-fifth-row split now states plainly
+that the earlier four ride a bounded receiver and **this one does not**: `RecursionLimiter` is a
+concrete public struct with no bound to reject anybody.
+
 ### Performance
 
-2. **`Sink::finish` replays the event log once instead of twice.** Materialization used to make
+3. **`Sink::finish` replays the event log once instead of twice.** Materialization used to make
    a full gather pass over every event before the walk that drives the builder: it validated
    kinds and retro-wrap targets, collected the recorded lexer-error spans, and read the
    uncovered runs off the token spans so the walk could tile a run at the token it trails. All
@@ -107,7 +279,7 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    refused; a stream with two defects may name the other one. Within a single event the order is
    unchanged — each fused arm runs its gather checks ahead of its walk checks.
 
-3. **A `Sink` reserves its event log at construction, from the source's length.** The log used
+4. **A `Sink` reserves its event log at construction, from the source's length.** The log used
    to grow from empty, doubling about sixteen times over a 57.7 KB document and copying roughly
    4 MiB in the process. `Sink::new` now asks for the capacity that doubling would have arrived
    at — the source's byte length rounded up to a power of two, capped at 65,536 events (2 MiB) —
@@ -127,7 +299,7 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    allocator says.
 
 
-4. **A `trace`-feature preview no longer costs the entire remaining source, every time.**
+5. **A `trace`-feature preview no longer costs the entire remaining source, every time.**
  `InputRef`'s per-event source preview (`trace_preview`, behind the `trace` feature) built
  `format!("{rest:?}")` over the *whole* remaining source — potentially the entire input, at
  every instrumented combinator call (`peek`, `begin`/`commit`/`rollback`, `try_expect`,
@@ -181,8 +353,174 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
 
 ### Fixed
 
+- **The collection gate's own census could pass by not looking.** `parser::many`'s `GATE_CENSUS`
+  read four hard-coded sources and counted one exact spelling of the swallow beneath the gate —
+  `emit_error(Spanned::new(span,`. A swallow spelled any other way, or written in a fifth source,
+  moved neither tally, so the equality it asserted still held and the census stayed green over an
+  ungated emit-and-continue site. A census quoted as evidence that answers by not looking is worse
+  than none.
 
-5. **A `trace`-feature preview no longer reports a partial `Debug` rendering as the complete,
+  The swallow is now a single chokepoint — one `emit_error` call in the whole `many`/`fold` tree,
+  with the three never-recoverable witnesses above it — so a driver physically has nothing to spell
+  differently. The census matches the **call** rather than its arguments and asserts the count is
+  zero in every driver source; it scans the chokepoint's own body for the three witnesses ahead of
+  the emission; and a third test requires every module of the driver trees to be classified, so the
+  source list cannot fall behind the tree. Every scan panics when the thing it looks for is absent
+  instead of finding nothing to check. Shown non-vacuous by planting a swallow in a fifth source
+  with a spelling the old shape did not match — it fails, naming the file, then the plant was
+  removed. No behaviour change. — *(#148, verification debt)*
+
+  **And the same defect, one level in: the witness scan proved presence, not gating.** The scan
+  above requires each of the three never-recoverable witnesses to appear once in the source ahead
+  of the emission. Textual presence ahead of a call is not control-flow domination — a body that
+  reads all three into `let _ =` bindings and then emits unconditionally satisfies it with the gate
+  entirely gone. Compiled and run: the census stayed green.
+
+  Answered by mutation rather than by a stronger scan, since proving domination from source text
+  means writing a Rust parser inside a test module that must also build under
+  `--no-default-features`. Each witness was neutered in turn and the whole `--all-features` suite
+  run: the frontier-`Incomplete` witness reds 2 tests, the descent-trip witness reds 12 — and
+  **`at_committed_boundary()` red nothing at all**, in the entire suite. Its only cell was negative
+  (a boundary the cursor has *not* reached must not be charged to an ordinary failure), which a
+  deleted witness also satisfies. Unguarded, a collection that runs onto a poison boundary files
+  the stop as an ordinary syntax error and returns a **silently truncated success** — `Ok` over
+  input the scanner never read.
+
+  `tokora/tests/collection_terminal_stop.rs` gains the positive direction: five `r1b_*` cells, one
+  per try-driven family plus the truncation case, each with the file's non-vacuity control (the
+  same probe run twice with only the scan limit changed, required to disagree, and required to have
+  actually tripped). All five are red under the mutation and green without it. The census now states
+  what a needle scan proves and names the suite that proves the rest, and both it and the
+  chokepoint's own docs carry the re-check procedure. No behaviour change. — *(#148, verification
+  debt)*
+
+- **The recursion-limit test suite's stack-address witness made every Miri job and the ASan job
+  red, on `main`.** `pratt_limit_unit_sink`'s unwind cell corroborates its two depth-cell
+  assertions out-of-band by comparing the addresses of two stack locals. That comparison measures
+  frame liveness only while the addresses are native stack offsets: ASan can relocate a frame's
+  locals onto a heap-allocated fake stack and Miri hands out virtual allocation addresses. Three of
+  four instrumented hosts measured the *unwound* frame as farther from the baseline than the
+  descent it had already left — inverted operands, so no threshold rescues the comparison — while a
+  fourth (ASan on aarch64-darwin) passed on the same source. A relation whose answer changes with
+  the runner is reporting the runner, so it is now scoped to native builds via `cfg!(miri)` plus a
+  `TOKORA_SANITIZER` variable `ci/sanitizer.sh` exports for every leg it runs.
+
+  The two depth-cell assertions stay **active** under Miri and every sanitizer, and the gated one
+  is not replaced by a second library-side counter: reading the same cell twice is not
+  corroboration. A skipped assertion announces itself on the process's real stderr — not through
+  `eprintln!`, which libtest swallows for a passing test — so the one build where the check does
+  not run is not the one build where nobody can see that. — *(#148, verification debt)*
+
+- **`pratt_limit`'s deep-stack wall-clock bound was calibrated for the wrong machine, and it made
+  the `miri-tb-x86_64-unknown-linux-gnu` leg intermittently red on `main`.** `on_a_deep_stack`
+  bounds every deep-recursion cell to a fixed number of seconds so a recursion-limit regression
+  fails the test with a message instead of hanging the process. Under interpretation that number
+  measures the interpreter, not the parser, and not by a flat factor: `-Zmiri-tree-borrows`
+  revalidates a growing borrow tree on every access, so
+  `the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it`'s 1000-level `unlimited()`
+  chain — this file's deepest cell — scales worse than linearly with depth, not by the roughly two
+  orders of magnitude a flat per-step slowdown would predict. Measured directly, with the exact
+  command and `-tb` flags `ci/miri_tb.sh` runs: 60–69s across three runs on aarch64-apple-darwin —
+  already more than half of the native 120s bound, on a different host and architecture than the
+  `x86_64-unknown-linux-gnu` shared runner CI failed on, which is why that leg flaked instead of
+  failing outright every time.
+
+  The bound is now `cfg!(miri)`-scoped: 700 seconds under Miri — a ×10 margin over the slower
+  reading, sized for the cross-host and shared-runner gap CI had already demonstrated, not just
+  this machine's own run-to-run noise — and 120 seconds, unchanged, natively. The bound's purpose
+  is untouched: a genuine hang is still caught, on a schedule that fits the machine actually
+  running it, and the native path carries no behaviour change — an unlimited native run finishes
+  in hundredths of a second, nowhere near either number. — *(#148, verification debt)*
+
+- **The name-collision gate reported an incomplete verdict as if it were a result.**
+  `gen_probe.py` had no template for the owners #147 introduced, so every row on them came back
+  `FATAL`. Templates alone were not enough: a probe naming an owner the same diff introduces cannot
+  compile against the base ref, and base-no-compile was unconditionally `INCONCL`. A new
+  `new-owner` verdict says exactly that, and carries two witnesses so it cannot be manufactured —
+  rustc must name the owner as unresolved on base and must not on head. The verdict is complete
+  now: 27/27 rows probed, 0 FATAL, 0 INCONCL, 0 UNPROBED. — *(#148, verification debt)*
+
+- **That verdict proved base was broken and never checked that head ran.** Its two witnesses
+  required rustc to name the owner unresolved on base and to stay silent about it on head — but
+  silence is also what a head build broken for an unrelated reason looks like: `no-compile`,
+  `upstream-fail`, `bad-witness(...)` and `unreached` none say the owner is unresolved either, so a
+  head that failed to compile the probe for a reason having nothing to do with the owner — or that
+  never reached the call at all — still read as proof the owner is new. `new-owner` now
+  additionally requires head to show a completed run, checked by an allowlist of the one shape
+  that is evidence (`witness=*`) rather than a denylist of the shapes already known to be broken,
+  which is silent about the next one nobody has named yet. Re-run against a genuine pre-#147 base,
+  9 of the 14 `RecursionLimitReached` rows the prior entry counted turn out to have been passing on
+  exactly this hole: `map_offset` and `of`'s templates call the real method with fewer arguments
+  than it takes, and the other five methods' `used` spelling forces a `u8` return type none of them
+  have, so head never compiled on any of the nine. They now score `INCONCL`, correctly — only the
+  five methods whose `discarded` spelling silently and successfully calls the real inherent method
+  were ever provable, and the fix does not widen to paper over the rest. — *(#148, verification
+  debt)*
+
+- **That fix's own allowlist was still too wide, and a sibling verdict had none at all.**
+  `new-owner`'s `case "$h" in witness=*)` accepts `witness=1` exactly as readily as `witness=0` —
+  but the marker is CONSUMER-CALLS, attribution rather than existence (see the comment where it is
+  assigned), and `witness=1` means the CONSUMER's own extension item took the call, i.e. the
+  probed name on the new owner was never a candidate this run. A template that compiles clean
+  while constructing no real collision would still have scored `new-owner`. The allowlist now
+  requires `witness=0*` specifically — the one shape that says tokora's item won the resolution —
+  and a `witness=1` head reads `INCONCL`, naming the reason.
+
+  Separately, the `glob-err`/`glob-ok` verdicts intercepted only the LITERAL STRING `no-compile` on
+  the base side before trusting head's evidence. A base broken for any other reason —
+  `upstream-fail` chief among them — fell through into the head-only checks and let a head-side
+  ambiguity decide the verdict alone, with no valid before-state at all. The base side is now
+  checked against an allowlist too: `no-compile` or `unreached` (the only two shapes a
+  compiling-or-rejected glob probe can produce, since `glob_name`/`glob_macro`'s `drive()` calls
+  only `ran()` and never `reached()`), anything else `INCONCL`.
+
+  Both proved in the failing direction, against a real glob collision and a real `new-owner` row,
+  then reverted — `git diff` confirmed clean before this fix was committed. A forced
+  `base=upstream-fail` alongside a genuine head-side ambiguity moved the glob row from `glob-err`
+  to `INCONCL`; a forced `witness=1` (explicit UFCS on the consumer trait, bypassing inherent-method
+  resolution) on a real `new-owner` row moved it from `new-owner` to `INCONCL`. Re-run against the
+  same pre-#147 base as the prior entry, the tally is unchanged — 5 `new-owner`, 9 `INCONCL` —
+  because none of the 14 real rows there naturally produce `witness=1`; only the forced case
+  exercises the new branch. — *(#148, verification debt)*
+
+- **That base-side allowlist had a mirror-image hole on the head side, and it was the more
+  exploitable of the two.** After the fix above, `glob-ok`'s only remaining check was
+  `elif [ -n "$said" ]` — accept once rustc says *something* ambiguity-shaped anywhere in the
+  head log, with no check on `$h` itself. `upstream-fail`, `bad-witness(...)` and any
+  `witness=*` all read as a pass exactly as readily as a genuine `unreached`, so a head build
+  broken for a reason having nothing to do with the probed name — provided an attributed
+  ambiguity diagnostic happened to be sitting in the same log — still scored `glob-ok`. That is
+  acceptance on the absence of a completed head-side probe: the same defect class the base-side
+  fix above had just closed, on the other side of the same row.
+
+  `h` is now held to the identical two-shape allowlist as `b`: `no-compile` or `unreached`,
+  because `glob_name`/`glob_macro`'s `drive()` calls only `ran()` and never `reached()` — a head
+  that actually finishes compiling and running can only ever read `unreached` here, never
+  `witness=*`. `glob-ok` now requires `h = unreached` specifically; `upstream-fail`,
+  `bad-witness(...)` and any `witness=*` read `INCONCL`, naming the reason, instead of falling
+  through.
+
+  Proved in the failing direction against the same pre-#147 base and the same
+  `RecursionLimitReached` glob row as the prior entry: a forced `head=upstream-fail` alongside
+  the row's genuine, untouched ambiguity diagnostic moved it from `glob-ok` to `INCONCL`; forcing
+  `bad-witness(calls=2,reached=0)`, `witness=0` and `witness=1` the same way each land `INCONCL`
+  too. Reverted afterward; `git diff` confirmed clean before this fix was committed. Re-run
+  unperturbed, the same row reaches its natural `glob-err` verdict, unchanged from before this
+  fix.
+
+  Audited the rest of the file for the same asymmetry — a verdict proving one side reached a
+  conclusion without proving the other did. `new-owner`'s two witnesses already check
+  `base_unresolved` and `head_unresolved` by the same predicate, and the item-row ladder's
+  `unreached`/`upstream-fail`/`bad-witness` filter matches against `"$b$h"` concatenated, which
+  catches either side by construction; the base-only `case "$b" in witness=1*|no-compile)`
+  further down is not a shape gap of this kind; it fixes the pre-release baseline's expected
+  value, and every value `$h` can still hold past it is already handled by name in the branches
+  below. This glob-row pair was the only place in the file carrying an allowlist on one side and
+  none on the other. — *(#148, verification debt)*
+
+
+
+6. **A `trace`-feature preview no longer reports a partial `Debug` rendering as the complete,
  short value it is not.** `bounded_debug` — the bounded sink `trace_preview` (behind the
  `trace` feature) uses to build its per-event source preview — discarded the `Result` from its
  own `write!` call outright, so its truncation flag came from the sink's private bookkeeping
@@ -211,6 +549,94 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
  which no in-tree `Source`/`Slice` pairing does, so every case that already reached the sink
  normally — which is to say, every case this crate has ever exercised — renders
  byte-identically to before.
+
+7. **A recursion-limit trip an element ANSWERED was still spendable — as a successful, complete
+   collection.** Item 2 above closes the path where an element hands its trip back as `Err`: the
+   collection drivers gate that at one chokepoint and re-raise it. They gated **only** that path.
+   An element that catches [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
+   itself and then reports *no more elements* — by declining, or by accepting without consuming
+   anything — hands the driver an `Ok`, the chokepoint never runs, and the driver's **absence** exit
+   reads it as the ordinary end of the construct. `repeated()`, `separated_by(..)` and both
+   delimited forms returned `Ok` with everything collected so far, filing nothing. A resource
+   budget stopped the parse and the parse reported a complete construct — the same defect as item 2,
+   for every error type equally, reached through the exit item 2's gate does not cover.
+
+   The absence exits now consult the same session counter, at the same per-element granularity, and
+   through a second chokepoint of their own: nine exits across the four drivers — the element
+   decline, the no-progress stall, and in the delimited pair the close probe's `WrongToken` and
+   `Eof` arms — surface the stop as the terminal-marked end-of-input error those exits already
+   produced for a *scanner* stop, instead of ending the construct cleanly.
+
+   | driving an element that catches a depth trip and then reports absence | before | now |
+   |---|---|---|
+   | `repeated()`, `separated_by(..)`, and both delimited forms | `Ok` with the elements collected before the stop, nothing filed | `Err` — a terminal end-of-input, still nothing filed |
+
+   **Unchanged here, and deliberately so**: the *scanner* half of this gate stays off an exit
+   resting on a **real token**. A `Close` verdict from the delimited drivers' close probe, and the
+   mid-scan closer in the delimited separated driver, read a committed pre-trip token, so the
+   construct ended *ahead of* any boundary a later lookahead latched and a wider scan window parses
+   the identical source to the identical value. The *descent* half of it is a different kind of fact
+   and does belong on those exits — item 8 below is that correction. An `Accept` is untouched either
+   way, and stays that way: an element that catches a trip and still returns a value has answered
+   it, not concluded absence, so the driver is faithfully collecting what it was handed rather than
+   manufacturing a stop of its own — item 2 above states this as the fourth channel a caught trip
+   can still spend, and why gating it would be a broader contract than #148 establishes. And
+   the granularity floor item 2 describes is exactly the same here — the baseline is one
+   **element**, so a trip an *earlier* element caught and parsed past does not end the collection
+   when a later one legitimately runs out of input.
+
+   The eight `*_while` drivers and folds share this hole and are **found, not fixed** — measured,
+   not inferred: `fold` over an element that catches a trip and declines returns `Ok(6)` on `"1 2 3"`
+   under a budget the element exceeds and `Ok(6)` under one it does not, and `repeated_while` over an
+   element that catches a trip and accepts consuming nothing returns `Ok([1, 2, 3, …])` under both.
+   Those drivers never file an element's `Err`, so a trip is terminal there unless the element
+   catches it — but an element that catches one and then reports absence ends the collection cleanly
+   just as it did in the try-driven four. Closing it needs a per-element trip baseline none of those
+   loops takes.
+   `parser::many`'s `GATE_CENSUS` records the classification per driver as data and requires a
+   source in that group to take **no** trip baseline and read **no** trip witness, so one cannot
+   half-adopt the gate: the day a `*_while` driver reads the counter, the classification reds and
+   has to be re-cut. — *(#148 R7)*
+
+8. **A closer that arrives after the trip does not unmake it.** Item 7 gated the delimited drivers'
+   *absence* exits and left the arm where the closer is genuinely present ungated, on the reasoning
+   that a committed pre-trip closer settles the question. It settles **one** of the two questions,
+   and the two are facts of different kinds:
+
+   - a terminal **scanner** stop is a fact about a token *position*. The close probe is cache-first,
+     so a `Close` verdict rests on a real pre-trip token: the construct ended *ahead of* whatever
+     boundary the element's lookahead went on to latch, and that boundary is not about it. Reading it
+     there would fail a parse a wider scan window completes to the identical value, so it still does
+     not — unchanged from item 7;
+   - a **descent** budget trip is a *counter event that already happened inside the element attempt*.
+     Nothing arriving afterwards unmakes it. An element that caught a
+     [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html),
+     reported *no more elements*, and was then followed by a real closer produced a **successfully
+     closed collection that had silently spent a resource-limit stop** — item 7's defect, through the
+     one arm item 7's gate deliberately does not cover.
+
+   Three exits now consult the trip counter before they commit a real closer, at the same
+   per-element granularity: `repeated().delimited()`'s decline arm and its no-progress epilogue, and
+   `separated_by(..).delimited()`'s epilogue.
+
+   | driving an element that catches a depth trip, reports absence, and IS followed by the closer | before | now |
+   |---|---|---|
+   | `repeated().delimited()` over `"( 1 2 3 )"`, element declines | `Ok([1, 2, 3])`, nothing filed | `Err` — a terminal end-of-input, still nothing filed |
+   | `repeated().delimited()` over `"( 1 2 3 )"`, element accepts consuming nothing | `Ok([1, 2, 3, …])`, nothing filed | `Err` — likewise |
+   | `separated_by(..).delimited()`, element consumes and declines before the closer | `Ok([1, 2, 3])`, nothing filed | `Err` — likewise |
+
+   **Still unchanged**: the mid-scan closer in `separated_by(..).delimited()`. It is reached from the
+   top of a cycle, so only an *accepting* element can precede it — a decline and a stall each break
+   into the epilogue — and the cycle's baseline is taken above it, which makes the term a constant
+   `false` there. An `Accept` remains untouched everywhere, for the reason item 7 gives.
+
+   **Found and not fixed**, in the same terms as item 7's residual: the `*_while` drivers and the
+   folds have real-closer exits too, and they take no trip baseline at all, so this correction cannot
+   reach them until the per-element baseline item 7 describes is added. `parser::many`'s
+   `GATE_CENSUS` gains a per-source count of real-closer exits with a region scan requiring each
+   close verdict to reach the gate before it commits, plus a two-directional scan of the gate itself
+   — the counter read, the position *not* read, since a scanner term smuggled in there is as much a
+   defect as a missing descent one. — *(#148 R8)*
 
 
 ## 0.8.0 (2026-07-31)
@@ -2393,6 +2819,8 @@ parse-to-emitter contract, and it flips when `finish` starts refusing these span
 `duplicate_zero_width_tokens_are_not_yet_detected`
 
 — *(R8, #123)*
+
+<a id="0.8.0-known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound"></a>
 
 ### Known limitation — a discarding error sink erases the recursion trip's stop, not its bound
 

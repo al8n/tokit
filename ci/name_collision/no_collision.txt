@@ -8,4 +8,24 @@
 # probe globbed only the crate root, and three functions referenced in the type namespace.
 # None of them was tested. That is why agreement is no longer accepted by default.
 #
-# (currently empty — every probe constructs a real collision)
+# ── `InputRef::recursion` — an EARLIER pick claims the call ──────────────────────────────
+#
+# tokora's is `pub const fn recursion(&self) -> &RecursionLimiter`. The `inherent_method`
+# template's consumer is `fn recursion(&mut self) -> u8`, and the probe's receiver expression
+# already has type `&mut InputRef<..>`. The receiver walk therefore finds the consumer's item
+# at its FIRST step — `self: &mut InputRef` matches by value — while tokora's `&self` item is
+# only reachable one autoref step later. The earlier pick wins, on both sides, and tokora's
+# item is never a candidate.
+#
+# So this is a real property of this probe's shape and not a broken probe — and it is a
+# statement about the SHAPE, not about the name. A consumer whose extension item takes `&self`
+# competes at the same step tokora's does, and this harness cannot generate that consumer:
+# `inherent_method` hardcodes `&mut self`, exactly as it hardcodes `-> u8` (see README, "What
+# this harness does NOT test"). Read these two rows as "the `&mut self` consumer keeps its
+# call", never as "`recursion` cannot be stolen".
+#
+# The sibling names on the same owner are the control: `descend` and `descending` are both
+# `&mut self` in tokora, compete at the same first step, and score `loud` on this same
+# template — so the template does construct collisions on `InputRef` when the receivers agree.
+recursion/used
+recursion/discarded

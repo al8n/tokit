@@ -35,8 +35,26 @@ SANITIZERS="${2:-address thread}"
 
 export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
 
+# ## Telling the tests they are instrumented
+#
+# One test — `pratt_limit_unit_sink`'s unwind cell — corroborates the library's recursion-depth
+# accounting against the *machine*, by comparing the addresses of two stack locals. That
+# comparison is only a measurement while the addresses are native stack offsets, and under a
+# sanitizer they are not: ASan can relocate a frame's locals onto a heap-allocated fake stack, so
+# the recoverer measured DEEPER than the descent it had already unwound past. Inverted operands,
+# not a tight margin — no threshold rescues it.
+#
+# There is no stable `cfg` for "am I instrumented": `cfg(sanitize = "address")` needs
+# `feature(cfg_sanitize)`, and an integration test compiled on stable cannot carry a feature gate.
+# So the leg announces itself in the environment and the test reads it at run time. Exported
+# INSIDE the loop, and with `${san}` rather than a constant, so it covers every sanitizer this
+# script runs and names which one in the skip line the test prints.
+#
+# It gates exactly one assertion. The depth-cell assertions stay live under every sanitizer, and
+# the skipped one is announced loudly on stderr rather than quietly passing.
 for san in $SANITIZERS; do
   echo "=== sanitizer: ${san} on ${TARGET} ==="
+  export TOKORA_SANITIZER="${san}"
   case "$san" in
     memory | thread)
       # instrumented std — see the note above before removing `-Zbuild-std`

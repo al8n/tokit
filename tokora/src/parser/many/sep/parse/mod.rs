@@ -77,6 +77,11 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
           false
         }
       })? {
+        // An empty separator slot with nothing observed at it: a genuine end of the token stream,
+        // concluded from THIS probe rather than from any element attempt. No absence gate belongs
+        // here — the scanner half is `try_expect_or_stop`'s own, above, and the descent half would
+        // be a constant `false`, since nothing between the top of this cycle and this probe can
+        // trip. See `many::absence_after_element`.
         None => match ps {
           None => return self.handle_end(state, inp, &anchor, num_elems, end_state_handler),
           Some(span) => span,
@@ -89,30 +94,22 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         }
       };
 
+      // The descent witness's baseline, taken once per ELEMENT — the attempt the chokepoint below
+      // judges. See `many::file_element_failure` for why it is per element and not per collection.
+      let trips = inp.trip_snapshot();
       match self.f.try_parse_input(inp) {
-        // The never-recoverable gate and its terminal dual: a frontier `Incomplete` (const-false
-        // under `Complete`) or a terminal scanner stop from the element parser re-raises untouched —
-        // never spent as a diagnostic, since no further input clears either. The terminal witness
-        // reads the *committed cursor* ([`at_committed_boundary`]), so a boundary a prior lookahead
-        // already latched does not mis-charge an ordinary element failure short of it. Failure-arm
-        // only — a successful element does zero terminal work; no `MaybeTerminal` bound needed.
-        Err(e) if Cmpl::is_incomplete_error(&e) || inp.at_committed_boundary() => return Err(e),
-        Err(e) => {
-          let span = inp.span_since(&cursor);
-          inp.emitter().emit_error(Spanned::new(span, e))?;
-        }
-        // The decline concludes *absence*, but the element's own lookahead can latch a terminal
-        // scanner stop and still return `Ok` with a short window, so that conclusion may rest on a
-        // truncated view — a case the separator-slot gate above cannot see, since the latch happens
-        // after it. Attempt-relative, so an inherited boundary is not mis-charged here.
+        // File the failure as a diagnostic and keep looping — unless it is one of the three the
+        // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
+        // the chokepoint's, not this loop's: see `many::file_element_failure` for the three
+        // witnesses and for why `trips` is taken per ELEMENT rather than per collection.
+        Err(e) => file_element_failure(inp, e, &cursor, trips)?,
+        // The decline concludes *absence* from what this element attempt did, and the element can
+        // hit either never-recoverable stop and still hand back `Ok` — a scanner latch its own
+        // lookahead took (which the separator-slot gate above cannot see, since it happens after
+        // it), or a descent trip it caught itself. Both are the chokepoint's; neither is spendable
+        // as the end of a list.
         Ok(Decline) => {
-          if inp.latched_during_attempt(&latch) {
-            return Err(
-              UnexpectedEot::eot_of(inp.span().end())
-                .into_terminal()
-                .into(),
-            );
-          }
+          absence_after_element(inp, &latch, trips)?;
           return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
         }
         Ok(Accept(elem)) => {
@@ -140,15 +137,10 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
       let new_committed = inp.span().end();
       let new_cursor = inp.cursor().clone();
       if new_committed <= committed {
-        // The stall concludes *absence* on the same truncated-view risk as the decline arm above:
-        // surface a stop this attempt latched rather than ending the list cleanly.
-        if inp.latched_during_attempt(&latch) {
-          return Err(
-            UnexpectedEot::eot_of(inp.span().end())
-              .into_terminal()
-              .into(),
-          );
-        }
+        // The stall concludes *absence* on the same two risks as the decline arm above, and from
+        // the same element attempt: surface a stop that attempt hit rather than ending the list
+        // cleanly.
+        absence_after_element(inp, &latch, trips)?;
         return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
       }
       committed = new_committed;

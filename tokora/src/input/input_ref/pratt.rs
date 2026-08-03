@@ -74,10 +74,11 @@ where
   /// into a truncated-but-successful parse:
   ///
   /// - [`RecursionLimitReached`] — the parse's shared depth budget (see
-  ///   [`descend`](Self::descend)) ran out at this frame's prologue. Terminal on this type; a
-  ///   grammar whose error discards the value on conversion (`()` included) does not inherit
-  ///   that marker, and recovery spends the trip instead of re-raising it — see
-  ///   [`RecursionLimitReached`]'s own docs for what a discarding sink costs and does not cost.
+  ///   [`descend`](Self::descend)) ran out at this frame's prologue. Terminal, and terminal
+  ///   independently of the grammar's error type: the trip latches the input session, so a grammar
+  ///   whose error discards the value on conversion (`()` included) loses the payload and still
+  ///   gets the re-raise — see [`RecursionLimitReached`]'s own docs for what a discarding sink
+  ///   costs and does not cost.
   /// - [`NonAssociativeChain`] — a second same-power [`PrattInfix::Neither`] operator appeared in
   ///   one chain. The operator is left on the input, unconsumed. Not terminal: recovery may
   ///   spend it.

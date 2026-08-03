@@ -11,6 +11,8 @@
 #   warned    both ran and head gains a warning NAMING the probed subject       non-fatal
 #   silent*   a SILENT row listed in disclosed.txt                              non-fatal
 #   ok*       both sides AGREE and the row is justified in no_collision.txt     non-fatal
+#   new-owner base cannot resolve the OWNER and head can — the same diff        non-fatal
+#             introduces the owner, so no call site could predate the name
 #   SILENT    both ran, neither warned, witness differs, not disclosed          FATAL
 #   UNPROBED  both sides agree and it is NOT justified — likely a vacuous probe FATAL
 #   INCONCL   no before-state (base did not run, or the witness was unreadable) FATAL
@@ -189,6 +191,7 @@ globok=0
 loud=0
 okc=0
 incon=0
+newowner=0
 while IFS=$(printf '\t') read -r cat name owner spelling; do
   [ -n "$cat" ] || continue
   if ! python3 "$HERE/gen_probe.py" "$cat" "$name" "$owner" "$spelling" > "$WORK/probe.rs" 2> "$WORK/gen.err"; then
@@ -356,6 +359,31 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
       said=""
       grep -E "(^|[^A-Za-z0-9_])$name([^A-Za-z0-9_]|$)" "$WORK/out-head.txt" 2>/dev/null \
         | grep -qiE "ambiguous|E0659" && said=yes
+      # The base side must be one of the two shapes a glob row can actually produce on an
+      # ordinary run before head's evidence means anything: `no-compile` (rustc rejected the
+      # probe outright — its own INCONCL below) or `unreached` (it compiled — `glob_name` and
+      # `glob_macro`'s `drive()` calls only `ran()`, never `reached()`, so a successful compile
+      # classifies as `unreached`, NEVER `witness=*`, on either side). `upstream-fail`,
+      # `bad-witness(...)`, and a `witness=*` these templates cannot produce all mean the base
+      # side never reached a normal, comparable conclusion — and nothing here was checking for
+      # them: this branch used to match the LITERAL STRING `no-compile` and nothing else, so any
+      # OTHER broken base classification fell straight through into the head-only checks below
+      # and let a head-side ambiguity alone decide `glob-err`/`glob-ok` with no valid
+      # before-state at all. An ALLOWLIST of the shapes that are actually evidence, not a
+      # denylist of the shapes already known to be broken — a denylist is silent about the next
+      # broken shape nobody has named yet, which is exactly how this one went unnoticed (see the
+      # `new-owner` verdict below for the same rule, stated the first time).
+      case "$b" in
+        no-compile | unreached) ;;
+        *)
+          printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+          echo "          the base side did not reach a normal compile-or-reject conclusion"
+          echo "          (base=$b), so there is no valid before-state for this glob row — a"
+          echo "          head-side ambiguity alone cannot stand in for one"
+          incon=$((incon + 1)); status=2
+          continue
+          ;;
+      esac
       if [ "$b" = no-compile ]; then
         printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
         echo "          the base side did not compile, so nothing was compared"
@@ -368,16 +396,34 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
         echo "          the head side failed to build but no diagnostic names \`$name\` —"
         echo "          the probe broke for an unrelated reason and measured nothing"
         incon=$((incon + 1)); status=2
-      elif [ -n "$said" ]; then
+      # The identical hole, on the OTHER side. This used to be `elif [ -n "$said" ]`, which
+      # accepted ANY non-no-compile head classification as `glob-ok` the moment rustc said
+      # something ambiguity-shaped ANYWHERE in the head log — `upstream-fail`,
+      # `bad-witness(...)`, or a `witness=*` these templates cannot produce all read as a pass
+      # exactly as readily as a genuine `unreached`. Every one of those means the head side
+      # never reached a normal, comparable conclusion, which is the same absence the `$b` check
+      # above exists to catch — an attributed ambiguity diagnostic sitting in the log is not
+      # evidence of a COMPLETED head-side probe. `h` is now held to the identical two-shape
+      # allowlist as `b`: `unreached` is the only shape left once `no-compile` is handled above,
+      # because `glob_name`/`glob_macro`'s `drive()` calls only `ran()` and never `reached()`
+      # (see the comment above the `$b` check) — a head that actually finished compiling and
+      # running can only ever read `unreached` here, never `witness=*`.
+      elif [ "$h" = unreached ] && [ -n "$said" ]; then
         printf "  glob-ok %-42s base=%-12s head=%s   (not rejected here; see README)\n" "$label" "$b" "$h"
         globok=$((globok + 1))
-      else
+      elif [ "$h" = unreached ]; then
         printf "  UNPROBED %-41s base=%-12s head=%s\n" "$label" "$b" "$h"
         echo "          both sides built and rustc said NOTHING about \`$name\` — so this"
         echo "          is not 'the toolchain does not reject it', it is 'no collision was"
         echo "          constructed'. Those are the same absence and must not read as green."
         unprobed=$((unprobed + 1))
         [ "$status" -lt 1 ] && status=1
+      else
+        printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+        echo "          the head side did not reach a normal compile-or-reject conclusion"
+        echo "          (head=$h), so an attributed ambiguity diagnostic left in its log cannot"
+        echo "          stand in for a completed head-side probe"
+        incon=$((incon + 1)); status=2
       fi
       continue
       ;;
@@ -429,11 +475,104 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
       ;;
   esac
   if [ "$b" = no-compile ]; then
-    printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
-    echo "          the probe does not compile on the BASE side, so there is no before-state"
-    echo "          to compare against — this is a broken probe, not a clean result"
-    incon=$((incon + 1))
-    status=2
+    # "The base side did not compile" is an absence, and it has TWO causes — which is the
+    # pattern every other false verdict in this harness turned out to be.
+    #
+    #   1. the probe is broken. No before-state, nothing compared, fatal.
+    #   2. the OWNER does not exist on the base ref, because the same diff introduces it.
+    #      #147's `RecursionLimitReached` is the first of these: 14 rows whose probe names a
+    #      type the base ref has never heard of.
+    #
+    # The second is not a broken probe and not something a better template can reach. A probe
+    # is byte-identical on both sides by construction, and a method call needs a CONCRETE
+    # receiver type — so a name on an owner the same release introduces has no consumer call
+    # site that could exist before the release, and therefore no before-state to steal. That
+    # absence IS the finding. Refusing to say so would either fail the gate forever or push the
+    # row onto a subject that does exist, which is the vacuous-probe defect this harness was
+    # built after: `Gadget::parse_except` cannot collide with `Ident::parse_except`.
+    #
+    # FOUR witnesses, not three — "fine" is again being asserted by an absence and this
+    # file's rule is that each such verdict must produce positive evidence:
+    #
+    #   * rustc must SAY, on the base side, that it cannot resolve THIS ROW'S OWNER — an
+    #     unresolved import / cannot-find / failed-to-resolve diagnostic naming it. A base build
+    #     that failed for any other reason is still a broken probe.
+    #   * the head side must NOT say the same thing. Otherwise a template that misspells its
+    #     owner reports `new-owner` on every run while never having compiled anywhere, which is
+    #     the same shape as a probe that tests nothing.
+    #   * the head side must have COMPLETED — reached a witness, not merely stayed silent about
+    #     the base diagnostic. Silence is what `no-compile`, `upstream-fail`, `bad-witness(...)`
+    #     and `unreached` all look like from here just as much as a clean run does: none of them
+    #     say "`$owner` is unresolved", so `head_unresolved` reads empty for all of them, and
+    #     without this third check any of the four reads as proof the owner is new. A head build
+    #     that fails to compile the probe for a reason that has nothing to do with `$owner` — a
+    #     typo elsewhere in the same generated file, say — is the sharpest case: it still sets
+    #     `$h` to `no-compile`, same as the base side, and no diagnostic anywhere disagrees. This
+    #     is the same defect class this whole verdict exists to catch, sitting inside the verdict
+    #     itself.
+    #   * and a completed head run must show tokora's item TOOK THE CALL, not merely that SOME
+    #     call completed. `witness=N` is CONSUMER-CALLS (see the marker comment above this
+    #     loop) — attribution, not existence — and `witness=1` means the CONSUMER's own
+    #     extension item is what ran, i.e. the probed name on the new owner was never a
+    #     candidate this run. A completed run and a resolved owner are both true on a
+    #     `witness=1` row, and neither says a collision happened. Accepting any `witness=*`
+    #     here made that shape indistinguishable from the one that actually proves it, so a
+    #     future template that compiles clean while constructing no real collision would still
+    #     score `new-owner`. The check below is therefore an ALLOWLIST of the one shape that is
+    #     actual evidence (`witness=0*`) rather than a denylist of the shapes known to be broken
+    #     — a denylist is silent about the next broken shape nobody has named yet.
+    #
+    # What the row then means is narrow and is printed with it: no pre-existing call site can be
+    # stolen. It says nothing about a consumer written AFTER the release, which is out of scope
+    # for a two-sided delta harness by construction.
+    base_unresolved=""
+    head_unresolved=""
+    grep -E "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)" "$WORK/out-base.txt" 2>/dev/null \
+      | grep -qE "unresolved import|cannot find|failed to resolve|E0432|E0433|E0412" \
+      && base_unresolved=yes
+    grep -E "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)" "$WORK/out-head.txt" 2>/dev/null \
+      | grep -qE "unresolved import|cannot find|failed to resolve|E0432|E0433|E0412" \
+      && head_unresolved=yes
+    if [ -n "$base_unresolved" ] && [ -z "$head_unresolved" ]; then
+      case "$h" in
+        witness=0*)
+          printf "  new-owner %-40s base=%-12s head=%s   (owner \`%s\` is new)\n" \
+            "$label" "$b" "$h" "$owner"
+          echo "          rustc cannot resolve \`$owner\` on the base ref and can on head, so this"
+          echo "          release introduces the owner as well as the name. There is no consumer"
+          echo "          call site that could predate it and nothing to steal."
+          newowner=$((newowner + 1))
+          ;;
+        witness=*)
+          printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+          echo "          head completed a run and resolved \`$owner\`, but \`$h\` is"
+          echo "          CONSUMER-CALLS, not existence: a nonzero count means the CONSUMER's"
+          echo "          own item took the call, so tokora's new \`$owner\` item was never a"
+          echo "          candidate this run. This proves the probe compiles, not that a"
+          echo "          collision exists."
+          incon=$((incon + 1))
+          status=2
+          ;;
+        *)
+          printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+          echo "          the owner \`$owner\` is unresolved on the BASE side and head does not"
+          echo "          repeat that diagnostic — but head never reached a completed run"
+          echo "          (head=$h), so that silence is not evidence head resolved \`$owner\` at"
+          echo "          all, let alone ran past it. This is a broken probe on the side that was"
+          echo "          supposed to prove the owner is new, not a clean result."
+          incon=$((incon + 1))
+          status=2
+          ;;
+      esac
+    else
+      printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+      echo "          the probe does not compile on the BASE side and no base-side diagnostic"
+      echo "          says \`$owner\` is unresolved there — so there is no before-state to"
+      echo "          compare against and no evidence the owner is new. This is a broken probe,"
+      echo "          not a clean result."
+      incon=$((incon + 1))
+      status=2
+    fi
   elif [ "$b" = "$h_raw" ]; then
     # Agreement means the added name was not a candidate. Sometimes that is the honest
     # answer (a bound genuinely rejects the receiver) — but it is indistinguishable from a
@@ -478,7 +617,7 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
   fi
 done < "$WORK/plan.tsv"
 
-echo "name-collision: $total probe(s) — $okc justified-no-collision, $loud loud, $silent silent ($newsilent undisclosed), $incon inconclusive, $unprobed UNPROBED, $fatal FATAL; globs: $globerr rejected, $globok not-rejected"
+echo "name-collision: $total probe(s) — $okc justified-no-collision, $loud loud, $silent silent ($newsilent undisclosed), $newowner owner-introduced-here, $incon inconclusive, $unprobed UNPROBED, $fatal FATAL; globs: $globerr rejected, $globok not-rejected"
 
 # A baseline entry that no longer reproduces is stale. Left unchecked it becomes a rubber
 # stamp for a probe that stopped running at all — the failure mode of every allowlist.
@@ -556,6 +695,9 @@ elif [ "$newsilent" -eq 0 ] && [ "$unprobed" -eq 0 ]; then
   echo "name-collision:     silently even with the return used. That shape is not probed."
   echo "name-collision:   * glob rows carry no witness; their verdict is compile-status"
   echo "name-collision:     only, and which class it lands in depends on the toolchain."
+  echo "name-collision:   * a new-owner row says only that no call site could PREDATE the"
+  echo "name-collision:     name. A two-sided delta cannot speak about a consumer written"
+  echo "name-collision:     after the release, on either side of that line."
   echo "name-collision: This is a regression detector, not a proof of absence."
 fi
 exit "$status"

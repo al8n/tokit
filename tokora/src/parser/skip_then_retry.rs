@@ -110,11 +110,26 @@ where
   ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
     // First attempt, exactly `Recover`'s shape: speculate through `try_attempt` so a failure
     // rolls back to the pre-parse state (position, lexer state, emissions), and re-raise an
-    // `Incomplete` — or a terminal scanner stop — untouched before any skip, since no skipping
-    // clears either (the never-recoverable law and its terminal dual).
+    // `Incomplete` — or a terminal stop — untouched before any skip, since no skipping clears
+    // either (the never-recoverable law and its terminal dual).
+    //
+    // Terminality is read from both places it is stored: off the error for a scanner stop, and
+    // off the input for a **resource budget trip**, which a grammar error type is allowed to
+    // discard on conversion. This is the arm where the difference cost committed input — through
+    // a discarding sink the cycles below used to skip the whole tripping construct and its sync
+    // token, buying progress that cannot help, because no quantity of skipped input makes the
+    // next descent shallower. See [`InputRef::descend`](crate::InputRef::descend).
+    //
+    // The input's reading is attempt-relative: the baseline is taken immediately before each
+    // attempt and the arm asks whether the counter moved *during it*. The cell is monotone and
+    // never cleared, so reading it absolutely would refuse every retry in a session where anything
+    // once caught a trip and parsed on, ordinary syntax errors included.
+    let trips = inp.trip_snapshot();
     let mut err = match inp.try_attempt(|input| self.parser.parse_input(input)) {
       Ok(output) => return Ok(output),
-      Err(e) if e.is_incomplete() || e.is_terminal() => return Err(e),
+      Err(e) if e.is_incomplete() || e.is_terminal() || inp.tripped_during_attempt(trips) => {
+        return Err(e);
+      }
       Err(e) => e,
     };
 
@@ -136,11 +151,16 @@ where
         return Err(err);
       }
 
+      // This retry's own baseline: each cycle is its own attempt, and a trip an earlier one caused
+      // is already an `Err` this loop returned rather than something to charge to this cycle.
+      let trips = inp.trip_snapshot();
       match inp.try_attempt(|input| self.parser.parse_input(input)) {
         Ok(output) => return Ok(output),
-        // The law applies to every raise: an `Incomplete` or a terminal scanner stop from a retry
-        // re-raises unchanged, with no further skipping.
-        Err(e) if e.is_incomplete() || e.is_terminal() => return Err(e),
+        // The law applies to every raise: an `Incomplete`, a terminal scanner stop, or a resource
+        // budget trip this retry caused re-raises unchanged, with no further skipping.
+        Err(e) if e.is_incomplete() || e.is_terminal() || inp.tripped_during_attempt(trips) => {
+          return Err(e);
+        }
         Err(e) => {
           // The progress guard: a cycle that consumed nothing — zero-skip sync, and the
           // failed retry rolled back to the same spot — must not loop. Bail with the error

@@ -14,13 +14,19 @@
 /// | Source | Terminal when | Your arm writes | How it reaches you, and what a wrong arm costs |
 /// |---|---|---|---|
 /// | [`UnexpectedEnd`](crate::error::UnexpectedEnd) | its [`is_terminal`](crate::error::UnexpectedEnd::is_terminal) flag is raised — a **scanner** stop: a scanner resource-limit trip, or the poison boundary it latches | `e.is_terminal()` | through `From<UnexpectedEnd<…>>`, as the committed form's end-of-input error, so it reads as an ordinary end of input to a caller that does not care yet stays distinguishable from a *genuine* end of input to one that does. An arm left at `false` is **spent silently**, as a recoverable failure |
-/// | [`RecursionLimitReached`](crate::error::RecursionLimitReached) | **always** — a **descent** stop: the frame budget [`InputRef::descend`](crate::InputRef::descend) enforces, which both Pratt engines enter every frame through | `e.is_terminal()` | through `From<RecursionLimitReached<…>>`, as its own type on the `Err` channel, never emitted. It latches nothing: the unwind restores the depth cell on its way out. An arm left at `false` is **spent silently** |
+/// | [`RecursionLimitReached`](crate::error::RecursionLimitReached) | **always** — a **descent** stop: the frame budget [`InputRef::descend`](crate::InputRef::descend) enforces, which both Pratt engines enter every frame through | `e.is_terminal()` | through `From<RecursionLimitReached<…>>`, as its own type on the `Err` channel, never emitted. **This is the one row whose stop does not depend on your arm**: the trip latches the input session, and the three recovery combinators read that latch beside this trait, so an arm left at `false` — `()` included — loses the *payload* and still re-raises. Write the arm anyway if you want the offset and the depth |
 /// | [`SessionRefusal`](crate::input::SessionRefusal) | **always** — a **session** stop: the cross-attempt byte budget is exhausted, or an earlier attempt latched the session shut. Both are decided before any attempt work | `true`, spelled out — this type deliberately does **not** implement `MaybeTerminal`, so there is nothing to delegate to | through `From<SessionRefusal>` inside [`PartialSession::parse`](crate::input::PartialSession::parse), which then **asserts** the converted value is terminal. That assertion is unconditional, so an arm left at `false` is a **panic in a release build**, not a silent spend — see the [coherence law](crate::input::SessionRefusal#the-coherence-law) for why it is a panic and not a returned error |
 ///
 /// Recovery is the caller that must care about the first two, and it asks *this trait* rather than
-/// either type — so a grammar error that holds one of them decides the verdict by what its
-/// [`is_terminal`](Self::is_terminal) returns, not by what the value inside it would have said. The
-/// third has a stricter caller: the session gate does not consult the verdict, it *requires* it.
+/// either type. For [`UnexpectedEnd`](crate::error::UnexpectedEnd) that is the whole answer: a
+/// grammar error holding one decides the verdict by what its [`is_terminal`](Self::is_terminal)
+/// returns, not by what the value inside it would have said. For
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached) the payload arm still matters —
+/// for the details it carries (the offset, the depth) and for a value your own code fabricated
+/// rather than received from a real trip — but it no longer decides the verdict alone: an actual
+/// input-descent trip is decided by the session latch **in addition to** the trait check, so an arm
+/// left at `false` — `()` included — no longer settles the question by itself. The third has a
+/// stricter caller: the session gate does not consult the verdict, it *requires* it.
 ///
 /// No other value in this crate **reports itself** terminal. The trait's only other implementations
 /// here are [`NonAssociativeChain`](crate::error::NonAssociativeChain) and `()`, and both keep the
@@ -66,10 +72,13 @@
 ///
 /// A conversion that **discards** the source discards the marker with it. The converted value is
 /// non-terminal whatever the value it came from said — `()` included, since the sink stores nothing
-/// — and recovery will spend the stop rather than re-raise it. See
+/// — and recovery will spend the stop rather than re-raise it. **The one exception is the resource
+/// budget**: a [`RecursionLimitReached`](crate::error::RecursionLimitReached) trip is recorded on
+/// the input session as well as in the value, and the three recovery combinators read both, so that
+/// stop survives a discarding conversion. Every other row of the table above is yours to carry. See
 /// [`RecursionLimitReached`](crate::error::RecursionLimitReached)'s own
-/// [section on a discarding sink](crate::error::RecursionLimitReached#a-discarding-sink-erases-the-stop-and-does-not-erase-the-bound)
-/// for what that costs and what it does not.
+/// [section on the payload and the stop](crate::error::RecursionLimitReached#the-stop-does-not-travel-in-the-payload-so-a-discarding-sink-cannot-drop-it)
+/// for why exactly one row works that way and what it still costs to discard the value.
 ///
 /// # Where the set stops being closed
 ///
@@ -208,9 +217,18 @@ pub trait MaybeTerminal {
 }
 
 /// The unit error sink is never a terminal signal: it stores nothing, so it can carry no source's
-/// marker. Converting a terminal stop into `()` is therefore an opt-out of terminal re-raise — see
-/// [Opting in](MaybeTerminal#opting-in). It is also why this crate ships no
-/// `From<SessionRefusal>` for `()`, and why it never will: that conversion is the one the
+/// marker — `is_terminal` on `()` always answers `false`. For a stop whose only carrier is the
+/// converted value, that makes converting it into `()` an opt-out of terminal re-raise — see
+/// [Opting in](MaybeTerminal#opting-in). **The one exception is
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached)**: converting a trip to `()`
+/// still loses the *payload* — the offset, the depth, the limitation — but not the *stop*, because
+/// the trip also latches the input session, and the three recovery combinators consult that latch
+/// beside this trait. A `()`-errored grammar therefore still re-raises an actual input-descent
+/// trip, exactly as a delegating error type does. See
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached)'s own
+/// [section on the payload and the stop](crate::error::RecursionLimitReached#the-stop-does-not-travel-in-the-payload-so-a-discarding-sink-cannot-drop-it)
+/// for the detail. It is also why this crate ships no `From<SessionRefusal>` for `()`, and why it
+/// never will: that conversion is the one the
 /// [session gate](crate::input::SessionRefusal#the-coherence-law) *requires* to be terminal rather
 /// than merely consulting, and a sink that always answers `false` can never satisfy it.
 impl MaybeTerminal for () {}

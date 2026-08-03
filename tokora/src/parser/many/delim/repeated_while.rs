@@ -5,7 +5,6 @@ use crate::{
   delimiter::Delimiter,
   emitter::{FromUnclosed, FullContainerEmitter, UnclosedEmitter},
   error::Unclosed,
-  span::Span as _,
 };
 
 use super::*;

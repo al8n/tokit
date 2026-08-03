@@ -75,10 +75,11 @@ where
 /// grammar shares, pratt or not — and the repeat is built by each engine at its own exit. Both
 /// happen where no emitter is in scope.
 ///
-/// The trip's `From` impl is the one with a consequence past its payload. One that **stores**
-/// the value keeps its always-terminal marker readable through
-/// [`MaybeTerminal`](crate::error::MaybeTerminal); one that discards it opts the error type out
-/// of terminal re-raise, which is the documented `MaybeTerminal` posture. See
+/// The trip's `From` impl decides how much of the trip you can *read*, and nothing more. One that
+/// **stores** the value keeps the offset, the depth and the limitation, and its always-terminal
+/// marker readable through [`MaybeTerminal`](crate::error::MaybeTerminal); one that discards it
+/// keeps none of that. Neither decides whether recovery re-raises: the trip latches the input
+/// session, and the recovery combinators read that latch beside `MaybeTerminal`. See
 /// [`RecursionLimitReached`](crate::error::RecursionLimitReached)'s own docs for what a
 /// discarding sink costs and what it does not.
 pub trait FromPrattError<'inp, L, Lang: ?Sized = ()>: FromEmitterError<'inp, L, Lang> {

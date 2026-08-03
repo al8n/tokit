@@ -672,6 +672,43 @@ fn limited<'inp>(limit: usize) -> ParserContext<'inp, TestLexer<'inp>, Fatal<Lim
   fatal_ctx().with_recursion_limiter(RecursionLimiter::with_limitation(limit))
 }
 
+/// The wall-clock bound [`on_a_deep_stack`] enforces, in seconds — native-calibrated, and a
+/// different number once the build is interpreted.
+///
+/// Miri does not apply a flat per-step overhead here: `-Zmiri-tree-borrows` revalidates a growing
+/// borrow tree on every access, so this file's deepest cell — the `unlimited` half of
+/// `the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it`, a 1000-level
+/// `unlimited()` chain — scales worse than linearly with depth, not by the roughly two orders of
+/// magnitude a constant per-step slowdown would predict. A 120s native budget is not "a bit tight"
+/// under Miri; it is calibrated for a different machine.
+///
+/// This is not the `frames_are_relocated` situation next door in `pratt_limit_unit_sink.rs`:
+/// there, instrumentation makes the witness's own measurement meaningless, so the assertion is
+/// skipped and the skip announces itself on real stderr — otherwise a build where the check never
+/// ran would look identical to one where it passed. Here the witness — the bound not tripping
+/// while the worker is still making progress — still runs, and still means the same thing under
+/// Miri; only the number of seconds it is willing to wait has to change. Nothing is skipped, so
+/// there is nothing to announce.
+///
+/// Measured directly with the exact command and flags `ci/miri_tb.sh` runs for the leg issue #148
+/// saw this trip on (`-Zmiri-strict-provenance -Zmiri-disable-isolation
+/// -Zmiri-symbolic-alignment-check -Zmiri-tree-borrows`), i.e. `cargo +nightly miri test --test
+/// pratt_limit the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it`:
+///
+/// | run | aarch64-apple-darwin |
+/// |---|---|
+/// | 1 | 68.56s |
+/// | 2 | 61.38s |
+///
+/// `ci`'s failing leg is `x86_64-unknown-linux-gnu` on a shared runner, a different host and
+/// architecture than the one above, and it was already landing intermittently past the *native*
+/// 120s bound — over 1.7× the slower reading here — before this fix, so a small multiple would
+/// only relocate the same flake. ×10 over the slower reading (685.6s, rounded up to 700) absorbs
+/// that cross-host gap and ordinary scheduler noise while staying a bounded timeout: a genuine
+/// hang is still caught in about 12 minutes, comfortably inside CI's job-level timeout, instead of
+/// being masked indefinitely.
+const DEEP_STACK_TIMEOUT_SECS: u64 = if cfg!(miri) { 700 } else { 120 };
+
 /// Runs `f` on a thread with a stack far larger than the harness's own and a hard wall-clock
 /// bound. A recursion-limit defect does not fail an assertion — it hangs, or aborts the process
 /// — so the bound has to live outside the code under test. The stack has to be bigger for the
@@ -684,12 +721,12 @@ fn on_a_deep_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) ->
       let _ = tx.send(f());
     })
     .expect("spawn the deep-stack worker");
-  match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+  match rx.recv_timeout(std::time::Duration::from_secs(DEEP_STACK_TIMEOUT_SECS)) {
     Ok(v) => {
       handle.join().expect("the deep-stack worker panicked");
       v
     }
-    Err(e) => panic!("the parse did not terminate within 120s: {e:?}"),
+    Err(e) => panic!("the parse did not terminate within {DEEP_STACK_TIMEOUT_SECS}s: {e:?}"),
   }
 }
 
@@ -2087,9 +2124,14 @@ fn the_trip_is_identical_with_an_empty_and_a_prefilled_cache() {
   assert_eq!(empty, prefilled);
 }
 
-/// A recoverer **may not** spend a trip: `Recover` consults `MaybeTerminal` and re-raises, so
-/// the recovery body never runs. The contrast with
+/// A recoverer **may not** spend a trip: `Recover` consults `MaybeTerminal` *and* the input's
+/// resource-trip latch and re-raises, so the recovery body never runs. The contrast with
 /// `an_explicit_recovery_may_spend_the_repeat` is the whole point of the two classifications.
+///
+/// Paired with `pratt_limit_unit_sink.rs::a_discarding_sink_cannot_let_recovery_spend_a_trip`,
+/// which runs this ladder, this limit and this input through `()`. The two must keep agreeing:
+/// that agreement is the invariance issue #148 asked for, and until it landed they disagreed —
+/// this cell re-raised and its `()` twin spent the trip.
 #[test]
 fn a_recoverer_re_raises_a_trip_instead_of_spending_it() {
   fn recovery<'inp, Ctx>(
@@ -2127,6 +2169,12 @@ fn a_recoverer_re_raises_a_trip_instead_of_spending_it() {
 
 /// `skip_then_retry` re-raises a trip too, and — the part worth pinning — it does so **before**
 /// any skipping: no amount of input clears a depth budget, so a retry would only re-trip.
+///
+/// Paired with
+/// `pratt_limit_unit_sink.rs::a_discarding_sink_cannot_let_skip_then_retry_burn_input_on_a_trip`,
+/// which runs this exact source through `()` and asserts the same `Some(0)` handback. That cell
+/// read `Some(68)` before issue #148 — the whole chain and the sync token skipped and committed —
+/// so the two files' agreement on this number is the observable the fix delivers.
 #[test]
 fn skip_then_retry_re_raises_a_trip_without_skipping() {
   fn probe<'inp, Ctx>(
