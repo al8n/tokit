@@ -1142,6 +1142,73 @@ concrete public struct with no bound to reject anybody.
    and the ungated-primitive check is a **list**, so a recovery phase built on a primitive nobody
    added is a phase nothing reads.
 
+22. **The collection drivers had the same rollback hole item 16 closed for recovery, and the
+   monotone counter it added now closes it here too.** Item 16 said, correctly, that `parser::many`'s
+   twelve collection drivers "consult the poison boundary at every absence exit". What it did not
+   say is that those drivers were reading it with exactly the defect it was in the middle of fixing
+   one module over: the boundary is a lineage memo, and a driver's read of it sits outside every
+   rollback the elements below it may perform.
+
+   An element is entitled to open an [`attempt`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.attempt)
+   of its **own**, meet a scanner resource trip inside it, catch the stop, and decline that attempt.
+   The inner restore then rewinds the cursor, the cache, the emissions **and** the poison boundary
+   together — back to the value the *driver* snapshotted before its element loop. Every witness the
+   drivers had answered `false` afterwards, over a stop that is live, already diagnosed and re-trips
+   on the next scan of the same prefix:
+
+   - **34 gates** read clean. The 30 absence exits concluded "no more elements" and returned a
+     silently truncated `Ok`; measured, `peek`-free `repeated()` over such an element returns
+     `Ok([])` on `"1 2"` under a budget the element spent, indistinguishable from the same parse
+     under a budget it did not.
+   - the **4** `file_element_failure` swallow sites were worse than a missed re-raise. There the
+     element's ordinary `Err` was **filed as a recoverable diagnostic and the loop carried on** — so
+     the run also gained a syntax error describing input the scanner never read, and the rollback
+     had already erased the trip's own diagnostic, leaving a log that does not mention the stop at
+     all.
+   - the **8** real-closer gates are unaffected and stay that way, deliberately. A committed
+     pre-trip closer settles the scanner question, and the lookahead that latched past that closer
+     is the same one that bumped the counter — so a counter reading there would refuse exactly the
+     delimited parses the latch reading would, all of which a wider scan window completes to the
+     identical value.
+
+   Neither companion witness could have covered it. `at_committed_boundary()` is positional and the
+   restore rewinds the cursor too; `tripped_during_attempt` counts *descent* trips, and a scanner
+   trip bumps no descent counter.
+
+   The fix is item 16's, reused rather than reinvented: `Input::scanner_trips`, the monotone session
+   counter whose sole writer is the crate's terminal predicate, read through
+   `scanner_trip_snapshot` / `scanner_tripped_during_attempt` at
+   `absence_after_element` and `file_element_failure`. Nothing `pub` changed and no bound moved.
+
+   **Its baseline is per COLLECTION, and that is the opposite of the descent counter's.** The two
+   facts decay differently: a descent trip an element caught and legitimately parsed past stops
+   being true of the input, so its baseline is re-taken per element; a spent scanner budget does
+   not, so its baseline is taken once, above the element loop, beside `latch_snapshot()` whose
+   question it answers. Per element it would drop the case *element 1 trips and accepts, element 2
+   declines* — element 2's baseline would be taken after element 1's trip and the exit would read
+   clean — which is a case the latch beside it has always refused.
+
+   **The latch reading is now fully subsumed, and is kept anyway.** Every transition this crate can
+   produce that moves the boundary goes through `latch_if_limit_tripped`, which bumps the counter
+   first. Measured rather than argued: with `latched_during_attempt` neutered in place and the
+   counter left in the condition, all 105 test binaries of `--all-features` pass — including the ten
+   `absence_terminal_stop.rs` cells the latch used to be the sole holder of. It stays for the reason
+   the recovery gate's equivalent term stays: it is the reading the boundary itself is the subject
+   of, it costs one clone already being paid, and a witness removed on a subsumption argument is a
+   witness removed on an argument rather than on a measurement. `file_element_failure`'s positional
+   `at_committed_boundary()` is **not** subsumed and is load-bearing — it sees a boundary latched
+   before the driver started that the element has now run onto, which no per-collection counter
+   baseline can see.
+
+   `GATE_CENSUS` grew the witness and a placement test that is the exact mirror of the descent one:
+   the scanner baseline must be taken once per collection and **outside** the element loop, where
+   hoisting the descent baseline would itself be the defect. Watched failing with the whole
+   behaviour suite green — the extension's own demonstration: with one driver's baseline moved
+   inside its loop, `every_driver_baselines_its_scanner_witness_once_per_collection` is the **only**
+   failing test in all 105 binaries, because no behaviour cell anyone wrote builds the shape that
+   placement drops. Two new regressions pin the behaviour itself, one per gate, each watched failing
+   first and each with a widened-limit control that differs in nothing but the scan budget.
+
 ### Added
 
 17. **`cast::token_any` and `cast::tokens` close the two gaps in the cast module's token

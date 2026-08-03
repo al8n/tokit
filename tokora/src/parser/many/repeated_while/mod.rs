@@ -305,6 +305,12 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
     // The terminal-latch baseline for the absence exits below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per collection.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     let mut nums = 0;
     let mut full = false;
 
@@ -339,7 +345,7 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
           // end of the construct. Both never-recoverable witnesses are the chokepoint's, not this
           // loop's; the scanner half is attempt-relative against the entry snapshot, so an inherited
           // boundary is not mis-charged here.
-          absence_after_element(inp, &latch, trips)?;
+          absence_after_element(inp, &latch, scans, trips)?;
           let span = inp.span_since(&anchor);
           return rh.on_stop(nums, inp, &anchor).map(|_| span);
         }
@@ -371,7 +377,7 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
         // cannot see, because the latch happens after it), or a descent budget trip it caught
         // itself and answered with a value it consumed nothing for. Both are the chokepoint's; this
         // is the exit the measurement in `many`'s docs found spending the second of them.
-        absence_after_element(inp, &latch, trips)?;
+        absence_after_element(inp, &latch, scans, trips)?;
         let span = inp.span_since(&anchor);
         return rh.on_stop(nums, inp, &anchor).map(|_| span);
       }

@@ -94,6 +94,12 @@ where
     // The terminal-latch baseline for the absence check after the loop: comparing the live latch
     // against it keeps that witness attempt-relative. One offset clone per fold.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     // The trip baseline of the LAST element attempt, carried out by whichever break concluded
     // absence — see `many::absence_after_element`.
     let elem_trips = loop {
@@ -146,7 +152,7 @@ where
     // same way. One chokepoint on the single success path covers all of it, unbypassable by either
     // break — `many::absence_after_element` holds both witnesses and says why each baseline is the
     // granularity it is.
-    absence_after_element(inp, &latch, elem_trips)?;
+    absence_after_element(inp, &latch, scans, elem_trips)?;
 
     Ok(output)
   }
@@ -215,6 +221,12 @@ where
     // The terminal-latch baseline for the absence check after the loop: comparing the live latch
     // against it keeps that witness attempt-relative. One offset clone per fold.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     // The trip baseline of the LAST element attempt, carried out by whichever break concluded
     // absence — see `many::absence_after_element`.
     let elem_trips = loop {
@@ -268,7 +280,7 @@ where
     // same way. One chokepoint on the single success path covers all of it, unbypassable by either
     // break — `many::absence_after_element` holds both witnesses and says why each baseline is the
     // granularity it is.
-    absence_after_element(inp, &latch, elem_trips)?;
+    absence_after_element(inp, &latch, scans, elem_trips)?;
 
     Ok(output)
   }
@@ -353,6 +365,12 @@ where
     // The terminal-latch baseline for the absence check after the loop: comparing the live latch
     // against it keeps that witness attempt-relative. One offset clone per fold.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     // The trip baseline of the LAST element attempt, carried out by whichever break concluded
     // absence — see `many::absence_after_element`.
     let elem_trips = loop {
@@ -408,7 +426,7 @@ where
     // same way. One chokepoint on the single success path covers all of it, unbypassable by either
     // break — `many::absence_after_element` holds both witnesses and says why each baseline is the
     // granularity it is.
-    absence_after_element(inp, &latch, elem_trips)?;
+    absence_after_element(inp, &latch, scans, elem_trips)?;
 
     Ok(output)
   }

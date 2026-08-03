@@ -129,6 +129,12 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the opener's
     // own scan is not charged to the element loop. One offset clone per collection.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     loop {
       // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
       // cycle runs at most one, inside `handle_continue`. It sits above the separator-or-close scan
@@ -204,7 +210,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                   // `false` pair at this exit (the eager terminal gate above already refused a
                   // latched boundary, and this cycle's element has not run), routed through it so
                   // no close-miss arm of this driver spells a gate of its own.
-                  absence_after_element(inp, &latch, trips)?;
+                  absence_after_element(inp, &latch, scans, trips)?;
                   // One junk token, one report: a close expectation names a different token or
                   // nothing. Nothing committed since the wrong opener was flagged ⇒ the cache
                   // front still holds that same token (FIFO), so this probe is re-seeing it.
@@ -218,7 +224,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                 // closed.
                 CloseStatus::Eof => {
                   // Same absence conclusion as the wrong-token arm above, so the same gate.
-                  absence_after_element(inp, &latch, trips)?;
+                  absence_after_element(inp, &latch, scans, trips)?;
                   if let Some(open_span) = open_span.clone() {
                     inp
                       .emitter()
@@ -281,7 +287,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                   // served whole from that cache, so it carries no terminal flag, and the same cached
                   // token reads as a spurious wrong closer here. Both witnesses are the chokepoint's;
                   // the scanner half is attempt-relative against the post-opener snapshot.
-                  absence_after_element(inp, &latch, trips)?;
+                  absence_after_element(inp, &latch, scans, trips)?;
                   // One junk token, one report: a close expectation names a different token or
                   // nothing. Nothing committed since the wrong opener was flagged ⇒ the cache
                   // front still holds that same token (FIFO), so this probe is re-seeing it.
@@ -296,7 +302,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                   // Same absence conclusion as the wrong-token arm above, so the same gate. No
                   // legitimate `Unclosed` is lost: a scan that reaches a live boundary stops there and
                   // reports the stop, so an `Eof` verdict cannot coexist with one.
-                  absence_after_element(inp, &latch, trips)?;
+                  absence_after_element(inp, &latch, scans, trips)?;
                   if let Some(open_span) = open_span.clone() {
                     inp
                       .emitter()
@@ -370,7 +376,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                     // own lookahead latched after the decision gate ran, or a descent budget trip
                     // it caught itself. Both are the chokepoint's; the scanner half is
                     // attempt-relative against the post-opener snapshot.
-                    absence_after_element(inp, &latch, trips)?;
+                    absence_after_element(inp, &latch, scans, trips)?;
                     // One junk token, one report: a close expectation names a different token
                     // or nothing. Nothing committed since the wrong opener was flagged ⇒ the
                     // cache front still holds that same token (FIFO), so this probe is
@@ -386,7 +392,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                     // Same absence conclusion as the wrong-token arm above, so the same gate. No
                     // legitimate `Unclosed` is lost: a scan that reaches a live boundary stops there
                     // and reports the stop, so an `Eof` verdict cannot coexist with one.
-                    absence_after_element(inp, &latch, trips)?;
+                    absence_after_element(inp, &latch, scans, trips)?;
                     if let Some(open_span) = open_span.clone() {
                       inp
                         .emitter()

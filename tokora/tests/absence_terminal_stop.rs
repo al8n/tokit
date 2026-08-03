@@ -374,6 +374,39 @@ where
   Ok(ParseAttempt::Decline)
 }
 
+/// Try-shape element: opens an `attempt` of its **own**, drains through the committed leaf inside
+/// it — which is where the scanner trips — catches that stop, and declines the inner attempt. The
+/// restore then puts the poison boundary back to the value the element started with, so nothing
+/// about the latch differs from the driver's per-collection snapshot. The element then declines.
+///
+/// One level deeper than [`peek_latch_rollback_decline`], and that one level is the whole
+/// difference: there the trip happens *before* the inner checkpoint is taken, so the checkpoint
+/// saved an already-latched boundary and the restore hands it straight back. Here the checkpoint is
+/// taken **first** and the trip happens inside it, so the restore erases the boundary outright.
+/// Every reading of the latch — positional or presence-plus-change, at any single nesting depth —
+/// is clean afterwards, over a stop that is live, already diagnosed, and re-trips on the next scan
+/// of the same prefix. Only a cell no rollback reaches sees it.
+fn trip_inside_attempt_decline<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>,
+) -> Result<ParseAttempt<i64>, CErr>
+where
+  Ctx: ParseContext<'inp, TLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TLexer<'inp>, Error = CErr>,
+{
+  let _: Option<()> = inp.attempt(|t| {
+    loop {
+      match t.next_or_stop() {
+        Ok(Some(_)) => continue,
+        // Both exits decline the inner attempt, so the rollback is identical either way and the
+        // scan limit is the only thing that decides whether a stop happened inside it. That is
+        // what makes the widened control below a control.
+        Ok(None) | Err(_) => return None,
+      }
+    }
+  });
+  Ok(ParseAttempt::Decline)
+}
+
 /// Try-shape element: consumes one `Num`, then peeks a `U2` window (which may trip); declines on
 /// anything that is not a `Num`, leaving that token cached and unconsumed.
 fn num_then_peek<'inp, Ctx>(
@@ -863,6 +896,56 @@ fn rollback_after_a_peek_latch_still_surfaces_terminal() {
 
   let out = drive(ScanLimiter::with_limit(2), parse, "1 2 3");
   assert_terminal(out, "repeated / decline after rolling back over the latch");
+}
+
+// ── …and no rollback at any depth can erase it, because the witness is a counter ─
+//
+// The level below the cell above, and the one a latch comparison cannot reach. There the trip is
+// taken *before* the element's inner checkpoint, so the checkpoint saves an already-latched boundary
+// and the restore hands it back; the latch survives and the presence-plus-change reading sees it.
+// Here the checkpoint is taken **first** and the trip happens inside it, so the restore puts the
+// boundary back to what the driver itself snapshotted — and the absence gate reads clean over a
+// spent scanner budget, concluding the construct ended.
+//
+// Relocating a latch read closes one depth and opens the next. A cell inside the rollback set cannot
+// witness an event across a rollback at any depth, so the witness is `Input::scanner_trips`: a
+// monotone session counter bumped by the crate's sole terminal predicate, outside the rollback set
+// by construction. This is the same answer `parser::recovery_gate` reached for the recovery
+// combinators, applied to the twelve collection drivers.
+
+#[test]
+fn a_trip_caught_inside_an_elements_own_attempt_still_surfaces_terminal() {
+  // `1 2` under a limit of 1: the element's inner `attempt` drains `1` (1st scan) and trips on `2`
+  // (2nd scan) — inside the attempt — then declines it. The restore rewinds the cursor, the cache,
+  // the emissions AND the poison boundary; the element declines, and `repeated`'s decline exit is
+  // the absence conclusion the gate has to refuse.
+  fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>) -> Result<Vec<i64>, CErr>
+  where
+    Ctx: ParseContext<'inp, TLexer<'inp>>,
+    Ctx::Emitter: FixtureEmitter<'inp>,
+  {
+    trip_inside_attempt_decline
+      .repeated()
+      .collect()
+      .parse_input(inp)
+  }
+
+  let out = drive(ScanLimiter::with_limit(1), parse, "1 2");
+  assert_terminal(
+    out,
+    "repeated / trip caught inside the element's own attempt",
+  );
+
+  // Non-vacuity: the identical element and the identical rollback, with only the scan limit
+  // widened. Nothing trips, the decline is an ordinary absence, and the construct ends cleanly — so
+  // the cell above measures the stop rather than the shape.
+  let roomy = drive(ScanLimiter::with_limit(1_000), parse, "1 2");
+  assert_eq!(
+    roomy,
+    Ok(vec![]),
+    "the control differs from the run above in one thing only — with room, nothing trips and the \
+     same declining element ends the collection cleanly; got {roomy:?}"
+  );
 }
 
 // ── A cached closer beyond the latch is a real closer: the list still closes ───

@@ -56,6 +56,12 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
     // The terminal-latch baseline for the absence exits below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per collection.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     let mut num_elems = 0;
     let mut full = false;
 
@@ -120,7 +126,7 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
               // half is a constant `false` at this exit — it is reached before this cycle's element
               // runs, so the element that could have caught a trip is the PREVIOUS cycle's
               // *accepting* one, which `many`'s module docs exempt.
-              absence_after_element(inp, &latch, trips)?;
+              absence_after_element(inp, &latch, scans, trips)?;
               return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
             }
             Action::Continue => {
@@ -151,7 +157,7 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
             // lookahead latched (which neither the separator-slot gate nor the decision gate above
             // can see, since the latch happens after both), or a descent budget trip it caught
             // itself and answered with a value it consumed nothing for. Both are the chokepoint's.
-            absence_after_element(inp, &latch, trips)?;
+            absence_after_element(inp, &latch, scans, trips)?;
             return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
           }
           committed = new_committed;

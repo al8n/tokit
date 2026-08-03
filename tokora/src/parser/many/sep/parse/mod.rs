@@ -57,6 +57,12 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     // The terminal-latch baseline for the element-absence exits below: comparing the live latch
     // against it keeps their witness attempt-relative. One offset clone per collection.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     let mut num_elems = 0;
     let mut full = false;
 
@@ -102,14 +108,14 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
         // the chokepoint's, not this loop's: see `many::file_element_failure` for the three
         // witnesses and for why `trips` is taken per ELEMENT rather than per collection.
-        Err(e) => file_element_failure(inp, e, &cursor, trips)?,
+        Err(e) => file_element_failure(inp, e, &cursor, scans, trips)?,
         // The decline concludes *absence* from what this element attempt did, and the element can
         // hit either never-recoverable stop and still hand back `Ok` — a scanner latch its own
         // lookahead took (which the separator-slot gate above cannot see, since it happens after
         // it), or a descent trip it caught itself. Both are the chokepoint's; neither is spendable
         // as the end of a list.
         Ok(Decline) => {
-          absence_after_element(inp, &latch, trips)?;
+          absence_after_element(inp, &latch, scans, trips)?;
           return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
         }
         Ok(Accept(elem)) => {
@@ -140,7 +146,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // The stall concludes *absence* on the same two risks as the decline arm above, and from
         // the same element attempt: surface a stop that attempt hit rather than ending the list
         // cleanly.
-        absence_after_element(inp, &latch, trips)?;
+        absence_after_element(inp, &latch, scans, trips)?;
         return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
       }
       committed = new_committed;

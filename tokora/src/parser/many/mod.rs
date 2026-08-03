@@ -8,7 +8,9 @@
 //! way, because no further input clears any of them — a frontier `Incomplete`, a terminal
 //! *scanner* stop, and a *descent* budget trip. [`file_element_failure`] is the **one** place an
 //! element failure is either filed or re-raised, and it gates on all three before it files; the
-//! drivers below carry no swallow of their own.
+//! drivers below carry no swallow of their own. The scanner stop is read there through **two**
+//! witnesses rather than one, because the obvious reading of it lives inside the rollback set —
+//! see "the two scanner readings" below.
 //!
 //! **A stop does not need an `Err` to be spent.** An element that meets a terminal stop and answers
 //! it *itself* — catching the trip, or declining on a lookahead window the scanner truncated — hands
@@ -29,18 +31,18 @@
 //! `every_driver_baselines_its_trip_witness_inside_its_element_loop` is what keeps the baseline in
 //! the loop that hosts each call, in all twelve.
 //!
-//! **The two witnesses are not the same kind of fact, and a committed closer settles only one of
-//! them.** A scanner latch is a fact about a *token position*: a construct that closed on a real
-//! pre-trip token closed **before** the boundary, so a boundary latched past that closer says
-//! nothing about it, and gating a real close on it would fail a parse a wider window completes
-//! identically. A descent trip is a *counter event that happened during the element attempt*: a
-//! valid closer arriving afterwards does not unmake it. An element that caught one, reported *no
-//! more elements*, and was then followed by a real closer therefore yields a **successfully closed
-//! collection that silently spent a resource-limit stop** — the same defect, through the one exit
-//! the absence chokepoint deliberately does not cover. So the real-closer exits take the descent
-//! witness and **not** the scanner one, through [`close_after_element`]. Three chokepoints rather
-//! than one guard with a mode flag, because the three exits differ in what they hold: an error to
-//! re-raise, both witnesses, or the counter alone.
+//! **The two FACTS are not the same kind, and a committed closer settles only one of them.** A
+//! scanner stop is, in its positional aspect, a fact about a *token position*: a construct that
+//! closed on a real pre-trip token closed **before** the boundary, so a boundary latched past that
+//! closer says nothing about it, and gating a real close on it would fail a parse a wider window
+//! completes identically. A descent trip is a *counter event that happened during the element
+//! attempt*: a valid closer arriving afterwards does not unmake it. An element that caught one,
+//! reported *no more elements*, and was then followed by a real closer therefore yields a
+//! **successfully closed collection that silently spent a resource-limit stop** — the same defect,
+//! through the one exit the absence chokepoint deliberately does not cover. So the real-closer
+//! exits take the descent witness and **neither** scanner one, through [`close_after_element`].
+//! Three chokepoints rather than one guard with a mode flag, because the three exits differ in what
+//! they hold: an error to re-raise, every witness, or the descent counter alone.
 //!
 //! The descent witness is not carried by the error value. It is a **monotone session counter** on
 //! the input (`Input::resource_trips`), bumped by [`InputRef::descend`](crate::InputRef::descend)
@@ -49,6 +51,30 @@
 //! the re-raise independent of the error type: a
 //! [`RecursionLimitReached`](crate::error::RecursionLimitReached) that a discarding sink erases on
 //! conversion — `()` does — still cannot be filed here.
+//!
+//! ## The two scanner readings, and why a latch alone cannot answer
+//!
+//! The scanner half has a counter of its own, for a reason the descent half never had to face. The
+//! two readings the drivers *used* to have — the poison boundary's value at an absence exit, and
+//! the committed cursor's position at a failure exit — are both inside the **rollback set**: a
+//! [`Checkpoint`](crate::input::Checkpoint) carries the boundary and a restore copies it back
+//! verbatim, along with the cursor, the cache and the emissions.
+//!
+//! Grammar code is entitled to catch a scanner stop inside an [`attempt`](crate::InputRef::attempt)
+//! of its **own** and then decline it. That inner rollback puts the boundary back to the value the
+//! *driver* snapshotted and the cursor back behind it, so at the exit that follows every reading of
+//! either says clean — over a stop that is live, already diagnosed, and will re-trip on the next
+//! scan of the same prefix. Relocating a read closes one nesting level and opens the next: **a cell
+//! inside the rollback set cannot witness an event across a rollback at any depth.**
+//!
+//! So the load-bearing scanner witness is `Input::scanner_trips`, a monotone session counter bumped
+//! by `InputRef::latch_if_limit_tripped` — the crate's sole terminal predicate, reached by both
+//! lexing drivers — read through `InputRef::scanner_trip_snapshot` /
+//! `InputRef::scanner_tripped_during_attempt`. It is outside the rollback set by construction, and
+//! it is the same answer `parser::recovery_gate` reached for the
+//! recovery combinators. Its baseline here is **per collection**, beside `latch_snapshot()` and
+//! deliberately unlike the descent counter's per-element one; [`absence_after_element`] says why
+//! the two granularities differ.
 //!
 //! ## What a counter witnesses, and what it cannot
 //!
@@ -209,25 +235,39 @@ where
 /// function or propagates it with `?`, and the gate is upstream of the only `emit_error` in the
 /// tree.
 ///
-/// # The three witnesses, in order
+/// # The four witnesses, in order
+///
+/// Three facts, and two readings of the scanner one — neither of which subsumes the other, because
+/// one is positional and inside the rollback set while the other is a counter outside it:
 ///
 /// * `Cmpl::is_incomplete_error(&err)` — the frontier `Incomplete`. A constant `false` under
 ///   [`Complete`](crate::input::Complete), so the complete path keeps its codegen.
-/// * `inp.at_committed_boundary()` — the **scanner** stop. Reads the *committed* cursor, so it is
-///   attempt-relative: a boundary a prior lookahead already latched does not mis-charge an
-///   ordinary element failure short of it. Never the lex-offset `at_latched_boundary`, which a
-///   prefilled cache would make false-positive on that same ordinary failure.
+/// * `inp.at_committed_boundary()` — the **scanner** stop, *positionally*. Reads the *committed*
+///   cursor, so it is attempt-relative: a boundary a prior lookahead already latched does not
+///   mis-charge an ordinary element failure short of it. Never the lex-offset
+///   `at_latched_boundary`, which a prefilled cache would make false-positive on that same ordinary
+///   failure. **Not redundant** with the counter below and the reverse of the absence gate's
+///   situation: this one sees a boundary latched *before the driver started* that the element has
+///   now run onto, which no per-collection counter baseline can see.
+/// * `inp.scanner_tripped_during_attempt(scans)` — the **scanner** stop, as a *session counter
+///   event*. The reading no rollback reaches. An element that catches a trip inside an
+///   [`attempt`](crate::InputRef::attempt) of its own and then fails ordinarily has that inner
+///   restore rewind the cursor, the cache, the emissions **and** the poison boundary together — so
+///   the positional witness above reads clean, the trip's own diagnostic is gone from the log, and
+///   without this term the driver files a spent scanner budget as an ordinary syntax error and
+///   keeps looping. See the module docs' "the two scanner readings" for why relocating a
+///   rollback-set read cannot fix this at any depth.
 /// * `inp.tripped_during_attempt(trips)` — the **descent** budget trip, which latches no boundary
-///   (it has a control stack, not a position) and so is invisible to the witness above.
+///   (it has a control stack, not a position) and so is invisible to both witnesses above.
 ///
-/// All three are positional/session facts read on the failure path, so a successful element does
+/// All four are positional/session facts read on the failure path, so a successful element does
 /// zero terminal work and none of them costs a trait bound: no `MaybeTerminal` appears in these
 /// families.
 ///
 /// # What holds each witness in the guard
 ///
 /// One behavioural suite per witness, each confirmed by neutering the term and watching the suite
-/// go red. `GATE_CENSUS` also scans this body for all three, but a needle scan proves presence and
+/// go red. `GATE_CENSUS` also scans this body for all four, but a needle scan proves presence and
 /// ordering, never that the term gates — the census says so itself, and says what it measured.
 /// Editing the guard means keeping these green:
 ///
@@ -236,22 +276,34 @@ where
 ///   5 of them. Its `r1_*` sibling pins only the negative direction (the witness must not fire on
 ///   a boundary the cursor has not reached), which is why the term was for a while deletable with
 ///   the whole suite still green.
+/// * `inp.scanner_tripped_during_attempt(scans)` — `tokora/tests/collection_terminal_stop.rs`'s
+///   `r1c_*` cell, which no other witness in this guard can answer.
 /// * `inp.tripped_during_attempt(trips)` — `tokora/tests/collection_resource_trip.rs`, 12 cells.
 ///
-/// # `trips` is the caller's, and it must be per element
+/// # `trips` is the caller's per ELEMENT, and `scans` is the caller's per COLLECTION
 ///
-/// The baseline belongs to the *attempt this call judges*, so the caller takes
+/// The descent baseline belongs to the *attempt this call judges*, so the caller takes
 /// `inp.trip_snapshot()` **inside its element loop**, once per element — not hoisted out beside
-/// `latch_snapshot()`, whose absence witness genuinely is per driver attempt. Hoisted, the
-/// comparison degrades into a read of the monotone session counter, and every element failure
-/// after the parse's first trip re-raises — ordinary syntax errors included. `GATE_CENSUS` pins
-/// the placement; the module docs state the granularity floor this leaves, and why the floor
-/// cannot be lowered without cooperation from whoever catches a trip.
+/// `latch_snapshot()`. Hoisted, the comparison degrades into a read of the monotone session
+/// counter, and every element failure after the parse's first trip re-raises — ordinary syntax
+/// errors included. `GATE_CENSUS` pins the placement; the module docs state the granularity floor
+/// this leaves, and why the floor cannot be lowered without cooperation from whoever catches a
+/// trip.
+///
+/// The scanner baseline is the opposite, and takes the *latch's* granularity rather than the
+/// descent counter's, because it answers the latch's question: `inp.scanner_trip_snapshot()` beside
+/// `latch_snapshot()`, once per collection. A caught descent trip stops being true of the input; a
+/// spent scanner budget does not — the token stream ends where it ended, and an element failure
+/// after that point is a failure on a view the stop truncated. Per element it would also miss the
+/// case an inner rollback creates: element *n* trips and Accepts, element *n+1* then fails against
+/// the truncated remainder having tripped nothing itself. [`absence_after_element`] states the same
+/// asymmetry for the exits with no error in hand.
 #[inline(always)]
 pub(super) fn file_element_failure<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
   err: <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
   since: &Cursor<'inp, 'closure, L>,
+  scans: usize,
   trips: usize,
 ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
 where
@@ -261,6 +313,7 @@ where
 {
   if Cmpl::is_incomplete_error(&err)
     || inp.at_committed_boundary()
+    || inp.scanner_tripped_during_attempt(scans)
     || inp.tripped_during_attempt(trips)
   {
     return Err(err);
@@ -269,8 +322,8 @@ where
   inp.emitter().emit_error(Spanned::new(span, err))
 }
 
-/// Refuses an **absence** conclusion that a terminal stop produced — **the single place either
-/// witness is consulted** on every guard-bearing driver's non-`Err` exits.
+/// Refuses an **absence** conclusion that a terminal stop produced — **the single place any of its
+/// witnesses is consulted** on every guard-bearing driver's non-`Err` exits.
 ///
 /// All twelve reach it: the four try-driven collection families, the four `*_while` ones, and the
 /// four fold sources. [`file_element_failure`] is this function's twin on the `Err` exits, and it
@@ -282,86 +335,118 @@ where
 /// * the failure path has an error in hand and **re-raises that value**; there is none here, so this
 ///   synthesizes a terminal end-of-input instead — the same value the scanner-stop exits have always
 ///   produced;
-/// * the failure path's scanner witness is positional ([`at_committed_boundary`]), because it is
-///   discriminating a *failure* that reached the poison from one that did not. An absence exit needs
-///   [`latched_during_attempt`] instead: a restore over the latch rewinds the cursor behind a
+/// * the failure path's positional scanner witness ([`at_committed_boundary`]) is
+///   load-bearing there, because it is discriminating a *failure* that reached the poison from one
+///   that did not — including a poison latched before the driver even started. An absence exit
+///   cannot use a positional reading at all: a restore over the latch rewinds the cursor behind a
 ///   boundary that survives, so every positional reading is clean there while the stop is live;
-/// * and the two scanner witnesses take different baselines — one none at all, the other a
-///   per-collection snapshot. A single helper would have to carry both and pick, which is a
-///   `match` on which caller it has, not a chokepoint.
+/// * and the scanner witnesses take different baselines between the two — the positional one none
+///   at all, the counter a per-collection snapshot. A single helper would have to carry each and
+///   pick, which is a `match` on which caller it has, not a chokepoint.
 ///
 /// [`at_committed_boundary`]: crate::InputRef::at_committed_boundary
-/// [`latched_during_attempt`]: crate::InputRef::latched_during_attempt
 ///
-/// # The two witnesses, and the two granularities
+/// # The three witnesses, the two facts, and the two granularities
 ///
 /// An absence exit concludes "no more elements" from what the last element attempt did. Two facts
 /// make that attempt's evidence unrepresentative of the input, and an element that hits either can
 /// still return `Ok`, which is exactly why neither reaches the failure chokepoint:
 ///
-/// * `inp.latched_during_attempt(latch)` — a terminal **scanner** stop. An element's own lookahead
-///   ([`peek`](crate::InputRef::peek) and friends) latches one and still hands back `Ok` with a
-///   short window, so the element may decline, or accept consuming nothing, on a truncated view.
-///   Its baseline is **per collection**: the latch is a position, an element that reaches it leaves
-///   it standing for every element after, and the stop genuinely ends the token stream there.
+/// * `inp.scanner_tripped_during_attempt(scans)` — a terminal **scanner** stop, as a *counter
+///   event*. This is the load-bearing scanner reading, and the only one of the three that no
+///   rollback can erase. An element's own lookahead ([`peek`](crate::InputRef::peek) and friends)
+///   latches a stop and still hands back `Ok` with a short window, so the element may decline, or
+///   accept consuming nothing, on a truncated view — and it may equally catch that stop inside an
+///   [`attempt`](crate::InputRef::attempt) of its own, decline the attempt, and have the restore put
+///   the boundary back to the value this driver snapshotted. Its baseline is **per collection**, for
+///   the reason the latch's is.
+/// * `inp.latched_during_attempt(latch)` — the same stop as a *boundary value*, compared against a
+///   per-collection snapshot. The narrower reading: it answers *a different stop is standing at this
+///   exit*, where the counter answers *a stop happened inside this collection*. **It is subsumed**
+///   — every transition this crate can produce that moves the latch goes through
+///   `latch_if_limit_tripped`, which bumps the counter first, so this term adds no verdict the
+///   counter does not already give. It is kept for the reason
+///   `parser::recovery_gate`'s equivalent term is: it is the reading the
+///   boundary itself is the subject of, it costs one `Option<L::Offset>` clone per collection on a
+///   path that already takes one, and a witness removed on a subsumption argument is a witness
+///   removed on an argument rather than on a measurement.
 /// * `inp.tripped_during_attempt(trips)` — a **descent** budget trip the element caught itself and
-///   answered with `Decline`, or with an `Accept` that consumed nothing. It latches no boundary — it
-///   has a control stack rather than a position — so the witness above reads `false` for one, and
-///   without this term a resource-budget stop is spent as an *accepted absence*: the collection ends
-///   clean and succeeds. Its baseline is **per element**, for the reason
-///   [`file_element_failure`] gives at length: the counter is a monotone session fact, so a
-///   collection-wide baseline would charge every later absence exit in the parse with a trip some
-///   earlier element caught and legitimately parsed past.
+///   answered with `Decline`, or with an `Accept` that consumed nothing. It latches no boundary and
+///   bumps no scanner counter — it has a control stack rather than a position — so both witnesses
+///   above read `false` for one, and without this term a resource-budget stop is spent as an
+///   *accepted absence*: the collection ends clean and succeeds. Its baseline is **per element**,
+///   for the reason [`file_element_failure`] gives at length: the counter is a monotone session
+///   fact, so a collection-wide baseline would charge every later absence exit in the parse with a
+///   trip some earlier element caught and legitimately parsed past.
 ///
-/// The asymmetry in the two baselines is therefore a property of the two facts, not an oversight:
-/// a latched boundary stays true of the input, a caught trip does not.
+/// The asymmetry in the baselines is therefore a property of the two facts, not an oversight: a
+/// spent scanner budget stays true of the input, a caught descent trip does not. Concretely, the
+/// per-collection scanner baseline is what keeps *element 1 tripped and accepted, element 2
+/// declines* refused; per element, element 2's baseline would be taken after element 1's trip and
+/// the exit would read clean.
 ///
 /// # Where it does **not** belong
 ///
-/// Only on the exits that conclude absence *from an element attempt*. Not, **as a pair**, on an exit
-/// resting on a **real token**: the delimited drivers' `CloseStatus::Close` arms and the mid-scan
-/// closer in `sep/delim` read a committed pre-trip token. That token settles the *position*
+/// Only on the exits that conclude absence *from an element attempt*. Not, **as a group**, on an
+/// exit resting on a **real token**: the delimited drivers' `CloseStatus::Close` arms and the
+/// mid-scan closer in `sep/delim` read a committed pre-trip token. That token settles the *position*
 /// question and only the position question — the construct closed before any boundary a later
-/// lookahead latched, so the scanner term there would fail a parse a wider window completes
-/// identically. It settles nothing about the *counter*: a trip the element already caught is not
-/// unmade by a closer arriving after it. Those exits therefore take the descent witness alone,
-/// through [`close_after_element`], and this function stays off them.
+/// lookahead latched, so *neither* scanner term belongs there: the counter would refuse the same
+/// parse the latch would, and a wider scan window completes it to the identical value. It settles
+/// nothing about the *descent counter*: a trip the element already caught is not unmade by a closer
+/// arriving after it. Those exits therefore take the descent witness alone, through
+/// [`close_after_element`], and this function stays off them.
 ///
 /// Not on a separator-slot probe that runs *before* this cycle's element either: nothing between the
-/// cycle's baseline and that probe can trip, so the term would be a constant `false` there.
+/// cycle's baseline and that probe can trip, so the descent term would be a constant `false` there.
 ///
 /// And not, ever, on an `Accept` — the third exemption, and the one worth naming rather than
 /// leaving to be inferred from "this function is about absence exits". An `Accept` is not an
-/// absence conclusion, so there is nothing here for either witness to refuse: the element produced
+/// absence conclusion, so there is nothing here for any witness to refuse: the element produced
 /// a value, and the driver collects it. That holds even when the element caught this very trip to
-/// produce it. The consequence is permanent, not local to that one call: the next element's own
-/// baseline is taken *after* the accepting one's trip, so no later absence exit in this collection
-/// ever sees it either. This is not a hole left open by accident — gating a value a grammar
-/// legitimately produced would forbid recovering from a caught budget, for this error alone among
-/// every error a grammar may catch and answer. See the module docs' "the channel neither
-/// chokepoint closes" section for the reasoning in full, and
-/// `tokora/tests/collection_resource_trip.rs`'s section 6 for the pin.
+/// produce it. This is not a hole left open by accident — gating a value a grammar legitimately
+/// produced would forbid recovering from a caught budget, for this error alone among every error a
+/// grammar may catch and answer. See the module docs' "the channel neither chokepoint closes"
+/// section for the reasoning in full, and `tokora/tests/collection_resource_trip.rs`'s section 6 for
+/// the pin.
+///
+/// The exemption's *reach* differs per witness, and this is the one place to say so plainly. For the
+/// **descent** counter it is permanent: the next element's own baseline is taken *after* the
+/// accepting one's trip, so no later absence exit in this collection ever sees it either. For the
+/// two **scanner** readings it is local to the accepting call, because both are baselined per
+/// collection — an element that trips, accepts, and is followed by a declining element is refused at
+/// *that* element's absence exit. That has always been the latch's behaviour; the counter now
+/// answers the same way when a rollback erased the latch.
 ///
 /// # What holds each witness in the guard
 ///
-/// `GATE_CENSUS` pins that all twelve guard-bearing drivers spell neither witness themselves and
-/// that both appear in this body ahead of the stop — but a needle scan proves presence and ordering,
-/// never that a term gates. One behavioural suite per witness does, each confirmed by neutering the
-/// term in place and watching the suite go red:
+/// `GATE_CENSUS` pins that all twelve guard-bearing drivers spell none of these witnesses themselves
+/// and that all three appear in this body ahead of the stop — but a needle scan proves presence and
+/// ordering, never that a term gates. One behavioural suite per witness does, each confirmed by
+/// neutering the term in place and watching the suite go red:
 ///
-/// * `inp.latched_during_attempt(latch)` — `tokora/tests/absence_terminal_stop.rs`, 10 of its 46
-///   cells.
+/// * `inp.scanner_tripped_during_attempt(scans)` —
+///   `tokora/tests/absence_terminal_stop.rs::a_trip_caught_inside_an_elements_own_attempt_still_surfaces_terminal`.
+///   The one cell no other witness here can answer: with the term neutered it returns `Ok([])` over
+///   a spent budget, and the other 46 cells stay green.
+/// * `inp.latched_during_attempt(latch)` — **nothing**. Measured, not assumed: with this term
+///   replaced by `let _ = inp.latched_during_attempt(latch);` above the `if` and the counter left in
+///   the condition, the whole `--all-features` suite passes — all 105 test binaries, including the
+///   10 `absence_terminal_stop.rs` cells this term used to be the sole holder of. That is the
+///   subsumption argument above turned into an observation, and it is the honest reading of this
+///   row: the term is kept for the reasons given, not because a test would notice its absence.
 /// * `inp.tripped_during_attempt(trips)` — `tokora/tests/collection_resource_trip.rs`'s section 4,
 ///   all 16 cells, and its section 7, all 32.
 ///
 /// To re-check in five minutes rather than by re-deriving it: replace one term with
-/// `let _ = <that term>;` above the `if`, leaving the other in the condition, and run
+/// `let _ = <that term>;` above the `if`, leaving the others in the condition, and run
 /// `cargo test -p tokora --all-features --no-fail-fast`. The suite named for that witness must go
 /// red and the census must stay green. Repeat per witness.
 #[inline(always)]
 pub(super) fn absence_after_element<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   latch: &Option<L::Offset>,
+  scans: usize,
   trips: usize,
 ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
 where
@@ -370,7 +455,10 @@ where
   Cmpl: crate::input::Completeness,
   <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
 {
-  if inp.latched_during_attempt(latch) || inp.tripped_during_attempt(trips) {
+  if inp.scanner_tripped_during_attempt(scans)
+    || inp.latched_during_attempt(latch)
+    || inp.tripped_during_attempt(trips)
+  {
     return Err(
       UnexpectedEot::eot_of(inp.span().end())
         .into_terminal()
@@ -384,16 +472,20 @@ where
 /// descent-only third chokepoint, for the delimited drivers' exits that commit a REAL closer after
 /// an element attempt.
 ///
-/// [`absence_after_element`] holds both witnesses because both bear on an absence conclusion. Here
-/// exactly one of them does, and the difference is not a matter of degree — the two witnesses are
-/// facts of different kinds, and a committed pre-trip closer settles one of them and not the other:
+/// [`absence_after_element`] holds every witness because all of them bear on an absence conclusion.
+/// Here exactly one does, and the difference is not a matter of degree — the **scanner** stop and
+/// the **descent** trip are facts of different kinds, and a committed pre-trip closer settles one of
+/// them and not the other:
 ///
-/// * the **scanner** latch is a fact about a *token position*. A `CloseStatus::Close` verdict is
-///   cache-first, so it rests on a real token that was read before any stop; the construct closed
-///   **ahead of** whatever boundary the element's lookahead went on to latch, and that boundary is
-///   simply not about this construct. Reading it here would fail a parse that a wider scan window
-///   completes to the identical value, which is why `latched_during_attempt` is deliberately absent
-///   from this body and `GATE_CENSUS` pins its absence rather than leaving it to be noticed;
+/// * the **scanner** stop is, for this exit, a fact about a *token position*. A `CloseStatus::Close`
+///   verdict is cache-first, so it rests on a real token that was read before any stop; the
+///   construct closed **ahead of** whatever boundary the element's lookahead went on to latch, and
+///   that boundary is simply not about this construct. Reading it here would fail a parse that a
+///   wider scan window completes to the identical value. That is why **both** of the absence gate's
+///   scanner readings are deliberately absent from this body — the latch
+///   (`latched_during_attempt`) and the session counter (`scanner_tripped_during_attempt`) alike,
+///   since a counter bumped by the very lookahead that latched past the closer answers exactly as
+///   wrongly. `GATE_CENSUS` pins both absences rather than leaving them to be noticed;
 /// * the **descent** trip is a *counter event that happened inside the element attempt*. Nothing
 ///   arriving afterwards unmakes it. An element that catches a
 ///   [`RecursionLimitReached`](crate::error::RecursionLimitReached), reports *no more elements*, and
@@ -444,8 +536,8 @@ where
 /// `GATE_CENSUS`'s `every_real_closer_exit_after_an_element_is_trip_gated` pins that every
 /// `CloseStatus::Close` verdict in the tree reaches this call before it commits, and
 /// `the_close_chokepoint_reads_the_counter_and_not_the_position` scans this body in **both**
-/// directions — the descent witness present, the scanner witness absent. A needle scan proves
-/// presence and ordering, never that a term gates; the behaviour is
+/// directions — the descent witness present, and **both** scanner witnesses absent. A needle scan
+/// proves presence and ordering, never that a term gates; the behaviour is
 /// `tokora/tests/collection_resource_trip.rs`'s section 5, where an element catches a trip and then
 /// declines — or accepts consuming nothing — with the closer genuinely present, over both sinks.
 /// Neuter the term (`let _ = inp.tripped_during_attempt(trips);` above the `if`) and that section
@@ -503,11 +595,19 @@ mod gate_census {
   //! then declines — or that declines on a window a *scanner* stop truncated — hands the driver an
   //! `Ok`, and the driver's absence exit reads it as "no more elements" and succeeds. The failure
   //! chokepoint above never sees it. [`absence_after_element`](super::absence_after_element) is the
-  //! second chokepoint and holds both witnesses for those exits, and
+  //! second chokepoint and holds all three witnesses for those exits, and
   //! [`every_absence_exit_carries_the_terminal_witnesses`] applies the same shape of proof to it:
-  //! **all twelve** guard-bearing drivers spell **neither** witness themselves, so there is nothing
+  //! **all twelve** guard-bearing drivers spell **none** of them themselves, so there is nothing
   //! left for them to spell differently, and the count of chokepoint calls is pinned per source so a
   //! new absence exit cannot land ungated.
+  //!
+  //! One of those three is a *counter*, not a boundary, and that is the whole of what made this half
+  //! reach one nesting level deeper than it used to. A driver's two rollback-set readings — the
+  //! poison boundary at an absence exit, the committed cursor at a failure exit — are both erased by
+  //! an element that catches a stop inside an [`attempt`](crate::InputRef::attempt) of its own and
+  //! declines it, so both answered `false` over a live stop. `Input::scanner_trips` is outside the
+  //! rollback set by construction; [`every_driver_baselines_its_scanner_witness_once_per_collection`]
+  //! pins its baseline at the granularity the fact has, which is the *opposite* of the descent one's.
   //!
   //! This half reaches further than the swallow scan does, and deliberately so. Only the try-driven
   //! four can spend an element's `Err`, so only they need a gate above a swallow; the four `*_while`
@@ -521,33 +621,45 @@ mod gate_census {
   //! # The third half: the exits that close on a real token
   //!
   //! An exit that commits a REAL closer is not an absence exit, and for a long time that was read as
-  //! "neither witness belongs there". It is true of one of them. A committed pre-trip closer is a
+  //! "no witness belongs there". It is true of the scanner ones. A committed pre-trip closer is a
   //! fact about *position*: the construct ended ahead of whatever boundary the element's lookahead
-  //! went on to latch, so the scanner witness is not about it, and gating on it would fail a parse
-  //! that a wider scan window completes identically. It is not a fact about the *counter*: a descent
-  //! trip the element caught happened inside the attempt that concluded "no more elements", and a
-  //! valid closer arriving afterwards does not unmake it — the collection closes successfully having
+  //! went on to latch, so neither scanner witness is about it — the boundary reading and the counter
+  //! reading come from the same lookahead — and gating on either would fail a parse that a wider
+  //! scan window completes identically. It is not a fact about the *descent counter*: a trip the
+  //! element caught happened inside the attempt that concluded "no more elements", and a valid
+  //! closer arriving afterwards does not unmake it — the collection closes successfully having
   //! silently spent a resource-limit stop. [`close_after_element`](super::close_after_element) is the
   //! third chokepoint and holds the descent witness **alone**;
   //! [`every_real_closer_exit_after_an_element_is_trip_gated`] pins that every close verdict in the
   //! tree reaches it before committing — **every** one, with no per-site exemption, which is what
   //! lets that test scan the verdict→commit region per verdict instead of comparing tallies — and
   //! [`the_close_chokepoint_reads_the_counter_and_not_the_position`] pins the asymmetry in both
-  //! directions, since a scanner term smuggled into that body is as much a defect as a missing
+  //! directions, since either scanner term smuggled into that body is as much a defect as a missing
   //! descent one. The only exits it exempts are the two **direct** closers, committed from a
   //! driver's own scan with no probe verdict at all, and it counts those rather than ignoring them.
   //!
-  //! # The one thing the chokepoint cannot centralize
+  //! # The two things the chokepoints cannot centralize, and they pull opposite ways
   //!
-  //! `trips` is the caller's. It must be `inp.trip_snapshot()` taken **inside the element loop**,
-  //! once per element — not hoisted out beside `latch_snapshot()`, whose absence witness genuinely
-  //! is per driver attempt. The counter is a monotone session fact and is never cleared, so a
-  //! baseline hoisted above the loop is arithmetically a session-absolute read for every element
-  //! after the first: an ordinary syntax error in an unrelated construct then ends the collection
-  //! instead of being filed, and one deep expression early in a document suppresses every
+  //! Both baselines are the caller's, and getting either one's granularity from the other's is a
+  //! defect. They are scanned per caller because placement is a per-caller property.
+  //!
+  //! `trips` must be `inp.trip_snapshot()` taken **inside the element loop**, once per element — not
+  //! hoisted out beside `latch_snapshot()`. The counter is a monotone session fact and is never
+  //! cleared, so a baseline hoisted above the loop is arithmetically a session-absolute read for
+  //! every element after the first: an ordinary syntax error in an unrelated construct then ends the
+  //! collection instead of being filed, and one deep expression early in a document suppresses every
   //! diagnostic after it. Hoisting it also restores the defect one nesting level up — a trip inside
   //! an *inner* collection that an element swallows charged to the enclosing driver's next ordinary
-  //! failure. That placement is a per-caller property, so it is scanned per caller.
+  //! failure.
+  //!
+  //! `scans` must be `inp.scanner_trip_snapshot()` taken **outside** it, once per collection, beside
+  //! `latch_snapshot()` — the exact opposite, because the two facts decay differently. A descent trip
+  //! an element caught and parsed past stops being true of the input; a spent scanner budget does
+  //! not, and every element after it is reading a stream the stop truncated. Taken per element the
+  //! baseline is re-read after each accepted trip, and *element 1 tripped and accepted, element 2
+  //! declines* concludes cleanly over a spent budget — the case the latch beside it has always
+  //! refused. [`every_driver_baselines_its_scanner_witness_once_per_collection`] pins that placement
+  //! in both directions, as its sibling does for `trips`.
 
   use super::end_state_census::{code_find, code_matches};
 
@@ -560,10 +672,14 @@ mod gate_census {
   const CHOKEPOINT: &str = "file_element_failure(";
   const CHOKEPOINT_DEF: &str = "fn file_element_failure";
 
-  /// The three witnesses the chokepoint must consult before it reaches [`EMIT`].
-  const WITNESSES: [&str; 3] = [
+  /// The four witnesses the chokepoint must consult before it reaches [`EMIT`] — three facts, with
+  /// the scanner one read both positionally and as a session counter. Neither scanner reading
+  /// subsumes the other: the positional one sees a boundary latched *before* the driver started that
+  /// the element has now run onto, and the counter sees a stop an inner rollback erased.
+  const WITNESSES: [&str; 4] = [
     "Cmpl::is_incomplete_error(&",
     "inp.at_committed_boundary()",
+    "inp.scanner_tripped_during_attempt(",
     "inp.tripped_during_attempt(",
   ];
 
@@ -575,27 +691,42 @@ mod gate_census {
   /// region, the way [`EMIT`] ends the failure chokepoint's.
   const ABSENCE_STOP: &str = "into_terminal()";
 
-  /// The two witnesses the absence chokepoint must consult before it reaches [`ABSENCE_STOP`]. The
-  /// scanner half is **not** the failure path's `at_committed_boundary`: a restore over the latch
+  /// The three witnesses the absence chokepoint must consult before it reaches [`ABSENCE_STOP`].
+  ///
+  /// Neither scanner half is the failure path's `at_committed_boundary`: a restore over the latch
   /// rewinds the cursor behind a boundary that survives, so every positional reading is clean at an
-  /// absence exit while the stop is live.
-  const ABSENCE_WITNESSES: [&str; 2] =
-    ["inp.latched_during_attempt(", "inp.tripped_during_attempt("];
+  /// absence exit while the stop is live. The **counter** is the load-bearing one — a restore taken
+  /// *before* the trip puts the boundary back too, so the latch is clean there as well — and it is
+  /// listed first for that reason.
+  const ABSENCE_WITNESSES: [&str; 3] = [
+    "inp.scanner_tripped_during_attempt(",
+    "inp.latched_during_attempt(",
+    "inp.tripped_during_attempt(",
+  ];
 
   /// The descent-only close chokepoint: its call in a driver, and its definition in this module's
   /// own source. It shares [`ABSENCE_STOP`] as the needle that ends its guard region.
   const CLOSE_GATE: &str = "close_after_element(";
   const CLOSE_GATE_DEF: &str = "fn close_after_element";
 
-  /// The one witness [`CLOSE_GATE`] must read, and the one it must **not**.
+  /// The one witness [`CLOSE_GATE`] must read, and the two it must **not**.
   ///
   /// The asymmetry is the whole point of there being a third chokepoint, so it is pinned in both
   /// directions rather than only in the direction that is easy to check. A real pre-trip closer
-  /// settles the *position* fact — the construct ended ahead of any boundary a later lookahead
-  /// latched — and settles nothing about the *counter* fact, which is a trip that already happened
-  /// inside the element attempt this exit is concluding from.
+  /// settles the *scanner* fact — the construct ended ahead of any boundary a later lookahead
+  /// latched — and settles nothing about the *descent counter* fact, which is a trip that already
+  /// happened inside the element attempt this exit is concluding from.
+  ///
+  /// **Both** scanner readings are non-witnesses here, not just the latch. The lookahead that
+  /// latched past the closer also bumped the session counter, so a counter reading in this body
+  /// refuses exactly the parses the latch reading would — every delimited parse a wider scan window
+  /// completes to the identical value. Adding a witness to the absence gate without adding it here
+  /// as a *non*-witness is the shape that quietly breaks that, so the list is a list.
   const CLOSE_WITNESS: &str = "inp.tripped_during_attempt(";
-  const CLOSE_NON_WITNESS: &str = "inp.latched_during_attempt(";
+  const CLOSE_NON_WITNESSES: [&str; 2] = [
+    "inp.latched_during_attempt(",
+    "inp.scanner_tripped_during_attempt(",
+  ];
 
   /// A real-closer exit, in the two spellings a driver can reach one by: the probe verdict that
   /// hands the closer over, and the by-value commit that settles it. `CLOSE_HANDOFF` is the
@@ -610,6 +741,16 @@ mod gate_census {
   const ATTEMPT: &str = "try_parse_input(inp)";
   const BASELINE: &str = "inp.trip_snapshot()";
   const HOSTING_LOOP: &str = "loop {";
+
+  /// The **scanner** witness's baseline, and the latch baseline it must sit beside.
+  ///
+  /// The mirror image of [`BASELINE`], and the reason it is scanned separately: this one is per
+  /// COLLECTION and must be taken *above* the element loop, exactly where hoisting the descent one
+  /// would be the defect. A spent scanner budget stays true of the input, so a per-element baseline
+  /// would be taken after the trip an earlier element caught and every later exit would read clean —
+  /// which is the case "element 1 tripped and accepted, element 2 declines".
+  const SCANNER_BASELINE: &str = "inp.scanner_trip_snapshot()";
+  const LATCH_BASELINE: &str = "inp.latch_snapshot()";
 
   /// SWALLOW SCAN — every source in the `many` and `fold` trees that can reach an [`InputRef`]
   /// inside a repetition: the eight collection drivers, the four folds, and the three tree `mod.rs`
@@ -738,9 +879,10 @@ mod gate_census {
       assert_eq!(
         code_matches(guard, witness),
         1,
-        "`many/mod.rs`: the chokepoint must consult all three never-recoverable witnesses before \
+        "`many/mod.rs`: the chokepoint must consult all four never-recoverable witnesses before \
          it files — `{witness}` is missing from, or duplicated in, the code ahead of its \
-         `emit_error`"
+         `emit_error`. The two scanner readings are both required: the positional one for a \
+         boundary latched before the driver started, the counter for a stop an inner rollback erased"
       );
     }
   }
@@ -853,6 +995,11 @@ mod gate_census {
   ///
   /// The `rfind` panics rather than passing when a chokepoint call is not inside a loop at all, so
   /// this cannot be satisfied by a source that has stopped looking like a driver.
+  ///
+  /// [`every_driver_baselines_its_scanner_witness_once_per_collection`] is the exact mirror of this
+  /// test for the *scanner* counter, whose baseline must be **outside** the loop this one requires
+  /// its baseline inside. The two are separate tests because they are opposite properties, and
+  /// writing them as one would need a flag naming which is which at every assertion.
   #[test]
   #[cfg_attr(
     miri,
@@ -916,6 +1063,95 @@ mod gate_census {
       "sixteen element loops across the twelve sources, each with its own baseline, and \
        forty-two chokepoint calls reading one: four failure gates, thirty absence gates and eight \
        real-closer gates. The totals are pinned so a gate cannot move between sources unnoticed"
+    );
+  }
+
+  /// **All twelve** guard-bearing drivers take their scanner-trip baseline once per COLLECTION,
+  /// beside the latch and **outside** the element loop — and every gate that reads one is a gate
+  /// that has one hoisted above it.
+  ///
+  /// The exact mirror of
+  /// [`every_driver_baselines_its_trip_witness_inside_its_element_loop`], and the reason the two
+  /// cannot be one test: the descent counter's baseline must be *inside* the loop and the scanner
+  /// counter's must be *outside* it, because the two facts decay differently. A descent trip an
+  /// element caught and legitimately parsed past stops being true of the input; a spent scanner
+  /// budget does not — the token stream ends where it ended.
+  ///
+  /// What a per-element scanner baseline would cost, stated as the case it drops: element 1 trips,
+  /// catches the stop and *accepts*; element 2 declines. Element 2's baseline would be taken after
+  /// element 1's trip, the counter would not have moved during element 2, and the collection would
+  /// conclude cleanly over a spent budget. Hoisted, it refuses — which is what the latch beside it
+  /// has always done, and what the counter now also does when a rollback erased the latch.
+  ///
+  /// Both directions are pinned. The count per source stops a second, stray baseline from being
+  /// added (which would silently re-narrow one gate), and the region scan — `loop {` → call, which
+  /// must contain **zero** of them — stops the baseline being moved into the loop. The `rfind`
+  /// panics rather than passing when a call is not inside a loop at all.
+  #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+  )]
+  fn every_driver_baselines_its_scanner_witness_once_per_collection() {
+    let sites = progress_guard_sites();
+    let counts = element_loop_counts();
+    let mut baselines = 0;
+    let mut gates = 0;
+    for i in 0..sites.len() {
+      let (name, src) = sites[i];
+      let (classified, loops) = counts[i];
+      assert_eq!(
+        name, classified,
+        "the guard-bearing source list and the element-loop classification have drifted apart at \
+         row {i}: `{name}` against `{classified}`. They are index-aligned on purpose — a row that \
+         names a source the scan does not read is a row that checks nothing"
+      );
+      assert_eq!(
+        code_matches(src, SCANNER_BASELINE),
+        loops,
+        "{name}: exactly one `{SCANNER_BASELINE}` baseline per collection — the same count as the \
+         `{LATCH_BASELINE}` it sits beside, because the two answer the same question at the same \
+         granularity. A collection without one leaves its absence and failure exits blind to a stop \
+         an element caught inside an `attempt` of its own"
+      );
+      assert_eq!(
+        code_matches(src, SCANNER_BASELINE),
+        code_matches(src, LATCH_BASELINE),
+        "{name}: the scanner counter's baseline and the latch's are taken together, once per \
+         collection. A count that has drifted apart means one gate is reading a per-collection fact \
+         and its neighbour is not"
+      );
+
+      // The two gates that read it, and the negative half: NOTHING between the hosting loop and the
+      // call may take this baseline, because taking it there makes it per element.
+      for needle in [CHOKEPOINT, ABSENCE] {
+        let mut from = 0;
+        while let Some(at) = code_find(&src[from..], needle) {
+          let call_at = from + at;
+          let loop_at = src[..call_at].rfind(HOSTING_LOOP).unwrap_or_else(|| {
+            panic!("{name}: a `{needle}` call that is not inside a repetition loop")
+          });
+          assert_eq!(
+            code_matches(&src[loop_at..call_at], SCANNER_BASELINE),
+            0,
+            "{name}: the scanner witness is COLLECTION-relative — take `{SCANNER_BASELINE}` above \
+             the element loop, beside the latch. Taken inside it, the baseline is re-read after \
+             every trip an earlier element caught and accepted, and the very next exit reads clean \
+             over a spent budget"
+          );
+          gates += 1;
+          from = call_at + needle.len();
+        }
+      }
+      baselines += loops;
+    }
+    assert_eq!(
+      (baselines, gates),
+      (16, 34),
+      "sixteen collections across the twelve sources, each with its own scanner baseline, and \
+       thirty-four gates reading one: four failure gates and thirty absence gates. The eight \
+       real-closer gates are deliberately NOT among them — see `close_after_element` — so this total \
+       is the previous test's forty-two minus exactly those eight"
     );
   }
 
@@ -1225,7 +1461,7 @@ mod gate_census {
     ]
   }
 
-  /// Every guard-bearing driver's absence exits reach **both** never-recoverable witnesses, through
+  /// Every guard-bearing driver's absence exits reach **every** never-recoverable witness, through
   /// one chokepoint no driver can spell around.
   ///
   /// A driver's absence exits — the no-progress stall, the element-decline break, a condition's
@@ -1236,29 +1472,33 @@ mod gate_census {
   ///
   /// * a terminal **scanner** stop the element's own lookahead latched, which leaves the pre-trip
   ///   tokens cached and the window short (the eager decision gate does not see it: the next window
-  ///   is served whole from that cache and carries no terminal flag). The witness is
-  ///   `latched_during_attempt` — presence-plus-change against a per-collection `latch_snapshot`,
-  ///   never a positional reading, because a rollback over the latch moves the offset back behind a
-  ///   boundary that survives;
-  /// * a **descent** budget trip the element caught itself. It latches no boundary, so the witness
-  ///   above reads `false` for one, and the absence exit spends the stop as a *success*. The witness
-  ///   is `tripped_during_attempt` against the per-**element** baseline, for the reason
-  ///   [`every_element_loop_baselines_its_trip_witness_per_element`] gives.
+  ///   is served whole from that cache and carries no terminal flag). Two witnesses, both baselined
+  ///   per collection: `scanner_tripped_during_attempt` against a `scanner_trip_snapshot`, and
+  ///   `latched_during_attempt` — presence-plus-change against a `latch_snapshot`, never a positional
+  ///   reading, because a rollback over the latch moves the offset back behind a boundary that
+  ///   survives. The counter is the load-bearing one, and the latch is the narrower reading it
+  ///   subsumes: a rollback taken *before* the trip puts the boundary back as well as the offset, so
+  ///   the latch is clean there too, and only a cell outside the rollback set answers;
+  /// * a **descent** budget trip the element caught itself. It latches no boundary and bumps no
+  ///   scanner counter, so both witnesses above read `false` for one, and the absence exit spends the
+  ///   stop as a *success*. The witness is `tripped_during_attempt` against the per-**element**
+  ///   baseline, for the reason [`every_element_loop_baselines_its_trip_witness_per_element`] gives.
   ///
   /// In the delimited drivers **this** gate belongs *inside* the close probe's `WrongToken`/`Eof`
   /// arms, never ahead of the probe: the probe is cache-first, so a `Close` verdict rests on a real
-  /// pre-trip token, and the *scanner* half of this pair must not reach it — a boundary latched past
-  /// the closer is not about a construct that ended before it, and reading it there would fail a
-  /// parse a wider window completes identically. The *descent* half is a different kind of fact and
-  /// does reach it, through the separate [`close_after_element`](super::close_after_element) gate
-  /// that [`every_real_closer_exit_after_an_element_is_trip_gated`] counts.
+  /// pre-trip token, and *neither* scanner witness may reach it — a boundary latched past the closer
+  /// is not about a construct that ended before it, the counter was bumped by the very lookahead
+  /// that latched it, and reading either there would fail a parse a wider window completes
+  /// identically. The *descent* witness is a different kind of fact and does reach it, through the
+  /// separate [`close_after_element`](super::close_after_element) gate that
+  /// [`every_real_closer_exit_after_an_element_is_trip_gated`] counts.
   ///
   /// What this pins, per source: the baseline is taken; the source carries the count
-  /// [`absence_exit_shapes`] classifies it with; and the source spells **neither** witness itself,
-  /// which is the "nothing left to balance" form — the strongest of these the codebase has, and the
-  /// one the swallow scan above uses. What it does not pin is that the chokepoint's own guard
+  /// [`absence_exit_shapes`] classifies it with; and the source spells **none** of the witnesses
+  /// itself, which is the "nothing left to balance" form — the strongest of these the codebase has,
+  /// and the one the swallow scan above uses. What it does not pin is that the chokepoint's own guard
   /// *gates*, which is
-  /// [`the_absence_chokepoint_consults_both_witnesses_before_it_stops`]'s region scan for presence
+  /// [`the_absence_chokepoint_consults_every_witness_before_it_stops`]'s region scan for presence
   /// and `tokora/tests/collection_resource_trip.rs`'s sections 4 and 7 for behaviour.
   #[test]
   fn every_absence_exit_carries_the_terminal_witnesses() {
@@ -1297,8 +1537,8 @@ mod gate_census {
           code_matches(src, witness),
           0,
           "{name}: a driver hands its absence exits to `absence_after_element` — it never reads \
-           `{witness}` itself. A hand-spelled gate can consult one witness and not the other, which \
-           is exactly the defect the chokepoint exists to make unspellable"
+           `{witness}` itself. A hand-spelled gate can consult two witnesses of three and look \
+           complete, which is exactly the defect the chokepoint exists to make unspellable"
         );
       }
       chokepointed += calls;
@@ -1311,31 +1551,47 @@ mod gate_census {
     );
   }
 
-  /// The absence chokepoint consults **both** never-recoverable witnesses before it produces its
+  /// The absence chokepoint consults **every** never-recoverable witness before it produces its
   /// terminal end-of-input, and it is the only place in the tree that reads the scanner latch.
   ///
   /// The absence twin of the region scan in
   /// [`every_element_failure_routes_through_the_gated_chokepoint`], and it proves exactly as much
   /// and as little: each witness is present, named, and textually ahead of the stop. That is a
   /// tripwire on the source — a witness dropped, renamed or duplicated reds one cheap unit test —
-  /// and **not** a proof of control-flow domination, which a body reading both into `let _ =`
+  /// and **not** a proof of control-flow domination, which a body reading them all into `let _ =`
   /// bindings would satisfy with the gate gone. Verified, not reasoned about: with the descent term
   /// so neutered this test and the whole census stayed green while
   /// `tokora/tests/collection_resource_trip.rs` red 16 cells. What proves each gate gates is that
-  /// suite — section 4's 16 cells for the descent term, and
-  /// `tokora/tests/absence_terminal_stop.rs`'s 10 (of 46) for the scanner term. Both `find`s panic
-  /// rather than pass when what they scan for is absent.
+  /// suite — section 4's 16 cells for the descent term,
+  /// `tokora/tests/absence_terminal_stop.rs`'s 10 (of 47) for the latch, and that file's
+  /// `a_trip_caught_inside_an_elements_own_attempt_still_surfaces_terminal` for the scanner counter.
+  /// Both `find`s panic rather than pass when what they scan for is absent.
+  ///
+  /// The two tree-wide tallies below are the "counted globally" form of the asymmetry
+  /// [`the_close_chokepoint_reads_the_counter_and_not_the_position`] pins locally: the latch is read
+  /// **once** in the whole tree and the scanner counter **twice** — once at each of the two gates
+  /// that judge from an element attempt, and never at the third.
   #[test]
   #[cfg_attr(
     miri,
     ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
   )]
-  fn the_absence_chokepoint_consults_both_witnesses_before_it_stops() {
+  fn the_absence_chokepoint_consults_every_witness_before_it_stops() {
     let prod = super::end_state_census::many_mod_production();
     assert_eq!(
       code_matches(prod, "inp.latched_during_attempt("),
       1,
       "`many/mod.rs`: the scanner latch is read once in this tree, inside `absence_after_element`"
+    );
+    assert_eq!(
+      code_matches(prod, "inp.scanner_tripped_during_attempt("),
+      2,
+      "`many/mod.rs`: the scanner counter is read exactly twice in this tree — in \
+       `absence_after_element` and in `file_element_failure`, the two gates that judge from an \
+       element attempt. A third reading is `close_after_element` having grown one, which fails a \
+       delimited parse a wider scan window completes identically; a count of one is the witness \
+       dropped from a gate whose remaining witnesses answer the same way on every case anyone \
+       thought to write"
     );
     let def_at = code_find(prod, ABSENCE_DEF).unwrap_or_else(|| {
       panic!(
@@ -1355,9 +1611,10 @@ mod gate_census {
       assert_eq!(
         code_matches(guard, witness),
         1,
-        "`many/mod.rs`: the absence chokepoint must consult both never-recoverable witnesses before \
-         it stops — `{witness}` is missing from, or duplicated in, the code ahead of its terminal \
-         end-of-input. One witness alone leaves the other's stop spendable as an accepted absence"
+        "`many/mod.rs`: the absence chokepoint must consult all three never-recoverable witnesses \
+         before it stops — `{witness}` is missing from, or duplicated in, the code ahead of its \
+         terminal end-of-input. One witness alone leaves the others' stops spendable as an accepted \
+         absence"
       );
     }
   }
@@ -1522,15 +1779,17 @@ mod gate_census {
   /// siblings: the witness is present, named, and textually ahead of the stop. That is a tripwire on
   /// the source and **not** a proof of control-flow domination — a body reading the counter into a
   /// `let _ =` binding satisfies it with the gate gone, exactly as
-  /// [`the_absence_chokepoint_consults_both_witnesses_before_it_stops`] records for its own. What
+  /// [`the_absence_chokepoint_consults_every_witness_before_it_stops`] records for its own. What
   /// proves this one gates is `tokora/tests/collection_resource_trip.rs`'s section 5.
   ///
-  /// The negative half has no sibling: `latched_during_attempt` must **not** appear here. A scanner
-  /// term smuggled into this body would fail every delimited parse whose element lookahead latched a
-  /// boundary past a closer that legitimately closed — a regression a wider scan window makes
-  /// invisible, and the exact reason the previous revision left the whole arm ungated. Pinning the
-  /// absence is cheap; noticing it later is not. `many/mod.rs`'s single tree-wide reading of the
-  /// latch, asserted next door, is the same claim counted globally.
+  /// The negative half has no sibling: **neither** scanner reading may appear here — not the latch
+  /// and not the session counter. Either one smuggled into this body would fail every delimited
+  /// parse whose element lookahead latched a boundary past a closer that legitimately closed (the
+  /// lookahead that latched also bumped the counter, so the two refuse the same parses) — a
+  /// regression a wider scan window makes invisible, and the exact reason the previous revision left
+  /// the whole arm ungated. Pinning the absence is cheap; noticing it later is not.
+  /// `many/mod.rs`'s tree-wide tallies for both, asserted next door, are the same claim counted
+  /// globally.
   #[test]
   #[cfg_attr(
     miri,
@@ -1560,15 +1819,18 @@ mod gate_census {
        end-of-input. Without it a closer that arrives after a trip the element answered closes the \
        collection successfully"
     );
-    assert_eq!(
-      code_matches(guard, CLOSE_NON_WITNESS),
-      0,
-      "`many/mod.rs`: the close chokepoint must NOT read the scanner latch (`{CLOSE_NON_WITNESS}`). \
-       A committed pre-trip closer settles the position fact — the construct ended ahead of any \
-       boundary a later lookahead latched — so reading it here fails a parse a wider scan window \
-       completes to the identical value. The asymmetry between the two witnesses is why this \
-       chokepoint exists apart from `absence_after_element`"
-    );
+    for non_witness in CLOSE_NON_WITNESSES {
+      assert_eq!(
+        code_matches(guard, non_witness),
+        0,
+        "`many/mod.rs`: the close chokepoint must read NEITHER scanner witness (`{non_witness}` is \
+         present). A committed pre-trip closer settles the scanner fact — the construct ended ahead \
+         of any boundary a later lookahead latched, and that same lookahead is what bumped the \
+         session counter — so reading either here fails a parse a wider scan window completes to \
+         the identical value. The asymmetry between the scanner facts and the descent one is why \
+         this chokepoint exists apart from `absence_after_element`"
+      );
+    }
   }
 
   /// Every no-progress guard measures committed consumption (`span().end()`), never a cache-front
