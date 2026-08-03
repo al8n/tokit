@@ -3234,32 +3234,65 @@ after the walk rather than before it — **plus one `k log k` ordering of the `k
 diagnostic spans.** With one lexer error per token `k` is Θ(events), so materialization is
 **O(n log n)**, not linear; the quadratic term is what this round removes.
 
-This round replaced the rescan with a *gather* pass in front of the walk, and item 51 below
-folded that gather into the walk. The figures immediately below are therefore measured against
-the two-pass shape item 51 superseded; item 51 carries its own measurement of the fold.
+This round first replaced the rescan with a *gather* pass in front of the walk, and item 51
+below then folded that gather into the walk. Every figure here was originally taken on that
+intermediate two-pass shape, so all of it has been **remeasured against what ships** — and one
+of them changed sign. Each bullet is the shipped `finish` against the pre-round rescan shape
+at `548fd9a`, which is the baseline the superseded figures were against too, with the two-pass
+reading kept beside it so the fold's own share stays visible.
 
 A distribution sort that would make it genuinely linear was implemented and **rejected on
 measurement**: a fixed four-pass radix costs 15n against a 9n budget at every size, an
 adaptive one steps between one and two passes across the probe range and reports growth
 indistinguishable from real nonlinearity, and both pay ~1024 fixed operations per `finish` in
-the common case where a parse records a handful of diagnostics. It remains a candidate with
-its own measurement.
+the common case where a parse records a handful of diagnostics. Those two readings are the one
+thing here that is *not* remeasured — the candidate was never merged, so there is nothing left
+to run — and the `9n` they are scored against is the pre-round bound `3 × (events + gap
+tiles)`, from before the sort was charged its own `k log k`. The rejection stands as a decision
+of that date, not as a measurement of what ships. It remains a candidate with its own
+measurement.
 
-- `finish_error_dense` — **15.9× faster** (4 096 alternating error/token pairs). A growth
-  probe pins the shape rather than the constant: 799 / 3 199 / 12 799 units of replay work
-  against bounds of 900 / 3 600 / 14 400, growth **4.00×** for a 4× input.
-- `finish_wrap_heavy` — **3.62× faster** (2 048 retro-wrap targets).
-- `finish_clean` — **18% slower, and this ships.** It is the harness's designated
-  no-regression control, so it is disclosed rather than folded into an average: ~19 → ~22 ns
-  per token over 4 096 tokens, measured on `finish` alone. It reproduces at all nine
-  alignment residues of a padding sweep (min +12.4%, max +22.8%), so it is a real cost and
-  not the layout artifact its bimodal raw readings first suggested. Two candidate causes are
-  eliminated — the event footprint is unchanged (`size_of::<Event<SimpleSpan>>()` is 32 on
-  both sides) and the new reachability bitset never allocates on clean input — and the
-  residual is not yet attributed. `finish`'s internals are private, so an attribution can
-  land in a patch release without breaking anyone.
+- `finish_error_dense` — **17.4× faster** (4 096 alternating error/token pairs; 2 406 µs →
+  138.0 µs). The two-pass shape read 15.9×, which is the figure this section carried before.
+  A growth probe pins the shape rather than the constant: the in-suite replay-work instrument
+  reads **1 299 / 5 999 / 27 199** units at n = 100 / 400 / 1 600 against its bound of
+  1 600 / 7 200 / 32 000, growth **4.62× / 4.53×** for a 4× input. The 799 / 3 199 / 12 799
+  against 900 / 3 600 / 14 400 at a flat **4.00×** published here before is withdrawn twice
+  over: 4.00× was an artifact of charging the sort a flat element count, which made the
+  charged quantity linear by construction and left the growth clause unable to fail for the
+  reason it existed, and the payload predates the fold besides. A reading above 4.00× is the
+  correct one — it is the sort's `k log k` becoming visible to its own gate, which is this
+  section's **O(n log n)** being met rather than contradicted.
+- `finish_wrap_heavy` — **3.90× faster** (2 048 retro-wrap targets; 160.4 µs → 41.1 µs). The
+  two-pass shape read 3.62×.
+- `finish_clean` — **8.7% faster** (74.1 µs → 67.7 µs over 8 192 tokens), where this section
+  said *18% slower, and this ships*. It is the harness's designated no-regression control, and
+  measured on what ships it does not regress: the gather pass was the cost, and folding it into
+  the walk gives back **17.8%** against the two-pass shape — more than the regression it was
+  disclosed for. What is *not* settled is the constant. The regression this replaces moved
+  between +12.4% and +22.8% across the nine alignment residues of a padding sweep, and this
+  remeasurement is one residue on one toolchain; composing the two puts the shipped walk
+  between ~8% faster and within a point of parity across that whole band. So the 18% is gone
+  at every residue the sweep covers, and the 8.7% is not a constant to lean on. `finish`'s
+  internals are private, so a sharper figure can land in a patch release without breaking
+  anyone.
 
-  — *(R8, #123)*
+  Method, and it is the one the scan-path table below uses. Four `[profile.bench]` builds off
+  one shared `Cargo.lock`, so criterion and every other dependency is identical and only
+  tokora's own source differs: the shipped tree twice in separate target directories, the
+  two-pass shape at `868eb0c`, and the pre-round shape at `548fd9a`. `benches/cst.rs` is
+  byte-identical across the first three. It did not exist at `548fd9a`, so that arm runs the
+  shipped bench under three mechanical API adaptations and nothing else — `Sink::new` arity,
+  `finish` taking the source, `cst_finish` arity — and what qualifies it is that it reproduces
+  the two published two-pass ratios independently, at 15.96× and 3.57× against 15.9× and 3.62×.
+  Arms were interleaved within each of sixteen rounds rather than run in blocks: 32 shipped
+  runs per id against 16 two-pass and 12 pre-round. **The null control is 0.12–0.28% with no
+  excursion** — the two shipped builds are byte-identical, same SHA-256 — and the smallest
+  delta above clears its own control by 31×, with no population overlapping any other. This was
+  **not** a quiet machine and nothing here depends on it having been one: the same M4 Pro at a
+  1-minute load average of 2.5–5.0 across 14 cores, unrelated work resident throughout.
+
+  — *(R8, #123; figures remeasured against the shipped fold)*
 
 - A nested rollback is **linear in lineage depth** rather than quadratic.
 - **The release-level scan path regresses on `next_drain`: +2.7% against 0.7.3.** The leading
