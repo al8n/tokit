@@ -591,6 +591,27 @@ where
   /// copies it back verbatim, since a last-in, first-out restore returns to exactly
   /// the lineage the checkpoint recorded.
   ///
+  /// # Read by recovery, and this cell is NOT the witness that holds
+  ///
+  /// A trip reported by a *rejecting* emitter reaches the grammar as a value built from the lexer's
+  /// own `Token::Error`, with no [`UnexpectedEnd`](crate::error::UnexpectedEnd) on the path to mark
+  /// terminal, so [`MaybeTerminal`](crate::error::MaybeTerminal) alone cannot answer for it.
+  /// [`Recover`](crate::parser::Recover), [`InplaceRecover`](crate::parser::InplaceRecover) and
+  /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) therefore consult the input as well —
+  /// but through [`scanner_trips`](Self::scanner_trips), *not* through this cell, and the
+  /// difference is the whole reason that cell exists.
+  ///
+  /// This one is **inside the rollback set**, and a witness inside it cannot answer a question
+  /// asked from outside it. A speculating attempt restores this field on `Err`, so a snapshot taken
+  /// before the attempt and compared after it compares a restored value against the value it was
+  /// restored *to* — always equal, always `false`. Moving the read *inside* the attempt fixes that
+  /// one level and no more: grammar code that catches a scanner stop inside an **inner**
+  /// `try_attempt` or transaction has the inner rollback put this field back before the outer read
+  /// ever runs, and the outer verdict reads clean over a live, already-diagnosed stop. A rollbackable
+  /// cell compared across a rollback boundary is unreliable at *every* depth, so the depth-proof
+  /// witness is the monotone counter and this cell is read beside it as the narrower, standing-stop
+  /// reading. `parser::recovery_gate` is the one place either is read.
+  ///
   /// # A trip is TERMINAL, and terminal outranks incomplete
   ///
   /// A latched boundary is the crate's **terminal** condition: it means *no amount of further input
@@ -746,6 +767,58 @@ where
   /// [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and therefore
   /// a fresh cell, and harvests terminality by its own separate route.
   resource_trips: usize,
+  /// **Where SCANNER terminality is stored**: how many times the scanner has tripped a lexer
+  /// resource limit in this input session. The exact twin of
+  /// [`resource_trips`](Self::resource_trips) one field up, for the other budget — monotone, never
+  /// cleared, and deliberately outside the rollback set.
+  ///
+  /// # Why the poison boundary could not be this witness
+  ///
+  /// [`poison_boundary`](Self::poison_boundary) already records a scanner trip, and it records
+  /// something this cell does not: *where*. It is nonetheless the wrong thing to judge an attempt
+  /// with, because it is a **lineage memo** — a [`Checkpoint`] carries it and a
+  /// [`restore`](InputRef::restore) copies it back verbatim. Any comparison of it across a rollback
+  /// boundary therefore reads a restored value against what it was restored to.
+  ///
+  /// Moving the comparison *inside* the attempt closes exactly one level of that, and the level
+  /// below reopens it: grammar code is free to catch a scanner stop inside an inner
+  /// [`try_attempt`](InputRef::try_attempt) or transaction, and that inner rollback puts the
+  /// boundary back before an outer gate ever looks. The stop is live — the diagnostic is filed, the
+  /// budget is spent, re-lexing the same prefix re-trips — and every reading of the latch says
+  /// clean. **A rollbackable cell cannot witness an event across a rollback at any depth**, so the
+  /// witness is a cell no rollback reaches. That is this one, and it is immune to nesting depth
+  /// because it never goes down.
+  ///
+  /// The two are kept and read together, not traded: the boundary is *where the stream stops* and
+  /// gates the scanner itself (`reached_boundary`, `lex_within_boundary`), which is a positional
+  /// job a counter cannot do; this is *that a stop happened*, which is the judgement job the
+  /// boundary cannot do.
+  ///
+  /// # One writer, before anything the grammar can see
+  ///
+  /// `InputRef::latch_if_limit_tripped` — the crate's terminal predicate, and `InputRef::classify`
+  /// is its sole caller, so **both** lexing drivers (the scanner's `scan_with` and the peek fill)
+  /// count through it by construction rather than by each remembering to. That placement matters:
+  /// a peek that trips latches and still returns `Ok` with a short window, so a driver that counted
+  /// only in `scan_with`'s `Verdict::Trip` arm would miss every lookahead trip. The bump happens
+  /// **before** the diagnostic is offered to the emitter, so a rejecting emitter's `Err` — which is
+  /// the report, not a refusal to make one — cannot carry the stop out past an uncounted trip.
+  ///
+  /// # Read as a per-attempt difference, exactly like its sibling
+  ///
+  /// Monotone storage, attempt-relative verdict: `InputRef::scanner_trip_snapshot` before the
+  /// attempt, `InputRef::scanner_tripped_during_attempt` when judging its failure. Read
+  /// absolutely, `!= 0` answers "did this parse ever trip the scanner", which is true forever
+  /// after the first trip and is not the question any consulting site has. A **count** rather than
+  /// a flag is what makes the comparison hold up a second time — see
+  /// [`resource_trips`](Self::resource_trips) for the full argument, which transfers verbatim,
+  /// including the granularity floor of one attempt and the sense in which it fails closed.
+  ///
+  /// Per **input session**, like the sibling: a
+  /// [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and a fresh
+  /// cell, and harvests terminality by its own route (which reads the error value only — see
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal)).
+  scanner_trips: usize,
   /// The **bound emitter** — the one emission log this input's parse writes, owned here for the
   /// input's whole life and paired with it at
   /// [`with_state_and_context`](Self::with_state_and_context).
@@ -917,6 +990,9 @@ where
       // zero is also what makes an attempt baseline taken before the first descent mean "no trip
       // yet" rather than "some trip, inherited".
       resource_trips: 0,
+      // Untripped, and for the same reason: a scanner trip is a fact about THIS session's lexing,
+      // and no constructor carries one in.
+      scanner_trips: 0,
       emitter,
       lineage: Lineage::new(),
       #[cfg(feature = "trace")]
@@ -1049,6 +1125,9 @@ where
       // The resource-trip counter, borrowed for the same reason: a trip raised through this handle
       // is a fact about the session, so it has to outlive the handle that raised it.
       resource_trips: &mut self.resource_trips,
+      // The scanner-trip counter, borrowed for the identical reason: a trip the scanner takes
+      // through this handle is a fact about the session, so it has to outlive the handle.
+      scanner_trips: &mut self.scanner_trips,
       // The lineage memos, the emitter borrow, and the session-point stack, in one cell (see
       // `input_ref::session`): the stack starts empty and stays unallocated until the first
       // `InputRef::begin_point`, so a reference that never opens a session pays a few zeroed

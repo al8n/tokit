@@ -3,7 +3,10 @@ use crate::{
   input::Cursor,
 };
 
-use super::*;
+use super::{
+  recovery_gate::{Attempted, inplace_attempt, speculated_attempt},
+  *,
+};
 
 /// A trait for recovery parsers that start from the original position after backtracking.
 ///
@@ -294,6 +297,28 @@ where
 /// - Errors from the **recovery parser are propagated**
 /// - For error collection, use an emitter that accumulates errors
 ///
+/// # The never-recoverable law, and its terminal dual
+///
+/// Two failures are never handed to the recoverer, whatever it would have produced from them:
+///
+/// - an [`Incomplete`](crate::error::Incomplete) — *more input may fix this*, so synthesizing over
+///   it fabricates output from input that has not finished arriving;
+/// - a **terminal stop** — a resource limit the parse tripped, which *no input ever clears*.
+///   Re-entering the parser from a recoverer only re-trips the same limit.
+///
+/// Terminality is read from **all four** places this crate stores it, not from the error value
+/// alone: [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal::is_terminal) for a stop the
+/// grammar's error type carries; the input's session trip counter for a **descent** budget; and the
+/// input's poison latch for a **scanner** trip. The last two exist because a conversion into the
+/// grammar's error type may discard the marker — `()` does — and because a *rejecting* emitter
+/// reports a scanner trip by returning the value its `From<<L::Token as Token>::Error>` builds,
+/// with no [`UnexpectedEnd`](crate::error::UnexpectedEnd) anywhere on that path to mark.
+///
+/// All four are attempt-relative and all four are *read* on the failure path only. What a
+/// successful attempt pays is the two baselines taken before it: a `usize` load, and one clone of
+/// the latch — the same `Option<L::Offset>` the checkpoint this combinator already saves clones for
+/// its own rollback set.
+///
 /// # See Also
 ///
 /// - [`InplaceRecover`] - Error recovery without backtracking
@@ -351,41 +376,26 @@ where
     &mut self,
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-    // Speculate through `try_attempt`: it saves a checkpoint before the primary runs, and
-    // on `Ok` keeps the progress while dropping the checkpoint's lineage id — closing the
-    // success-path leak where a bare `save` left an orphan id on the live stack for every
-    // valid parse. On `Err` it restores that checkpoint (rewinding to the pre-parse state,
-    // see [`restore`](InputRef::restore)) and hands the error back, so the recoverer runs
-    // from the restored position exactly as the raw save/restore pair did.
+    // Speculate through the recovery chokepoint's `speculated_attempt`, which wraps the primary in
+    // `try_attempt`: it saves a checkpoint before the primary runs, and on `Ok` keeps the progress
+    // while dropping the checkpoint's lineage id — closing the success-path leak where a bare
+    // `save` left an orphan id on the live stack for every valid parse. On `Err` it restores that
+    // checkpoint (rewinding to the pre-parse state, see [`restore`](InputRef::restore)) and hands
+    // the error back, so the recoverer runs from the restored position exactly as the raw
+    // save/restore pair did.
     //
-    // The trip baseline for that attempt, taken immediately before it: what the arm needs to know
-    // is whether *this* attempt tripped a budget, not whether the parse ever has. The restore does
-    // not touch the counter — it is outside the rollback set, deliberately, since a rewind cannot
-    // un-exceed a budget — so the comparison below still sees a trip the rolled-back attempt made.
-    let trips = inp.trip_snapshot();
-    match inp.try_attempt(|input| self.parser.parse_input(input)) {
-      Ok(output) => Ok(output),
-      // The never-recoverable law and its terminal dual: an `Incomplete` (more input may fix
-      // this) and a terminal stop (no input ever will) both ride the `Err` channel untouched.
-      // Recovery fabricates a value from a *malformed* construct; neither an unfinished construct
-      // nor a tripped limit is that, so re-raise verbatim rather than invoking the recoverer —
-      // see [`MaybeIncomplete`](crate::error::MaybeIncomplete) and
-      // [`MaybeTerminal`](crate::error::MaybeTerminal).
-      //
-      // Two readings of terminality, deliberately, because they store it in different places. The
-      // error's own answer covers a *scanner* stop, which the grammar's error type carries. The
-      // input's covers a **resource budget trip**, which it does not have to: a grammar error may
-      // discard `RecursionLimitReached` on conversion (`()` does), and a bound the error sink can
-      // opt out of is not a bound. The session counter is bumped before that conversion runs, so
-      // this arm answers the same way for every sink — see
-      // [`InputRef::descend`](crate::InputRef::descend).
-      //
-      // Attempt-relative, against the baseline above. The counter is monotone and never cleared,
-      // so an absolute reading would refuse every later recovery in a session where anything once
-      // caught a trip and parsed on — including ordinary syntax errors that have nothing to do
-      // with the budget. One `usize` load and a compare, on the failure arm only.
-      Err(e) if e.is_incomplete() || e.is_terminal() || inp.tripped_during_attempt(trips) => Err(e),
-      Err(e) => self.recoverer.recover_input(inp, e),
+    // The never-recoverable law and its terminal dual are the chokepoint's, and so are the two
+    // baselines they are read against: an `Incomplete` (more input may fix this) and a terminal
+    // stop (no input ever will) both ride the `Err` channel untouched, because recovery fabricates
+    // a value from a *malformed* construct and neither an unfinished construct nor a tripped budget
+    // is that. FIVE readings, in the five places the two conditions are stored — see
+    // [`recovery_gate`](super::recovery_gate) for each of them, for why the error value alone can
+    // never answer for a scanner stop a rejecting emitter reported, and for why the input-side
+    // readings have to happen inside the attempt rather than after it.
+    match speculated_attempt(inp, |input| self.parser.parse_input(input)) {
+      Attempted::Done(output) => Ok(output),
+      Attempted::Reraise(e) => Err(e),
+      Attempted::Recoverable(e) => self.recoverer.recover_input(inp, e),
     }
   }
 }
@@ -491,14 +501,18 @@ where
 /// - Errors from the **recovery parser are propagated**
 /// - Recovery parser sees input from where the primary parser stopped
 ///
-/// # The never-recoverable law
+/// # The never-recoverable law, and its terminal dual
 ///
-/// An [`Incomplete`](crate::error::Incomplete) error is re-raised untouched — before the
-/// recovery parser runs — exactly as [`Recover`] and
-/// [`skip_then_retry`](crate::ParseInput::skip_then_retry) do: recovery synthesizes progress
-/// over a *malformed* construct, but an incomplete one is merely unfinished, so continuing past
-/// it would fabricate output from input that has not finished arriving. See
-/// [`MaybeIncomplete`](crate::error::MaybeIncomplete).
+/// An [`Incomplete`](crate::error::Incomplete) error, and a **terminal stop**, are re-raised
+/// untouched — before the recovery parser runs — exactly as [`Recover`] and
+/// [`skip_then_retry`](crate::ParseInput::skip_then_retry) do, off the same five witnesses
+/// [`Recover`] documents. Recovery synthesizes progress over a *malformed* construct; an incomplete
+/// one is merely unfinished and a tripped limit is not a construct at all. See
+/// [`MaybeIncomplete`](crate::error::MaybeIncomplete) and
+/// [`MaybeTerminal`](crate::error::MaybeTerminal).
+///
+/// Checking before the handler runs matters more here than anywhere else: this path never
+/// backtracks, so it cannot undo a recovery it should never have begun.
 ///
 /// # See Also
 ///
@@ -549,20 +563,26 @@ where
     // The in-place path never backtracks: hand the recovery handler a position view
     // (the cursor where the primary parser started), not a restorable checkpoint.
     let cursor = inp.cursor().clone();
-    // The trip baseline for the attempt below — see [`Recover`]'s arm for why it is a per-attempt
-    // difference rather than a reading of the session cell.
-    let trips = inp.trip_snapshot();
-    match self.parser.parse_input(inp) {
-      Ok(output) => Ok(output),
-      // The never-recoverable law and its terminal dual, read from both of the places terminality
-      // is stored — the error for a scanner stop, the input for a resource budget trip this attempt
-      // caused. See [`Recover`]'s arm above for why the second reading exists and why it is
-      // attempt-relative, and [`InputRef::descend`](crate::InputRef::descend) for the cell.
-      Err(e) if e.is_incomplete() || e.is_terminal() || inp.tripped_during_attempt(trips) => Err(e),
-      Err(e) => self.recoverer.inplace_recover_input(inp, cursor, e),
+    // The never-recoverable law and its terminal dual, through the same chokepoint [`Recover`]
+    // uses — `inplace_attempt` differs from it in exactly one respect, that there is no checkpoint
+    // and so no rollback, and in none of the five witnesses it reads. Checking the failure BEFORE
+    // the handler runs is the only correct order here: this path cannot undo a recovery it should
+    // never have begun.
+    match inplace_attempt(inp, |input| self.parser.parse_input(input)) {
+      Attempted::Done(output) => Ok(output),
+      Attempted::Reraise(e) => Err(e),
+      Attempted::Recoverable(e) => self.recoverer.inplace_recover_input(inp, cursor, e),
     }
   }
 }
+
+// ── RECOVERY_GATE_CENSUS_END — production above, tests below ──────────────────
+//
+// `RECOVERY_GATE_CENSUS` (in `parser/recovery_gate.rs`) reads this file's source and counts
+// needles that its own test fixtures also spell. The split is this marker rather than the first
+// `#[cfg(test)]`, because the suites below are feature-gated and their attribute is not that
+// literal; the census `expect()`s the marker, so deleting it fails loudly instead of silently
+// widening the scan over test code.
 
 // The no-growth regression needs a lexer that actually runs (so `save`/`next` push and
 // commit real checkpoints), which pins it to `logos` + `std` — the same set the
