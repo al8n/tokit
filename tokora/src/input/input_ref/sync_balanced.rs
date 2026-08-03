@@ -218,12 +218,44 @@ where
   ///
   /// # Panic unwind
   ///
-  /// A panic out of the predicate, the expected-tokens closure, the lexer or the emitter is an
-  /// exit too, and it settles — this method's `to`-shaped commit posture keeps the diagnosed
-  /// prefix and puts the in-flight token back; the rewinding scans
-  /// ([`sync_through`](Self::sync_through), [`sync_balanced`](Self::sync_balanced)) restore to
-  /// the call's entry instead. Either way no token leaves the stream and no emitter mark is
-  /// stranded.
+  /// A panic out of the predicate, the classifier, the lexer or the emitter **anywhere but the
+  /// end-of-input settle** is an exit too, and it settles with **this method's own posture** —
+  /// which is neither of the other two's, because this is the method where the family's two axes
+  /// cross. It stops *before* the sync token and commits the skipped prefix, exactly as
+  /// [`sync_to`](Self::sync_to) does; it rewinds the full pre-call state at a no-match end of
+  /// input, exactly as [`sync_through`](Self::sync_through) does. So the disposition of an unwind
+  /// belongs to the **exit**, not to the method, and branching on the method alone is a defect this
+  /// crate has already paid for:
+  ///
+  /// - **once the predicate has answered stop**, in the stop settle itself, the scan keeps the
+  ///   prefix its own stop keeps: the position stands at the last skipped token. The in-flight
+  ///   token has been handed to that settle by then, so it is **not** put back — the put-back is
+  ///   precisely the step the unwind interrupted — and the retained stream is cleared against the
+  ///   committed position instead, leaving a catching host's retry to re-lex the swallowed stopper.
+  ///   ([`sync_to`](Self::sync_to) states the held-versus-handed-over split in full; this method's
+  ///   keeping arm sits entirely on the handed-over side of it.)
+  ///   `r9_balanced_stop_exit_panic_keeps_the_prefix_like_its_own_stop_does`
+  ///   (`src/input/input_ref/tests.rs`) reads a committed `(3, 5)` over `"ab cd ef gh"`, with four
+  ///   lex calls and nothing left live;
+  /// - **anywhere else** — mid-scan, and equally once the frontier has left the scope for the very
+  ///   `commit_at` that would record it — the scan abandons, to the same restore-to-entry its
+  ///   no-match end of input performs: the stream is cleared and the position, the lexer state, the
+  ///   dedup watermark and every emission the scan made come back off.
+  ///   `r9_frontier_commit_interrupted_abandons_rather_than_half_keeping` reads `((0, 0), 0, 0, 0)`
+  ///   — keeping there instead would leave the per-token settles describing a prefix the position
+  ///   does not cover, which a retry duplicates.
+  ///
+  /// Either way the committed position never advances past a token nothing recorded, so no token is
+  /// lost and no emitter mark is stranded. Note that the prefix in
+  /// question is **skipped, not diagnosed**: this scan makes no per-token report, so the emissions
+  /// an unwind decides the fate of are the genuine lexer errors it crossed — the one hole
+  /// diagnostic is emitted only after a successful sync returns, which an unwind never reaches.
+  ///
+  /// The exclusion is the one [`skip_while`](Self::skip_while) states, and it costs this method
+  /// nothing: the scope is disarmed before the end-of-input settle runs, but that settle is this
+  /// method's *rewind*, and a scan that reaches it has committed no progress for a dropped frontier
+  /// to strand — the position was never off the call's entry. It is the stop exit above, not this
+  /// one, where the frontier is load-bearing.
   #[inline(always)]
   #[allow(clippy::type_complexity)]
   pub fn sync_balanced<D, F>(

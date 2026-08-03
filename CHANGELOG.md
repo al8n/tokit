@@ -1337,6 +1337,119 @@ concrete public struct with no bound to reject anybody.
    the 64 in question comes from `ParserContext` and the input layer — plus two source line
    numbers into another file, now symbol names.
 
+19. **Three public claims corrected where they said more than the crate does. Documentation only —
+   no behaviour changed, nothing `pub` moved, no test result changed.** Each was already
+   contradicted, or already left unstated, by something measured in the tree.
+
+   **The sync family's panic-unwind claim was false at two of its three sites, and one paragraph
+   held all three.**
+   [`sync_to`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.sync_to),
+   [`sync_through`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.sync_through)
+   and
+   [`sync_balanced`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.sync_balanced)
+   carried the same sentence byte for byte: a panic out of the predicate, the expected-tokens
+   closure, the lexer or the emitter "settles — this method's `to`-shaped commit posture keeps the
+   diagnosed prefix; the rewinding scans (`sync_through`, `sync_balanced`) restore to the call's
+   entry instead". The clause names its own two counterexamples in its own next breath. `sync_to`
+   commits; `sync_through` **consumes** on a stop, committing at the matching token's own span, and
+   **rewinds** at a no-match end of input; `sync_balanced` crosses the axes — it stops before the
+   sync token and keeps the skipped prefix like the first, and rewinds at end of input like the
+   second, which is why its unwind disposition belongs to the *exit* rather than to the mode. Three
+   postures cannot share one true sentence. Each method now states its own, with its own
+   measurement: `r9_stop_exit_panic_still_commits_the_diagnosed_prefix` for `sync_to`;
+   `sync_through_unwind_restores_emissions` and `sync_through_warm_unwind_prices_its_re_lex` for
+   `sync_through`; and the pair
+   `r9_balanced_stop_exit_panic_keeps_the_prefix_like_its_own_stop_does` /
+   `r9_frontier_commit_interrupted_abandons_rather_than_half_keeping` for `sync_balanced`.
+   `sync_balanced`'s paragraph also stops calling its prefix *diagnosed*: that scan makes no
+   per-token report at all. The **in-flight token** is stated as the two-case fact it is rather
+   than a blanket put-back: the scanner's `TokenSlot` separates a token still *held* — true across
+   the predicate and nowhere else, where an unwind returns it to the front of the stream — from one
+   already *handed over* to the stop settle, where the put-back is precisely the step the panic
+   interrupted and so cannot happen. There the retained stream is cleared instead and the region
+   re-lexes from the committed position, which reproduces the token; what is lost is the cache's
+   memo of it, not a token. `r9_stop_exit_panic_still_commits_the_diagnosed_prefix` measures that
+   handed-over case, and the two rewinding scans reach their keeping arm only on the same side of
+   the split. No behaviour changed anywhere; only the sentences were wrong.
+
+   **One clause is genuinely common, and it is the one that was newly needed.** The exclusion
+   [`skip_while`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.skip_while)'s
+   claim was narrowed for — *anywhere but the end-of-input settle* — is a property of the shared
+   scan scope, which every mode's end-of-input exit disarms *before* its settle runs, so all four
+   carry it. For a committing scan that is where the whole diagnosed prefix goes: the skipped run
+   sits in an uncommitted frontier, the unwind drops it, and the position stays at the call's entry
+   with the diagnostics already emitted standing over a prefix it no longer covers —
+   `eof_commit_interrupted(true)` reads `((0, 0), 0)`, the entry position beside the entry state.
+   For the two rewinding scans it costs nothing, because there that settle *is* the restore and the
+   scan committed no progress for a dropped frontier to strand; what is at stake is the rest of the
+   restore, swept at every `L::Offset` clone by `r9_restore_entry_is_atomic_at_every_offset_clone`.
+
+   **The byte-identity requirement that produced this is retired, and replaced rather than
+   dropped.** Requiring the three paragraphs to hash identically was doing real anti-drift work, and
+   it could only ever be satisfied by making two of the three wrong. A `POSTURE_CENSUS` in
+   `src/input/input_ref/census_tests.rs` takes the work over in three parts: all four sections must
+   carry the shared exclusion; the three sync sections must stay pairwise **distinct**, each saying
+   it states *this method's own* posture, with none carrying the retired sentence again; and — the
+   part that actually looks at behaviour — each section must state the posture its own `ScanMode`
+   **has**, its required *and* forbidden phrases derived per method from `HOLDS_ENTRY`,
+   `COMMITS_FRONTIER_ON_STOP` and `REPORT_SKIPPED` as they stand in `scan.rs`, over a pin on the
+   `ScanScope::keeps_on_unwind` formula those phrases are keyed to. Shared-clause presence and
+   distinctness alone would pass three paragraphs that are pairwise different and wrong about all
+   three methods; the derived check fails on any permutation of them, and flipping one of the
+   constants fails the doc until the prose follows it. Prose is compared with `///` stripped and
+   whitespace collapsed, so rewrapping a paragraph is not drift. Every check was watched failing
+   against the defect it names — each section swapped for another's in turn, and all three rotated
+   together for the case only the derived check can catch.
+
+   **Why a *consuming* `Accept` is exempt from every terminality witness — and why a zero-width one
+   is not — is now said in public.** Items 2, 16 and 22 finished a programme that put three
+   witnesses under the never-recoverable law — the descent counter, the scanner counter for the
+   recovery combinators, and the same scanner counter for the collection drivers. The docs said
+   where each witness sits; the reason the **accept channel** is exempt from all of them was written
+   only in `parser::many`'s module docs, whose `//!` text rustdoc does not render because the module
+   is private.
+   [`MaybeTerminal`](https://docs.rs/tokora/latest/tokora/error/trait.MaybeTerminal.html) now states
+   it where the contract itself is described: every gate under that law sits on a channel where
+   *this crate* draws the conclusion — a recoverer synthesizing a value, a driver concluding a
+   construct ended from a decline, a stall or a closer — and none of them is consulted when the
+   grammar produces the value itself **and consumed input to produce it**. So an element that
+   catches a trip, still consumes and returns `ParseAttempt::Accept` spends it, permanently and by
+   design: gating that would mean a value-producing parser can never recover from a budget it
+   deliberately caught, which is a contract this crate makes for no other error.
+
+   **The exemption stops at a zero-width `Accept`, and the section says so outright rather than
+   leaving it to be inferred.** A value returned without consuming anything has produced a value but
+   not moved the parse, and the driver's very next act is to read that absence of progress as *no
+   more elements* — a conclusion of the driver's own, gated through the same chokepoint a decline
+   reaches and by all three witnesses at once. That is not a corner case: the four `*_while`
+   collection drivers and the `*_while` folds take their element through `ParseInput`, which has no
+   decline channel at all, so a zero-width return **is** their decline — which is exactly the
+   hole item 12 closed for the descent witness and item 22 for the scanner one. Publishing the
+   exemption
+   without its boundary would have restated, as a contract, the shape two shipped fixes had just
+   removed. The "answered versus swallowed" framing does not settle this case by itself, so the
+   boundary is drawn on what the return *consumed* instead.
+   [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html),
+   which stated the exemption for its own stop only, now points at the general statement and carries
+   the same limit on it.
+
+   **`Emitter::rewind`'s "report before you mutate" rider now says what it does not buy.** The rider
+   requires a detecting emitter to raise its unpaired-settle report from a preflight over unchanged
+   state, so a host that catches it holds the emitter it had rather than a half-rewound one — and it
+   stopped there, which invites reading the whole operation as recoverable. It is not:
+   [`rewind`](https://docs.rs/tokora/latest/tokora/emitter/trait.Emitter.html#method.rewind) is
+   called from the middle of a checkpoint restore, below the point where the lineage has been popped
+   through the target and any session points above it released, and above the point where the
+   position, the error-reporting witnesses and the cache-push counter are installed. A compliant
+   preflight makes the *emitter* transactional and cannot make the *restore* so; a host that catches
+   the report must treat the parse as over rather than resume on that handle. The tear itself was
+   already measured — `restore_unchecked_is_not_transactional_across_the_settle_wall` — and already
+   stated on
+   [`InputRef::restore`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.restore),
+   but only there, behind the `unstable-raw` feature, where a consumer of the recording CST `Sink`
+   never reads it. The bound now sits on the always-compiled trait contract that grants the panic
+   door in the first place.
+
 ### Added
 
 17. **`cast::token_any` and `cast::tokens` close the two gaps in the cast module's token

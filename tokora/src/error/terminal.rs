@@ -58,6 +58,60 @@
 /// terminal *event* can reach them through a carrier nothing marked. See
 /// [Where the set stops being closed](MaybeTerminal#where-the-set-stops-being-closed).
 ///
+/// # The channel no witness is consulted on: a value the grammar consumed input to produce
+///
+/// Every gate that law drives — this trait, and the two input-side witnesses beside it: the
+/// **descent** counter [`InputRef::descend`](crate::InputRef::descend) bumps, and the **scanner**
+/// counter the crate's terminal predicate bumps, which the three recovery combinators read and the
+/// twelve resilient collection drivers read on its own, carrying no `MaybeTerminal` bound at
+/// all — sits on a channel where *this crate* is the one drawing a conclusion. A recoverer
+/// synthesizes a value for a construct that failed; a collection driver concludes the construct
+/// ended because its element declined, made no progress, or was followed by a closer. Each infers
+/// something from a stop the caller was never told about, so each has to guard its own inference.
+///
+/// **No witness is consulted when the grammar produces the value itself — and consumed input to
+/// produce it.** Grammar code is entitled to catch a terminal stop — a
+/// [`RecursionLimitReached`](crate::error::RecursionLimitReached) out of a nested descent, a
+/// scanner trip inside a speculation of its own — and what it does next is the whole distinction:
+/// code that catches a stop, consumes, and still yields a value has **answered** it, where code
+/// that catches one and then declines has **swallowed** it, asserting an absence built on a stop
+/// nothing else can see. An element that catches a trip, still consumes, and returns
+/// [`ParseAttempt::Accept`](crate::try_parse_input::ParseAttempt) is the first: it hands the driver
+/// a value, and the driver collects it exactly as it would from an element no budget ever touched.
+/// The collection then closes normally — the delimited `separated` driver commits a real closer
+/// left at the following slot straight from its own mid-scan arm, one of the two **direct** closers
+/// its gate census exempts, and exempt precisely because only an accepting element can precede
+/// one — and succeeds.
+///
+/// ## The exemption stops at a zero-width `Accept`, and that is the case to get right
+///
+/// *Consumes* is load-bearing above, and this is the shape the answered/swallowed framing does not
+/// settle on its own. An element that catches a stop and returns a value **while consuming
+/// nothing** has produced a value — but it has not moved the parse, and the driver's very next act
+/// is to read that absence of progress as *no more elements*. **That** conclusion is the driver's
+/// own, manufactured from a stop the caller was never told about, which is exactly what every gate
+/// above exists to guard. So the stall is gated, through the same chokepoint a decline reaches and
+/// by all three witnesses at once: the collection ends on the `Err` channel with a terminal
+/// end-of-input instead of yielding a truncated container. Producing a value is therefore not the
+/// test — *concluding nothing of the driver's* is, and a zero-width return concludes something.
+///
+/// It is not a corner case, either. The four `*_while` collection drivers and the `*_while` folds
+/// take their element through [`ParseInput`](crate::ParseInput), which has **no decline channel at
+/// all**, so returning a value while consuming nothing is the only way one of their elements can
+/// report absence: there the zero-width return *is* the decline.
+/// `tokora/tests/collection_resource_trip.rs` drives both absence exits of the four try-driven
+/// families through the guard in its section 4 —
+/// `a_stalling_element_that_answered_a_trip_does_not_end_repeated` and its three siblings — and
+/// every one of the other eight drivers in its section 7.
+///
+/// **The consuming half of the boundary is as designed, not a gate nobody has reached yet.**
+/// Refusing an `Accept` that consumed would mean a value-producing parser can never recover from a
+/// budget it deliberately caught — a contract this crate makes for no other error, since nothing
+/// stops a grammar from catching *any* error and returning a value without diagnosing it, and
+/// terminal stops are not singled out for that treatment. Section 6 of the same file pins that half
+/// in both directions, so the boundary cannot drift silently: narrower, if a *consuming* `Accept`
+/// starts being gated, or wider, if the absence and closer exits stop being.
+///
 /// # Opting in
 ///
 /// This is the minimal hook that makes the law testable on any error type, mirroring
