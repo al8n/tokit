@@ -116,6 +116,12 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the
     // opener's own scan is not charged to the element loop. One offset clone per collection.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
 
     // The trip baseline of the LAST element attempt, carried out by the stall break below for the
     // epilogue's absence exits — the decline arm's own exits are inside the loop and read it
@@ -130,7 +136,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
         // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
         // the chokepoint's, not this loop's: see `many::file_element_failure` for the three
         // witnesses and for why `trips` is taken per ELEMENT rather than per collection.
-        Err(err) => file_element_failure(inp, err, &elem_cur, trips)?,
+        Err(err) => file_element_failure(inp, err, &elem_cur, scans, trips)?,
         // TODO(al8n): tracing dropped element
         Ok(Accept(nxt)) => push_element(&mut nums, &mut full, container, nxt, inp, &anchor)?,
         // no more elemnts.
@@ -158,7 +164,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
               // No closer: the decline plus this verdict conclude *absence* from what this element
               // attempt did, so surface a terminal stop it hit ahead of the close-miss diagnostic
               // rather than reporting a close that never happened.
-              absence_after_element(inp, &latch, trips)?;
+              absence_after_element(inp, &latch, scans, trips)?;
               // One junk token, one report: emit unless the emitter already holds a live report
               // naming this very front token. See FRONT_REPORTED at the top of this body.
               if !inp.front_report_live(tok.span_ref().end_ref()) {
@@ -172,7 +178,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
               // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate
               // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the
               // stop, so an `Eof` verdict cannot coexist with one.
-              absence_after_element(inp, &latch, trips)?;
+              absence_after_element(inp, &latch, scans, trips)?;
               if let Some(open_span) = open_span.clone() {
                 inp
                   .emitter()
@@ -229,7 +235,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       CloseStatus::WrongToken(tok) => {
         // No closer: the stall plus this verdict conclude *absence* from what the last element
         // attempt did, so surface a terminal stop it hit ahead of the close-miss diagnostic.
-        absence_after_element(inp, &latch, elem_trips)?;
+        absence_after_element(inp, &latch, scans, elem_trips)?;
         // One junk token, one report: emit unless the emitter already holds a live report naming
         // this very front token. See FRONT_REPORTED at the top of this body.
         if !inp.front_report_live(tok.span_ref().end_ref()) {
@@ -242,7 +248,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
         // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate
         // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the stop,
         // so an `Eof` verdict cannot coexist with one.
-        absence_after_element(inp, &latch, elem_trips)?;
+        absence_after_element(inp, &latch, scans, elem_trips)?;
         // EOI — no tokens left, no close delimiter: the opener was never closed.
         if let Some(open_span) = open_span.clone() {
           inp

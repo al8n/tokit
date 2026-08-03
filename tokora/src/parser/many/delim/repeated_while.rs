@@ -112,6 +112,12 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the opener's
     // own scan is not charged to the element loop. One offset clone per collection.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
 
     // The trip baseline of the LAST element attempt, carried out by the stall break below for the
     // epilogue's exits — the exits inside the loop read it directly. See
@@ -178,7 +184,7 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
               // snapshot, and the descent half is a constant `false` at this exit for the same
               // structural reason the mid-scan closer above gives — the stop is reached before this
               // cycle's element runs.
-              absence_after_element(inp, &latch, trips)?;
+              absence_after_element(inp, &latch, scans, trips)?;
               // PRIMARY — the close-miss diagnostic first: under a fail-fast emitter
               // this short-circuits, so `Unclosed` (not the secondary bounds) surfaces.
               match close {
@@ -259,7 +265,7 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
         // — a terminal scanner stop its own lookahead latched after the decision gate ran, or a
         // descent trip it caught itself. Surface either ahead of the close-miss diagnostic; the
         // scanner half is attempt-relative against the post-opener snapshot.
-        absence_after_element(inp, &latch, elem_trips)?;
+        absence_after_element(inp, &latch, scans, elem_trips)?;
         // One junk token, one report: emit unless the emitter already holds a live report naming
         // this very front token. See FRONT_REPORTED at the top of this body.
         if !inp.front_report_live(tok.span_ref().end_ref()) {
@@ -272,7 +278,7 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
         // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate
         // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the stop,
         // so an `Eof` verdict cannot coexist with one.
-        absence_after_element(inp, &latch, elem_trips)?;
+        absence_after_element(inp, &latch, scans, elem_trips)?;
         // EOI — no tokens left, no close delimiter: the opener was never closed.
         if let Some(open_span) = open_span.clone() {
           inp

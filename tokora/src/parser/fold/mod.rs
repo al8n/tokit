@@ -86,6 +86,12 @@ where
     // The terminal-latch baseline for the absence exit below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per fold, off the per-element path.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     // The trip baseline of the LAST element attempt, carried out by whichever break concluded
     // absence — see `many::absence_after_element` for what the gate below does with it. Taking it
     // per element is why this is a `loop` rather than the `while let` it used to be: the condition
@@ -118,7 +124,7 @@ where
     // scanner stop its own lookahead latched, leaving a short window, or a descent budget trip it
     // caught itself. `many::absence_after_element` holds both and says why each baseline is the
     // granularity it is.
-    absence_after_element(inp, &latch, elem_trips)?;
+    absence_after_element(inp, &latch, scans, elem_trips)?;
     Ok(output)
   }
 }
@@ -179,6 +185,12 @@ where
     // The terminal-latch baseline for the absence exit below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per fold, off the per-element path.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     // The trip baseline of the LAST element attempt, carried out by whichever break concluded
     // absence. Taking it per element is why this is a `loop` rather than the `while let` it used to
     // be — see [`Fold`]'s body above.
@@ -207,7 +219,7 @@ where
     // conclude *absence*: "no more elements", on the strength of what the last element attempt did.
     // A terminal scanner stop its own lookahead latched, and a descent budget trip it caught itself,
     // both leave it returning `Ok`; `many::absence_after_element` holds both witnesses.
-    absence_after_element(inp, &latch, elem_trips)?;
+    absence_after_element(inp, &latch, scans, elem_trips)?;
     Ok(output)
   }
 }
@@ -271,6 +283,12 @@ where
     // The terminal-latch baseline for the absence exit below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per fold, off the per-element path.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     // The trip baseline of the LAST element attempt, carried out by whichever break concluded
     // absence. See `many::absence_after_element`.
     let elem_trips = loop {
@@ -301,7 +319,7 @@ where
     // conclude *absence*: "no more elements", on the strength of what the last element attempt did.
     // A terminal scanner stop its own lookahead latched, and a descent budget trip it caught itself,
     // both leave it returning `Ok`; `many::absence_after_element` holds both witnesses.
-    absence_after_element(inp, &latch, elem_trips)?;
+    absence_after_element(inp, &latch, scans, elem_trips)?;
     Ok(output)
   }
 }

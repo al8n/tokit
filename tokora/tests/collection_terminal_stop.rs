@@ -72,6 +72,17 @@ impl ScanLimiter {
   fn increase(&self) {
     self.scanned.set(self.scanned.get() + 1);
   }
+
+  /// A shared handle on the scan counter, readable after the state has been moved into the parse.
+  ///
+  /// The non-vacuity control for [`r1c_a_trip_caught_inside_an_elements_own_attempt_is_not_filed`],
+  /// which cannot use [`limit_diags`]: the element catches its trip inside an `attempt` it then
+  /// declines, and that rollback rewinds the **emissions** along with everything else — the trip's
+  /// own diagnostic included. A count above the limit is the fact that survives it, because
+  /// [`State::check`] is exactly that comparison and a failing `check` is what the trip is.
+  fn counter(&self) -> Rc<Cell<usize>> {
+    self.scanned.clone()
+  }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -757,6 +768,114 @@ boundary_cell!(
   8,
   filed = 0
 );
+
+// ── R1c: a trip caught inside the ELEMENT'S OWN attempt is not filed and looped past ─
+//
+// R1b's twin one nesting level down, and the sharper of the two: there the element runs onto a
+// boundary that is standing, so the positional `at_committed_boundary()` sees it. Here the element
+// opens an `attempt` of its own, trips **inside** it, catches the stop and declines the attempt —
+// and the restore rewinds the cursor, the cache and the poison boundary together. Every positional
+// reading is then clean *and* the latch is back at the value the driver snapshotted, so both of the
+// scanner-side readings this tree had answered `false` and the chokepoint filed a spent scanner
+// budget as an ordinary syntax diagnostic and carried on looping.
+//
+// This is the worst of the class the counter closes. An absence exit that reads clean returns a
+// silently truncated `Ok`; this one *also* manufactures a diagnostic describing input the scanner
+// never read, and does it on the resilient path that exists to keep parsing.
+
+/// An element that trips the scanner inside its **own** inner attempt, catches the stop, declines
+/// that attempt, and then fails ordinarily.
+///
+/// Grammar code is entitled to every one of those moves — speculating, catching an error, and
+/// failing for its own reasons. What it must not be able to do is erase the driver's evidence that
+/// a resource budget was spent, which is a property of where the evidence lives and not of what the
+/// grammar did.
+fn trip_inside_attempt_then_fail<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>,
+) -> Result<ParseAttempt<i64>, CErr>
+where
+  Ctx: ParseContext<'inp, TLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TLexer<'inp>, Error = CErr>,
+{
+  let _: Option<()> = inp.attempt(|t| {
+    loop {
+      match t.next_or_stop() {
+        Ok(Some(_)) => continue,
+        // Both exits decline the inner attempt, so the rollback is identical either way and only
+        // the scan limit decides whether a stop happened inside it.
+        Ok(None) | Err(_) => return None,
+      }
+    }
+  });
+  Err(CErr::Ordinary)
+}
+
+#[test]
+fn r1c_a_trip_caught_inside_an_elements_own_attempt_is_not_filed() {
+  // `1 2` under a limit of 1: the element's inner attempt drains `1` (1st scan) and trips on `2`
+  // (2nd scan), catches it, declines the attempt, and then fails ordinarily with the cursor rolled
+  // back to the front and the boundary erased.
+  fn parse<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TLexer<'inp>, Ctx>) -> Result<Vec<i64>, CErr>
+  where
+    Ctx: ParseContext<'inp, TLexer<'inp>>,
+    Ctx::Emitter:
+      Emitter<'inp, TLexer<'inp>, Error = CErr> + FullContainerEmitter<'inp, TLexer<'inp>>,
+  {
+    trip_inside_attempt_then_fail
+      .repeated()
+      .collect()
+      .parse_input(inp)
+  }
+
+  let tight_limiter = ScanLimiter::with_limit(1);
+  let tight_scans = tight_limiter.counter();
+  let mut tight_log = Verbose::<CErr>::new();
+  let tight = drive(&mut tight_log, tight_limiter, parse, "1 2");
+  assert!(
+    tight_scans.get() > 1,
+    "the tight run must really have tripped the scan limit — without that this cell compares two \
+     untripped parses and asserts nothing. Note what CANNOT be asserted here: `limit_diags` is 0, \
+     because the element caught the trip inside an `attempt` it then declined and the rollback \
+     rewound the emissions too. The stop is not merely unfiled — after the rollback the diagnostic \
+     log does not mention it at all, which is exactly why the witness has to be a cell no rollback \
+     reaches"
+  );
+  assert_eq!(
+    limit_diags(&tight_log),
+    0,
+    "the rollback rewound the trip's own diagnostic — pinned so that a later change which keeps it \
+     is noticed here rather than quietly making the assertion above redundant"
+  );
+  assert_eq!(
+    (&tight, ordinary_diags(&tight_log)),
+    (&Err(CErr::Ordinary), 0),
+    "an element failure that shares its attempt with a scanner trip the element caught inside a \
+     speculation of its own is re-raised untouched, and nothing is filed. Filed instead, the loop \
+     carries on over a spent scanner budget and the caller gets `Ok(vec![])` plus a syntax \
+     diagnostic over input the scanner never read"
+  );
+
+  // Non-vacuity: the identical element and the identical rollback, only the scan limit widened. The
+  // swallow arm is reachable in this fixture — the control proves it by taking it.
+  let roomy_limiter = ScanLimiter::with_limit(1_000);
+  let roomy_scans = roomy_limiter.counter();
+  let mut roomy_log = Verbose::<CErr>::new();
+  let roomy = drive(&mut roomy_log, roomy_limiter, parse, "1 2");
+  assert!(
+    roomy_scans.get() <= 1_000,
+    "the control differs from the run above in one thing only — with room, nothing trips"
+  );
+  assert_eq!(
+    (&roomy, ordinary_diags(&roomy_log)),
+    (&Ok(vec![]), 1),
+    "the control pins the fixture absolutely: the same element fails the same way, and with no stop \
+     to refuse the driver files that one diagnostic, stalls, and ends the collection"
+  );
+  assert_ne!(
+    tight, roomy,
+    "the two runs must disagree — a cell where they agree is measuring the scan limit, not the gate"
+  );
+}
 
 // ── R2: the separator-slot decision gate surfaces a trip ──────────────────────
 

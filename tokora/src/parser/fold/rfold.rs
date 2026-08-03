@@ -58,6 +58,12 @@ where
     // The terminal-latch baseline for the absence exit below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per fold, off the per-element path.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
     // The trip baseline of the LAST element attempt, carried out by whichever break concluded
     // absence. Taking it per element is why this is a `loop` rather than the `while let` it used to
     // be: the condition of a `while let` runs the element attempt, leaving nowhere to snapshot the
@@ -90,7 +96,7 @@ where
     // both leave it returning `Ok`; `many::absence_after_element` holds both witnesses. Checked here,
     // ahead of the buffered reverse fold — the loop's only successor and the single success path, so
     // neither break can bypass it.
-    absence_after_element(inp, &latch, elem_trips)?;
+    absence_after_element(inp, &latch, scans, elem_trips)?;
 
     Ok(buf.into_iter().rfold((self.init)(), &mut self.acc))
   }

@@ -262,6 +262,12 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
     // The terminal-latch baseline for the absence exit below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per collection, off the per-element path.
     let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
 
     // The trip baseline of the LAST element attempt, carried out by whichever break concluded
     // absence — see `many::absence_after_element` for what the gate below does with it, and why the
@@ -283,7 +289,7 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
         // for why `trips` is taken per ELEMENT rather than per collection. `?` here propagates both
         // a re-raise and an emitter that refused the diagnostic, exactly as the hand-written arms
         // this replaced did.
-        Err(err) => file_element_failure(inp, err, &cursor, trips)?,
+        Err(err) => file_element_failure(inp, err, &cursor, scans, trips)?,
       }
 
       // A cycle that consumed nothing re-sees the same input and would retry forever. The progress
@@ -306,7 +312,7 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
     // never-recoverable facts have to be witnessed here. `absence_after_element` holds both and says
     // why each baseline is the granularity it is. The end-of-input anchors on the committed end,
     // matching the decision-window and consume gates.
-    absence_after_element(inp, &latch, elem_trips)?;
+    absence_after_element(inp, &latch, scans, elem_trips)?;
 
     rh.on_stop(num, inp, &anchor)
   }
