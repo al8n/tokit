@@ -4785,7 +4785,7 @@ fn tombstone_error_kind_refused_at_construction() {
 /// pays nothing for it.
 ///
 /// **Debug-only, and deliberately so.** The wall this exercises is `cfg!(debug_assertions)`-
-/// gated in the walk, because keeping it per-event in release cost a measured 8.3% on ordinary
+/// gated in the walk, because keeping it per-event in release costs a measured 4.4% on ordinary
 /// materialization while every externally reachable door already validates unconditionally.
 /// This cell would therefore pass vacuously under `cargo test --release` — it would observe an
 /// `Ok` tree and no refusal — so it is compiled only where the wall exists. The doors' own

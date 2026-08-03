@@ -627,16 +627,37 @@ not when it is finished, and the materialization walk no longer rescans.
     one materialization earlier than the error did.
 
     The honest limit, which is also stated at the site: the *per-event* validator inside
-    `finish` is `cfg!(debug_assertions)`-gated, because keeping it in every build cost a
-    measured **+8.3%** on ordinary materialization — an unpredictable indirect call per event
-    inside a tight builder loop. Every route reachable from outside this crate goes through a
-    door that validates in every build, so for external callers the wall is absolute. The one
-    route with no door is `push_raw_event_for_tests`, which is `pub(crate)`. So: a **release**
-    build whose event log was assembled by raw in-crate injection can materialize an
-    out-of-language kind. Every test run and every CI build refuses it. `ReservedKind` is not
-    gated — the tombstone band is a plain comparison and was a release wall before this round.
+    `finish` is `cfg!(debug_assertions)`-gated, because keeping it in every build costs a
+    measured **+4.4%** on ordinary materialization — an indirect call per event inside a tight
+    builder loop. Every route reachable from outside this crate goes through a door that
+    validates in every build, so for external callers the wall is absolute. The one route with
+    no door is `push_raw_event_for_tests`, which is `pub(crate)`. So: a **release** build whose
+    event log was assembled by raw in-crate injection can materialize an out-of-language kind.
+    Every test run and every CI build refuses it. `ReservedKind` is not gated — the tombstone
+    band is a plain comparison and was a release wall before this round.
 
-    — *(R8, #123)*
+    **That +4.4% is measured on the shipped fused walk, and it withdraws a +8.3%.** The
+    withdrawn figure was taken on the two-pass gather+walk shape item 51 superseded, where
+    these three calls sat in the *gather* pass rather than in the builder loop. The
+    remeasurement is the shipped tree against the same tree with `cfg!(debug_assertions) &&`
+    deleted from exactly those three sites and nothing else: the inlined `materialize` carries
+    one indirect branch in the shipped build — the once-per-materialization root check — and
+    four in the ungated one, so the per-event call is really there and really indirect.
+    `finish_clean` (8 192 tokens) reads **+4.4%**, the median of sixteen interleaved paired
+    rounds, positive in all sixteen and spread +2.1% to +6.9%, against a null control of two
+    byte-identical builds of one source read as that same per-round statistic: −1.15% to +1.13%
+    about a median of −0.08%, so it is wider than the aggregate-median floor the **Performance**
+    section quotes and is the one this comparison is scored against. The two populations do not
+    overlap. `finish_error_dense` reads +2.0%, `finish_wrap_heavy` +3.3%. The same deletion on
+    the *two-pass* shape reads **+1.1%** — a median inside the control's own span, populations
+    overlapping, only eleven of sixteen rounds above their own round's control — so 8.3% is
+    reproduced on neither shape, and in absolute terms the fold made these three checks dearer
+    rather than cheaper: 0.07 ns per call in the gather pass against 0.37 ns in the builder
+    loop. One code layout on one toolchain, so read it as low single digits rather than as a
+    constant. The trade the gate buys is smaller than this entry claimed. It is still real, and
+    clear of the noise floor, and the gate stays.
+
+    — *(R8, #123; the per-event cost remeasured against the shipped fold)*
 
 15. **`FinishError` gains `InvalidDiagnosticSpan`, `MismatchedFinish`, `NonUtf8Source` and
     `InvalidDialectKind`, and `CstEmitter::cst_finish` takes the kind it intends to close.**

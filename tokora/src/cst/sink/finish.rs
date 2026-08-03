@@ -781,11 +781,19 @@ where
   // two synthesized kinds — so for any caller reachable from outside this crate the wall is
   // already absolute, and earlier: it refuses at the emit site, at the cause, instead of one
   // materialization later. The single route with no door is `push_raw_event_for_tests`, which
-  // is `pub(crate)`. Keeping the check here for that route, in every build, cost a measured
-  // +8.3% on ordinary materialization (an unpredictable indirect call per event inside a tight
-  // builder loop), which is the whole of it. So the honest trade, stated rather than hidden: a
+  // is `pub(crate)`. Keeping the check here for that route, in every build, costs a measured
+  // +4.4% on ordinary materialization (an indirect call per event inside a tight builder
+  // loop), which is the whole of it. So the honest trade, stated rather than hidden: a
   // RELEASE build whose event log was assembled by raw in-crate injection can materialize an
   // out-of-language kind. Every test run and every CI build refuses it.
+  //
+  // The +4.4% is this walk as it ships against the same tree with `cfg!(debug_assertions) &&`
+  // deleted from exactly the three sites below: `finish_clean` (8 192 tokens), median of
+  // sixteen interleaved paired rounds, positive in all sixteen, against a null control of two
+  // byte-identical builds that spans -1.15%..+1.13%. It replaces a +8.3% taken on the two-pass
+  // gather+walk shape this round superseded, where these three calls sat in the gather pass
+  // rather than in the builder loop; the same deletion reads +1.1% there, a median inside that
+  // control's own span. One code layout on one toolchain — low single digits, not a constant.
   //
   // `ReservedKind` is NOT gated — the tombstone band is a plain comparison, it costs nothing,
   // and it was a release wall.
