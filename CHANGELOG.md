@@ -656,6 +656,28 @@ concrete public struct with no bound to reject anybody.
   below. This glob-row pair was the only place in the file carrying an allowlist on one side and
   none on the other. — *(#148, verification debt)*
 
+- **`gen_probe.py`'s two newest templates assumed a call shape neither real method has, so 9 of
+  the 14 rows the entry above counted could only ever read `INCONCL`.**
+  `error_subject_method`/`error_subject_assoc_fn` — added for
+  `RecursionLimitReached`/`NonAssociativeChain` — rode the same fixed zero-argument, `-> u8`
+  consumer shape every other inherent-method/assoc-fn template does. That shape fits neither
+  type: `map_offset` consumes `self` and takes a closure, `of` takes the type's own fields (two
+  arguments on `RecursionLimitReached`, one on `NonAssociativeChain`), and none of the five plain
+  accessors (`offset`, `offset_ref`, `exceeded`, `depth`, `limitation`) returns `u8`. The emitted
+  call failed to compile on the head side before rustc ever reached the collision —
+  `map_offset`/`of` with E0061 (too few arguments), the other five's `used` spelling with E0308
+  (the `let`-binding's forced type) — which is exactly the hole the entry above named and left
+  open: "the fix does not widen to paper over the rest."
+
+  Both templates now derive the call's arity, and the `used` spelling's `let`-binding type, from
+  the REAL signature instead of assuming one. Verified two-sided, against the same genuine
+  pre-#147 base the entries above use (`60f27a3`): before this fix the 14 `RecursionLimitReached`
+  rows scored 5 `new-owner` / 9 `INCONCL`, matching the count already on record; after, all 14
+  score `new-owner`, each on a head run that compiled and completed (`CONSUMER-CALLS: 0` —
+  tokora's own item took every call). No effect on this branch's own run: it adds no name
+  reusing either owner, so it scores `probes=0`/`PASS` regardless — the fix matters the next
+  time a PR gives one of these two types a genuinely new item. — *(#148, verification debt)*
+
 
 
 6. **A `trace`-feature preview no longer reports a partial `Debug` rendering as the complete,

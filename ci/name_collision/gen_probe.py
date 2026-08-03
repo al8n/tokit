@@ -421,6 +421,34 @@ ERROR_SUBJECTS = {
             "  let subject: RecursionLimitReached<usize, ()> =\n"
             "    RecursionLimitReached::of(7usize, exceeded);\n"
         ),
+        # `of`'s own two arguments — the same values `build` above feeds it to construct
+        # `subject`, split out because `error_subject_assoc_fn` probes `of` ITSELF and needs
+        # them without a `let subject = ...` wrapped around the call. Two independently spelled
+        # fields rather than one parsed back out of the other: both read "the type's own doc
+        # example, two `increase`s over a limitation of 1", so a change to one is a prompt to
+        # check the other.
+        "of_setup": (
+            "  let mut limiter = RecursionLimiter::with_limitation(1);\n"
+            "  limiter.increase();\n"
+            "  limiter.increase();\n"
+            "  let exceeded = RecursionTracker::check(&limiter)\n"
+            "    .expect_err(\"a limiter two levels over its limitation must report exceeded\");\n"
+        ),
+        "of_args": "7usize, exceeded",
+        # The real return type of every OTHER inherent item these two types declare — what
+        # `error_subject_method` substitutes for the `used` spelling's `let` binding instead of
+        # the fixed `u8` every other inherent-method row rides. `offset`/`offset_ref` read the
+        # same `O = usize` both owners fix here; `exceeded`/`depth`/`limitation` exist only on
+        # this owner. `map_offset` is deliberately absent: it is the one name that takes an
+        # argument and consumes `self`, so `error_subject_method` builds its call directly
+        # rather than from this table.
+        "accessors": {
+            "offset": "usize",
+            "offset_ref": "&usize",
+            "exceeded": "tokora::state::recursion_tracker::RecursionLimitExceeded",
+            "depth": "usize",
+            "limitation": "usize",
+        },
     },
     "NonAssociativeChain": {
         "ty": "NonAssociativeChain<usize, ()>",
@@ -429,6 +457,12 @@ ERROR_SUBJECTS = {
         "build": (
             "  let subject: NonAssociativeChain<usize, ()> = NonAssociativeChain::of(6usize);\n"
         ),
+        "of_setup": "",
+        "of_args": "6usize",
+        "accessors": {
+            "offset": "usize",
+            "offset_ref": "&usize",
+        },
     },
 }
 
@@ -439,6 +473,17 @@ def error_subject_method(name, owner, spelling):
     `&self`, not `&mut self`: every method these types declare takes `&self` or `self`, and a
     consumer's receiver has to be reachable by the same autoref step tokora's is, or the two are
     not competing for the same pick.
+
+    The call has to reach the REAL method's arity and `used`-binding type, not the fixed
+    zero-arg/`u8` shape every other inherent-method row rides: `map_offset` consumes `self` and
+    takes a closure, and the five plain accessors return `usize`, `&usize` or
+    `RecursionLimitExceeded` — never `u8`. Built against the wrong shape, the call fails with
+    E0061 or E0308 before rustc ever reaches the collision, which reads as INCONCL rather than
+    the `new-owner` finding it should be. (`map_offset`'s consumer trait below still declares
+    `&self`, not the real method's by-value `self` — harmlessly: the real, by-value `map_offset`
+    is found at the FIRST autoref step, before the trait's `&self` candidate at the next step is
+    ever considered, so which receiver kind the trait declares cannot change which one is
+    picked.)
     """
     # Unpacked into locals BEFORE the f-string, not indexed inside it. Same reason the
     # parameter type in `trait_method` is: a quote inside an f-string expression is a
@@ -446,10 +491,21 @@ def error_subject_method(name, owner, spelling):
     # on the runner. A gate that cannot be parsed is not a gate.
     rec = ERROR_SUBJECTS[owner]
     imports, ty, build = rec["imports"], rec["ty"], rec["build"]
+    if name == "map_offset":
+        # The identity closure keeps `U = O`, so the result is the same type `subject` already
+        # is. The parameter is typed explicitly rather than left for inference — see
+        # `trait_method`'s `peek_then_head` for why a bare closure parameter is not something
+        # this file leaves to chance.
+        args, returns = "|x: usize| x", ty
+    else:
+        returns = rec["accessors"].get(name)
+        if returns is None:
+            sys.exit(f"gen_probe: no call-shape template for method {name!r} on {owner!r}")
+        args = ""
     call = (
-        f"let _v: u8 = subject.{name}();"
+        f"let _v: {returns} = subject.{name}({args});"
         if spelling == "used"
-        else f"subject.{name}();"
+        else f"subject.{name}({args});"
     )
     return FIXTURE + f"""
 {imports}
@@ -472,13 +528,23 @@ fn drive() {{
 
 
 def error_subject_assoc_fn(name, owner, spelling):
-    """The path-resolved half of the same two types — `Type::name()`, no receiver."""
+    """The path-resolved half of the same two types — `Type::name(args)`, no receiver.
+
+    `of` is the only associated function either type declares without a receiver — everything
+    else on them takes `&self` or `self` and rides `error_subject_method` instead — so this
+    always probes the constructor itself, at its real arity: two arguments on
+    `RecursionLimitReached` (`at`, `exceeded`), one on `NonAssociativeChain` (`at`). A call built
+    with neither, as this used to be, fails with E0061 before rustc ever reaches the collision.
+    """
     rec = ERROR_SUBJECTS[owner]
     imports, ty, path = rec["imports"], rec["ty"], rec["path"]
+    if name != "of":
+        sys.exit(f"gen_probe: no call-shape template for associated fn {name!r} on {owner!r}")
+    setup, args = rec["of_setup"], rec["of_args"]
     call = (
-        f"let _v: u8 = {path}::{name}();"
+        f"let _v: {ty} = {path}::{name}({args});"
         if spelling == "used"
-        else f"{path}::{name}();"
+        else f"{path}::{name}({args});"
     )
     return FIXTURE + f"""
 {imports}
@@ -495,7 +561,7 @@ impl ConsumerAssoc for {ty} {{
 
 fn drive() {{
   use ConsumerAssoc as _;
-  reached();
+{setup}  reached();
   {call}
 }}
 """ + WITNESS
