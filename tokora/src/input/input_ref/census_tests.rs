@@ -1978,7 +1978,7 @@ fn front_census_every_probe_is_const_gated() {
 ///
 /// `Token`, `State` and `Span` are unconstrained in size, so every `W::CAPACITY`-slot
 /// store the fill builds costs `W::CAPACITY × (Token + State + Span)` of stack. Through
-/// 0.8.0 it built a second one — a `GenericArray<MaybeUninit<_>, W::CAPACITY>` staging the
+/// 0.7.3 it built a second one — a `GenericArray<MaybeUninit<_>, W::CAPACITY>` staging the
 /// tokens lexed past the cache until the cache region had been copied into the output
 /// buffer — so a cache miss reserved two full windows and a large token or lexer state
 /// doubled a peek's frame. Those tokens are now staged in the output buffer itself and

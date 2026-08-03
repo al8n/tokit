@@ -26,1454 +26,7 @@ When `## Unreleased` becomes `## 0.9.0 (date)`, its anchors and the links to the
 with it. `ci/changelog_structure.sh` enforces every clause above and will red until they do.
 -->
 
-## Unreleased
-
-### Changed (breaking)
-
-1. **A gap is now tiled where it opens — in the node of the token it trails — not where it is
-   noticed.** Where an uncovered run of source bytes lands no longer depends on what happens
-   after the run is already determined. A run used to be tiled at the token that *revealed* it,
-   or, for the **trailing** run, at the end of the walk; both are moments at which the parse may
-   have left the node it was in when it stopped covering the source. So the same garbage produced
-   two tree shapes, chosen by whether more input happened to follow: for a lossless dialect the
-   tail landed *outside* the document node while identical garbage mid-document landed inside it.
-
-   The rule now: an uncovered run opens the instant the token before it settles, and it is tiled
-   there, in the node open at that moment. It is in the tree before the next event is read, so
-   nothing that follows can move it. One clause covers the run that **no token precedes** — a
-   source starting with bytes no token claims — which tiles where the walk first sees it: at the
-   first committed token, or, if the parse committed no token at all, at the end of the walk in
-   whatever node is open there.
-
-   `Root[Document[Tok] Gap]` is now `Root[Document[Tok Gap]]`, and the node **widens over** the
-   run it takes — a `Document@0..11` before a four-byte tail is `Document@0..15` after. A run
-   nested deeper goes deeper: it lands at the depth of the token it trails, not one level below
-   the root by fiat.
-
-   Two placement laws hold by construction and are pinned over a corpus rather than as examples.
-   *Appending a token never moves a gap*: two streams sharing a prefix through the token a run
-   trails place that run in the same node, including when one of them stops there. *Hoisting a
-   lexer error never moves a gap*: placement reads the token and structure events only. The
-   second matters because a prefilled lookahead cache emits the lexer errors it crosses when it
-   crosses them, so prefetching moves such a diagnostic earlier in the event stream — the token
-   stream is exactly invariant under prefill and the diagnostic stream is not, and a rule reading
-   a diagnostic's position would make the tree a function of how far the caller peeked.
-
-   Unchanged: a **leading** run still tiles at the first token that follows it, inside whatever
-   node that token lands in; a run trailing a root-level token stays a root child; a source with
-   **nothing lexable in it** keeps its run beside the document node (`Root[Document@0..0,
-   Gap@0..len]`), because there is no token for it to trail and the identical parse with one
-   lexable byte appended puts it at the root too; and
-   [`finish_partial`](https://docs.rs/tokora/latest/tokora/cst/struct.Sink.html#method.finish_partial)
-   on an **unbalanced** stream still tiles a token-less run into the innermost *open* node. On a
-   balanced stream both doors agree, as they did before.
-
-   `tree.text() == source` is untouched: every uncovered byte still tiles, byte-exactly, under
-   every one of these placements. Only the shape moved.
-
-   **Re-bless any snapshot of a tree built over a source with an uncovered run that follows a
-   committed token** — a truncated parse, an unterminated string or block string, a stray
-   unlexable punctuator after real input. Consumers that walk by text see no change; consumers
-   that walk by node, or that assert on a rendered tree, see the run inside the node of the token
-   before it. A source with *no* committed token at all is not affected.
-
-2. **A recursion-limit trip is now terminal for every grammar error type, `()` included — neither
-   recovery nor a collection driver's failure path can spend it.** Two more of a collection
-   driver's exits can reach a construct's end without the trip ever surfacing as an `Err`, and both
-   close later in this entry: an element's absence exit (item 7) and a real closer committed just
-   after one (item 8). A fourth exit does not close, and is not going to: an element that catches
-   the trip and still answers `Accept` spends it, for every error type, on purpose. Decline lets
-   the *driver* manufacture the construct's end from a stop the caller is never told about, which is
-   why the driver has to guard its own conclusion; `Accept` means the *element* produced the value,
-   and the driver is faithfully collecting what it was handed, not concluding anything of its own.
-   tokora cannot stop a grammar from catching an error and returning a value without diagnosing
-   it — true of every error a grammar can catch and answer, not only this one — so gating `Accept`
-   would forbid a value-producing element from ever recovering from a budget it deliberately
-   caught: a broader contract than #148 establishes. Item 7 states the exemption at the point it
-   first applies; `parser::many`'s module docs carry it as the standing contract, not an
-   afterthought.
-
-   This closes 0.8.0's [known limitation — a discarding error sink erases
-   the recursion trip's stop, not its
-   bound](#0.8.0-known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound),
-   which recorded the behaviour rather than answering it. The answer is that a resource bound an
-   unrelated error sink can opt out of is not a bound.
-
-   [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
-   has always been terminal for every value, but
-   [`recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.recover),
-   [`inplace_recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.inplace_recover)
-   and
-   [`skip_then_retry`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.skip_then_retry)
-   read that off the **converted** value — after the grammar's `From` had run. A `From` that
-   discards the payload discards the marker with it, so a `()`-errored grammar got
-   `is_terminal() == false` back and recovery **spent** the trip.
-
-   **Where resource terminality is stored now:** on the **input session**, in a monotone counter
-   (`Input::resource_trips`, crate-internal, bumped by
-   [`InputRef::descend`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.descend)'s
-   trip arm before the grammar's `From` runs, so a panicking conversion cannot skip it). The three
-   combinators read it **beside** `MaybeTerminal::is_terminal`. No conversion the grammar writes
-   can reach it, and nothing lowers it: a `Checkpoint` does not carry it and a restore does not
-   touch it. Grammar error conversion therefore cannot affect it — which is the question 0.8.0's
-   entry left open, answered here in the terms it asked for.
-
-   **What the cell records and what the combinators test are different questions, deliberately.**
-   The cell is a session fact — *this parse exceeded a budget, this many times* — and it is never
-   cleared, because nothing can un-exceed a budget. Every site that consults it is judging **one
-   attempt**, so it snapshots the counter before that attempt and re-raises only when the count
-   moved *during* it. The two answers come apart exactly where grammar code catches a trip itself
-   and parses on: the session has tripped forever after, while the next attempt is an ordinary one.
-   Reading the session fact there would refuse recovery — and, below, emit-and-continue — for every
-   later failure in the document, ordinary syntax errors included. A real trip is still re-raised
-   wherever one happens, a second trip after a caught first one included.
-
-   **What changes for you, and only if your error type discards the value:**
-
-   | your grammar's error type | before | now |
-   |---|---|---|
-   | stores it and delegates `is_terminal` | re-raised | re-raised — **unchanged** |
-   | `()`, or any `From` that drops it | recovery ran; `skip_then_retry` skipped and committed | re-raised |
-
-   Concretely, measured on one ladder and one 32-deep input: `.recover(..)` used to return
-   `Ok(<the recoverer's synthesized value>)` and now returns `Err`; `.skip_then_retry(..)` used to
-   hand the surrounding grammar back offset **68** — the whole chain and the sync token consumed
-   and committed — and now hands back **0**, which is the number a delegating error type always
-   read. Same ladder, same limit, two error types, one answer.
-
-   **If you relied on the old behaviour**, the fix is the budget, not the sink: raise it with
-   [`with_recursion_limiter`](https://docs.rs/tokora/latest/tokora/struct.ParserContext.html#method.with_recursion_limiter).
-   Recovering from an exhausted depth budget was never sound — no quantity of skipped input makes
-   the next descent shallower, so those cycles spent input for a verdict they could not change. If
-   you want the trip's *details* (offset, depth, limitation), that still requires an error type
-   that stores the value; the discarding sink loses the payload exactly as before.
-
-   **The same stop now also reaches the resilient collection loops — and that half was never
-   sink-dependent.** `repeated`, `separated` and their delimited forms swallow an element's `Err`
-   by design: emit it as a diagnostic and keep looping. Their gate re-raised the frontier
-   `Incomplete` and the *scanner*'s committed boundary, and a descent trip latches neither — it has
-   a control stack rather than a position, so there is no boundary for it to latch. A trip inside
-   an element was therefore filed as an ordinary diagnostic and the loop went on to the next one,
-   bounded only by the no-progress guard. Unlike the recovery half above, that happened for **every**
-   error type: a delegating one was spent there exactly as `()` was. The gate reads the session
-   counter too now — and, like the recovery half, it reads it against a baseline taken **once per
-   element**, so what re-raises is a trip *that element* caused.
-
-   | driving an element whose own attempt hands the trip back as `Err` | before | now |
-   |---|---|---|
-   | `repeated()`, `separated_by(..)`, and both delimited forms | the trip filed as a diagnostic; the loop continued to the next element and returned `Ok` with whatever it collected | the collection returns `Err` at the first trip, with **nothing filed** |
-   | the same, for an element that fails **ordinarily** after some earlier construct's trip was caught and parsed past | the failure filed as a diagnostic; the loop continued | unchanged — the failure filed as a diagnostic; the loop continues |
-
-   **This half changes behaviour for delegating and discarding error types alike**, so a grammar
-   that used to receive a truncated-with-diagnostics container over a too-deep input now receives a
-   failed parse. The remedy is the same one as above and for the same reason: raise the budget with
-   `with_recursion_limiter`. A container assembled from elements the budget forbade reading was
-   never a description of the input, and the diagnostic that named the trip was filed against a
-   construct the parse had already been told to stop reading.
-
-   **The scope of the change, stated rather than left to be found: it is the element's own trip
-   that ends the collection, not the session's.** A parse that catches a trip and goes on keeps
-   emit-and-continue recovery for the constructs after it — which is what an editor or language
-   server needs, since one deeply-nested expression must not suppress the rest of the file's
-   diagnostics. The same holds one nesting level up: an inner collection's trip that an element
-   swallows is not charged to the enclosing collection's next ordinary failure.
-
-   **The granularity floor, because "the constructs after it" has a resolution.** The witness is a
-   counter, and a counter proves that *a* trip happened during the unit being judged — not that the
-   error being judged *is* that trip. The unit is one attempt for `recover` and `inplace_recover`,
-   one retry cycle for `skip_then_retry`, and one **element** for the collections. So grammar code
-   that catches a trip itself and then fails **ordinarily inside that same unit** has the ordinary
-   failure re-raised rather than recovered or filed. Move the catch one construct further out and
-   it recovers, or is filed and looped past, exactly as an untripped parse would; that contrast is
-   pinned by a test on each side of it.
-
-   The floor **fails closed** at the recovery, failure, absence and real-closer gates: a real trip
-   that reaches one of them is never recovered from and never filed as a diagnostic, and the only
-   over-charged case is an ordinary failure that shares its unit with a caught trip. It says nothing
-   about `Accept`, the fourth exit above: an element that catches a trip and still answers `Accept`
-   spends it, for every error type, on purpose.
-
-   The floor cannot be lowered by reading the error, because the error type is allowed to be `()` and
-   discard the trip — which is why the witness is on the input in the first place. Lowering it
-   needs a cooperative *rebaseline* published for code that deliberately catches a trip and wants
-   the enclosing baseline moved past it. That is not in this release; no public name changes if it
-   is ever added.
-
-   — *(#148 R1)*
-
-9. **An unpaired settle in the CST `Sink` now panics in release builds too, instead of silently
-   shearing the two logs.** `<Sink as Emitter>::rewind` was already a wall against a *truncating
-   rewind to a mid-log mark no live row captured* — a mark `checkpoint()` never returned, or one
-   whose capture an earlier `rewind`/`release` already spent. That wall was
-   `debug_assertions`-only. It is now unconditional.
-
-   The reasoning it was built on had a hole. The debug-only posture deferred upward: the input
-   layer's own LIFO witness was said to reject the condition on every input-mediated path, so the
-   sink only needed a second wall for undisciplined raw use. But that witness is *itself*
-   `debug_assertions`-gated, so a release build had no wall on **either** layer. What a release
-   build did instead was keep the sink's own channels exact and leave the inner emitter untouched
-   — the event log and the diagnostic log silently out of step, with nothing recording that they
-   were. That is bounded only for as long as materialization reads the whole log in one pass at
-   the end; anything that hands part of the tree onward before the parse finishes turns it into a
-   wrong tree that no consumer can detect.
-
-   The condition is a **parser bug and cannot be provoked by input**: a malformed document
-   changes which branches run, not whether a branch settles its own capture exactly once. So
-   hardening it cannot turn a bad document into a crash — verified across the malformed and
-   truncated-prefix corpora, which produce the recovery holes and rewinds this touches and whose
-   tree hashes are unchanged.
-
-   **`release` is deliberately *not* hardened with it**, and that is the one asymmetry to be aware
-   of. Its two non-top outcomes are specified behaviour rather than violations, mirroring
-   `InputRef::commit`'s documented cost model: removing a row that is not the innermost is the
-   "linear removal" that method already promises when a younger capture is still live, and finding
-   no row at all is its "harmless no-op … (no panic, in any build)". Settles are newest-first only
-   *within* a family — guards and session points interleave by design — so an out-of-stack-order
-   release is lawful. Making either loud would convert a documented guarantee into a crash.
-
-   **The panic is raised before the rewind's first mutation.** A wall placed after the damage
-   only narrates it. The condition is decided by a read-only preflight over the unchanged mark
-   stack, ahead of the row spend, the `events.truncate`, the undo journal's reverse replay and
-   the era ledger's truncation record — every one of which the violating call used to have
-   already performed by the time the check fired. A host that `catch_unwind`s the panic therefore
-   keeps the sink it had, on every channel, instead of one whose event log was rewound and whose
-   inner emitter was not; `finish_partial` on such a sink used to return that sheared state as a
-   perfectly ordinary tree, with a `gap_kind` tile standing where the dropped token had been.
-
-   **A panic already unwinding is exempt, and this is load-bearing rather than a hedge.**
-   `Emitter::rewind` can run from a rolling-back guard's `Drop`, and a panic raised there is a
-   *double* panic: the process aborts outright — no unwinding, no `catch_unwind`, signal 6. That
-   is strictly worse than the shear being reported. The report is therefore suppressed when
-   `std::thread::panicking()` is true — but suppressing the *report* is not licence to degrade
-   invisibly, and this is where the mid-unwind path changed as well. It no longer leaves the sink
-   half-rewound. It degrades to a **total no-op on every channel** (the sink has no correct
-   rewind to perform, so it performs none, and both logs are left describing the same history)
-   and **latches** the fact. `Emitter::rewind`'s contract is amended to state the general rule:
-   what an implementation must never do is **abort**, so an emitter that can *detect* an unpaired
-   settle may report it by panicking, provided it checks `std::thread::panicking()` first, raises
-   before it mutates, and records any report it had to suppress.
-
-   **New: `FinishError::UnpairedSettle { mark, len }`.** The latch is what a caller sees. After a
-   degraded rewind, **both** materialization doors refuse — `finish` and `finish_partial` alike,
-   because a log describing a rollback that never happened is corruption, not the incompleteness
-   `finish_partial` exists to tolerate. A typed error rather than a panic, following the posture
-   the neighbouring emission-time walls already take (a detect-at-cause assert, with a typed
-   `FinishError` as the backstop at materialization) and preserving `finish`'s documented
-   never-panics guarantee. `FinishError` is `#[non_exhaustive]`, so the new variant is additive;
-   a `match` that does not name it keeps compiling.
-
-   **What to expect if you are affected.** A parser that was quietly relying on the release-build
-   degradation now panics at the cause with `Sink rewind to a mid-log mark with no captured row`.
-   The fix is always at the call site, not here: some capture is being settled twice, or a mark is
-   being rewound to after it was released. Debug builds and `cargo test` already panicked on it,
-   so a parser whose backtracking paths are exercised in tests will see no change. Note also that
-   `InputRef::restore`'s release-build promise is narrowed to match: it still makes no panic of its
-   own after an out-of-order raw restore, but the *emitter* it hands the violation to keeps its own
-   posture, and the `Sink`'s is now loud in every build. One consequence is documented rather than
-   removed: a raw restore the sink refuses is **not itself transactional**. The emitter's state is
-   untouched, but `restore` raises from the middle of its own rollback, so the checkpoint lineage
-   has been popped through the target while the position and the reporting witnesses have not been
-   restored. That is inside the "unspecified but bounded" envelope the method already documents,
-   it is reachable only through the double-settle bug being reported, and it is now pinned by a
-   test rather than assumed away.
-
-18. **`RecursionLimiter::new` and the combined `Limiter`'s defaults return to 500 too — only
-    `ParserContext` and the input layer keep 64.** The 500 → 64 drop above landed on one constant
-    shared by more subjects than it should have. `RecursionLimiter::new` (and `Default`) is the
-    tracker's own general-purpose depth, with no assumption about what a level costs.
-    `ParserContext` and the input layer are the only two places a level IS a live native-stack
-    frame: each holds its own `RecursionLimiter`, sized against a measured debug-build ceiling,
-    for the budget a Pratt-driven parse actually descends against. `Limiter::new` and
-    `Limiter::with_token_tracker` requested that same 64 by construction, but fed neither one —
-    `Limiter` is not part of tokora's own parser wiring anywhere in this crate. Like bare
-    `RecursionLimiter`, it is documented as usable directly as a lexer's `State`/`Extras` nesting
-    tracker, where a level costs no native stack at all, and both of those lexer-facing paths
-    inherited 64 anyway, tripping on a number chosen for a reason that does not apply to either.
-
-    `RecursionLimiter::new`/`Default`, `Limiter::new`/`Default`, and `Limiter::with_token_tracker`
-    all give back 500, unconditionally. Only `ParserContext` and the input layer still request
-    the native-stack-safe 64 explicitly, from the crate-private
-    `RecursionLimiter::PARSE_DEFAULT_DEPTH` — neither one holds a `Limiter` or calls
-    `RecursionLimiter::new`, so neither can silently fall back to the general-purpose default,
-    and a Pratt-driven parse still gets exactly the protection it had. Everywhere else changes: a
-    tracker built through `RecursionLimiter::new`, `Limiter::new`, `Limiter::with_token_tracker`,
-    or `#[derive(Default)]` over either type, with no parser anywhere near it, trips at 500
-    again, not 64. That includes the depth 0.8.0 shipped for `Limiter::new` and
-    `Limiter::with_token_tracker` ([43](#0.8.0-changed-breaking)) — the same lexer-side reasoning
-    that moved bare `RecursionLimiter::new` applies to them equally, and was missed there the
-    first time. Spell the limit you meant with `RecursionLimiter::with_limitation` if 500 is
-    still wrong for your grammar or your lexer.
-
-### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
-
-**This release adds no public names.** The one entry here is a disclosure about a name **0.8.0**
-added, measured for the first time now, and it is filed here rather than folded into the shipped
-0.8.0 section because it is news a 0.7.3 consumer needs and 0.8.0's own text does not carry it.
-
-#### `RecursionLimiter::unlimited` — measured SILENT, and it is your call site to check
-
-**You are exposed if you wrote an `unlimited()` associated function on `RecursionLimiter`.** That
-type is public in **0.7.3**, so this is not hypothetical: any consumer holding one already had
-somewhere to hang the name, and 0.8.0's
-[`RecursionLimiter::unlimited`](https://docs.rs/tokora/latest/tokora/state/recursion_tracker/struct.RecursionLimiter.html#method.unlimited)
-now competes for it by path.
-
-Reproduced two-sided by `ci/name_collision/`, base `60f27a3` against this branch:
-
-```text
-SILENT  unlimited/discarded    base=witness=1  head=witness=0
-```
-
-Both sides compile, **neither emits any diagnostic**, and the two run different functions: yours
-on 0.7.3, tokora's on 0.8.0 and later. `unlimited/used` is `loud` on the same probe, so a
-discarded return is the whole of the difference — `RecursionLimiter` carries no `#[must_use]`, and
-`unused_must_use` does not fire on a plain struct. **The remedy is UFCS**: `MyTrait::unlimited(..)`
-or `<RecursionLimiter as MyExt>::unlimited()` pins your function by name and is immune to this.
-
-`#[must_use]` was considered and rejected as the fix: it would not reach the case that matters —
-a consumer who *assigns* the result, which the harness cannot generate and which stays silent
-regardless — while firing on legitimate discards. Disclosure is the honest instrument here.
-
-Two things about *why this arrives late*, both of which are the point rather than an excuse:
-
-- 0.8.0's exposure table already lists `unlimited` under "you wrote it on `RecursionLimiter`", so
-  the *name* was disclosed. What was not disclosed is that this one is **measured silent**, in a
-  category the harness's README says a silent row "would be news" in — the first
-  `inherent_assoc_fn` row ever to score one. The probe could not construct it at the time: #147
-  introduced the owner and `gen_probe.py` had no template for it, so every row on that owner came
-  back `FATAL` — an *incomplete* verdict, which is not a clean one. #148's Stage A added the
-  templates and the `new-owner` verdict, and the finding fell out immediately.
-- It is disclosed on **this** branch and could not wait. The probe's inventory is a two-sided
-  delta: once this merges, `unlimited` exists on both sides, the row leaves every future plan, and
-  the harness can never re-litigate it. A green run after that would mean "not probed", not "not
-  colliding".
-
-Recorded in `ci/name_collision/disclosed.txt`, whose fourth-and-fifth-row split now states plainly
-that the earlier four ride a bounded receiver and **this one does not**: `RecursionLimiter` is a
-concrete public struct with no bound to reject anybody.
-
-### Performance
-
-3. **`Sink::finish` replays the event log once instead of twice.** Materialization used to make
-   a full gather pass over every event before the walk that drives the builder: it validated
-   kinds and retro-wrap targets, collected the recorded lexer-error spans, and read the
-   uncovered runs off the token spans so the walk could tile a run at the token it trails. All
-   three now happen inside the walk.
-
-   The canaries move to the arm of the event they were already about. The error spans are still
-   merged into a **set** and the coverage verdict is still order-independent — it is simply
-   decided after the walk instead of before it, which it can be because
-   [`UncoveredGap`](https://docs.rs/tokora/latest/tokora/cst/enum.FinishError.html) was only
-   ever consumed at the end. The run lookahead is now a *monotone cursor*: a run's tile is armed
-   at the token that opens it and forced at the next builder-visible event, which resolves its
-   far end by scanning forward to the next token — never rescanning, and skipping outright every
-   region whose run the following token resolves for free.
-
-   Measured on a 57.7 KB GraphQL document (64,085 events): **1,727 µs → 1,663 µs, −64 µs**,
-   with the produced tree byte-identical across the clean, perturbed, hand-broken and
-   every-prefix corpora.
-
-   **One behaviour changes, and only on a malformed stream: error precedence.** Two passes meant
-   every gather-class refusal (`ReservedKind`, `StaleStartAt`, `DanglingForwardParent`,
-   `InvalidDiagnosticSpan`, `InvalidDialectKind`) outranked every walk-class refusal
-   (`OrphanFinish`, `ImproperWrap`, `MismatchedFinish`, `OverlappingSpans`, `SpanOutOfBounds`,
-   `OffsetOverflow`) whatever their buffer indices. One pass reports the **first violation in
-   buffer order**. No stream that was refused is now accepted, and none that was accepted is now
-   refused; a stream with two defects may name the other one. Within a single event the order is
-   unchanged — each fused arm runs its gather checks ahead of its walk checks.
-
-4. **A `Sink` reserves its event log at construction, from the source's length.** The log used
-   to grow from empty, doubling about sixteen times over a 57.7 KB document and copying roughly
-   4 MiB in the process. `Sink::new` now asks for the capacity that doubling would have arrived
-   at — the source's byte length rounded up to a power of two, capped at 65,536 events (2 MiB) —
-   so the same final block is bought once.
-
-   The predictor is sound only because a sink is compile-time restricted to trivia-surfacing
-   lexers: every source byte reaches it as a token or a reported lexer error, so the event count
-   tracks the byte count (0.80–1.11 events per byte across this crate's corpora). The **cap** is
-   what keeps that from being a liability for a grammar whose tokens are long — past it the byte
-   count stops being evidence and the `Vec` resumes doubling — and the **rounding** is what keeps
-   the reservation from backfiring: reserving the raw length under-reserves a lossless log, which
-   buys a large eager allocation *and* a double-sized reallocation on top, and measured slower
-   than reserving nothing at all. An empty source still allocates nothing.
-
-   Measured on the same 57.7 KB document, paired over fourteen rounds: **−5 µs (σ 8)**. The
-   allocation count and the ~4 MiB of copying go regardless of what the wall clock on one
-   allocator says.
-
-
-5. **A `trace`-feature preview no longer costs the entire remaining source, every time.**
- `InputRef`'s per-event source preview (`trace_preview`, behind the `trace` feature) built
- `format!("{rest:?}")` over the *whole* remaining source — potentially the entire input, at
- every instrumented combinator call (`peek`, `begin`/`commit`/`rollback`, `try_expect`,
- several per token) — then walked that string a second time to count it, just to keep the
- first 24 characters. Θ(remaining input) per event, unconditionally, made Θ(n²) over a parse:
- benchmarking with `--all-features` (which enables `trace`) against a ~128 KiB fixture wrote
- 133 MB of stderr in 5 minutes without finishing the cheapest bench cell's warm-up.
-
- A bounded `fmt::Write` sink now aborts the `Debug` call as soon as it has enough output to
- answer the 24-character window and the ellipsis, so the preview never walks more of the
- remaining source than a `Debug` impl's own internal batching forces. Measured against this
- crate's own `input_scan` bench fixture shape (newline-delimited, digits and punctuation): a
- single preview at offset 0 goes from 250µs to 208ns at 128 KiB and from 10.5ms to 958ns at
- 8 MiB; a full traced parse over that shape scales linearly in token count on both sides of
- the fix, at a per-token cost that no longer grows with how much input is left.
-
- That bound is conditional, not universal: it holds for a `Debug` impl that writes
- incrementally, and it does not hold for one that front-loads its entire output before its
- first write. Every `Source`/`Slice` pairing this crate ships was checked against that line;
- the guarantee is asserted for exactly these, not for `Source` in general.
-
- A third shape is not narrow at all, and is the only one of the three reachable from outside
- this crate. `Source`'s `Slice` associated type is public and implementable downstream, and
- `Slice`'s own bound (`PartialEq + Eq + Debug`) puts no streaming requirement on its `Debug`
- impl. A conforming impl may scan, escape and allocate its *entire* remaining slice into a
- temporary and call `write_str` once; this sink cannot shorten work that already ran before
- it was ever invoked, so the cost stays exactly the `O(remaining source)` this fix exists to
- remove. Output is still correct even here — the window and the ellipsis decision come from a
- genuine prefix of the untruncated dump no matter how it was produced — so this is a cost
- gap, not a correctness one, but it is the most severe of the three: unbounded, not merely
- narrower, and reachable with an ordinary trait implementation, no unsafe or misuse of this
- crate required. No in-tree backing does this today; `bounded_debug`'s doc comment and its
- `bounded_debug_is_correct_but_unbounded_for_a_front_loading_debug_impl` test carry a fixture
- that exercises exactly this shape.
-
- The other two remain narrower and **found, not fixed**: a `[u8]`-shaped backing (`[u8]`,
- `HipByt`, the `smol-bytes` byte types) bounds its allocation and escaping work but still
- iterates every remaining element, because `Formatter::debug_list` drives its iterator to
- completion independently of write failures; and a `str`-shaped backing (`str`, `HipStr`,
- `Utf8Bytes`) still costs `O(run)` for a run of characters with nothing escape-worthy in it,
- because `Debug for str` accumulates such a run before its first write. Realistic text —
- which breaks such runs at newlines, quotes, etc. — is unaffected, but a contrived input like
- this crate's own `int_run_source`/`comma_list_source` bench fixtures (digits and spaces for
- ~128 KiB at a stretch) is not; `bytes::Bytes` and `bstr::BStr` have neither gap, since both
- hand-write their `Debug` loop with `?` on every write.
-
- Output is unchanged: every trace line reads identically to before this fix, character for
- character, ellipsis included — checked against a spread of inputs (empty, short, exactly at
- the 24-character boundary, far longer, and content that escapes heavily: newlines, tabs,
- both quote characters, backslashes, non-ASCII, and a multi-byte scalar straddling the cut).
-
-10. **The trivia skip no longer goes through the shared scanner on a complete input.**
-   [`skip_while`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.skip_while) —
-   the primitive behind the `padded` combinators, and the door every lossless grammar opens at
-   every decision point — now runs its own two-phase loop under
-   [`Complete`](https://docs.rs/tokora/latest/tokora/input/struct.Complete.html): a token already
-   at the front of the stream is judged **where it lies** and consumed there, and only once the
-   stream is empty does it reach the lexer. No scan scope is built, no frontier pair is cloned,
-   and a token already resident is never taken out and put back to be judged. The lexing phase
-   does keep one thing the scope carried, and entry 11 below is that.
-
-   **Measured against the previous release line: 7.4% off a whole GraphQL parse** (1600.2 µs →
-   1482.5 µs on a 57 kB document; 159.0 µs → 148.1 µs, 6.9%, on a 7.5 kB one). Minimum over nine
-   blocks with `apollo-parser` as an unchanged control, builds interleaved within each repetition,
-   five repetitions, contended repetitions discarded. That figure is **net of** the unwind guard in
-   entry 11 below, which is the honest number for this release because the guard ships with the
-   route: without it the same measurement reads 17.4% and 15.9%. An earlier draft of this entry
-   claimed 25%; that did not describe this measurement even before the guard existed, and it is
-   replaced rather than adjusted.
-
-   **No caller-visible behaviour changes**, and the guarantee is the one already documented on the
-   method: for a caller whose input-layer callbacks are inert and whose predicate answers from the
-   values it is handed, the parse result, the tokens read next, the resume cursor, the committed
-   span and lexer state, the diagnostics, the poison boundary, the dedup watermark and the
-   predicate call sequence are all identical. What the route runs *internally* differs: it clamps
-   the committed position once per skipped token where the scan clamped once per call, and it asks
-   the cache for its front where the scan popped and pushed back.
-
-   Two things it had to re-establish, both pinned by new cells in `fast_path_tests`. A resource
-   trip inside a skip latches the poison boundary at the **committed cursor** rather than at the
-   scanner's deferred frontier, and those are the same offset because the route commits every
-   token as it crosses it. And a panic mid-skip leaves the input whole: a call interrupted at its
-   `k`-th predicate consumes exactly the `k − 1` tokens the predicate accepted and every other
-   token stays reachable. The two phases reach that differently, and entry 11 below is what makes
-   the second half true — the resident phase runs the fallible half of each settle while the token
-   is still in the stream and so needs nothing, while the lexing phase holds the token it lexed
-   across the predicate and owes a put-back. One consequence is visible only to a host that catches
-   an unwind: an interrupted end-of-input commit now keeps the prefix the call had already crossed
-   (span and state describing the same token) where the scanner discarded it.
-
-   A [`Partial`](https://docs.rs/tokora/latest/tokora/input/struct.Partial.html) input keeps the
-   shared scanner, whose scope owns the five-fact `Incomplete` restore and the emitter mark a
-   streaming skip needs settled on every exit. The split is by typestate and is guarded by a
-   differential sweep: a *sealed* partial input takes every decision a complete one takes, so the
-   two routes are held to the same observation over the same programs, sources and cache
-   capacities.
-
-   **That parity claim excludes exactly one exit, and the exclusion is deliberate**: an unwind
-   *inside the end-of-input settle* — the consequence the paragraph before last already names, seen
-   from the other side. Both routes finish a skip that ran to end of input the same way — read `Lexer::span`,
-   take `Lexer::into_state`, write the pair — but the scanner reaches that settle having already
-   disarmed its scan scope, so the frontier holding the whole skipped run is dropped with the
-   unwind, while this route committed each token as it crossed it and keeps them. The complete
-   input's answer is the better one: both routes told `Emitter::commit_token` that the run's tokens
-   were consumed, and only this one's committed position agrees with what it said. Every callback
-   that can raise that unwind — the lexer, the source, the span, the offset — is one the method's
-   own precondition already requires to be inert, so the narrowed claim costs a caller who meets
-   the condition nothing. Nothing wider diverges: a panic out of the predicate, out of
-   `Emitter::commit_token`, out of the emitter's diagnostic path, out of `Lexer::lex`, or out of
-   `Lexer::span` anywhere but the settle leaves the two routes identical, as does every run in
-   which nothing unwinds. The difference is pinned — as a difference, with both columns asserted —
-   by `the_two_completeness_routes_are_pinned_apart_on_an_interrupted_eof_settle`.
-
-### Fixed
-
-- **The collection gate's own census could pass by not looking.** `parser::many`'s `GATE_CENSUS`
-  read four hard-coded sources and counted one exact spelling of the swallow beneath the gate —
-  `emit_error(Spanned::new(span,`. A swallow spelled any other way, or written in a fifth source,
-  moved neither tally, so the equality it asserted still held and the census stayed green over an
-  ungated emit-and-continue site. A census quoted as evidence that answers by not looking is worse
-  than none.
-
-  The swallow is now a single chokepoint — one `emit_error` call in the whole `many`/`fold` tree,
-  with the three never-recoverable witnesses above it — so a driver physically has nothing to spell
-  differently. The census matches the **call** rather than its arguments and asserts the count is
-  zero in every driver source; it scans the chokepoint's own body for the three witnesses ahead of
-  the emission; and a third test requires every module of the driver trees to be classified, so the
-  source list cannot fall behind the tree. Every scan panics when the thing it looks for is absent
-  instead of finding nothing to check. Shown non-vacuous by planting a swallow in a fifth source
-  with a spelling the old shape did not match — it fails, naming the file, then the plant was
-  removed. No behaviour change. — *(#148, verification debt)*
-
-  **And the same defect, one level in: the witness scan proved presence, not gating.** The scan
-  above requires each of the three never-recoverable witnesses to appear once in the source ahead
-  of the emission. Textual presence ahead of a call is not control-flow domination — a body that
-  reads all three into `let _ =` bindings and then emits unconditionally satisfies it with the gate
-  entirely gone. Compiled and run: the census stayed green.
-
-  Answered by mutation rather than by a stronger scan, since proving domination from source text
-  means writing a Rust parser inside a test module that must also build under
-  `--no-default-features`. Each witness was neutered in turn and the whole `--all-features` suite
-  run: the frontier-`Incomplete` witness reds 2 tests, the descent-trip witness reds 12 — and
-  **`at_committed_boundary()` red nothing at all**, in the entire suite. Its only cell was negative
-  (a boundary the cursor has *not* reached must not be charged to an ordinary failure), which a
-  deleted witness also satisfies. Unguarded, a collection that runs onto a poison boundary files
-  the stop as an ordinary syntax error and returns a **silently truncated success** — `Ok` over
-  input the scanner never read.
-
-  `tokora/tests/collection_terminal_stop.rs` gains the positive direction: five `r1b_*` cells, one
-  per try-driven family plus the truncation case, each with the file's non-vacuity control (the
-  same probe run twice with only the scan limit changed, required to disagree, and required to have
-  actually tripped). All five are red under the mutation and green without it. The census now states
-  what a needle scan proves and names the suite that proves the rest, and both it and the
-  chokepoint's own docs carry the re-check procedure. No behaviour change. — *(#148, verification
-  debt)*
-
-- **The recursion-limit test suite's stack-address witness made every Miri job and the ASan job
-  red, on `main`.** `pratt_limit_unit_sink`'s unwind cell corroborates its two depth-cell
-  assertions out-of-band by comparing the addresses of two stack locals. That comparison measures
-  frame liveness only while the addresses are native stack offsets: ASan can relocate a frame's
-  locals onto a heap-allocated fake stack and Miri hands out virtual allocation addresses. Three of
-  four instrumented hosts measured the *unwound* frame as farther from the baseline than the
-  descent it had already left — inverted operands, so no threshold rescues the comparison — while a
-  fourth (ASan on aarch64-darwin) passed on the same source. A relation whose answer changes with
-  the runner is reporting the runner, so it is now scoped to native builds via `cfg!(miri)` plus a
-  `TOKORA_SANITIZER` variable `ci/sanitizer.sh` exports for every leg it runs.
-
-  The two depth-cell assertions stay **active** under Miri and every sanitizer, and the gated one
-  is not replaced by a second library-side counter: reading the same cell twice is not
-  corroboration. A skipped assertion announces itself on the process's real stderr — not through
-  `eprintln!`, which libtest swallows for a passing test — so the one build where the check does
-  not run is not the one build where nobody can see that. — *(#148, verification debt)*
-
-- **`pratt_limit`'s deep-stack wall-clock bound was calibrated for the wrong machine, and it made
-  the `miri-tb-x86_64-unknown-linux-gnu` leg intermittently red on `main`.** `on_a_deep_stack`
-  bounds every deep-recursion cell to a fixed number of seconds so a recursion-limit regression
-  fails the test with a message instead of hanging the process. Under interpretation that number
-  measures the interpreter, not the parser, and not by a flat factor: `-Zmiri-tree-borrows`
-  revalidates a growing borrow tree on every access, so
-  `the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it`'s 1000-level `unlimited()`
-  chain — this file's deepest cell — scales worse than linearly with depth, not by the roughly two
-  orders of magnitude a flat per-step slowdown would predict. Measured directly, with the exact
-  command and `-tb` flags `ci/miri_tb.sh` runs: 60–69s across three runs on aarch64-apple-darwin —
-  already more than half of the native 120s bound, on a different host and architecture than the
-  `x86_64-unknown-linux-gnu` shared runner CI failed on, which is why that leg flaked instead of
-  failing outright every time.
-
-  The bound is now `cfg!(miri)`-scoped: 700 seconds under Miri — a ×10 margin over the slower
-  reading, sized for the cross-host and shared-runner gap CI had already demonstrated, not just
-  this machine's own run-to-run noise — and 120 seconds, unchanged, natively. The bound's purpose
-  is untouched: a genuine hang is still caught, on a schedule that fits the machine actually
-  running it, and the native path carries no behaviour change — an unlimited native run finishes
-  in hundredths of a second, nowhere near either number. — *(#148, verification debt)*
-
-- **The name-collision gate reported an incomplete verdict as if it were a result.**
-  `gen_probe.py` had no template for the owners #147 introduced, so every row on them came back
-  `FATAL`. Templates alone were not enough: a probe naming an owner the same diff introduces cannot
-  compile against the base ref, and base-no-compile was unconditionally `INCONCL`. A new
-  `new-owner` verdict says exactly that, and carries two witnesses so it cannot be manufactured —
-  rustc must name the owner as unresolved on base and must not on head. The verdict is complete
-  now: 27/27 rows probed, 0 FATAL, 0 INCONCL, 0 UNPROBED. — *(#148, verification debt)*
-
-- **That verdict proved base was broken and never checked that head ran.** Its two witnesses
-  required rustc to name the owner unresolved on base and to stay silent about it on head — but
-  silence is also what a head build broken for an unrelated reason looks like: `no-compile`,
-  `upstream-fail`, `bad-witness(...)` and `unreached` none say the owner is unresolved either, so a
-  head that failed to compile the probe for a reason having nothing to do with the owner — or that
-  never reached the call at all — still read as proof the owner is new. `new-owner` now
-  additionally requires head to show a completed run, checked by an allowlist of the one shape
-  that is evidence (`witness=*`) rather than a denylist of the shapes already known to be broken,
-  which is silent about the next one nobody has named yet. Re-run against a genuine pre-#147 base,
-  9 of the 14 `RecursionLimitReached` rows the prior entry counted turn out to have been passing on
-  exactly this hole: `map_offset` and `of`'s templates call the real method with fewer arguments
-  than it takes, and the other five methods' `used` spelling forces a `u8` return type none of them
-  have, so head never compiled on any of the nine. They now score `INCONCL`, correctly — only the
-  five methods whose `discarded` spelling silently and successfully calls the real inherent method
-  were ever provable, and the fix does not widen to paper over the rest. — *(#148, verification
-  debt)*
-
-- **That fix's own allowlist was still too wide, and a sibling verdict had none at all.**
-  `new-owner`'s `case "$h" in witness=*)` accepts `witness=1` exactly as readily as `witness=0` —
-  but the marker is CONSUMER-CALLS, attribution rather than existence (see the comment where it is
-  assigned), and `witness=1` means the CONSUMER's own extension item took the call, i.e. the
-  probed name on the new owner was never a candidate this run. A template that compiles clean
-  while constructing no real collision would still have scored `new-owner`. The allowlist now
-  requires `witness=0*` specifically — the one shape that says tokora's item won the resolution —
-  and a `witness=1` head reads `INCONCL`, naming the reason.
-
-  Separately, the `glob-err`/`glob-ok` verdicts intercepted only the LITERAL STRING `no-compile` on
-  the base side before trusting head's evidence. A base broken for any other reason —
-  `upstream-fail` chief among them — fell through into the head-only checks and let a head-side
-  ambiguity decide the verdict alone, with no valid before-state at all. The base side is now
-  checked against an allowlist too: `no-compile` or `unreached` (the only two shapes a
-  compiling-or-rejected glob probe can produce, since `glob_name`/`glob_macro`'s `drive()` calls
-  only `ran()` and never `reached()`), anything else `INCONCL`.
-
-  Both proved in the failing direction, against a real glob collision and a real `new-owner` row,
-  then reverted — `git diff` confirmed clean before this fix was committed. A forced
-  `base=upstream-fail` alongside a genuine head-side ambiguity moved the glob row from `glob-err`
-  to `INCONCL`; a forced `witness=1` (explicit UFCS on the consumer trait, bypassing inherent-method
-  resolution) on a real `new-owner` row moved it from `new-owner` to `INCONCL`. Re-run against the
-  same pre-#147 base as the prior entry, the tally is unchanged — 5 `new-owner`, 9 `INCONCL` —
-  because none of the 14 real rows there naturally produce `witness=1`; only the forced case
-  exercises the new branch. — *(#148, verification debt)*
-
-- **That base-side allowlist had a mirror-image hole on the head side, and it was the more
-  exploitable of the two.** After the fix above, `glob-ok`'s only remaining check was
-  `elif [ -n "$said" ]` — accept once rustc says *something* ambiguity-shaped anywhere in the
-  head log, with no check on `$h` itself. `upstream-fail`, `bad-witness(...)` and any
-  `witness=*` all read as a pass exactly as readily as a genuine `unreached`, so a head build
-  broken for a reason having nothing to do with the probed name — provided an attributed
-  ambiguity diagnostic happened to be sitting in the same log — still scored `glob-ok`. That is
-  acceptance on the absence of a completed head-side probe: the same defect class the base-side
-  fix above had just closed, on the other side of the same row.
-
-  `h` is now held to the identical two-shape allowlist as `b`: `no-compile` or `unreached`,
-  because `glob_name`/`glob_macro`'s `drive()` calls only `ran()` and never `reached()` — a head
-  that actually finishes compiling and running can only ever read `unreached` here, never
-  `witness=*`. `glob-ok` now requires `h = unreached` specifically; `upstream-fail`,
-  `bad-witness(...)` and any `witness=*` read `INCONCL`, naming the reason, instead of falling
-  through.
-
-  Proved in the failing direction against the same pre-#147 base and the same
-  `RecursionLimitReached` glob row as the prior entry: a forced `head=upstream-fail` alongside
-  the row's genuine, untouched ambiguity diagnostic moved it from `glob-ok` to `INCONCL`; forcing
-  `bad-witness(calls=2,reached=0)`, `witness=0` and `witness=1` the same way each land `INCONCL`
-  too. Reverted afterward; `git diff` confirmed clean before this fix was committed. Re-run
-  unperturbed, the same row reaches its natural `glob-err` verdict, unchanged from before this
-  fix.
-
-  Audited the rest of the file for the same asymmetry — a verdict proving one side reached a
-  conclusion without proving the other did. `new-owner`'s two witnesses already check
-  `base_unresolved` and `head_unresolved` by the same predicate, and the item-row ladder's
-  `unreached`/`upstream-fail`/`bad-witness` filter matches against `"$b$h"` concatenated, which
-  catches either side by construction; the base-only `case "$b" in witness=1*|no-compile)`
-  further down is not a shape gap of this kind; it fixes the pre-release baseline's expected
-  value, and every value `$h` can still hold past it is already handled by name in the branches
-  below. This glob-row pair was the only place in the file carrying an allowlist on one side and
-  none on the other. — *(#148, verification debt)*
-
-- **`gen_probe.py`'s two newest templates assumed a call shape neither real method has, so 9 of
-  the 14 rows the entry above counted could only ever read `INCONCL`.**
-  `error_subject_method`/`error_subject_assoc_fn` — added for
-  `RecursionLimitReached`/`NonAssociativeChain` — rode the same fixed zero-argument, `-> u8`
-  consumer shape every other inherent-method/assoc-fn template does. That shape fits neither
-  type: `map_offset` consumes `self` and takes a closure, `of` takes the type's own fields (two
-  arguments on `RecursionLimitReached`, one on `NonAssociativeChain`), and none of the five plain
-  accessors (`offset`, `offset_ref`, `exceeded`, `depth`, `limitation`) returns `u8`. The emitted
-  call failed to compile on the head side before rustc ever reached the collision —
-  `map_offset`/`of` with E0061 (too few arguments), the other five's `used` spelling with E0308
-  (the `let`-binding's forced type) — which is exactly the hole the entry above named and left
-  open: "the fix does not widen to paper over the rest."
-
-  Both templates now derive the call's arity, and the `used` spelling's `let`-binding type, from
-  the REAL signature instead of assuming one. Verified two-sided, against the same genuine
-  pre-#147 base the entries above use (`60f27a3`): before this fix the 14 `RecursionLimitReached`
-  rows scored 5 `new-owner` / 9 `INCONCL`, matching the count already on record; after, all 14
-  score `new-owner`, each on a head run that compiled and completed (`CONSUMER-CALLS: 0` —
-  tokora's own item took every call). No effect on this branch's own run: it adds no name
-  reusing either owner, so it scores `probes=0`/`PASS` regardless — the fix matters the next
-  time a PR gives one of these two types a genuinely new item. — *(#148, verification debt)*
-
-
-
-6. **A `trace`-feature preview no longer reports a partial `Debug` rendering as the complete,
- short value it is not.** `bounded_debug` — the bounded sink `trace_preview` (behind the
- `trace` feature) uses to build its per-event source preview — discarded the `Result` from its
- own `write!` call outright, so its truncation flag came from the sink's private bookkeeping
- alone: `true` only when the sink itself had refused a write after filling its 24-character
- window. A `Debug` impl can fail for a reason that has nothing to do with the sink —
- `fmt::Result` is a plain `Result`, and neither the trait nor `Slice`'s bound (`PartialEq + Eq
- + Debug`) forbids it — and that case left the flag `false`: the preview then rendered
- whatever partial content had been written, with no ellipsis, as though it were the whole
- value.
-
- The single flag is replaced with a three-state outcome — `Complete`, `WindowTruncated`, or
- `FormatFailed` — because a bool cannot carry both facts a reader needs kept apart: whether
- there is more of the value than the window shows, and whether the value's own `Debug` impl
- finished at all. Folding a foreign `Err` into the same flag a real truncation sets is just as
- wrong in the other direction: a `Debug` impl can write its complete, short rendering and only
- then fail for a reason of its own, and reporting that as truncated appends `…` to a trace
- line for a value that has no more content, claiming a continuation that does not exist.
-
- The sink's own bookkeeping (`sink.truncated`) is what tells the two causes apart, and does so
- reliably: the sink has exactly one branch that ever returns `Err`, and that branch sets
- `sink.truncated` in the same statement, so a `write!` failure the sink did not record cannot
- be the sink's. `trace_preview` now renders each state distinctly — no marker for `Complete`,
- `…` for `WindowTruncated`, and a separate `<fmt error>` marker for `FormatFailed` that says
- the renderer broke without claiming missing content. This is a correctness fix, not a
- performance one: it changes output only for a `Debug` impl that fails on its own account,
- which no in-tree `Source`/`Slice` pairing does, so every case that already reached the sink
- normally — which is to say, every case this crate has ever exercised — renders
- byte-identically to before.
-
-7. **A recursion-limit trip an element ANSWERED was still spendable — as a successful, complete
-   collection.** Item 2 above closes the path where an element hands its trip back as `Err`: the
-   collection drivers gate that at one chokepoint and re-raise it. They gated **only** that path.
-   An element that catches [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
-   itself and then reports *no more elements* — by declining, or by accepting without consuming
-   anything — hands the driver an `Ok`, the chokepoint never runs, and the driver's **absence** exit
-   reads it as the ordinary end of the construct. `repeated()`, `separated_by(..)` and both
-   delimited forms returned `Ok` with everything collected so far, filing nothing. A resource
-   budget stopped the parse and the parse reported a complete construct — the same defect as item 2,
-   for every error type equally, reached through the exit item 2's gate does not cover.
-
-   The absence exits now consult the same session counter, at the same per-element granularity, and
-   through a second chokepoint of their own: nine exits across the four drivers — the element
-   decline, the no-progress stall, and in the delimited pair the close probe's `WrongToken` and
-   `Eof` arms — surface the stop as the terminal-marked end-of-input error those exits already
-   produced for a *scanner* stop, instead of ending the construct cleanly.
-
-   | driving an element that catches a depth trip and then reports absence | before | now |
-   |---|---|---|
-   | `repeated()`, `separated_by(..)`, and both delimited forms | `Ok` with the elements collected before the stop, nothing filed | `Err` — a terminal end-of-input, still nothing filed |
-
-   **Unchanged here, and deliberately so**: the *scanner* half of this gate stays off an exit
-   resting on a **real token**. A `Close` verdict from the delimited drivers' close probe, and the
-   mid-scan closer in the delimited separated driver, read a committed pre-trip token, so the
-   construct ended *ahead of* any boundary a later lookahead latched and a wider scan window parses
-   the identical source to the identical value. The *descent* half of it is a different kind of fact
-   and does belong on those exits — item 8 below is that correction. An `Accept` is untouched either
-   way, and stays that way: an element that catches a trip and still returns a value has answered
-   it, not concluded absence, so the driver is faithfully collecting what it was handed rather than
-   manufacturing a stop of its own — item 2 above states this as the fourth channel a caught trip
-   can still spend, and why gating it would be a broader contract than #148 establishes. And
-   the granularity floor item 2 describes is exactly the same here — the baseline is one
-   **element**, so a trip an *earlier* element caught and parsed past does not end the collection
-   when a later one legitimately runs out of input.
-
-   The eight `*_while` drivers and folds shared this hole; **item 12 below closes it** for them, and
-   the measurement that found it is recorded there. — *(#148 R7)*
-
-8. **A closer that arrives after the trip does not unmake it.** Item 7 gated the delimited drivers'
-   *absence* exits and left the arm where the closer is genuinely present ungated, on the reasoning
-   that a committed pre-trip closer settles the question. It settles **one** of the two questions,
-   and the two are facts of different kinds:
-
-   - a terminal **scanner** stop is a fact about a token *position*. The close probe is cache-first,
-     so a `Close` verdict rests on a real pre-trip token: the construct ended *ahead of* whatever
-     boundary the element's lookahead went on to latch, and that boundary is not about it. Reading it
-     there would fail a parse a wider scan window completes to the identical value, so it still does
-     not — unchanged from item 7;
-   - a **descent** budget trip is a *counter event that already happened inside the element attempt*.
-     Nothing arriving afterwards unmakes it. An element that caught a
-     [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html),
-     reported *no more elements*, and was then followed by a real closer produced a **successfully
-     closed collection that had silently spent a resource-limit stop** — item 7's defect, through the
-     one arm item 7's gate deliberately does not cover.
-
-   Three exits now consult the trip counter before they commit a real closer, at the same
-   per-element granularity: `repeated().delimited()`'s decline arm and its no-progress epilogue, and
-   `separated_by(..).delimited()`'s epilogue.
-
-   | driving an element that catches a depth trip, reports absence, and IS followed by the closer | before | now |
-   |---|---|---|
-   | `repeated().delimited()` over `"( 1 2 3 )"`, element declines | `Ok([1, 2, 3])`, nothing filed | `Err` — a terminal end-of-input, still nothing filed |
-   | `repeated().delimited()` over `"( 1 2 3 )"`, element accepts consuming nothing | `Ok([1, 2, 3, …])`, nothing filed | `Err` — likewise |
-   | `separated_by(..).delimited()`, element consumes and declines before the closer | `Ok([1, 2, 3])`, nothing filed | `Err` — likewise |
-
-   **Still unchanged**: the mid-scan closer in `separated_by(..).delimited()`. It is reached from the
-   top of a cycle, so only an *accepting* element can precede it — a decline and a stall each break
-   into the epilogue — and the cycle's baseline is taken above it, which makes the term a constant
-   `false` there. An `Accept` remains untouched everywhere, for the reason item 7 gives.
-
-   The two delimited `*_while` drivers have real-closer exits too, and **item 12 below** brings them
-   under the same gate. `parser::many`'s `GATE_CENSUS` gains a per-source count of real-closer exits
-   with a region scan requiring each close verdict to reach the gate before it commits, plus a
-   two-directional scan of the gate itself — the counter read, the position *not* read, since a
-   scanner term smuggled in there is as much a defect as a missing descent one. — *(#148 R8)*
-
-12. **The same trip, through the same absence exits, in the other eight drivers.** Items 7 and 8
-   closed this for the four **try-driven** collection families and recorded the other eight
-   guard-bearing sources — `repeated_while()`, `separated_by_*_while()`, both of their delimited
-   forms, and the fold sources behind `fold`/`try_fold`/`try_fold_with`/`rfold` and their four
-   `*_while` twins — as *found, not fixed*. They are fixed now.
-
-   Their exposure was **narrower** than the four's, not different: none of them files an element's
-   `Err`, so a trip an element *hands back* propagates untouched and was already terminal there. The
-   hole was the exit with no `Err` in it — an element that catches
-   [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
-   itself and then reports *no more elements*. Measured rather than inferred, on the code as it
-   stood:
-
-   | driving an element that catches a depth trip and then reports absence | before | now |
-   |---|---|---|
-   | `fold(..)` over `"1 2 3"`, element declines | `Ok(6)` under a budget the element exceeds — identical to `Ok(6)` under one it does not | `Err` — a terminal end-of-input, still nothing filed |
-   | `repeated_while(..)` over `"1 2 3"`, element accepts consuming nothing | `Ok([1, 2, 3, -1])` under both budgets | `Err` — likewise |
-
-   Closing it needed a per-**element** trip baseline none of those loops took, which is a shape
-   change rather than a gate addition: three of the folds were `while let Accept(..) = element(..)`
-   loops, and a `while let`'s condition *is* the element attempt, so there is nowhere in one to
-   snapshot the counter before it. Those three are now `loop { let trips = …; match … }`. The
-   remaining five take the baseline at the top of the cycle, which is once per element, since a
-   cycle attempts at most one.
-
-   Thirty absence exits across all twelve sources now route through `absence_after_element`, and
-   eight real-closer exits through `close_after_element` — every `CloseStatus::Close` verdict in the
-   tree, with **no per-site exemption**. Where a probe sits at the top of a cycle its descent term is
-   a constant `false`, and the call is kept anyway: a `usize` comparison costs less than an
-   exemption table, it fails closed if a later refactor moves an element attempt above the probe,
-   and it is what lets the census scan each verdict's own arm instead of comparing tallies. The two
-   **direct** closers — `separated_by_*(..).delimited()`'s and `separated_by_*_while(..).delimited()`'s
-   mid-scan arms, which commit from the driver's own scan with no probe verdict — stay exempt for
-   the structural reason item 8 gives, and are counted as such.
-
-   **Unchanged, and deliberately so**: an `Accept` is still never gated, in any of the twelve, for
-   the reason item 7 states. So is each `*_while` driver's `Action::Stop` exit in practice — it is
-   reached before that cycle's element runs, so the element that could have caught a trip is the
-   previous cycle's *accepting* one, and the term there is a constant `false` by construction rather
-   than by exemption.
-
-   `parser::many`'s `GATE_CENSUS` loses its two-shape classification: `absence_exit_shapes` has no
-   zeroes left, every source is required to spell **neither** witness itself, and a new
-   `every_driver_baselines_its_trip_witness_inside_its_element_loop` pins one `trip_snapshot()` per
-   element loop in all twelve — matched against the loop openers as a second, independent needle —
-   and requires every one of the forty-two chokepoint calls to read a baseline taken inside the loop
-   that hosts it. — *(#148 R9)*
-
-
-11. **A trivia skip whose predicate panics no longer loses the token it was asked about.** On a
-   [`Complete`](https://docs.rs/tokora/latest/tokora/input/struct.Complete.html) input,
-   [`skip_while`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.skip_while)
-   reaches its lexer once the stream is drained, and the token it lexes was handed to the
-   predicate while nothing owned it. A predicate that unwound therefore dropped that token: the
-   call resumed from the previously committed span and the next read **re-lexed** it, where the
-   same skip on a sealed
-   [`Partial`](https://docs.rs/tokora/latest/tokora/input/struct.Partial.html) input — whose scan
-   scope holds the token for exactly this reason — put it back at the front of the stream and
-   resumed there. Two typestates, one primitive, two different resume cursors under
-   `catch_unwind`.
-
-   The token is now owned by a guard across that one call, so an unwinding predicate leaves it
-   parked rather than dropped, and the ordinary stop and the unwind edge perform the identical
-   put-back. **For an unwind out of the predicate** — at every call, over every residency and cache
-   capacity swept — both routes now leave the same cursor, the same front residency and the same
-   amount of re-lexing. They still part company on one other exit, an unwind inside the
-   end-of-input settle, which was left as it is on purpose; entry 10 above says why and names the
-   cell that pins it.
-
-   Visible only to a host that catches an unwind out of its own `skip_while` predicate and keeps
-   using the input; a predicate that returns normally, or a panic that aborts, is unaffected.
-
-   **It gives back about three fifths of entry 10's win — the two fifths that remain are what
-   ships — and that is stated rather than buried.** Measured on the same harness and in the same
-   interleaved runs as the figure there: 1321.0 µs → 1482.5 µs on the 57 kB document and 133.7 µs →
-   148.1 µs on the 7.5 kB one, so **+12.2% and +10.8%** of a whole parse. Entry 5's route was 17.4%
-   and 15.9% faster than the previous release line before this guard and is 7.4% and 6.9% faster
-   with it, so the guard hands back 10.0 of those 17.4 points and 9.0 of those 15.9 — 57.5% and
-   56.6%.
-
-   The whole of the cost is the **unwind cleanup region** a destructor opens in the lexing loop,
-   not the guard's own work: the identical wrapper with its `Drop` deleted is free, and so is the
-   guard itself compiled `panic = "abort"`. Six shapes were built and timed and this is the
-   cheapest — scoping the guard tighter, taking its `Drop` out of line, moving the predicate call
-   into a non-inlined helper, and outlining the whole lexing phase are all worse or no better. The
-   resident-token path — the 22,033-of-39,057 skips that skip nothing, and every skip over a warm
-   cache — builds no guard and is unaffected.
-
-   It was judged correct to pay because a panicking predicate is **contract-covered behaviour**,
-   not undefined territory: `skip_while` documents a *Panic unwind* section promising that no token
-   leaves the stream, and the predicate is explicitly outside the "inert callbacks" precondition
-   that scopes the rest of the fast path's guarantees. Two typestates disagreeing there falsifies a
-   documented promise, and entry 10's own claim rests on panic tests as its evidence.
-
-   **That same reasoning is why the other divergence was not paid for.** The end-of-input settle
-   exclusion in entry 10 is reachable only through the lexer, the source, the span or the offset —
-   all of them *inside* the inert-callbacks precondition, so no caller who meets the condition can
-   provoke it — and the complete-input route's answer there is the stronger of the two, not a
-   defect being tolerated. Where a promise was over-broad the promise was narrowed and the
-   behaviour pinned; where the behaviour was wrong, as it was for the predicate, it was fixed.
-
-   The differential sweep that should have caught this could not: its check on where the stream
-   resumes was a *range* between the committed position and the next token's start, and a token
-   put back and a token dropped are both inside it. It is an equality now, and a new cell compares
-   the two typestate routes field by field after a panicking predicate — cursor, front residency,
-   whether the token was re-lexed, and the committed-token notifications the interrupted call had
-   already made. That last is also a new observer for a gap noted and left open in the previous
-   round: `Emitter::commit_token` reaches no value a caller reads back off the input, so a skip
-   that consumed a **parked** token and told nobody had, until now, nothing watching it.
-
-14. **The same wrong-machine wall-clock bound was still sitting in `pratt_limit_unit_sink`, and it
-   took the `miri-tb-x86_64-unknown-linux-gnu` leg red on `main` — 57 minutes in.** The entry
-   further up this section corrected `pratt_limit`'s deep-stack bound and did not sweep for
-   siblings. There was one: `bounded`, the wall every cell in `pratt_limit_unit_sink` runs under,
-   with 60 seconds hard-coded at all thirty-one call sites. On a compiled build 60 seconds is
-   enormous — this file's slowest cell, the section 3 unwind cell, runs in 9.8–10.4 ms and no
-   other cell reaches a millisecond — and under interpretation it is a coin flip. Measured with
-   the exact command and `-tb` flags `ci/miri_tb.sh` runs, timing the interval `bounded` itself
-   bounds:
-
-   | | native | Miri, aarch64-apple-darwin | slowdown |
-   |---|---|---|---|
-   | the unwind cell, alone | 9.8 ms | 49.72s / 48.61s | about ×4,800 |
-   | the unwind cell, in a whole-file run | 10.4 ms | 49.32s | about ×4,800 |
-   | all sixteen cells | 10 ms | 58.02s | — |
-
-   So the cell is essentially the whole file, which is why CI reported `15 passed; 1 failed`
-   rather than general slowness. The bound is now 500 seconds under Miri and 60 natively,
-   unchanged. 500 is ×10 over the slowest reading, the same multiple the deep-stack bound chose,
-   and this time the cross-host gap has a measured floor rather than an argument: the same cell
-   that reads 49.7s here tripped a 60s wall on the shared `x86_64-unknown-linux-gnu` runner, so
-   that runner is at least ×1.21 slower on an interpreted workload of this shape. A tripped
-   deadline reports "over the budget" and never by how much, so ×1.21 is a floor; ×10 leaves room
-   over it and over a pessimistic ×3 draw on a noisy runner alike. It is deliberately not larger,
-   because a budget is also a bill the job pays if a termination regression ever lands: sixteen
-   cells at 500 seconds is 2h13, inside the job timeout, where an hour a cell would be a way of
-   never finding out.
-
-   **The two bounds are now one bound.** Both suites' helpers were the same function modulo a
-   stack size and a number, and keeping them separate is what let the first fix miss the second
-   site. They now both call `common::bounded_wait`, whose allowance is a `WallClock` — a pair of
-   figures, one per build kind, both required. A third suite that needs a wall cannot spell one
-   without saying what an interpreted build is allowed, which is the property that was missing,
-   and `bounded_wait` refuses a pair whose interpreted figure is below its native one, because
-   interpretation is not the faster of the two and such a pair is transposed rather than measured.
-   Each call site keeps its own measured number and its own reasoning; only the mechanism is
-   shared.
-
-   The deep-stack bound's 700 seconds was re-read under Miri with the refactor in place and is
-   unchanged — its own doc records the cross-check. No library behaviour changes, and the native
-   path is untouched: every cell here finishes in single-digit milliseconds, nowhere near either
-   figure. — *(#148, verification debt)*
-
-16. **A scanner resource trip is now terminal for every emitter, not only for the ones that accept
-   its diagnostic — recovery re-raises it instead of retrying it.** Item 2 answered the *descent*
-   side of "terminality is a property of the event, and this crate enumerates carriers of it". This
-   is the *scanner* side of the same root cause, and it was reachable through every fail-fast
-   emitter.
-
-   One trip, one position, one committed leaf, two emitters, two verdicts. An **accepting** emitter
-   files the trip's diagnostic and the committed leaf
-   ([`next_or_stop`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.next_or_stop),
-   [`try_expect_or_stop`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.try_expect_or_stop))
-   builds an
-   [`UnexpectedEot`](https://docs.rs/tokora/latest/tokora/error/struct.UnexpectedEot.html) through
-   `into_terminal`, so `is_terminal()` is `true` and recovery re-raises. A **rejecting** emitter
-   reports the same trip by returning `Err` from
-   [`emit_lexer_error`](https://docs.rs/tokora/latest/tokora/emitter/trait.Emitter.html#method.emit_lexer_error) —
-   which is not a refusal to report, it *is* the report — and the scanner propagates that value
-   straight out of its trip arm. It was built by `FromEmitterError::from_lexer_error` from the
-   lexer's own `Token::Error`; no `UnexpectedEnd` exists on that path, so nothing calls
-   `into_terminal` and `is_terminal()` is `false`. Recovery then **ran**: measured through
-   [`recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.recover) under
-   [`Fatal`](https://docs.rs/tokora/latest/tokora/emitter/struct.Fatal.html), the recoverer
-   re-entered the scanner and re-tripped the same limit — scan count 3 → 4 — and returned `Ok`,
-   turning a spent resource budget into a successful parse. All four recovery attempts were
-   affected: `recover`,
-   [`inplace_recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.inplace_recover),
-   and both of
-   [`skip_then_retry`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.skip_then_retry)'s
-   attempts.
-
-   **The witness already existed and those four sites were the only guarded ones not reading it.**
-   The input's poison boundary is the scanner's own record of the trip, and `parser::many`'s twelve
-   collection drivers consult it at every absence exit through `latch_snapshot` /
-   `latched_during_attempt`. The four recovery sites consulted it zero times. They now read it,
-   beside `MaybeTerminal::is_terminal` and the session trip counter — five witnesses, in the five
-   places the two never-recoverable conditions are stored.
-
-   **The scanner's witness is a monotone COUNTER, not the boundary that trip latched, and that is
-   the whole of the fix.** The boundary is a *lineage memo*: a `Checkpoint` carries it and a restore
-   copies it back verbatim. Any comparison of it across a rollback therefore reads a restored value
-   against what it was restored to, and moving the comparison closes exactly one level at a time:
-
-   - read **after** the attempt, it compares the latch `try_attempt`'s `Err` arm just restored
-     against the value it restored it to — always equal, always `false`. Measured: with the read
-     there, only the non-backtracking `inplace_recover` cell passed and all three speculating ones
-     still failed with the scanner re-entered after the trip.
-   - read **inside** the attempt, that level is closed and the level below opens. Grammar code may
-     catch a scanner stop inside an *inner* `attempt` of its own and decline it; the inner rollback
-     restores the boundary before the outer gate ever looks, and the outer verdict reads clean over
-     a stop that is live, already diagnosed, and re-trips on the next scan of the same prefix.
-     Measured the same way: the recoverer ran and the scan count moved 3 → 4.
-
-   Relocating the read a third time closes level two and opens level three. **A cell inside the
-   rollback set cannot witness an event across a rollback at any depth**, so the witness is a cell
-   no rollback reaches: a new `Input::scanner_trips`, monotone, never lowered, not carried by a
-   `Checkpoint` and not by the sync family's `ThroughEntry` either. It is the exact twin of the
-   descent counter item 2 added, for the other budget, and it is classified in the same place —
-   `input::lineage`'s CELL_CENSUS destructures `Input` exhaustively, so the field could not be added
-   without a row in the taxonomy table saying what a restore does to it. Its **one writer** is
-   `latch_if_limit_tripped`, the crate's sole terminal predicate: `classify` is its only caller and
-   both lexing drivers reach `classify`, so *every* scanner trip is counted, a lookahead's included
-   — and a lookahead that trips latches the boundary and still returns `Ok` with a short window,
-   which is precisely the trip a driver-level count in `scan_with`'s `Verdict::Trip` arm would have
-   missed. The bump runs before the diagnostic is offered to the emitter, so a rejecting emitter's
-   `Err` cannot carry the stop out past an uncounted trip.
-
-   The latch reading is **kept** beside it, and demoted rather than deleted: it answers "a different
-   stop is standing at the end of this attempt" where the counter answers "a stop happened inside
-   it", and every transition this crate can produce that moves the latch also moves the counter. It
-   costs one `Option<L::Offset>` clone on a path that already clones one, and removing a witness on
-   a subsumption argument is removing it on an argument rather than on a measurement. The witnesses
-   are still read **inside** the attempt, for that narrow term's sake, and the verdict rides out
-   beside the error.
-
-   **The guard is now one chokepoint rather than four copies, and the false justification that let
-   the copies drift is gone.** A new crate-internal `parser::recovery_gate` owns the whole judgement
-   — every per-attempt baseline and all five witnesses — and the combinators hand it their attempt
-   and match on a three-way outcome. Nothing about the law is spelled at a call site, which also
-   deletes a hoistable baseline: `skip_then_retry`'s retry-cycle `trip_snapshot()` had to stay
-   inside the retry loop (hoisted, the monotone session counter would refuse every retry after the
-   parse's first trip) and nothing checked that it did. There is no longer a baseline there to
-   hoist. The comment above the old `Recover` guard claimed the error's own answer "covers a
-   *scanner* stop, which the grammar's error type carries" — the first half of which is exactly this
-   defect; it is corrected rather than deleted, along with
-   [`MaybeTerminal`](https://docs.rs/tokora/latest/tokora/error/trait.MaybeTerminal.html)'s "the arm
-   is yours to answer for" clause, which is now true of a
-   [`PartialSession`](https://docs.rs/tokora/latest/tokora/input/struct.PartialSession.html)'s
-   terminal latch and no longer of the three recovery combinators.
-
-   **`skip_then_retry`'s recovery was not only its retries, and the rest of it ran outside the gate
-   entirely.** A gate that wraps the parse attempts constrains what happens *inside* one and says
-   nothing about recovery work that never enters one — and this combinator's actual recovering is
-   the **skip** to a sync point and the **advance** over a sync point that did not admit a parse.
-   Both are `Ok`-returning primitives that fold a terminal trip into the value they use for genuine
-   exhaustion: `sync_balanced` answers `Ok(None)` whether it found no sync point or the scanner
-   tripped mid-skip, and `next` answers `Ok(None)` whether the input ended or the scan tripped. So a
-   spent scanner budget read as *"nothing left to skip to"* and the combinator surfaced its ordinary
-   trigger error for it — an error whose `is_terminal()` is `false`, which a `PartialSession`'s
-   terminal latch reads and nothing else corrects. Through a **rejecting** emitter this never showed,
-   because the rejection propagates as an `Err` out of the skip itself; through an **accepting** one
-   the diagnostic is filed and the `Ok` comes back looking exactly like end of input.
-
-   Both phases now go through `recovery_gate::recovery_step`, which samples the three input-side
-   witnesses across the operation — it reads three rather than five because the other two
-   interrogate an error value and a step that returned `Ok` has none — and a stop inside either
-   surfaces the terminal-marked `UnexpectedEot` every other committed exit in this crate surfaces
-   for a trip an accepting emitter took. *"The scanner stopped"* and *"there was nowhere to sync
-   to"* are two different answers again, and only the second is recoverable.
-
-   **Unchanged:** an ordinary failure still recovers, in all four attempts, and a genuine sync
-   exhaustion still surfaces the trigger error — the EOF reading is narrowed, not replaced, and a
-   cell pins each half of that pair. The verdict is attempt-relative against per-attempt baselines,
-   so a stop an *enclosing* lookahead caused before the attempt started is never charged to it.
-
-   **One source-breaking addition, and it is the only public-surface change.**
-   `ParseInput for SkipThenRetry` grows
-   `Error: From<UnexpectedEot<L::Offset, Lang>>`, because surfacing a terminal stop means
-   *constructing* one and that is the carrier this crate constructs. It is the same conversion
-   `next_or_stop`, `try_expect_or_stop`, the peek family and both pratt engines already require, and
-   one fifth of `FromTokenErrors`, so a grammar that can reach end of input at all already has it; a
-   grammar that cannot gets a compile error naming the missing `From`. There was no bound-free
-   alternative — `MaybeTerminal` is a *predicate*, with nothing to build from — and the alternative
-   of leaving the stop unmarked is the defect. Everything else is internal: `recovery_gate` is a
-   private module, `Input::scanner_trips` is a private field, and its two accessors are
-   `pub(crate)`.
-
-   **What it costs, stated exactly:** every witness is read on the failure path only, so a
-   successful attempt pays just its baselines — one `Option<L::Offset>` clone plus two `usize` loads
-   per attempt. For the two speculating combinators the clone is the same value the checkpoint they
-   save clones anyway; `inplace_recover`, which saves none, pays it new. The scanner counter's write
-   side is one `wrapping_add` on the trip arm of the terminal predicate, which is a path that has
-   already decided to stop.
-
-   **Narrowed on purpose, and this is the one behaviour change beyond the headline:** a scanner stop
-   latched *anywhere inside* the attempt now re-raises, including when the attempt then fails for an
-   ordinary reason short of the boundary — a wide lookahead that trips, followed by a syntax error.
-   That is the same rule `parser::many`'s absence exits already apply, and for the same reason: the
-   attempt's evidence was truncated by a stop, and recovering from it would re-lex the same prefix
-   and re-trip. It fails closed, and the whole existing suite is unaffected by it.
-
-   **What holds it, and what watched it fail.** A new behavioural suite,
-   `tokora/tests/recovery_terminal_stop.rs`, 13 cells. The trip cells are self-calibrating, so no
-   absolute scan tally has to be maintained: the primary parser records the scan count at the
-   instant its own scan tripped, and each cell requires the counter not to have moved since. Five
-   direct trip cells (all four attempts, plus the accepting-emitter control that proves the two
-   sinks now agree); two **nested-speculation** cells, in which the primary catches the trip inside
-   an inner `attempt` of its own, declines it, and then fails ordinarily — driven through both
-   `recover` and `inplace_recover`, because the two rollback postures are what would otherwise make
-   the defect look like a property of the *outer* attempt when the *inner* rollback is what defeats
-   the latch; two **phase** cells for a trip inside the skip and inside the advance; and four
-   scoping cells that go red if the gate starts refusing ordinary failures, one of them the genuine
-   sync exhaustion paired against the skip-phase trip.
-
-   `RECOVERY_GATE_CENSUS` covers the structure the suite cannot, and it was extended for the reason
-   its own shape made it miss the sync phase: it constrained what happens *inside* the chokepoint,
-   which is silent about recovery work that never enters one. It now names the **phases**, not just
-   the attempts — every step routes through `recovery_step`, each matches both outcomes, and no
-   combinator source reaches a recovery primitive on its own handle (`inp.sync_balanced(`,
-   `inp.next(` and three siblings pinned absent, which works off the convention that a combinator's
-   handle is `inp` and the chokepoint's closure parameter is `input`). The witness scan is now split
-   by subject: the two error-carried witnesses appear exactly once, in `judge`; the three
-   input-side ones exactly twice, once in each judging body, each ahead of the verdict that body
-   carries out.
-
-   Watched failing three times, each with the whole behaviour suite green: with the latch swapped
-   for the positional `at_committed_boundary` (a real regression a rollback over the latch defeats);
-   with `Recover`'s guard re-spelled by hand, correctly; and — the extension's own demonstration —
-   with the scanner counter deleted from `recovery_step`, where the behaviour suite stays 13-for-13
-   because the latch reading beside it answers the same way on every case anyone wrote, and the
-   census reds on the count. That is the shape the census exists for: a witness redundant on the
-   cases in the suite and load-bearing on the ones that are not.
-
-   Two frontiers are stated on it rather than left to be found. It reads two combinator sources plus
-   the chokepoint, so a recovery combinator added in a *new file* is not read until it is listed;
-   and the ungated-primitive check is a **list**, so a recovery phase built on a primitive nobody
-   added is a phase nothing reads.
-
-22. **The collection drivers had the same rollback hole item 16 closed for recovery, and the
-   monotone counter it added now closes it here too.** Item 16 said, correctly, that `parser::many`'s
-   twelve collection drivers "consult the poison boundary at every absence exit". What it did not
-   say is that those drivers were reading it with exactly the defect it was in the middle of fixing
-   one module over: the boundary is a lineage memo, and a driver's read of it sits outside every
-   rollback the elements below it may perform.
-
-   An element is entitled to open an [`attempt`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.attempt)
-   of its **own**, meet a scanner resource trip inside it, catch the stop, and decline that attempt.
-   The inner restore then rewinds the cursor, the cache, the emissions **and** the poison boundary
-   together — back to the value the *driver* snapshotted before its element loop. Every witness the
-   drivers had answered `false` afterwards, over a stop that is live, already diagnosed and re-trips
-   on the next scan of the same prefix:
-
-   - **34 gates** read clean. The 30 absence exits concluded "no more elements" and returned a
-     silently truncated `Ok`; measured, `peek`-free `repeated()` over such an element returns
-     `Ok([])` on `"1 2"` under a budget the element spent, indistinguishable from the same parse
-     under a budget it did not.
-   - the **4** `file_element_failure` swallow sites were worse than a missed re-raise. There the
-     element's ordinary `Err` was **filed as a recoverable diagnostic and the loop carried on** — so
-     the run also gained a syntax error describing input the scanner never read, and the rollback
-     had already erased the trip's own diagnostic, leaving a log that does not mention the stop at
-     all.
-   - the **8** real-closer gates are unaffected and stay that way, deliberately. A committed
-     pre-trip closer settles the scanner question, and the lookahead that latched past that closer
-     is the same one that bumped the counter — so a counter reading there would refuse exactly the
-     delimited parses the latch reading would, all of which a wider scan window completes to the
-     identical value.
-
-   Neither companion witness could have covered it. `at_committed_boundary()` is positional and the
-   restore rewinds the cursor too; `tripped_during_attempt` counts *descent* trips, and a scanner
-   trip bumps no descent counter.
-
-   The fix is item 16's, reused rather than reinvented: `Input::scanner_trips`, the monotone session
-   counter whose sole writer is the crate's terminal predicate, read through
-   `scanner_trip_snapshot` / `scanner_tripped_during_attempt` at
-   `absence_after_element` and `file_element_failure`. Nothing `pub` changed and no bound moved.
-
-   **Its baseline is per COLLECTION, and that is the opposite of the descent counter's.** The two
-   facts decay differently: a descent trip an element caught and legitimately parsed past stops
-   being true of the input, so its baseline is re-taken per element; a spent scanner budget does
-   not, so its baseline is taken once, above the element loop, beside `latch_snapshot()` whose
-   question it answers. Per element it would drop the case *element 1 trips and accepts, element 2
-   declines* — element 2's baseline would be taken after element 1's trip and the exit would read
-   clean — which is a case the latch beside it has always refused.
-
-   **The latch reading is now fully subsumed, and is kept anyway.** Every transition this crate can
-   produce that moves the boundary goes through `latch_if_limit_tripped`, which bumps the counter
-   first. Measured rather than argued: with `latched_during_attempt` neutered in place and the
-   counter left in the condition, all 105 test binaries of `--all-features` pass — including the ten
-   `absence_terminal_stop.rs` cells the latch used to be the sole holder of. It stays for the reason
-   the recovery gate's equivalent term stays: it is the reading the boundary itself is the subject
-   of, it costs one clone already being paid, and a witness removed on a subsumption argument is a
-   witness removed on an argument rather than on a measurement. `file_element_failure`'s positional
-   `at_committed_boundary()` is **not** subsumed and is load-bearing — it sees a boundary latched
-   before the driver started that the element has now run onto, which no per-collection counter
-   baseline can see.
-
-   `GATE_CENSUS` grew the witness and a placement test that is the exact mirror of the descent one:
-   the scanner baseline must be taken once per collection and **outside** the element loop, where
-   hoisting the descent baseline would itself be the defect. Watched failing with the whole
-   behaviour suite green — the extension's own demonstration: with one driver's baseline moved
-   inside its loop, `every_driver_baselines_its_scanner_witness_once_per_collection` is the **only**
-   failing test in all 105 binaries, because no behaviour cell anyone wrote builds the shape that
-   placement drops. Two new regressions pin the behaviour itself, one per gate, each watched failing
-   first and each with a widened-limit control that differs in nothing but the scan budget.
-
-13. **A peek that reached the lexer reserved two token windows, not one.** The fill allocated the
-   public `Peeked<W>` deque the caller gets back, and then — on the cache-miss path — a second
-   `W::CAPACITY`-slot store of the same entry type, a `GenericArray<MaybeUninit<_>, W::CAPACITY>`
-   holding the tokens lexed past the cache until the cache region had been copied out. The window
-   bound caps the slot *count*, but `Token`, `State` and `Span` are unconstrained in size, so a
-   grammar with a large token payload or a large lexer state paid **twice** the window it asked
-   for on every peek that reached the lexer. For the crate's own oversized fixture — a 1 KiB token
-   beside a 1 KiB lexer state, 2,072 bytes an entry — that is 132,632 bytes at `U32` and 33,176 at
-   `U8`; those are now **66,320** and **16,592**. Nothing about the peek's result changes; this is
-   stack the caller was paying for and could not see. It matters most where the stack is smallest,
-   which is the `no_std` target the crate advertises.
-
-   The second store existed to solve an **ordering** problem, not a storage one. A window's two
-   halves are produced in the opposite order from the one it must report: the tokens past the
-   cache are lexed *during* the fill, while the cache region is copied out in one bulk read
-   *after* it, and `Cache::peek` only appends. That needs the staged region to end up *behind* the
-   cache region — not a second array. So it is staged at the tail of the window the caller already
-   owns and rotated back once the cache region is in. The rotation permutes values inside the
-   deque and copies none out, and the deque owns each staged entry from the moment it is pushed,
-   so every exit — success, a withheld frontier, a limit trip, a fatal emit — frees it exactly
-   once. `input/input_ref/` now contains no `unsafe` block at all; the two it had were the removed
-   array's partial-initialization bookkeeping.
-
-   Reordering the copy *ahead* of the loop would need no rotation and no check, and it is not
-   available: `Cache::peek` takes `&'p self` and the entries it appends borrow the cache for the
-   whole of the fill, while the loop's every step — `lex_within_boundary`, `classify`,
-   `emit_lexer_error_deduped`, `cache_append` — takes `&mut self`, and `cache_append` mutates the
-   very cache those entries borrow.
-
-   **The reordering creates one hazard, and it is checked.** `Cache::len` is now load-bearing: the
-   fill reserves the window's cache region from it *before* it stages anything, so a `len` that is
-   not the resident count mis-sizes the copy that follows. An under-report clips the copy mid-run
-   and the rotation then closes the gap with staged tokens that belong *after* the residents the
-   clip dropped — not a short window, a **hole**, at a position the next consume will not serve.
-   `Cache::len` and `Cache::peek` now say so where an implementor reads them, and the fill exit
-   that rotates checks the copy it got, in **every build**: a count identity, and — because an
-   inexact `len` can satisfy any count derived from it — the resident run's own `front`/`back`
-   endpoints, gated on the staged count, which is a number the fill computes rather than one the
-   cache reports. The endpoint witness is the release-critical half, not the optional one: it is
-   the only check that sees a clip landing exactly on the window's edge, or a `len` under-reporting
-   all the way to **zero**, which passes the count trivially as `0 == 0`. Both of those are the
-   hole. `InputRef::peek` grows a `# Panics` section. The two exits that answer from tokens already
-   at the front of the stream append nothing behind their copy, so they cannot hole, and they are
-   unchanged and unchecked.
-
-   **The hot read pays nothing for it, and that took measuring.** The half of the fill that
-   reaches the lexer is now `#[inline(never)]`: staging in the window puts a deque push, a
-   truncate, a rotation and a `Cache::peek` whose room is a runtime value into the same body as
-   the resident-head arm, and the register allocation and block layout that follow are shared.
-   Left in one function, six peek-shaped bench ids paid **1.11×–1.31×** for code they never run —
-   and the checks are not what they were paying: with both removed entirely the same six ids
-   still read 1.11×–1.31×. Split out, with the overflow-free fill taking its own exit and the
-   panic message built out of line, the same six read **0.80×–1.15×**: the two `heavy` ids — a
-   large lexer state, exactly the shape the second window cost the most — come back **20%
-   faster**, and the worst reading is `input/scan/peek1_then_next` at 1.15×, a drain that defeats
-   its own cache by construction so that every read is a fill. Geometric mean across the six,
-   0.98×. Nothing outside the peek family moves.
-
-   The same law decided where the release-active endpoint witness lives, and it cost one more
-   measurement to find out. Inlined into the fill it sits past the overflow-free `return`,
-   unreachable from the arm that takes it — and moved `peek1_then_next` by **1.025×** anyway,
-   consistently and outside the noise, for exactly the reason the split above exists. So
-   `assert_cache_copy` is `#[inline(never)]` too, and its second message joins the first in a
-   `#[cold]` free function. Out of line, the six ids read **0.9987** geometric mean against the
-   window fix alone, every one of them inside 0.974×–1.009×, over ten interleaved criterion
-   rounds. The 67–70-instruction figure that once argued for keeping the witness in debug builds
-   is withdrawn: it was the cost of running the check, and what a hot path actually pays is the
-   cost of *stepping over* it.
-
-   Coverage, since the previous overflow tests asserted only `len()`: seven cells pinning window
-   order across the cache/overflow boundary — the smallest overflow, a prefilled cache, a cache
-   that retains nothing, a parked front token, and the widest window over an oversized token and
-   state — which removing the rotation turns red along with the pre-existing
-   `token_accessor_reads_owned_arm`; a drop-counted cell for the *keeping* exit; a second phase on
-   the fatal-emit cell that reads the buffer back after the failing return; compile-time size
-   assertions over the oversized fixture; and a source census that refuses to let the fill body
-   name an array, a deque, a `MaybeUninit` or `unsafe` again. The two `should_panic` cells that
-   exercise the endpoint witness alone — the under-report by one, and the under-report to zero —
-   are ungated and run under `cargo test --release` as well, which is the build the witness was
-   promoted for; a `should_panic` whose panic compiles out passes by never running the code it
-   names. The drop-safety cells now count into a per-scenario `Rc<Ledger>` instead of `static
-   AtomicUsize`: they assert *live* deltas while their own window is still held, so under Rust's
-   default parallel test runner they were counting whatever else happened to be running —
-   `cargo test overflow_peek` failed 184 runs out of 200. —
-   *(#156)*
-
-20. **The peek fill had two paths no benchmark in this repository entered — including the one
-   item 13's rotation and its release-active endpoint witness live on — and one bench file kept
-   its evidence where nothing could check it.** No library behaviour changes; both halves are
-   benchmark-suite defects.
-
-   `InputRef`'s peek fill returns early when the window is already met (`want == 0`, no lexer
-   touched) and, on a window wider than the cache, stages the surplus tokens at the tail of the
-   caller's own buffer and rotates them in behind the cache region. **Neither path was reachable
-   from a single shipped bench id.** Every peek id read width 1 and consumed what it peeked
-   before peeking again, so `want` was always 1; and `DefaultCache` is three slots, so nothing
-   narrower than a width-4 peek can overflow. That was measured, not argued: with the sites
-   instrumented to panic, all 45 ids across `input_scan`, `parser_combinators`, `pratt_typed`,
-   `cst` and `backtrack` ran clean. Item 13 disclosed the same gap from the other side — it
-   promoted a `Cache`-contract endpoint witness to release-active precisely because a clipped
-   copy rotated in behind staged tokens holes the window rather than shortening it, and no
-   shipped id reached the rotation that check guards.
-
-   A new `input/peek` group in `tokora/benches/input_scan.rs` adds `r4_peek1_hit8` (a width-3
-   peek primes the cache, three width-1 peeks then take the hit exit) and
-   `r4_peek8_heavy_staged` (a width-8 peek over the three-slot cache, under the deliberately
-   heavy lexer state, so five tokens overflow and the `L::State` clone they pay is a visible
-   256-byte copy). Under the same instrumentation `r4_peek8_heavy_staged` trips all three sites
-   of the miss path — the staging push, `assert_cache_copy`'s endpoint half, and the
-   `rotate_left` itself — `r4_peek1_hit8` trips only the hit exit, and no pre-existing id trips
-   any of them. The arithmetic that reaches each exit is also a `const`-gated assertion inside
-   the driver itself, run once outside the timing loop, so a probe that stopped reaching its path
-   would fail the bench instead of reading as coverage; the existing groups' ids, fixtures and
-   baselines are untouched.
-
-   `tokora/benches/pratt_typed.rs` had 758 comment lines carrying measured figures and structural
-   claims that nothing could verify — seven review rounds had produced about twenty corrections to
-   its prose and none to its code. The structural claims are now assertions that run before either
-   entry point registers anything: fixture byte-density counted from the generated bytes rather
-   than from the generator's loop, the right/left pair proved equal except at exactly the operator
-   positions, the checksum's depth-1 associativity blind spot pinned in both directions, and the
-   recursion-budget rationale executed against the deepest fixture instead of argued. Every
-   remaining figure moved into one dated, attributed record block that states it is not re-derived
-   by anything. That pass found the file already carrying a stale claim — it attributed the parse
-   recursion default to `RecursionLimiter::new`, which item 18 of this release returned to 500;
-   the 64 in question comes from `ParserContext` and the input layer — plus two source line
-   numbers into another file, now symbol names.
-
-19. **Three public claims corrected where they said more than the crate does. Documentation only —
-   no behaviour changed, nothing `pub` moved, no test result changed.** Each was already
-   contradicted, or already left unstated, by something measured in the tree.
-
-   **The sync family's panic-unwind claim was false at two of its three sites, and one paragraph
-   held all three.**
-   [`sync_to`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.sync_to),
-   [`sync_through`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.sync_through)
-   and
-   [`sync_balanced`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.sync_balanced)
-   carried the same sentence byte for byte: a panic out of the predicate, the expected-tokens
-   closure, the lexer or the emitter "settles — this method's `to`-shaped commit posture keeps the
-   diagnosed prefix; the rewinding scans (`sync_through`, `sync_balanced`) restore to the call's
-   entry instead". The clause names its own two counterexamples in its own next breath. `sync_to`
-   commits; `sync_through` **consumes** on a stop, committing at the matching token's own span, and
-   **rewinds** at a no-match end of input; `sync_balanced` crosses the axes — it stops before the
-   sync token and keeps the skipped prefix like the first, and rewinds at end of input like the
-   second, which is why its unwind disposition belongs to the *exit* rather than to the mode. Three
-   postures cannot share one true sentence. Each method now states its own, with its own
-   measurement: `r9_stop_exit_panic_still_commits_the_diagnosed_prefix` for `sync_to`;
-   `sync_through_unwind_restores_emissions` and `sync_through_warm_unwind_prices_its_re_lex` for
-   `sync_through`; and the pair
-   `r9_balanced_stop_exit_panic_keeps_the_prefix_like_its_own_stop_does` /
-   `r9_frontier_commit_interrupted_abandons_rather_than_half_keeping` for `sync_balanced`.
-   `sync_balanced`'s paragraph also stops calling its prefix *diagnosed*: that scan makes no
-   per-token report at all. The **in-flight token** is stated as the two-case fact it is rather
-   than a blanket put-back: the scanner's `TokenSlot` separates a token still *held* — true across
-   the predicate and nowhere else, where an unwind returns it to the front of the stream — from one
-   already *handed over* to the stop settle, where the put-back is precisely the step the panic
-   interrupted and so cannot happen. There the retained stream is cleared instead and the region
-   re-lexes from the committed position, which reproduces the token; what is lost is the cache's
-   memo of it, not a token. `r9_stop_exit_panic_still_commits_the_diagnosed_prefix` measures that
-   handed-over case, and the two rewinding scans reach their keeping arm only on the same side of
-   the split. No behaviour changed anywhere; only the sentences were wrong.
-
-   **One clause is genuinely common, and it is the one that was newly needed.** The exclusion
-   [`skip_while`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.skip_while)'s
-   claim was narrowed for — *anywhere but the end-of-input settle* — is a property of the shared
-   scan scope, which every mode's end-of-input exit disarms *before* its settle runs, so all four
-   carry it. For a committing scan that is where the whole diagnosed prefix goes: the skipped run
-   sits in an uncommitted frontier, the unwind drops it, and the position stays at the call's entry
-   with the diagnostics already emitted standing over a prefix it no longer covers —
-   `eof_commit_interrupted(true)` reads `((0, 0), 0)`, the entry position beside the entry state.
-   For the two rewinding scans it costs nothing, because there that settle *is* the restore and the
-   scan committed no progress for a dropped frontier to strand; what is at stake is the rest of the
-   restore, swept at every `L::Offset` clone by `r9_restore_entry_is_atomic_at_every_offset_clone`.
-
-   **The byte-identity requirement that produced this is retired, and replaced rather than
-   dropped.** Requiring the three paragraphs to hash identically was doing real anti-drift work, and
-   it could only ever be satisfied by making two of the three wrong. A `POSTURE_CENSUS` in
-   `src/input/input_ref/census_tests.rs` takes the work over in three parts: all four sections must
-   carry the shared exclusion; the three sync sections must stay pairwise **distinct**, each saying
-   it states *this method's own* posture, with none carrying the retired sentence again; and — the
-   part that actually looks at behaviour — each section must state the posture its own `ScanMode`
-   **has**, its required *and* forbidden phrases derived per method from `HOLDS_ENTRY`,
-   `COMMITS_FRONTIER_ON_STOP` and `REPORT_SKIPPED` as they stand in `scan.rs`, over a pin on the
-   `ScanScope::keeps_on_unwind` formula those phrases are keyed to. Shared-clause presence and
-   distinctness alone would pass three paragraphs that are pairwise different and wrong about all
-   three methods; the derived check fails on any permutation of them, and flipping one of the
-   constants fails the doc until the prose follows it. Prose is compared with `///` stripped and
-   whitespace collapsed, so rewrapping a paragraph is not drift. Every check was watched failing
-   against the defect it names — each section swapped for another's in turn, and all three rotated
-   together for the case only the derived check can catch.
-
-   **Why a *consuming* `Accept` is exempt from every terminality witness — and why a zero-width one
-   is not — is now said in public.** Items 2, 16 and 22 finished a programme that put three
-   witnesses under the never-recoverable law — the descent counter, the scanner counter for the
-   recovery combinators, and the same scanner counter for the collection drivers. The docs said
-   where each witness sits; the reason the **accept channel** is exempt from all of them was written
-   only in `parser::many`'s module docs, whose `//!` text rustdoc does not render because the module
-   is private.
-   [`MaybeTerminal`](https://docs.rs/tokora/latest/tokora/error/trait.MaybeTerminal.html) now states
-   it where the contract itself is described: every gate under that law sits on a channel where
-   *this crate* draws the conclusion — a recoverer synthesizing a value, a driver concluding a
-   construct ended from a decline, a stall or a closer — and none of them is consulted when the
-   grammar produces the value itself **and consumed input to produce it**. So an element that
-   catches a trip, still consumes and returns `ParseAttempt::Accept` spends it, permanently and by
-   design: gating that would mean a value-producing parser can never recover from a budget it
-   deliberately caught, which is a contract this crate makes for no other error.
-
-   **The exemption stops at a zero-width `Accept`, and the section says so outright rather than
-   leaving it to be inferred.** A value returned without consuming anything has produced a value but
-   not moved the parse, and the driver's very next act is to read that absence of progress as *no
-   more elements* — a conclusion of the driver's own, gated through the same chokepoint a decline
-   reaches and by all three witnesses at once. That is not a corner case: the four `*_while`
-   collection drivers and the `*_while` folds take their element through `ParseInput`, which has no
-   decline channel at all, so a zero-width return **is** their decline — which is exactly the
-   hole item 12 closed for the descent witness and item 22 for the scanner one. Publishing the
-   exemption
-   without its boundary would have restated, as a contract, the shape two shipped fixes had just
-   removed. The "answered versus swallowed" framing does not settle this case by itself, so the
-   boundary is drawn on what the return *consumed* instead.
-   [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html),
-   which stated the exemption for its own stop only, now points at the general statement and carries
-   the same limit on it.
-
-   **`Emitter::rewind`'s "report before you mutate" rider now says what it does not buy.** The rider
-   requires a detecting emitter to raise its unpaired-settle report from a preflight over unchanged
-   state, so a host that catches it holds the emitter it had rather than a half-rewound one — and it
-   stopped there, which invites reading the whole operation as recoverable. It is not:
-   [`rewind`](https://docs.rs/tokora/latest/tokora/emitter/trait.Emitter.html#method.rewind) is
-   called from the middle of a checkpoint restore, below the point where the lineage has been popped
-   through the target and any session points above it released, and above the point where the
-   position, the error-reporting witnesses and the cache-push counter are installed. A compliant
-   preflight makes the *emitter* transactional and cannot make the *restore* so; a host that catches
-   the report must treat the parse as over rather than resume on that handle. The tear itself was
-   already measured — `restore_unchecked_is_not_transactional_across_the_settle_wall` — and already
-   stated on
-   [`InputRef::restore`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.restore),
-   but only there, behind the `unstable-raw` feature, where a consumer of the recording CST `Sink`
-   never reads it. The bound now sits on the always-compiled trait contract that grants the panic
-   door in the first place.
-
-### Added
-
-17. **`cast::token_any` and `cast::tokens` close the two gaps in the cast module's token
-   helpers.** `token` answers one kind, first match, and that was the whole vocabulary: a node
-   whose grammar puts more than one token kind in the same slot, or repeats one token kind under
-   a parent that gives it no node kind of its own, had nothing to reach for and had to hand-roll
-   the same `children_with_tokens` filter at the call site.
-
-   `token_any` is the first direct token child whose kind is one of several, scanned in
-   **document order, not `kinds` order**: trying `kinds[0]` and falling back to `kinds[1]` would
-   answer the wrong token for a node carrying both, which is a difference no caller should have
-   to know about. `tokens` is every direct token child of one kind, in document order, returned
-   through the new `cast::TokenChildren` iterator — `cast::children`'s `NodeChildren` is an
-   alias for an upstream rowan type, and rowan has no ready-made iterator over one token kind,
-   so this crate now provides one.
-
-   Both are generic over `Language` and take their kind(s) by reference, matching `token`'s own
-   shape; `token_any` takes `&[L::Kind]` rather than a predicate closure because callers pass a
-   fixed, short, statically-known set of alternatives, not an open-ended rule. Both also see
-   only *direct* token children, exactly like `token`: a token belonging to a child node is that
-   node's, and neither helper reaches into it — covered alongside the document-order and
-   empty/no-match cases in `cst::cast`'s test suite.
-
-## 0.8.0 (2026-07-31)
+## 0.8.0 (2026-08-04)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.
 
@@ -1508,7 +61,7 @@ numbered entry below that carries the full reasoning.
 | A wrong opening delimiter produced **two** diagnostics naming the same token — once as the wrong opener, once again as a close miss | exactly one | Only under a recording emitter, and only while the first report is still live in the log. Assertions that counted diagnostics on the recovering path change. | [40](#0.8.0-changed-breaking) |
 | A second same-power `PrattInfix::Neither` operator in one chain folded left in silence — `7 = 1 ; 2 ; 3` returned `Ok(((7=(1;2));3))` with the **whole input consumed**, so no end-of-input check had anything to catch | the parse fails with `NonAssociativeChain`, the operator left on the input unconsumed | Handing the operator up re-associates the chain across an enclosing frame that cannot know the constraint. Not terminal: recovery may still spend it. | [41](#0.8.0-changed-breaking) |
 | Recursive descent was unbounded — a deep enough expression exhausted the native stack and **aborted the process** | a shared per-input depth budget, **64** by default, failing the parse with the always-terminal `RecursionLimitReached` | An abort carries no diagnostic and cannot be caught; a refusal names the knob that raises it. `RecursionLimiter::unlimited()` restores 0.7.3's behaviour. | [42](#0.8.0-changed-breaking) |
-| `RecursionLimiter::new` / `Default`, and `Limiter::new` / `Limiter::with_token_tracker`, defaulted to depth **500** | **64** | Reaches code with no pratt parser in it: the same type doubles as a **lexer-side** nesting tracker in a `State` / `Extras` position. | [43](#0.8.0-changed-breaking) |
+| `RecursionLimiter::new` / `Default`, and `Limiter::new` / `Limiter::with_token_tracker`, defaulted to depth **500** | **500** — unchanged, so there is nothing to do here. [43](#0.8.0-changed-breaking) dropped these four to 64 during the campaign and [50](#0.8.0-changed-breaking) returned them before release; only a build tracked between the two ever saw 64 | These constructors reach code with no pratt parser in it: the same type doubles as a **lexer-side** nesting tracker in a `State` / `Extras` position, where a level costs no native stack and 64 was a number chosen for a reason that does not apply. The depth that *does* change is the input layer's, in the row above. | [43](#0.8.0-changed-breaking), [50](#0.8.0-changed-breaking) |
 | Your own `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 16 new inherent items and 6 new defaulted trait methods enter the method space. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 | — | a new `warning: unused import` naming one of *your* combinator traits | That warning is the **only** breadcrumb the silent case gives you: the steal stranded the import. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 
@@ -1539,7 +92,7 @@ numbered entry below that carries the full reasoning.
 | An error type without `From<UnexpectedEot<…>>` on the peek / `Expect` / fold / `Repeated` surfaces | add it, or name `ComposableParseContext` | A terminal stop has to be expressible as an error. | [16](#0.8.0-changed-breaking), [17](#0.8.0-changed-breaking) |
 | An error type without `MaybeTerminal` | `impl MaybeTerminal for MyError {}` is enough | Unless the type can itself carry a terminal stop, and **three** that this crate builds and marks can reach it: an `UnexpectedEnd` whose flag the scanner may raise; a `RecursionLimitReached` — new in this release, required of every pratt-driving error type — terminal for **every** value; and a `SessionRefusal`, terminal for every value too but *not* a `MaybeTerminal` implementor, so its arm is written `true` by hand. Answer for each one you store. An arm left at `false` is spent as a recoverable failure — except the refusal, which `PartialSession::parse` asserts on unconditionally, so that one panics a release build. Those three are what the crate knows it produces, **not** a proof that nothing else is terminal: a scanner trip a *rejecting* emitter refuses propagates as that emitter's `Err`, built from your lexer's error value and unmarked, so the arm holding your lexer error may need answering too — `MaybeTerminal`'s doc has that path and the rule for it. | [16](#0.8.0-changed-breaking), [46](#0.8.0-changed-breaking) |
 | `<[P; N] as ParseChoice>::Id::new(i)` (0-based) | `::new(i + 1)` (1-based) | `RangedUsize`'s bounds are inclusive, so the old id space admitted `N` and every `[P; 0]` id panicked. Tuple choices are unaffected. | [35](#0.8.0-changed-breaking) |
-| `match op { … }` over `fuzz::Op` without a wildcard | add an `IsExhausted` arm | `fuzz` feature only. *Found by the mechanical API diff; disclosed nowhere before.* | [38](#0.8.0-changed-breaking) |
+| `match op { … }` over `fuzz::Op` without a wildcard | add an `IsExhausted` arm | `fuzz` feature only. *Found by the mechanical API diff; disclosed nowhere before.* | [39](#0.8.0-changed-breaking) |
 | `dyn SeparatorHandler` | no longer object-safe | `OBSERVES_SEPARATORS` is an associated const. Nothing in this crate used it. | [5](#0.8.0-changed-breaking) |
 | `let (e, c) = ctx.into_components();` | `let (e, c, recursion) = …` | `InputContext` carries the recursion budget now, and a decomposition that dropped it would hand the input an unconfigured one. `..` is not available on a tuple pattern, so the compiler points at every site. | [45](#0.8.0-changed-breaking) |
 | An error type driving either pratt engine without `From<RecursionLimitReached<…>>` and `From<NonAssociativeChain<…>>` | add both | The engines **return** these two rather than emitting them, so the entry-point bounds ask for them. Two `From` impls; every example in this repo shows the shape. | [46](#0.8.0-changed-breaking) |
@@ -1721,6 +274,52 @@ What was measured, on rustc 1.87, 1.95 stable and 1.97-nightly:
   the trait. An unused-import warning on a combinator trait after upgrading means one of
   its methods was re-resolved. If the trait is declared in the same file, you get nothing
   at all. The remedy either way is UFCS: `MyTrait::labelled(parser, "name")`.
+
+**One entry here was measured after the rest of this section was written.** It concerns a
+name this release adds, which the exposure table above already lists — what that table did
+not carry is that this one is measured **silent**, and that is news a 0.7.3 consumer needs.
+
+#### `RecursionLimiter::unlimited` — measured SILENT, and it is your call site to check
+
+**You are exposed if you wrote an `unlimited()` associated function on `RecursionLimiter`.** That
+type is public in **0.7.3**, so this is not hypothetical: any consumer holding one already had
+somewhere to hang the name, and 0.8.0's
+[`RecursionLimiter::unlimited`](https://docs.rs/tokora/latest/tokora/state/recursion_tracker/struct.RecursionLimiter.html#method.unlimited)
+now competes for it by path.
+
+Reproduced two-sided by `ci/name_collision/`, base `60f27a3` against this branch:
+
+```text
+SILENT  unlimited/discarded    base=witness=1  head=witness=0
+```
+
+Both sides compile, **neither emits any diagnostic**, and the two run different functions: yours
+on 0.7.3, tokora's on 0.8.0 and later. `unlimited/used` is `loud` on the same probe, so a
+discarded return is the whole of the difference — `RecursionLimiter` carries no `#[must_use]`, and
+`unused_must_use` does not fire on a plain struct. **The remedy is UFCS**: `MyTrait::unlimited(..)`
+or `<RecursionLimiter as MyExt>::unlimited()` pins your function by name and is immune to this.
+
+`#[must_use]` was considered and rejected as the fix: it would not reach the case that matters —
+a consumer who *assigns* the result, which the harness cannot generate and which stays silent
+regardless — while firing on legitimate discards. Disclosure is the honest instrument here.
+
+Two things about *why this arrives late*, both of which are the point rather than an excuse:
+
+- 0.8.0's exposure table already lists `unlimited` under "you wrote it on `RecursionLimiter`", so
+  the *name* was disclosed. What was not disclosed is that this one is **measured silent**, in a
+  category the harness's README says a silent row "would be news" in — the first
+  `inherent_assoc_fn` row ever to score one. The probe could not construct it at the time: #147
+  introduced the owner and `gen_probe.py` had no template for it, so every row on that owner came
+  back `FATAL` — an *incomplete* verdict, which is not a clean one. #148's Stage A added the
+  templates and the `new-owner` verdict, and the finding fell out immediately.
+- It is disclosed on **this** branch and could not wait. The probe's inventory is a two-sided
+  delta: once this merges, `unlimited` exists on both sides, the row leaves every future plan, and
+  the harness can never re-litigate it. A green run after that would mean "not probed", not "not
+  colliding".
+
+Recorded in `ci/name_collision/disclosed.txt`, whose fourth-and-fifth-row split now states plainly
+that the earlier four ride a bounded receiver and **this one does not**: `RecursionLimiter` is a
+concrete public struct with no bound to reject anybody.
 
 <a id="0.8.0-source-breaking-additions-that-fail-loudly"></a>
 
@@ -2028,16 +627,38 @@ not when it is finished, and the materialization walk no longer rescans.
     one materialization earlier than the error did.
 
     The honest limit, which is also stated at the site: the *per-event* validator inside
-    `finish` is `cfg!(debug_assertions)`-gated, because keeping it in every build cost a
-    measured **+8.3%** on ordinary materialization — an unpredictable indirect call per event
-    inside a tight builder loop. Every route reachable from outside this crate goes through a
-    door that validates in every build, so for external callers the wall is absolute. The one
-    route with no door is `push_raw_event_for_tests`, which is `pub(crate)`. So: a **release**
-    build whose event log was assembled by raw in-crate injection can materialize an
-    out-of-language kind. Every test run and every CI build refuses it. `ReservedKind` is not
-    gated — the tombstone band is a plain comparison and was a release wall before this round.
+    `finish` is `cfg!(debug_assertions)`-gated, because keeping it in every build costs a
+    measured **+4.4%** on ordinary materialization — an indirect call per event inside a tight
+    builder loop. Every route reachable from outside this crate goes through a door that
+    validates in every build, so for external callers the wall is absolute. The one route with
+    no door is `push_raw_event_for_tests`, which is `pub(crate)`. So: a **release** build whose
+    event log was assembled by raw in-crate injection can materialize an out-of-language kind.
+    Debug-assertions test runs, and the CI profiles that run this cell, refuse it;
+    release-profile test runs do not exercise that wall. `ReservedKind` is not gated — the
+    tombstone band is a plain comparison and was a release wall before this round.
 
-    — *(R8, #123)*
+    **That +4.4% is measured on the shipped fused walk, and it withdraws a +8.3%.** The
+    withdrawn figure was taken on the two-pass gather+walk shape item 51 superseded, where
+    these three calls sat in the *gather* pass rather than in the builder loop. The
+    remeasurement is the shipped tree against the same tree with `cfg!(debug_assertions) &&`
+    deleted from exactly those three sites and nothing else: the inlined `materialize` carries
+    one indirect branch in the shipped build — the once-per-materialization root check — and
+    four in the ungated one, so the per-event call is really there and really indirect.
+    `finish_clean` (8 192 tokens) reads **+4.4%**, the median of sixteen interleaved paired
+    rounds, positive in all sixteen and spread +2.1% to +6.9%, against a null control of two
+    byte-identical builds of one source read as that same per-round statistic: −1.15% to +1.13%
+    about a median of −0.08%, so it is wider than the aggregate-median floor the **Performance**
+    section quotes and is the one this comparison is scored against. The two populations do not
+    overlap. `finish_error_dense` reads +2.0%, `finish_wrap_heavy` +3.3%. The same deletion on
+    the *two-pass* shape reads **+1.1%** — a median inside the control's own span, populations
+    overlapping, only eleven of sixteen rounds above their own round's control — so 8.3% is
+    reproduced on neither shape, and in absolute terms the fold made these three checks dearer
+    rather than cheaper: 0.07 ns per call in the gather pass against 0.37 ns in the builder
+    loop. One code layout on one toolchain, so read it as low single digits rather than as a
+    constant. The trade the gate buys is smaller than this entry claimed. It is still real, and
+    clear of the noise floor, and the gate stays.
+
+    — *(R8, #123; the per-event cost remeasured against the shipped fold)*
 
 15. **`FinishError` gains `InvalidDiagnosticSpan`, `MismatchedFinish`, `NonUtf8Source` and
     `InvalidDialectKind`, and `CstEmitter::cst_finish` takes the kind it intends to close.**
@@ -2689,16 +1310,23 @@ everywhere else.
     — *(R12; the default resized against measurement in R13; the guard marked `#[must_use]` in
     R22; `descending` added and the other three early-release shapes measured in R23)*
 
-43. **`RecursionLimiter`'s default depth drops from 500 to 64 in every constructor that supplies
-    one** — `RecursionLimiter::new` and its `Default`, and `Limiter::new` /
-    `Limiter::with_token_tracker`, which build one for you. This is the row that reaches code with
-    no pratt parser in it: the same type doubles as a **lexer-side** nesting tracker in a `State` /
-    `Extras` position, where it counts lexing nesting, costs no native stack, and where 500 was
-    never sized against anything. A lexer that inherited the default and nests deeper than 64 now
-    trips where it did not.
+43. **`RecursionLimiter`'s default depth was dropped from 500 to 64 in every constructor that
+    supplies one, then reverted before release.** `RecursionLimiter::new` and its `Default`, and
+    `Limiter::new` / `Limiter::with_token_tracker` — which build one for you — carried the 64
+    default only during the campaign. [50](#0.8.0-changed-breaking) returned all four to 500
+    before 0.8.0 shipped: what 0.8.0 ships is 500 for every one of them, and only `ParserContext`
+    and the input layer keep 64 — neither routes through these constructors. This entry is kept
+    because [50](#0.8.0-changed-breaking) and the migration table's row for these four
+    constructors both rely on the reasoning below — read the two together, and act on 50.
 
-    Spell the limit you meant with `RecursionLimiter::with_limitation`. The one `500` left standing
-    in the docs is the lexer-extras example in `Limiter`'s own documentation, and it is left
+    **The reasoning:** these four constructors reach code with no pratt parser in it. The same
+    type doubles as a **lexer-side** nesting tracker in a `State` / `Extras` position, where it
+    counts lexing nesting, costs no native stack, and where 500 was never sized against anything.
+    Had the drop shipped, a lexer that inherited the default and nested deeper than 64 would have
+    tripped where it had not before.
+
+    Spell the limit you meant with `RecursionLimiter::with_limitation`. The one `500` this round
+    left standing in the docs was the lexer-extras example in `Limiter`'s own documentation, kept
     deliberately: there the number is the example's explicit choice rather than a default, and the
     two subjects are worth keeping apart.
 
@@ -2768,12 +1396,287 @@ everywhere else.
     `FromPrattError` impl has to change.**
 
     The choice this obligation carries is unchanged, only its spelling: an impl that *stores* the
-    trip keeps its always-terminal marker readable through `MaybeTerminal`; one that discards it
-    opts the error type out of terminal re-raise (see *Known limitation — a discarding error
-    sink…* below). Both are legitimate, and a `From` impl is the author's own code either way, so
-    neither is picked for you.
+    trip keeps its payload — offset, depth, limitation — readable, and its always-terminal marker
+    readable through `MaybeTerminal`; one that discards it loses both. What discarding no longer
+    costs is the **stop**: item 48 moved the resource-trip witness onto the input session, where no
+    `From` the grammar writes can reach it. Both are legitimate, and a `From` impl is the author's
+    own code either way, so neither is picked for you.
 
     — *(R12, R21)*
+
+47. **A gap is now tiled where it opens — in the node of the token it trails — not where it is
+   noticed.** Where an uncovered run of source bytes lands no longer depends on what happens
+   after the run is already determined. A run used to be tiled at the token that *revealed* it,
+   or, for the **trailing** run, at the end of the walk; both are moments at which the parse may
+   have left the node it was in when it stopped covering the source. So the same garbage produced
+   two tree shapes, chosen by whether more input happened to follow: for a lossless dialect the
+   tail landed *outside* the document node while identical garbage mid-document landed inside it.
+
+   The rule now: an uncovered run opens the instant the token before it settles, and it is tiled
+   there, in the node open at that moment. It is in the tree before the next event is read, so
+   nothing that follows can move it. One clause covers the run that **no token precedes** — a
+   source starting with bytes no token claims — which tiles where the walk first sees it: at the
+   first committed token, or, if the parse committed no token at all, at the end of the walk in
+   whatever node is open there.
+
+   `Root[Document[Tok] Gap]` is now `Root[Document[Tok Gap]]`, and the node **widens over** the
+   run it takes — a `Document@0..11` before a four-byte tail is `Document@0..15` after. A run
+   nested deeper goes deeper: it lands at the depth of the token it trails, not one level below
+   the root by fiat.
+
+   Two placement laws hold by construction and are pinned over a corpus rather than as examples.
+   *Appending a token never moves a gap*: two streams sharing a prefix through the token a run
+   trails place that run in the same node, including when one of them stops there. *Hoisting a
+   lexer error never moves a gap*: placement reads the token and structure events only. The
+   second matters because a prefilled lookahead cache emits the lexer errors it crosses when it
+   crosses them, so prefetching moves such a diagnostic earlier in the event stream — the token
+   stream is exactly invariant under prefill and the diagnostic stream is not, and a rule reading
+   a diagnostic's position would make the tree a function of how far the caller peeked.
+
+   Unchanged: a **leading** run still tiles at the first token that follows it, inside whatever
+   node that token lands in; a run trailing a root-level token stays a root child; a source with
+   **nothing lexable in it** keeps its run beside the document node (`Root[Document@0..0,
+   Gap@0..len]`), because there is no token for it to trail and the identical parse with one
+   lexable byte appended puts it at the root too; and
+   [`finish_partial`](https://docs.rs/tokora/latest/tokora/cst/struct.Sink.html#method.finish_partial)
+   on an **unbalanced** stream still tiles a token-less run into the innermost *open* node. On a
+   balanced stream both doors agree, as they did before.
+
+   `tree.text() == source` is untouched: every uncovered byte still tiles, byte-exactly, under
+   every one of these placements. Only the shape moved.
+
+   **Re-bless any snapshot of a tree built over a source with an uncovered run that follows a
+   committed token** — a truncated parse, an unterminated string or block string, a stray
+   unlexable punctuator after real input. Consumers that walk by text see no change; consumers
+   that walk by node, or that assert on a rendered tree, see the run inside the node of the token
+   before it. A source with *no* committed token at all is not affected.
+
+48. **A recursion-limit trip is now terminal for every grammar error type, `()` included — neither
+   recovery nor a collection driver's failure path can spend it.** Two more of a collection
+   driver's exits can reach a construct's end without the trip ever surfacing as an `Err`, and both
+   close later in this entry: an element's absence exit (item 56) and a real closer committed just
+   after one (item 57). A fourth exit does not close, and is not going to: an element that catches
+   the trip and still answers `Accept` spends it, for every error type, on purpose. Decline lets
+   the *driver* manufacture the construct's end from a stop the caller is never told about, which is
+   why the driver has to guard its own conclusion; `Accept` means the *element* produced the value,
+   and the driver is faithfully collecting what it was handed, not concluding anything of its own.
+   tokora cannot stop a grammar from catching an error and returning a value without diagnosing
+   it — true of every error a grammar can catch and answer, not only this one — so gating `Accept`
+   would forbid a value-producing element from ever recovering from a budget it deliberately
+   caught: a broader contract than #148 establishes. Item 56 states the exemption at the point it
+   first applies; `parser::many`'s module docs carry it as the standing contract, not an
+   afterthought.
+
+   This closes 0.8.0's [known limitation — a discarding error sink erased
+   the recursion trip's stop, not its
+   bound](#0.8.0-known-limitation-recorded-and-closed-before-release--a-discarding-error-sink-erased-the-recursion-trips-stop-not-its-bound),
+   which recorded the behaviour rather than answering it. The answer is that a resource bound an
+   unrelated error sink can opt out of is not a bound.
+
+   [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
+   has always been terminal for every value, but
+   [`recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.recover),
+   [`inplace_recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.inplace_recover)
+   and
+   [`skip_then_retry`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.skip_then_retry)
+   read that off the **converted** value — after the grammar's `From` had run. A `From` that
+   discards the payload discards the marker with it, so a `()`-errored grammar got
+   `is_terminal() == false` back and recovery **spent** the trip.
+
+   **Where resource terminality is stored now:** on the **input session**, in a monotone counter
+   (`Input::resource_trips`, crate-internal, bumped by
+   [`InputRef::descend`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.descend)'s
+   trip arm before the grammar's `From` runs, so a panicking conversion cannot skip it). The three
+   combinators read it **beside** `MaybeTerminal::is_terminal`. No conversion the grammar writes
+   can reach it, and nothing lowers it: a `Checkpoint` does not carry it and a restore does not
+   touch it. Grammar error conversion therefore cannot affect it — which is the question 0.8.0's
+   entry left open, answered here in the terms it asked for.
+
+   **What the cell records and what the combinators test are different questions, deliberately.**
+   The cell is a session fact — *this parse exceeded a budget, this many times* — and it is never
+   cleared, because nothing can un-exceed a budget. Every site that consults it is judging **one
+   attempt**, so it snapshots the counter before that attempt and re-raises only when the count
+   moved *during* it. The two answers come apart exactly where grammar code catches a trip itself
+   and parses on: the session has tripped forever after, while the next attempt is an ordinary one.
+   Reading the session fact there would refuse recovery — and, below, emit-and-continue — for every
+   later failure in the document, ordinary syntax errors included. A real trip is still re-raised
+   wherever one happens, a second trip after a caught first one included.
+
+   **What changes for you, and only if your error type discards the value:**
+
+   | your grammar's error type | before | now |
+   |---|---|---|
+   | stores it and delegates `is_terminal` | re-raised | re-raised — **unchanged** |
+   | `()`, or any `From` that drops it | recovery ran; `skip_then_retry` skipped and committed | re-raised |
+
+   Concretely, measured on one ladder and one 32-deep input: `.recover(..)` used to return
+   `Ok(<the recoverer's synthesized value>)` and now returns `Err`; `.skip_then_retry(..)` used to
+   hand the surrounding grammar back offset **68** — the whole chain and the sync token consumed
+   and committed — and now hands back **0**, which is the number a delegating error type always
+   read. Same ladder, same limit, two error types, one answer.
+
+   **If you relied on the old behaviour**, the fix is the budget, not the sink: raise it with
+   [`with_recursion_limiter`](https://docs.rs/tokora/latest/tokora/struct.ParserContext.html#method.with_recursion_limiter).
+   Recovering from an exhausted depth budget was never sound — no quantity of skipped input makes
+   the next descent shallower, so those cycles spent input for a verdict they could not change. If
+   you want the trip's *details* (offset, depth, limitation), that still requires an error type
+   that stores the value; the discarding sink loses the payload exactly as before.
+
+   **The same stop now also reaches the resilient collection loops — and that half was never
+   sink-dependent.** `repeated`, `separated` and their delimited forms swallow an element's `Err`
+   by design: emit it as a diagnostic and keep looping. Their gate re-raised the frontier
+   `Incomplete` and the *scanner*'s committed boundary, and a descent trip latches neither — it has
+   a control stack rather than a position, so there is no boundary for it to latch. A trip inside
+   an element was therefore filed as an ordinary diagnostic and the loop went on to the next one,
+   bounded only by the no-progress guard. Unlike the recovery half above, that happened for **every**
+   error type: a delegating one was spent there exactly as `()` was. The gate reads the session
+   counter too now — and, like the recovery half, it reads it against a baseline taken **once per
+   element**, so what re-raises is a trip *that element* caused.
+
+   | driving an element whose own attempt hands the trip back as `Err` | before | now |
+   |---|---|---|
+   | `repeated()`, `separated_by(..)`, and both delimited forms | the trip filed as a diagnostic; the loop continued to the next element and returned `Ok` with whatever it collected | the collection returns `Err` at the first trip, with **nothing filed** |
+   | the same, for an element that fails **ordinarily** after some earlier construct's trip was caught and parsed past | the failure filed as a diagnostic; the loop continued | unchanged — the failure filed as a diagnostic; the loop continues |
+
+   **This half changes behaviour for delegating and discarding error types alike**, so a grammar
+   that used to receive a truncated-with-diagnostics container over a too-deep input now receives a
+   failed parse. The remedy is the same one as above and for the same reason: raise the budget with
+   `with_recursion_limiter`. A container assembled from elements the budget forbade reading was
+   never a description of the input, and the diagnostic that named the trip was filed against a
+   construct the parse had already been told to stop reading.
+
+   **The scope of the change, stated rather than left to be found: it is the element's own trip
+   that ends the collection, not the session's.** A parse that catches a trip and goes on keeps
+   emit-and-continue recovery for the constructs after it — which is what an editor or language
+   server needs, since one deeply-nested expression must not suppress the rest of the file's
+   diagnostics. The same holds one nesting level up: an inner collection's trip that an element
+   swallows is not charged to the enclosing collection's next ordinary failure.
+
+   **The granularity floor, because "the constructs after it" has a resolution.** The witness is a
+   counter, and a counter proves that *a* trip happened during the unit being judged — not that the
+   error being judged *is* that trip. The unit is one attempt for `recover` and `inplace_recover`,
+   one retry cycle for `skip_then_retry`, and one **element** for the collections. So grammar code
+   that catches a trip itself and then fails **ordinarily inside that same unit** has the ordinary
+   failure re-raised rather than recovered or filed. Move the catch one construct further out and
+   it recovers, or is filed and looped past, exactly as an untripped parse would; that contrast is
+   pinned by a test on each side of it.
+
+   The floor **fails closed** at the recovery, failure, absence and real-closer gates: a real trip
+   that reaches one of them is never recovered from and never filed as a diagnostic, and the only
+   over-charged case is an ordinary failure that shares its unit with a caught trip. It says nothing
+   about `Accept`, the fourth exit above: an element that catches a trip and still answers `Accept`
+   spends it, for every error type, on purpose.
+
+   The floor cannot be lowered by reading the error, because the error type is allowed to be `()` and
+   discard the trip — which is why the witness is on the input in the first place. Lowering it
+   needs a cooperative *rebaseline* published for code that deliberately catches a trip and wants
+   the enclosing baseline moved past it. That is not in this release; no public name changes if it
+   is ever added.
+
+   — *(#148 R1)*
+
+49. **An unpaired settle in the CST `Sink` now panics in release builds too, instead of silently
+   shearing the two logs.** `<Sink as Emitter>::rewind` was already a wall against a *truncating
+   rewind to a mid-log mark no live row captured* — a mark `checkpoint()` never returned, or one
+   whose capture an earlier `rewind`/`release` already spent. That wall was
+   `debug_assertions`-only. It is now unconditional.
+
+   The reasoning it was built on had a hole. The debug-only posture deferred upward: the input
+   layer's own LIFO witness was said to reject the condition on every input-mediated path, so the
+   sink only needed a second wall for undisciplined raw use. But that witness is *itself*
+   `debug_assertions`-gated, so a release build had no wall on **either** layer. What a release
+   build did instead was keep the sink's own channels exact and leave the inner emitter untouched
+   — the event log and the diagnostic log silently out of step, with nothing recording that they
+   were. That is bounded only for as long as materialization reads the whole log in one pass at
+   the end; anything that hands part of the tree onward before the parse finishes turns it into a
+   wrong tree that no consumer can detect.
+
+   The condition is a **parser bug and cannot be provoked by input**: a malformed document
+   changes which branches run, not whether a branch settles its own capture exactly once. So
+   hardening it cannot turn a bad document into a crash — verified across the malformed and
+   truncated-prefix corpora, which produce the recovery holes and rewinds this touches and whose
+   tree hashes are unchanged.
+
+   **`release` is deliberately *not* hardened with it**, and that is the one asymmetry to be aware
+   of. Its two non-top outcomes are specified behaviour rather than violations, mirroring
+   `InputRef::commit`'s documented cost model: removing a row that is not the innermost is the
+   "linear removal" that method already promises when a younger capture is still live, and finding
+   no row at all is its "harmless no-op … (no panic, in any build)". Settles are newest-first only
+   *within* a family — guards and session points interleave by design — so an out-of-stack-order
+   release is lawful. Making either loud would convert a documented guarantee into a crash.
+
+   **The panic is raised before the rewind's first mutation.** A wall placed after the damage
+   only narrates it. The condition is decided by a read-only preflight over the unchanged mark
+   stack, ahead of the row spend, the `events.truncate`, the undo journal's reverse replay and
+   the era ledger's truncation record — every one of which the violating call used to have
+   already performed by the time the check fired. A host that `catch_unwind`s the panic therefore
+   keeps the sink it had, on every channel, instead of one whose event log was rewound and whose
+   inner emitter was not; `finish_partial` on such a sink used to return that sheared state as a
+   perfectly ordinary tree, with a `gap_kind` tile standing where the dropped token had been.
+
+   **A panic already unwinding is exempt, and this is load-bearing rather than a hedge.**
+   `Emitter::rewind` can run from a rolling-back guard's `Drop`, and a panic raised there is a
+   *double* panic: the process aborts outright — no unwinding, no `catch_unwind`, signal 6. That
+   is strictly worse than the shear being reported. The report is therefore suppressed when
+   `std::thread::panicking()` is true — but suppressing the *report* is not licence to degrade
+   invisibly, and this is where the mid-unwind path changed as well. It no longer leaves the sink
+   half-rewound. It degrades to a **total no-op on every channel** (the sink has no correct
+   rewind to perform, so it performs none, and both logs are left describing the same history)
+   and **latches** the fact. `Emitter::rewind`'s contract is amended to state the general rule:
+   what an implementation must never do is **abort**, so an emitter that can *detect* an unpaired
+   settle may report it by panicking, provided it checks `std::thread::panicking()` first, raises
+   before it mutates, and records any report it had to suppress.
+
+   **New: `FinishError::UnpairedSettle { mark, len }`.** The latch is what a caller sees. After a
+   degraded rewind, **both** materialization doors refuse — `finish` and `finish_partial` alike,
+   because a log describing a rollback that never happened is corruption, not the incompleteness
+   `finish_partial` exists to tolerate. A typed error rather than a panic, following the posture
+   the neighbouring emission-time walls already take (a detect-at-cause assert, with a typed
+   `FinishError` as the backstop at materialization) and preserving `finish`'s documented
+   never-panics guarantee. `FinishError` is `#[non_exhaustive]`, so the new variant is additive;
+   a `match` that does not name it keeps compiling.
+
+   **What to expect if you are affected.** A parser that was quietly relying on the release-build
+   degradation now panics at the cause with `Sink rewind to a mid-log mark with no captured row`.
+   The fix is always at the call site, not here: some capture is being settled twice, or a mark is
+   being rewound to after it was released. Debug builds and `cargo test` already panicked on it,
+   so a parser whose backtracking paths are exercised in tests will see no change. Note also that
+   `InputRef::restore`'s release-build promise is narrowed to match: it still makes no panic of its
+   own after an out-of-order raw restore, but the *emitter* it hands the violation to keeps its own
+   posture, and the `Sink`'s is now loud in every build. One consequence is documented rather than
+   removed: a raw restore the sink refuses is **not itself transactional**. The emitter's state is
+   untouched, but `restore` raises from the middle of its own rollback, so the checkpoint lineage
+   has been popped through the target while the position and the reporting witnesses have not been
+   restored. That is inside the "unspecified but bounded" envelope the method already documents,
+   it is reachable only through the double-settle bug being reported, and it is now pinned by a
+   test rather than assumed away.
+
+50. **`RecursionLimiter::new` and the combined `Limiter`'s defaults return to 500 too — only
+    `ParserContext` and the input layer keep 64.** The 500 → 64 drop above landed on one constant
+    shared by more subjects than it should have. `RecursionLimiter::new` (and `Default`) is the
+    tracker's own general-purpose depth, with no assumption about what a level costs.
+    `ParserContext` and the input layer are the only two places a level IS a live native-stack
+    frame: each holds its own `RecursionLimiter`, sized against a measured debug-build ceiling,
+    for the budget a Pratt-driven parse actually descends against. `Limiter::new` and
+    `Limiter::with_token_tracker` requested that same 64 by construction, but fed neither one —
+    `Limiter` is not part of tokora's own parser wiring anywhere in this crate. Like bare
+    `RecursionLimiter`, it is documented as usable directly as a lexer's `State`/`Extras` nesting
+    tracker, where a level costs no native stack at all, and both of those lexer-facing paths
+    inherited 64 anyway, tripping on a number chosen for a reason that does not apply to either.
+
+    `RecursionLimiter::new`/`Default`, `Limiter::new`/`Default`, and `Limiter::with_token_tracker`
+    all give back 500, unconditionally. Only `ParserContext` and the input layer still request
+    the native-stack-safe 64 explicitly, from the crate-private
+    `RecursionLimiter::PARSE_DEFAULT_DEPTH` — neither one holds a `Limiter` or calls
+    `RecursionLimiter::new`, so neither can silently fall back to the general-purpose default,
+    and a Pratt-driven parse still gets exactly the protection it had. Everywhere else changes: a
+    tracker built through `RecursionLimiter::new`, `Limiter::new`, `Limiter::with_token_tracker`,
+    or `#[derive(Default)]` over either type, with no parser anywhere near it, trips at 500
+    again, not 64. That includes the depth set by [43](#0.8.0-changed-breaking) above for
+    `Limiter::new` and `Limiter::with_token_tracker` — the same lexer-side reasoning
+    that moved bare `RecursionLimiter::new` applies to them equally, and was missed there the
+    first time. Spell the limit you meant with `RecursionLimiter::with_limitation` if 500 is
+    still wrong for your grammar or your lexer.
 
 ### Debug and rendered output
 
@@ -3106,6 +2009,27 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
   which member is missing rather than getting rustc's default trait-bound phrasing.
   — *(W-api-B)*
 
+66. **`cast::token_any` and `cast::tokens` close the two gaps in the cast module's token
+   helpers.** `token` answers one kind, first match, and that was the whole vocabulary: a node
+   whose grammar puts more than one token kind in the same slot, or repeats one token kind under
+   a parent that gives it no node kind of its own, had nothing to reach for and had to hand-roll
+   the same `children_with_tokens` filter at the call site.
+
+   `token_any` is the first direct token child whose kind is one of several, scanned in
+   **document order, not `kinds` order**: trying `kinds[0]` and falling back to `kinds[1]` would
+   answer the wrong token for a node carrying both, which is a difference no caller should have
+   to know about. `tokens` is every direct token child of one kind, in document order, returned
+   through the new `cast::TokenChildren` iterator — `cast::children`'s `NodeChildren` is an
+   alias for an upstream rowan type, and rowan has no ready-made iterator over one token kind,
+   so this crate now provides one.
+
+   Both are generic over `Language` and take their kind(s) by reference, matching `token`'s own
+   shape; `token_any` takes `&[L::Kind]` rather than a predicate closure because callers pass a
+   fixed, short, statically-known set of alternatives, not an open-ended rule. Both also see
+   only *direct* token children, exactly like `token`: a token belonging to a child node is that
+   node's, and neither helper reaches into it — covered alongside the document-order and
+   empty/no-match cases in `cst::cast`'s test suite.
+
 ### Fixed
 
 - **An `Input` is bound to exactly one emitter, at construction, for its whole life.** The input
@@ -3391,57 +2315,1236 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
   conversion unconditionally. Documented so a later cleanup does not "fix" it.
   — *(R10)*
 
+- **The collection gate's own census could pass by not looking.** `parser::many`'s `GATE_CENSUS`
+  read four hard-coded sources and counted one exact spelling of the swallow beneath the gate —
+  `emit_error(Spanned::new(span,`. A swallow spelled any other way, or written in a fifth source,
+  moved neither tally, so the equality it asserted still held and the census stayed green over an
+  ungated emit-and-continue site. A census quoted as evidence that answers by not looking is worse
+  than none.
+
+  The swallow is now a single chokepoint — one `emit_error` call in the whole `many`/`fold` tree,
+  with the three never-recoverable witnesses above it — so a driver physically has nothing to spell
+  differently. The census matches the **call** rather than its arguments and asserts the count is
+  zero in every driver source; it scans the chokepoint's own body for the three witnesses ahead of
+  the emission; and a third test requires every module of the driver trees to be classified, so the
+  source list cannot fall behind the tree. Every scan panics when the thing it looks for is absent
+  instead of finding nothing to check. Shown non-vacuous by planting a swallow in a fifth source
+  with a spelling the old shape did not match — it fails, naming the file, then the plant was
+  removed. No behaviour change. — *(#148, verification debt)*
+
+  **And the same defect, one level in: the witness scan proved presence, not gating.** The scan
+  above requires each of the three never-recoverable witnesses to appear once in the source ahead
+  of the emission. Textual presence ahead of a call is not control-flow domination — a body that
+  reads all three into `let _ =` bindings and then emits unconditionally satisfies it with the gate
+  entirely gone. Compiled and run: the census stayed green.
+
+  Answered by mutation rather than by a stronger scan, since proving domination from source text
+  means writing a Rust parser inside a test module that must also build under
+  `--no-default-features`. Each witness was neutered in turn and the whole `--all-features` suite
+  run: the frontier-`Incomplete` witness reds 2 tests, the descent-trip witness reds 12 — and
+  **`at_committed_boundary()` red nothing at all**, in the entire suite. Its only cell was negative
+  (a boundary the cursor has *not* reached must not be charged to an ordinary failure), which a
+  deleted witness also satisfies. Unguarded, a collection that runs onto a poison boundary files
+  the stop as an ordinary syntax error and returns a **silently truncated success** — `Ok` over
+  input the scanner never read.
+
+  `tokora/tests/collection_terminal_stop.rs` gains the positive direction: five `r1b_*` cells, one
+  per try-driven family plus the truncation case, each with the file's non-vacuity control (the
+  same probe run twice with only the scan limit changed, required to disagree, and required to have
+  actually tripped). All five are red under the mutation and green without it. The census now states
+  what a needle scan proves and names the suite that proves the rest, and both it and the
+  chokepoint's own docs carry the re-check procedure. No behaviour change. — *(#148, verification
+  debt)*
+
+- **The recursion-limit test suite's stack-address witness made every Miri job and the ASan job
+  red, on `main`.** `pratt_limit_unit_sink`'s unwind cell corroborates its two depth-cell
+  assertions out-of-band by comparing the addresses of two stack locals. That comparison measures
+  frame liveness only while the addresses are native stack offsets: ASan can relocate a frame's
+  locals onto a heap-allocated fake stack and Miri hands out virtual allocation addresses. Three of
+  four instrumented hosts measured the *unwound* frame as farther from the baseline than the
+  descent it had already left — inverted operands, so no threshold rescues the comparison — while a
+  fourth (ASan on aarch64-darwin) passed on the same source. A relation whose answer changes with
+  the runner is reporting the runner, so it is now scoped to native builds via `cfg!(miri)` plus a
+  `TOKORA_SANITIZER` variable `ci/sanitizer.sh` exports for every leg it runs.
+
+  The two depth-cell assertions stay **active** under Miri and every sanitizer, and the gated one
+  is not replaced by a second library-side counter: reading the same cell twice is not
+  corroboration. A skipped assertion announces itself on the process's real stderr — not through
+  `eprintln!`, which libtest swallows for a passing test — so the one build where the check does
+  not run is not the one build where nobody can see that. — *(#148, verification debt)*
+
+- **`pratt_limit`'s deep-stack wall-clock bound was calibrated for the wrong machine, and it made
+  the `miri-tb-x86_64-unknown-linux-gnu` leg intermittently red on `main`.** `on_a_deep_stack`
+  bounds every deep-recursion cell to a fixed number of seconds so a recursion-limit regression
+  fails the test with a message instead of hanging the process. Under interpretation that number
+  measures the interpreter, not the parser, and not by a flat factor: `-Zmiri-tree-borrows`
+  revalidates a growing borrow tree on every access, so
+  `the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it`'s 1000-level `unlimited()`
+  chain — this file's deepest cell — scales worse than linearly with depth, not by the roughly two
+  orders of magnitude a flat per-step slowdown would predict. Measured directly, with the exact
+  command and `-tb` flags `ci/miri_tb.sh` runs: 60–69s across three runs on aarch64-apple-darwin —
+  already more than half of the native 120s bound, on a different host and architecture than the
+  `x86_64-unknown-linux-gnu` shared runner CI failed on, which is why that leg flaked instead of
+  failing outright every time.
+
+  The bound is now `cfg!(miri)`-scoped: 700 seconds under Miri — a ×10 margin over the slower
+  reading, sized for the cross-host and shared-runner gap CI had already demonstrated, not just
+  this machine's own run-to-run noise — and 120 seconds, unchanged, natively. The bound's purpose
+  is untouched: a genuine hang is still caught, on a schedule that fits the machine actually
+  running it, and the native path carries no behaviour change — an unlimited native run finishes
+  in hundredths of a second, nowhere near either number. — *(#148, verification debt)*
+
+- **The name-collision gate reported an incomplete verdict as if it were a result.**
+  `gen_probe.py` had no template for the owners #147 introduced, so every row on them came back
+  `FATAL`. Templates alone were not enough: a probe naming an owner the same diff introduces cannot
+  compile against the base ref, and base-no-compile was unconditionally `INCONCL`. A new
+  `new-owner` verdict says exactly that, and carries two witnesses so it cannot be manufactured —
+  rustc must name the owner as unresolved on base and must not on head. The verdict is complete
+  now: 27/27 rows probed, 0 FATAL, 0 INCONCL, 0 UNPROBED. — *(#148, verification debt)*
+
+- **That verdict proved base was broken and never checked that head ran.** Its two witnesses
+  required rustc to name the owner unresolved on base and to stay silent about it on head — but
+  silence is also what a head build broken for an unrelated reason looks like: `no-compile`,
+  `upstream-fail`, `bad-witness(...)` and `unreached` none say the owner is unresolved either, so a
+  head that failed to compile the probe for a reason having nothing to do with the owner — or that
+  never reached the call at all — still read as proof the owner is new. `new-owner` now
+  additionally requires head to show a completed run, checked by an allowlist of the one shape
+  that is evidence (`witness=*`) rather than a denylist of the shapes already known to be broken,
+  which is silent about the next one nobody has named yet. Re-run against a genuine pre-#147 base,
+  9 of the 14 `RecursionLimitReached` rows the prior entry counted turn out to have been passing on
+  exactly this hole: `map_offset` and `of`'s templates call the real method with fewer arguments
+  than it takes, and the other five methods' `used` spelling forces a `u8` return type none of them
+  have, so head never compiled on any of the nine. They now score `INCONCL`, correctly — only the
+  five methods whose `discarded` spelling silently and successfully calls the real inherent method
+  were ever provable, and the fix does not widen to paper over the rest. — *(#148, verification
+  debt)*
+
+- **That fix's own allowlist was still too wide, and a sibling verdict had none at all.**
+  `new-owner`'s `case "$h" in witness=*)` accepts `witness=1` exactly as readily as `witness=0` —
+  but the marker is CONSUMER-CALLS, attribution rather than existence (see the comment where it is
+  assigned), and `witness=1` means the CONSUMER's own extension item took the call, i.e. the
+  probed name on the new owner was never a candidate this run. A template that compiles clean
+  while constructing no real collision would still have scored `new-owner`. The allowlist now
+  requires `witness=0*` specifically — the one shape that says tokora's item won the resolution —
+  and a `witness=1` head reads `INCONCL`, naming the reason.
+
+  Separately, the `glob-err`/`glob-ok` verdicts intercepted only the LITERAL STRING `no-compile` on
+  the base side before trusting head's evidence. A base broken for any other reason —
+  `upstream-fail` chief among them — fell through into the head-only checks and let a head-side
+  ambiguity decide the verdict alone, with no valid before-state at all. The base side is now
+  checked against an allowlist too: `no-compile` or `unreached` (the only two shapes a
+  compiling-or-rejected glob probe can produce, since `glob_name`/`glob_macro`'s `drive()` calls
+  only `ran()` and never `reached()`), anything else `INCONCL`.
+
+  Both proved in the failing direction, against a real glob collision and a real `new-owner` row,
+  then reverted — `git diff` confirmed clean before this fix was committed. A forced
+  `base=upstream-fail` alongside a genuine head-side ambiguity moved the glob row from `glob-err`
+  to `INCONCL`; a forced `witness=1` (explicit UFCS on the consumer trait, bypassing inherent-method
+  resolution) on a real `new-owner` row moved it from `new-owner` to `INCONCL`. Re-run against the
+  same pre-#147 base as the prior entry, the tally is unchanged — 5 `new-owner`, 9 `INCONCL` —
+  because none of the 14 real rows there naturally produce `witness=1`; only the forced case
+  exercises the new branch. — *(#148, verification debt)*
+
+- **That base-side allowlist had a mirror-image hole on the head side, and it was the more
+  exploitable of the two.** After the fix above, `glob-ok`'s only remaining check was
+  `elif [ -n "$said" ]` — accept once rustc says *something* ambiguity-shaped anywhere in the
+  head log, with no check on `$h` itself. `upstream-fail`, `bad-witness(...)` and any
+  `witness=*` all read as a pass exactly as readily as a genuine `unreached`, so a head build
+  broken for a reason having nothing to do with the probed name — provided an attributed
+  ambiguity diagnostic happened to be sitting in the same log — still scored `glob-ok`. That is
+  acceptance on the absence of a completed head-side probe: the same defect class the base-side
+  fix above had just closed, on the other side of the same row.
+
+  `h` is now held to the identical two-shape allowlist as `b`: `no-compile` or `unreached`,
+  because `glob_name`/`glob_macro`'s `drive()` calls only `ran()` and never `reached()` — a head
+  that actually finishes compiling and running can only ever read `unreached` here, never
+  `witness=*`. `glob-ok` now requires `h = unreached` specifically; `upstream-fail`,
+  `bad-witness(...)` and any `witness=*` read `INCONCL`, naming the reason, instead of falling
+  through.
+
+  Proved in the failing direction against the same pre-#147 base and the same
+  `RecursionLimitReached` glob row as the prior entry: a forced `head=upstream-fail` alongside
+  the row's genuine, untouched ambiguity diagnostic moved it from `glob-ok` to `INCONCL`; forcing
+  `bad-witness(calls=2,reached=0)`, `witness=0` and `witness=1` the same way each land `INCONCL`
+  too. Reverted afterward; `git diff` confirmed clean before this fix was committed. Re-run
+  unperturbed, the same row reaches its natural `glob-err` verdict, unchanged from before this
+  fix.
+
+  Audited the rest of the file for the same asymmetry — a verdict proving one side reached a
+  conclusion without proving the other did. `new-owner`'s two witnesses already check
+  `base_unresolved` and `head_unresolved` by the same predicate, and the item-row ladder's
+  `unreached`/`upstream-fail`/`bad-witness` filter matches against `"$b$h"` concatenated, which
+  catches either side by construction; the base-only `case "$b" in witness=1*|no-compile)`
+  further down is not a shape gap of this kind; it fixes the pre-release baseline's expected
+  value, and every value `$h` can still hold past it is already handled by name in the branches
+  below. This glob-row pair was the only place in the file carrying an allowlist on one side and
+  none on the other. — *(#148, verification debt)*
+
+- **`gen_probe.py`'s two newest templates assumed a call shape neither real method has, so 9 of
+  the 14 rows the entry above counted could only ever read `INCONCL`.**
+  `error_subject_method`/`error_subject_assoc_fn` — added for
+  `RecursionLimitReached`/`NonAssociativeChain` — rode the same fixed zero-argument, `-> u8`
+  consumer shape every other inherent-method/assoc-fn template does. That shape fits neither
+  type: `map_offset` consumes `self` and takes a closure, `of` takes the type's own fields (two
+  arguments on `RecursionLimitReached`, one on `NonAssociativeChain`), and none of the five plain
+  accessors (`offset`, `offset_ref`, `exceeded`, `depth`, `limitation`) returns `u8`. The emitted
+  call failed to compile on the head side before rustc ever reached the collision —
+  `map_offset`/`of` with E0061 (too few arguments), the other five's `used` spelling with E0308
+  (the `let`-binding's forced type) — which is exactly the hole the entry above named and left
+  open: "the fix does not widen to paper over the rest."
+
+  Both templates now derive the call's arity, and the `used` spelling's `let`-binding type, from
+  the REAL signature instead of assuming one. Verified two-sided, against the same genuine
+  pre-#147 base the entries above use (`60f27a3`): before this fix the 14 `RecursionLimitReached`
+  rows scored 5 `new-owner` / 9 `INCONCL`, matching the count already on record; after, all 14
+  score `new-owner`, each on a head run that compiled and completed (`CONSUMER-CALLS: 0` —
+  tokora's own item took every call). No effect on this branch's own run: it adds no name
+  reusing either owner, so it scores `probes=0`/`PASS` regardless — the fix matters the next
+  time a PR gives one of these two types a genuinely new item. — *(#148, verification debt)*
+
+
+
+55. **A `trace`-feature preview no longer reports a partial `Debug` rendering as the complete,
+ short value it is not.** `bounded_debug` — the bounded sink `trace_preview` (behind the
+ `trace` feature) uses to build its per-event source preview — discarded the `Result` from its
+ own `write!` call outright, so its truncation flag came from the sink's private bookkeeping
+ alone: `true` only when the sink itself had refused a write after filling its 24-character
+ window. A `Debug` impl can fail for a reason that has nothing to do with the sink —
+ `fmt::Result` is a plain `Result`, and neither the trait nor `Slice`'s bound (`PartialEq + Eq
+ + Debug`) forbids it — and that case left the flag `false`: the preview then rendered
+ whatever partial content had been written, with no ellipsis, as though it were the whole
+ value.
+
+ The single flag is replaced with a three-state outcome — `Complete`, `WindowTruncated`, or
+ `FormatFailed` — because a bool cannot carry both facts a reader needs kept apart: whether
+ there is more of the value than the window shows, and whether the value's own `Debug` impl
+ finished at all. Folding a foreign `Err` into the same flag a real truncation sets is just as
+ wrong in the other direction: a `Debug` impl can write its complete, short rendering and only
+ then fail for a reason of its own, and reporting that as truncated appends `…` to a trace
+ line for a value that has no more content, claiming a continuation that does not exist.
+
+ The sink's own bookkeeping (`sink.truncated`) is what tells the two causes apart, and does so
+ reliably: the sink has exactly one branch that ever returns `Err`, and that branch sets
+ `sink.truncated` in the same statement, so a `write!` failure the sink did not record cannot
+ be the sink's. `trace_preview` now renders each state distinctly — no marker for `Complete`,
+ `…` for `WindowTruncated`, and a separate `<fmt error>` marker for `FormatFailed` that says
+ the renderer broke without claiming missing content. This is a correctness fix, not a
+ performance one: it changes output only for a `Debug` impl that fails on its own account,
+ which no in-tree `Source`/`Slice` pairing does, so every case that already reached the sink
+ normally — which is to say, every case this crate has ever exercised — renders
+ byte-identically to before.
+
+56. **A recursion-limit trip an element ANSWERED was still spendable — as a successful, complete
+   collection.** Item 48 above closes the path where an element hands its trip back as `Err`: the
+   collection drivers gate that at one chokepoint and re-raise it. They gated **only** that path.
+   An element that catches [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
+   itself and then reports *no more elements* — by declining, or by accepting without consuming
+   anything — hands the driver an `Ok`, the chokepoint never runs, and the driver's **absence** exit
+   reads it as the ordinary end of the construct. `repeated()`, `separated_by(..)` and both
+   delimited forms returned `Ok` with everything collected so far, filing nothing. A resource
+   budget stopped the parse and the parse reported a complete construct — the same defect as item 48,
+   for every error type equally, reached through the exit item 48's gate does not cover.
+
+   The absence exits now consult the same session counter, at the same per-element granularity, and
+   through a second chokepoint of their own: nine exits across the four drivers — the element
+   decline, the no-progress stall, and in the delimited pair the close probe's `WrongToken` and
+   `Eof` arms — surface the stop as the terminal-marked end-of-input error those exits already
+   produced for a *scanner* stop, instead of ending the construct cleanly.
+
+   | driving an element that catches a depth trip and then reports absence | before | now |
+   |---|---|---|
+   | `repeated()`, `separated_by(..)`, and both delimited forms | `Ok` with the elements collected before the stop, nothing filed | `Err` — a terminal end-of-input, still nothing filed |
+
+   **Unchanged here, and deliberately so**: the *scanner* half of this gate stays off an exit
+   resting on a **real token**. A `Close` verdict from the delimited drivers' close probe, and the
+   mid-scan closer in the delimited separated driver, read a committed pre-trip token, so the
+   construct ended *ahead of* any boundary a later lookahead latched and a wider scan window parses
+   the identical source to the identical value. The *descent* half of it is a different kind of fact
+   and does belong on those exits — item 57 below is that correction. An `Accept` is untouched either
+   way, and stays that way: an element that catches a trip and still returns a value has answered
+   it, not concluded absence, so the driver is faithfully collecting what it was handed rather than
+   manufacturing a stop of its own — item 48 above states this as the fourth channel a caught trip
+   can still spend, and why gating it would be a broader contract than #148 establishes. And
+   the granularity floor item 48 describes is exactly the same here — the baseline is one
+   **element**, so a trip an *earlier* element caught and parsed past does not end the collection
+   when a later one legitimately runs out of input.
+
+   The eight `*_while` drivers and folds shared this hole; **item 58 below closes it** for them, and
+   the measurement that found it is recorded there. — *(#148 R7)*
+
+57. **A closer that arrives after the trip does not unmake it.** Item 56 gated the delimited drivers'
+   *absence* exits and left the arm where the closer is genuinely present ungated, on the reasoning
+   that a committed pre-trip closer settles the question. It settles **one** of the two questions,
+   and the two are facts of different kinds:
+
+   - a terminal **scanner** stop is a fact about a token *position*. The close probe is cache-first,
+     so a `Close` verdict rests on a real pre-trip token: the construct ended *ahead of* whatever
+     boundary the element's lookahead went on to latch, and that boundary is not about it. Reading it
+     there would fail a parse a wider scan window completes to the identical value, so it still does
+     not — unchanged from item 56;
+   - a **descent** budget trip is a *counter event that already happened inside the element attempt*.
+     Nothing arriving afterwards unmakes it. An element that caught a
+     [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html),
+     reported *no more elements*, and was then followed by a real closer produced a **successfully
+     closed collection that had silently spent a resource-limit stop** — item 56's defect, through the
+     one arm item 56's gate deliberately does not cover.
+
+   Three exits now consult the trip counter before they commit a real closer, at the same
+   per-element granularity: `repeated().delimited()`'s decline arm and its no-progress epilogue, and
+   `separated_by(..).delimited()`'s epilogue.
+
+   | driving an element that catches a depth trip, reports absence, and IS followed by the closer | before | now |
+   |---|---|---|
+   | `repeated().delimited()` over `"( 1 2 3 )"`, element declines | `Ok([1, 2, 3])`, nothing filed | `Err` — a terminal end-of-input, still nothing filed |
+   | `repeated().delimited()` over `"( 1 2 3 )"`, element accepts consuming nothing | `Ok([1, 2, 3, …])`, nothing filed | `Err` — likewise |
+   | `separated_by(..).delimited()`, element consumes and declines before the closer | `Ok([1, 2, 3])`, nothing filed | `Err` — likewise |
+
+   **Still unchanged**: the mid-scan closer in `separated_by(..).delimited()`. It is reached from the
+   top of a cycle, so only an *accepting* element can precede it — a decline and a stall each break
+   into the epilogue — and the cycle's baseline is taken above it, which makes the term a constant
+   `false` there. An `Accept` remains untouched everywhere, for the reason item 56 gives.
+
+   The two delimited `*_while` drivers have real-closer exits too, and **item 58 below** brings them
+   under the same gate. `parser::many`'s `GATE_CENSUS` gains a per-source count of real-closer exits
+   with a region scan requiring each close verdict to reach the gate before it commits, plus a
+   two-directional scan of the gate itself — the counter read, the position *not* read, since a
+   scanner term smuggled in there is as much a defect as a missing descent one. — *(#148 R8)*
+
+58. **The same trip, through the same absence exits, in the other eight drivers.** Items 56 and 57
+   closed this for the four **try-driven** collection families and recorded the other eight
+   guard-bearing sources — `repeated_while()`, `separated_by_*_while()`, both of their delimited
+   forms, and the fold sources behind `fold`/`try_fold`/`try_fold_with`/`rfold` and their four
+   `*_while` twins — as *found, not fixed*. They are fixed now.
+
+   Their exposure was **narrower** than the four's, not different: none of them files an element's
+   `Err`, so a trip an element *hands back* propagates untouched and was already terminal there. The
+   hole was the exit with no `Err` in it — an element that catches
+   [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html)
+   itself and then reports *no more elements*. Measured rather than inferred, on the code as it
+   stood:
+
+   | driving an element that catches a depth trip and then reports absence | before | now |
+   |---|---|---|
+   | `fold(..)` over `"1 2 3"`, element declines | `Ok(6)` under a budget the element exceeds — identical to `Ok(6)` under one it does not | `Err` — a terminal end-of-input, still nothing filed |
+   | `repeated_while(..)` over `"1 2 3"`, element accepts consuming nothing | `Ok([1, 2, 3, -1])` under both budgets | `Err` — likewise |
+
+   Closing it needed a per-**element** trip baseline none of those loops took, which is a shape
+   change rather than a gate addition: three of the folds were `while let Accept(..) = element(..)`
+   loops, and a `while let`'s condition *is* the element attempt, so there is nowhere in one to
+   snapshot the counter before it. Those three are now `loop { let trips = …; match … }`. The
+   remaining five take the baseline at the top of the cycle, which is once per element, since a
+   cycle attempts at most one.
+
+   Thirty absence exits across all twelve sources now route through `absence_after_element`, and
+   eight real-closer exits through `close_after_element` — every `CloseStatus::Close` verdict in the
+   tree, with **no per-site exemption**. Where a probe sits at the top of a cycle its descent term is
+   a constant `false`, and the call is kept anyway: a `usize` comparison costs less than an
+   exemption table, it fails closed if a later refactor moves an element attempt above the probe,
+   and it is what lets the census scan each verdict's own arm instead of comparing tallies. The two
+   **direct** closers — `separated_by_*(..).delimited()`'s and `separated_by_*_while(..).delimited()`'s
+   mid-scan arms, which commit from the driver's own scan with no probe verdict — stay exempt for
+   the structural reason item 57 gives, and are counted as such.
+
+   **Unchanged, and deliberately so**: an `Accept` is still never gated, in any of the twelve, for
+   the reason item 56 states. So is each `*_while` driver's `Action::Stop` exit in practice — it is
+   reached before that cycle's element runs, so the element that could have caught a trip is the
+   previous cycle's *accepting* one, and the term there is a constant `false` by construction rather
+   than by exemption.
+
+   `parser::many`'s `GATE_CENSUS` loses its two-shape classification: `absence_exit_shapes` has no
+   zeroes left, every source is required to spell **neither** witness itself, and a new
+   `every_driver_baselines_its_trip_witness_inside_its_element_loop` pins one `trip_snapshot()` per
+   element loop in all twelve — matched against the loop openers as a second, independent needle —
+   and requires every one of the forty-two chokepoint calls to read a baseline taken inside the loop
+   that hosts it. — *(#148 R9)*
+
+
+59. **A trivia skip whose predicate panics no longer loses the token it was asked about.** On a
+   [`Complete`](https://docs.rs/tokora/latest/tokora/input/struct.Complete.html) input,
+   [`skip_while`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.skip_while)
+   reaches its lexer once the stream is drained, and the token it lexes was handed to the
+   predicate while nothing owned it. A predicate that unwound therefore dropped that token: the
+   call resumed from the previously committed span and the next read **re-lexed** it, where the
+   same skip on a sealed
+   [`Partial`](https://docs.rs/tokora/latest/tokora/input/struct.Partial.html) input — whose scan
+   scope holds the token for exactly this reason — put it back at the front of the stream and
+   resumed there. Two typestates, one primitive, two different resume cursors under
+   `catch_unwind`.
+
+   The token is now owned by a guard across that one call, so an unwinding predicate leaves it
+   parked rather than dropped, and the ordinary stop and the unwind edge perform the identical
+   put-back. **For an unwind out of the predicate** — at every call, over every residency and cache
+   capacity swept — both routes now leave the same cursor, the same front residency and the same
+   amount of re-lexing. They still part company on one other exit, an unwind inside the
+   end-of-input settle, which was left as it is on purpose; entry 54 below says why and names the
+   cell that pins it.
+
+   Visible only to a host that catches an unwind out of its own `skip_while` predicate and keeps
+   using the input; a predicate that returns normally, or a panic that aborts, is unaffected.
+
+   **It gives back about three fifths of entry 54's win — the two fifths that remain are what
+   ships — and that is stated rather than buried.** Measured on the same harness and in the same
+   interleaved runs as the figure there: 1321.0 µs → 1482.5 µs on the 57 kB document and 133.7 µs →
+   148.1 µs on the 7.5 kB one, so **+12.2% and +10.8%** of a whole parse. Entry 54's route was 17.4%
+   and 15.9% faster than the previous release line before this guard and is 7.4% and 6.9% faster
+   with it, so the guard hands back 10.0 of those 17.4 points and 9.0 of those 15.9 — 57.5% and
+   56.6%.
+
+   The whole of the cost is the **unwind cleanup region** a destructor opens in the lexing loop,
+   not the guard's own work: the identical wrapper with its `Drop` deleted is free, and so is the
+   guard itself compiled `panic = "abort"`. Six shapes were built and timed and this is the
+   cheapest — scoping the guard tighter, taking its `Drop` out of line, moving the predicate call
+   into a non-inlined helper, and outlining the whole lexing phase are all worse or no better. The
+   resident-token path — the 22,033-of-39,057 skips that skip nothing, and every skip over a warm
+   cache — builds no guard and is unaffected.
+
+   It was judged correct to pay because a panicking predicate is **contract-covered behaviour**,
+   not undefined territory: `skip_while` documents a *Panic unwind* section promising that no token
+   leaves the stream, and the predicate is explicitly outside the "inert callbacks" precondition
+   that scopes the rest of the fast path's guarantees. Two typestates disagreeing there falsifies a
+   documented promise, and entry 54's own claim rests on panic tests as its evidence.
+
+   **That same reasoning is why the other divergence was not paid for.** The end-of-input settle
+   exclusion in entry 54 is reachable only through the lexer, the source, the span or the offset —
+   all of them *inside* the inert-callbacks precondition, so no caller who meets the condition can
+   provoke it — and the complete-input route's answer there is the stronger of the two, not a
+   defect being tolerated. Where a promise was over-broad the promise was narrowed and the
+   behaviour pinned; where the behaviour was wrong, as it was for the predicate, it was fixed.
+
+   The differential sweep that should have caught this could not: its check on where the stream
+   resumes was a *range* between the committed position and the next token's start, and a token
+   put back and a token dropped are both inside it. It is an equality now, and a new cell compares
+   the two typestate routes field by field after a panicking predicate — cursor, front residency,
+   whether the token was re-lexed, and the committed-token notifications the interrupted call had
+   already made. That last is also a new observer for a gap noted and left open in the previous
+   round: `Emitter::commit_token` reaches no value a caller reads back off the input, so a skip
+   that consumed a **parked** token and told nobody had, until now, nothing watching it.
+
+60. **The same wrong-machine wall-clock bound was still sitting in `pratt_limit_unit_sink`, and it
+   took the `miri-tb-x86_64-unknown-linux-gnu` leg red on `main` — 57 minutes in.** The entry
+   further up this section corrected `pratt_limit`'s deep-stack bound and did not sweep for
+   siblings. There was one: `bounded`, the wall every cell in `pratt_limit_unit_sink` runs under,
+   with 60 seconds hard-coded at all thirty-one call sites. On a compiled build 60 seconds is
+   enormous — this file's slowest cell, the section 3 unwind cell, runs in 9.8–10.4 ms and no
+   other cell reaches a millisecond — and under interpretation it is a coin flip. Measured with
+   the exact command and `-tb` flags `ci/miri_tb.sh` runs, timing the interval `bounded` itself
+   bounds:
+
+   | | native | Miri, aarch64-apple-darwin | slowdown |
+   |---|---|---|---|
+   | the unwind cell, alone | 9.8 ms | 49.72s / 48.61s | about ×4,800 |
+   | the unwind cell, in a whole-file run | 10.4 ms | 49.32s | about ×4,800 |
+   | all sixteen cells | 10 ms | 58.02s | — |
+
+   So the cell is essentially the whole file, which is why CI reported `15 passed; 1 failed`
+   rather than general slowness. The bound is now 500 seconds under Miri and 60 natively,
+   unchanged. 500 is ×10 over the slowest reading, the same multiple the deep-stack bound chose,
+   and this time the cross-host gap has a measured floor rather than an argument: the same cell
+   that reads 49.7s here tripped a 60s wall on the shared `x86_64-unknown-linux-gnu` runner, so
+   that runner is at least ×1.21 slower on an interpreted workload of this shape. A tripped
+   deadline reports "over the budget" and never by how much, so ×1.21 is a floor; ×10 leaves room
+   over it and over a pessimistic ×3 draw on a noisy runner alike. It is deliberately not larger,
+   because a budget is also a bill the job pays if a termination regression ever lands: sixteen
+   cells at 500 seconds is 2h13, inside the job timeout, where an hour a cell would be a way of
+   never finding out.
+
+   **The two bounds are now one bound.** Both suites' helpers were the same function modulo a
+   stack size and a number, and keeping them separate is what let the first fix miss the second
+   site. They now both call `common::bounded_wait`, whose allowance is a `WallClock` — a pair of
+   figures, one per build kind, both required. A third suite that needs a wall cannot spell one
+   without saying what an interpreted build is allowed, which is the property that was missing,
+   and `bounded_wait` refuses a pair whose interpreted figure is below its native one, because
+   interpretation is not the faster of the two and such a pair is transposed rather than measured.
+   Each call site keeps its own measured number and its own reasoning; only the mechanism is
+   shared.
+
+   The deep-stack bound's 700 seconds was re-read under Miri with the refactor in place and is
+   unchanged — its own doc records the cross-check. No library behaviour changes, and the native
+   path is untouched: every cell here finishes in single-digit milliseconds, nowhere near either
+   figure. — *(#148, verification debt)*
+
+61. **A scanner resource trip is now terminal for every emitter, not only for the ones that accept
+   its diagnostic — recovery re-raises it instead of retrying it.** Item 48 answered the *descent*
+   side of "terminality is a property of the event, and this crate enumerates carriers of it". This
+   is the *scanner* side of the same root cause, and it was reachable through every fail-fast
+   emitter.
+
+   One trip, one position, one committed leaf, two emitters, two verdicts. An **accepting** emitter
+   files the trip's diagnostic and the committed leaf
+   ([`next_or_stop`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.next_or_stop),
+   [`try_expect_or_stop`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.try_expect_or_stop))
+   builds an
+   [`UnexpectedEot`](https://docs.rs/tokora/latest/tokora/error/struct.UnexpectedEot.html) through
+   `into_terminal`, so `is_terminal()` is `true` and recovery re-raises. A **rejecting** emitter
+   reports the same trip by returning `Err` from
+   [`emit_lexer_error`](https://docs.rs/tokora/latest/tokora/emitter/trait.Emitter.html#method.emit_lexer_error) —
+   which is not a refusal to report, it *is* the report — and the scanner propagates that value
+   straight out of its trip arm. It was built by `FromEmitterError::from_lexer_error` from the
+   lexer's own `Token::Error`; no `UnexpectedEnd` exists on that path, so nothing calls
+   `into_terminal` and `is_terminal()` is `false`. Recovery then **ran**: measured through
+   [`recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.recover) under
+   [`Fatal`](https://docs.rs/tokora/latest/tokora/emitter/struct.Fatal.html), the recoverer
+   re-entered the scanner and re-tripped the same limit — scan count 3 → 4 — and returned `Ok`,
+   turning a spent resource budget into a successful parse. All four recovery attempts were
+   affected: `recover`,
+   [`inplace_recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.inplace_recover),
+   and both of
+   [`skip_then_retry`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.skip_then_retry)'s
+   attempts.
+
+   **The witness already existed and those four sites were the only guarded ones not reading it.**
+   The input's poison boundary is the scanner's own record of the trip, and `parser::many`'s twelve
+   collection drivers consult it at every absence exit through `latch_snapshot` /
+   `latched_during_attempt`. The four recovery sites consulted it zero times. They now read it,
+   beside `MaybeTerminal::is_terminal` and the session trip counter — five witnesses, in the five
+   places the two never-recoverable conditions are stored.
+
+   **The scanner's witness is a monotone COUNTER, not the boundary that trip latched, and that is
+   the whole of the fix.** The boundary is a *lineage memo*: a `Checkpoint` carries it and a restore
+   copies it back verbatim. Any comparison of it across a rollback therefore reads a restored value
+   against what it was restored to, and moving the comparison closes exactly one level at a time:
+
+   - read **after** the attempt, it compares the latch `try_attempt`'s `Err` arm just restored
+     against the value it restored it to — always equal, always `false`. Measured: with the read
+     there, only the non-backtracking `inplace_recover` cell passed and all three speculating ones
+     still failed with the scanner re-entered after the trip.
+   - read **inside** the attempt, that level is closed and the level below opens. Grammar code may
+     catch a scanner stop inside an *inner* `attempt` of its own and decline it; the inner rollback
+     restores the boundary before the outer gate ever looks, and the outer verdict reads clean over
+     a stop that is live, already diagnosed, and re-trips on the next scan of the same prefix.
+     Measured the same way: the recoverer ran and the scan count moved 3 → 4.
+
+   Relocating the read a third time closes level two and opens level three. **A cell inside the
+   rollback set cannot witness an event across a rollback at any depth**, so the witness is a cell
+   no rollback reaches: a new `Input::scanner_trips`, monotone, never lowered, not carried by a
+   `Checkpoint` and not by the sync family's `ThroughEntry` either. It is the exact twin of the
+   descent counter item 48 added, for the other budget, and it is classified in the same place —
+   `input::lineage`'s CELL_CENSUS destructures `Input` exhaustively, so the field could not be added
+   without a row in the taxonomy table saying what a restore does to it. Its **one writer** is
+   `latch_if_limit_tripped`, the crate's sole terminal predicate: `classify` is its only caller and
+   both lexing drivers reach `classify`, so *every* scanner trip is counted, a lookahead's included
+   — and a lookahead that trips latches the boundary and still returns `Ok` with a short window,
+   which is precisely the trip a driver-level count in `scan_with`'s `Verdict::Trip` arm would have
+   missed. The bump runs before the diagnostic is offered to the emitter, so a rejecting emitter's
+   `Err` cannot carry the stop out past an uncounted trip.
+
+   The latch reading is **kept** beside it, and demoted rather than deleted: it answers "a different
+   stop is standing at the end of this attempt" where the counter answers "a stop happened inside
+   it", and every transition this crate can produce that moves the latch also moves the counter. It
+   costs one `Option<L::Offset>` clone on a path that already clones one, and removing a witness on
+   a subsumption argument is removing it on an argument rather than on a measurement. The witnesses
+   are still read **inside** the attempt, for that narrow term's sake, and the verdict rides out
+   beside the error.
+
+   **The guard is now one chokepoint rather than four copies, and the false justification that let
+   the copies drift is gone.** A new crate-internal `parser::recovery_gate` owns the whole judgement
+   — every per-attempt baseline and all five witnesses — and the combinators hand it their attempt
+   and match on a three-way outcome. Nothing about the law is spelled at a call site, which also
+   deletes a hoistable baseline: `skip_then_retry`'s retry-cycle `trip_snapshot()` had to stay
+   inside the retry loop (hoisted, the monotone session counter would refuse every retry after the
+   parse's first trip) and nothing checked that it did. There is no longer a baseline there to
+   hoist. The comment above the old `Recover` guard claimed the error's own answer "covers a
+   *scanner* stop, which the grammar's error type carries" — the first half of which is exactly this
+   defect; it is corrected rather than deleted, along with
+   [`MaybeTerminal`](https://docs.rs/tokora/latest/tokora/error/trait.MaybeTerminal.html)'s "the arm
+   is yours to answer for" clause, which is now true of a
+   [`PartialSession`](https://docs.rs/tokora/latest/tokora/input/struct.PartialSession.html)'s
+   terminal latch and no longer of the three recovery combinators.
+
+   **`skip_then_retry`'s recovery was not only its retries, and the rest of it ran outside the gate
+   entirely.** A gate that wraps the parse attempts constrains what happens *inside* one and says
+   nothing about recovery work that never enters one — and this combinator's actual recovering is
+   the **skip** to a sync point and the **advance** over a sync point that did not admit a parse.
+   Both are `Ok`-returning primitives that fold a terminal trip into the value they use for genuine
+   exhaustion: `sync_balanced` answers `Ok(None)` whether it found no sync point or the scanner
+   tripped mid-skip, and `next` answers `Ok(None)` whether the input ended or the scan tripped. So a
+   spent scanner budget read as *"nothing left to skip to"* and the combinator surfaced its ordinary
+   trigger error for it — an error whose `is_terminal()` is `false`, which a `PartialSession`'s
+   terminal latch reads and nothing else corrects. Through a **rejecting** emitter this never showed,
+   because the rejection propagates as an `Err` out of the skip itself; through an **accepting** one
+   the diagnostic is filed and the `Ok` comes back looking exactly like end of input.
+
+   Both phases now go through `recovery_gate::recovery_step`, which samples the three input-side
+   witnesses across the operation — it reads three rather than five because the other two
+   interrogate an error value and a step that returned `Ok` has none — and a stop inside either
+   surfaces the terminal-marked `UnexpectedEot` every other committed exit in this crate surfaces
+   for a trip an accepting emitter took. *"The scanner stopped"* and *"there was nowhere to sync
+   to"* are two different answers again, and only the second is recoverable.
+
+   **Unchanged:** an ordinary failure still recovers, in all four attempts, and a genuine sync
+   exhaustion still surfaces the trigger error — the EOF reading is narrowed, not replaced, and a
+   cell pins each half of that pair. The verdict is attempt-relative against per-attempt baselines,
+   so a stop an *enclosing* lookahead caused before the attempt started is never charged to it.
+
+   **One source-breaking addition, and it is the only public-surface change.**
+   `ParseInput for SkipThenRetry` grows
+   `Error: From<UnexpectedEot<L::Offset, Lang>>`, because surfacing a terminal stop means
+   *constructing* one and that is the carrier this crate constructs. It is the same conversion
+   `next_or_stop`, `try_expect_or_stop`, the peek family and both pratt engines already require, and
+   one fifth of `FromTokenErrors`, so a grammar that can reach end of input at all already has it; a
+   grammar that cannot gets a compile error naming the missing `From`. There was no bound-free
+   alternative — `MaybeTerminal` is a *predicate*, with nothing to build from — and the alternative
+   of leaving the stop unmarked is the defect. Everything else is internal: `recovery_gate` is a
+   private module, `Input::scanner_trips` is a private field, and its two accessors are
+   `pub(crate)`.
+
+   **What it costs, stated exactly:** every witness is read on the failure path only, so a
+   successful attempt pays just its baselines — one `Option<L::Offset>` clone plus two `usize` loads
+   per attempt. For the two speculating combinators the clone is the same value the checkpoint they
+   save clones anyway; `inplace_recover`, which saves none, pays it new. The scanner counter's write
+   side is one `wrapping_add` on the trip arm of the terminal predicate, which is a path that has
+   already decided to stop.
+
+   **Narrowed on purpose, and this is the one behaviour change beyond the headline:** a scanner stop
+   latched *anywhere inside* the attempt now re-raises, including when the attempt then fails for an
+   ordinary reason short of the boundary — a wide lookahead that trips, followed by a syntax error.
+   That is the same rule `parser::many`'s absence exits already apply, and for the same reason: the
+   attempt's evidence was truncated by a stop, and recovering from it would re-lex the same prefix
+   and re-trip. It fails closed, and the whole existing suite is unaffected by it.
+
+   **What holds it, and what watched it fail.** A new behavioural suite,
+   `tokora/tests/recovery_terminal_stop.rs`, 13 cells. The trip cells are self-calibrating, so no
+   absolute scan tally has to be maintained: the primary parser records the scan count at the
+   instant its own scan tripped, and each cell requires the counter not to have moved since. Five
+   direct trip cells (all four attempts, plus the accepting-emitter control that proves the two
+   sinks now agree); two **nested-speculation** cells, in which the primary catches the trip inside
+   an inner `attempt` of its own, declines it, and then fails ordinarily — driven through both
+   `recover` and `inplace_recover`, because the two rollback postures are what would otherwise make
+   the defect look like a property of the *outer* attempt when the *inner* rollback is what defeats
+   the latch; two **phase** cells for a trip inside the skip and inside the advance; and four
+   scoping cells that go red if the gate starts refusing ordinary failures, one of them the genuine
+   sync exhaustion paired against the skip-phase trip.
+
+   `RECOVERY_GATE_CENSUS` covers the structure the suite cannot, and it was extended for the reason
+   its own shape made it miss the sync phase: it constrained what happens *inside* the chokepoint,
+   which is silent about recovery work that never enters one. It now names the **phases**, not just
+   the attempts — every step routes through `recovery_step`, each matches both outcomes, and no
+   combinator source reaches a recovery primitive on its own handle (`inp.sync_balanced(`,
+   `inp.next(` and three siblings pinned absent, which works off the convention that a combinator's
+   handle is `inp` and the chokepoint's closure parameter is `input`). The witness scan is now split
+   by subject: the two error-carried witnesses appear exactly once, in `judge`; the three
+   input-side ones exactly twice, once in each judging body, each ahead of the verdict that body
+   carries out.
+
+   Watched failing three times, each with the whole behaviour suite green: with the latch swapped
+   for the positional `at_committed_boundary` (a real regression a rollback over the latch defeats);
+   with `Recover`'s guard re-spelled by hand, correctly; and — the extension's own demonstration —
+   with the scanner counter deleted from `recovery_step`, where the behaviour suite stays 13-for-13
+   because the latch reading beside it answers the same way on every case anyone wrote, and the
+   census reds on the count. That is the shape the census exists for: a witness redundant on the
+   cases in the suite and load-bearing on the ones that are not.
+
+   Two frontiers are stated on it rather than left to be found. It reads two combinator sources plus
+   the chokepoint, so a recovery combinator added in a *new file* is not read until it is listed;
+   and the ungated-primitive check is a **list**, so a recovery phase built on a primitive nobody
+   added is a phase nothing reads.
+
+62. **The collection drivers had the same rollback hole item 61 closed for recovery, and the
+   monotone counter it added now closes it here too.** Item 61 said, correctly, that `parser::many`'s
+   twelve collection drivers "consult the poison boundary at every absence exit". What it did not
+   say is that those drivers were reading it with exactly the defect it was in the middle of fixing
+   one module over: the boundary is a lineage memo, and a driver's read of it sits outside every
+   rollback the elements below it may perform.
+
+   An element is entitled to open an [`attempt`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.attempt)
+   of its **own**, meet a scanner resource trip inside it, catch the stop, and decline that attempt.
+   The inner restore then rewinds the cursor, the cache, the emissions **and** the poison boundary
+   together — back to the value the *driver* snapshotted before its element loop. Every witness the
+   drivers had answered `false` afterwards, over a stop that is live, already diagnosed and re-trips
+   on the next scan of the same prefix:
+
+   - **34 gates** read clean. The 30 absence exits concluded "no more elements" and returned a
+     silently truncated `Ok`; measured, `peek`-free `repeated()` over such an element returns
+     `Ok([])` on `"1 2"` under a budget the element spent, indistinguishable from the same parse
+     under a budget it did not.
+   - the **4** `file_element_failure` swallow sites were worse than a missed re-raise. There the
+     element's ordinary `Err` was **filed as a recoverable diagnostic and the loop carried on** — so
+     the run also gained a syntax error describing input the scanner never read, and the rollback
+     had already erased the trip's own diagnostic, leaving a log that does not mention the stop at
+     all.
+   - the **8** real-closer gates are unaffected and stay that way, deliberately. A committed
+     pre-trip closer settles the scanner question, and the lookahead that latched past that closer
+     is the same one that bumped the counter — so a counter reading there would refuse exactly the
+     delimited parses the latch reading would, all of which a wider scan window completes to the
+     identical value.
+
+   Neither companion witness could have covered it. `at_committed_boundary()` is positional and the
+   restore rewinds the cursor too; `tripped_during_attempt` counts *descent* trips, and a scanner
+   trip bumps no descent counter.
+
+   The fix is item 61's, reused rather than reinvented: `Input::scanner_trips`, the monotone session
+   counter whose sole writer is the crate's terminal predicate, read through
+   `scanner_trip_snapshot` / `scanner_tripped_during_attempt` at
+   `absence_after_element` and `file_element_failure`. Nothing `pub` changed and no bound moved.
+
+   **Its baseline is per COLLECTION, and that is the opposite of the descent counter's.** The two
+   facts decay differently: a descent trip an element caught and legitimately parsed past stops
+   being true of the input, so its baseline is re-taken per element; a spent scanner budget does
+   not, so its baseline is taken once, above the element loop, beside `latch_snapshot()` whose
+   question it answers. Per element it would drop the case *element 1 trips and accepts, element 2
+   declines* — element 2's baseline would be taken after element 1's trip and the exit would read
+   clean — which is a case the latch beside it has always refused.
+
+   **The latch reading is now fully subsumed, and is kept anyway.** Every transition this crate can
+   produce that moves the boundary goes through `latch_if_limit_tripped`, which bumps the counter
+   first. Measured rather than argued: with `latched_during_attempt` neutered in place and the
+   counter left in the condition, all 105 test binaries of `--all-features` pass — including the ten
+   `absence_terminal_stop.rs` cells the latch used to be the sole holder of. It stays for the reason
+   the recovery gate's equivalent term stays: it is the reading the boundary itself is the subject
+   of, it costs one clone already being paid, and a witness removed on a subsumption argument is a
+   witness removed on an argument rather than on a measurement. `file_element_failure`'s positional
+   `at_committed_boundary()` is **not** subsumed and is load-bearing — it sees a boundary latched
+   before the driver started that the element has now run onto, which no per-collection counter
+   baseline can see.
+
+   `GATE_CENSUS` grew the witness and a placement test that is the exact mirror of the descent one:
+   the scanner baseline must be taken once per collection and **outside** the element loop, where
+   hoisting the descent baseline would itself be the defect. Watched failing with the whole
+   behaviour suite green — the extension's own demonstration: with one driver's baseline moved
+   inside its loop, `every_driver_baselines_its_scanner_witness_once_per_collection` is the **only**
+   failing test in all 105 binaries, because no behaviour cell anyone wrote builds the shape that
+   placement drops. Two new regressions pin the behaviour itself, one per gate, each watched failing
+   first and each with a widened-limit control that differs in nothing but the scan budget.
+
+63. **A peek that reached the lexer reserved two token windows, not one.** The fill allocated the
+   public `Peeked<W>` deque the caller gets back, and then — on the cache-miss path — a second
+   `W::CAPACITY`-slot store of the same entry type, a `GenericArray<MaybeUninit<_>, W::CAPACITY>`
+   holding the tokens lexed past the cache until the cache region had been copied out. The window
+   bound caps the slot *count*, but `Token`, `State` and `Span` are unconstrained in size, so a
+   grammar with a large token payload or a large lexer state paid **twice** the window it asked
+   for on every peek that reached the lexer. For the crate's own oversized fixture — a 1 KiB token
+   beside a 1 KiB lexer state, 2,072 bytes an entry — that is 132,632 bytes at `U32` and 33,176 at
+   `U8`; those are now **66,320** and **16,592**. Nothing about the peek's result changes; this is
+   stack the caller was paying for and could not see. It matters most where the stack is smallest,
+   which is the `no_std` target the crate advertises.
+
+   The second store existed to solve an **ordering** problem, not a storage one. A window's two
+   halves are produced in the opposite order from the one it must report: the tokens past the
+   cache are lexed *during* the fill, while the cache region is copied out in one bulk read
+   *after* it, and `Cache::peek` only appends. That needs the staged region to end up *behind* the
+   cache region — not a second array. So it is staged at the tail of the window the caller already
+   owns and rotated back once the cache region is in. The rotation permutes values inside the
+   deque and copies none out, and the deque owns each staged entry from the moment it is pushed,
+   so every exit — success, a withheld frontier, a limit trip, a fatal emit — frees it exactly
+   once. `input/input_ref/` now contains no `unsafe` block at all; the two it had were the removed
+   array's partial-initialization bookkeeping.
+
+   Reordering the copy *ahead* of the loop would need no rotation and no check, and it is not
+   available: `Cache::peek` takes `&'p self` and the entries it appends borrow the cache for the
+   whole of the fill, while the loop's every step — `lex_within_boundary`, `classify`,
+   `emit_lexer_error_deduped`, `cache_append` — takes `&mut self`, and `cache_append` mutates the
+   very cache those entries borrow.
+
+   **The reordering creates one hazard, and it is checked.** `Cache::len` is now load-bearing: the
+   fill reserves the window's cache region from it *before* it stages anything, so a `len` that is
+   not the resident count mis-sizes the copy that follows. An under-report clips the copy mid-run
+   and the rotation then closes the gap with staged tokens that belong *after* the residents the
+   clip dropped — not a short window, a **hole**, at a position the next consume will not serve.
+   `Cache::len` and `Cache::peek` now say so where an implementor reads them, and the fill exit
+   that rotates checks the copy it got, in **every build**: a count identity, and — because an
+   inexact `len` can satisfy any count derived from it — the resident run's own `front`/`back`
+   endpoints, gated on the staged count, which is a number the fill computes rather than one the
+   cache reports. The endpoint witness is the release-critical half, not the optional one: it is
+   the only check that sees a clip landing exactly on the window's edge, or a `len` under-reporting
+   all the way to **zero**, which passes the count trivially as `0 == 0`. Both of those are the
+   hole. `InputRef::peek` grows a `# Panics` section. The two exits that answer from tokens already
+   at the front of the stream append nothing behind their copy, so they cannot hole, and they are
+   unchanged and unchecked.
+
+   **The hot read pays nothing for it, and that took measuring.** The half of the fill that
+   reaches the lexer is now `#[inline(never)]`: staging in the window puts a deque push, a
+   truncate, a rotation and a `Cache::peek` whose room is a runtime value into the same body as
+   the resident-head arm, and the register allocation and block layout that follow are shared.
+   Left in one function, six peek-shaped bench ids paid **1.11×–1.31×** for code they never run —
+   and the checks are not what they were paying: with both removed entirely the same six ids
+   still read 1.11×–1.31×. Split out, with the overflow-free fill taking its own exit and the
+   panic message built out of line, the same six read **0.80×–1.15×**: the two `heavy` ids — a
+   large lexer state, exactly the shape the second window cost the most — come back **20%
+   faster**, and the worst reading is `input/scan/peek1_then_next` at 1.15×, a drain that defeats
+   its own cache by construction so that every read is a fill. Geometric mean across the six,
+   0.98×. Nothing outside the peek family moves.
+
+   The same law decided where the release-active endpoint witness lives, and it cost one more
+   measurement to find out. Inlined into the fill it sits past the overflow-free `return`,
+   unreachable from the arm that takes it — and moved `peek1_then_next` by **1.025×** anyway,
+   consistently and outside the noise, for exactly the reason the split above exists. So
+   `assert_cache_copy` is `#[inline(never)]` too, and its second message joins the first in a
+   `#[cold]` free function. Out of line, the six ids read **0.9987** geometric mean against the
+   window fix alone, every one of them inside 0.974×–1.009×, over ten interleaved criterion
+   rounds. The 67–70-instruction figure that once argued for keeping the witness in debug builds
+   is withdrawn: it was the cost of running the check, and what a hot path actually pays is the
+   cost of *stepping over* it.
+
+   Coverage, since the previous overflow tests asserted only `len()`: seven cells pinning window
+   order across the cache/overflow boundary — the smallest overflow, a prefilled cache, a cache
+   that retains nothing, a parked front token, and the widest window over an oversized token and
+   state — which removing the rotation turns red along with the pre-existing
+   `token_accessor_reads_owned_arm`; a drop-counted cell for the *keeping* exit; a second phase on
+   the fatal-emit cell that reads the buffer back after the failing return; compile-time size
+   assertions over the oversized fixture; and a source census that refuses to let the fill body
+   name an array, a deque, a `MaybeUninit` or `unsafe` again. The two `should_panic` cells that
+   exercise the endpoint witness alone — the under-report by one, and the under-report to zero —
+   are ungated and run under `cargo test --release` as well, which is the build the witness was
+   promoted for; a `should_panic` whose panic compiles out passes by never running the code it
+   names. The drop-safety cells now count into a per-scenario `Rc<Ledger>` instead of `static
+   AtomicUsize`: they assert *live* deltas while their own window is still held, so under Rust's
+   default parallel test runner they were counting whatever else happened to be running —
+   `cargo test overflow_peek` failed 184 runs out of 200. —
+   *(#156)*
+
+64. **The peek fill had two paths no benchmark in this repository entered — including the one
+   item 63's rotation and its release-active endpoint witness live on — and one bench file kept
+   its evidence where nothing could check it.** No library behaviour changes; both halves are
+   benchmark-suite defects.
+
+   `InputRef`'s peek fill returns early when the window is already met (`want == 0`, no lexer
+   touched) and, on a window wider than the cache, stages the surplus tokens at the tail of the
+   caller's own buffer and rotates them in behind the cache region. **Neither path was reachable
+   from a single shipped bench id.** Every peek id read width 1 and consumed what it peeked
+   before peeking again, so `want` was always 1; and `DefaultCache` is three slots, so nothing
+   narrower than a width-4 peek can overflow. That was measured, not argued: with the sites
+   instrumented to panic, all 45 ids across `input_scan`, `parser_combinators`, `pratt_typed`,
+   `cst` and `backtrack` ran clean. Item 63 disclosed the same gap from the other side — it
+   promoted a `Cache`-contract endpoint witness to release-active precisely because a clipped
+   copy rotated in behind staged tokens holes the window rather than shortening it, and no
+   shipped id reached the rotation that check guards.
+
+   A new `input/peek` group in `tokora/benches/input_scan.rs` adds `r4_peek1_hit8` (a width-3
+   peek primes the cache, three width-1 peeks then take the hit exit) and
+   `r4_peek8_heavy_staged` (a width-8 peek over the three-slot cache, under the deliberately
+   heavy lexer state, so five tokens overflow and the `L::State` clone they pay is a visible
+   256-byte copy). Under the same instrumentation `r4_peek8_heavy_staged` trips all three sites
+   of the miss path — the staging push, `assert_cache_copy`'s endpoint half, and the
+   `rotate_left` itself — `r4_peek1_hit8` trips only the hit exit, and no pre-existing id trips
+   any of them. The arithmetic that reaches each exit is also a `const`-gated assertion inside
+   the driver itself, run once outside the timing loop, so a probe that stopped reaching its path
+   would fail the bench instead of reading as coverage; the existing groups' ids, fixtures and
+   baselines are untouched.
+
+   `tokora/benches/pratt_typed.rs` had 758 comment lines carrying measured figures and structural
+   claims that nothing could verify — seven review rounds had produced about twenty corrections to
+   its prose and none to its code. The structural claims are now assertions that run before either
+   entry point registers anything: fixture byte-density counted from the generated bytes rather
+   than from the generator's loop, the right/left pair proved equal except at exactly the operator
+   positions, the checksum's depth-1 associativity blind spot pinned in both directions, and the
+   recursion-budget rationale executed against the deepest fixture instead of argued. Every
+   remaining figure moved into one dated, attributed record block that states it is not re-derived
+   by anything. That pass found the file already carrying a stale claim — it attributed the parse
+   recursion default to `RecursionLimiter::new`, which item 50 of this release returned to 500;
+   the 64 in question comes from `ParserContext` and the input layer — plus two source line
+   numbers into another file, now symbol names.
+
+65. **Three public claims corrected where they said more than the crate does. Documentation only —
+   no behaviour changed, nothing `pub` moved, no test result changed.** Each was already
+   contradicted, or already left unstated, by something measured in the tree.
+
+   **The sync family's panic-unwind claim was false at two of its three sites, and one paragraph
+   held all three.**
+   [`sync_to`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.sync_to),
+   [`sync_through`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.sync_through)
+   and
+   [`sync_balanced`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.sync_balanced)
+   carried the same sentence byte for byte: a panic out of the predicate, the expected-tokens
+   closure, the lexer or the emitter "settles — this method's `to`-shaped commit posture keeps the
+   diagnosed prefix; the rewinding scans (`sync_through`, `sync_balanced`) restore to the call's
+   entry instead". The clause names its own two counterexamples in its own next breath. `sync_to`
+   commits; `sync_through` **consumes** on a stop, committing at the matching token's own span, and
+   **rewinds** at a no-match end of input; `sync_balanced` crosses the axes — it stops before the
+   sync token and keeps the skipped prefix like the first, and rewinds at end of input like the
+   second, which is why its unwind disposition belongs to the *exit* rather than to the mode. Three
+   postures cannot share one true sentence. Each method now states its own, with its own
+   measurement: `r9_stop_exit_panic_still_commits_the_diagnosed_prefix` for `sync_to`;
+   `sync_through_unwind_restores_emissions` and `sync_through_warm_unwind_prices_its_re_lex` for
+   `sync_through`; and the pair
+   `r9_balanced_stop_exit_panic_keeps_the_prefix_like_its_own_stop_does` /
+   `r9_frontier_commit_interrupted_abandons_rather_than_half_keeping` for `sync_balanced`.
+   `sync_balanced`'s paragraph also stops calling its prefix *diagnosed*: that scan makes no
+   per-token report at all. The **in-flight token** is stated as the two-case fact it is rather
+   than a blanket put-back: the scanner's `TokenSlot` separates a token still *held* — true across
+   the predicate and nowhere else, where an unwind returns it to the front of the stream — from one
+   already *handed over* to the stop settle, where the put-back is precisely the step the panic
+   interrupted and so cannot happen. There the retained stream is cleared instead and the region
+   re-lexes from the committed position, which reproduces the token; what is lost is the cache's
+   memo of it, not a token. `r9_stop_exit_panic_still_commits_the_diagnosed_prefix` measures that
+   handed-over case, and the two rewinding scans reach their keeping arm only on the same side of
+   the split. No behaviour changed anywhere; only the sentences were wrong.
+
+   **One clause is genuinely common, and it is the one that was newly needed.** The exclusion
+   [`skip_while`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.skip_while)'s
+   claim was narrowed for — *anywhere but the end-of-input settle* — is a property of the shared
+   scan scope, which every mode's end-of-input exit disarms *before* its settle runs, so all four
+   carry it. For a committing scan that is where the whole diagnosed prefix goes: the skipped run
+   sits in an uncommitted frontier, the unwind drops it, and the position stays at the call's entry
+   with the diagnostics already emitted standing over a prefix it no longer covers —
+   `eof_commit_interrupted(true)` reads `((0, 0), 0)`, the entry position beside the entry state.
+   For the two rewinding scans it costs nothing, because there that settle *is* the restore and the
+   scan committed no progress for a dropped frontier to strand; what is at stake is the rest of the
+   restore, swept at every `L::Offset` clone by `r9_restore_entry_is_atomic_at_every_offset_clone`.
+
+   **The byte-identity requirement that produced this is retired, and replaced rather than
+   dropped.** Requiring the three paragraphs to hash identically was doing real anti-drift work, and
+   it could only ever be satisfied by making two of the three wrong. A `POSTURE_CENSUS` in
+   `src/input/input_ref/census_tests.rs` takes the work over in three parts: all four sections must
+   carry the shared exclusion; the three sync sections must stay pairwise **distinct**, each saying
+   it states *this method's own* posture, with none carrying the retired sentence again; and — the
+   part that actually looks at behaviour — each section must state the posture its own `ScanMode`
+   **has**, its required *and* forbidden phrases derived per method from `HOLDS_ENTRY`,
+   `COMMITS_FRONTIER_ON_STOP` and `REPORT_SKIPPED` as they stand in `scan.rs`, over a pin on the
+   `ScanScope::keeps_on_unwind` formula those phrases are keyed to. Shared-clause presence and
+   distinctness alone would pass three paragraphs that are pairwise different and wrong about all
+   three methods; the derived check fails on any permutation of them, and flipping one of the
+   constants fails the doc until the prose follows it. Prose is compared with `///` stripped and
+   whitespace collapsed, so rewrapping a paragraph is not drift. Every check was watched failing
+   against the defect it names — each section swapped for another's in turn, and all three rotated
+   together for the case only the derived check can catch.
+
+   **Why a *consuming* `Accept` is exempt from every terminality witness — and why a zero-width one
+   is not — is now said in public.** Items 48, 61 and 62 finished a programme that put three
+   witnesses under the never-recoverable law — the descent counter, the scanner counter for the
+   recovery combinators, and the same scanner counter for the collection drivers. The docs said
+   where each witness sits; the reason the **accept channel** is exempt from all of them was written
+   only in `parser::many`'s module docs, whose `//!` text rustdoc does not render because the module
+   is private.
+   [`MaybeTerminal`](https://docs.rs/tokora/latest/tokora/error/trait.MaybeTerminal.html) now states
+   it where the contract itself is described: every gate under that law sits on a channel where
+   *this crate* draws the conclusion — a recoverer synthesizing a value, a driver concluding a
+   construct ended from a decline, a stall or a closer — and none of them is consulted when the
+   grammar produces the value itself **and consumed input to produce it**. So an element that
+   catches a trip, still consumes and returns `ParseAttempt::Accept` spends it, permanently and by
+   design: gating that would mean a value-producing parser can never recover from a budget it
+   deliberately caught, which is a contract this crate makes for no other error.
+
+   **The exemption stops at a zero-width `Accept`, and the section says so outright rather than
+   leaving it to be inferred.** A value returned without consuming anything has produced a value but
+   not moved the parse, and the driver's very next act is to read that absence of progress as *no
+   more elements* — a conclusion of the driver's own, gated through the same chokepoint a decline
+   reaches and by all three witnesses at once. That is not a corner case: the four `*_while`
+   collection drivers and the `*_while` folds take their element through `ParseInput`, which has no
+   decline channel at all, so a zero-width return **is** their decline — which is exactly the
+   hole item 58 closed for the descent witness and item 62 for the scanner one. Publishing the
+   exemption
+   without its boundary would have restated, as a contract, the shape two shipped fixes had just
+   removed. The "answered versus swallowed" framing does not settle this case by itself, so the
+   boundary is drawn on what the return *consumed* instead.
+   [`RecursionLimitReached`](https://docs.rs/tokora/latest/tokora/error/struct.RecursionLimitReached.html),
+   which stated the exemption for its own stop only, now points at the general statement and carries
+   the same limit on it.
+
+   **`Emitter::rewind`'s "report before you mutate" rider now says what it does not buy.** The rider
+   requires a detecting emitter to raise its unpaired-settle report from a preflight over unchanged
+   state, so a host that catches it holds the emitter it had rather than a half-rewound one — and it
+   stopped there, which invites reading the whole operation as recoverable. It is not:
+   [`rewind`](https://docs.rs/tokora/latest/tokora/emitter/trait.Emitter.html#method.rewind) is
+   called from the middle of a checkpoint restore, below the point where the lineage has been popped
+   through the target and any session points above it released, and above the point where the
+   position, the error-reporting witnesses and the cache-push counter are installed. A compliant
+   preflight makes the *emitter* transactional and cannot make the *restore* so; a host that catches
+   the report must treat the parse as over rather than resume on that handle. The tear itself was
+   already measured — `restore_unchecked_is_not_transactional_across_the_settle_wall` — and already
+   stated on
+   [`InputRef::restore`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.restore),
+   but only there, behind the `unstable-raw` feature, where a consumer of the recording CST `Sink`
+   never reads it. The bound now sits on the always-compiled trait contract that grants the panic
+   door in the first place.
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,
-which is Θ(n²) in the number of diagnosed gaps. It is now two passes that are linear in
-events — a gather, then the walk against a shared monotone cursor — **plus one `k log k`
-ordering of the `k` recorded diagnostic spans.** With one lexer error per token `k` is
-Θ(events), so materialization is **O(n log n)**, not linear; the quadratic term is what this
-round removes.
+which is Θ(n²) in the number of diagnosed gaps. As 0.8.0 ships it is a **single** pass that is
+linear in events — one walk against a monotone run cursor, with the coverage verdict settled
+after the walk rather than before it — **plus one `k log k` ordering of the `k` recorded
+diagnostic spans.** With one lexer error per token `k` is Θ(events), so materialization is
+**O(n log n)**, not linear; the quadratic term is what this round removes.
+
+This round first replaced the rescan with a *gather* pass in front of the walk, and item 51
+below then folded that gather into the walk. Every figure here was originally taken on that
+intermediate two-pass shape, so all of it has been **remeasured against what ships** — and one
+of them changed sign. Each bullet is the shipped `finish` against the pre-round rescan shape
+at `548fd9a`, which is the baseline the superseded figures were against too, with the two-pass
+reading kept beside it so the fold's own share stays visible.
 
 A distribution sort that would make it genuinely linear was implemented and **rejected on
 measurement**: a fixed four-pass radix costs 15n against a 9n budget at every size, an
 adaptive one steps between one and two passes across the probe range and reports growth
 indistinguishable from real nonlinearity, and both pay ~1024 fixed operations per `finish` in
-the common case where a parse records a handful of diagnostics. It remains a candidate with
-its own measurement.
+the common case where a parse records a handful of diagnostics. Those two readings are the one
+thing here that is *not* remeasured — the candidate was never merged, so there is nothing left
+to run — and the `9n` they are scored against is the pre-round bound `3 × (events + gap
+tiles)`, from before the sort was charged its own `k log k`. The rejection stands as a decision
+of that date, not as a measurement of what ships. It remains a candidate with its own
+measurement.
 
-- `finish_error_dense` — **15.9× faster** (4 096 alternating error/token pairs). A growth
-  probe pins the shape rather than the constant: 799 / 3 199 / 12 799 units of replay work
-  against bounds of 900 / 3 600 / 14 400, growth **4.00×** for a 4× input.
-- `finish_wrap_heavy` — **3.62× faster** (2 048 retro-wrap targets).
-- `finish_clean` — **18% slower, and this ships.** It is the harness's designated
-  no-regression control, so it is disclosed rather than folded into an average: ~19 → ~22 ns
-  per token over 4 096 tokens, measured on `finish` alone. It reproduces at all nine
-  alignment residues of a padding sweep (min +12.4%, max +22.8%), so it is a real cost and
-  not the layout artifact its bimodal raw readings first suggested. Two candidate causes are
-  eliminated — the event footprint is unchanged (`size_of::<Event<SimpleSpan>>()` is 32 on
-  both sides) and the new reachability bitset never allocates on clean input — and the
-  residual is not yet attributed. `finish`'s internals are private, so an attribution can
-  land in a patch release without breaking anyone.
+- `finish_error_dense` — **17.4× faster** (4 096 alternating error/token pairs; 2 406 µs →
+  138.0 µs). The two-pass shape read 15.9×, which is the figure this section carried before.
+  A growth probe pins the shape rather than the constant: the in-suite replay-work instrument
+  reads **1 299 / 5 999 / 27 199** units at n = 100 / 400 / 1 600 against its bound of
+  1 600 / 7 200 / 32 000, growth **4.62× / 4.53×** for a 4× input. The 799 / 3 199 / 12 799
+  against 900 / 3 600 / 14 400 at a flat **4.00×** published here before is withdrawn twice
+  over: 4.00× was an artifact of charging the sort a flat element count, which made the
+  charged quantity linear by construction and left the growth clause unable to fail for the
+  reason it existed, and the payload predates the fold besides. A reading above 4.00× is the
+  correct one — it is the sort's `k log k` becoming visible to its own gate, which is this
+  section's **O(n log n)** being met rather than contradicted.
+- `finish_wrap_heavy` — **3.90× faster** (2 048 retro-wrap targets; 160.4 µs → 41.1 µs). The
+  two-pass shape read 3.62×.
+- `finish_clean` — **8.7% faster** (74.1 µs → 67.7 µs over 8 192 tokens), where this section
+  said *18% slower, and this ships*. It is the harness's designated no-regression control, and
+  measured on what ships it does not regress: the gather pass was the cost, and folding it into
+  the walk gives back **17.8%** against the two-pass shape — more than the regression it was
+  disclosed for. What is *not* settled is the constant. The regression this replaces moved
+  between +12.4% and +22.8% across the nine alignment residues of a padding sweep, and this
+  remeasurement is one residue on one toolchain; composing the two puts the shipped walk
+  between ~8% faster and within a point of parity across that whole band. So the 18% is gone
+  at every residue the sweep covers, and the 8.7% is not a constant to lean on. `finish`'s
+  internals are private, so a sharper figure can land in a patch release without breaking
+  anyone.
 
-  — *(R8, #123)*
+  Method, and it is the one the scan-path table below uses. Four `[profile.bench]` builds off
+  one shared `Cargo.lock`, so criterion and every other dependency is identical and only
+  tokora's own source differs: the shipped tree twice in separate target directories, the
+  two-pass shape at `868eb0c`, and the pre-round shape at `548fd9a`. `benches/cst.rs` is
+  byte-identical across the first three. It did not exist at `548fd9a`, so that arm runs the
+  shipped bench under three mechanical API adaptations and nothing else — `Sink::new` arity,
+  `finish` taking the source, `cst_finish` arity — and what qualifies it is that it reproduces
+  the two published two-pass ratios independently, at 15.96× and 3.57× against 15.9× and 3.62×.
+  Arms were interleaved within each of sixteen rounds rather than run in blocks: 32 shipped
+  runs per id against 16 two-pass and 12 pre-round. **The null control is 0.12–0.28% with no
+  excursion** — the two shipped builds are byte-identical, same SHA-256 — and the smallest
+  delta above clears its own control by 31×, with no population overlapping any other. This was
+  **not** a quiet machine and nothing here depends on it having been one: the same M4 Pro at a
+  1-minute load average of 2.5–5.0 across 14 cores, unrelated work resident throughout.
+
+  — *(R8, #123; figures remeasured against the shipped fold)*
 
 - A nested rollback is **linear in lineage depth** rather than quadratic.
-- **The scan path costs measurably more, and the wall-clock figure is not yet trustworthy.**
-  The ownership that closes item 9 is the cost. It cannot be relocated: the benched path
-  lexes with no peek, so there is no stream slot to borrow the token from, and tracking each
-  handover separately — which is what makes the unwind edge correct — is state the scan must
-  carry.
+- **The release-level scan path regresses on `next_drain`: +2.7% against 0.7.3.** The leading
+  suspect, not an established cause, is the ownership that closes item 9: the benched path lexes
+  with no peek, so there is no stream slot to borrow the token from, and tracking each handover
+  separately — which is what makes the unwind edge correct — is state the scan must carry, and
+  could not be relocated even if confirmed. It stays a suspect because nothing isolates it:
+  `ScanScope` is what makes the unwind edge correct, so there is no build with it reverted to
+  difference against, and the figure below is the release-level delta, 0.7.3 → 0.8.0 over 54
+  commits, not item 9 alone. That absence of an isolating build is exactly why the attribution
+  stops at suspicion rather than cause.
 
   What is measured and solid is code size: the `input_scan` bench closure grows **+560 bytes
-  against 0.7.3**, and a **356-byte `drop_glue::<ScanScope>`** symbol now exists where every
-  earlier revision of this round measured none. Two mitigations were tried and both reverted
-  on measurement — outlining the whole `Drop` as cold made a second bench worse.
+  against 0.7.3**. An earlier draft of this entry also cited a 356-byte
+  `drop_glue::<ScanScope>` symbol as evidence; that citation is withdrawn. `skip_trivia_next` is
+  the only bench in this file that ever touched `ScanScope`, and item 54 below (#154) took the
+  complete-input trivia skip off the shared scanner: no scan scope is built on that path any
+  more, so there is nothing left to link, let alone size. `nm` confirms zero occurrences under
+  `[profile.bench]` as shipped, under that profile with LTO disabled, and under an unoptimized
+  debug build alike. No build configuration reproduces the symbol, so the figure is dropped
+  rather than requalified. Two mitigations were tried and both reverted on measurement —
+  outlining the whole `Drop` as cold made a second bench worse.
 
-  An earlier revision of this round disclosed **+1.5%** on `skip_trivia_next`. **That figure
-  is stale** — it was taken when the symbol above was 1 680 bytes and it is now 2 100 — and
-  it is deliberately not restated here rather than reprinted at a precision it no longer has.
-  A replacement is owed on a quiet machine before release; it may be materially larger.
-  Against this, `failed_sync_through_over_8` improved 1.4–2.5% when last measured cleanly.
+  The wall-clock figure earlier revisions of this round left owed is measured, and the whole
+  `input/scan` group is given rather than the one id, because the group does not move together:
+
+  | `input/scan` id     | 0.7.3    | 0.8.0    | change       | null control | separation       |
+  |---------------------|----------|----------|--------------|--------------|------------------|
+  | `next_drain`        | 333.1 µs | 342.1 µs | **+2.7%**    | 0.08%        | disjoint         |
+  | `try_expect_hits`   | 216.3 µs | 219.1 µs | inside noise | 0.63%        | inside the floor |
+  | `peek1_then_next`   | 530.4 µs | 527.9 µs | inside noise | 1.55%        | inside the floor |
+  | `skip_trivia_next`  | 338.9 µs | 279.3 µs | **−17.6%**   | 0.25%        | disjoint         |
+  | `try_expect_misses` | 523.2 µs | 427.5 µs | **−18.3%**   | 0.02%        | disjoint         |
+
+  Two `[profile.bench]` builds — `468f7aa` (0.7.3) and this release — resolved from one shared
+  `Cargo.lock`, so every dependency version including criterion is identical and only tokora's
+  own source differs. The drivers and the `synthetic_source` fixture are byte-identical at both
+  revisions. Arms were interleaved within each round rather than run in blocks, across three
+  campaigns: 28 runs per id on 0.8.0 against 14 on 0.7.3 for the first three, 12 against 6 for
+  the rest.
+
+  **The noise floor is 0.6%, with one excursion to 1.55%**, and it was established before any
+  delta was believed: a null control of two builds of *identical* source in separate target
+  directories — which came out byte-identical, same SHA-256 — carried through every campaign as
+  a third arm. Its two halves differ by 0.02–0.63% on five of the six ids. On the sixth they
+  differ by 1.55%, because a single run of `peek1_then_next` returned 622.8 µs against a ~525 µs
+  population. That is a machine event, and it is why nothing here under ~1.5% is called a
+  result. `next_drain`'s +2.7% is 34× its own control, the two populations do not overlap at
+  all, and it reproduced independently at +2.8% and +2.5% in two campaigns.
+
+  This was **not** a quiet machine and nothing above depends on it having been one: an M4 Pro at
+  a 1-minute load average of 2.7–4.8 across 14 cores, with unrelated work resident throughout.
+  Interleaving plus the null control is what makes that survivable, since drift lands on all
+  three arms alike — and the one event that did occur is the 1.55% row rather than something
+  folded into an average.
+
+  Two limits on reading it. The first is stated where the attribution is made, above: the
+  figure is release-level, not item 9 in isolation, and a narrower attribution is a patch
+  release's job for the same reason `finish_clean`'s residual above is. The second: earlier
+  revisions disclosed **+1.5% on `skip_trivia_next`** and then withheld it as stale; withholding
+  it was right for a stronger reason than staleness, because against 0.7.3 that figure is
+  **wrong in sign**. #154 took the trivia skip off the shared scanner after item 9 landed, and
+  the id is now 17.6% *faster*. `failed_sync_through_over_8`, offered here before as the
+  counterweight at 1.4–2.5%, comes back inside noise against 0.7.3 on this harness, so it is
+  withdrawn as one. The counterweight that survives measurement is `try_expect_misses`, at
+  −18.3%.
 
   — *(R9)*
+
+51. **`Sink::finish` replays the event log once instead of twice.** Materialization used to make
+   a full gather pass over every event before the walk that drives the builder: it validated
+   kinds and retro-wrap targets, collected the recorded lexer-error spans, and read the
+   uncovered runs off the token spans so the walk could tile a run at the token it trails. All
+   three now happen inside the walk.
+
+   The canaries move to the arm of the event they were already about. The error spans are still
+   merged into a **set** and the coverage verdict is still order-independent — it is simply
+   decided after the walk instead of before it, which it can be because
+   [`UncoveredGap`](https://docs.rs/tokora/latest/tokora/cst/enum.FinishError.html) was only
+   ever consumed at the end. The run lookahead is now a *monotone cursor*: a run's tile is armed
+   at the token that opens it and forced at the next builder-visible event, which resolves its
+   far end by scanning forward to the next token — never rescanning, and skipping outright every
+   region whose run the following token resolves for free.
+
+   Measured on a 57.7 KB GraphQL document (64,085 events): **1,727 µs → 1,663 µs, −64 µs**,
+   with the produced tree byte-identical across the clean, perturbed, hand-broken and
+   every-prefix corpora.
+
+   **One behaviour changes, and only on a malformed stream: error precedence.** Two passes meant
+   every gather-class refusal (`ReservedKind`, `StaleStartAt`, `DanglingForwardParent`,
+   `InvalidDiagnosticSpan`, `InvalidDialectKind`) outranked every walk-class refusal
+   (`OrphanFinish`, `ImproperWrap`, `MismatchedFinish`, `OverlappingSpans`, `SpanOutOfBounds`,
+   `OffsetOverflow`) whatever their buffer indices. One pass reports the **first violation in
+   buffer order**. No stream that was refused is now accepted, and none that was accepted is now
+   refused; a stream with two defects may name the other one. Within a single event the order is
+   unchanged — each fused arm runs its gather checks ahead of its walk checks.
+
+52. **A `Sink` reserves its event log at construction, from the source's length.** The log used
+   to grow from empty, doubling about sixteen times over a 57.7 KB document and copying roughly
+   4 MiB in the process. `Sink::new` now asks for the capacity that doubling would have arrived
+   at — the source's byte length rounded up to a power of two, capped at 65,536 events (2 MiB) —
+   so the same final block is bought once.
+
+   The predictor is sound only because a sink is compile-time restricted to trivia-surfacing
+   lexers: every source byte reaches it as a token or a reported lexer error, so the event count
+   tracks the byte count (0.80–1.11 events per byte across this crate's corpora). The **cap** is
+   what keeps that from being a liability for a grammar whose tokens are long — past it the byte
+   count stops being evidence and the `Vec` resumes doubling — and the **rounding** is what keeps
+   the reservation from backfiring: reserving the raw length under-reserves a lossless log, which
+   buys a large eager allocation *and* a double-sized reallocation on top, and measured slower
+   than reserving nothing at all. An empty source still allocates nothing.
+
+   Measured on the same 57.7 KB document, paired over fourteen rounds: **−5 µs (σ 8)**. The
+   allocation count and the ~4 MiB of copying go regardless of what the wall clock on one
+   allocator says.
+
+
+53. **A `trace`-feature preview no longer costs the entire remaining source, every time.**
+ `InputRef`'s per-event source preview (`trace_preview`, behind the `trace` feature) built
+ `format!("{rest:?}")` over the *whole* remaining source — potentially the entire input, at
+ every instrumented combinator call (`peek`, `begin`/`commit`/`rollback`, `try_expect`,
+ several per token) — then walked that string a second time to count it, just to keep the
+ first 24 characters. Θ(remaining input) per event, unconditionally, made Θ(n²) over a parse:
+ benchmarking with `--all-features` (which enables `trace`) against a ~128 KiB fixture wrote
+ 133 MB of stderr in 5 minutes without finishing the cheapest bench cell's warm-up.
+
+ A bounded `fmt::Write` sink now aborts the `Debug` call as soon as it has enough output to
+ answer the 24-character window and the ellipsis, so the preview never walks more of the
+ remaining source than a `Debug` impl's own internal batching forces. Measured against this
+ crate's own `input_scan` bench fixture shape (newline-delimited, digits and punctuation): a
+ single preview at offset 0 goes from 250µs to 208ns at 128 KiB and from 10.5ms to 958ns at
+ 8 MiB; a full traced parse over that shape scales linearly in token count on both sides of
+ the fix, at a per-token cost that no longer grows with how much input is left.
+
+ That bound is conditional, not universal: it holds for a `Debug` impl that writes
+ incrementally, and it does not hold for one that front-loads its entire output before its
+ first write. Every `Source`/`Slice` pairing this crate ships was checked against that line;
+ the guarantee is asserted for exactly these, not for `Source` in general.
+
+ A third shape is not narrow at all, and is the only one of the three reachable from outside
+ this crate. `Source`'s `Slice` associated type is public and implementable downstream, and
+ `Slice`'s own bound (`PartialEq + Eq + Debug`) puts no streaming requirement on its `Debug`
+ impl. A conforming impl may scan, escape and allocate its *entire* remaining slice into a
+ temporary and call `write_str` once; this sink cannot shorten work that already ran before
+ it was ever invoked, so the cost stays exactly the `O(remaining source)` this fix exists to
+ remove. Output is still correct even here — the window and the ellipsis decision come from a
+ genuine prefix of the untruncated dump no matter how it was produced — so this is a cost
+ gap, not a correctness one, but it is the most severe of the three: unbounded, not merely
+ narrower, and reachable with an ordinary trait implementation, no unsafe or misuse of this
+ crate required. No in-tree backing does this today; `bounded_debug`'s doc comment and its
+ `bounded_debug_is_correct_but_unbounded_for_a_front_loading_debug_impl` test carry a fixture
+ that exercises exactly this shape.
+
+ The other two remain narrower and **found, not fixed**: a `[u8]`-shaped backing (`[u8]`,
+ `HipByt`, the `smol-bytes` byte types) bounds its allocation and escaping work but still
+ iterates every remaining element, because `Formatter::debug_list` drives its iterator to
+ completion independently of write failures; and a `str`-shaped backing (`str`, `HipStr`,
+ `Utf8Bytes`) still costs `O(run)` for a run of characters with nothing escape-worthy in it,
+ because `Debug for str` accumulates such a run before its first write. Realistic text —
+ which breaks such runs at newlines, quotes, etc. — is unaffected, but a contrived input like
+ this crate's own `int_run_source`/`comma_list_source` bench fixtures (digits and spaces for
+ ~128 KiB at a stretch) is not; `bytes::Bytes` and `bstr::BStr` have neither gap, since both
+ hand-write their `Debug` loop with `?` on every write.
+
+ Output is unchanged: every trace line reads identically to before this fix, character for
+ character, ellipsis included — checked against a spread of inputs (empty, short, exactly at
+ the 24-character boundary, far longer, and content that escapes heavily: newlines, tabs,
+ both quote characters, backslashes, non-ASCII, and a multi-byte scalar straddling the cut).
+
+54. **The trivia skip no longer goes through the shared scanner on a complete input.**
+   [`skip_while`](https://docs.rs/tokora/latest/tokora/input/struct.InputRef.html#method.skip_while) —
+   the primitive behind the `padded` combinators, and the door every lossless grammar opens at
+   every decision point — now runs its own two-phase loop under
+   [`Complete`](https://docs.rs/tokora/latest/tokora/input/struct.Complete.html): a token already
+   at the front of the stream is judged **where it lies** and consumed there, and only once the
+   stream is empty does it reach the lexer. No scan scope is built, no frontier pair is cloned,
+   and a token already resident is never taken out and put back to be judged. The lexing phase
+   does keep one thing the scope carried, and entry 59 above is that.
+
+   **Measured against the previous release line: 7.4% off a whole GraphQL parse** (1600.2 µs →
+   1482.5 µs on a 57 kB document; 159.0 µs → 148.1 µs, 6.9%, on a 7.5 kB one). Minimum over nine
+   blocks with `apollo-parser` as an unchanged control, builds interleaved within each repetition,
+   five repetitions, contended repetitions discarded. That figure is **net of** the unwind guard in
+   entry 59 above, which is the honest number for this release because the guard ships with the
+   route: without it the same measurement reads 17.4% and 15.9%. An earlier draft of this entry
+   claimed 25%; that did not describe this measurement even before the guard existed, and it is
+   replaced rather than adjusted.
+
+   **No caller-visible behaviour changes**, and the guarantee is the one already documented on the
+   method: for a caller whose input-layer callbacks are inert and whose predicate answers from the
+   values it is handed, the parse result, the tokens read next, the resume cursor, the committed
+   span and lexer state, the diagnostics, the poison boundary, the dedup watermark and the
+   predicate call sequence are all identical. What the route runs *internally* differs: it clamps
+   the committed position once per skipped token where the scan clamped once per call, and it asks
+   the cache for its front where the scan popped and pushed back.
+
+   Two things it had to re-establish, both pinned by new cells in `fast_path_tests`. A resource
+   trip inside a skip latches the poison boundary at the **committed cursor** rather than at the
+   scanner's deferred frontier, and those are the same offset because the route commits every
+   token as it crosses it. And a panic mid-skip leaves the input whole: a call interrupted at its
+   `k`-th predicate consumes exactly the `k − 1` tokens the predicate accepted and every other
+   token stays reachable. The two phases reach that differently, and entry 59 above is what makes
+   the second half true — the resident phase runs the fallible half of each settle while the token
+   is still in the stream and so needs nothing, while the lexing phase holds the token it lexed
+   across the predicate and owes a put-back. One consequence is visible only to a host that catches
+   an unwind: an interrupted end-of-input commit now keeps the prefix the call had already crossed
+   (span and state describing the same token) where the scanner discarded it.
+
+   A [`Partial`](https://docs.rs/tokora/latest/tokora/input/struct.Partial.html) input keeps the
+   shared scanner, whose scope owns the five-fact `Incomplete` restore and the emitter mark a
+   streaming skip needs settled on every exit. The split is by typestate and is guarded by a
+   differential sweep: a *sealed* partial input takes every decision a complete one takes, so the
+   two routes are held to the same observation over the same programs, sources and cache
+   capacities.
+
+   **That parity claim excludes exactly one exit, and the exclusion is deliberate**: an unwind
+   *inside the end-of-input settle* — the consequence the paragraph before last already names, seen
+   from the other side. Both routes finish a skip that ran to end of input the same way — read `Lexer::span`,
+   take `Lexer::into_state`, write the pair — but the scanner reaches that settle having already
+   disarmed its scan scope, so the frontier holding the whole skipped run is dropped with the
+   unwind, while this route committed each token as it crossed it and keeps them. The complete
+   input's answer is the better one: both routes told `Emitter::commit_token` that the run's tokens
+   were consumed, and only this one's committed position agrees with what it said. Every callback
+   that can raise that unwind — the lexer, the source, the span, the offset — is one the method's
+   own precondition already requires to be inert, so the narrowed claim costs a caller who meets
+   the condition nothing. Nothing wider diverges: a panic out of the predicate, out of
+   `Emitter::commit_token`, out of the emitter's diagnostic path, out of `Lexer::lex`, or out of
+   `Lexer::span` anywhere but the settle leaves the two routes identical, as does every run in
+   which nothing unwinds. The difference is pinned — as a difference, with both columns asserted —
+   by `the_two_completeness_routes_are_pinned_apart_on_an_interrupted_eof_settle`.
 
 ### What CI enforces now that it did not at 0.7.3
 
@@ -3654,20 +3757,33 @@ parse-to-emitter contract, and it flips when `finish` starts refusing these span
 
 — *(R8, #123)*
 
-<a id="0.8.0-known-limitation--a-discarding-error-sink-erases-the-recursion-trips-stop-not-its-bound"></a>
+<a id="0.8.0-known-limitation-recorded-and-closed-before-release--a-discarding-error-sink-erased-the-recursion-trips-stop-not-its-bound"></a>
 
-### Known limitation — a discarding error sink erases the recursion trip's stop, not its bound
+### Known limitation recorded and closed before release — a discarding error sink erased the recursion trip's stop, not its bound
 
-Item 42's `RecursionLimitReached` is always terminal, and the recovery combinators decide whether
-to re-raise by asking the **converted** error — the type the grammar actually names — for
-`MaybeTerminal::is_terminal()`. So a grammar whose `From` for it discards the value, `()` included,
-gets `false` back and **recovery spends the trip** instead of re-raising it. That is the
-pre-existing `MaybeTerminal` opt-out reaching a *resource guard* rather than a malformed-input
-report. The conversion was deliberately not removed and the contract deliberately not redesigned:
-16 error types under `error::` carry a `From<…> for ()`, 14 of them before this release, so these
-are two more instances of a crate-wide design rather than a new one.
+**This limitation was closed before release and does not ship in 0.8.0.** It was recorded when the
+recursion budget landed and answered later in the same release by [48](#0.8.0-changed-breaking),
+which moved the resource-trip witness off the grammar's error value and onto the input session,
+where no `From` the grammar writes can reach it. The heading above originally read as a live
+caveat despite this paragraph, so it was rewritten to state the closure directly; the anchor
+changed with it, since this file names an anchor for the heading text it sits above, and the
+in-document link from item 48 was updated to match. Design documents written while the
+limitation was open still cite the old anchor and are outside this file's reach. What follows
+is kept as the record of what it was, in the past tense, and not a caveat a 0.8.0 consumer has
+to act on.
 
-**What is not lost — measured, not reasoned:**
+**What it was.** Item 42's `RecursionLimitReached` is always terminal, and the recovery combinators
+decided whether to re-raise by asking the **converted** error — the type the grammar actually
+names — for `MaybeTerminal::is_terminal()`. So a grammar whose `From` for it discarded the value,
+`()` included, got `false` back and **recovery spent the trip** instead of re-raising it: measured
+on one ladder, one limit and one 32-deep input under `skip_then_retry`, the surrounding grammar was
+handed back offset **68** — the whole chain and the sync token consumed and committed — where a
+delegating error type was handed back **0**. That was the pre-existing `MaybeTerminal` opt-out
+reaching a *resource guard* rather than a malformed-input report, and this entry recorded it rather
+than answering it: 16 error types under `error::` carry a `From<…> for ()`, 14 of them before this
+release, so it read as two more instances of a crate-wide design rather than a new one.
+
+**What it never put at risk — measured, not reasoned, and still true:**
 
 - **The native stack is already back.** `Descent`'s destructor releases every level on the unwind
   that carries the error out, so by the time any recoverer sees the converted value, every frame
@@ -3681,39 +3797,26 @@ are two more instances of a crate-wide design rather than a new one.
   `skip_then_retry` consumes its sync token per continuing cycle and runs out of sync points, and a
   repetition over a recovering element stalls on the first element that commits nothing.
 
-**What is lost is the stop, and the input it costs to discover there was one.** Measured on one
-ladder, one limit and one 32-deep input under `skip_then_retry`, the verdict is `Err` either way —
-a caller matching on the discriminant sees no difference at all. The difference is where the input
-is left:
+**How it is answered.** Item 48 carries the full account and the before/now measurements. The short
+form: the witness is a monotone counter on the **input session**, bumped by `InputRef::descend`'s
+trip arm *before* the grammar's `From` runs, and `recover`, `inplace_recover`, `skip_then_retry`
+and the resilient collection loops read it **beside** `MaybeTerminal::is_terminal`. Both error
+types now hand the surrounding grammar back offset **0**. A resource bound that an unrelated error
+sink can opt out of is not a bound.
 
-| the grammar's error type | result | input handed back to the surrounding grammar |
-|---|---|---|
-| delegating (stores the value) | `Err` | offset **0** — re-raised before any skip, nothing consumed |
-| `()` (discards it) | `Err` | offset **68** — the 32-deep chain *and* the sync token consumed and committed |
+**What the answer does not cover, and what is still open.** `NonAssociativeChain` was the control
+here and remains inert: it is `is_terminal() == false` to begin with, so recovery spends it through
+a delegating type and through `()` alike and the sink decides nothing; what a sink costs there is
+only the offset, which is the ordinary price of discarding a payload and not a change of contract.
+And the *class* is older than this release and still stands. `UnexpectedEnd` — the type behind
+`UnexpectedEot`, `UnexpectedEoLhs` and `UnexpectedEoRhs`, whose terminal values are real driver
+output — is the only other type under `error::` that overrides `is_terminal`, it carries a
+`From<…> for ()` of its own, and both have shipped since before this campaign. Whether a discarding
+sink should be able to erase terminality for a grammar error, as it no longer can for a resource
+guard, is a question about `MaybeTerminal` rather than about these two types, and it is still
+recorded rather than answered.
 
-Skipping is how recovery buys progress over a *malformed* construct, and a depth budget is not one:
-no quantity of skipped input makes the next descent shallower, so those cycles spend input for a
-verdict they cannot change.
-
-**If your grammar needs the stop, give the error type a variant that stores this one and delegate
-`is_terminal`** — the type's own documentation carries that as a compiling example. The `()` sink
-stays available and means exactly what it says: that no error of any kind carries information,
-resource trips included.
-
-**`NonAssociativeChain` is the control here, and it is inert.** It is `is_terminal() == false` to
-begin with, so recovery spends it through a delegating type and through `()` alike and the sink
-decides nothing; what a sink costs there is only the offset, which is the ordinary price of
-discarding a payload and not a change of contract. The two conversions items 41 and 42 add are
-therefore not one hazard — only the resource guard's is load-bearing.
-
-**And the class is older than this release.** `UnexpectedEnd` — the type behind `UnexpectedEot`,
-`UnexpectedEoLhs` and `UnexpectedEoRhs`, whose terminal values are real driver output — is the only
-other type under `error::` that overrides `is_terminal`, it carries a `From<…> for ()` of its own,
-and both have shipped since before this campaign. Whether a discarding sink should be able to erase
-terminality for a resource guard as opposed to a grammar error is a question about `MaybeTerminal`,
-not about these two types, and it is recorded here rather than answered.
-
-— *(R16)*
+— *(R16; closed by #148 R1)*
 
 ### Notes
 

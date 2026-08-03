@@ -49,9 +49,9 @@
 //!
 //! - an [`Incomplete`](crate::error::Incomplete) means *"more input may fix this"* — the caller
 //!   refills and re-drives;
-//! - a **terminal** condition — a resource-limit trip ([`Lexer::check`](crate::Lexer::check) failing
-//!   after a token) and the poison boundary it latches — means *"no amount of input will fix this"*
-//!   — the caller must stop.
+//! - a **terminal** condition — a resource-limit trip ([`Lexer::check`] failing after a token) and
+//!   the poison boundary it latches — means *"no amount of input will fix this"* — the caller must
+//!   stop.
 //!
 //! They are mutually exclusive, and **the terminal one wins**. Nothing in this crate may disguise a
 //! terminal condition as an `Incomplete`: the limit is probed, and latched, *before* the frontier

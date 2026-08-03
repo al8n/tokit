@@ -6,9 +6,12 @@
 //! unreachable, because the sink's own stack refuses first), close identity (a finish names
 //! the kind it means to close, and closing a different one is refused), retro-wrap integrity
 //! (stale `StartAt` targets, dangling `forward_parent` pointers — the journal's finish-time
-//! canary), kind hygiene (the reserved tombstone band, and every kind the dialect's own
-//! validator rejects), span discipline for tokens **and** for the diagnostic spans that
-//! license gaps (monotone, non-overlapping, in-bounds, u32-fitting, char-aligned), the
+//! canary), kind hygiene (the reserved tombstone band and the root kind, refused
+//! unconditionally in every build; every other kind, refused at the emission doors in every
+//! build too, and re-checked here only as a debug-assertions-gated backstop — see
+//! [`FinishError::InvalidDialectKind`]), span discipline for tokens **and** for the diagnostic
+//! spans that license gaps (monotone, non-overlapping, in-bounds, u32-fitting, char-aligned),
+//! the
 //! **token-channel wall** (a balanced
 //! stream that builds structure without one committed token over a nonempty source *no
 //! lexer error explains* is the half-forwarding-wrapper signature, refused instead of
@@ -384,8 +387,10 @@ where
   ///
   /// The replay validates and builds in one walk: balance, close identity
   /// ([`FinishError::MismatchedFinish`]), retro-wrap integrity, kind hygiene (the reserved
-  /// band, and every kind the dialect's own validator rejects —
-  /// [`FinishError::InvalidDialectKind`]), span discipline for tokens and for the diagnostic
+  /// band and the root kind, refused unconditionally; every other kind, refused at the
+  /// emission doors in every build too, and re-checked here only as a debug-assertions-gated
+  /// backstop — [`FinishError::InvalidDialectKind`]), span discipline for tokens and for the
+  /// diagnostic
   /// spans that license gaps ([`FinishError::InvalidDiagnosticSpan`]), the token-channel wall
   /// ([`FinishError::StructureWithoutTokens`] — structure with zero committed tokens
   /// over a nonempty source *no lexer error explains* is a severed `commit_token` channel,
@@ -781,11 +786,20 @@ where
   // two synthesized kinds — so for any caller reachable from outside this crate the wall is
   // already absolute, and earlier: it refuses at the emit site, at the cause, instead of one
   // materialization later. The single route with no door is `push_raw_event_for_tests`, which
-  // is `pub(crate)`. Keeping the check here for that route, in every build, cost a measured
-  // +8.3% on ordinary materialization (an unpredictable indirect call per event inside a tight
-  // builder loop), which is the whole of it. So the honest trade, stated rather than hidden: a
+  // is `pub(crate)`. Keeping the check here for that route, in every build, costs a measured
+  // +4.4% on ordinary materialization (an indirect call per event inside a tight builder
+  // loop), which is the whole of it. So the honest trade, stated rather than hidden: a
   // RELEASE build whose event log was assembled by raw in-crate injection can materialize an
-  // out-of-language kind. Every test run and every CI build refuses it.
+  // out-of-language kind. Debug-assertions test runs, and the CI profiles that run this cell,
+  // refuse it; release-profile test runs do not exercise that wall.
+  //
+  // The +4.4% is this walk as it ships against the same tree with `cfg!(debug_assertions) &&`
+  // deleted from exactly the three sites below: `finish_clean` (8 192 tokens), median of
+  // sixteen interleaved paired rounds, positive in all sixteen, against a null control of two
+  // byte-identical builds that spans -1.15%..+1.13%. It replaces a +8.3% taken on the two-pass
+  // gather+walk shape this round superseded, where these three calls sat in the gather pass
+  // rather than in the builder loop; the same deletion reads +1.1% there, a median inside that
+  // control's own span. One code layout on one toolchain — low single digits, not a constant.
   //
   // `ReservedKind` is NOT gated — the tombstone band is a plain comparison, it costs nothing,
   // and it was a release wall.

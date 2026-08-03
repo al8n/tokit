@@ -131,7 +131,7 @@ where
   /// which for every realistic type is `W::CAPACITY × (size_of::<Token>() + size_of::<State>() +
   /// size_of::<Span>())` plus per-entry padding and a discriminant. A **cache miss costs no
   /// second window**: tokens lexed past the cache are staged in this same buffer and rotated
-  /// into place, so the miss path reserves exactly what the hit path does. (Through 0.8.0 the
+  /// into place, so the miss path reserves exactly what the hit path does. (Through 0.7.3 the
   /// miss path staged them in a separate `W::CAPACITY`-slot array, doubling the figure above.)
   ///
   /// Everything else in the frame is **O(1) in the window width**: single-entry temporaries (one
@@ -491,7 +491,7 @@ where
       // PEEK_HOT_SPLIT — NOTHING OVERFLOWED, which is what a fill that fits the cache always
       // looks like, and what a trip leaves behind after the truncation above. `buf` holds
       // exactly what it held here before the reordering — the caller's prefix and the parked
-      // token — so this exit *is* the one 0.8.0 shipped: nothing to rotate, and no CACHE_COPY
+      // token — so this exit *is* the one 0.7.3 shipped: nothing to rotate, and no CACHE_COPY
       // hazard, because a copy with nothing behind it can shorten the window but cannot hole
       // it (the same reason the two arms above are unchecked).
       //

@@ -198,7 +198,6 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
 
   /// Returns the number of additional tokens that can be cached.
   ///
-  /// For unbounded caches (like `Vec`), this might return a large number.
   /// For fixed-size caches, this returns the number of free slots.
   /// For black hole caches, this always returns 0.
   fn remaining(&self) -> usize;
