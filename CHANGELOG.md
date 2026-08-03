@@ -896,6 +896,49 @@ concrete public struct with no bound to reject anybody.
    round: `Emitter::commit_token` reaches no value a caller reads back off the input, so a skip
    that consumed a **parked** token and told nobody had, until now, nothing watching it.
 
+14. **The same wrong-machine wall-clock bound was still sitting in `pratt_limit_unit_sink`, and it
+   took the `miri-tb-x86_64-unknown-linux-gnu` leg red on `main` — 57 minutes in.** The entry
+   further up this section corrected `pratt_limit`'s deep-stack bound and did not sweep for
+   siblings. There was one: `bounded`, the wall every cell in `pratt_limit_unit_sink` runs under,
+   with 60 seconds hard-coded at all thirty-one call sites. On a compiled build 60 seconds is
+   enormous — this file's slowest cell, the section 3 unwind cell, runs in 9.8–10.4 ms and no
+   other cell reaches a millisecond — and under interpretation it is a coin flip. Measured with
+   the exact command and `-tb` flags `ci/miri_tb.sh` runs, timing the interval `bounded` itself
+   bounds:
+
+   | | native | Miri, aarch64-apple-darwin | slowdown |
+   |---|---|---|---|
+   | the unwind cell, alone | 9.8 ms | 49.72s / 48.61s | about ×4,800 |
+   | the unwind cell, in a whole-file run | 10.4 ms | 49.32s | about ×4,800 |
+   | all sixteen cells | 10 ms | 58.02s | — |
+
+   So the cell is essentially the whole file, which is why CI reported `15 passed; 1 failed`
+   rather than general slowness. The bound is now 500 seconds under Miri and 60 natively,
+   unchanged. 500 is ×10 over the slowest reading, the same multiple the deep-stack bound chose,
+   and this time the cross-host gap has a measured floor rather than an argument: the same cell
+   that reads 49.7s here tripped a 60s wall on the shared `x86_64-unknown-linux-gnu` runner, so
+   that runner is at least ×1.21 slower on an interpreted workload of this shape. A tripped
+   deadline reports "over the budget" and never by how much, so ×1.21 is a floor; ×10 leaves room
+   over it and over a pessimistic ×3 draw on a noisy runner alike. It is deliberately not larger,
+   because a budget is also a bill the job pays if a termination regression ever lands: sixteen
+   cells at 500 seconds is 2h13, inside the job timeout, where an hour a cell would be a way of
+   never finding out.
+
+   **The two bounds are now one bound.** Both suites' helpers were the same function modulo a
+   stack size and a number, and keeping them separate is what let the first fix miss the second
+   site. They now both call `common::bounded_wait`, whose allowance is a `WallClock` — a pair of
+   figures, one per build kind, both required. A third suite that needs a wall cannot spell one
+   without saying what an interpreted build is allowed, which is the property that was missing,
+   and `bounded_wait` refuses a pair whose interpreted figure is below its native one, because
+   interpretation is not the faster of the two and such a pair is transposed rather than measured.
+   Each call site keeps its own measured number and its own reasoning; only the mechanism is
+   shared.
+
+   The deep-stack bound's 700 seconds was re-read under Miri with the refactor in place and is
+   unchanged — its own doc records the cross-check. No library behaviour changes, and the native
+   path is untouched: every cell here finishes in single-digit milliseconds, nowhere near either
+   figure. — *(#148, verification debt)*
+
 ## 0.8.0 (2026-07-31)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.

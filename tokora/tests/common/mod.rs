@@ -454,3 +454,91 @@ use tokora::parser::PrattPower;
 pub struct Power(pub i32);
 
 impl PrattPower for Power {}
+
+// ── The wall-clock wall ───────────────────────────────────────────────────────
+//
+// The one bounded wait in this test tree, and the reason it is only one.
+//
+// A termination defect does not fail an assertion — it hangs, or spins — so the suites that pin
+// termination put a hard wall-clock bound outside the code under test. Two of them do:
+// `pratt_limit`'s `on_a_deep_stack` and `pratt_limit_unit_sink`'s `bounded`. Both used to spell
+// that wall themselves, and both were wrong in the same way: the number of seconds was calibrated
+// on a compiled build and then inherited, unmeasured, by an interpreted one. #148 corrected the
+// first and did not sweep for the second, so the second went red on `main` on its own three
+// commits later.
+//
+// So the wall lives here now, once, and its allowance is a [`WallClock`] — a pair, not a number.
+// A third suite that needs a bound reaches for `bounded_wait`, and `bounded_wait` cannot be
+// called without saying what an interpreted build is allowed. That is the whole guard: the
+// mistake is not caught after the fact, it is unspellable.
+
+/// A wall-clock allowance for [`bounded_wait`], stated once per **build kind**.
+///
+/// Both figures are required, and the requirement is the point. A termination bound is not a
+/// property of the parser; it is a property of the parser *and the machine running it*, and an
+/// interpreted build is a different machine — this tree measures between two and four orders of
+/// magnitude slower under Miri depending on the shape, because `-Zmiri-tree-borrows` revalidates
+/// a growing borrow tree on every access rather than charging a flat per-step cost. One number is
+/// therefore a number calibrated for whichever build its author happened to run, with the other
+/// build silently inheriting a deadline nobody measured.
+///
+/// Measure the interpreted figure; do not scale the native one by a guess. Both call sites record
+/// their readings, the command that produced them, and the margin they chose over them.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct WallClock {
+  /// Seconds allowed when the test binary is compiled and executed directly.
+  pub native_secs: u64,
+  /// Seconds allowed when the test binary is **interpreted** — today, Miri.
+  pub interpreted_secs: u64,
+}
+
+/// Runs `f` on a fresh worker thread with `stack_bytes` of stack and a hard wall-clock bound,
+/// returning what `f` returned or panicking if the bound is reached first.
+///
+/// Two jobs, and both matter to the callers:
+///
+/// * the **bound**, which has to sit outside the code under test — a parse that never terminates
+///   is not a failing assertion, it is a hung process, and the only place that can be observed is
+///   a thread that is not the one stuck;
+/// * the **fresh worker**, which gives the body its own stack (deep-recursion cells need far more
+///   than the harness's 2 MiB) and its own thread-locals (cells that observe through a
+///   `thread_local!` must not read each other's marks under the harness's parallel runner).
+///
+/// Which half of `budget` applies is decided here, once, from `cfg!(miri)`.
+#[allow(dead_code)]
+pub fn bounded_wait<T: Send + 'static>(
+  stack_bytes: usize,
+  budget: WallClock,
+  f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+  // Not a measurement question — an ordering one. Interpretation is slower than compilation, so
+  // an interpreted allowance below the native one is a transposed pair or a scaling applied the
+  // wrong way, and either would reintroduce exactly the failure this helper exists to end.
+  assert!(
+    budget.interpreted_secs >= budget.native_secs,
+    "the interpreted allowance ({}s) is below the native one ({}s); an interpreted build is \
+     never the faster of the two, so this pair is transposed rather than measured",
+    budget.interpreted_secs,
+    budget.native_secs
+  );
+  let secs = if cfg!(miri) {
+    budget.interpreted_secs
+  } else {
+    budget.native_secs
+  };
+  let (tx, rx) = std::sync::mpsc::channel();
+  let handle = std::thread::Builder::new()
+    .stack_size(stack_bytes)
+    .spawn(move || {
+      let _ = tx.send(f());
+    })
+    .expect("spawn the bounded worker");
+  match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+    Ok(v) => {
+      handle.join().expect("the bounded worker panicked");
+      v
+    }
+    Err(e) => panic!("the parse did not terminate within {secs}s: {e:?}"),
+  }
+}
