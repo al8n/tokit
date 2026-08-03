@@ -165,6 +165,18 @@ harness = false
 required-features = ["logos", "std"]
 
 [[bench]]
+name = "pratt_typed"
+path = "benches/pratt_typed.rs"
+harness = false
+# The TYPED pratt driver (`Pratt::parse_input`), which `parser_combinators`'s `pratt_expr` does
+# not reach — that one drives the token-level `InputRef::pratt`. Kept out of
+# `parser_combinators.rs` for three reasons, all of them in the file's own header: it needs a
+# lexer with a non-trivial `L::State` (a different `logos` `extras`, so a different token enum),
+# it deliberately leaves criterion's measurement knobs live where that file pins them in code,
+# and a new file leaves the existing group's ids and baselines untouched.
+required-features = ["logos", "std"]
+
+[[bench]]
 name = "cst"
 path = "benches/cst.rs"
 harness = false
