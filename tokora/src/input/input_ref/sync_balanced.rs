@@ -221,7 +221,7 @@ where
   /// A panic out of the predicate, the classifier, the lexer or the emitter **anywhere but the
   /// end-of-input settle** is an exit too, and it settles with **this method's own posture** —
   /// which is neither of the other two's, because this is the method where the family's two axes
-  /// cross. It stops *before* the sync token and commits the skipped prefix, exactly as
+  /// cross. It stops *before* the stopping token and commits the skipped prefix, exactly as
   /// [`sync_to`](Self::sync_to) does; it rewinds the full pre-call state at a no-match end of
   /// input, exactly as [`sync_through`](Self::sync_through) does. So the disposition of an unwind
   /// belongs to the **exit**, not to the method, and branching on the method alone is a defect this
