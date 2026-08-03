@@ -1624,7 +1624,7 @@ mod gate_census {
 }
 
 #[cfg(test)]
-mod end_state_census {
+pub(super) mod end_state_census {
   //! END_STATE_CENSUS and its companions — the accounting laws of the repetition drivers,
   //! locked by count.
   //!
@@ -1637,9 +1637,10 @@ mod end_state_census {
   /// Counts occurrences of `needle` on lines that are not whole-line comments, so prose
   /// mentions of a counted name do not skew a tally.
   ///
-  /// Shared with [`gate_census`](super::gate_census), whose baseline tallies need the same
-  /// comment-blindness for the same reason.
-  pub(super) fn code_matches(src: &str, needle: &str) -> usize {
+  /// Shared with [`gate_census`](super::gate_census) and with
+  /// [`parser::recovery_gate`](crate::parser::recovery_gate)'s `RECOVERY_GATE_CENSUS`, whose
+  /// baseline tallies need the same comment-blindness for the same reason.
+  pub(crate) fn code_matches(src: &str, needle: &str) -> usize {
     src
       .lines()
       .filter(|line| !line.trim_start().starts_with("//"))
@@ -1653,7 +1654,7 @@ mod end_state_census {
   /// The positional twin of [`code_matches`], and comment-blind for the same reason: a region scan
   /// anchored on a needle a doc comment also spells would measure the wrong region, which is a
   /// quieter failure than measuring nothing.
-  pub(super) fn code_find(src: &str, needle: &str) -> Option<usize> {
+  pub(crate) fn code_find(src: &str, needle: &str) -> Option<usize> {
     let mut at = 0;
     for line in src.split_inclusive('\n') {
       let hit = if line.trim_start().starts_with("//") {

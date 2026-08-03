@@ -939,6 +939,182 @@ concrete public struct with no bound to reject anybody.
    path is untouched: every cell here finishes in single-digit milliseconds, nowhere near either
    figure. — *(#148, verification debt)*
 
+16. **A scanner resource trip is now terminal for every emitter, not only for the ones that accept
+   its diagnostic — recovery re-raises it instead of retrying it.** Item 2 answered the *descent*
+   side of "terminality is a property of the event, and this crate enumerates carriers of it". This
+   is the *scanner* side of the same root cause, and it was reachable through every fail-fast
+   emitter.
+
+   One trip, one position, one committed leaf, two emitters, two verdicts. An **accepting** emitter
+   files the trip's diagnostic and the committed leaf
+   ([`next_or_stop`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.next_or_stop),
+   [`try_expect_or_stop`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html#method.try_expect_or_stop))
+   builds an
+   [`UnexpectedEot`](https://docs.rs/tokora/latest/tokora/error/struct.UnexpectedEot.html) through
+   `into_terminal`, so `is_terminal()` is `true` and recovery re-raises. A **rejecting** emitter
+   reports the same trip by returning `Err` from
+   [`emit_lexer_error`](https://docs.rs/tokora/latest/tokora/trait.Emitter.html#method.emit_lexer_error) —
+   which is not a refusal to report, it *is* the report — and the scanner propagates that value
+   straight out of its trip arm. It was built by `FromEmitterError::from_lexer_error` from the
+   lexer's own `Token::Error`; no `UnexpectedEnd` exists on that path, so nothing calls
+   `into_terminal` and `is_terminal()` is `false`. Recovery then **ran**: measured through
+   [`recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.recover) under
+   [`Fatal`](https://docs.rs/tokora/latest/tokora/emitter/struct.Fatal.html), the recoverer
+   re-entered the scanner and re-tripped the same limit — scan count 3 → 4 — and returned `Ok`,
+   turning a spent resource budget into a successful parse. All four recovery attempts were
+   affected: `recover`,
+   [`inplace_recover`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.inplace_recover),
+   and both of
+   [`skip_then_retry`](https://docs.rs/tokora/latest/tokora/trait.ParseInput.html#method.skip_then_retry)'s
+   attempts.
+
+   **The witness already existed and those four sites were the only guarded ones not reading it.**
+   The input's poison boundary is the scanner's own record of the trip, and `parser::many`'s twelve
+   collection drivers consult it at every absence exit through `latch_snapshot` /
+   `latched_during_attempt`. The four recovery sites consulted it zero times. They now read it,
+   beside `MaybeTerminal::is_terminal` and the session trip counter — five witnesses, in the five
+   places the two never-recoverable conditions are stored.
+
+   **The scanner's witness is a monotone COUNTER, not the boundary that trip latched, and that is
+   the whole of the fix.** The boundary is a *lineage memo*: a `Checkpoint` carries it and a restore
+   copies it back verbatim. Any comparison of it across a rollback therefore reads a restored value
+   against what it was restored to, and moving the comparison closes exactly one level at a time:
+
+   - read **after** the attempt, it compares the latch `try_attempt`'s `Err` arm just restored
+     against the value it restored it to — always equal, always `false`. Measured: with the read
+     there, only the non-backtracking `inplace_recover` cell passed and all three speculating ones
+     still failed with the scanner re-entered after the trip.
+   - read **inside** the attempt, that level is closed and the level below opens. Grammar code may
+     catch a scanner stop inside an *inner* `attempt` of its own and decline it; the inner rollback
+     restores the boundary before the outer gate ever looks, and the outer verdict reads clean over
+     a stop that is live, already diagnosed, and re-trips on the next scan of the same prefix.
+     Measured the same way: the recoverer ran and the scan count moved 3 → 4.
+
+   Relocating the read a third time closes level two and opens level three. **A cell inside the
+   rollback set cannot witness an event across a rollback at any depth**, so the witness is a cell
+   no rollback reaches: a new `Input::scanner_trips`, monotone, never lowered, not carried by a
+   `Checkpoint` and not by the sync family's `ThroughEntry` either. It is the exact twin of the
+   descent counter item 2 added, for the other budget, and it is classified in the same place —
+   `input::lineage`'s CELL_CENSUS destructures `Input` exhaustively, so the field could not be added
+   without a row in the taxonomy table saying what a restore does to it. Its **one writer** is
+   `latch_if_limit_tripped`, the crate's sole terminal predicate: `classify` is its only caller and
+   both lexing drivers reach `classify`, so *every* scanner trip is counted, a lookahead's included
+   — and a lookahead that trips latches the boundary and still returns `Ok` with a short window,
+   which is precisely the trip a driver-level count in `scan_with`'s `Verdict::Trip` arm would have
+   missed. The bump runs before the diagnostic is offered to the emitter, so a rejecting emitter's
+   `Err` cannot carry the stop out past an uncounted trip.
+
+   The latch reading is **kept** beside it, and demoted rather than deleted: it answers "a different
+   stop is standing at the end of this attempt" where the counter answers "a stop happened inside
+   it", and every transition this crate can produce that moves the latch also moves the counter. It
+   costs one `Option<L::Offset>` clone on a path that already clones one, and removing a witness on
+   a subsumption argument is removing it on an argument rather than on a measurement. The witnesses
+   are still read **inside** the attempt, for that narrow term's sake, and the verdict rides out
+   beside the error.
+
+   **The guard is now one chokepoint rather than four copies, and the false justification that let
+   the copies drift is gone.** A new crate-internal `parser::recovery_gate` owns the whole judgement
+   — every per-attempt baseline and all five witnesses — and the combinators hand it their attempt
+   and match on a three-way outcome. Nothing about the law is spelled at a call site, which also
+   deletes a hoistable baseline: `skip_then_retry`'s retry-cycle `trip_snapshot()` had to stay
+   inside the retry loop (hoisted, the monotone session counter would refuse every retry after the
+   parse's first trip) and nothing checked that it did. There is no longer a baseline there to
+   hoist. The comment above the old `Recover` guard claimed the error's own answer "covers a
+   *scanner* stop, which the grammar's error type carries" — the first half of which is exactly this
+   defect; it is corrected rather than deleted, along with
+   [`MaybeTerminal`](https://docs.rs/tokora/latest/tokora/error/trait.MaybeTerminal.html)'s "the arm
+   is yours to answer for" clause, which is now true of a
+   [`PartialSession`](https://docs.rs/tokora/latest/tokora/input/struct.PartialSession.html)'s
+   terminal latch and no longer of the three recovery combinators.
+
+   **`skip_then_retry`'s recovery was not only its retries, and the rest of it ran outside the gate
+   entirely.** A gate that wraps the parse attempts constrains what happens *inside* one and says
+   nothing about recovery work that never enters one — and this combinator's actual recovering is
+   the **skip** to a sync point and the **advance** over a sync point that did not admit a parse.
+   Both are `Ok`-returning primitives that fold a terminal trip into the value they use for genuine
+   exhaustion: `sync_balanced` answers `Ok(None)` whether it found no sync point or the scanner
+   tripped mid-skip, and `next` answers `Ok(None)` whether the input ended or the scan tripped. So a
+   spent scanner budget read as *"nothing left to skip to"* and the combinator surfaced its ordinary
+   trigger error for it — an error whose `is_terminal()` is `false`, which a `PartialSession`'s
+   terminal latch reads and nothing else corrects. Through a **rejecting** emitter this never showed,
+   because the rejection propagates as an `Err` out of the skip itself; through an **accepting** one
+   the diagnostic is filed and the `Ok` comes back looking exactly like end of input.
+
+   Both phases now go through `recovery_gate::recovery_step`, which samples the three input-side
+   witnesses across the operation — it reads three rather than five because the other two
+   interrogate an error value and a step that returned `Ok` has none — and a stop inside either
+   surfaces the terminal-marked `UnexpectedEot` every other committed exit in this crate surfaces
+   for a trip an accepting emitter took. *"The scanner stopped"* and *"there was nowhere to sync
+   to"* are two different answers again, and only the second is recoverable.
+
+   **Unchanged:** an ordinary failure still recovers, in all four attempts, and a genuine sync
+   exhaustion still surfaces the trigger error — the EOF reading is narrowed, not replaced, and a
+   cell pins each half of that pair. The verdict is attempt-relative against per-attempt baselines,
+   so a stop an *enclosing* lookahead caused before the attempt started is never charged to it.
+
+   **One source-breaking addition, and it is the only public-surface change.**
+   `ParseInput for SkipThenRetry` grows
+   `Error: From<UnexpectedEot<L::Offset, Lang>>`, because surfacing a terminal stop means
+   *constructing* one and that is the carrier this crate constructs. It is the same conversion
+   `next_or_stop`, `try_expect_or_stop`, the peek family and both pratt engines already require, and
+   one fifth of `FromTokenErrors`, so a grammar that can reach end of input at all already has it; a
+   grammar that cannot gets a compile error naming the missing `From`. There was no bound-free
+   alternative — `MaybeTerminal` is a *predicate*, with nothing to build from — and the alternative
+   of leaving the stop unmarked is the defect. Everything else is internal: `recovery_gate` is a
+   private module, `Input::scanner_trips` is a private field, and its two accessors are
+   `pub(crate)`.
+
+   **What it costs, stated exactly:** every witness is read on the failure path only, so a
+   successful attempt pays just its baselines — one `Option<L::Offset>` clone plus two `usize` loads
+   per attempt. For the two speculating combinators the clone is the same value the checkpoint they
+   save clones anyway; `inplace_recover`, which saves none, pays it new. The scanner counter's write
+   side is one `wrapping_add` on the trip arm of the terminal predicate, which is a path that has
+   already decided to stop.
+
+   **Narrowed on purpose, and this is the one behaviour change beyond the headline:** a scanner stop
+   latched *anywhere inside* the attempt now re-raises, including when the attempt then fails for an
+   ordinary reason short of the boundary — a wide lookahead that trips, followed by a syntax error.
+   That is the same rule `parser::many`'s absence exits already apply, and for the same reason: the
+   attempt's evidence was truncated by a stop, and recovering from it would re-lex the same prefix
+   and re-trip. It fails closed, and the whole existing suite is unaffected by it.
+
+   **What holds it, and what watched it fail.** A new behavioural suite,
+   `tokora/tests/recovery_terminal_stop.rs`, 13 cells. The trip cells are self-calibrating, so no
+   absolute scan tally has to be maintained: the primary parser records the scan count at the
+   instant its own scan tripped, and each cell requires the counter not to have moved since. Five
+   direct trip cells (all four attempts, plus the accepting-emitter control that proves the two
+   sinks now agree); two **nested-speculation** cells, in which the primary catches the trip inside
+   an inner `attempt` of its own, declines it, and then fails ordinarily — driven through both
+   `recover` and `inplace_recover`, because the two rollback postures are what would otherwise make
+   the defect look like a property of the *outer* attempt when the *inner* rollback is what defeats
+   the latch; two **phase** cells for a trip inside the skip and inside the advance; and four
+   scoping cells that go red if the gate starts refusing ordinary failures, one of them the genuine
+   sync exhaustion paired against the skip-phase trip.
+
+   `RECOVERY_GATE_CENSUS` covers the structure the suite cannot, and it was extended for the reason
+   its own shape made it miss the sync phase: it constrained what happens *inside* the chokepoint,
+   which is silent about recovery work that never enters one. It now names the **phases**, not just
+   the attempts — every step routes through `recovery_step`, each matches both outcomes, and no
+   combinator source reaches a recovery primitive on its own handle (`inp.sync_balanced(`,
+   `inp.next(` and three siblings pinned absent, which works off the convention that a combinator's
+   handle is `inp` and the chokepoint's closure parameter is `input`). The witness scan is now split
+   by subject: the two error-carried witnesses appear exactly once, in `judge`; the three
+   input-side ones exactly twice, once in each judging body, each ahead of the verdict that body
+   carries out.
+
+   Watched failing three times, each with the whole behaviour suite green: with the latch swapped
+   for the positional `at_committed_boundary` (a real regression a rollback over the latch defeats);
+   with `Recover`'s guard re-spelled by hand, correctly; and — the extension's own demonstration —
+   with the scanner counter deleted from `recovery_step`, where the behaviour suite stays 13-for-13
+   because the latch reading beside it answers the same way on every case anyone wrote, and the
+   census reds on the count. That is the shape the census exists for: a witness redundant on the
+   cases in the suite and load-bearing on the ones that are not.
+
+   Two frontiers are stated on it rather than left to be found. It reads two combinator sources plus
+   the chokepoint, so a recovery combinator added in a *new file* is not read until it is listed;
+   and the ungated-primitive check is a **list**, so a recovery phase built on a primitive nobody
+   added is a phase nothing reads.
+
 ### Added
 
 17. **`cast::token_any` and `cast::tokens` close the two gaps in the cast module's token

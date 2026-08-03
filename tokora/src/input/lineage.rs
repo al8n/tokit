@@ -126,6 +126,7 @@
 //! | `finality` (`is_final`) | `Input` (snapshot on `InputRef`) | **world fact** | **nothing** — and it cannot change while a handle lives |
 //! | `recursion` (the descent budget) | `Input` (borrowed through `InputRef`) | **control-stack fact** | **nothing** — a checkpoint does not carry it; the `Descent` guard's drop balances it with the frame it counts |
 //! | `resource_trips` (how many budget trips) | `Input` (borrowed through `InputRef`) | **monotone session fact** | **nothing** — it only counts up, and there is no writer that lowers it. A rollback rewinds *input progress*; it cannot un-exceed a budget, so restoring this cell would erase a stop that has already been decided. Sites that need a *per-attempt* answer snapshot it and compare rather than reading it absolutely |
+//! | `scanner_trips` (how many scanner trips) | `Input` (borrowed through `InputRef`) | **monotone session fact** | **nothing** — the same class and the same argument as the cell above, for the other budget. It is the row that makes the `poison_boundary` row *safe*: a trip's **position** is a lineage memo and comes back with a restore, so no comparison of that memo can witness a trip across a rollback — at one level or at ten. The *fact* of the trip is recorded here instead, where nothing reaches it, which is why the recovery gate judges a scanner stop on this and reads the boundary only as the narrower standing-stop reading |
 //! | `witness` (input identity) | `Input` | witness | nothing (identity is fixed for the input's life) |
 //! | `depth` (trace nesting) | `Input` | instrumentation | nothing (trace events are out of band) |
 
@@ -197,6 +198,15 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     //   lowering writer exists. Not in `Checkpoint`. The recovery combinators and the collection
     //   drivers read it as a per-attempt *difference*, never absolutely — see the field's doc.
     resource_trips: _,
+    // — MONOTONE SESSION FACT: restore does NOT touch it, and must not. Same class, same argument,
+    //   other budget. `poison_boundary` above records the same event as a lineage memo, and that
+    //   is the point of having both: the memo says WHERE the stream stops and has to come back
+    //   with a restore for the scanner to keep working; this says THAT a stop happened and must
+    //   not, because an event a rollback can erase is an event no gate outside that rollback can
+    //   see. Counted up by `latch_if_limit_tripped`; no lowering writer exists. Not in
+    //   `Checkpoint`, and not in `ThroughEntry` either — the sync family's own positional rewind
+    //   restores the boundary and deliberately leaves this alone.
+    scanner_trips: _,
     // — GROUND TRUTH, and the aggregate's anchor: the emission log itself, bound at construction
     //   and owned for the input's whole life. Restore truncates it to the saved mark — the same
     //   action as when it was borrowed per handle. What changed is that the two watermarks above
@@ -248,6 +258,9 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     // — MONOTONE SESSION FACT (borrowed): counted up by `raise_level`'s trip arm, never lowered
     //   and never restored. Same class as the `Input` field above it.
     resource_trips: _,
+    // — MONOTONE SESSION FACT (borrowed): counted up by `latch_if_limit_tripped`, never lowered
+    //   and never restored. Same class as the `Input` field above it.
+    scanner_trips: _,
     // — WORLD FACT, as a read-only `Copy` snapshot: no mutator, and the handle's borrow of the
     //   input locks out the seal, so it is CONSTANT for this handle's life.
     finality: _,

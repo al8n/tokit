@@ -54,7 +54,9 @@
 /// will", and neither may be spent as a recoverable failure.
 /// [`Recover`](crate::parser::Recover), [`InplaceRecover`](crate::parser::InplaceRecover), and
 /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) require this bound and re-raise, rather
-/// than recover, when `is_terminal()` holds.
+/// than recover, when `is_terminal()` holds — and on two input-side witnesses beside it, because a
+/// terminal *event* can reach them through a carrier nothing marked. See
+/// [Where the set stops being closed](MaybeTerminal#where-the-set-stops-being-closed).
 ///
 /// # Opting in
 ///
@@ -97,9 +99,29 @@
 /// [`UnexpectedEnd`](crate::error::UnexpectedEnd) is constructed on that path, so
 /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) never runs and **nothing marks it**.
 /// The same trip, at the same position, reaches you as a plain lexer error whose
-/// [`is_terminal`](Self::is_terminal) is whatever your own arm says — and if that arm says `false`,
-/// recovery spends it and the session's terminal latch never closes. This crate does not mark that
-/// path; the arm is yours to answer for, and the rule below is how.
+/// [`is_terminal`](Self::is_terminal) is whatever your own arm says. This crate still does not
+/// **mark** that path — there is no `UnexpectedEnd` on it to raise a flag on.
+///
+/// What it does now is not depend on the mark. The scanner's trip is **counted on the input
+/// session**, and [`Recover`](crate::parser::Recover),
+/// [`InplaceRecover`](crate::parser::InplaceRecover) and
+/// [`skip_then_retry`](crate::ParseInput::skip_then_retry) read that counter — attempt-relative,
+/// against a per-attempt snapshot — beside this trait, exactly as they read the session counter for
+/// a descent trip. So an unmarked scanner trip is **re-raised rather than spent** whatever your arm
+/// says, and the two emitters now agree: same trip, same verdict, accepting sink or rejecting one.
+/// Before that, a `false` arm here meant the recoverer ran, re-entered the scanner and re-tripped
+/// the same limit.
+///
+/// A **counter** and not the poison boundary that same trip latches, and the difference is not
+/// cosmetic: the boundary is inside the rollback set, so grammar code that catches the stop inside
+/// a speculation of its own has that rollback erase it before any enclosing gate looks. A count
+/// nothing lowers is what survives that, at any nesting depth.
+///
+/// The arm is still yours to answer for, and the rule below is still how — for two reasons that
+/// outlive the recovery combinators. A [`PartialSession`](crate::input::PartialSession)'s terminal
+/// latch reads *only* this trait, so a `false` arm still admits the next attempt over a spent
+/// budget; and your own code, and any caller that asks `is_terminal()` for itself, still gets the
+/// answer your arm gives.
 ///
 /// **Outside this crate — anything you wrap.** `MaybeTerminal` is unsealed and its default is
 /// `false`, so a downstream type may report itself terminal for a limit of its own: an error wrapped
@@ -123,7 +145,7 @@
 ///
 /// | Wrong arm | What it costs |
 /// |---|---|
-/// | `false` on a real terminal stop | [`Recover`](crate::parser::Recover), [`InplaceRecover`](crate::parser::InplaceRecover) and [`skip_then_retry`](crate::ParseInput::skip_then_retry) **spend** it: they synthesize a value and re-enter the parser, which re-trips the same limit. Under a [`PartialSession`](crate::input::PartialSession) the terminal latch misses it too, so the next attempt is admitted and re-lexes the same prefix. Nothing in this crate bounds either loop |
+/// | `false` on a real terminal stop | [`Recover`](crate::parser::Recover), [`InplaceRecover`](crate::parser::InplaceRecover) and [`skip_then_retry`](crate::ParseInput::skip_then_retry) **spend** it: they synthesize a value and re-enter the parser, which re-trips the same limit. Under a [`PartialSession`](crate::input::PartialSession) the terminal latch misses it too, so the next attempt is admitted and re-lexes the same prefix. Nothing in this crate bounds either loop. The three recovery combinators are covered for the **two limits this crate itself enforces** — a scanner trip through the input's poison latch, a descent trip through the session counter, neither of which your conversion can discard — so what a `false` arm still spends there is a limit of *your own*; the `PartialSession` latch has no such second witness and misses every one |
 /// | `true` on a recoverable failure | recovery re-raises what it could have repaired, so one diagnostic becomes a hard stop; under a `PartialSession` it also latches the session shut and later attempts are refused. Both fail **closed** — you lose recovery, loudly, and never spin |
 ///
 /// Malformed input is the one case where `false` is affirmatively right, and you can always
@@ -174,8 +196,9 @@
 ///       // Always, and spelled out: `SessionRefusal` has no `is_terminal` to delegate to.
 ///       MyError::Refused(_) => true,
 ///       // The arm no table names, decided by PROVENANCE: a scanner trip whose diagnostic the
-///       // emitter rejected lands here unmarked, so this arm is the only thing that can tell
-///       // recovery to re-raise it rather than spend it and re-trip the same limit.
+///       // emitter rejected lands here unmarked. Recovery no longer depends on this arm for one —
+///       // it reads the input's poison latch too — but a `PartialSession`'s terminal latch does,
+///       // and so does anything of yours that asks.
 ///       MyError::Lex(LexError::LimitTripped) => true,
 ///       MyError::Lex(LexError::BadChar) => false,
 ///       MyError::Other => false,

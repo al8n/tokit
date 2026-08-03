@@ -160,6 +160,15 @@ where
   /// no handle method exposes a mutable route to the cell, and the recursion cell it guards is
   /// read-only too.
   pub(super) resource_trips: &'closure mut usize,
+  /// The **scanner-trip counter**, borrowed from the owning [`Input`](super::Input) — see that
+  /// field for why a monotone counter, and not the rollbackable poison boundary beside it, is what
+  /// can witness a scanner stop across a nested speculation.
+  ///
+  /// Read through [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) and compared through
+  /// [`scanner_tripped_during_attempt`](Self::scanner_tripped_during_attempt); its only writer is
+  /// [`latch_if_limit_tripped`](Self::latch_if_limit_tripped), the crate's terminal predicate, and
+  /// no handle method exposes a mutable route to the cell.
+  pub(super) scanner_trips: &'closure mut usize,
   /// The **session cell**: the input's lineage memos (the live-checkpoint stack, the pin set, and
   /// the cache-push/checkpoint-id/savepoint counters), the handle's **emitter borrow** (the
   /// ground-truth emission log, reached through [`emitter`](Self::emitter)), and the live
@@ -905,6 +914,51 @@ where
     self.poison_boundary.is_some() && *self.poison_boundary != *since
   }
 
+  /// Snapshots the session's **scanner-trip counter** — how many times the scanner has tripped a
+  /// lexer resource limit in this input session — for a rollback-proof terminality witness.
+  ///
+  /// The scanner twin of [`trip_snapshot`](Self::trip_snapshot), used identically: take the
+  /// baseline once per attempt, hand it back to
+  /// [`scanner_tripped_during_attempt`](Self::scanner_tripped_during_attempt) when judging that
+  /// attempt.
+  ///
+  /// **This, and not [`latch_snapshot`](Self::latch_snapshot), is what a recovery gate judges a
+  /// scanner stop with.** The latch is a lineage memo: a [`Checkpoint`](crate::input::Checkpoint)
+  /// carries it and a restore copies it back, so comparing it across a rollback compares a restored
+  /// value against what it was restored to. Reading it inside the attempt fixes one level and the
+  /// level below reopens it — grammar code that catches a stop inside an inner
+  /// [`try_attempt`](Self::try_attempt) has that rollback erase the latch before an outer gate
+  /// looks. This counter is outside the rollback set entirely and is therefore depth-independent.
+  ///
+  /// Costs one `usize` load per attempt: no scan, no lookahead fill and no token commit reads it.
+  #[inline(always)]
+  pub(crate) const fn scanner_trip_snapshot(&self) -> usize {
+    *self.scanner_trips
+  }
+
+  /// Whether the **scanner tripped a resource limit during the attempt** that took `since` as its
+  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) baseline.
+  ///
+  /// The depth-proof input-side witness for scanner terminality, read by the recovery gate beside
+  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal) and
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt). It answers where the error value
+  /// cannot: a *rejecting* emitter reports a scanner trip by returning the value its
+  /// `From<<L::Token as Token>::Error>` builds, and nothing on that path constructs an
+  /// [`UnexpectedEnd`](crate::error::UnexpectedEnd) for
+  /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) to mark.
+  ///
+  /// **Attempt-relative, not session-absolute**, and a **count** rather than a flag — the same two
+  /// disciplines [`tripped_during_attempt`](Self::tripped_during_attempt) documents at length, for
+  /// the same two reasons. Its granularity floor is the same as well: this witnesses that *a* trip
+  /// happened while the attempt ran, not that the `Err` in hand *is* that trip, so a unit that
+  /// catches a trip and then fails ordinarily is re-raised. It fails closed, never open.
+  ///
+  /// Costs one `usize` load and a comparison, on the failure arm only.
+  #[inline(always)]
+  pub(crate) const fn scanner_tripped_during_attempt(&self, since: usize) -> bool {
+    *self.scanner_trips != since
+  }
+
   /// Lexes the next token unless doing so would cross the poison boundary.
   ///
   /// Once the position the next token would be lexed at (`lex_at`, threaded by the
@@ -953,9 +1007,35 @@ where
   /// the law: a tripped limit is terminal, so it may never be withheld as an
   /// [`Incomplete`](crate::error::Incomplete) merely because the tripping token landed on a chunk
   /// boundary.
+  ///
+  /// # The one writer of the scanner-trip counter
+  ///
+  /// It is also where [`Input::scanner_trips`](super::Input) is counted up, and being the sole
+  /// terminal probe is exactly why the count lives here rather than in a driver's `Verdict::Trip`
+  /// arm. [`classify`](Self::classify) is reached by **both** lexing drivers — the scanner
+  /// ([`scan_with`](Self::scan_with)) and the peek fill — so counting here makes "every scanner
+  /// trip is counted" a property of the module. Counting in `scan_with`'s trip arm instead would
+  /// miss every trip a **lookahead** takes, and a lookahead that trips latches the boundary and
+  /// still returns `Ok` with a short window, so those are precisely the trips an attempt can be
+  /// judged over.
+  ///
+  /// The bump runs **before** the boundary write and before the caller offers the diagnostic to
+  /// the emitter — the same ordering [`raise_level`](Self::raise_level) uses for the descent
+  /// counter, and for the same reason: a rejecting emitter reports the trip by *returning* `Err`,
+  /// so a count taken after the emit would be skipped by the very path the counter exists for.
+  /// `wrapping_add`, again for the sibling's reason: the reading is an inequality against a
+  /// per-attempt baseline, and wrapping is the one overflow behaviour under which consecutive
+  /// values always differ.
   #[inline(always)]
   fn latch_if_limit_tripped(&mut self, lexer: &L, boundary: L::Offset) -> bool {
     if lexer.check().is_err() {
+      // COUNT, then record where. The count is the fact ("a scanner budget was spent inside this
+      // attempt"); the boundary is the position, and it is a lineage memo a rollback puts back.
+      // Counting every detected trip — including one that does not lower an already-latched
+      // boundary — is deliberate: the reading is per attempt, and a second trip inside a later
+      // attempt must not compare equal to that attempt's baseline just because the position it
+      // latched is one an earlier trip had already reached.
+      *self.scanner_trips = self.scanner_trips.wrapping_add(1);
       // A trip can only maintain or increase poison: clamp to the more-poisoned
       // (smaller) of any existing frontier and this one. In practice a live scan
       // never reaches a trip past an already-latched boundary (it stops at the

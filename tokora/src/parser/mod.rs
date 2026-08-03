@@ -236,6 +236,7 @@ mod peek;
 mod pratt;
 mod punct;
 mod recover;
+mod recovery_gate;
 mod select;
 mod skip_then_retry;
 mod then;
