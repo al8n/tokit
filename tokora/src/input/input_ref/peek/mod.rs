@@ -1,71 +1,73 @@
-use core::mem::{ManuallyDrop, MaybeUninit};
-
-use generic_arraydeque::{ArrayLength, GenericArrayDeque, array::GenericArray};
+use generic_arraydeque::GenericArrayDeque;
 
 use super::*;
 
-/// Drop-safe staging buffer for peek tokens that overflow the cache window.
+/// CACHE_COPY's release half, raised **out of line**.
 ///
-/// A peek that looks past the cache capacity must hold the overflow tokens
-/// somewhere until the cache region is copied into the output buffer. Those
-/// tokens are **owned** (`Maybe::Owned`), so a raw `MaybeUninit` array would leak
-/// them if an early return (a fatal lexer error emitted mid-scan) skipped the
-/// hand-off. `Overflow` tracks how many entries are initialized and frees exactly
-/// those in its `Drop`, so no exit path — success, `Decline`, or fatal error —
-/// can leak a staged token or its state.
-struct Overflow<T, N: ArrayLength> {
-  slots: GenericArray<MaybeUninit<T>, N>,
-  len: usize,
+/// `#[cold]` and `#[inline(never)]` are load-bearing rather than decorative, and for a
+/// reason that is this module's whole subject: a formatted `panic!` needs a
+/// `core::fmt::Arguments` and its argument array built somewhere, and inlined into the fill
+/// that somewhere is the *fill's* frame — 96 bytes on aarch64, reserved on every call for a
+/// path that never runs. PEEK_FOOTPRINT is a frame-size law, so the panic's own storage
+/// belongs in the panic's own function. Measured: with this message inlined, a `U1` peek's
+/// release frame *grew* by those 96 bytes and swallowed the window this change was made to
+/// save.
+///
+/// Free-standing rather than an associated function for the same accounting: it names none
+/// of `InputRef`'s eight parameters, so the crate carries one copy of it instead of one per
+/// monomorphization.
+#[cold]
+#[inline(never)]
+fn cache_copy_count_violation(reserved: usize, copied: usize) -> ! {
+  panic!(
+    "`Cache` contract violation: the peek fill counted {reserved} resident entr(ies) from \
+     `Cache::len` and left `Cache::peek` room for all of them — and `Cache::peek` appended \
+     {copied}. `len` must be exactly the resident count and `peek` must append exactly \
+     `min(len(), the buffer's remaining capacity)`"
+  )
 }
 
-impl<T, N: ArrayLength> Overflow<T, N> {
-  #[inline(always)]
-  fn new() -> Self {
-    Self {
-      slots: GenericArray::uninit(),
-      len: 0,
-    }
-  }
-
-  // Only read by the debug-assertion accounting below; gate it to the same
-  // configuration so release builds do not see it as dead code.
-  #[cfg(debug_assertions)]
-  #[inline(always)]
-  fn len(&self) -> usize {
-    self.len
-  }
-
-  /// Stages one owned entry. Callers must not exceed `N` pushes (the overflow
-  /// region can never hold more than the window capacity).
-  #[inline(always)]
-  fn push(&mut self, value: T) {
-    self.slots[self.len].write(value);
-    self.len += 1;
-  }
-
-  /// Moves every staged entry into `buf`, in staging order, and disarms the
-  /// guard so its `Drop` will not touch the moved-out entries.
-  #[inline(always)]
-  fn drain_into(self, buf: &mut GenericArrayDeque<T, N>) {
-    // Wrap in `ManuallyDrop` up front: once entries are read out they must not be
-    // dropped again by the guard.
-    let this = ManuallyDrop::new(self);
-    for i in 0..this.len {
-      // SAFETY: `slots[0..len]` were initialized by `push`; each is read once.
-      buf.push_back(unsafe { this.slots[i].assume_init_read() });
-    }
-  }
+/// CACHE_COPY's endpoint half, raised **out of line**, for exactly the reason
+/// [`cache_copy_count_violation`] is.
+///
+/// This message is the longer of the two and takes two runtime arguments, so inlined it
+/// reserves its `core::fmt::Arguments` and argument array in the *fill's* frame — the 96-byte
+/// aarch64 cost measured on the count message, on a path that never runs. Free-standing and
+/// non-generic for the same accounting: one copy in the crate rather than one per
+/// monomorphization. It is also what keeps the release-active witness at its call site down to
+/// the compares themselves plus a never-taken branch to here.
+#[cold]
+#[inline(never)]
+fn cache_copy_endpoint_violation(copied: usize, staged: usize) -> ! {
+  panic!(
+    "`Cache` contract violation: `Cache::peek` did not copy the cache's whole resident run. \
+     The {copied} entr(ies) it appended do not span the cache from `front` to `back`, and \
+     {staged} staged token(s) are about to be rotated in behind them — so the window would \
+     report a token at a position the next consume will not serve. That is what an inexact \
+     `Cache::len` does to this copy: the fill reserves the room from `len` before it stages \
+     anything, so a `len` below the resident count clips the copy mid-run"
+  )
 }
 
-impl<T, N: ArrayLength> Drop for Overflow<T, N> {
-  #[inline(always)]
-  fn drop(&mut self) {
-    for slot in self.slots.iter_mut().take(self.len) {
-      // SAFETY: `slots[0..len]` were initialized by `push` and not moved out
-      // (`drain_into` disarms via `ManuallyDrop`), so each is dropped once.
-      unsafe { slot.assume_init_drop() };
-    }
-  }
+/// Stages one overflow token at the tail of the window, out of line.
+///
+/// `#[inline(never)]` for the same reason [`cache_copy_count_violation`] is: this arm runs
+/// only where the cache has refused a token, and a ring push's head/len arithmetic and
+/// capacity branch inlined into the fill loop shape the register allocation of the arm that
+/// runs on every ordinary fill.
+#[inline(never)]
+fn stage_overflow<T, N: generic_arraydeque::ArrayLength>(
+  buf: &mut GenericArrayDeque<T, N>,
+  value: T,
+) {
+  // The fill's accounting proves the push is always accepted (see PEEK_FOOTPRINT); assert the
+  // room in debug builds so a future change to it cannot silently drop a token. The predicate
+  // is the window's own two numbers, not the cache's.
+  debug_assert!(
+    buf.len() < buf.capacity(),
+    "peek staged an overflow token past the window capacity"
+  );
+  buf.push_back(value);
 }
 
 impl<'inp, L, Ctx, Lang: ?Sized, Cmpl> InputRef<'inp, '_, L, Ctx, Lang, Cmpl>
@@ -115,6 +117,47 @@ where
   /// limit trip during the fill emits its diagnostic and latches the poison boundary before the
   /// holdback is consulted, so a peek can no more hide a tripped limit than a consume can. See
   /// [terminal beats incomplete](crate::input#terminal-beats-incomplete-and-they-never-substitute).
+  ///
+  /// # Stack footprint: one window, cache hit or miss
+  ///
+  /// The window this returns is the **only** `W::CAPACITY`-sized owned token storage a peek
+  /// reserves, and its worst case is the whole array live at once:
+  ///
+  /// ```text
+  /// W::CAPACITY × size_of::<Maybe<CachedToken<&Token, &State, &Span>,
+  ///                              CachedToken<Token, State, Span>>>()
+  /// ```
+  ///
+  /// which for every realistic type is `W::CAPACITY × (size_of::<Token>() + size_of::<State>() +
+  /// size_of::<Span>())` plus per-entry padding and a discriminant. A **cache miss costs no
+  /// second window**: tokens lexed past the cache are staged in this same buffer and rotated
+  /// into place, so the miss path reserves exactly what the hit path does. (Through 0.8.0 the
+  /// miss path staged them in a separate `W::CAPACITY`-slot array, doubling the figure above.)
+  ///
+  /// Everything else in the frame is **O(1) in the window width**: single-entry temporaries (one
+  /// [`CachedToken`](crate::cache::CachedToken) in flight to the cache, the deque's own push and
+  /// rotate temporaries), one clone of the lexer — `size_of::<L>()`, which contains `State` — and
+  /// a small fixed part. Nothing here is heap-allocated, and nothing scales with the input.
+  ///
+  /// `Token` and `State` are unconstrained in size, so the bound is linear in both and in the
+  /// window width — with a coefficient of **one**, not two. A grammar carrying a large token
+  /// payload or a large lexer state pays `W::CAPACITY` times it for the width it asks for:
+  /// prefer the narrowest window that decides the production, and
+  /// [`peek_kind`](Self::peek_kind) or [`head_satisfies`](Self::head_satisfies) — which run at
+  /// `U1` — for a head test.
+  ///
+  /// # Panics
+  ///
+  /// On a [`Cache`](crate::cache::Cache) that breaks its own contract, and only then, on the
+  /// fill path that reaches the lexer. The fill reserves the window's cache region from
+  /// [`Cache::len`](crate::cache::Cache::len) *before* it stages anything past it, so a `len`
+  /// that is not the resident count mis-sizes the room
+  /// [`Cache::peek`](crate::cache::Cache::peek) is then given. The exit that hands such a window
+  /// back checks the copy that landed in it — against the room the fill left, and against the
+  /// cache's own `front` and `back`, which an inexact `len` cannot move — and panics rather than
+  /// return a window that is wrong about the stream. **Both checks run in release**, because the
+  /// window a broken `len` produces there is not a short one but a hole. Every cache this crate
+  /// ships conforms, and the cache conformance kit checks a downstream one.
   #[inline]
   pub fn peek<'p, W>(
     &'p mut self,
@@ -126,6 +169,9 @@ where
   }
 
   /// Peeks tokens to fill the provided buffer and returns the emitter.
+  ///
+  /// Reserves the same one owned window as [`peek`](Self::peek), cache hit or miss, and panics
+  /// on the same broken-`Cache` condition — see its stack-footprint and panics sections.
   #[inline]
   pub fn peek_with_emitter<'p, W>(
     &'p mut self,
@@ -156,6 +202,10 @@ where
   ///
   /// Callers must consult the flag **immediately**, before any fallible or emitting call (`decide`,
   /// element handlers, close probes): an ordinary error raised in between preempts the terminal stop.
+  ///
+  /// Rides the same fill as [`peek`](Self::peek) — the terminal flag is an extra out-parameter on
+  /// it, not a second code path — so it reserves the same one owned window, cache hit or miss, and
+  /// panics on the same broken-`Cache` condition. See its stack-footprint and panics sections.
   #[inline]
   pub fn peek_with_emitter_terminal<'p, W>(
     &'p mut self,
@@ -180,7 +230,6 @@ where
   /// end of input or a partial-input frontier — see
   /// [`peek_with_emitter_terminal`](Self::peek_with_emitter_terminal).
   #[inline]
-  #[allow(unused_assignments)]
   fn peek_with_emitter_inner<'p, W>(
     &'p mut self,
     buf: &mut Peeked<'p, 'inp, L, W>,
@@ -196,12 +245,8 @@ where
     // The parked front token is not a cache entry, but it IS the front of the stream, so it takes
     // a window slot and the fill must not re-lex it.
     let parked = usize::from(Self::can_park() && self.pending.is_some());
-    let mut in_cache = self.cache().len();
-    #[cfg(debug_assertions)]
-    let initial_in_cache = in_cache;
-    let mut want = remaining_cap.saturating_sub(parked + in_cache);
-    #[cfg(debug_assertions)]
-    let exp = want;
+    let in_cache = self.cache().len();
+    let want = remaining_cap.saturating_sub(parked + in_cache);
 
     // If enough tokens are already retained, just serve them
     if want == 0 {
@@ -235,8 +280,99 @@ where
       return Ok(self.session.emitter);
     }
 
-    // Drop-safe staging for tokens lexed past the cache window (see `Overflow`).
-    let mut overflowed = Overflow::<MaybeRefCachedTokenOf<'p, 'inp, L>, W::CAPACITY>::new();
+    // The flag comes back as a value rather than through the `&mut bool`: `peek_one` passes a
+    // `&mut false` it never reads, and with the fill out of line an out-parameter would force
+    // that temporary into memory and a pointer into the call. Returned, both writes to it are
+    // dead stores the inliner drops.
+    self
+      .peek_lex_fill::<W>(buf, buf_len, parked, in_cache, want)
+      .map(|(emitter, term)| {
+        *terminal = term;
+        emitter
+      })
+  }
+
+  /// PEEK_HOT_SPLIT — the half of the fill that reaches the lexer, kept **out of line**.
+  ///
+  /// The two arms above answer from tokens already at the front of the stream, and on a
+  /// grammar's decision points that is nearly always the answer: measured on a GraphQL parse,
+  /// 17,028 width-1 reads out of 17,029. This half is the other one.
+  ///
+  /// `#[inline(never)]` is a measurement, not a preference. Staging the overflow region in
+  /// `buf` puts the deque's push, truncate and rotate — and a `Cache::peek` whose room is now a
+  /// runtime value rather than a constant — into the same body as those two arms, and the
+  /// register allocation and block layout that follow are shared. Left in one function the
+  /// resident-head arm picked up about seven instructions on a thirty-instruction path it does
+  /// not use, and six peek-shaped bench ids paid **1.11×–1.31×** for a change that never
+  /// touched their code. Split out — with the overflow-free exit below taking its own tail and
+  /// the panic message built in [`cache_copy_count_violation`] — the same six read 0.80×–1.15×,
+  /// geometric mean 0.98×, and the two `heavy` ids come back 20% faster than the two-window
+  /// version they replace. The extra call is paid only where a lexer call is about to dwarf it.
+  /// (The cost is *not* the CACHE_COPY checks: with them removed entirely the same six ids
+  /// still read 1.11×–1.31×.)
+  ///
+  /// The receiver is `&'p mut self` — the *caller's own* borrow, not a fresh reborrow — because
+  /// the entries [`Cache::peek`](crate::cache::Cache::peek) appends borrow the cache for `'p`,
+  /// the window's element lifetime. The return type names `'p`, which is what forces the
+  /// reborrow to be that long.
+  ///
+  /// # Parameters
+  ///
+  /// The four quantities the caller already computed, so this body does not recompute them:
+  /// `buf_len` (the caller's own prefix, excluded from everything here), `parked`, `in_cache`
+  /// (the cache's reported resident count) and `want` (window slots left to fill, `> 0`).
+  #[inline(never)]
+  fn peek_lex_fill<'p, W>(
+    &'p mut self,
+    buf: &mut Peeked<'p, 'inp, L, W>,
+    buf_len: usize,
+    parked: usize,
+    in_cache: usize,
+    want: usize,
+  ) -> Result<(&'p mut Ctx::Emitter, bool), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    W: Window,
+  {
+    let mut terminal = false;
+    let mut in_cache = in_cache;
+    let mut want = want;
+    #[cfg(debug_assertions)]
+    let initial_in_cache = in_cache;
+    #[cfg(debug_assertions)]
+    let exp = want;
+
+    // PEEK_FOOTPRINT — WHY THE OVERFLOW REGION LIVES IN `buf`.
+    //
+    // The two halves of a window are produced in the opposite order from the one it must
+    // report: the cache region is copied out in one bulk read *after* the fill, while the
+    // tokens past the cache are lexed *during* it. That ordering — not a shortage of room —
+    // is what a staging area exists to solve. It is solved here by staging those tokens at
+    // `buf`'s own tail and, once the cache region has been copied in behind them, rotating
+    // them back to the end (see after the loop).
+    //
+    // Staging in `buf` rather than in a second `W::CAPACITY`-slot array is what holds the peek
+    // frame to ONE window-sized store: `Token` and `State` are unconstrained in size, so a
+    // second one doubles a peek's stack for a grammar that carries a large payload. It is also
+    // why this function needs no partial-initialization bookkeeping: `buf` owns each staged
+    // entry from the moment it is pushed, so every exit path — success, a withheld frontier, a
+    // trip, or a failing return from a fatal emit — frees it exactly once through the deque's
+    // own `Drop`.
+    //
+    // The copy is NOT reorderable ahead of the loop. `Cache::peek` takes `&'p self` and the
+    // entries it appends borrow the cache for `'p`, the whole of the fill; the loop's every
+    // step (`lex_within_boundary`, `classify`, `emit_lexer_error_deduped`, `cache_append`)
+    // takes `&mut self`, and `cache_append` genuinely mutates the cache it would be aliasing.
+    //
+    // The staged region always fits. With `cap = buf.capacity()`, the fill is entered only with
+    // `want = cap - buf_len - parked - in_cache` (the `saturating_sub` above returns early at
+    // zero), and every token the loop produces decrements `want` and lands in either the cache
+    // (`in_cache += 1`) or the staged region. So at every point
+    // `buf_len + staged + parked + in_cache <= cap`, and the per-push assertion below pins the
+    // same bound locally. Note what that accounting reserves: the cache region's room as much
+    // as the staged region's, sized from `Cache::len()` before a single token is staged. A
+    // `Cache` whose `len` is not its resident count therefore mis-sizes the copy that comes
+    // after the loop — see CACHE_COPY there for the checks that refuse to rotate on one.
+    let mut staged = 0usize;
     // Set when a limit trip latches the input mid-scan: the staged overflow
     // tokens then become unreachable and must be truncated away (see below).
     let mut tripped = false;
@@ -271,10 +407,17 @@ where
           Verdict::Withheld(_) => break,
           Verdict::Trip(err) => {
             // A limit trip is sticky, and `classify` has already latched the durable frontier — so
-            // this (possibly fatal) emit cannot lose it: the `?` returns with the latch recorded for
-            // every later operation, and `overflowed`'s `Drop` frees any staged tokens on the way
-            // out.
-            self.emit_lexer_error_deduped(err)?;
+            // this (possibly fatal) emit cannot lose it: the failing return below carries the latch
+            // into every later operation.
+            if let Err(err) = self.emit_lexer_error_deduped(err) {
+              // Unstage before propagating. Nothing but the staged tokens has been pushed yet, so
+              // `buf` holds exactly `buf_len + staged` entries and truncating to `buf_len` drops
+              // each staged token exactly once (the deque owns them) and hands the caller's buffer
+              // back byte-for-byte as it arrived — the same observable the discarded staging
+              // buffer used to produce.
+              buf.truncate(buf_len);
+              return Err(err);
+            }
             tripped = true;
             break;
           }
@@ -282,8 +425,12 @@ where
             // Emit immediately regardless of cache fullness so an error in the
             // overflow region is never silently dropped. The dedup mark keeps a
             // later consume that re-lexes this region from reporting it twice.
-            // `overflowed`'s `Drop` frees any staged tokens on this `?`-return.
-            self.emit_lexer_error_deduped(err)?;
+            if let Err(err) = self.emit_lexer_error_deduped(err) {
+              // Unstage before propagating; see the `Trip` arm for why `buf_len` is the exact
+              // pre-fill length here.
+              buf.truncate(buf_len);
+              return Err(err);
+            }
           }
           Verdict::Token(tok) => {
             let cached = CachedToken::new(tok, lexer.state().clone());
@@ -294,8 +441,9 @@ where
                 in_cache += 1;
               }
               Err(ct) => {
-                // Cache full: stage the overflow token drop-safely.
-                overflowed.push(Maybe::Owned(ct));
+                // Cache full: stage the overflow token at the tail of the output buffer.
+                stage_overflow::<_, W::CAPACITY>(buf, Maybe::Owned(ct));
+                staged += 1;
               }
             }
             want -= 1;
@@ -307,9 +455,25 @@ where
     }
     *at_slot = lex_at;
 
+    if tripped {
+      // The fill was cut short by a fresh trip: report it terminal so a decision-window
+      // combinator surfaces the stop instead of reading the short window as a decline.
+      terminal = true;
+      // Truncate the result at the durability boundary. A limit trip latched the
+      // input mid-overflow, so a post-peek `next()` will drain the cache-resident
+      // prefix (copied in just below) and then stop — it can never re-lex the
+      // staged overflow tokens. Handing them back would expose phantom lookahead
+      // the caller can never consume, so drop them here instead. Nothing but the
+      // staged tokens has been pushed yet, so `buf_len` is the exact pre-fill
+      // length and the truncation frees each staged token exactly once. This
+      // covers a trip on the first overflow token (nothing staged) and a trip
+      // after several are staged alike.
+      buf.truncate(buf_len);
+      staged = 0;
+    }
+
     // Fill the buffer from the front of the stream (this covers a parked token, the cached ones,
     // and any this fill just added)
-    // SAFETY: Cache.peek() returns slice of initialized tokens, guaranteed by trait contract
     // The parked token is the front of the stream, so it heads the window and the cache fills in
     // behind it. Safe unguarded because every caller of this fill passes a buffer with room for at
     // least one entry.
@@ -318,50 +482,209 @@ where
         buf.push_back(Maybe::Ref(parked.as_ref()));
       }
     }
-    self.cache.peek::<W>(buf);
     debug_assert!(
-      buf_len + parked + in_cache == buf.len(),
-      "Cache peek returned unexpected number of tokens"
+      buf.len() == buf_len + staged + parked,
+      "the fill pushed something it did not account for before the cache copy"
     );
 
-    if tripped {
-      // The fill was cut short by a fresh trip: report it terminal so a decision-window
-      // combinator surfaces the stop instead of reading the short window as a decline.
-      *terminal = true;
-      // Truncate the result at the durability boundary. A limit trip latched the
-      // input mid-overflow, so a post-peek `next()` will drain the cache-resident
-      // prefix (already copied into `buf` above) and then stop — it can never
-      // re-lex the staged overflow tokens. Handing them back would expose phantom
-      // lookahead the caller can never consume, so drop them here instead. The
-      // `Overflow` guard frees each staged token exactly once on this early
-      // return; the `drain_into` hand-off below is skipped, so there is no
-      // double-drop. This covers a trip on the first overflow token (nothing
-      // staged) and a trip after several are staged alike.
-      drop(overflowed);
-      return Ok(self.session.emitter);
+    if staged == 0 {
+      // PEEK_HOT_SPLIT — NOTHING OVERFLOWED, which is what a fill that fits the cache always
+      // looks like, and what a trip leaves behind after the truncation above. `buf` holds
+      // exactly what it held here before the reordering — the caller's prefix and the parked
+      // token — so this exit *is* the one 0.8.0 shipped: nothing to rotate, and no CACHE_COPY
+      // hazard, because a copy with nothing behind it can shorten the window but cannot hole
+      // it (the same reason the two arms above are unchecked).
+      //
+      // Its own arm rather than a fold into the general one, and the difference is not
+      // cosmetic: with `staged` a runtime value the room this copy is given stops being a
+      // constant, which is enough to cost the copy its specialization. Six peek-shaped bench
+      // ids — the dispatch family, which drains as it goes and so reaches this fill on every
+      // token — paid 1.11×–1.31× for exactly that, with the checks removed entirely.
+      self.cache.peek::<W>(buf);
+      #[cfg(debug_assertions)]
+      {
+        debug_assert!(
+          buf.len() == buf_len + parked + in_cache,
+          "buffer length mismatch after the cache copy"
+        );
+        if want == 0 {
+          debug_assert!(
+            exp == in_cache - initial_in_cache,
+            "expected peeked token count mismatch"
+          );
+        }
+      }
+      return Ok((self.session.emitter, terminal));
     }
 
-    #[cfg(debug_assertions)]
-    let yielded = overflowed.len();
-    // Move the staged overflow tokens into the output buffer; `drain_into`
-    // disarms the guard so nothing is double-dropped.
-    overflowed.drain_into(buf);
+    let cache_copy_at = buf.len();
+    self.cache.peek::<W>(buf);
+    Self::assert_cache_copy::<W>(self.cache, buf, cache_copy_at, in_cache, staged);
+
+    // Restore stream order. The staged tokens were appended *before* the front-of-stream
+    // region, so the region this fill owns currently reads `[staged…][parked?][cache…]` where
+    // the window must read `[parked?][cache…][staged…]`. One left-rotation by `staged` over
+    // that region (`buf_len..`) is exactly that permutation, and it permutes values inside the
+    // deque — nothing is copied out, so no entry can be leaked or dropped twice. Entries the
+    // caller passed in (`..buf_len`) are excluded, so a prefilled buffer keeps its order too.
+    buf.make_contiguous()[buf_len..].rotate_left(staged);
 
     #[cfg(debug_assertions)]
     {
       debug_assert!(
-        buf.len() == buf_len + parked + in_cache + yielded,
-        "buffer length mismatch after adding overflowed tokens"
+        buf.len() == buf_len + parked + in_cache + staged,
+        "buffer length mismatch after the cache copy and the staged region"
       );
       if want == 0 {
         debug_assert!(
-          exp == (in_cache - initial_in_cache) + yielded,
+          exp == (in_cache - initial_in_cache) + staged,
           "expected peeked token count mismatch"
         );
       }
     }
 
-    Ok(self.session.emitter)
+    Ok((self.session.emitter, terminal))
+  }
+
+  /// CACHE_COPY — the window invariant on the one exit that reorders, checked there and
+  /// nowhere else.
+  ///
+  /// # The invariant
+  ///
+  /// > A peek window is a **contiguous prefix of the token stream at the cursor**. On the fill
+  /// > exit the cache region is not the window's tail — the staged region is rotated in behind
+  /// > it — so that region must be the cache's **whole resident run**, `front` through `back`.
+  /// > A capacity clip is not licensed here and cannot happen on a conforming cache: by the
+  /// > fill's own arithmetic the room left for the copy is `in_cache + want_unspent`, which is
+  /// > never below `in_cache`.
+  ///
+  /// # Why a caller-facing check exists at all, and only here
+  ///
+  /// [`Cache::len`](crate::cache::Cache::len) is load-bearing on this path: the fill reserves the
+  /// window's cache region from it *before* it stages anything, spends the rest of the window on
+  /// tokens lexed past the cache, and only then calls [`Cache::peek`](crate::cache::Cache::peek)
+  /// into the room that is left. A `len` that is not the resident count mis-sizes that copy, and
+  /// the two directions fail differently:
+  ///
+  /// - an **under-report** clips the copy mid-run, and the rotation then closes the gap with
+  ///   staged tokens that belong *after* the residents the clip dropped — not a short window, a
+  ///   **HOLE**: the window reports a token at a position where the next consume serves a
+  ///   different one. This failure is **created by the reordering** and is the reason this
+  ///   function exists;
+  /// - an **over-report** makes the fill reserve slots for residents that are not there and lex
+  ///   too few tokens for them, so the window comes back **SHORT** while the input still has
+  ///   more. That one is not new — it is what an over-reporting cache did before the reordering
+  ///   too — but the count below sees it for free.
+  ///
+  /// The two early exits of the fill (the cache hit and the latched boundary) append nothing
+  /// behind the copy, so neither can hole and neither is checked: they behave exactly as they
+  /// did before the reordering, and adding a check there would put its cost on the width-1 head
+  /// read a grammar runs per token.
+  ///
+  /// # Why the guards are shaped the way they are
+  ///
+  /// Every quantity a check is *gated* on is one the **fill** computes — `at`, `copied`,
+  /// `staged` — never one the cache reports. `reserved` is a cache-derived value and appears
+  /// only on the *expected* side of a comparison, where a lie shows up as a mismatch; it never
+  /// decides whether a comparison runs. That is not a style preference, it is the correction of
+  /// a real defect: an earlier revision of this check gated the endpoint witness on
+  /// `reserved > 0`, and a cache under-reporting all the way to **zero** skipped the witness by
+  /// that precondition while passing the count trivially as `0 == 0` — blindest exactly where
+  /// the lie was largest. A precondition is an escape hatch unless it is itself verified.
+  ///
+  /// # The two halves, both in every build
+  ///
+  /// **THE COUNT** is a compare in every build. It catches the over-report direction outright,
+  /// and it catches every under-report except the one that lands exactly on the window's edge.
+  ///
+  /// **THE ENDPOINTS** — the resident run's own witness, read from `front`/`back` rather than
+  /// from `len`, so an inexact `len` cannot both cause the fault and hide it — is in every build
+  /// too. It has to be, because it is the ONLY check that can see the two cases the count cannot:
+  /// a clip whose `copied` happens to equal the reserved count, and an under-report all the way
+  /// to zero, which satisfies the count trivially as `0 == 0`. Both of those are the **hole**, and
+  /// a release build is where a downstream `Cache` runs.
+  ///
+  /// It was a `debug_assert!` for one release, on an instruction count that read the comparison —
+  /// two ring indexes, a `Maybe` discriminant, an `Option<&Span>` compare — at 67–70 instructions
+  /// retired per cache-miss fill. **That reasoning is retracted, and the retraction is measured.**
+  /// The instruction count was never the price: the six peek-shaped bench ids read **0.9987**
+  /// geometric mean with this witness release-active, every id inside 0.974×–1.009×, over ten
+  /// interleaved criterion rounds on aarch64-apple-darwin.
+  ///
+  /// What the promotion *did* cost, before `#[inline(never)]` below, was the same thing
+  /// PEEK_HOT_SPLIT found: the witness's code sitting in
+  /// [`peek_lex_fill`](Self::peek_lex_fill)'s body — past the
+  /// overflow-free `return`, never executed by it — moved `input/scan/peek1_then_next` by
+  /// **1.025×**, consistently and outside the noise. Out of line it reads **1.003×**. An
+  /// instruction count answers "what does this code cost where it runs"; the question that
+  /// decides a hot path is "what does its presence cost the arm that skips it", and only a
+  /// measurement answers that one.
+  ///
+  /// # Parameters
+  ///
+  /// - `at` — where the copy began: `buf.len()` immediately before `Cache::peek`.
+  /// - `reserved` — the resident count the fill believes the cache has: `Cache::len()` read
+  ///   before the fill, plus every token the fill then appended. Untrusted.
+  /// - `staged` — how many tokens are waiting to be rotated in behind the copy, and the whole
+  ///   reason this function is called: the fill reaches it only where `staged > 0`, because
+  ///   that is exactly where a clipped copy becomes a hole rather than a short tail. Reported
+  ///   in the message; not read as a gate, since the gate is the call site.
+  ///
+  /// # Panics
+  ///
+  /// On a `Cache` that breaks the contract above, in **every build**, on either half — the
+  /// posture [`InputRef::park`](super::InputRef) takes for a `RETAINS_FRONT` refusal and
+  /// [`Sink::cst_start`](crate::cst::Sink::cst_start) takes for a node kind. The violation is in
+  /// caller-supplied trait code, no caller can repair its own `Cache` mid-parse, and the
+  /// alternative to failing here is handing back a window that is wrong about the stream. A
+  /// recoverable error is not on offer and would not be right if it were: the peek surface
+  /// returns the *emitter's* error type, so a broken `Cache` would reach the grammar disguised
+  /// as a diagnostic about the input.
+  ///
+  /// `#[inline(never)]` is the measurement above, and both messages stay in their own `#[cold]`
+  /// free functions on top of it: this body is generic, so it is one copy per monomorphization,
+  /// while [`cache_copy_count_violation`] and [`cache_copy_endpoint_violation`] are one copy
+  /// crate-wide — and PEEK_FOOTPRINT is a frame-size law that a callee's frame counts against as
+  /// surely as the fill's own.
+  #[inline(never)]
+  fn assert_cache_copy<W>(
+    cache: &Ctx::Cache,
+    buf: &Peeked<'_, 'inp, L, W>,
+    at: usize,
+    reserved: usize,
+    staged: usize,
+  ) where
+    W: Window,
+  {
+    use crate::cache::PeekedTokenExt as _;
+
+    let copied = buf.len() - at;
+
+    // THE COUNT. The fill left the copy `reserved + want_unspent` slots of room and
+    // `Cache::peek`'s own law owes it `min(len(), room)` entries; with `len() == reserved` and
+    // `room >= reserved` that is `reserved` exactly, so anything else is the cache disagreeing
+    // with the count the fill sized the window from. One compare and a never-taken branch
+    // here; the message is built in [`cache_copy_count_violation`], which is where its frame
+    // belongs.
+    if copied != reserved {
+      cache_copy_count_violation(reserved, copied);
+    }
+
+    // THE ENDPOINTS. This function is reached only from the exit that rotates, which the fill
+    // takes only with `staged > 0` — the one configuration where a clipped copy holes the window
+    // rather than shortening it. An overflow-free fill (and a trip, which truncates the staged
+    // region away) returns before it, unchecked, exactly as the two resident-head arms do.
+    let front = cache.front_span().map(Span::start_ref);
+    let whole_run = if copied == 0 {
+      // Nothing came back. Sound only if there was nothing to bring.
+      front.is_none()
+    } else {
+      front == Some(buf[at].span().start_ref())
+        && cache.back_span().map(Span::end_ref) == Some(buf[buf.len() - 1].span().end_ref())
+    };
+    if !whole_run {
+      cache_copy_endpoint_violation(copied, staged);
+    }
   }
 
   /// Width-1 head observation in grammar vocabulary, terminal-aware by construction.

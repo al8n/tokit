@@ -229,6 +229,34 @@ The feature graph layers up from there:
 - **no feature** → `core` only. Core `str` / `[u8]` sources, the parser itself, and its
   stack-buffered lookahead machinery (peek windows of 1-32 tokens over a small inline
   cache) — no allocator in sight.
+
+  Stack-buffered means the lookahead is on **your** stack, so the bound is worth stating.
+  A `peek::<W>()` reserves **one** window and its worst case is the whole array live at
+  once:
+
+  ```text
+  W::CAPACITY × size_of::<Maybe<CachedToken<&Token, &State, &Span>,
+                                CachedToken<Token, State, Span>>>()
+  ```
+
+  which for every realistic type is `W::CAPACITY × (size_of::<Token>() + size_of::<State>() +
+  size_of::<Span>())` plus per-entry padding and a discriminant. `W::CAPACITY` is at most
+  **32** — `U32` is the widest window the crate offers — so that expression, evaluated at
+  32, is the maximum a single peek can cost. Everything else on the frame is O(1) in the
+  window width: single-entry temporaries, one clone of the lexer (`size_of::<L>()`, which
+  contains `State`), and a small fixed part.
+
+  The coefficient is **one**, not two, and that is recent: through 0.8.0 a peek that looked
+  past the cache staged the extra tokens in a *second* `W::CAPACITY`-slot array, so a cache
+  miss cost twice the figure above. At `U32` over a 1 KiB token beside a 1 KiB lexer state —
+  2,072 bytes an entry — that second array was 66,312 bytes of stack nobody asked for, and the
+  peek's owned storage was 132,632 bytes rather than 66,320. Those tokens are now staged in
+  the window the caller already owns.
+
+  `Token`, `State` and `Span` are yours and unconstrained in size, so this is the one place
+  an embedded target has to do the arithmetic itself: pick the narrowest window that decides
+  the production, and use `peek_kind` / `head_satisfies` — which run at `U1` — for a head
+  test. Nothing here is heap-allocated and nothing scales with the length of the input.
 - **`alloc`** → adds the allocator-backed pieces (growable containers, the session stack) while
   staying `no_std`.
 - **`std`** (default) → everything, plus it turns on the upstream backends' own default features.

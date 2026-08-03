@@ -168,6 +168,19 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// Returns the number of tokens currently stored in the cache.
   ///
   /// This count includes all cached tokens from front to back.
+  ///
+  /// # It must be **exact**, and the peek fill is why
+  ///
+  /// [`InputRef::peek`](crate::input::InputRef::peek) sizes the window's cache region from
+  /// this number *before* it lexes: it reserves one window slot per reported resident, spends
+  /// the rest of the window on tokens lexed past the cache, and only then calls
+  /// [`peek`](Cache::peek) into the room that is left. A `len` that is not the resident count
+  /// therefore mis-sizes that copy — under-report and it is clipped mid-run with the
+  /// later-lexed tokens closing the gap behind it, over-report and the window comes back short
+  /// while the input still has more. The fill checks the copy it gets and **panics** rather
+  /// than hand back a window that is wrong about the stream; see that method's `# Panics`.
+  ///
+  /// An upper bound, a capacity, or a count that lags a push is not a `len`.
   fn len(&self) -> usize;
 
   /// Returns the number of additional tokens that can be cached.
@@ -328,6 +341,12 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
   /// observable of the cache, and calling it twice on an unchanged cache appends the same
   /// sequence both times. A borrowed entry and an owned one denote the same token, so a caller
   /// cannot tell which a cache chose to hand back.
+  ///
+  /// Given room for `len()` entries this must therefore deliver the resident run **entire**,
+  /// [`front`](Cache::front) through [`back`](Cache::back). The one place a copy may stop short
+  /// of `back` is where the buffer's own capacity stopped it. The peek fill leaves exactly the
+  /// room [`len`](Cache::len) claimed and checks what comes back — see that method for the
+  /// consequences of the two directions a wrong `len` can take.
   ///
   /// # Parameters
   ///

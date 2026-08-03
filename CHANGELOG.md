@@ -1209,6 +1209,92 @@ concrete public struct with no bound to reject anybody.
    placement drops. Two new regressions pin the behaviour itself, one per gate, each watched failing
    first and each with a widened-limit control that differs in nothing but the scan budget.
 
+13. **A peek that reached the lexer reserved two token windows, not one.** The fill allocated the
+   public `Peeked<W>` deque the caller gets back, and then — on the cache-miss path — a second
+   `W::CAPACITY`-slot store of the same entry type, a `GenericArray<MaybeUninit<_>, W::CAPACITY>`
+   holding the tokens lexed past the cache until the cache region had been copied out. The window
+   bound caps the slot *count*, but `Token`, `State` and `Span` are unconstrained in size, so a
+   grammar with a large token payload or a large lexer state paid **twice** the window it asked
+   for on every peek that reached the lexer. For the crate's own oversized fixture — a 1 KiB token
+   beside a 1 KiB lexer state, 2,072 bytes an entry — that is 132,632 bytes at `U32` and 33,176 at
+   `U8`; those are now **66,320** and **16,592**. Nothing about the peek's result changes; this is
+   stack the caller was paying for and could not see. It matters most where the stack is smallest,
+   which is the `no_std` target the crate advertises.
+
+   The second store existed to solve an **ordering** problem, not a storage one. A window's two
+   halves are produced in the opposite order from the one it must report: the tokens past the
+   cache are lexed *during* the fill, while the cache region is copied out in one bulk read
+   *after* it, and `Cache::peek` only appends. That needs the staged region to end up *behind* the
+   cache region — not a second array. So it is staged at the tail of the window the caller already
+   owns and rotated back once the cache region is in. The rotation permutes values inside the
+   deque and copies none out, and the deque owns each staged entry from the moment it is pushed,
+   so every exit — success, a withheld frontier, a limit trip, a fatal emit — frees it exactly
+   once. `input/input_ref/` now contains no `unsafe` block at all; the two it had were the removed
+   array's partial-initialization bookkeeping.
+
+   Reordering the copy *ahead* of the loop would need no rotation and no check, and it is not
+   available: `Cache::peek` takes `&'p self` and the entries it appends borrow the cache for the
+   whole of the fill, while the loop's every step — `lex_within_boundary`, `classify`,
+   `emit_lexer_error_deduped`, `cache_append` — takes `&mut self`, and `cache_append` mutates the
+   very cache those entries borrow.
+
+   **The reordering creates one hazard, and it is checked.** `Cache::len` is now load-bearing: the
+   fill reserves the window's cache region from it *before* it stages anything, so a `len` that is
+   not the resident count mis-sizes the copy that follows. An under-report clips the copy mid-run
+   and the rotation then closes the gap with staged tokens that belong *after* the residents the
+   clip dropped — not a short window, a **hole**, at a position the next consume will not serve.
+   `Cache::len` and `Cache::peek` now say so where an implementor reads them, and the fill exit
+   that rotates checks the copy it got, in **every build**: a count identity, and — because an
+   inexact `len` can satisfy any count derived from it — the resident run's own `front`/`back`
+   endpoints, gated on the staged count, which is a number the fill computes rather than one the
+   cache reports. The endpoint witness is the release-critical half, not the optional one: it is
+   the only check that sees a clip landing exactly on the window's edge, or a `len` under-reporting
+   all the way to **zero**, which passes the count trivially as `0 == 0`. Both of those are the
+   hole. `InputRef::peek` grows a `# Panics` section. The two exits that answer from tokens already
+   at the front of the stream append nothing behind their copy, so they cannot hole, and they are
+   unchanged and unchecked.
+
+   **The hot read pays nothing for it, and that took measuring.** The half of the fill that
+   reaches the lexer is now `#[inline(never)]`: staging in the window puts a deque push, a
+   truncate, a rotation and a `Cache::peek` whose room is a runtime value into the same body as
+   the resident-head arm, and the register allocation and block layout that follow are shared.
+   Left in one function, six peek-shaped bench ids paid **1.11×–1.31×** for code they never run —
+   and the checks are not what they were paying: with both removed entirely the same six ids
+   still read 1.11×–1.31×. Split out, with the overflow-free fill taking its own exit and the
+   panic message built out of line, the same six read **0.80×–1.15×**: the two `heavy` ids — a
+   large lexer state, exactly the shape the second window cost the most — come back **20%
+   faster**, and the worst reading is `input/scan/peek1_then_next` at 1.15×, a drain that defeats
+   its own cache by construction so that every read is a fill. Geometric mean across the six,
+   0.98×. Nothing outside the peek family moves.
+
+   The same law decided where the release-active endpoint witness lives, and it cost one more
+   measurement to find out. Inlined into the fill it sits past the overflow-free `return`,
+   unreachable from the arm that takes it — and moved `peek1_then_next` by **1.025×** anyway,
+   consistently and outside the noise, for exactly the reason the split above exists. So
+   `assert_cache_copy` is `#[inline(never)]` too, and its second message joins the first in a
+   `#[cold]` free function. Out of line, the six ids read **0.9987** geometric mean against the
+   window fix alone, every one of them inside 0.974×–1.009×, over ten interleaved criterion
+   rounds. The 67–70-instruction figure that once argued for keeping the witness in debug builds
+   is withdrawn: it was the cost of running the check, and what a hot path actually pays is the
+   cost of *stepping over* it.
+
+   Coverage, since the previous overflow tests asserted only `len()`: seven cells pinning window
+   order across the cache/overflow boundary — the smallest overflow, a prefilled cache, a cache
+   that retains nothing, a parked front token, and the widest window over an oversized token and
+   state — which removing the rotation turns red along with the pre-existing
+   `token_accessor_reads_owned_arm`; a drop-counted cell for the *keeping* exit; a second phase on
+   the fatal-emit cell that reads the buffer back after the failing return; compile-time size
+   assertions over the oversized fixture; and a source census that refuses to let the fill body
+   name an array, a deque, a `MaybeUninit` or `unsafe` again. The two `should_panic` cells that
+   exercise the endpoint witness alone — the under-report by one, and the under-report to zero —
+   are ungated and run under `cargo test --release` as well, which is the build the witness was
+   promoted for; a `should_panic` whose panic compiles out passes by never running the code it
+   names. The drop-safety cells now count into a per-scenario `Rc<Ledger>` instead of `static
+   AtomicUsize`: they assert *live* deltas while their own window is still held, so under Rust's
+   default parallel test runner they were counting whatever else happened to be running —
+   `cargo test overflow_peek` failed 184 runs out of 200. —
+   *(#156)*
+
 ### Added
 
 17. **`cast::token_any` and `cast::tokens` close the two gaps in the cast module's token
