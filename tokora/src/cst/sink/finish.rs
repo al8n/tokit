@@ -49,9 +49,11 @@ use super::{
   Sink, TriviaPolicy,
 };
 
-/// Why a materialization was refused. Every variant names the offending **event index**
-/// (the buffer position of the event that broke the law), so the failure is diagnosable
-/// against the recorded stream without exposing the stream itself.
+/// Why a materialization was refused. Every variant that names a *law the recorded stream
+/// broke* names the offending **event index** (the buffer position of the event that broke
+/// it), so the failure is diagnosable against the recorded stream without exposing the stream
+/// itself. The few that describe the whole stream, its source, or a rewind the sink could not
+/// perform name what they can instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum FinishError {
@@ -252,6 +254,35 @@ pub enum FinishError {
     valid_up_to: u32,
   },
 
+  /// The sink was asked for a rewind it had no correct way to perform and could not report:
+  /// an **unpaired settle** (a truncating rewind to a mid-log mark no live row captured)
+  /// detected while a panic was already unwinding, where panicking would have aborted the
+  /// process. [`Sink::rewind`](crate::emitter::Emitter::rewind) panics on that condition in
+  /// every build; mid-unwind it degrades to a total no-op and latches this instead.
+  ///
+  /// The refusal is the point. The events above the mark are still in the log and the inner
+  /// emitter still holds their records, so the two channels do agree — with each other, and
+  /// with a rollback that never happened. A tree built from them would be a *plausible* tree
+  /// for a branch the parser abandoned, which is precisely the class of silent wrongness the
+  /// unconditional wall exists to remove; a host that catches the original panic and asks for
+  /// the tree anyway gets this error rather than that tree. Both doors refuse — this is
+  /// corruption, not the incompleteness [`finish_partial`](Sink::finish_partial) tolerates.
+  ///
+  /// The fix is always at the call site: some capture is being settled twice, or a mark is
+  /// being rewound to after it was released. See the `# Panics` section on
+  /// [`Emitter::rewind`](crate::emitter::Emitter::rewind)'s `Sink` implementation.
+  #[error(
+    "a rewind to mid-log mark {mark} of a {len}-event log was refused mid-unwind (no live row \
+     captured it, and reporting it would have aborted the process): the event log describes a \
+     rollback that never happened"
+  )]
+  UnpairedSettle {
+    /// The mark the refused rewind named.
+    mark: u64,
+    /// The event-log length at the refused rewind.
+    len: u64,
+  },
+
   /// A `FinishNode` names a different kind than the frame it would close — the leaked-finish
   /// shape, where the intended start was rolled back and the finish lands on an ancestor
   /// instead.
@@ -349,6 +380,12 @@ where
   /// half-built green state is dropped and a typed [`FinishError`] comes back instead;
   /// this method **never panics**.
   ///
+  /// One refusal precedes the walk rather than arising from it: a sink that had to degrade a
+  /// rewind it could not perform — an unpaired settle detected mid-unwind, where reporting it
+  /// would have aborted the process — refuses here
+  /// ([`FinishError::UnpairedSettle`]) instead of materializing a log that describes a
+  /// rollback that never happened.
+  ///
   /// # Abort semantics
   ///
   /// - An `Incomplete` parse (needs more input) should not be materialized: keep the sink
@@ -435,6 +472,13 @@ where
   /// the two ways an incomplete parse differs from a complete one; refusing them would defeat
   /// the door.
   ///
+  /// A **degraded rewind** ([`FinishError::UnpairedSettle`]) is refused through this door for
+  /// the same reason a malformed diagnostic span is: it is corruption, not incompleteness. The
+  /// log is not a *partial* record of the parse — it is a complete record of a branch the
+  /// parser abandoned and the sink was unable to roll back. Tooling inspecting a fatally
+  /// aborted parse is exactly the caller this door exists for, and exactly the caller that must
+  /// not be handed that tree.
+  ///
   /// # Where a gap lands
   ///
   /// This door places every gap exactly where [`finish`](Self::finish) does, by the rule that
@@ -467,6 +511,24 @@ where
     L::Offset: TryInto<u32>,
     L::Source: CstText,
   {
+    // The poison, read before anything else: a sink that refused a rewind mid-unwind holds a
+    // log describing a rollback that never happened, and every law below would pass over it
+    // happily — the events are internally consistent, they are simply the wrong events. This
+    // is the same posture the neighbouring emission-time walls take (a debug assert at cause,
+    // a typed `FinishError` as the release backstop), except that here the at-cause report is
+    // suppressed by the unwind rather than by the profile, which makes the backstop the ONLY
+    // signal a caller can ever see. So it is checked through both doors: `finish_partial`
+    // tolerates incompleteness, not corruption.
+    if let Some(degraded) = self.degraded {
+      return (
+        Err(FinishError::UnpairedSettle {
+          mark: degraded.mark,
+          len: degraded.len,
+        }),
+        self.inner,
+      );
+    }
+
     let events = self.events;
     let profile = self.profile;
     let inner = self.inner;

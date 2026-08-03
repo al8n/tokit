@@ -15,6 +15,7 @@
 //! | E4 | [`Sink::rows`] | **release stack + per-checkpoint depth ledger + inner reading** | push at `checkpoint()` (freezing the depth and the inner emitter's own checkpoint reading), pop at `release()` (kept) and `rewind()` (spent, the popped row's inner reading is the inner's rewind target); depth entries are frozen facts about prefixes, never live counters |
 //! | — | [`Sink::floor`] | derived memo (the newest released row) | reset to the surviving top row when a rewind drops below it |
 //! | — | [`Sink::base_inner`] | derived memo (the inner's construction-time reading) | primed at the first advancing touch (provably the construction reading), never restored (the exact no-row target at the origin only) |
+//! | — | [`Sink::degraded`] | **latching poison** (a rewind the sink refused to perform) | set — never cleared — by the one rewind that must degrade instead of report (an unpaired settle detected mid-unwind); a rewind cannot un-refuse an earlier refusal, so it is deliberately outside the rewind timeline |
 //! | — | `inner`, `source`, `profile`, `trivia` | configuration / the wrapped emitter | never touched by rewind (the inner rewinds through its own contract) |
 //! | — | `witness` | sink identity (validated at every mark spend, every build) | never restored |
 //!
@@ -125,6 +126,22 @@ impl MarkRow {
     depth: 0,
     inner: 0,
   };
+}
+
+/// The one rewind a sink can be asked for and be unable to perform: an **unpaired settle**
+/// detected while a panic is already unwinding, where reporting it would abort the process
+/// (see the `# Panics` section on [`rewind`](Emitter::rewind)). Recorded rather than merely
+/// skipped, because the alternative is a sink whose later materialization is
+/// indistinguishable from a clean one.
+///
+/// Carries the two numbers that name the violation, so the typed refusal
+/// ([`FinishError::UnpairedSettle`]) is as diagnosable as the panic would have been.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DegradedRewind {
+  /// The mark the rewind named — mid-log, and captured by no live row.
+  mark: u64,
+  /// The event-log length at the refused rewind.
+  len: u64,
 }
 
 /// One undo-journal entry: an in-place `forward_parent` write performed by
@@ -266,8 +283,14 @@ fn bump_witness(next: &core::sync::atomic::AtomicUsize) -> usize {
 /// whichever `Lang` instantiation reads it (the trait's one-timeline law). The sink hands
 /// `inner.rewind` only readings it knows exactly — a row's capture, or the construction-time
 /// base for a full unwind to the origin; a rewind that truncates nothing never touches the
-/// inner, and a truncating rewind to a mid-log mark no row captured is witnessed in debug and
-/// leaves the inner untouched in release (the sink never fabricates a reading).
+/// inner, and a truncating rewind to a mid-log mark no row captured — an **unpaired settle**,
+/// which is a parser bug — **panics in every build** (the sink never fabricates a reading).
+/// The panic is raised by a preflight, before this method's first mutation, so a caught panic
+/// leaves the sink exactly as it was rather than half-rewound. The sole exception is a panic
+/// already unwinding, where reporting would abort the process instead: there the rewind
+/// degrades to a total no-op and **latches**, and materialization then refuses through both
+/// doors ([`FinishError::UnpairedSettle`]) rather than return the tree of a rollback that
+/// never ran. See the `# Panics` section on [`rewind`](Emitter::rewind).
 ///
 /// A table-keyed emitter — one that allocates per-`checkpoint` bookkeeping behind interior
 /// mutability and reclaims it per-`release` — is **rejected as the inner at compile time**: the
@@ -351,15 +374,26 @@ where
   /// E3 — the monotone era source and truncation witness backing mark validation.
   ledger: TruncationLedger,
   /// The inner emitter's **construction-time** reading — the no-row **origin** rewind's exact
-  /// inner target (an empty event log provably pairs with the construction reading; mid-log
-  /// no-row marks have no exact reading and never touch the inner). Primed at the first
-  /// inner-advancing touch (a forwarded diagnostic or a settled token; the rewind fallback
-  /// reads it the same way), which provably equals the reading at [`new`](Self::new): the sink
+  /// inner target (an empty event log provably pairs with the construction reading; a mid-log
+  /// no-row mark has no exact reading and is refused by the preflight instead of guessed at).
+  /// Primed at the first inner-advancing touch (a forwarded diagnostic or a settled token; the
+  /// rewind fallback reads it the same way), which provably equals the reading at
+  /// [`new`](Self::new): the sink
   /// exposes no `&mut` path to the inner, so the inner cannot advance before the sink's own
   /// first advancing call — and every advancing surface primes this field before forwarding.
   /// (The capture is lazy only to keep the constructor free of emitter bounds: `Emitter` is
   /// `Lang`-parameterized and the built-in emitters implement it for exactly one `Lang`.)
   base_inner: Option<u64>,
+  /// The latching poison: set by the one [`rewind`](Emitter::rewind) that detects an unpaired
+  /// settle while it is forbidden to report one (a panic already unwinding), where it degrades
+  /// to a total no-op instead. Materialization refuses through **both** doors afterwards
+  /// ([`FinishError::UnpairedSettle`]), because the tree that door would return is the tree of a
+  /// rollback that never happened.
+  ///
+  /// First-wins and never cleared: the first refusal is the cause, and no later rewind can undo
+  /// it. It is therefore **not** part of the rewind timeline — restoring it at a rewind would
+  /// let a subsequent rollback launder the refusal away.
+  degraded: Option<DegradedRewind>,
   /// The buffer this parse runs over, bound at construction: materialization slices every
   /// token's text out of it, so the sink and the tree can never disagree about which source
   /// the spans belong to.
@@ -385,6 +419,7 @@ where
       .field("inner", &self.inner)
       .field("events", &self.events.len())
       .field("live_marks", &self.rows.borrow().len())
+      .field("degraded", &self.degraded)
       .field("error_kind", &self.profile.error_kind())
       .field("gap_kind", &self.profile.gap_kind())
       .field("trivia", &self.trivia)
@@ -418,6 +453,10 @@ where
     // — derived memo: the inner's construction-time reading, primed at first advancing touch,
     // never restored.
     base_inner: _,
+    // — latching poison: a rewind the sink refused to perform (an unpaired settle detected
+    // mid-unwind). Set once, NEVER cleared and never rewound — a later rollback must not be
+    // able to launder an earlier refusal away. Read only at materialization, which refuses.
+    degraded: _,
     // — configuration: the construction-bound source buffer, fixed for the sink's life.
     source: _,
     // — configuration: the dialect's kind space, fixed for the sink's life.
@@ -638,6 +677,7 @@ where
       floor: MarkRow::ZERO,
       ledger: TruncationLedger::new(),
       base_inner: None,
+      degraded: None,
       source,
       profile,
       trivia: TriviaPolicy::AsEmitted,
@@ -989,11 +1029,46 @@ where
   /// a real checkpoint taken at the current length; `Verbose` may clamp only because it
   /// keeps no per-mark bookkeeping. A rewind to a mark exactly **at** the current length
   /// is the trait's rewind-to-current law — a no-op on every observable channel that
-  /// still spends its capture's row. A truncating rewind to a mid-log mark no live row
-  /// captured has no exact inner reading anywhere: debug builds panic at cause; release
-  /// builds keep the sink's own channels exact and leave the inner untouched
-  /// (unspecified-but-bounded — the sink never guesses a reading; see the *Inner-emitter
-  /// contract* on [`Sink`]).
+  /// still spends its capture's row.
+  ///
+  /// # Panics
+  ///
+  /// A **truncating rewind to a mid-log mark no live row captured** panics, in **every**
+  /// build — release included. The mark was never returned by
+  /// [`checkpoint`](Emitter::checkpoint), or its capture was already spent by an earlier
+  /// `rewind`/`release`: an **unpaired settle**. That is a parser bug and never an
+  /// input-dependent condition — a malformed document changes which branches run, not
+  /// whether a branch settles its own capture exactly once — so hardening it cannot turn a
+  /// bad document into a crash.
+  ///
+  /// It was a `debug_assertions`-only wall through 0.8, on the reasoning that the input
+  /// layer's LIFO witness already rejected it upstream. That witness is *itself* debug-only
+  /// (`InputRef::restore`, the `unstable-raw` valve), so a release build had no wall on
+  /// either layer: the two logs silently sheared, the sink's own channels exact and the
+  /// inner's stale. Bounded while materialization reads the whole log at once; a silently
+  /// wrong tree the moment any of it is flushed incrementally.
+  ///
+  /// **The panic is raised before the first mutation, so it is transactional.** The condition
+  /// is decided by a read-only preflight over the unchanged mark stack — ahead of the row
+  /// spend, the truncation, the journal replay and the ledger write, all of which the
+  /// violating call would otherwise have already performed by the time the wall fired. A wall
+  /// placed after the damage only narrates it: a host that catches this panic would be left
+  /// holding a sink whose event log had been rewound and whose inner had not, and
+  /// [`finish_partial`](Self::finish_partial) would then hand back that sheared state as a
+  /// tree. Caught here, the sink is exactly as it was, on every channel.
+  ///
+  /// **The one exception is an unwind already in progress**, and it is a guard against a
+  /// worse outcome rather than a softening. This method may run from a rolling-back guard's
+  /// `Drop` (see the mid-unwind clause on [`Emitter::rewind`]), where a panic is a *double*
+  /// panic and aborts the process — strictly worse than the violation it would report. When
+  /// `std::thread::panicking` is true the report is therefore suppressed, and the call
+  /// degrades to a **total no-op on every channel** — the same shape as the out-of-range
+  /// future mark above, and for the same reason: the sink has no correct rewind to perform,
+  /// so it performs none, rather than rewinding half of itself. The degradation is
+  /// **latched**, and materialization refuses through both doors afterwards
+  /// ([`FinishError::UnpairedSettle`]). Silence there is only permissible because it is
+  /// recorded; a caller that catches the original panic must not be able to obtain a tree
+  /// that looks like the product of a rollback that never happened.
   fn rewind(&mut self, cursor: &Cursor<'inp, '_, L>, checkpoint: u64)
   where
     L: Lexer<'inp>,
@@ -1007,7 +1082,7 @@ where
       // `checkpoint.min(len)` clamp instead dressed a future mark up as a
       // rewind-to-current, and the row lookup below then spent the live row of a REAL
       // checkpoint taken at the current length; that checkpoint's own later rewind found
-      // no row (the mid-log witness in debug, the ghost-inner in release). No live row
+      // no row (now the unconditional mid-log panic below). No live row
       // can sit above `len` (rows are pushed at the current length and truncation pops
       // them first), so no settle is owed here — the no-op is exact, not defensive.
       // `Verbose` may clamp only because it keeps no per-mark bookkeeping: clamp and
@@ -1018,12 +1093,69 @@ where
     }
     let mark = checkpoint;
 
+    // ── PREFLIGHT — the unpaired-settle verdict, read off UNCHANGED state ──────────────
+    //
+    // Nothing above this point has written to any cell (the future-mark guard returns, and
+    // `len`/`mark` are reads), so this is the last instant at which the sink is still exactly
+    // as the caller left it. The wall has to be here, not at the inner-target match below: by
+    // the time that match runs, this method has already spent the rows at and above the mark,
+    // truncated the event log, reverse-replayed the journal and appended a truncation to the
+    // ledger. Reported from there, a caught panic leaves the sink SHEARED — its own channels
+    // rewound, the inner not — and `finish`/`finish_partial` will happily materialize that.
+    // Reported from here, a caught panic leaves the sink untouched.
+    //
+    // The predicate is the exact read-only mirror of the spend below: the pop loop stops at
+    // the newest row whose mark is at or below the target, and the target row is that row iff
+    // its mark IS the target. `find` over the reverse iterator names the same row without
+    // removing anything. (Rows are pushed at the then-current length and every truncation pops
+    // the rows above it, so the stack is sorted non-decreasing by mark; the reverse scan
+    // mirrors the loop whether or not that holds.) The two exempt no-row cases are exempt for
+    // the reasons the match below states: `mark == len` truncates nothing, and `mark == 0` has
+    // an exact reading in the construction-time base.
+    let unpaired_settle = mark > 0
+      && mark < len
+      && !self
+        .rows
+        .get_mut()
+        .iter()
+        .rev()
+        .copied()
+        .find(|row| row.mark <= mark)
+        .is_some_and(|row| row.mark == mark);
+    if unpaired_settle {
+      // `rowan` implies `std` (this whole module is behind that feature), so the
+      // in-flight-panic query is as available as the `Arc`s rowan itself uses.
+      if !std::thread::panicking() {
+        panic!(
+          "Sink rewind to a mid-log mark with no captured row: mark {mark} of a \
+           {len}-event log was never returned by checkpoint(), or its capture was already \
+           spent by an earlier rewind or release — no exact inner reading exists for it"
+        );
+      }
+      // Mid-unwind, where a panic is a DOUBLE panic and aborts the process. Reporting is off,
+      // so the rewind degrades — and it degrades to NOTHING, on every channel, exactly like
+      // the out-of-range future mark above. The sink has no correct rewind to perform here (no
+      // exact inner reading exists for this mark), and performing the half it *can* is what
+      // shears the two logs. Leaving both un-rewound at least keeps them describing the same
+      // history; it is wrong about the parser's intent, never wrong about itself.
+      //
+      // Latched, first-wins, and never rewound away: `finish`/`finish_partial` refuse
+      // afterwards (`FinishError::UnpairedSettle`). Staying quiet is only defensible because
+      // this record exists — otherwise a host that catches the original panic could still ask
+      // for a tree and get one that silently reflects a rollback that never ran.
+      if self.degraded.is_none() {
+        self.degraded = Some(DegradedRewind { mark, len });
+      }
+      return;
+    }
+
     // Spend the captures at or above the mark, capturing the target row's inner reading as
     // it is spent: everything strictly above dies with the branch; the newest capture at
     // exactly the mark is the one being rewound to, and it carries the exact inner reading to
     // hand back. A disciplined rewind (guards, attempt, the scan family, correct raw
     // save/restore) always finds that row live — a released mark is a committed mark, never
-    // rewound to. `None` is the no-row case, resolved below by what the sink still knows.
+    // rewound to. `None` is the no-row case, resolved below by what the sink still knows —
+    // and the preflight above has already removed the one no-row case with no answer.
     let target_inner = {
       let rows = self.rows.get_mut();
       while rows.last().is_some_and(|row| row.mark > mark) {
@@ -1068,30 +1200,25 @@ where
     //   - the construction-time base for a no-row unwind to the ORIGIN, exact by the
     //     advancing-surfaces law: every inner advance appends an event and primes the base
     //     first, so an empty event log pairs with exactly the construction reading.
-    // A truncating no-row rewind to a MID-LOG mark has no exact reading anywhere: the
-    // inner's reading is inner-specific (an emission-log length, a token count, a constant)
-    // and was never captured at that mark — the mark was never returned by `checkpoint()`,
-    // or its capture was already spent by an earlier rewind or release. That is
-    // undisciplined raw use: debug builds panic at cause (the sink-level twin of the input
-    // layer's LIFO witness, which already rejects it on every input-mediated path); release
-    // builds keep the sink's own channels exact and REFUSE TO GUESS an inner reading — the
-    // inner stays put, one-sided staleness that preserves every inner-side record the
-    // surviving prefix still references. Rewinding to `base` here (the pre-fix behavior) or
-    // to a neighboring row's reading would instead destroy committed inner state the
-    // surviving log still carries.
+    // The third no-row case — a truncating rewind to a MID-LOG mark — has no exact reading
+    // anywhere: the inner's reading is inner-specific (an emission-log length, a token count,
+    // a constant) and was never captured at that mark. It cannot reach this match at all. The
+    // PREFLIGHT at the top of the body decided it against unchanged state and either panicked
+    // (the normal path) or returned as a total no-op after latching the poison (mid-unwind),
+    // which is why the last arm below can take the `mark == 0` reading without a guard: the
+    // only two no-row cases left are the two exact ones. Rewinding to `base` for a mid-log
+    // mark — the pre-0.8 behavior — or to a neighboring row's reading would destroy committed
+    // inner state the surviving log still carries; the sink hands the inner a reading it can
+    // prove, or nothing at all.
     let inner_target = match target_inner {
       Some(reading) => Some(reading),
       None if mark == len => None,
-      None if mark == 0 => Some(self.base_inner_mark::<Lang>()),
       None => {
-        if cfg!(debug_assertions) {
-          panic!(
-            "Sink rewind to a mid-log mark with no captured row: mark {mark} of a \
-             {len}-event log was never returned by checkpoint(), or its capture was already \
-             spent by an earlier rewind or release — no exact inner reading exists for it"
-          );
-        }
-        None
+        debug_assert_eq!(
+          mark, 0,
+          "the preflight refuses every mid-log no-row rewind before this point"
+        );
+        Some(self.base_inner_mark::<Lang>())
       }
     };
     if let Some(reading) = inner_target {
@@ -1130,11 +1257,39 @@ where
   /// it is a plain value, not an inner-side resource (see *Inner-emitter contract* on the
   /// type); the forward census pins `self.inner.release` at zero so any future forwarding
   /// change must rewrite the contract deliberately.
+  ///
+  /// # Why the two non-top branches stay silent
+  ///
+  /// [`rewind`](Emitter::rewind) panics in every build on an unpaired settle. `release` does
+  /// **not**, and the asymmetry is forced rather than an oversight: its two non-top outcomes
+  /// are *specified behaviour*, not violations.
+  ///
+  /// - **Removing a non-innermost row** (`rposition` + `remove`) is the emitter-side mirror of
+  ///   `InputRef::commit`'s documented cost model — "`O(1)` when
+  ///   `checkpoint` is the youngest live checkpoint … and a linear removal otherwise (e.g. a
+  ///   younger raw checkpoint was dropped above it); the rest of the stack keeps its order
+  ///   either way". Settles are newest-first only *within* a family: the trait's own
+  ///   [`release`](Emitter::release) contract states that guards and session points interleave,
+  ///   so an out-of-stack-order release is lawful by construction.
+  /// - **Finding no row at all** is the same doc's "harmless **no-op**: its id is simply
+  ///   absent, so nothing is released and no state changes (no panic, in any build)".
+  ///
+  /// Hardening either would convert a documented guarantee into a crash. Neither can strand
+  /// the mark stack in a shape that outlives the parse, either: a middle `remove` only fires
+  /// when the top row's mark differs, so `rows` holds at least two entries and cannot be
+  /// emptied by it, and equal-mark rows are interchangeable (same prefix ⟹ same depth and
+  /// same inner reading, guaranteed by the [`ValueKeyedEmitter`] bound), so which of them is
+  /// removed is unobservable. The residue a dropped-rather-committed raw checkpoint leaves is
+  /// a *stale* row — the mark stack is a superset of the live captures, never a subset, which
+  /// is the conservative direction for any consumer that keys on the oldest live mark. The one
+  /// way a *live* capture loses its row is a double settle, and that surfaces where it should:
+  /// at the later `rewind`, which panics.
   fn release(&mut self, checkpoint: u64) {
     let rows = self.rows.get_mut();
     let row = if rows.last().map(|row| row.mark) == Some(checkpoint) {
       rows.pop()
     } else {
+      // Both non-top outcomes are lawful, not violations — see the contract note above.
       rows
         .iter()
         .rposition(|row| row.mark == checkpoint)

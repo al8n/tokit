@@ -2531,7 +2531,7 @@ where
   ///
   /// Release builds do not check. An out-of-order restore leaves the input in an
   /// **unspecified but bounded** state. Even then, all of the following still hold:
-  /// no undefined behavior, no leak, no panic originating in this crate, every scan
+  /// no undefined behavior, no leak, no panic originating in the **input layer**, every scan
   /// terminates (the resource-limiter state travels inside the checkpoint, so a
   /// re-reached limit re-trips instead of rescanning without bound), and the input
   /// remains usable.
@@ -2540,6 +2540,23 @@ where
   /// attributed to the wrong branch, and the replayed token stream may differ from
   /// what was visible at the save. The only well-specified use of a checkpoint is
   /// restoring it while it is still valid.
+  ///
+  /// **The attached emitter keeps its own posture, and one of them is louder than this.** The
+  /// no-panic clause above is the input layer speaking for itself; a violation still reaches
+  /// [`Emitter::rewind`], and an emitter that can *detect* the resulting unpaired settle is
+  /// permitted to report it (see that method's mid-unwind contract). The recording CST
+  /// `Sink` (the `rowan` feature) does: a stale restore that lands on a mid-log mark whose row
+  /// was already spent panics there in **every** build, release included, rather than shear
+  /// the event log from the diagnostic log. Every built-in diagnostics emitter (`Verbose`,
+  /// `Fatal`, `Silent`) has nothing to detect and stays silent as before.
+  ///
+  /// **A restore the emitter refuses is not rolled back either.** The emitter's own state is
+  /// left exactly as it was — the `Sink` decides before it mutates — but this method is not
+  /// transactional across that panic: it raises from the middle of the rollback, so the
+  /// lineage has already been popped through the target while the position and the
+  /// error-reporting witnesses have not been restored. That is inside the
+  /// "unspecified but bounded" envelope above and is the cost of being told at all; the input
+  /// stays usable, and the only way to reach it is the violation being reported.
   #[cfg(feature = "unstable-raw")]
   #[cfg_attr(docsrs, doc(cfg(feature = "unstable-raw")))]
   #[doc(alias = "rewinds")]
@@ -2838,7 +2855,20 @@ where
     }
 
     // ── CENSUS_PHASE_BOUNDARY — the restore. No caller code below this line except
-    // `Emitter::rewind`, which the crate contracts as non-panicking on exactly this path. ──
+    // `Emitter::rewind`.
+    //
+    // That admission used to rest on the trait contracting `rewind` as non-panicking here. It
+    // no longer does: an emitter that can DETECT an unpaired settle may report it when no
+    // unwind is in flight (see `Emitter::rewind`'s mid-unwind contract), and the recording CST
+    // `Sink` takes that door. So the exception is now a known, measured hole rather than a
+    // proof — a panic from the rewind below leaves the lineage popped through the target id
+    // while the position, the three facts and the cache-push counter are never installed. That
+    // is a torn restore, and reordering this phase cannot close it: phase 1 has already
+    // abandoned the session points above the target and cleared the parked slot, neither of
+    // which is recoverable either. It is reachable only through the same double-settle bug the
+    // emitter is reporting, and only after that bug has already made the parse wrong.
+    // `restore_unchecked_is_not_transactional_across_the_settle_wall` in `cst/sink/tests.rs`
+    // pins both halves so the hole stays measured rather than assumed away. ──
     #[cfg(any(feature = "std", feature = "alloc"))]
     self.live_pop_through(ckp_id);
     self.emitter().rewind(&cursor, emitter_checkpoint);

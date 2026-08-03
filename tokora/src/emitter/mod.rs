@@ -423,7 +423,7 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// implementation are the `restore_rewinds_verbose_errors_*` family in `tests/emitter.rs`
   /// and `sync_balanced_hole_emission_unwinds_on_rollback` in `src/input/input_ref/tests.rs`.
   ///
-  /// # Contract: this may run mid-unwind, and must not panic
+  /// # Contract: this may run mid-unwind, and must not panic *there*
   ///
   /// A rolling-back guard settles in its `Drop`, and a `Drop` can run while a panic is already
   /// in flight — including for a [`Commit`](crate::Commit)-policy guard, which takes the
@@ -432,6 +432,34 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// stay observably total on the restore path. The built-in emitters are structurally
   /// non-panicking there (truncations and pops); the crate's rollback-on-drop guarantee is
   /// conditional on yours being too.
+  ///
+  /// The property that actually has to hold is **"never abort the process"**, and it binds
+  /// only while an unwind is in progress. An implementation that can *detect* a settle
+  /// violation — a mark it never issued, or one already spent — MAY panic to report it,
+  /// provided it first checks `std::thread::panicking` and stays silent when that is true.
+  /// A detected unpaired settle is a caller bug with no correct recovery, and reporting it at
+  /// the cause beats degrading into a state the caller cannot distinguish from success; a
+  /// double-panic abort would be worse than either. The recording CST `Sink` is the one
+  /// in-crate implementation that takes this door (the `rowan` feature), and its
+  /// `rewind`'s `# Panics` section states exactly which condition and why. An emitter with
+  /// nothing to detect — every built-in one — simply inherits the stricter "never panics"
+  /// reading, unchanged.
+  ///
+  /// Two riders come with that door, and neither is optional.
+  ///
+  /// - **Report before you mutate.** The panic is a wall, not a narration: raise it from a
+  ///   preflight over unchanged state, so a caller that catches it is left holding the emitter
+  ///   it had rather than a half-rewound one. A violation detected after the rewind has already
+  ///   truncated its own log is a violation announced *from inside* the corruption it names.
+  /// - **A suppressed report must still be recorded.** Silence while unwinding is a licence to
+  ///   avoid the abort, not a licence to degrade invisibly: the emitter must latch the fact and
+  ///   refuse — as a typed error, not a later panic — at whatever surface hands its accumulated
+  ///   output onward. Otherwise a caller that catches the *original* panic can go on to collect
+  ///   a result that is indistinguishable from one no violation ever touched.
+  ///
+  /// The condition an implementation is allowed to report this way is a caller bug, never an
+  /// input-dependent one. Detecting something a malformed document can provoke and panicking on
+  /// it is outside this permission entirely.
   fn rewind(&mut self, cursor: &Cursor<'a, '_, L>, checkpoint: u64)
   where
     L: Lexer<'a>;

@@ -243,11 +243,21 @@ every channel**: events, the mark stack, the floor, the journal, the era ledger,
 the live row of a *real* checkpoint taken at that length, and that checkpoint's own later rewind would
 then find no row: the desync.) And a truncating rewind to a *mid-log* mark that **no live row
 captured** has no exact inner reading anywhere — the mark was never returned by `checkpoint`, or its
-capture was already spent. That is undisciplined raw use: debug builds panic at the cause (the
-sink-level twin of the input layer's LIFO witness), and release builds keep the sink's own channels
-exact and leave the inner untouched — one-sided staleness that preserves every inner-side record the
-surviving prefix still references, never a fabricated reading that would destroy committed inner
-state. The sink hands the inner only readings it can prove, or nothing.
+capture was already spent. That is an **unpaired settle**: a parser bug, never something a document
+can provoke, so it **panics in every build**. The wall used to be `debug_assertions`-only, deferring
+to the input layer's LIFO witness one level up; that witness is itself debug-only, so a release build
+had no wall at all and the event log silently sheared away from the diagnostic log — bounded only
+because materialization reads the whole log at once, and a wrong tree the moment any of it is
+flushed incrementally. The condition is decided by a **preflight** over the unchanged mark stack,
+ahead of the row spend, the truncation, the journal replay and the ledger write, so a host that
+catches the panic holds the sink it had rather than the sheared one the wall exists to prevent.
+The one exception is a panic already unwinding, where raising a second one aborts the process rather
+than reporting anything: there the rewind degrades to a **total no-op** — both logs left describing
+the same history, rather than one of them rewound — and **latches**, so
+[`finish`](crate::cst::Sink::finish) and [`finish_partial`](crate::cst::Sink::finish_partial) refuse
+afterwards with [`UnpairedSettle`](crate::cst::FinishError::UnpairedSettle). Silence there is
+permissible only because it is recorded. The sink hands the inner only readings it can prove, or
+nothing.
 
 One more append-shaped write deserves a note, because it is the single censused exception to
 "append + suffix-truncate": the **recovery-hole wrap**. When [chapter 8](super::ch08_recovery)'s
@@ -270,7 +280,10 @@ silent one-level absorb under a root wrapper is unreachable, because the walk re
 retro-wrap integrity (a `StartAt` whose target is not a live tombstone is a
 [`StaleStartAt`](crate::cst::FinishError); a dangling `forward_parent` is the journal's finish-time
 canary); kind hygiene (the reserved tombstone band); span discipline (monotone, non-overlapping,
-in-bounds, `u32`-fitting); and the two losslessness laws below.
+in-bounds, `u32`-fitting); and the two losslessness laws below. One refusal precedes the walk instead
+of arising from it: a sink that had to degrade a rewind it could not perform refuses here
+([`UnpairedSettle`](crate::cst::FinishError::UnpairedSettle)) rather than materialize a log that
+describes a rollback that never happened.
 
 Same-target wraps are resolved in a pre-pass that groups the `StartAt`s by target and validates every
 `forward_parent` canary; the main walk then opens each target's wraps *latest-first* at the

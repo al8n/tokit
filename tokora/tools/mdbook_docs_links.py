@@ -189,6 +189,7 @@ DOCS_RS_MAP = {
   "crate::cst::Element": "cst/trait.Element.html",
   "crate::cst::FinishError": "cst/enum.FinishError.html",
   "crate::cst::FinishError::UncoveredGap": "cst/enum.FinishError.html#variant.UncoveredGap",
+  "crate::cst::FinishError::UnpairedSettle": "cst/enum.FinishError.html#variant.UnpairedSettle",
   "crate::cst::Node": "cst/trait.Node.html",
   "crate::cst::Node::try_cast_node": "cst/trait.Node.html#tymethod.try_cast_node",
   "crate::cst::NodeChildren": "cst/struct.NodeChildren.html",

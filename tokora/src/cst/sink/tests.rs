@@ -3519,15 +3519,20 @@ fn no_row_truncation_free_rewind_leaves_the_inner_untouched() {
   assert_eq!(sink.inner_ref().journal, std::vec![JEntry::Token]);
 }
 
-/// REGRESSION (mid-log no-row case): a truncating rewind to a mark no checkpoint ever
-/// captured has NO exact inner reading anywhere — undisciplined raw use, witnessed at cause
-/// in debug builds (the sink-level twin of the input layer's LIFO witness) instead of
-/// silently corrupting a channel. Pre-fix it silently paired the surviving prefix with the
-/// construction-time base, destroying committed inner state the log still carried.
-#[cfg(debug_assertions)]
+/// CONTRACT (mid-log no-row case): a truncating rewind to a mark no checkpoint ever captured
+/// has NO exact inner reading anywhere — an **unpaired settle**, which is a parser bug and
+/// never an input-dependent condition. It panics at cause in **EVERY** build.
+///
+/// Deliberately NOT `cfg(debug_assertions)`-gated: the whole point of the hardening is that
+/// the release profile behaves identically, so this case must be exercised by
+/// `cargo test --release` too. It was a `debug_assertions`-only wall, deferring to the input
+/// layer's LIFO witness one level up — but that witness is itself debug-only, so a release
+/// build had no wall on either layer and the event log silently sheared away from the
+/// diagnostic log. (Pre-fix it went further still and paired the surviving prefix with the
+/// construction-time base, destroying committed inner state the log still carried.)
 #[test]
 #[should_panic(expected = "rewind to a mid-log mark with no captured row")]
-fn no_row_middle_rewind_debug_asserts_at_cause() {
+fn no_row_middle_rewind_panics_at_cause_in_every_build() {
   let mut sink: JournalingSink<'_> = Sink::new("ab", JournalingEmitter::default(), profile());
   Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'a'), &span(0, 1));
   Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'b'), &span(1, 2));
@@ -3535,27 +3540,443 @@ fn no_row_middle_rewind_debug_asserts_at_cause() {
   Emitter::<MiniLexer<'_>>::rewind(&mut sink, Cursor::from_ref(&origin), 1);
 }
 
-/// The release twin of the debug witness: a truncating no-row mid-log rewind still rewinds
-/// the sink's OWN channels exactly, and refuses to guess an inner reading — the inner stays
-/// put (bounded one-sided staleness), never dropped to base (which would destroy inner-side
-/// records the surviving prefix still references).
-#[cfg(not(debug_assertions))]
+/// The panic is a WALL, not a narration: it is raised before the rewind's first mutation, so a
+/// host that catches it is left holding the sink it had, not a sheared one.
+///
+/// This is the half the unconditional wall was missing. The check used to sit at the
+/// inner-target match, which runs *after* the rows at and above the mark are spent, after
+/// `events.truncate`, after the journal reverse-replay and after the ledger's truncation
+/// record. Caught there, the caller kept a sink whose event log had been rewound and whose
+/// inner emitter had not — and `finish_partial` would then hand that back as a tree, which is
+/// the very shear the wall exists to prevent, merely announced on the way past. The verdict is
+/// now a read-only preflight over the unchanged mark stack.
+///
+/// Every channel is checked, not just the log: the mark stack (a stale row above the mark is
+/// how a *later* disciplined rewind gets refused), the journal, the floor's depth memo, and the
+/// era ledger — whose truncation record cannot be taken back and would strand every live
+/// `EventMark` below it. Then materialization, because a tree is what a caught panic actually
+/// lets a host reach.
 #[test]
-fn no_row_middle_rewind_leaves_the_inner_untouched_in_release() {
+fn caught_unpaired_settle_panic_leaves_the_sink_exactly_as_it_was() {
+  let mut sink: JournalingSink<'_> = Sink::new("ab", JournalingEmitter::default(), profile());
+
+  // A live capture ABOVE the mark the bad rewind will name, so the row spend has something to
+  // destroy, and a retro-wrap mark so the journal and the ledger do too.
+  let tomb = CstEmitter::<MiniLexer<'_>, ()>::cst_mark(&mut sink);
+  Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'a'), &span(0, 1));
+  let live = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'b'), &span(1, 2));
+  CstEmitter::<MiniLexer<'_>, ()>::cst_start_at(&mut sink, tomb, K_NODE);
+  CstEmitter::<MiniLexer<'_>, ()>::cst_finish(&mut sink, K_NODE);
+
+  let events_before = sink.events().len();
+  let journal_before = sink.journal_len();
+  let rows_before = sink.rows_len();
+  let forward_parent_before = sink.forward_parent_at(0);
+  let inner_before = sink.inner_ref().journal.clone();
+  assert!(
+    rows_before == 1 && journal_before == 1 && forward_parent_before.is_some(),
+    "the fixture must actually arm every channel the rewind would touch: rows \
+     {rows_before}, journal {journal_before}, forward_parent {forward_parent_before:?}"
+  );
+
+  // Mark 1 is mid-log and no live row captured it — the unpaired settle. `live` sits above it
+  // and would be popped; the log would truncate to 1; the journal entry would reverse-replay;
+  // the ledger would record a truncation.
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let origin = 0usize;
+    Emitter::<MiniLexer<'_>>::rewind(&mut sink, Cursor::from_ref(&origin), 1);
+  }));
+  let payload = caught.expect_err("an unpaired settle panics on the normal path");
+  let message = payload
+    .downcast_ref::<std::string::String>()
+    .cloned()
+    .expect("the wall's payload is a formatted String");
+  assert!(
+    message.contains("rewind to a mid-log mark with no captured row"),
+    "the wall must be what fired, not something downstream of it: {message}"
+  );
+
+  // ── Nothing moved. Every cell the rewind would have written, on both sides. ──
+  assert_eq!(
+    sink.events().len(),
+    events_before,
+    "E1: the event log must not be truncated by a rewind that was refused"
+  );
+  assert_eq!(
+    sink.journal_len(),
+    journal_before,
+    "E2: the undo journal must not be reverse-replayed by a rewind that was refused"
+  );
+  assert_eq!(
+    sink.forward_parent_at(0),
+    forward_parent_before,
+    "E2: the retro-wrap's forward_parent must not be restored by a rewind that was refused"
+  );
+  assert_eq!(
+    sink.rows_len(),
+    rows_before,
+    "E4: the live capture above the mark must survive — spending it here is what makes a \
+     LATER disciplined rewind of it get refused too"
+  );
+  assert_eq!(
+    sink.inner_ref().journal,
+    inner_before,
+    "the inner is untouched, as it always was on this path"
+  );
+
+  // E3: the era ledger records truncations and never un-records them, so a refused rewind
+  // that reached it would strand the mark permanently. The mark is still spendable.
+  let fresh = CstEmitter::<MiniLexer<'_>, ()>::cst_mark(&mut sink);
+  CstEmitter::<MiniLexer<'_>, ()>::cst_start_at(&mut sink, fresh, K_LIST);
+
+  // And the capture above the mark is still live: its own rewind finds its row, so it does not
+  // trip the wall a second time on a perfectly disciplined settle.
+  let origin = 0usize;
+  Emitter::<MiniLexer<'_>>::rewind(&mut sink, Cursor::from_ref(&origin), live);
+  assert_eq!(sink.rows_len(), 0, "the surviving capture was spendable");
+  assert_eq!(sink.events().len(), live as usize);
+  assert_eq!(
+    sink.inner_ref().journal,
+    std::vec![JEntry::Token],
+    "the disciplined rewind restored the inner to its captured reading"
+  );
+}
+
+/// The same question asked of the materialization door, which is what a host that catches the
+/// panic can actually reach: the tree must be the tree of the un-rewound sink, with the two
+/// channels agreeing on how many tokens settled.
+///
+/// Against the post-damage wall this fails twice over — the log is short one token, so the
+/// tree carries a `Gap` tile where `b` should be, and the inner still holds both tokens.
+#[test]
+fn a_caught_unpaired_settle_panic_still_materializes_the_unsheared_tree() {
   let mut sink: JournalingSink<'_> = Sink::new("ab", JournalingEmitter::default(), profile());
   Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'a'), &span(0, 1));
   Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'b'), &span(1, 2));
-  let origin = 0usize;
-  Emitter::<MiniLexer<'_>>::rewind(&mut sink, Cursor::from_ref(&origin), 1);
+
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let origin = 0usize;
+    Emitter::<MiniLexer<'_>>::rewind(&mut sink, Cursor::from_ref(&origin), 1);
+  }));
+  assert!(
+    caught.is_err(),
+    "an unpaired settle panics on the normal path"
+  );
+
+  let inner_tokens = sink
+    .inner_ref()
+    .journal
+    .iter()
+    .filter(|entry| matches!(entry, JEntry::Token))
+    .count();
+  let (green, _inner) = sink.finish_partial(K_ROOT);
+  let green = green.expect("a refused rewind that changed nothing leaves a materializable log");
+  assert_eq!(
+    shape(&green),
+    "Root[Tok\"a\" Tok\"b\"]",
+    "the surviving log is the whole log: no truncation, and therefore no gap tile standing \
+     in for the token a half-done rewind would have dropped"
+  );
+  let tree_tokens = tree(green)
+    .descendants_with_tokens()
+    .filter(|element| element.as_token().is_some_and(|tok| tok.kind() == K_TOK))
+    .count();
+  assert_eq!(
+    tree_tokens, inner_tokens,
+    "the two channels must agree on how many tokens settled — that equality IS the absence \
+     of shear"
+  );
+}
+
+/// The mid-unwind carve-out, and the reason the wall could be made unconditional at all:
+/// `Emitter::rewind` may run from a rolling-back guard's `Drop` while a panic is already in
+/// flight, where raising a second panic is a **double panic that aborts the process** — no
+/// unwinding, no `catch_unwind`, the test binary simply dies. So the report is suppressed when
+/// `std::thread::panicking()` is true.
+///
+/// This test would ABORT rather than fail if the carve-out were removed, which is exactly the
+/// outcome it exists to prevent: it drives the no-row mid-log rewind from a `Drop` running
+/// under a live panic, and asserts the ORIGINAL panic is what `catch_unwind` observes.
+///
+/// What the carve-out is *not* allowed to be is a quiet shear. Suppressing the report used to
+/// leave the previous posture in place — the sink's own channels rewound, the inner not — and
+/// that state then materialized as an ordinary tree. It now degrades to a **total no-op**
+/// instead, on every channel, and latches: both channels are left describing the same history,
+/// and the fact that a rewind was refused survives to the finish door.
+#[test]
+fn no_row_middle_rewind_degrades_to_nothing_mid_unwind_instead_of_aborting() {
+  /// Settles the sink from a destructor, the way a rolling-back guard does.
+  struct RollbackOnDrop<'a, 'inp>(&'a mut JournalingSink<'inp>);
+
+  impl Drop for RollbackOnDrop<'_, '_> {
+    fn drop(&mut self) {
+      let origin = 0usize;
+      // Mid-log, no row: the condition that panics on the normal path.
+      Emitter::<MiniLexer<'_>>::rewind(self.0, Cursor::from_ref(&origin), 1);
+    }
+  }
+
+  let mut sink: JournalingSink<'_> = Sink::new("ab", JournalingEmitter::default(), profile());
+  Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'a'), &span(0, 1));
+  Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'b'), &span(1, 2));
+
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _guard = RollbackOnDrop(&mut sink);
+    panic!("the original failure");
+  }));
+
+  let payload = caught.expect_err("the original panic must propagate");
+  let message = payload
+    .downcast_ref::<&str>()
+    .copied()
+    .expect("the original payload survives");
+  assert_eq!(
+    message, "the original failure",
+    "the settle wall must not replace (or double) the panic already unwinding"
+  );
+
+  // Silent, but not sheared: the sink has no correct rewind to perform here, so it performs
+  // none. Both channels still describe the same history.
   assert_eq!(
     sink.events().len(),
-    1,
-    "the sink's own log truncates exactly"
+    2,
+    "the refused rewind is a total no-op on the sink's own log too — half-rewinding it is \
+     exactly the shear the wall exists to prevent"
   );
   assert_eq!(
     sink.inner_ref().journal,
     std::vec![JEntry::Token, JEntry::Token],
-    "no exact reading exists for a mid-log no-row mark: the inner is left untouched"
+    "the inner is untouched, and now so is the log it is in step with"
+  );
+
+  // And the degradation is recorded: a host that catches the original panic cannot go on to
+  // obtain a tree that silently reflects a rollback that never ran.
+  let (green, _inner) = sink.finish_partial(K_ROOT);
+  let err = green.expect_err("a degraded rewind must refuse materialization");
+  assert_eq!(
+    err,
+    FinishError::UnpairedSettle { mark: 1, len: 2 },
+    "the refusal names the rewind that was refused"
+  );
+}
+
+/// The poison refuses through **both** doors, and latches: `finish_partial` is the door for an
+/// *incomplete* parse, and a log describing a rollback that never happened is not incomplete —
+/// it is a complete record of the wrong branch. This is the same posture the neighbouring
+/// emission-time walls take (`cst_finish`'s global-underflow assert at cause, with
+/// `FinishError::OrphanFinish` as the release backstop at materialization), except that here
+/// the at-cause report is suppressed by the unwind rather than by the profile, which makes the
+/// typed refusal the only signal a caller can ever see.
+#[test]
+fn a_degraded_rewind_refuses_both_materialization_doors() {
+  /// Drives the mid-unwind rewind, then hands the sink back so a door can be tried.
+  fn degraded_sink<'inp>() -> JournalingSink<'inp> {
+    struct RollbackOnDrop<'a, 'inp>(&'a mut JournalingSink<'inp>);
+
+    impl Drop for RollbackOnDrop<'_, '_> {
+      fn drop(&mut self) {
+        let origin = 0usize;
+        Emitter::<MiniLexer<'_>>::rewind(self.0, Cursor::from_ref(&origin), 1);
+        // A LATER, perfectly disciplined rewind must not launder the refusal away.
+        Emitter::<MiniLexer<'_>>::rewind(self.0, Cursor::from_ref(&origin), 0);
+      }
+    }
+
+    let mut sink: JournalingSink<'_> = Sink::new("ab", JournalingEmitter::default(), profile());
+    Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'a'), &span(0, 1));
+    Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'b'), &span(1, 2));
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _guard = RollbackOnDrop(&mut sink);
+      panic!("the original failure");
+    }));
+    assert!(caught.is_err(), "the original panic must propagate");
+    sink
+  }
+
+  // The strict door.
+  let (green, _inner) = degraded_sink().finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("finish refuses a degraded rewind"),
+    FinishError::UnpairedSettle { mark: 1, len: 2 }
+  );
+
+  // The tooling door — the one that tolerates open nodes and uncovered gaps, and must not
+  // tolerate this.
+  let (green, _inner) = degraded_sink().finish_partial(K_ROOT);
+  assert_eq!(
+    green.expect_err("finish_partial refuses a degraded rewind too"),
+    FinishError::UnpairedSettle { mark: 1, len: 2 },
+    "the LATCH: a later lawful rewind to the origin must not clear the record"
+  );
+}
+
+/// The `release` half of the settle contract stays SILENT, and this pins that it is a
+/// decision rather than an omission. Both non-top outcomes are specified behaviour, mirrored
+/// from `InputRef::commit`'s own cost model — a linear removal when a younger capture is
+/// still live, and a harmless no-op ("no panic, in any build") when the mark is already gone.
+/// Hardening either would convert a documented guarantee into a crash.
+///
+/// Also pins the structural claim that lets the asymmetry stand: a middle `remove` fires only
+/// when the top row's mark differs, so at least two rows are present and `rows` can never be
+/// emptied by it — the mark stack stays a superset of the live captures, never a subset.
+#[test]
+fn release_of_a_non_innermost_mark_is_lawful_and_silent() {
+  let mut sink = verbose_sink("abc");
+
+  // An outer capture, some traffic, then an inner capture: two rows at distinct marks.
+  let outer = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'a'), &span(0, 1));
+  let inner = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'b'), &span(1, 2));
+  assert!(outer < inner, "the captures sit at distinct marks");
+  assert_eq!(sink.rows_len(), 2);
+
+  // Release the OUTER one first — out of stack order, which the settle contract permits
+  // across families. No panic, and the inner row survives.
+  Emitter::<MiniLexer<'_>>::release(&mut sink, outer);
+  assert_eq!(
+    sink.rows_len(),
+    1,
+    "a middle removal takes exactly one row and cannot empty the stack"
+  );
+
+  // The inner capture is still fully spendable: its row is live, so its rewind finds an exact
+  // inner reading and never reaches the unpaired-settle wall.
+  rewind(&mut sink, inner);
+  assert_eq!(sink.rows_len(), 0);
+  assert_eq!(
+    sink.events().len(),
+    inner as usize,
+    "the inner capture rewinds exactly to its own mark"
+  );
+
+  // Releasing a mark that is already gone is the documented no-op — in every build.
+  Emitter::<MiniLexer<'_>>::release(&mut sink, outer);
+  Emitter::<MiniLexer<'_>>::release(&mut sink, inner);
+  assert_eq!(sink.rows_len(), 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// What the wall costs the layer above it: `InputRef::restore_unchecked`
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// MEASUREMENT, not a guarantee: `InputRef::restore_unchecked` is **not** transactional across
+/// a `Sink` that reports an unpaired settle, and this records exactly how it fails so the claim
+/// is evidence rather than inspection.
+///
+/// The body is phase-separated (`SETTLE_CENSUS`) so that everything running caller code happens
+/// while the input is still wholly on the abandoned branch, and everything below the
+/// `CENSUS_PHASE_BOUNDARY` installs facts with no caller code among them. `Emitter::rewind` is
+/// the one call below that line, admitted there on the strength of a contract that said an
+/// emitter may not panic on this path. That contract is now weaker — an emitter that can
+/// *detect* an unpaired settle may report it when no unwind is in flight — so the phase
+/// boundary's premise no longer holds, and a panic from the emitter tears the restore in half:
+///
+/// - the lineage has already been popped through the target id (the restored shape), while
+/// - the position, the three witness facts and the cache-push counter are never installed (the
+///   abandoned shape).
+///
+/// Both halves are asserted below. This is a **found, not fixed** condition: the tear predates
+/// the wall becoming unconditional (the same panic existed in debug builds), it is reachable
+/// only through the same double-settle bug the wall is reporting, and closing it would mean
+/// reordering `restore_unchecked`'s phase 2 — which cannot make the call whole anyway, because
+/// phase 1 has already abandoned the session points above the target and cleared the parked
+/// slot. What the fix in the sink *does* guarantee is the other half of the question: the
+/// **emitter** is transactional. It is asserted here too.
+///
+/// Gated to the same feature set as `live_checkpoints_len`, the lineage observable.
+#[cfg(all(
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
+  feature = "std"
+))]
+#[test]
+fn restore_unchecked_is_not_transactional_across_the_settle_wall() {
+  let mut input = Input::<MiniLexer<'_>, JournalingCtx<'_>>::with_state_and_context(
+    "abcd",
+    (),
+    crate::input::InputContext::new(
+      Sink::new("abcd", JournalingEmitter::default(), profile()),
+      DefaultCache::<MiniLexer<'_>>::default(),
+    ),
+  );
+  // The handle and the `outer` checkpoint it borrows share one scope, so the input can be
+  // consumed for the materialization check afterwards.
+  {
+    let mut inp = input.as_ref();
+
+    // Two nested saves with a settle between them, so their emitter marks differ.
+    inp.next().expect("collects").expect("a token");
+    let _outer = inp.save();
+    inp.next().expect("collects").expect("b token");
+    // The sink's mark IS the event-log length, so this is `doomed`'s emitter checkpoint.
+    let doomed_mark = inp.emitter().events().len() as u64;
+    let doomed = inp.save();
+    inp.next().expect("collects").expect("c token");
+    assert_eq!(inp.live_checkpoints_len(), 2, "both ids are live going in");
+
+    // Spend `doomed`'s emitter row WITHOUT the lineage pop the input's own commit funnel would
+    // pair with it. That is exactly the state a double settle leaves behind — a live lineage id
+    // whose emitter row is gone — and it is the only way this wall is reachable through the
+    // input at all.
+    Emitter::<MiniLexer<'_>>::release(inp.emitter(), doomed_mark);
+    assert_eq!(
+      inp.emitter().rows_len(),
+      1,
+      "only `outer`'s row is left; `doomed`'s mark is now unpaired"
+    );
+
+    let committed_before = *crate::Span::end_ref(inp.span());
+    let events_before = inp.emitter().events().len();
+    let rows_before = inp.emitter().rows_len();
+    let inner_before = inp.emitter().inner_ref().journal.clone();
+    assert!(
+      doomed_mark < events_before as u64,
+      "the rewind must TRUNCATE for the wall to apply: mark {doomed_mark} of {events_before}"
+    );
+
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      inp.restore_unchecked(doomed);
+    }));
+    assert!(
+      caught.is_err(),
+      "the doubly-settled mark is mid-log with no live row: the wall must fire"
+    );
+
+    // ── The emitter half: TRANSACTIONAL. The preflight decided before touching a cell. ──
+    assert_eq!(
+      inp.emitter().events().len(),
+      events_before,
+      "the sink's event log is untouched by the rewind it refused"
+    );
+    assert_eq!(inp.emitter().rows_len(), rows_before);
+    assert_eq!(inp.emitter().inner_ref().journal, inner_before);
+
+    // ── The input half: TORN. One observable from each side of the phase boundary. ──
+    assert_eq!(
+      *crate::Span::end_ref(inp.span()),
+      committed_before,
+      "NOT restored: `install_position` sits BELOW the emitter rewind and never ran, so the \
+     input is still on the abandoned branch"
+    );
+    assert_eq!(
+      inp.live_checkpoints_len(),
+      1,
+      "but ALREADY invalidated: `live_pop_through` sits ABOVE the emitter rewind and did run. \
+     The restore landed between its two admissible outcomes — the input layer is not \
+     transactional across an emitter that reports on this path"
+    );
+  }
+
+  // The emitter is, though, all the way to the door: a normal-path report leaves no poison, so
+  // the log still materializes and it is the log the parse actually produced.
+  let sink = input.into_emitter();
+  let (green, _inner) = sink.finish_partial(K_ROOT);
+  let green = green.expect("a refused rewind that changed nothing leaves a materializable log");
+  assert_eq!(
+    text(green),
+    "abcd",
+    "and it is still lossless: three settled tokens plus the untouched tail"
   );
 }
 
@@ -3567,9 +3988,11 @@ fn no_row_middle_rewind_leaves_the_inner_untouched_in_release() {
 /// a point the log has not reached — a TOTAL no-op on every channel, the mark stack included.
 /// Pre-fix, `mark = checkpoint.min(len)` clamped it to the length BEFORE the row lookup, so a
 /// future mark masqueraded as a rewind-to-current and spent the live row of a REAL checkpoint
-/// taken at the current length; that checkpoint's own later rewind then found no row — the
-/// mid-log no-row witness fired on a disciplined mark in debug, the inner ghosted the
-/// abandoned branch's records in release.
+/// taken at the current length; that checkpoint's own later rewind then found no row — which,
+/// now that the mid-log no-row wall is unconditional, would panic on a perfectly disciplined
+/// mark in every build. (Pre-fix it fired only in debug, and the release build instead let the
+/// inner ghost the abandoned branch's records.) The wall being loud is exactly why this
+/// early-return has to stay exact rather than defensive.
 #[test]
 fn out_of_range_rewind_spends_no_live_row() {
   let mut sink: JournalingSink<'_> = Sink::new("ab", JournalingEmitter::default(), profile());

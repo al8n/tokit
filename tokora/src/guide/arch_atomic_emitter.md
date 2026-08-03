@@ -199,7 +199,15 @@ Three methods make the emitter's log rewindable in step with the cursor, and tog
   dropping exactly what was recorded after it. Like `release`, it can be called **from a drop that
   is already unwinding** — a rolling-back guard settles in its `Drop` — so it must not panic there;
   a panic mid-unwind aborts. The same rider is on
-  [`exit_label`](crate::Emitter::exit_label), whose pop `labelled` performs from a drop guard.
+  [`exit_label`](crate::Emitter::exit_label), whose pop `labelled` performs from a drop guard. The
+  binding property is *never abort*, not *never panic*: an emitter that can **detect** an unpaired
+  settle may report it by panicking on the normal path, so long as it checks
+  `std::thread::panicking` first. Two riders come with that: the report must be raised **before
+  the rewind mutates anything**, so a caught panic leaves the emitter whole rather than half
+  rewound; and when the report is suppressed mid-unwind the emitter must **latch** the fact and
+  refuse at whatever surface hands its output onward, rather than degrade in silence. The
+  recording CST `Sink` (the `rowan` feature) is the one implementation here that has anything to
+  detect, and it takes that door under both riders.
 - [`release`](crate::Emitter::release)`(mark)` is the eviction dual: it tells the emitter a mark was
   **kept** rather than rewound, so any per-mark bookkeeping can be reclaimed.
 
