@@ -1215,37 +1215,105 @@ where
   /// (the span written is a rejected *error's*, with no token to observe), `SyncTo::on_eof`
   /// (exhaustion, not a token), `commit_at` (its tokens already settled behind the frontier
   /// via `adopt`), and the position surgeries (`set_state`, the restore paths).
+  ///
+  /// # Two entrances, one settle
+  ///
+  /// The body is a fallible clamp followed by an infallible
+  /// [`settle_committed_token`](Self::settle_committed_token), and the split is not cosmetic:
+  /// this entrance is handed a token its caller has *already* removed from the stream, so its
+  /// clamp runs in the window where the token is out and the position has not moved.
+  /// [`commit_front`](Self::commit_front) is the other entrance, for a caller that removes the
+  /// token itself and can therefore clamp first — it closes that window rather than repairing it
+  /// afterwards. Both reach the side channel through the one infallible half, so the emitter hook
+  /// still has a single home.
   #[inline(always)]
   fn commit_token(&mut self, tok: &L::Token, span: &L::Span, state: L::State) {
-    // PUBLISH FIRST, THEN NOTIFY — and the order is the opposite of what it looks like it should
-    // be, so the reason is written down.
-    //
-    // Every caller of this reaches it having ALREADY taken the token off the front stream: a
-    // cache hit popped it, a lexed one was never put there. So by the time the observer runs, the
-    // token is gone from the stream whatever happens next. Notifying first therefore does not
-    // mean "a panicking observer publishes nothing" — it means the position is left behind a
-    // token the stream no longer holds, with the younger cache entries still resident in front of
-    // it, and `cursor()` reads straight past the gap. Measured: committed span (0, 0) against a
-    // stream starting at 3, with the token vanished.
-    //
-    // Publishing first closes it. A panicking observer then leaves a consistent input — the token
-    // consumed, the position accounting for it — and only the side-channel notification missing,
-    // which is a documented observer-contract violation rather than a lost token.
-    //
     // The state travels WITH the span. It used to be the caller's job to write it on the next
     // line, at sixteen call sites, and a caller that forgot published half a position: a
     // committed span paired with the lexer state of somewhere else. Taking it here makes that
     // unrepresentable rather than censused.
-    // `replace_position` rather than `commit_position`: the latter drops the replaced pair before
-    // it returns, and those drops are caller code. A panicking `L::Span`/`L::State` drop would
-    // then leave the token consumed and the position advanced with the observer never notified —
-    // the same missing-notification hole this ordering exists to close, entered through the other
-    // door. Hold the replaced pair, notify, and only then let it go.
-    let replaced = self.replace_position(span.into(), state);
+    //
+    // SETTLE_CENSUS: the clamp — the settle's ONE fallible step — runs here, and the two halves
+    // below cannot fail. Split for the same reason `replace_position` is split from
+    // `install_position`: a caller that removes the token from the stream itself needs the
+    // fallible half to run BEFORE the removal, and calls `commit_front` instead.
+    let (clamped, spare) = self.clamped_span(span.into());
+    self.settle_committed_token(clamped, spare, tok, span, state);
+  }
+
+  /// SETTLE_CENSUS — the **infallible half** of a token settle: install the already-clamped
+  /// position, notify the committed-token side channel, and only then let the replaced pair go.
+  ///
+  /// `install_position` rather than `replace_position`: the clamp has already happened, and
+  /// keeping it out of this body is the whole point. Everything here is a move or a foreign call
+  /// made *after* the input is whole again.
+  ///
+  /// # Publish first, then notify — and the order is the opposite of what it looks like it
+  /// should be
+  ///
+  /// Every caller reaches this having ALREADY taken the token off the front stream: a cache hit
+  /// popped it, a lexed one was never there. So by the time the observer runs, the token is gone
+  /// from the stream whatever happens next. Notifying first therefore does not mean "a panicking
+  /// observer publishes nothing" — it means the position is left behind a token the stream no
+  /// longer holds, with the younger cache entries still resident in front of it, and
+  /// [`cursor`](Self::cursor) reads straight past the gap. Measured: committed span (0, 0)
+  /// against a stream starting at 3, with the token vanished.
+  ///
+  /// Publishing first closes it. A panicking observer then leaves a consistent input — the token
+  /// consumed, the position accounting for it — and only the side-channel notification missing,
+  /// which is a documented observer-contract violation rather than a lost token. The replaced
+  /// pair is held across the notification for the same reason: `L::Span::drop` and
+  /// `L::State::drop` are caller code, and a panicking drop between the publish and the notify
+  /// would enter the same hole through the other door.
+  #[inline(always)]
+  fn settle_committed_token(
+    &mut self,
+    clamped: L::Span,
+    spare: Option<L::Offset>,
+    tok: &L::Token,
+    span: &L::Span,
+    state: L::State,
+  ) {
+    let replaced = self.install_position(clamped, spare, state);
     // The settle observed: the one home of the committed-token side channel on the
     // consume surface (SETTLE_CENSUS locks the emitter-hook sites too).
     self.session.emitter.commit_token(tok, span);
     drop(replaced);
+  }
+
+  /// SETTLE_CENSUS / FRONT_CENSUS — consumes the token at the front of the stream with its
+  /// position **already clamped**, and returns it.
+  ///
+  /// This is [`commit_token`](Self::commit_token) for a caller that takes the token out of the
+  /// stream itself, with the two steps in the order that leaves no window: the caller runs
+  /// [`clamped_span`](Self::clamped_span) — the settle's only fallible step, and caller code
+  /// three times over (`Source::len`, an `L::Offset` comparison, an `L::Span::clone`) — while the
+  /// token is **still in the stream**, and hands the answer here. Everything from the removal to
+  /// the publish is then a move.
+  ///
+  /// The ordinary settle cannot do that: `commit_token` is handed a token its caller has already
+  /// popped, so its clamp necessarily runs with the token out of the stream and the position
+  /// still behind it. That window is the crate's long-standing posture for the 1:1 consume
+  /// settles and is left alone; the trivia skip's **resident** run crosses a *run* of tokens
+  /// rather than one, so it takes this entrance and closes the window by construction rather than
+  /// by a scope whose `Drop` repairs it afterwards. Its **lexing** run does not reach here at all
+  /// — a token it just lexed was never in the stream, so there is no removal to clamp ahead of,
+  /// and it settles through `commit_token` like every other 1:1 consume.
+  ///
+  /// # Panics
+  ///
+  /// If the front of the stream is empty. The clamp the caller passes in was necessarily read off
+  /// a token it found there, and nothing runs in between that could take it away.
+  #[inline(always)]
+  fn commit_front(&mut self, clamped: (L::Span, Option<L::Offset>)) -> Spanned<L::Token, L::Span> {
+    let (span, spare) = clamped;
+    // ── nothing fallible from here to the publish: a take, a destructure, two moves ──
+    let (tok, state) = self
+      .take_front()
+      .expect("the caller clamped a token it read at the front a moment ago")
+      .into_components();
+    self.settle_committed_token(span, spare, tok.data(), tok.span_ref(), state);
+    tok
   }
 
   /// Commits a scan at its [`AtFrontier`] frontier — the end of the last token it settled there,

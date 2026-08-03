@@ -8731,7 +8731,10 @@ fn r9_state_drop_inventory() {
 /// Drives a committing scan to end of input with `Lexer::into_state` armed — the caller code
 /// that `SyncTo::on_eof` used to run BETWEEN the two halves of the position write — and reports
 /// `(committed span, committed state's tally)`.
-fn eof_commit_interrupted() -> ((usize, usize), usize) {
+///
+/// `via_scan` picks the route: the shared scanner at [`SkipWhile`](super::scan::SkipWhile), or
+/// `skip_while` itself, which on a complete input runs its own loop.
+fn eof_commit_interrupted(via_scan: bool) -> ((usize, usize), usize) {
   let cache = DefaultCache::<'_, BombLexer<'_>>::default();
   let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
     "ab cd ef gh",
@@ -8742,7 +8745,11 @@ fn eof_commit_interrupted() -> ((usize, usize), usize) {
 
   arm_into_state(true);
   let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-    let _ = inp.skip_while(|_| true);
+    if via_scan {
+      let _ = inp.skip_until::<super::scan::SkipWhile, _, _>(|_| false, || None, ());
+    } else {
+      let _ = inp.skip_while(|_| true);
+    }
   }));
   arm_into_state(false);
   assert!(caught.is_err(), "the armed `into_state` must have panicked");
@@ -8762,12 +8769,316 @@ fn r9_committing_eof_commit_is_atomic_in_span_and_state() {
   // tally 0. A host that catches and resumes then lexes from offset 11 under a state that has seen
   // nothing: silent stream corruption, and only for stateful lexers, which is the population least
   // able to notice. The span and the state must move together or not at all.
+  //
+  // Both routes are pinned, because they land on DIFFERENT — and both whole — positions, and the
+  // difference is the point of the complete-input route:
+  //
+  // * the scanner accumulates the four skipped tokens in an uncommitted frontier and disarms its
+  //   scope before calling `on_eof`, so an unwind there drops the frontier and NOTHING is written;
+  // * `skip_while`'s own loop commits each token as it crosses it, so the same unwind lands on the
+  //   fourth token's span paired with the state that produced it — the progress the call actually
+  //   made, kept rather than discarded.
+  //
+  // What the cell measures is the same either way: span and state describing the same token. A
+  // tear on the second route would read ((11, 11), 4) — the lexer's end beside the last token's
+  // tally — which is exactly the shape the ordering here exists to rule out.
   assert_eq!(
-    eof_commit_interrupted(),
+    eof_commit_interrupted(true),
     ((0, 0), 0),
     "an interrupted end-of-input commit must leave the position pair WHOLE: both halves are \
      computed before either is written, so an unwind in the caller code that produces them lands \
      with nothing written at all"
+  );
+  assert_eq!(
+    eof_commit_interrupted(false),
+    ((9, 11), 4),
+    "and on the complete-input route the same unwind lands on the last token this call committed \
+     — span (9, 11) with the tally that produced it, whole — not on the lexer's end beside a \
+     stale state"
+  );
+}
+
+// ── The one exit the two completeness routes answer differently ─────────────
+//
+// The cell above compares two SCAN MODES entered from a complete input, and asks of each only that
+// the pair it leaves is whole. What follows compares the two TYPESTATE routes of one method — which
+// is the thing `skip_while` makes a parity claim about — and asks what each one keeps.
+
+/// Everything one route leaves behind after an interrupted end-of-input settle.
+#[derive(Debug, PartialEq)]
+struct EofSettleResidue {
+  /// The committed span, and the tally of the state committed beside it.
+  span: (usize, usize),
+  scanned: usize,
+  /// Where the next read resumes, and what the reads from there yield.
+  cursor: usize,
+  drained: std::vec::Vec<(usize, usize)>,
+  /// The lexer calls the drain needed to produce them: a prefix this route kept is not lexed
+  /// again, and one it dropped is.
+  drain_lexed: usize,
+  /// Committed-token notifications the interrupted call made — the side channel no other field
+  /// carries, and the one that makes the two answers comparable at all.
+  commits: usize,
+  live_rows: usize,
+  poisoned: bool,
+}
+
+/// Which caller-code step [`eof_settle_residue`] arms. Three of the four are controls: the cell
+/// below is a **bound** on the divergence as much as a record of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettleBomb {
+  /// Nothing armed — the run in which the two routes must agree.
+  None,
+  /// `Lexer::into_state`: the one caller-code step *inside* the end-of-input settle, called
+  /// exactly once per scan by both routes.
+  IntoState,
+  /// The committed-token observer, fired once per skipped token by both routes — an emitter panic
+  /// mid-skip, outside the settle.
+  CommitToken,
+  /// The emitter's diagnostic path over a crossed limit trip — again outside the settle.
+  Emit,
+}
+
+impl SettleBomb {
+  /// `Emit` needs a lexer error to be diagnosed, which is a tally the second token trips.
+  fn tally(self) -> BombTally {
+    match self {
+      SettleBomb::Emit => BombTally {
+        scanned: 0,
+        limit: 1,
+      },
+      _ => BombTally::default(),
+    }
+  }
+}
+
+/// One `skip_while(|_| true)` over `"ab cd ef gh"` down one route, with `bomb` armed, and the whole
+/// residue it leaves.
+fn eof_settle_residue<'a, Cmpl>(
+  inp: &mut InputRef<'a, '_, BombLexer<'a>, BombCtx<'a>, (), Cmpl>,
+  bomb: SettleBomb,
+) -> EofSettleResidue
+where
+  Cmpl: crate::input::SurfaceIncomplete<'a, BombLexer<'a>, BombCtx<'a>, ()>,
+{
+  match bomb {
+    SettleBomb::IntoState => arm_into_state(true),
+    SettleBomb::CommitToken => inp.emitter().panic_on_commit_token = true,
+    SettleBomb::Emit => inp.emitter().panic_on_emit = true,
+    SettleBomb::None => {}
+  }
+  let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let _ = inp.skip_while(|_| true);
+  }))
+  .is_err();
+  arm_into_state(false);
+  inp.emitter().panic_on_commit_token = false;
+  inp.emitter().panic_on_emit = false;
+  assert_eq!(
+    caught,
+    bomb != SettleBomb::None,
+    "the armed step must have fired, and the control must not have: {bomb:?}"
+  );
+
+  let sp = inp.span();
+  let span = (sp.start, sp.end);
+  let scanned = inp.state().scanned;
+  let cursor = *inp.cursor().as_inner();
+  let poisoned = inp.is_poisoned();
+  let commits = inp.emitter().commits.len();
+
+  // Reset AFTER the call, so this counts only what the drain had to produce.
+  reset_lex_calls();
+  let mut drained = std::vec::Vec::new();
+  while let Ok(Some(tok)) = inp.next() {
+    let s = tok.span_ref();
+    drained.push((s.start, s.end));
+  }
+
+  EofSettleResidue {
+    span,
+    scanned,
+    cursor,
+    drained,
+    drain_lexed: lex_calls(),
+    commits,
+    live_rows: inp.emitter().live_rows(),
+    poisoned,
+  }
+}
+
+/// The same program down both typestate routes: `skip_while` on a [`Complete`](crate::input::Complete)
+/// input, which runs its own loop, and on a **sealed** [`Partial`](crate::input::Partial) one, which
+/// runs the shared scanner. Sealed, because that is the residency in which a partial input takes
+/// every decision a complete one takes — anything else would be comparing two different programs.
+fn both_completeness_routes_over_the_settle(
+  bomb: SettleBomb,
+) -> (EofSettleResidue, EofSettleResidue) {
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut complete = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    "ab cd ef gh",
+    bomb.tally(),
+    crate::input::InputContext::new(BombEmitter::default(), cache),
+  );
+  let direct = {
+    let mut inp = complete.as_ref();
+    eof_settle_residue(&mut inp, bomb)
+  };
+
+  let cache = DefaultCache::<'_, BombLexer<'_>>::default();
+  let mut partial =
+    Input::<BombLexer<'_>, BombCtx<'_>, (), crate::input::Partial>::with_state_and_context(
+      "ab cd ef gh",
+      bomb.tally(),
+      crate::input::InputContext::new(BombEmitter::default(), cache),
+    );
+  partial.seal();
+  let scanned = {
+    let mut inp = partial.as_ref();
+    eof_settle_residue(&mut inp, bomb)
+  };
+
+  (direct, scanned)
+}
+
+/// **This cell pins a difference, and the difference is deliberate.** It is not a regression
+/// witness and a green run is not evidence of parity — both columns are asserted, so a change that
+/// made the two routes *agree* here fails just as loudly as one that moved either of them.
+///
+/// [`skip_while`](InputRef::skip_while) runs its own loop under
+/// [`Complete`](crate::input::Complete) and the shared scanner under
+/// [`Partial`](crate::input::Partial), and it claims the two are held to the same observation. That
+/// claim now excludes exactly one exit, and this is it: an unwind **inside the end-of-input
+/// settle**. Both routes finish a run-to-end-of-input the same way — read `Lexer::span`, take
+/// `Lexer::into_state`, write the pair — but the scanner reaches that settle having already
+/// disarmed its [`ScanScope`](super::scan::ScanScope), so the frontier holding the whole skipped
+/// run is dropped with the unwind. The complete-input route committed each token as it crossed it
+/// and has no frontier to drop.
+///
+/// **Why the claim was narrowed instead of the behaviour changed.** The `commits` row is the
+/// argument. Both routes told the committed-token side channel that four tokens were consumed;
+/// only the complete-input route's committed position agrees with what it said. The scanner leaves
+/// a recording sink holding four settles for tokens the input then serves a second time, which is
+/// the weaker answer, and the stronger one falls out of the per-token commit that the route exists
+/// for. Paying to degrade it would buy agreement on an unwind that only a lexer, source, span or
+/// offset callback can raise — the very code `skip_while`'s first condition clause requires to be
+/// inert — and never on the predicate, which is outside that clause and whose divergence *was*
+/// fixed (`the_two_completeness_routes_observe_the_same_unwound_skip`).
+///
+/// **The bound is the other three cases.** Nothing here is asked to fail: with nothing armed, with
+/// the committed-token observer armed, and with the emitter's diagnostic path armed over a crossed
+/// limit trip, the two routes leave the identical residue. So the divergence is the settle and not
+/// the route.
+#[test]
+fn the_two_completeness_routes_are_pinned_apart_on_an_interrupted_eof_settle() {
+  // ── control: nothing armed ──
+  let (direct, scanned) = both_completeness_routes_over_the_settle(SettleBomb::None);
+  assert_eq!(
+    direct, scanned,
+    "with nothing armed the two routes must observe the same skip — this is the baseline the \
+     divergence below is a difference FROM"
+  );
+  assert_eq!(
+    direct,
+    EofSettleResidue {
+      span: (11, 11),
+      scanned: 4,
+      cursor: 11,
+      drained: std::vec::Vec::new(),
+      drain_lexed: 1,
+      commits: 4,
+      live_rows: 0,
+      poisoned: false,
+    },
+    "…and it is the right baseline: four tokens skipped and committed, the position at the \
+     LEXER's end, the input spent"
+  );
+
+  // ── the divergence: `Lexer::into_state`, inside the settle ──
+  let (direct, scanned) = both_completeness_routes_over_the_settle(SettleBomb::IntoState);
+  assert_eq!(
+    direct,
+    EofSettleResidue {
+      span: (9, 11),
+      scanned: 4,
+      cursor: 11,
+      drained: std::vec::Vec::new(),
+      drain_lexed: 1,
+      commits: 4,
+      live_rows: 0,
+      poisoned: false,
+    },
+    "the complete-input route KEEPS what the interrupted call crossed: the position stands at the \
+     fourth token with the tally that produced it, the cursor is past it, and the four \
+     committed-token notifications it made describe tokens the input agrees are gone"
+  );
+  assert_eq!(
+    scanned,
+    EofSettleResidue {
+      span: (0, 0),
+      scanned: 0,
+      cursor: 0,
+      drained: std::vec![(0, 2), (3, 5), (6, 8), (9, 11)],
+      drain_lexed: 5,
+      commits: 4,
+      live_rows: 0,
+      poisoned: false,
+    },
+    "and the sealed-partial route DISCARDS it: the frontier went with the unwind, so the position \
+     is the call's entry, the four tokens are lexed and served all over again — and the four \
+     committed-token notifications it already made now describe none of that. Neither column is a \
+     bug being tolerated; the first is the better answer and the second is what the scan scope's \
+     disarm-before-settle costs"
+  );
+  assert_ne!(
+    direct, scanned,
+    "and they must still DIFFER. If this ever passes by agreeing, the parity claim on \
+     `skip_while` can be widened again — but widen it deliberately, by reading why this cell says \
+     what it says, not by deleting the assertion that failed"
+  );
+
+  // ── bound: an emitter panic mid-skip is not the settle, and does not diverge ──
+  let (direct, scanned) = both_completeness_routes_over_the_settle(SettleBomb::CommitToken);
+  assert_eq!(
+    direct, scanned,
+    "a panicking committed-token observer is caller code both routes run once per skipped token, \
+     and it is OUTSIDE the settle: the two routes must agree"
+  );
+  assert_eq!(
+    direct,
+    EofSettleResidue {
+      span: (0, 2),
+      scanned: 1,
+      cursor: 2,
+      drained: std::vec![(3, 5), (6, 8), (9, 11)],
+      drain_lexed: 4,
+      commits: 0,
+      live_rows: 0,
+      poisoned: false,
+    },
+    "…on the first token, with the position already published behind it and the rest of the \
+     stream still reachable"
+  );
+
+  let (direct, scanned) = both_completeness_routes_over_the_settle(SettleBomb::Emit);
+  assert_eq!(
+    direct, scanned,
+    "and so must a panic out of the emitter's diagnostic path over a crossed limit trip"
+  );
+  assert_eq!(
+    direct,
+    EofSettleResidue {
+      span: (0, 2),
+      scanned: 1,
+      cursor: 2,
+      drained: std::vec::Vec::new(),
+      drain_lexed: 0,
+      commits: 1,
+      live_rows: 0,
+      poisoned: true,
+    },
+    "…the one token crossed before the trip is committed, the boundary is latched, and the drain \
+     stops at it on both routes"
   );
 }
 
