@@ -43,13 +43,20 @@ DOCS_RS_MAP = {
   "crate::Emitter": "emitter/trait.Emitter.html",
   "crate::Emitter::bound_source": "emitter/trait.Emitter.html#method.bound_source",
   "crate::Emitter::checkpoint": "emitter/trait.Emitter.html#method.checkpoint",
+  "crate::Emitter::commit_lexer_error": "emitter/trait.Emitter.html#method.commit_lexer_error",
   "crate::Emitter::commit_token": "emitter/trait.Emitter.html#method.commit_token",
   "crate::Emitter::emit_error": "emitter/trait.Emitter.html#tymethod.emit_error",
+  "crate::Emitter::emit_lexer_error": "emitter/trait.Emitter.html#tymethod.emit_lexer_error",
   "crate::Emitter::emit_skipped_region": "emitter/trait.Emitter.html#method.emit_skipped_region",
   "crate::Emitter::emit_warning": "emitter/trait.Emitter.html#method.emit_warning",
   "crate::Emitter::exit_label": "emitter/trait.Emitter.html#method.exit_label",
   "crate::Emitter::release": "emitter/trait.Emitter.html#method.release",
   "crate::Emitter::rewind": "emitter/trait.Emitter.html#tymethod.rewind",
+  # `EmitterView` is re-exported from the crate root AND from `tokora::emitter`; rustdoc's
+  # canonical page for it is the latter, so the value follows the same rule the `InputRef`
+  # entries do — the module the item is declared under, not the root re-export.
+  "crate::EmitterView": "emitter/struct.EmitterView.html",
+  "crate::EmitterView::emit_lexer_error": "emitter/struct.EmitterView.html#method.emit_lexer_error",
   "crate::ErrorOf": "type.ErrorOf.html",
   "crate::FatalContext": "type.FatalContext.html",
   "crate::Hole": "input/struct.Hole.html",
@@ -66,6 +73,7 @@ DOCS_RS_MAP = {
   "crate::InputRef::descend": "input/struct.InputRef.html#method.descend",
   "crate::InputRef::descending": "input/struct.InputRef.html#method.descending",
   "crate::InputRef::emit_error": "input/struct.InputRef.html#method.emit_error",
+  "crate::InputRef::emit_lexer_error": "input/struct.InputRef.html#method.emit_lexer_error",
   "crate::InputRef::emitter_ref": "input/struct.InputRef.html#method.emitter_ref",
   "crate::InputRef::next": "input/struct.InputRef.html#method.next",
   "crate::InputRef::peek": "input/struct.InputRef.html#method.peek",
