@@ -270,7 +270,7 @@ fn emit_error(sink: &mut VerboseSink<'_>, at: usize, tag: u8) {
 fn emissions_buffer_in_order() {
   let mut sink = verbose_sink("a");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   assert_eq!(
     sink.events(),
@@ -314,10 +314,10 @@ fn stale_mark_spend_panics_after_truncate_and_regrow() {
   let mut sink = verbose_sink("ab");
   let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
   let mark = sink.cst_mark();
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   rewind(&mut sink, ckp);
   // Regrow: a token now occupies the mark's old index.
-  sink.cst_token(&MiniTok(b'b'), &span(0, 1));
+  sink.record_token(&MiniTok(b'b'), &span(0, 1));
   sink.cst_start_at(mark, K_WRAP);
 }
 
@@ -344,7 +344,7 @@ fn inert_mark_spend_panics() {
   let mut fatal = Fatal::<TestErr>::new();
   let inert = CstEmitter::<MiniLexer<'_>>::cst_mark(&mut fatal);
   let mut sink = verbose_sink("a");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_start_at(inert, K_WRAP);
 }
 
@@ -384,11 +384,11 @@ fn witness_counter_aborts_before_wrapping() {
 fn mark_survives_rewinds_strictly_above_it() {
   let mut sink = verbose_sink("abc");
   let mark = sink.cst_mark();
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   rewind(&mut sink, ckp);
-  sink.cst_token(&MiniTok(b'c'), &span(1, 2));
+  sink.record_token(&MiniTok(b'c'), &span(1, 2));
   sink.cst_start_at(mark, K_WRAP);
   sink.cst_finish(K_WRAP);
   assert_eq!(
@@ -409,14 +409,14 @@ fn mark_survives_rewinds_strictly_above_it() {
 #[test]
 fn rewind_reverses_the_forward_parent_write() {
   let mut sink = verbose_sink("abc");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   let mark = sink.cst_mark();
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
 
   // The speculative wrap: StartAt + finish, with the journaled fp write onto index 1.
   sink.cst_start_at(mark, K_WRAP);
-  sink.cst_token(&MiniTok(b'c'), &span(2, 3));
+  sink.record_token(&MiniTok(b'c'), &span(2, 3));
   sink.cst_finish(K_WRAP);
   assert_eq!(sink.forward_parent_at(1), NonZeroU32::new(2));
   assert_eq!(sink.journal_len(), 1);
@@ -438,18 +438,18 @@ fn rewind_reverses_the_forward_parent_write() {
 #[test]
 fn regrown_branch_cannot_inherit_a_dead_wrap() {
   let mut sink = verbose_sink("abc");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   let mark = sink.cst_mark();
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
   sink.cst_start_at(mark, K_WRAP);
-  sink.cst_token(&MiniTok(b'c'), &span(2, 3));
+  sink.record_token(&MiniTok(b'c'), &span(2, 3));
   sink.cst_finish(K_WRAP);
   rewind(&mut sink, ckp);
 
   // The retry: an unrelated List over the next token.
   sink.cst_start(K_LIST);
-  sink.cst_token(&MiniTok(b'd'), &span(2, 3));
+  sink.record_token(&MiniTok(b'd'), &span(2, 3));
   sink.cst_finish(K_LIST);
 
   assert_eq!(
@@ -573,12 +573,12 @@ fn abandoned_session_points_release_their_emitter_marks() {
 #[should_panic(expected = "no open node")]
 fn orphan_finish_debug_asserts_at_emission() {
   let mut sink = verbose_sink("a");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
 }
 
 /// The leaked-finish MISUSE shape, now a typed error: `cst_start(A); checkpoint m;
-/// cst_start(B); rewind(m); cst_token; cst_finish(B)`. The finish was meant for B, but B's
+/// cst_start(B); rewind(m); <token settles>; cst_finish(B)`. The finish was meant for B, but B's
 /// start died with the rewind, so it lands on ancestor A. After the rewind the event buffer
 /// is byte-identical to a legal `A`-close
 /// (`cst_finish_across_a_live_checkpoint_is_legal_and_materializes`) — depth cannot tell them
@@ -593,7 +593,7 @@ fn mismatched_finish_kind_is_a_typed_error() {
   let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
   sink.cst_start(K_LIST); // the start this finish was meant to close …
   rewind(&mut sink, ckp); //  … rolled back: K_LIST never existed
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_LIST); // leaked: it would close the ancestor K_NODE instead
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
@@ -608,7 +608,7 @@ fn mismatched_finish_kind_is_a_typed_error() {
 
 /// The genuinely-legal case that must not panic — a node whose start was emitted and
 /// NEVER rolled back, closed across a still-live checkpoint: `cst_start(A); checkpoint m;
-/// cst_token; cst_finish` (balanced, non-leaked). Under commit/release both events survive
+/// <token settles>; cst_finish` (balanced, non-leaked). Under commit/release both events survive
 /// balanced; under a rewind of `m` this very finish is what truncates and `A` reopens (the
 /// contract's blessed truncate-and-reopen semantics — not exercised here, see the
 /// rewind-recovery tests elsewhere in this file). The old assert panicked on it; the
@@ -618,7 +618,7 @@ fn cst_finish_across_a_live_checkpoint_is_legal_and_materializes() {
   let mut sink = verbose_sink("a");
   sink.cst_start(K_NODE);
   let _ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
   let root = tree(green.expect("a balanced stream materializes"));
@@ -638,7 +638,7 @@ fn legal_cross_checkpoint_close_still_accepted() {
   let mut sink = verbose_sink("a");
   sink.cst_start(K_NODE);
   let _ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
   let root = tree(green.expect("a live checkpoint does not make a matching close a mismatch"));
@@ -655,7 +655,7 @@ fn legal_cross_checkpoint_close_still_accepted() {
 fn cst_finish_debug_asserts_on_genuine_global_underflow_across_a_checkpoint() {
   let mut sink = verbose_sink("a");
   let _ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE); // nothing was ever open — global underflow, checkpoint or not
 }
 
@@ -733,7 +733,7 @@ fn labels_forward_without_diag_slots() {
 #[test]
 fn rewind_ignores_out_of_range_marks() {
   let mut sink = verbose_sink("a");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   rewind(&mut sink, u64::MAX);
   assert_eq!(
     sink.events().len(),
@@ -789,12 +789,12 @@ fn checkpoint_rows_freeze_derived_depth() {
 fn hole_wrap_brackets_the_buffered_suffix() {
   let mut sink = verbose_sink("xab");
   // A committed token BEFORE the hole: outside the wrap.
-  sink.cst_token(&MiniTok(b'x'), &span(0, 1));
+  sink.record_token(&MiniTok(b'x'), &span(0, 1));
   // The hole's tokens, with a crossed lexer error between them (a Diag slot).
-  sink.cst_token(&MiniTok(b'a'), &span(1, 2));
+  sink.record_token(&MiniTok(b'a'), &span(1, 2));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
-  sink.cst_token(&MiniTok(b'b'), &span(3, 4));
+  sink.record_token(&MiniTok(b'b'), &span(3, 4));
 
   Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(1, 4), 2)
     .expect("verbose collects");
@@ -831,7 +831,7 @@ fn hole_wrap_brackets_the_buffered_suffix() {
 #[test]
 fn zero_skip_hole_makes_no_node() {
   let mut sink = verbose_sink("a");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(1, 1), 0).expect("collects");
   assert_eq!(sink.events().len(), 2, "one token, one Diag — no wrap");
   assert!(matches!(sink.events()[1], Event::Diag { .. }));
@@ -852,10 +852,10 @@ fn tokenless_hole_makes_no_node() {
 #[test]
 fn hole_wrap_rewinds_with_the_log() {
   let mut sink = verbose_sink("xab");
-  sink.cst_token(&MiniTok(b'x'), &span(0, 1));
+  sink.record_token(&MiniTok(b'x'), &span(0, 1));
   let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
-  sink.cst_token(&MiniTok(b'a'), &span(1, 2));
-  sink.cst_token(&MiniTok(b'b'), &span(2, 3));
+  sink.record_token(&MiniTok(b'a'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(2, 3));
   Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(1, 3), 2).expect("collects");
   assert_eq!(sink.events().len(), 6);
   rewind(&mut sink, ckp);
@@ -876,7 +876,7 @@ fn mut_ref_sink_records_events() {
     CstEmitter::<MiniLexer<'_>>::cst_start(&mut threaded, K_NODE);
     let tok = MiniTok(b'a');
     let sp = span(0, 1);
-    CstEmitter::<MiniLexer<'_>>::cst_token(&mut threaded, &tok, &sp);
+    Emitter::<MiniLexer<'_>>::commit_token(&mut threaded, &tok, &sp);
     let mark = CstEmitter::<MiniLexer<'_>>::cst_mark(&mut threaded);
     CstEmitter::<MiniLexer<'_>>::cst_start_at(&mut threaded, mark, K_WRAP);
     CstEmitter::<MiniLexer<'_>>::cst_finish(&mut threaded, K_WRAP);
@@ -949,7 +949,7 @@ fn cst_forward_census_one_helper_carries_every_channel() {
   assert!(
     count(src, "self.inner.commit_token(") == 1,
     "CST_FORWARD_CENSUS drift: the settle channel forwards exactly once, in \
-     Emitter::commit_token (cst_token is raw event transport and must NOT fabricate a settle)"
+     Emitter::commit_token, the token channel's one and only door"
   );
   // Option A: the sink NEVER forwards release — inner checkpoints are value-keyed readings.
   assert!(
@@ -993,7 +993,7 @@ fn cst_forward_census_one_helper_carries_every_channel() {
 fn cst_composition_census_every_family_method_is_overridden() {
   let src = include_str!("../sink.rs");
 
-  // (a) The 29-method inventory: 12 core Emitter + 5 CstEmitter + 12 capability emit_*.
+  // (a) The 28-method inventory: 12 core Emitter + 4 CstEmitter + 12 capability emit_*.
   // Each must appear as an `fn <name>` impl in the sink; a missing one is a severed channel.
   let overridden = [
     // 12 core Emitter
@@ -1011,9 +1011,8 @@ fn cst_composition_census_every_family_method_is_overridden() {
     // The sink is the one emitter in the crate that binds a source, so it is the one that
     // must answer this rather than inherit the `None` default.
     "bound_source",
-    // 5 CstEmitter
+    // 4 CstEmitter
     "cst_start",
-    "cst_token",
     "cst_finish",
     "cst_mark",
     "cst_start_at",
@@ -1038,8 +1037,8 @@ fn cst_composition_census_every_family_method_is_overridden() {
   ];
   assert_eq!(
     overridden.len(),
-    29,
-    "the family inventory is 12 core + 5 CstEmitter + 12 capability = 29"
+    28,
+    "the family inventory is 12 core + 4 CstEmitter + 12 capability = 28"
   );
 
   // DERIVED, and at the TYPE level rather than by string matching — the half a hand-written
@@ -1090,7 +1089,7 @@ fn cst_composition_census_every_family_method_is_overridden() {
   let cst_body = &cst[cst.find("pub trait CstEmitter<").unwrap()..cst.find("for &mut U").unwrap()];
   assert_eq!(
     count(cst_body, "  fn "),
-    5,
+    4,
     "CstEmitter method count drifted"
   );
   // The capability surface, DERIVED on both sides — no constant, because a hard-coded total is
@@ -1497,7 +1496,7 @@ use crate::cst::FinishError;
 fn finish_builds_the_straight_tree() {
   let mut sink = verbose_sink("a");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
   let green = green.expect("a balanced stream materializes");
@@ -1515,10 +1514,10 @@ fn finish_builds_the_straight_tree() {
 fn round_trip_with_a_lexer_error_is_structural() {
   let mut sink = verbose_sink("a!c");
   // Source "a!c": the `!` is a lexer error — a diagnostic, never a token event.
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
-  sink.cst_token(&MiniTok(b'c'), &span(2, 3));
+  sink.record_token(&MiniTok(b'c'), &span(2, 3));
   let (green, emitter) = sink.finish(K_ROOT);
   let green = green.expect("gap tiling makes the error-bearing input materialize");
   assert_eq!(
@@ -1559,10 +1558,10 @@ fn a_trailing_gap_joins_the_node_of_the_token_it_trails() {
   // then — `K_NODE`.
   let mut sink = verbose_sink("a!b");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
-  sink.cst_token(&MiniTok(b'b'), &span(2, 3));
+  sink.record_token(&MiniTok(b'b'), &span(2, 3));
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
   let mid = green.expect("the covering diagnostic licenses the gap");
@@ -1573,7 +1572,7 @@ fn a_trailing_gap_joins_the_node_of_the_token_it_trails() {
   // enclosing node — and now nothing follows it.
   let mut sink = verbose_sink("a!");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_NODE);
@@ -1624,7 +1623,7 @@ fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
   // node.
   let mut sink = verbose_sink("a!");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_NODE);
@@ -1636,7 +1635,7 @@ fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
   // diagnostic is emitted one slot later, AFTER the close. Nothing else differs.
   let mut sink = verbose_sink("a!");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
@@ -1658,7 +1657,7 @@ fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
   // must be as invisible as hoisting the diagnostic was.
   let mut sink = verbose_sink("a!");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_NODE);
@@ -1677,12 +1676,12 @@ fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
   // about depth for its own sake.
   let mut sink = verbose_sink("ab!c");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
-  sink.cst_token(&MiniTok(b'c'), &span(3, 4));
+  sink.record_token(&MiniTok(b'c'), &span(3, 4));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     shape(&green.expect("explained gap")),
@@ -1692,9 +1691,9 @@ fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
 
   let mut sink = verbose_sink("ab!");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -1728,7 +1727,7 @@ fn a_trailing_gap_lands_at_the_depth_of_the_token_it_trails() {
   let nested = |sink: &mut VerboseSink<'_>| {
     sink.cst_start(K_NODE);
     sink.cst_start(K_LIST);
-    sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
     Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(1, 2), MiniErr))
       .expect("verbose collects");
     sink.cst_finish(K_LIST);
@@ -1738,7 +1737,7 @@ fn a_trailing_gap_lands_at_the_depth_of_the_token_it_trails() {
   // though the token that reveals the run settles one level up, in `K_NODE`.
   let mut sink = verbose_sink("a!b");
   nested(&mut sink);
-  sink.cst_token(&MiniTok(b'b'), &span(2, 3));
+  sink.record_token(&MiniTok(b'b'), &span(2, 3));
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
@@ -1765,7 +1764,7 @@ fn a_trailing_gap_lands_at_the_depth_of_the_token_it_trails() {
   let mut sink = verbose_sink("a!");
   sink.cst_start(K_NODE);
   sink.cst_start(K_LIST);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_LIST);
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
@@ -1781,10 +1780,10 @@ fn a_trailing_gap_lands_at_the_depth_of_the_token_it_trails() {
   // it — and `K_NODE`, which closed long before, does not.
   let mut sink = verbose_sink("ab!");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   sink.cst_start(K_LIST);
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_LIST);
@@ -1813,9 +1812,9 @@ fn a_trailing_gap_stays_at_the_root_when_the_token_it_trails_did() {
   // The run trails a root-level settle, made after `K_NODE` closed.
   let mut sink = verbose_sink("ab!");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -1862,7 +1861,7 @@ fn a_leading_gap_tiles_at_the_first_token_that_follows_it() {
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
     .expect("verbose collects");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
   let green = green.expect("explained gap");
@@ -1880,7 +1879,7 @@ fn a_leading_gap_tiles_at_the_first_token_that_follows_it() {
   sink.cst_start(K_NODE);
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
     .expect("verbose collects");
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
@@ -1952,7 +1951,7 @@ fn a_source_with_nothing_lexable_keeps_its_gap_at_the_root_either_way() {
     .expect("verbose collects");
   sink.cst_start(K_NODE);
   sink.cst_finish(K_NODE);
-  sink.cst_token(&MiniTok(b'c'), &span(2, 3));
+  sink.record_token(&MiniTok(b'c'), &span(2, 3));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     shape(&green.expect("explained gap")),
@@ -1965,7 +1964,7 @@ fn a_source_with_nothing_lexable_keeps_its_gap_at_the_root_either_way() {
   // enough for the run to trail it, and the node widens over the run.
   let mut sink = verbose_sink("ab");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_NODE);
@@ -2016,7 +2015,7 @@ fn placement_drive(
     match *op {
       PlacementOp::Start(kind) => sink.cst_start(kind),
       PlacementOp::Finish(kind) => sink.cst_finish(kind),
-      PlacementOp::Tok(byte, lo, hi) => sink.cst_token(&MiniTok(byte), &span(lo, hi)),
+      PlacementOp::Tok(byte, lo, hi) => sink.record_token(&MiniTok(byte), &span(lo, hi)),
       PlacementOp::Diag(lo, hi) => {
         Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(lo, hi), MiniErr))
           .expect("verbose collects");
@@ -2325,7 +2324,7 @@ fn hoisting_a_lexer_error_never_moves_a_gap() {
 fn finish_partial_places_a_balanced_trailing_gap_exactly_as_finish_does() {
   let balanced = |sink: &mut VerboseSink<'_>| {
     sink.cst_start(K_NODE);
-    sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
     Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(1, 2), MiniErr))
       .expect("verbose collects");
     sink.cst_finish(K_NODE);
@@ -2364,7 +2363,7 @@ fn finish_partial_places_a_balanced_trailing_gap_exactly_as_finish_does() {
 fn finish_partial_trailing_gap_tiles_into_the_innermost_open_node() {
   let mut sink = verbose_sink("ab");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   // `K_NODE` is deliberately never finished, and `b` at [1,2) is an uncovered trailing gap.
   let (green, _emitter) = sink.finish_partial(K_ROOT);
   let root = tree(green.expect("finish_partial tolerates the open node and tiles the tail"));
@@ -2413,8 +2412,8 @@ fn finish_partial_trailing_gap_tiles_into_the_innermost_open_node() {
 #[test]
 fn uncovered_gap_refused_by_finish_tiled_by_partial() {
   let dropped_b = |sink: &mut VerboseSink<'_>| {
-    sink.cst_token(&MiniTok(b'a'), &span(0, 1));
-    sink.cst_token(&MiniTok(b'c'), &span(2, 3)); // the `b` at [1,2) never settled
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
+    sink.record_token(&MiniTok(b'c'), &span(2, 3)); // the `b` at [1,2) never settled
   };
 
   // The success door refuses the unexplained gap, naming exactly the dropped byte range.
@@ -2445,7 +2444,7 @@ fn leading_and_trailing_gaps_tile() {
   let mut sink = verbose_sink("abc");
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
     .expect("verbose collects");
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -2600,7 +2599,7 @@ fn structure_without_tokens_is_legal_where_a_lexer_error_explains_every_byte() {
 #[test]
 fn orphan_finish_is_a_typed_error_not_an_absorbed_close() {
   let mut sink = verbose_sink("a");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   // The release-build shape (debug builds refuse this at emission): a finish whose start
   // was rolled back away.
   sink.push_raw_event_for_tests(Event::FinishNode { kind: K_NODE });
@@ -2619,7 +2618,7 @@ fn unclosed_nodes_refuse_finish_but_finish_partial_closes() {
   let mut sink = verbose_sink("a");
   sink.cst_start(K_NODE);
   sink.cst_start(K_LIST);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     green.expect_err("open nodes refuse the total finish"),
@@ -2629,7 +2628,7 @@ fn unclosed_nodes_refuse_finish_but_finish_partial_closes() {
   let mut sink = verbose_sink("a");
   sink.cst_start(K_NODE);
   sink.cst_start(K_LIST);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   let (green, _emitter) = sink.finish_partial(K_ROOT);
   let green = green.expect("the partial opt-in closes the open nodes");
   assert_eq!(text(green.clone()), "a");
@@ -2677,7 +2676,7 @@ fn tombstone_mapper_asserts_at_emission_in_every_build() {
   }
   let profile = CstProfile::new(bad_map, KindValidator::new(in_kind_space), K_ERR, K_GAP);
   let mut sink: VerboseSink<'_> = Sink::new("a", Verbose::new(), profile);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
 }
 
 /// Overlapping and non-monotone token spans are refused — the no-duplication half of the
@@ -2685,8 +2684,8 @@ fn tombstone_mapper_asserts_at_emission_in_every_build() {
 #[test]
 fn overlapping_spans_are_refused() {
   let mut sink = verbose_sink("abc");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 2));
-  sink.cst_token(&MiniTok(b'b'), &span(1, 3));
+  sink.record_token(&MiniTok(b'a'), &span(0, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 3));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     green.expect_err("overlap is a hard error"),
@@ -2699,7 +2698,7 @@ fn overlapping_spans_are_refused() {
 #[test]
 fn offset_overflow_is_refused() {
   let mut sink = verbose_sink("a");
-  sink.cst_token(&MiniTok(b'a'), &span(0, u32::MAX as usize + 10));
+  sink.record_token(&MiniTok(b'a'), &span(0, u32::MAX as usize + 10));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     green.expect_err("no silent truncation"),
@@ -2712,7 +2711,7 @@ fn offset_overflow_is_refused() {
 #[test]
 fn span_out_of_bounds_is_refused() {
   let mut sink = verbose_sink("ab");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 5));
+  sink.record_token(&MiniTok(b'a'), &span(0, 5));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     green.expect_err("events and source must agree"),
@@ -2725,7 +2724,7 @@ fn span_out_of_bounds_is_refused() {
 #[test]
 fn stale_start_at_target_is_refused_at_finish() {
   let mut sink = verbose_sink("a");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.push_raw_event_for_tests(Event::StartAt {
     kind: K_WRAP,
     target: 0,
@@ -2771,7 +2770,7 @@ fn improper_wrap_across_a_node_boundary_is_refused() {
   let mut sink = verbose_sink("a");
   sink.cst_start(K_NODE);
   let mark = sink.cst_mark();
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE); // closes K_NODE — the mark is now interior to a closed node
   sink.cst_start_at(mark, K_WRAP);
   sink.cst_finish(K_WRAP);
@@ -2791,13 +2790,13 @@ fn improper_wrap_across_a_node_boundary_is_refused() {
 fn pratt_double_wrap_replays_inside_out() {
   let mut sink = verbose_sink("1+2+3");
   let mark = sink.cst_mark();
-  sink.cst_token(&MiniTok(b'1'), &span(0, 1));
-  sink.cst_token(&MiniTok(b'+'), &span(1, 2));
-  sink.cst_token(&MiniTok(b'2'), &span(2, 3));
+  sink.record_token(&MiniTok(b'1'), &span(0, 1));
+  sink.record_token(&MiniTok(b'+'), &span(1, 2));
+  sink.record_token(&MiniTok(b'2'), &span(2, 3));
   sink.cst_start_at(mark, K_WRAP); // fold 1: Bin[1,+,2]
   sink.cst_finish(K_WRAP);
-  sink.cst_token(&MiniTok(b'+'), &span(3, 4));
-  sink.cst_token(&MiniTok(b'3'), &span(4, 5));
+  sink.record_token(&MiniTok(b'+'), &span(3, 4));
+  sink.record_token(&MiniTok(b'3'), &span(4, 5));
   sink.cst_start_at(mark, K_WRAP); // fold 2: the OUTER Bin
   sink.cst_finish(K_WRAP);
 
@@ -2828,7 +2827,7 @@ fn pratt_double_wrap_replays_inside_out() {
 fn two_wraps_on_one_target_close_in_materialization_order() {
   let mut sink = verbose_sink("a");
   let mark = sink.cst_mark();
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_start_at(mark, K_WRAP); // declared first  → the INNER node
   sink.cst_start_at(mark, K_NODE); // declared second → the OUTER node
   sink.cst_finish(K_WRAP);
@@ -2854,11 +2853,11 @@ fn marker_complete_and_precede_build_nested_wraps() {
 
   let mut sink = verbose_sink("a:b");
   let marker = Marker::new(sink.cst_mark());
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
-  sink.cst_token(&MiniTok(b':'), &span(1, 2));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b':'), &span(1, 2));
   let completed = marker.complete(&mut sink, K_WRAP); // Alias[a, :]
   let outer = completed.precede();
-  sink.cst_token(&MiniTok(b'b'), &span(2, 3));
+  sink.record_token(&MiniTok(b'b'), &span(2, 3));
   let _outer = outer.complete(&mut sink, K_NODE); // Field[Alias[a,:], b]
 
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -2877,18 +2876,18 @@ fn marker_complete_and_precede_build_nested_wraps() {
 #[test]
 fn declined_wrap_leaves_the_retry_tree_pristine() {
   let mut sink = verbose_sink("abd");
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   let mark = sink.cst_mark();
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
   sink.cst_start_at(mark, K_WRAP);
-  sink.cst_token(&MiniTok(b'c'), &span(2, 3));
+  sink.record_token(&MiniTok(b'c'), &span(2, 3));
   sink.cst_finish(K_WRAP);
   rewind(&mut sink, ckp);
 
   // The retry consumes a different shape.
   sink.cst_start(K_LIST);
-  sink.cst_token(&MiniTok(b'd'), &span(2, 3));
+  sink.record_token(&MiniTok(b'd'), &span(2, 3));
   sink.cst_finish(K_LIST);
 
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -2909,8 +2908,8 @@ fn declined_wrap_leaves_the_retry_tree_pristine() {
 fn backtrack_equivalence_yields_identical_green_trees() {
   let drive = |sink: &mut VerboseSink<'_>| {
     sink.cst_start(K_NODE);
-    sink.cst_token(&MiniTok(b'a'), &span(0, 1));
-    sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
+    sink.record_token(&MiniTok(b'b'), &span(1, 2));
     sink.cst_finish(K_NODE);
   };
 
@@ -2921,7 +2920,7 @@ fn backtrack_equivalence_yields_identical_green_trees() {
   let mut backtracked = verbose_sink("ab");
   let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&backtracked);
   backtracked.cst_start(K_LIST);
-  backtracked.cst_token(&MiniTok(b'a'), &span(0, 1));
+  backtracked.record_token(&MiniTok(b'a'), &span(0, 1));
   rewind(&mut backtracked, ckp);
   drive(&mut backtracked);
   let (backtracked_green, _emitter) = backtracked.finish(K_ROOT);
@@ -2939,7 +2938,7 @@ fn backtrack_equivalence_yields_identical_green_trees() {
 fn diag_slots_and_inert_tombstones_are_invisible() {
   let mut sink = verbose_sink("a");
   let _unspent = sink.cst_mark();
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   emit_error(&mut sink, 0, 7);
   let (green, emitter) = sink.finish(K_ROOT);
   let green = green.expect("marks and diag slots are structural silence");
@@ -2961,12 +2960,12 @@ fn diag_slots_and_inert_tombstones_are_invisible() {
 #[test]
 fn hole_wrap_materializes_as_an_error_node_with_real_tokens() {
   let mut sink = verbose_sink("{xy}");
-  sink.cst_token(&MiniTok(b'{'), &span(0, 1));
+  sink.record_token(&MiniTok(b'{'), &span(0, 1));
   // The scan settles two garbage tokens, then the hole is reported.
-  sink.cst_token(&MiniTok(b'x'), &span(1, 2));
-  sink.cst_token(&MiniTok(b'y'), &span(2, 3));
+  sink.record_token(&MiniTok(b'x'), &span(1, 2));
+  sink.record_token(&MiniTok(b'y'), &span(2, 3));
   Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(1, 3), 2).expect("collects");
-  sink.cst_token(&MiniTok(b'}'), &span(3, 4));
+  sink.record_token(&MiniTok(b'}'), &span(3, 4));
 
   let (green, _emitter) = sink.finish(K_ROOT);
   let green = green.expect("the hole wrap balances");
@@ -4353,7 +4352,7 @@ fn error_dense_w(n: usize) -> (u64, u64, u64) {
     let lo = 2 * i;
     Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(lo, lo + 1), MiniErr))
       .expect("verbose collects");
-    sink.cst_token(&MiniTok(b'a'), &span(lo + 1, lo + 2));
+    sink.record_token(&MiniTok(b'a'), &span(lo + 1, lo + 2));
   }
   super::finish::w::reset();
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -4478,7 +4477,7 @@ fn replay_work_on_wraps_is_events_plus_chain_hops() {
   let mut sink = verbose_sink(&src);
   for i in 0..m {
     let mark = sink.cst_mark();
-    sink.cst_token(&MiniTok(b'a'), &span(i, i + 1));
+    sink.record_token(&MiniTok(b'a'), &span(i, i + 1));
     sink.cst_start_at(mark, K_WRAP);
     sink.cst_finish(K_WRAP);
   }
@@ -4512,10 +4511,10 @@ fn replay_work_on_wraps_is_events_plus_chain_hops() {
 fn diag_starting_after_covered_keeps_the_tree_lossless() {
   // H1: source "abcde", events Token[0,1) · Diag[2,3) · Token[4,5).
   let h1 = |sink: &mut VerboseSink<'_>| {
-    sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
     Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(2, 3), MiniErr))
       .expect("verbose collects");
-    sink.cst_token(&MiniTok(b'e'), &span(4, 5));
+    sink.record_token(&MiniTok(b'e'), &span(4, 5));
   };
 
   let mut sink = verbose_sink("abcde");
@@ -4546,7 +4545,7 @@ fn diag_starting_after_covered_keeps_the_tree_lossless() {
 fn diag_absorbing_to_source_end_still_refuses_the_dropped_token() {
   // H2: source "abcd", events Token[0,1) · Diag[2,4).
   let h2 = |sink: &mut VerboseSink<'_>| {
-    sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
     Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(2, 4), MiniErr))
       .expect("verbose collects");
   };
@@ -4580,7 +4579,7 @@ fn uncovered_gap_keeps_its_error_precedence() {
   // (A) an unclosed node outranks the uncovered gap.
   let mut sink = verbose_sink("abc");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     green.expect_err("balance is checked before the gap latch is consumed"),
@@ -4589,8 +4588,8 @@ fn uncovered_gap_keeps_its_error_precedence() {
 
   // (B) a later overlapping token span outranks it.
   let mut sink = verbose_sink("abc");
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2)); // reveals the unexplained gap [0,1)
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1)); // index 1: non-monotone
+  sink.record_token(&MiniTok(b'b'), &span(1, 2)); // reveals the unexplained gap [0,1)
+  sink.record_token(&MiniTok(b'a'), &span(0, 1)); // index 1: non-monotone
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     green.expect_err("the in-walk span wall answers first"),
@@ -4599,8 +4598,8 @@ fn uncovered_gap_keeps_its_error_precedence() {
 
   // (C) a later out-of-bounds token span outranks it.
   let mut sink = verbose_sink("abc");
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2)); // reveals the unexplained gap [0,1)
-  sink.cst_token(&MiniTok(b'c'), &span(2, 99)); // index 1: past the source end
+  sink.record_token(&MiniTok(b'b'), &span(1, 2)); // reveals the unexplained gap [0,1)
+  sink.record_token(&MiniTok(b'c'), &span(2, 99)); // index 1: past the source end
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     green.expect_err("the in-walk bounds wall answers first"),
@@ -4618,10 +4617,10 @@ fn uncovered_gap_keeps_its_error_precedence() {
 fn partially_explained_run_names_todays_span() {
   // "abcdef" / Token[0,1) · Diag[3,4) · Token[5,6): [1,3) is unexplained, [3,4) is named.
   let h = |sink: &mut VerboseSink<'_>| {
-    sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
     Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(3, 4), MiniErr))
       .expect("verbose collects");
-    sink.cst_token(&MiniTok(b'f'), &span(5, 6));
+    sink.record_token(&MiniTok(b'f'), &span(5, 6));
   };
 
   let mut sink = verbose_sink("abcdef");
@@ -4656,7 +4655,7 @@ fn partially_explained_run_names_todays_span() {
 fn wrap_chain_survives_rewind_and_regrow() {
   let mut sink = verbose_sink("a");
   let mark = sink.cst_mark(); // index 0
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1)); // index 1
+  sink.record_token(&MiniTok(b'a'), &span(0, 1)); // index 1
   let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // the truncation point, index 2
 
   // The branch that dies: one wrap declared and then rolled back.
@@ -4886,7 +4885,7 @@ fn malformed_diag_span_refused_by_both_doors() {
     // `0..99` over a 3-byte source: an end far past the source end.
     Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(0, 99), MiniErr))
       .expect("verbose collects");
-    sink.cst_token(&MiniTok(b'c'), &span(2, 3));
+    sink.record_token(&MiniTok(b'c'), &span(2, 3));
   };
 
   let mut sink = verbose_sink("abc");
@@ -4907,7 +4906,7 @@ fn malformed_diag_span_refused_by_both_doors() {
 
   // The control: the same dropped bytes, no diagnostic at all.
   let mut sink = verbose_sink("abc");
-  sink.cst_token(&MiniTok(b'c'), &span(2, 3));
+  sink.record_token(&MiniTok(b'c'), &span(2, 3));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     green.expect_err("the cell must not be passing for the wrong reason"),
@@ -5003,8 +5002,8 @@ type ByteSink<'inp> = Sink<'inp, ByteSrcLexer<'inp>, Verbose<TestErr>>;
 fn utf8_byte_source_materializes() {
   let src: &[u8] = "aé".as_bytes(); // 3 bytes: 'a', then a 2-byte 'é'
   let mut sink: ByteSink<'_> = Sink::new(src, Verbose::new(), profile());
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
-  sink.cst_token(&MiniTok(0xC3), &span(1, 3));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(0xC3), &span(1, 3));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     text(green.expect("valid UTF-8 bytes are a source like any other")),
@@ -5023,7 +5022,7 @@ fn non_utf8_byte_source_refused() {
   // `a`, then a lone continuation byte: invalid from offset 1.
   let src: &[u8] = &[b'a', 0x80, b'c'];
   let mut sink: ByteSink<'_> = Sink::new(src, Verbose::new(), profile());
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     green.expect_err("a non-UTF-8 source has no green tree"),
@@ -5067,21 +5066,21 @@ impl rowan::Language for StrictLang {
 fn no_ok_tree_panics_a_conforming_language() {
   let mut sink = verbose_sink("abcde");
   sink.cst_start(K_NODE);
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
 
   // A retro-wrap.
   let mark = sink.cst_mark();
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   sink.cst_start_at(mark, K_WRAP);
   sink.cst_finish(K_WRAP);
 
   // A direct node.
   sink.cst_start(K_LIST);
-  sink.cst_token(&MiniTok(b'c'), &span(2, 3));
+  sink.record_token(&MiniTok(b'c'), &span(2, 3));
   sink.cst_finish(K_LIST);
 
   // A recovery hole: the sink synthesizes the K_ERR wrap itself.
-  sink.cst_token(&MiniTok(b'd'), &span(3, 4));
+  sink.record_token(&MiniTok(b'd'), &span(3, 4));
   Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(3, 4), 1).expect("collects");
 
   // A refused byte: the sink synthesizes the K_GAP tile itself.
@@ -5273,6 +5272,52 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, L
   }
 }
 
+// The collecting bundle's conversions — needed by the `repeated_while` pin below, which is the
+// one shape in this file that goes through a public collecting combinator.
+impl<S, Lang: ?Sized> From<crate::error::syntax::FullContainer<S, Lang>> for SesErr {
+  fn from(_: crate::error::syntax::FullContainer<S, Lang>) -> Self {
+    Self::Lex
+  }
+}
+
+impl<S, Lang: ?Sized> From<crate::error::syntax::TooFew<S, Lang>> for SesErr {
+  fn from(_: crate::error::syntax::TooFew<S, Lang>) -> Self {
+    Self::Lex
+  }
+}
+
+impl<S, Lang: ?Sized> From<crate::error::syntax::TooMany<S, Lang>> for SesErr {
+  fn from(_: crate::error::syntax::TooMany<S, Lang>) -> Self {
+    Self::Lex
+  }
+}
+
+impl<O, Lang: ?Sized> From<crate::error::syntax::MissingSyntax<O, Lang>> for SesErr {
+  fn from(_: crate::error::syntax::MissingSyntax<O, Lang>) -> Self {
+    Self::Lex
+  }
+}
+
+impl<'a, T, K: Clone, S, Lang: ?Sized> From<crate::error::token::SeparatedError<'a, T, K, S, Lang>>
+  for SesErr
+{
+  fn from(_: crate::error::token::SeparatedError<'a, T, K, S, Lang>) -> Self {
+    Self::Lex
+  }
+}
+
+impl<D, S, Lang: ?Sized> From<crate::error::Unclosed<D, S, Lang>> for SesErr {
+  fn from(_: crate::error::Unclosed<D, S, Lang>) -> Self {
+    Self::Lex
+  }
+}
+
+impl<H, O, Lang: ?Sized, Set: Clone> From<crate::error::UnexpectedEnd<H, O, Lang, Set>> for SesErr {
+  fn from(_: crate::error::UnexpectedEnd<H, O, Lang, Set>) -> Self {
+    Self::Lex
+  }
+}
+
 type SesSink<'inp> = Sink<'inp, MiniLexer<'inp>, Verbose<SesErr>>;
 type SesCtx<'inp, 'e> = (&'e mut SesSink<'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
 
@@ -5352,10 +5397,6 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'i
 impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'inp> {
   fn cst_start(&mut self, kind: u16) {
     self.0.cst_start(kind);
-  }
-
-  fn cst_token(&mut self, tok: &MiniToken<'inp>, span: &MiniSpan<'inp>) {
-    self.0.cst_token(tok, span);
   }
 
   fn cst_finish(&mut self, kind: u16) {
@@ -5795,25 +5836,28 @@ fn conformance_emitter_kit_refuses_a_non_forwarding_wrapper() {
   assert_forwards_bound_source::<MiniLexer<'_>, (), _, _>(&wrapper, &inner_probe);
 }
 
-/// **A PIN OF A KNOWN-OPEN RESIDUE (1 of 5).** A wrapper that forwards every emission but hides
-/// `Emitter::bound_source` reports `None`, so the seam concludes "this emitter binds no source"
-/// and accepts a pairing it would otherwise refuse.
+/// **THE WRAPPER HAZARD, PINNED IN-CRATE (1 of 3 surviving cells).** A wrapper that forwards
+/// every emission but hides `Emitter::bound_source` reports `None`, so the seam concludes "this
+/// emitter binds no source" and accepts a pairing it would otherwise refuse.
 ///
 /// A finish-time wall against this was built and **removed**: it caught this shape and three
 /// separate bypasses were then found for it — pre-arming through the public `bound_source()`
-/// accessor, a parse whose events are all diagnostics, and hand-emitted `cst_token` spans.
-/// Each fix relocated the hole rather than closing it, because the witness was flags on the
-/// sink and the sink cannot tell who set them. A typed `FinishError` implying a protection with
-/// three published bypasses is the `## Panics` fiction this release deleted nine of, in a
-/// different medium.
+/// accessor, a parse whose events are all diagnostics, and hand-emitted token spans. Each fix
+/// relocated the hole rather than closing it, because the witness was flags on the sink and the
+/// sink cannot tell who set them. A typed `FinishError` implying a protection with three
+/// published bypasses is the `## Panics` fiction this release deleted nine of, in a different
+/// medium.
 ///
-/// **Minting did not flip this**, and that is the finding minting produced. `parse_lossless`
-/// pins `Ctx::Emitter` to `Sink` by name, so a wrapper cannot occupy the seat at the *entry* —
-/// but `InputRef::emitter()` hands `&mut Sink` to parser code running inside the driver, and
-/// the un-pinned entries still take an arbitrary context. The shape below is reachable through
-/// that route, unchanged, and `a_wrapper_around_the_live_sink_still_reaches_an_unpinned_entry`
-/// pins it there. Flips when the emitter stops being handed out as `&mut Ctx::Emitter`, or when
-/// the un-pinned entries cannot take a sink-shaped emitter.
+/// **The handle no longer hands out the sink; a callback parameter still does.** Wrapping a
+/// sink needs a `Sink` value or a `&mut Sink`, and the *handle* routes are shut — `Sink::new`,
+/// `InputRef::emitter` and `Input::emitter`/`into_emitter` are crate-private,
+/// `ParseState::emitter` is gone, `Cst` yields only the inner emitter, and
+/// `InputRef::emitter_ref` hands back `&Sink`, which cannot occupy an emitter slot because every
+/// recording method takes `&mut self`. The compile-time pin of that is the `compile_fail` pair
+/// on `cst::parse_lossless`. But `Decision::decide` and the token-level pratt folds still take
+/// `&mut Ctx::Emitter` as a parameter, so this shape remains reachable from outside — see
+/// `a_wrapper_around_the_live_sink_still_reaches_a_callback_parameter`, which mounts exactly this
+/// wrapper through that door.
 #[test]
 fn a_non_forwarding_wrapper_is_not_caught() {
   let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
@@ -5840,7 +5884,7 @@ fn a_non_forwarding_wrapper_is_not_caught() {
   );
 }
 
-/// **A PIN OF A KNOWN-OPEN RESIDUE (2 of 5): a parse whose events are all diagnostics.**
+/// **THE WRAPPER HAZARD (2 of 3): a parse whose events are all diagnostics.**
 ///
 /// No token is committed, so nothing token-shaped exists for a downstream check to key on —
 /// while the lexer diagnostics' spans still license gap tokens at materialization. A
@@ -5855,8 +5899,8 @@ fn a_non_forwarding_wrapper_is_not_caught() {
 /// path even before the wall was qualified. Add a node and it was — pin 5 is that variant, and
 /// records that it no longer is.
 ///
-/// **Minting did not flip this either** — see pin 1's note: the wrapper moved from the entry to
-/// `InputRef::emitter()`, it did not disappear.
+/// Reachable exactly as cell 1 is: the handle no longer yields the `&mut Sink` this shape wraps,
+/// but a `*_while` condition's emitter parameter still does.
 #[test]
 fn an_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_caught() {
   let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
@@ -5887,11 +5931,16 @@ fn an_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_caught() {
   );
 }
 
-/// **A PIN OF A KNOWN-OPEN RESIDUE (3 of 5): the binding can be *pre-armed*.**
-/// `Emitter::bound_source` is a public trait method and `InputRef::emitter()` hands parser code
-/// `&mut Ctx::Emitter`, so anything holding the sink — or the emitter through a parse — can
-/// query it. Any state a sink recorded from "I was asked" is therefore settable by a caller who
-/// is not the parse entry, which is why a sink-side witness cannot encode *who* asked.
+/// **A PIN OF A KNOWN-OPEN RESIDUE: the binding can be *pre-armed*.**
+/// `Emitter::bound_source` is a public trait method, and the handle forwards it
+/// (`InputRef::emitter_bound_source`), so anything holding an emitter — or reaching one through
+/// a parse — can query it. Any state a sink recorded from "I was asked" is therefore settable by
+/// a caller who is not the parse entry, which is why a sink-side witness cannot encode *who*
+/// asked. That is the reason the wrong-source class had to be closed by *construction* (the
+/// source named once, the emitter never handed out) rather than by a flag.
+///
+/// Still open as stated — a query anyone can make — and narrower than it was: a consumer can no
+/// longer reach a `Sink` to ask.
 ///
 /// This cell records the reachability rather than a tree: the accessor answers for anyone.
 #[test]
@@ -5911,33 +5960,42 @@ fn bound_source_is_publicly_queryable_so_no_sink_side_witness_can_encode_provena
   );
 }
 
-/// **A PIN OF A KNOWN-OPEN RESIDUE (4 of 5): hand-emitted `cst_token` spans.**
-/// `InputRef::emitter()` exposes the emitter to parser code, so a grammar can push token events
-/// with spans of its own choosing while consuming nothing through the auto-emission door. The
-/// log then carries source-indexing spans that no committed token accounts for, and the tree
-/// materializes over the sink's buffer.
+/// **A RETIRED RESIDUE: hand-emitted token spans, closed by deleting the door.**
 ///
-/// Pinned at the sink for what it is — a span in the log that arrived without a settle — since
-/// that is the shape any future check has to key on.
+/// This was a pin of an open hole. `CstEmitter::cst_token` was a public raw transport carrying a
+/// caller-chosen span and consuming nothing, so a grammar could push token events naming any
+/// source bytes it liked while the auto-emission channel stayed silent — and the resulting log
+/// is byte-identical to one a legal parse could produce, so nothing downstream could key on it.
+/// Minting did not close it: the door was on the emitter trait, not on the sink's construction.
+///
+/// **The trait member is gone.** The token channel now has exactly one door — the defaulted
+/// [`Emitter::commit_token`], which only the input layer's settle surfaces call — and the body
+/// below is the sink's own crate-private recorder, reachable from nowhere else. A consumer
+/// cannot write this test: `cst_token` does not exist, `record_token` is private, and
+/// `commit_token` needs a `&mut Sink` no public route yields.
+///
+/// What survives here is the *shape* — a span in the log that arrived without a settle — because
+/// that is what any future check would have to key on, and because it is still the sink's
+/// behaviour when the crate's own recorder is driven directly.
 #[test]
-fn hand_emitted_cst_token_spans_reach_materialization_without_a_settle() {
+fn a_recorded_span_with_no_settle_behind_it_materializes_like_any_other() {
   let mut sink = verbose_sink("ab");
   // No parse, no `commit_token`: just spans, chosen by the caller.
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
-  sink.cst_token(&MiniTok(b'b'), &span(1, 2));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
     text(green.expect("hand-emitted spans materialize like any other")),
     "ab",
-    "the residue: `cst_token` is the manual emission door and carries a span, so a caller \
-     chooses which source bytes the tree shows without any settle having happened"
+    "the shape, retained: a Token event is a span, and materialization asks nothing about how \
+     it got there — which is why the only door into it is the input layer's settle hook"
   );
 }
 
-/// **A PIN OF A KNOWN-OPEN RESIDUE (5 of 5): pin 2's shape with a node in it — and the
-/// widening is *this commit's*.**
+/// **THE WRAPPER HAZARD (3 of 3): cell 2's shape with a node in it — and the widening was
+/// the qualifying commit's.**
 ///
-/// The bypass is pin 2's exactly: a wrapper that hides `bound_source`, a parse over a foreign
+/// The bypass is cell 2's exactly: a wrapper that hides `bound_source`, a parse over a foreign
 /// buffer of equal length, every event a diagnostic. The one addition is the one a **lossless**
 /// grammar always makes — it opens its document node before it can know whether a token follows
 /// — and it is forwarded through the same wrapper as everything else, because a wrapper that
@@ -5960,11 +6018,10 @@ fn hand_emitted_cst_token_spans_reach_materialization_without_a_settle() {
 /// pin 1 describes was built and then removed: the witness was flags on the sink, and the sink
 /// cannot tell who set them.
 ///
-/// Recorded as an acceptance the crate does **not** want, exactly as pins 1–4 are — this cell
-/// asserts what materializes today, not a refusal anyone should read as a guarantee.
+/// Recorded as an acceptance the crate does **not** want — this cell asserts what materializes
+/// today, not a refusal anyone should read as a guarantee.
 ///
-/// **Minting did not flip this**, with pins 1, 2 and 4 — see pin 1's note for the route that
-/// survived.
+/// Reachable exactly as cells 1 and 2 are: shut on the handle, open on a callback parameter.
 #[test]
 fn a_structured_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_caught() {
   let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
@@ -6039,7 +6096,7 @@ fn duplicate_zero_width_tokens_are_not_yet_detected() {
       span: span(0, 0),
     });
   }
-  sink.cst_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
 
   let (green, _emitter) = sink.finish(K_ROOT);
   let green = green.expect("zero-width spans slip past the monotone wall");
@@ -6198,10 +6255,6 @@ impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for HalfForward<'_, 'inp> {
     self.0.cst_start(kind);
   }
 
-  fn cst_token(&mut self, tok: &MiniToken<'inp>, span: &MiniSpan<'inp>) {
-    self.0.cst_token(tok, span);
-  }
-
   fn cst_finish(&mut self, kind: u16) {
     self.0.cst_finish(kind);
   }
@@ -6281,10 +6334,6 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForwardPartial<'_, 'inp
 impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for HalfForwardPartial<'_, 'inp> {
   fn cst_start(&mut self, kind: u16) {
     self.inner.cst_start(kind);
-  }
-
-  fn cst_token(&mut self, tok: &MiniToken<'inp>, span: &MiniSpan<'inp>) {
-    self.inner.cst_token(tok, span);
   }
 
   fn cst_finish(&mut self, kind: u16) {
@@ -6502,43 +6551,87 @@ fn cst_carries_the_trivia_policy_to_materialization() {
   );
 }
 
-/// **A PIN OF A KNOWN-OPEN RESIDUE (6 of 6): the pinned emitter slot is an *entry* wall, and
-/// the parse hands the sink back out through [`InputRef::emitter`](crate::InputRef::emitter).**
+// The `InputRef::emitter()` half of the old residue-6 pin is closed, and its pin moved to a
+// medium that can hold it: this file is inside the crate, where `emitter()` is still callable, so
+// the cell went on compiling here no matter what the public surface said. Its replacement is the
+// `compile_fail` pair in `cst::parse_lossless`'s "The sink is not handed out by the handle"
+// section — the same wrapper, the same un-pinned entry, the same foreign buffer, refused at
+// `inp.emitter()`.
+//
+// The residue itself is NOT closed. It has a second route, and that route is below.
+
+/// **A PIN OF A KNOWN-OPEN RESIDUE: the emitter is still handed to *callback* code, so a wrapper
+/// around the live sink still reaches an un-pinned entry.**
 ///
-/// `parse_lossless` pins `Ctx::Emitter` to `Sink` by name, so a wrapper cannot occupy the seat
-/// *at the entry*. But a parser running inside that driver holds `&mut Sink` — `emitter()` is
-/// public and is how every parser emits — and the un-pinned entries (`parse_partial`, the
-/// `Parse` family, `PartialSession`) still take an arbitrary `Ctx`. Wrapping the live sink and
-/// driving a **different** buffer through one of them therefore still compiles.
+/// Closing [`InputRef::emitter`](crate::InputRef) and deleting `ParseState::emitter` shut the two
+/// doors a parser reaches *directly*. They are not the only doors. Several public callback traits
+/// take the emitter as a **parameter**, by `&mut`, and hand it to code the consumer wrote:
 ///
-/// A wrapper that forwards `bound_source` is caught by the runtime handshake at the parse
-/// entry. A wrapper that *hides* it — [`NonForwardingWrapper`], residue 1 — is not, so the sink
-/// records a foreign parse's structure and materializes it over its own bytes. Minting narrows
-/// who can reach a sink at all (only code already inside a lossless parse, and only by writing
-/// a full `Emitter` impl); it does not close this.
+/// - `Decision::decide(peeked, emitter: &mut E)` — the condition of every `*_while` combinator
+///   (`repeated_while`, `separated_while`, `fold_while`, `try_fold_while`, `peek_then`);
+/// - `PrattFoldTokenPrefix` / `PrattFoldTokenInfix` / `PrattFoldTokenPostfix` — the token-level
+///   pratt folds, `emitter: &mut Ctx::Emitter` in each.
 ///
-/// Flips when the emitter is no longer handed out as `&mut Ctx::Emitter`, or when the
-/// un-pinned entries cannot take a sink-shaped emitter.
+/// Under [`parse_lossless`](crate::cst::parse_lossless) `Ctx::Emitter` **is** `Sink`, so an
+/// ordinary `repeated_while` condition is handed the live sink by `&mut` — and `&mut Sink` is an
+/// emitter, which is the whole of the attack. The cell below is that attack end to end: the sink
+/// is minted over `"ab"`, the condition wraps it in a `bound_source`-hiding wrapper, drives the
+/// foreign buffer `"ZZ"` through the un-pinned [`parse_with`](crate::parse_with), and the tree
+/// materializes with `"ZZ"`'s structure over `"ab"`'s bytes.
+///
+/// Nothing about this is exotic: the second parameter of a `*_while` condition is `&mut
+/// Ctx::Emitter` in the crate's own reference tests (`decide_num_rw` in
+/// `tests/parser_repeated_while.rs` spells it exactly that way).
+///
+/// **This is why the `bound_source` runtime handshake must not retire.** It is the only thing
+/// that catches this route — and only for a wrapper that *forwards* `bound_source`; one that
+/// hides it, as here, is caught by nothing.
+///
+/// Flips when the callback traits stop taking `&mut Ctx::Emitter` — i.e. when they are handed a
+/// forwarding view that implements no emitter trait, exactly as the handle now is.
 #[test]
-fn a_wrapper_around_the_live_sink_still_reaches_an_unpinned_entry() {
-  fn inner_parse<'inp>(inp: &mut DrvIr<'inp, '_, crate::Complete>) -> Result<usize, SesErr> {
-    let sink: &mut SesSink<'inp> = inp.emitter();
-    // "ZZ" is a foreign buffer of the same length as the outer "ab".
-    let mut foreign =
-      crate::input::Input::<MiniLexer<'_>, NonFwdCtx<'_, '_>, ()>::with_state_and_context(
-        "ZZ",
-        (),
-        crate::input::InputContext::new(
-          NonForwardingWrapper(sink),
-          DefaultCache::<'_, MiniLexer<'_>>::default(),
-        ),
-      );
-    let mut foreign_ref = foreign.as_ref();
+fn a_wrapper_around_the_live_sink_still_reaches_a_callback_parameter() {
+  use crate::{
+    ParseInput, cache::Peeked, parse_input::Accumulator, parser::Action, utils::typenum::U1,
+  };
+
+  fn foreign<'inp>(
+    inp: &mut crate::InputRef<'inp, '_, MiniLexer<'inp>, NonFwdCtx<'inp, '_>>,
+  ) -> Result<usize, SesErr> {
     let mut n = 0;
-    while let Ok(Some(_)) = foreign_ref.next() {
+    while inp.next()?.is_some() {
       n += 1;
     }
     Ok(n)
+  }
+
+  fn step(inp: &mut DrvIr<'_, '_, crate::Complete>) -> Result<(), SesErr> {
+    let _ = inp.next()?;
+    Ok(())
+  }
+
+  /// An ordinary `repeated_while` condition. Its second parameter is the parse's emitter.
+  fn decide<'inp>(
+    _peeked: Peeked<'_, 'inp, MiniLexer<'inp>, U1>,
+    emitter: &mut SesSink<'inp>,
+  ) -> Result<Action, SesErr> {
+    let ctx: NonFwdCtx<'inp, '_> = (
+      NonForwardingWrapper(emitter),
+      DefaultCache::<'_, MiniLexer<'_>>::default(),
+    );
+    // "ZZ" is a foreign buffer of the same length as the outer "ab".
+    let read = crate::parse_with(foreign, "ZZ", ctx);
+    assert_eq!(read, Ok(2), "the foreign parse ran to completion");
+    Ok(Action::Stop)
+  }
+
+  fn attack<'inp>(inp: &mut DrvIr<'inp, '_, crate::Complete>) -> Result<Vec<()>, SesErr> {
+    (step as fn(&mut DrvIr<'inp, '_, crate::Complete>) -> Result<(), SesErr>)
+      .repeated_while::<_, U1>(
+        decide as fn(Peeked<'_, 'inp, MiniLexer<'inp>, U1>, &mut SesSink<'inp>) -> _,
+      )
+      .collect()
+      .parse_input(inp)
   }
 
   let (cst, parsed) = crate::cst::parse_lossless(
@@ -6547,15 +6640,15 @@ fn a_wrapper_around_the_live_sink_still_reaches_an_unpinned_entry() {
     Verbose::<SesErr>::new(),
     profile(),
     DefaultCache::<'_, MiniLexer<'_>>::default(),
-    inner_parse,
+    attack,
   );
-  assert_eq!(parsed, Ok(2), "the foreign parse ran to completion");
+  assert!(parsed.is_ok(), "the outer parse succeeded: {parsed:?}");
 
   let (green, _emitter) = cst.finish(K_ROOT);
   assert_eq!(
     text(green.expect("the hidden binding means nothing refused the pairing")),
     "ab",
-    "the residue: the events came from parsing \"ZZ\" and the text is the sink's own \"ab\" — \
-     equal length, fully covered, and nothing downstream can see it"
+    "the residue: the events came from parsing \"ZZ\" through a callback parameter and the \
+     text is the sink's own \"ab\" — the handle's door is shut and this one is not"
   );
 }
