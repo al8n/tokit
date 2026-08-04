@@ -297,6 +297,19 @@ impl Node<PLang> for ProbeNode {
 '''
 
 
+# The subject an `Emitter`-declared row rides.
+#
+# `Silent<PErr>` is the fixture's OWN emitter — `PCtx` is built on it — so this is a type tokora
+# really implements `Emitter` for rather than one picked for convenience. A subject that does not
+# implement the trait constructs no collision and reports a clean run, which is the failure
+# `trait_subject` exists to refuse.
+EMITTER_SUBJECT_FIXTURE = r'''
+pub fn emitter_value() -> Silent<PErr> {
+  Silent::<PErr>::new()
+}
+'''
+
+
 # ── Which subject a trait probe rides ────────────────────────────────────────────────────
 #
 # This was two hardcoded traits and an `else`:
@@ -342,6 +355,18 @@ TRAITS = {
         "self_ty": "ProbeNode",
         "scope": "use tokora::cst::*;",
         "fixture": CST_NODE_FIXTURE,
+    },
+    "Emitter": {
+        # A VALUE, and the fixture's own: `emitter_value()` hands back the `Silent<PErr>` that
+        # `PCtx` is built on. `self_ty` stays absent — every item `Emitter` declares takes a
+        # receiver, so a receiver-less path row would be a shape the trait does not have, and
+        # filling the field in "just in case" is how a probe ends up riding a guess.
+        "recvr": "emitter_value()",
+        "self_ty": None,
+        # `Emitter` is a PRE-EXISTING trait the shared fixture already imports by name, so no
+        # glob is needed — the import resolves on both sides.
+        "scope": None,
+        "fixture": EMITTER_SUBJECT_FIXTURE,
     },
 }
 
@@ -567,10 +592,342 @@ fn drive() {{
 """ + WITNESS
 
 
+# A spent lossless driver — the only door onto a `Cst`, and therefore the only way to build the
+# subject its rows ride.
+#
+# `Cst::from_sink` is `pub(crate)` on purpose ("the drivers are the only minters"), so a probe
+# cannot short-circuit to one; it has to run a real lossless parse. That drags in a lexer of its
+# own, because `parse_lossless` is walled at compile time to tokens declaring `SURFACES_TRIVIA`
+# and the shared fixture's `Tok` is a trivia-SKIPPING logos lexer — driving `Cst` off `PLexer`
+# fails post-monomorphization (E0080) on both sides and every row would read INCONCL.
+#
+# Copied in shape from `parse_lossless`'s own doc example in `tokora/src/cst/driver.rs`, which is
+# where the minimum viable trivia-surfacing lexer is already written down and compiled. The error
+# type is the fixture's `PErr` rather than a second one, so the `From` impls it already carries
+# are the ones this lexer needs.
+CST_HANDLE_FIXTURE = r'''
+#[allow(unused_imports)]
+use rowan::GreenNode;
+
+#[allow(unused_imports)]
+use tokora::{
+  SimpleSpan,
+  cache::DefaultCache,
+  cst::{Cst, CstProfile, FinishError, KindValidator, TriviaPolicy, parse_lossless},
+};
+
+const MINI_SRC: &str = "ab c";
+const MINI_ROOT: u16 = 1;
+const MINI_TOK: u16 = 10;
+const MINI_ERR: u16 = 90;
+const MINI_GAP: u16 = 91;
+
+#[derive(Debug, Clone, Copy)]
+pub struct MiniTok(u8);
+
+impl TokenT<'_> for MiniTok {
+  type Kind = u8;
+  type Error = PErr;
+  const SURFACES_TRIVIA: bool = true;
+  fn kind(&self) -> u8 {
+    self.0
+  }
+  fn is_trivia(&self) -> bool {
+    self.0 == b' '
+  }
+}
+
+pub struct Mini<'a> {
+  src: &'a str,
+  tok_start: usize,
+  pos: usize,
+  state: (),
+}
+
+impl<'inp> Lexer<'inp> for Mini<'inp> {
+  type State = ();
+  type Source = str;
+  type Token = MiniTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+  fn new(src: &'inp str) -> Self {
+    Self { src, tok_start: 0, pos: 0, state: () }
+  }
+  fn with_state(src: &'inp str, state: ()) -> Self {
+    Self { src, tok_start: 0, pos: 0, state }
+  }
+  fn check(&self) -> Result<(), PErr> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {
+    self.state
+  }
+  fn source(&self) -> &'inp str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.tok_start, self.pos)
+  }
+  fn slice(&self) -> &'inp str {
+    &self.src[self.tok_start..self.pos]
+  }
+  fn lex(&mut self) -> Option<Result<MiniTok, PErr>> {
+    let byte = *self.src.as_bytes().get(self.pos)?;
+    self.tok_start = self.pos;
+    self.pos += 1;
+    Some(Ok(MiniTok(byte)))
+  }
+  fn bump(&mut self, n: &usize) {
+    self.pos += *n;
+    self.tok_start = self.pos;
+  }
+}
+
+fn mini_drain<'inp, Ctx>(inp: &mut InputRef<'inp, '_, Mini<'inp>, Ctx>) -> Result<usize, PErr>
+where
+  Ctx: ParseContext<'inp, Mini<'inp>>,
+  Ctx::Emitter: Emitter<'inp, Mini<'inp>, (), Error = PErr>,
+{
+  let mut n = 0;
+  while inp.next()?.is_some() {
+    n += 1;
+  }
+  Ok(n)
+}
+
+/// The spent driver, by the only door there is.
+pub fn mini_cst() -> Cst<'static, Mini<'static>, Silent<PErr>> {
+  let profile = CstProfile::new(
+    |_: &MiniTok| MINI_TOK,
+    KindValidator::new(|k| matches!(k, MINI_ROOT | MINI_TOK | MINI_ERR | MINI_GAP)),
+    MINI_ERR,
+    MINI_GAP,
+  );
+  let (cst, _parsed) = parse_lossless(
+    MINI_SRC,
+    (),
+    Silent::<PErr>::new(),
+    profile,
+    DefaultCache::<Mini<'_>>::new(),
+    mini_drain,
+  );
+  cst
+}
+'''
+
+
+# ── Inherent subjects whose OWNER this same diff introduces ──────────────────────────────
+#
+# `EmitterView` and `Cst` are minted by the diff that adds their items, so the BASE side cannot
+# resolve the owner at all and the only verdict a row here can reach is `new-owner` — which
+# `run.sh` grants on four witnesses, the last of which is that the HEAD side reached
+# `witness=0`: compiled, ran, and let tokora's item take the call. A head that fails to compile
+# scores INCONCL instead, "a broken probe on the side that was supposed to prove the owner is
+# new".
+#
+# So for these owners the call is built at the item's REAL arity and the `used` spelling binds
+# the item's REAL return type. That is #158's lesson, applied to the two owners this release
+# mints: a fixed zero-argument `-> u8` call put 9 of `RecursionLimitReached`'s 14 rows in
+# INCONCL because the head side never compiled.
+#
+# The rule INVERTS for a PRE-EXISTING owner (`InputRef`, `ParserContext`, `ParseState`): there
+# the BASE side must compile and it has only the consumer's own item, so the binding stays the
+# consumer's `u8` and a head-side E0308 is the honest `loud` verdict. Do not move an owner
+# between the two shapes without moving it between these two rules.
+#
+# WHICH names can reach these tables is bounded, not merely observed. `surface_diff.py` assigns
+# each name ONE owner, the alphabetically LAST of those declaring it — `inherent_owners[nm]` is
+# overwritten inside `for owner, _ in sorted(...)`. `Cst` < `EmitterView` < `InputRef` <
+# `ParseState`, so these two owners can only ever receive the names they declare ALONE: every
+# forwarder `EmitterView` shares with `InputRef` or `ParseState` is routed to those instead. The
+# tables below are complete for their owners rather than a subset that happens to work today,
+# and a name outside them is a loud refusal naming what to add.
+INHERENT_SUBJECTS = {
+    "EmitterView": {
+        "imports": "use tokora::EmitterView;\n",
+        "fixture": "",
+        # `EmitterView::new(&mut E)` is public and grants nothing (see its own doc): a caller who
+        # can build one already held the `&mut E` the view exists to withhold. That is exactly
+        # what makes it usable here — the subject is a REAL view over a real emitter, not a
+        # stand-in. `L` is phantom in the view, so it is pinned by the annotation rather than by
+        # the argument.
+        "ty": "EmitterView<'_, 'static, PLexer<'static>, Silent<PErr>>",
+        "setup": "  let mut inner = Silent::<PErr>::new();\n",
+        "build": (
+            "  let mut subject: EmitterView<'_, 'static, PLexer<'static>, Silent<PErr>> =\n"
+            "    EmitterView::new(&mut inner);\n"
+        ),
+        "calls": {
+            "bound_source": ("", "Option<tokora::source::SourceIdentity>"),
+            "reborrow": ("", "EmitterView<'_, 'static, PLexer<'static>, Silent<PErr>>"),
+        },
+        "assoc_calls": {
+            "new": ("&mut inner", "EmitterView<'_, 'static, PLexer<'static>, Silent<PErr>>"),
+        },
+    },
+    "Cst": {
+        "imports": "",
+        "fixture": CST_HANDLE_FIXTURE,
+        "ty": "Cst<'static, Mini<'static>, Silent<PErr>>",
+        "setup": "",
+        # NOT `mut`: three of the seven items consume `self` and the other four take `&self`, so a
+        # `mut` binding would be an `unused_mut` warning on every row — a head-side diagnostic
+        # this template manufactured, in a harness whose verdicts are decided by which side gains
+        # one.
+        "build": (
+            "  let subject: Cst<'static, Mini<'static>, Silent<PErr>> = mini_cst();\n"
+        ),
+        "calls": {
+            "with_trivia_policy": ("TriviaPolicy::AsEmitted", "Cst<'static, Mini<'static>, Silent<PErr>>"),
+            "trivia_policy": ("", "TriviaPolicy"),
+            "error_kind": ("", "u16"),
+            "gap_kind": ("", "u16"),
+            "inner_ref": ("", "&Silent<PErr>"),
+            "finish": ("MINI_ROOT", "(Result<GreenNode, FinishError>, Silent<PErr>)"),
+            "finish_partial": ("MINI_ROOT", "(Result<GreenNode, FinishError>, Silent<PErr>)"),
+        },
+        # `Cst` declares no receiver-less associated function: `from_sink` is `pub(crate)` and the
+        # drivers are the only minters. An empty table rather than an absent key, so the refusal
+        # below reads "this owner has no such shape" instead of a KeyError.
+        "assoc_calls": {},
+    },
+}
+
+
+def inherent_subject(name, owner, table):
+    """The owner's call shape for `name`, or a FATAL that names both."""
+    rec = INHERENT_SUBJECTS[owner]
+    shape = rec[table].get(name)
+    if shape is None:
+        sys.exit(
+            f"gen_probe: no call-shape template for {name!r} on {owner!r}. {owner} is an owner "
+            f"this diff INTRODUCES, so the base side cannot compile and the head side must — a "
+            f"call built at the wrong arity or bound to the wrong return type scores INCONCL, "
+            f"not `new-owner`. Add {name!r} to INHERENT_SUBJECTS[{owner!r}][{table!r}] in "
+            f"gen_probe.py with its real arguments and return type."
+        )
+    return rec, shape
+
+
+def inherent_subject_method(name, owner, spelling):
+    """A consumer extension trait on an owner this same diff introduces."""
+    rec, (args, returns) = inherent_subject(name, owner, "calls")
+    imports, fixture, ty = rec["imports"], rec["fixture"], rec["ty"]
+    setup, build = rec["setup"], rec["build"]
+    call = (
+        f"let _v: {returns} = subject.{name}({args});"
+        if spelling == "used"
+        else f"subject.{name}({args});"
+    )
+    return FIXTURE + fixture + f"""
+{imports}
+pub trait ConsumerExt {{
+  fn {name}(&mut self) -> u8;
+}}
+
+impl ConsumerExt for {ty} {{
+  fn {name}(&mut self) -> u8 {{
+    ran();
+    7
+  }}
+}}
+
+#[allow(unused_mut)]
+fn drive() {{
+{setup}{build}  reached();
+  {call}
+}}
+""" + WITNESS
+
+
+def inherent_subject_assoc_fn(name, owner, spelling):
+    """The path-resolved half — `Type::name(args)` on an owner this same diff introduces.
+
+    A qualified path (`<Ty>::name(..)`) rather than a turbofish: these owners carry lifetime
+    parameters, and `EmitterView::<'_, 'static, ..>::new(..)` spells them in a position where the
+    elided form is not accepted. The qualified form takes the type written out once, which is the
+    same string the consumer's `impl` and the `used` binding use.
+    """
+    rec, (args, returns) = inherent_subject(name, owner, "assoc_calls")
+    imports, fixture, ty = rec["imports"], rec["fixture"], rec["ty"]
+    setup = rec["setup"]
+    call = (
+        f"let _v: {returns} = <{ty}>::{name}({args});"
+        if spelling == "used"
+        else f"<{ty}>::{name}({args});"
+    )
+    return FIXTURE + fixture + f"""
+{imports}
+pub trait ConsumerAssoc {{
+  fn {name}() -> u8;
+}}
+
+impl ConsumerAssoc for {ty} {{
+  fn {name}() -> u8 {{
+    ran();
+    7
+  }}
+}}
+
+fn drive() {{
+  use ConsumerAssoc as _;
+{setup}  reached();
+  {call}
+}}
+""" + WITNESS
+
+
 def inherent_method(name, owner, spelling):
     """A consumer extension trait declaring `name` on the OWNER tokora added it to."""
     if owner in ERROR_SUBJECTS:
         return error_subject_method(name, owner, spelling)
+    if owner in INHERENT_SUBJECTS:
+        return inherent_subject_method(name, owner, spelling)
+    if owner == "ParseState":
+        # A PRE-EXISTING owner gaining its first inherent items, so the consumer's own `-> u8`
+        # shape is the right one: the base side has to compile, and there it has only the
+        # consumer's item. (See INHERENT_SUBJECTS' header for why the rule inverts for a new
+        # owner.)
+        #
+        # `ParseState::new` is `pub(super)`, so the subject cannot be constructed — it is REACHED,
+        # through the one door a consumer has: a state-carrying callback. `map_with` hands the
+        # state BY VALUE, which is what makes the row a measurement: from a by-value receiver
+        # tokora's `&self` items are found at the `&T` step and its `&mut self` items at the
+        # `&mut T` step, where an inherent item beats the consumer's trait item. A `&mut
+        # ParseState` receiver would hand the consumer's `&mut self` item the FIRST step instead
+        # and every row would agree — the `InputRef::recursion` shape recorded in
+        # no_collision.txt.
+        call = f"let _v: u8 = st.{name}();" if spelling == "used" else f"st.{name}();"
+        return FIXTURE + f"""
+use tokora::ParseState;
+
+pub trait ConsumerExt {{
+  fn {name}(&mut self) -> u8;
+}}
+
+impl<'inp> ConsumerExt for ParseState<'_, 'inp, '_, PLexer<'inp>, PCtx<'inp>> {{
+  fn {name}(&mut self) -> u8 {{
+    ran();
+    7
+  }}
+}}
+
+#[allow(unused_mut)]
+fn drive() {{
+  let _ = Parser::with_context(ctx())
+    .apply(parse_num.map_with(|_o, mut st| {{
+      reached();
+      {call}
+    }}))
+    .parse_str("1 2");
+}}
+""" + WITNESS
     if owner == "ParserContext":
         # `ctx()` is the fixture's own `PCtx`, which exists on both sides — `ParserContext` is
         # not a new type, only `with_recursion_limiter` is a new item on it. The binding is
@@ -654,6 +1011,8 @@ fn drive() {{
 def inherent_assoc_fn(name, owner, spelling):
     if owner in ERROR_SUBJECTS:
         return error_subject_assoc_fn(name, owner, spelling)
+    if owner in INHERENT_SUBJECTS:
+        return inherent_subject_assoc_fn(name, owner, spelling)
     if owner == "RecursionLimiter":
         # A pre-existing type gaining a new associated function, so unlike the two error types
         # this one HAS a before-state: a consumer's `impl ConsumerAssoc for RecursionLimiter`
@@ -733,6 +1092,13 @@ def trait_method(name, owner, spelling):
         "peek_then_head":
             "|_h: Option<tokora::span::Spanned<&Tok, &tokora::SimpleSpan>>| Ok::<(), PErr>(())",
         "opt": "",
+        # `Emitter::commit_lexer_error(&mut self, Spanned<<L::Token as Token>::Error, L::Span>)`
+        # at its real arity, over the fixture's own token and span types: `Tok::Error` is `PErr`
+        # and `LogosLexer`'s `Span` is `SimpleSpan`. The consumer's parameter is the generic `A`
+        # this file builds for every argument-taking trait method, so the expression only has to
+        # be what TOKORA's item would accept — which is the half a wrong-arity call gets wrong.
+        "commit_lexer_error":
+            "tokora::span::Spanned::new(tokora::SimpleSpan::new(0, 1), PErr)",
     }.get(name)
     if args is None:
         sys.exit(f"gen_probe: no argument template for trait method {name!r} on {owner!r}")

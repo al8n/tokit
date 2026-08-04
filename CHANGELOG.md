@@ -395,6 +395,42 @@ Recorded in `ci/name_collision/disclosed.txt`, whose fourth-and-fifth-row split 
 that the earlier four ride a bounded receiver and **this one does not**: `RecursionLimiter` is a
 concrete public struct with no bound to reject anybody.
 
+#### `ParseState`'s zero-argument forwarders — four measured SILENT
+
+**You are exposed if you wrote a method of your own on `ParseState`**, the view a `map_with` /
+`and_then_with` / `validate_with` / `fold` callback is handed. That type is public in **0.7.3**
+and until [68](#0.8.0-changed-breaking) it declared **no inherent item at all** — a callback
+reached the emitter through `state.emitter()`, so `fn exit_label(&mut self)` on `ParseState`
+was the natural way to shorten that, and it now competes with a tokora method of the same name
+on the same receiver.
+
+Reproduced two-sided by `ci/name_collision/`, base `7b289bc` against this branch, rustc 1.97.1:
+
+```text
+SILENT  cst_mark/discarded              base=witness=1  head=witness=0
+SILENT  emitter_bound_source/discarded  base=witness=1  head=witness=0
+SILENT  emitter_ref/discarded           base=witness=1  head=witness=0
+SILENT  exit_label/discarded            base=witness=1  head=witness=0
+```
+
+Both sides compile, **neither emits any diagnostic**, and the two run different programs: yours
+before, tokora's after. Each `used` row is `loud` on the same probe (`E0308`), so a **discarded
+return** is the whole of the difference — and none of the four returns something
+`unused_must_use` fires on: `()`, a plain `EventMark`, an `Option`, a shared reference. Same
+discriminator as the `unused_must_use` table above — the lint, not a `#[must_use]` attribute.
+
+**Read this as "the four the harness could reach", never as "the other nine are safe".** These
+four are the whole of `ParseState`'s zero-argument set; the probe's consumer takes no arguments,
+so for the nine forwarders that take one or two the head side fails on the probe's **own arity**
+(`E0061`) and the row is filed `loud` — a verdict about the probe, not about the name. The
+question that terminates is still the exposure table at the top of this section, and the remedy
+is still UFCS: `MyTrait::exit_label(state)` pins your method by name.
+
+Recorded in `ci/name_collision/disclosed.txt`. They are disclosed on **this** branch for the
+reason `RecursionLimiter::unlimited` was: the probe's inventory is a two-sided delta, so once
+this merges the names exist on both sides, the rows leave every future plan, and the harness can
+never re-litigate them.
+
 <a id="0.8.0-source-breaking-additions-that-fail-loudly"></a>
 
 ### Source-breaking additions that fail *loudly*
@@ -411,6 +447,15 @@ concrete public struct with no bound to reject anybody.
   import them.) Blanket-ness is irrelevant — a trait with exactly one impl for one concrete
   input type collides identically. rustc prints its own disambiguation suggestions; the fix
   is UFCS.
+
+  **`commit_lexer_error` is the one name in that list the probe cannot construct, and saying
+  so is the point.** It takes `&mut self`, and the harness's three trait-method spellings
+  declare `self` or `&self` — both **earlier** picks on a non-deref receiver, so the
+  consumer's item wins on both sides and tokora's is never a candidate. The `E0034` above
+  therefore rests on the same-pick rule rather than on a measurement, and it applies to the
+  consumer who declares `&mut self`, which is the shape that competes. Recorded, with the
+  receiver walk, in `ci/name_collision/no_collision.txt` rather than left to look like a
+  clean run.
 
 - **Associated functions resolve by a different rule, and it is not the receiver walk.**
   `Ident::parse_except` and `Ident::try_parse_except` are inherent **associated functions**.
