@@ -2055,14 +2055,14 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
   `__private` twin) re-exported 0.16 only, and every one of the 79 integration test files was
   gated on the plain `logos` feature — which *implies* 0.16. The consequence was that the
   per-version CI legs compiled a crate whose adapter integration tests were all invisible to
-  them: they ran 2452 tests each and not one exercised a logos adapter.
+  them: not one test they ran exercised a logos adapter.
 
   Both aliases now follow the same newest-wins precedence chain the adapter re-exports use
   (0.16 > 0.15 > 0.14), and the 118 `feature = "logos"` gates across 99 files became the
   three-version disjunction. `--features logos` still means exactly what it meant — the
   feature still enables 0.16 — so no existing consumer changes.
 
-  Measured: the versioned legs go from **2452 to 6020 tests** at 0.14 and 0.15, all passing.
+  Measured: the versioned legs now run the adapter integration tests at 0.14 and 0.15, all passing.
   Exactly one source construct was version-divergent across the whole surface — logos 0.16's
   `allow_greedy` nested attribute in one test fixture — and it is now a per-version
   `cfg_attr` split rather than a 0.16-only file.
@@ -2548,8 +2548,8 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
 
 - **The `no_std` tiers now execute in CI, and the first run of that cell was red.**
   `cargo build --no-default-features` gated a production-code violation but never compiled a
-  test target, so nothing `no_std`-shaped had ever *run* — 1553 tests in a configuration that
-  executed zero. Enabling it immediately found a dead-code failure (`scan_tick` has no call
+  test target, so nothing `no_std`-shaped had ever *run* — a whole test suite in a configuration
+  that executed none of it. Enabling it immediately found a dead-code failure (`scan_tick` has no call
   site without an allocator, since its callers are allocator-gated) that predates this round
   and that no gate could see. Fixed, and the two host runs plus D46b's positive
   `thumbv6m` + `bstr` cell are now CI steps.
@@ -2649,7 +2649,7 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
   Answered by mutation rather than by a stronger scan, since proving domination from source text
   means writing a Rust parser inside a test module that must also build under
   `--no-default-features`. Each witness was neutered in turn and the whole `--all-features` suite
-  run: the frontier-`Incomplete` witness reds 2 tests, the descent-trip witness reds 12 — and
+  run: the frontier-`Incomplete` witness and the descent-trip witness each red tests — and
   **`at_committed_boundary()` red nothing at all**, in the entire suite. Its only cell was negative
   (a boundary the cursor has *not* reached must not be charged to an ordinary failure), which a
   deleted witness also satisfies. Unguarded, a collection that runs onto a poison boundary files
@@ -3044,7 +3044,7 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    | the unwind cell, in a whole-file run | 10.4 ms | 49.32s | about ×4,800 |
    | all sixteen cells | 10 ms | 58.02s | — |
 
-   So the cell is essentially the whole file, which is why CI reported `15 passed; 1 failed`
+   So the cell is essentially the whole file, which is why CI reported a single failing cell
    rather than general slowness. The bound is now 500 seconds under Miri and 60 natively,
    unchanged. 500 is ×10 over the slowest reading, the same multiple the deep-stack bound chose,
    and this time the cross-host gap has a measured floor rather than an argument: the same cell
@@ -3296,7 +3296,7 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    **The latch reading is now fully subsumed, and is kept anyway.** Every transition this crate can
    produce that moves the boundary goes through `latch_if_limit_tripped`, which bumps the counter
    first. Measured rather than argued: with `latched_during_attempt` neutered in place and the
-   counter left in the condition, all 105 test binaries of `--all-features` pass — including the ten
+   counter left in the condition, every test binary of `--all-features` passes — including the
    `absence_terminal_stop.rs` cells the latch used to be the sole holder of. It stays for the reason
    the recovery gate's equivalent term stays: it is the reading the boundary itself is the subject
    of, it costs one clone already being paid, and a witness removed on a subsumption argument is a
@@ -3923,7 +3923,7 @@ added because something got through the previous set.
 - **The `no_std` tiers execute.** The previous job *built* the crate without `std`, which never
   compiles a test target — so nothing `no_std`-shaped had ever run. Enabling it found a failure
   that predated the change and that no gate could have seen. That configuration now runs
-  **1553 tests where it ran zero**, and the CAS-less backing is checked on a real CAS-less
+  **its tests where it ran none**, and the CAS-less backing is checked on a real CAS-less
   target.
 - **The compile-time diagnostic rails assert they ran.** The trybuild harness pins its
   `.stderr` files to the MSRV toolchain and returns early on any other rustc — passing, having
@@ -3939,9 +3939,8 @@ added because something got through the previous set.
   cannot detect a missing member.
 - **The per-version logos legs actually exercise the adapter.** The `logos parity (0.14, 0.15)`
   matrix job existed, but the crate's 79 adapter integration files were gated on a feature that
-  implies 0.16, so the job ran 2452 tests containing zero logos-adapter coverage — a green gate
-  over an untested configuration. Those gates now name all three versions, and the same job
-  runs **6020 tests** per version.
+  implies 0.16, so they were invisible to it — a green gate over an untested configuration.
+  Those gates now name all three versions, and the same job exercises the adapter on each.
 - **A guide-only change is no longer un-gated.** The guide chapters are Markdown compiled as
   doctests, so a blanket `**.md` path filter meant a guide-only pull request landed with zero
   CI.
@@ -3957,10 +3956,9 @@ added because something got through the previous set.
   failure that predates this round: an odometer module gated on `std` whose only readers are
   gated on `logos`, so a `std, logos_0_N` test build had two unused functions and
   `#![deny(warnings)]` refused it. **That is the second never-executed configuration this round
-  found broken on arrival**, after the `no_std` one. Both now run, and 0.14 and 0.15 pass an
-  identical 2231 tests. *(0.16 runs 2324: the adapter's own test module is still hard-coded to
-  0.16, so 93 adapter-level tests remain single-version. That gap is real, named, and not
-  closed here.)*
+  found broken on arrival**, after the `no_std` one. Both now run and pass. *(The adapter's own
+  test module is still hard-coded to 0.16, so those adapter-level tests remain single-version.
+  That gap is real, named, and not closed here.)*
 - **The deep fuzz sweep runs per pull request.** Seeds `0..50_000`, `#[ignore]`d since it was
   written and never run anywhere. It was expected to need a monthly cadence; measured, it costs
   **0.10s in release** (0.85s in debug — the ratio is what says it is doing the work), so the
