@@ -104,6 +104,12 @@ const SOURCES: &[(&str, &str)] = &[
   // front, captures no checkpoint), which is exactly what registering it pins: a settle or a front
   // read added here would now move a count instead of arriving unseen.
   ("descent.rs", include_str!("descent.rs")),
+  // Added by the emitter-forwarding wall: the handle's `emit_*` / `cst_*` surface. Every count
+  // it contributes is **zero**, and that is exactly what registering it pins — the four members
+  // the input layer owns (`checkpoint`, `rewind`, `release`, `commit_token`) are deliberately not
+  // forwarded, so a forwarder added for one of them would move a count here instead of arriving
+  // unseen.
+  ("emit.rs", include_str!("emit.rs")),
   ("session.rs", include_str!("session.rs")),
   ("drop_policy.rs", include_str!("drop_policy.rs")),
   ("trace.rs", include_str!("trace.rs")),
@@ -951,6 +957,61 @@ fn settle_census_emitter_hook_rides_only_the_settles() {
     "SETTLE_CENSUS drift: `Emitter::commit_token` must appear exactly twice in \
      `emitter/mod.rs` — the defaulted declaration and the `&mut U` blanket forward \
      (grep SETTLE_CENSUS)."
+  );
+}
+
+/// LEXER_ERROR_CENSUS — the **evidence** door onto a recording sink's gap-coverage law
+/// (`Emitter::commit_lexer_error`) has exactly one caller in this crate: the input layer's own
+/// deduped reporting site, `emit_lexer_error_deduped` in `mod.rs`. It carries the lexer's span
+/// over bytes the layer just refused, and that span is the only thing that licenses a gap tile.
+///
+/// The census exists because the door was once `emit_lexer_error` — the *caller-facing* method —
+/// and a caller-chosen span with nothing consumed for it could therefore excuse an uncovered
+/// byte of the sink's own buffer, foreign spans included. So this locks two things at once: the
+/// producer is the layer and nothing else, and the method stays **off** the two forwarding
+/// surfaces (`emit.rs`, the handle's; `view.rs`, the callback's) beside `commit_token`, whose
+/// withholding this exactly mirrors.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
+fn lexer_error_census_the_evidence_door_is_the_input_layers_alone() {
+  // The one producer: inside `emit_lexer_error_deduped`, on the crate-private `emitter()`.
+  assert!(
+    count(source("mod.rs"), "commit_lexer_error(") == 1,
+    "LEXER_ERROR_CENSUS drift: `Emitter::commit_lexer_error` must be called exactly once in \
+     mod.rs — inside `emit_lexer_error_deduped` (grep LEXER_ERROR_CENSUS)."
+  );
+  // Nowhere else in the input layer, and in particular NOT on either forwarding surface: a
+  // forwarder here hands a caller the gap-licensing door back.
+  for (name, src) in SOURCES {
+    if *name == "mod.rs" {
+      continue;
+    }
+    assert!(
+      count(src, "commit_lexer_error(") == 0,
+      "LEXER_ERROR_CENSUS drift: `{name}` reaches the emitter's gap-evidence channel. Only \
+       the input layer's own deduped report may — a caller-chosen span licenses nothing \
+       (grep LEXER_ERROR_CENSUS)."
+    );
+  }
+  // The callback surface withholds it too, for the same reason it withholds `commit_token`:
+  // the view is what a downstream crate can wrap under the orphan rules.
+  const VIEW: &str = include_str!("../../emitter/view.rs");
+  assert!(
+    count(VIEW, "commit_lexer_error") == 0,
+    "LEXER_ERROR_CENSUS drift: `EmitterView` forwards the gap-evidence door. A wrapper built \
+     over the view could then license gaps in a sink's buffer with a foreign lexer error \
+     (grep LEXER_ERROR_CENSUS)."
+  );
+  // The trait surface: declared once (defaulted to the diagnostic door) and blanket-forwarded
+  // once — the same shape the settle and release censuses lock.
+  assert!(
+    count(EMITTER_MOD, "fn commit_lexer_error(") == 2,
+    "LEXER_ERROR_CENSUS drift: `Emitter::commit_lexer_error` must appear exactly twice in \
+     `emitter/mod.rs` — the defaulted declaration and the `&mut U` blanket forward \
+     (grep LEXER_ERROR_CENSUS)."
   );
 }
 

@@ -384,17 +384,46 @@ impl TruncationLedger {
 /// - **`precede` exists only on [`CompletedMarker`]** — wrapping an abandoned or still-open
 ///   intent is unrepresentable, not merely checked.
 ///
+/// # Two shapes, because [`complete`](Self::complete) needs the emitter itself
+///
+/// [`complete`](Self::complete) and [`CompletedMarker::precede`] take `&mut E` where
+/// `E: CstEmitter`. **Code that owns such an emitter drives the full typestate:**
+///
 /// ```ignore
-/// let m = Marker::new(inp.emitter().cst_mark());
+/// let mark = emitter.cst_mark();
+/// let m = Marker::new(mark);
+/// // … events recorded under the mark …
+/// let alias = m.complete(&mut emitter, K_ALIAS); // Alias[…]
+/// let _outer = alias.precede();                  // a further outer wrap, if wanted
+/// ```
+///
+/// **Inside a parse, no handle hands out the emitter.** A grammar reaches the event channel
+/// through the forwarding surface on [`InputRef`](crate::InputRef) /
+/// [`ParseState`](crate::ParseState) / [`EmitterView`](crate::EmitterView), which carries the
+/// operations and not the value, so the mark comes from `inp.cst_mark()` and the retro-wrap
+/// from the handle's own `cst_start_at` / `cst_finish` pair:
+///
+/// ```ignore
+/// let m = Marker::new(inp.cst_mark());          // tombstone anchor, from the handle
 /// let name = ident(inp)?;                       // tokens under the mark
 /// match try_colon(inp)? {
 ///   Accepted(_) => {
-///     let alias = m.complete(inp.emitter(), K_ALIAS); // Alias[Ident, Colon]
-///     let _ = alias.precede();                        // a further outer wrap, if wanted
+///     inp.cst_start_at(m.mark(), K_ALIAS);      // Alias[Ident, Colon]
+///     inp.cst_finish(K_ALIAS);
 ///   }
-///   Declined => m.abandon(),                          // tombstone stays inert
+///   Declined => m.abandon(),                    // tombstone stays inert
 /// }
 /// ```
+///
+/// That second shape spends the mark without consuming the [`Marker`], so the single-use
+/// typestate is not enforcing anything there — it is the raw pair with a `Marker` alongside it
+/// for the abandon case. `complete` is not callable from a parse handle at all while
+/// `InputRef::emitter` is crate-private and
+/// [`EmitterView`](crate::EmitterView) implements no emitter trait, so
+/// [`CompletedMarker`] and [`precede`](CompletedMarker::precede) are out of a grammar's reach
+/// with it. Both blocks are `ignore`d because a runnable one needs the `rowan`-gated recording
+/// sink and this module is not gated; the pair's own laws are pinned by the sink's test suite
+/// and by the `compile_fail` cells below.
 ///
 /// # Misuse is a compile error
 ///
@@ -453,6 +482,11 @@ impl Marker {
   /// everything recorded since the mark.
   ///
   /// Stale-mark spends panic in every build, at the emitter (see [`EventMark`]).
+  ///
+  /// **This takes the emitter, so a parse handle cannot call it.** Nothing public hands out
+  /// `&mut Ctx::Emitter` during a parse any more; a grammar's route to the same two events is
+  /// the handle's own `cst_start_at` / `cst_finish` pair (see the type's docs). This verb is for
+  /// code that owns an `E: CstEmitter` outright.
   #[inline(always)]
   pub fn complete<'a, L, Lang, E>(self, emitter: &mut E, kind: u16) -> CompletedMarker
   where

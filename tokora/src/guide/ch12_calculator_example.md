@@ -159,6 +159,7 @@ the one [`Right`](crate::parser::PrattInfix)-associative row; `(`/`)` share `PRE
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};
+# use tokora::EmitterView;
 # #[derive(Clone, Debug, Default, PartialEq)]
 # struct LexError;
 # impl From<()> for LexError { fn from(_: ()) -> Self { Self } }
@@ -246,6 +247,7 @@ can even be exercised directly with `E = ()`:
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};
+# use tokora::EmitterView;
 # #[derive(Clone, Debug, Default, PartialEq)]
 # struct LexError;
 # impl From<()> for LexError { fn from(_: ()) -> Self { Self } }
@@ -284,10 +286,10 @@ impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for Ca
 impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for CalcError { fn from(_: tokora::error::NonAssociativeChain<O, Lang>) -> Self { Self::UnexpectedEot } }
 use tokora::{SimpleSpan, parser::PrattInfix, span::Spanned};
 
-fn fold_prefix<E>(
+fn fold_prefix<'inp, E>(
   op: Spanned<Token, SimpleSpan>,
   operand: Spanned<Token, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>,
 ) -> Result<Spanned<Token, SimpleSpan>, CalcError> {
   let (span, op) = op.into_components();
   match op {
@@ -302,11 +304,11 @@ fn fold_prefix<E>(
   }
 }
 
-fn fold_infix<E>(
+fn fold_infix<'inp, E>(
   left: Spanned<Token, SimpleSpan>,
   right: Spanned<Token, SimpleSpan>,
   infix: Spanned<PrattInfix<Token, Token, Token>, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>,
 ) -> Result<Spanned<Token, SimpleSpan>, CalcError> {
   let (span, left_tok) = left.into_components();
   let l = match left_tok { Token::Num(n) => n, _ => unreachable!() };
@@ -324,36 +326,38 @@ fn fold_infix<E>(
   Ok(Spanned::new(span, Token::Num(value)))
 }
 
-fn fold_postfix<E>(
+fn fold_postfix<'inp, E>(
   operand: Spanned<Token, SimpleSpan>,
   _close: Spanned<Token, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>,
 ) -> Result<Spanned<Token, SimpleSpan>, CalcError> {
   Ok(operand) // `)` closed its group; the value flows on
 }
 
 // The folds are pure arithmetic over `Spanned<Token>`, so they run with no parser context: pick
-// `E = ()` and pass `&mut ()`.
+// `E = ()` and lend its (empty) operations through an `EmitterView`. Building one needs a `&mut
+// E` in hand, which is why it grants nothing a caller did not already have — and why a fold body
+// stays unit-testable without standing up a parse.
 let span = SimpleSpan::new(0, 0);
 let sum = fold_infix::<()>(
   Spanned::new(span, Token::Num(2.0)),
   Spanned::new(span, Token::Num(3.0)),
   Spanned::new(span, PrattInfix::Left(Token::Star)),
-  &mut (),
+  EmitterView::new(&mut ()),
 ).unwrap();
 assert!(matches!(sum.into_data(), Token::Num(n) if n == 6.0));
 
 let neg = fold_prefix::<()>(
   Spanned::new(span, Token::Minus),
   Spanned::new(span, Token::Num(2.0)),
-  &mut (),
+  EmitterView::new(&mut ()),
 ).unwrap();
 assert!(matches!(neg.into_data(), Token::Num(n) if n == -2.0));
 
 let grouped = fold_postfix::<()>(
   Spanned::new(span, Token::Num(9.0)),
   Spanned::new(span, Token::RParen),
-  &mut (),
+  EmitterView::new(&mut ()),
 ).unwrap();
 assert!(matches!(grouped.into_data(), Token::Num(n) if n == 9.0));
 ```
@@ -370,6 +374,7 @@ assertions below are the maintained evaluator's behavior contract, now executabl
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};
+# use tokora::EmitterView;
 # #[derive(Clone, Debug, Default, PartialEq)]
 # struct LexError;
 # impl From<()> for LexError { fn from(_: ()) -> Self { Self } }
@@ -440,7 +445,7 @@ impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for Calc
 #   }
 # }
 # use tokora::{SimpleSpan, span::Spanned};
-# fn fold_prefix<E>(op: Spanned<Token, SimpleSpan>, operand: Spanned<Token, SimpleSpan>, _: &mut E) -> Result<Spanned<Token, SimpleSpan>, CalcError> {
+# fn fold_prefix<'inp, E>(op: Spanned<Token, SimpleSpan>, operand: Spanned<Token, SimpleSpan>, _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>) -> Result<Spanned<Token, SimpleSpan>, CalcError> {
 #   let (span, op) = op.into_components();
 #   match op {
 #     Token::Minus => { let n = match operand.into_data() { Token::Num(n) => n, _ => unreachable!() }; Ok(Spanned::new(span, Token::Num(-n))) }
@@ -448,7 +453,7 @@ impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for Calc
 #     _ => unreachable!(),
 #   }
 # }
-# fn fold_infix<E>(left: Spanned<Token, SimpleSpan>, right: Spanned<Token, SimpleSpan>, infix: Spanned<PrattInfix<Token, Token, Token>, SimpleSpan>, _: &mut E) -> Result<Spanned<Token, SimpleSpan>, CalcError> {
+# fn fold_infix<'inp, E>(left: Spanned<Token, SimpleSpan>, right: Spanned<Token, SimpleSpan>, infix: Spanned<PrattInfix<Token, Token, Token>, SimpleSpan>, _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>) -> Result<Spanned<Token, SimpleSpan>, CalcError> {
 #   let (span, left_tok) = left.into_components();
 #   let l = match left_tok { Token::Num(n) => n, _ => unreachable!() };
 #   let r = match right.into_data() { Token::Num(n) => n, _ => unreachable!() };
@@ -456,7 +461,7 @@ impl<O, Lang: ?Sized> From<tokora::error::NonAssociativeChain<O, Lang>> for Calc
 #   let value = match op { Token::Plus => l + r, Token::Minus => l - r, Token::Star => l * r, Token::Slash => l / r, Token::Caret => l.powf(r), _ => unreachable!() };
 #   Ok(Spanned::new(span, Token::Num(value)))
 # }
-# fn fold_postfix<E>(operand: Spanned<Token, SimpleSpan>, _close: Spanned<Token, SimpleSpan>, _: &mut E) -> Result<Spanned<Token, SimpleSpan>, CalcError> { Ok(operand) }
+# fn fold_postfix<'inp, E>(operand: Spanned<Token, SimpleSpan>, _close: Spanned<Token, SimpleSpan>, _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>) -> Result<Spanned<Token, SimpleSpan>, CalcError> { Ok(operand) }
 use tokora::{Emitter, InputRef, Parse, ParseContext, Parser, emitter::PrattEmitter};
 
 fn calc_expr<'inp, Ctx>(

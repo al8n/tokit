@@ -21,6 +21,7 @@
 mod common;
 
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Accumulator, Emitter, InputRef, Lexer, Parse, ParseContext, ParseInput, Parser, ParserContext,
   Token as TokenTrait,
@@ -255,7 +256,7 @@ impl<'inp, E> RWEmitterBound<'inp> for E where
 
 fn decide_num_rw<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -1098,7 +1099,7 @@ fn test_repeated_while_full_container_verbose_records_and_terminates() {
     assert_eq!(out, Some(1));
     // The overflow was recorded rather than aborting the parse — and recorded exactly once,
     // however many later pushes the full container went on to refuse.
-    let recorded: usize = inp.emitter().errors().values().map(|v| v.len()).sum();
+    let recorded: usize = inp.emitter_ref().errors().values().map(|v| v.len()).sum();
     assert_eq!(
       recorded, 1,
       "a full container reports its refusal once per construct, not once per dropped element"

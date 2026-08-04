@@ -25,16 +25,22 @@
 //! 1. **[`event`](crate::cst::event)**: The event vocabulary, the era-branded
 //!    [`EventMark`](crate::cst::event::EventMark), and the
 //!    [`Marker`](crate::cst::event::Marker) retro-wrap typestate
-//! 2. **`Sink`** (`rowan`): The recording emitter — buffers events under the one
-//!    checkpoint/rewind mark and materializes once into a green tree, configured by a
-//!    `CstProfile` (the dialect's kind space: mapper, `KindValidator`, error and gap kinds)
-//!    and reading its text through `CstText`
-//! 3. **`SyntaxTreeBuilder`** (`rowan`): The low-level append-only builder over rowan's
+//! 2. **`parse_lossless`** / **`parse_lossless_partial`** (`rowan`): The only doors that mint
+//!    a `Sink`. They take the source once and use that one argument for both the sink and the
+//!    input, so the buffer the tree's text comes from and the buffer the parse reads cannot be
+//!    two different buffers
+//! 3. **`Sink`** (`rowan`): The recording emitter — buffers events under the one
+//!    checkpoint/rewind mark, configured by a `CstProfile` (the dialect's kind space: mapper,
+//!    `KindValidator`, error and gap kinds) and reading its text through `CstText`
+//! 4. **`Cst`** (`rowan`): The spent sink a driver hands back — the one door to
+//!    materialization (`finish` / `finish_partial`), and deliberately **not** an emitter, so
+//!    the artefact cannot be fed back in as a second parse's context
+//! 5. **`SyntaxTreeBuilder`** (`rowan`): The low-level append-only builder over rowan's
 //!    green tree builder (no rollback of its own — that is what the event buffer is for)
-//! 4. **`Element`** / **`Node`** / **`Token`** (`rowan`): Typed views over the finished
+//! 6. **`Element`** / **`Node`** / **`Token`** (`rowan`): Typed views over the finished
 //!    tree
-//! 5. **`cast`** (`rowan`): Utility functions for the typed layer
-//! 6. **`error`** (`rowan`): Error types for CST operations
+//! 7. **`cast`** (`rowan`): Utility functions for the typed layer
+//! 8. **`error`** (`rowan`): Error types for CST operations
 //!
 //! # Design Philosophy
 //!
@@ -73,9 +79,23 @@ mod profile;
 mod sink;
 
 #[cfg(feature = "rowan")]
+mod driver;
+
+#[cfg(feature = "rowan")]
+mod handle;
+
+#[cfg(feature = "rowan")]
 mod text;
 
 pub use profile::{CstProfile, KindValidator};
+
+#[cfg(feature = "rowan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
+pub use driver::{parse_lossless, parse_lossless_partial};
+
+#[cfg(feature = "rowan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
+pub use handle::Cst;
 
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]

@@ -361,7 +361,7 @@ where
     let at = *inp.span();
     // File a real diagnostic. Under `Verbose` this is recorded (and returns `Ok`); the
     // branch is about to decline, so it should not survive.
-    let _ = inp.emitter().emit_error(Spanned::new(at, Error));
+    let _ = inp.emit_error(Spanned::new(at, Error));
     None::<()>                              // decline → roll the whole branch back
   });
   assert!(declined.is_none());

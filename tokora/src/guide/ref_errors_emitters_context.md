@@ -268,6 +268,10 @@ trait Emitter<'a, L, Lang = ()> {
     fn checkpoint(&self) -> u64  //  ┐ the marks of that rewindable timeline: a reading
     fn release(&mut self, u64)   //  ┘ taken at a save, reclaimed when a branch is kept
     fn commit_token(.., ..)      // the auto-CST hook (see CstEmitter)
+    fn commit_lexer_error(..)    // its refusal-side twin: the INPUT LAYER's own lexer error,
+                                 // whose span is what licenses an untokenized byte in a CST
+                                 // parse. Defaults to emit_lexer_error, so a diagnostics-only
+                                 // emitter never notices the split.
     fn enter_label / exit_label  // the "while parsing X" stack for `labelled`
 }
 ```
@@ -475,7 +479,7 @@ where
         None => {
             // The one line the emitter reinterprets: under `Fatal` this `?` ends the parse;
             // under `Verbose` the diagnostic is filed and we return a recovered value.
-            inp.emitter().emit_error(Spanned::new(at, Error))?;
+            inp.emit_error(Spanned::new(at, Error))?;
             Ok(0)
         }
     }

@@ -204,8 +204,15 @@ section), which is what keeps the cost of a parse legible.
 
 A parser does not consume on one channel and report diagnostics on another, disconnected one. The
 emitter is borrowed *by the handle* — it lives in the same `session` cell as the backtracking
-bookkeeping — so [`inp.emitter()`](crate::InputRef::emitter) and the crate's structured `emit_*`
-paths write to the same object the consume path is driving. Consumption and emission share one
+bookkeeping — so the handle's own [`emit_*`](crate::InputRef::emit_error) forwarding methods
+and the crate's structured emission paths write to the same object the consume path is
+driving. (The emitter is reached *through* the handle, never handed out as a value: a
+`&mut Ctx::Emitter` is itself installable as another parse's emitter, which is how a
+recording sink could be aimed at a buffer it was not built over. The callbacks that used to
+receive the emitter — a `*_while` condition, a `peek_then` handler, a token-level pratt fold —
+receive an [`EmitterView`](crate::EmitterView) for the same reason: the same operations, in a
+value no emitter slot can take. The read side,
+[`emitter_ref`](crate::InputRef::emitter_ref), stays open.) Consumption and emission share one
 handle, and — the part that matters for what follows — **one timeline**.
 
 Two channels ride that timeline, and neither is a second pass:

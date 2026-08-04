@@ -34,6 +34,7 @@
 //! suppressing anything.
 
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Accumulator, Emitter, InputRef, Lexer, Parse, ParseContext, ParseInput, Parser, ParserContext,
   SimpleSpan, Token, TryParseInput,
@@ -415,7 +416,7 @@ where
 /// where the surgery happens) and then the loop to end so the close probe is reached.
 fn decide_once<'inp>(
   _peeked: Peeked<'_, 'inp, FlipLexer<'inp>, U1>,
-  _: &mut Verbose<D>,
+  _: EmitterView<'_, 'inp, FlipLexer<'inp>, Verbose<D>>,
 ) -> Result<Action, D> {
   Ok(if ONCE.with(|c| c.replace(true)) {
     Action::Stop
@@ -490,7 +491,7 @@ fn drive_blackhole(src: &'static str) -> std::vec::Vec<D> {
       .collect()
       .parse_input(inp);
     let _ = r;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(inp.emitter_ref().errors().values().flatten().cloned().collect())
   };
   Parser::with_context(ParserContext::new(Verbose::new()))
     .apply(probe)
@@ -556,7 +557,7 @@ fn drive_catching_state_mut(src: &'static str) -> std::vec::Vec<D> {
       .collect()
       .parse_input(inp);
     let _ = r;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(inp.emitter_ref().errors().values().flatten().cloned().collect())
   };
   Parser::with_context(vctx())
     .apply(probe)
@@ -608,7 +609,7 @@ fn drive_catching(src: &'static str) -> std::vec::Vec<D> {
       .collect()
       .parse_input(inp);
     let _ = r;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(inp.emitter_ref().errors().values().flatten().cloned().collect())
   };
   Parser::with_context(vctx())
     .apply(probe)
@@ -653,7 +654,7 @@ macro_rules! run_family {
            -> Result<std::vec::Vec<D>, D> {
             let outcome: Result<std::vec::Vec<i64>, D> = if surgery { $surgery } else { $plain };
             let _ = outcome;
-            Ok($inp.emitter().errors().values().flatten().cloned().collect())
+            Ok($inp.emitter_ref().errors().values().flatten().cloned().collect())
           };
       Parser::with_context(vctx())
         .apply(probe)

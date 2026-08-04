@@ -4,6 +4,7 @@ use generic_arraydeque::{ArrayLength, GenericArrayDeque, array::GenericArray, ty
 
 use crate::{
   cache::Peeked,
+  emitter::EmitterView,
   input::{DelimClass, InputRef},
   located::Located,
   parser::*,
@@ -63,9 +64,27 @@ seq_macro::seq!(N in 1..=32 {
 });
 
 /// Decision action for conditional parsing.
+///
+/// # The emitter's operations, not the emitter
+///
+/// The second parameter is an [`EmitterView`] — the emitter's own methods under their own names,
+/// in a value that implements no emitter trait. It used to be `&mut E`, and `&mut E` **is** an
+/// emitter: a condition handed one could wrap it and install the wrapper as the context of a
+/// second parse over a **different** buffer, so a recording sink pinned to one source recorded a
+/// foreign parse's structure and materialized it over its own bytes. A view has nothing to install.
+///
+/// Everything a condition could do to the emitter it can still do to the view — the whole
+/// diagnostic surface, the CST structuring surface, and every capability channel — so a condition
+/// still decides *and reports* inline, with no rewind. See [`EmitterView`] for the four members
+/// deliberately withheld (all four are the input layer's own bookkeeping, and none was ever
+/// callable from a condition without desynchronizing the parse).
 pub trait Decision<'inp, L, E, W, Lang: ?Sized = ()> {
   /// Decide the next action based on the peeked tokens.
-  fn decide(&mut self, toks: Peeked<'_, 'inp, L, W>, emitter: &mut E) -> Result<Action, E::Error>
+  fn decide(
+    &mut self,
+    toks: Peeked<'_, 'inp, L, W>,
+    emitter: EmitterView<'_, 'inp, L, E, Lang>,
+  ) -> Result<Action, E::Error>
   where
     L: Lexer<'inp>,
     E: Emitter<'inp, L, Lang>,
@@ -74,13 +93,17 @@ pub trait Decision<'inp, L, E, W, Lang: ?Sized = ()> {
 
 impl<'inp, F, L, E, W, Lang: ?Sized> Decision<'inp, L, E, W, Lang> for F
 where
-  F: FnMut(Peeked<'_, 'inp, L, W>, &mut E) -> Result<Action, E::Error>,
+  F: FnMut(Peeked<'_, 'inp, L, W>, EmitterView<'_, 'inp, L, E, Lang>) -> Result<Action, E::Error>,
   L: Lexer<'inp>,
   E: Emitter<'inp, L, Lang>,
   W: Window,
 {
   #[inline(always)]
-  fn decide(&mut self, toks: Peeked<'_, 'inp, L, W>, emitter: &mut E) -> Result<Action, E::Error>
+  fn decide(
+    &mut self,
+    toks: Peeked<'_, 'inp, L, W>,
+    emitter: EmitterView<'_, 'inp, L, E, Lang>,
+  ) -> Result<Action, E::Error>
   where
     W: Window,
   {
@@ -128,7 +151,7 @@ mod decision_adapters {
     fn decide(
       &mut self,
       mut toks: Peeked<'_, 'inp, L, typenum::U1>,
-      _emitter: &mut E,
+      _emitter: EmitterView<'_, 'inp, L, E, Lang>,
     ) -> Result<Action, E::Error> {
       use crate::cache::PeekedTokenExt as _;
       Ok(match toks.pop_front() {
@@ -148,7 +171,7 @@ mod decision_adapters {
     fn decide(
       &mut self,
       mut toks: Peeked<'_, 'inp, L, typenum::U1>,
-      _emitter: &mut E,
+      _emitter: EmitterView<'_, 'inp, L, E, Lang>,
     ) -> Result<Action, E::Error> {
       use crate::cache::PeekedTokenExt as _;
       Ok(match toks.pop_front() {
@@ -835,7 +858,7 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
     Ctx: ParseContext<'inp, L, Lang>,
     C: FnMut(
       Peeked<'_, 'inp, L, W>,
-      &mut Ctx::Emitter,
+      EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
     ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
     W: Window,
     PeekThen<Self, C, L::Token, W, Cmpl>: ParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
@@ -873,7 +896,7 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
     Self,
     impl FnMut(
       Peeked<'_, 'inp, L, typenum::U1>,
-      &mut Ctx::Emitter,
+      EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
     ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
     L::Token,
     typenum::U1,
@@ -889,7 +912,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   {
     PeekThen::of(
       self,
-      move |mut toks: Peeked<'_, 'inp, L, typenum::U1>, _emitter: &mut Ctx::Emitter| {
+      move |mut toks: Peeked<'_, 'inp, L, typenum::U1>,
+            _emitter: EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>| {
         use crate::cache::PeekedTokenExt as _;
         match toks.pop_front() {
           Some(t) => condition(Some(Spanned::new(t.span(), t.token()))),

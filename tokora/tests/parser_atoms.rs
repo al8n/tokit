@@ -336,7 +336,7 @@ fn remaining<'inp>(
 fn error_spans<'inp>(
   inp: &mut InputRef<'inp, '_, TestLexer<'inp>, ParserContext<'inp, TestLexer<'inp>, Verbose<E>>>,
 ) -> Vec<SimpleSpan> {
-  inp.emitter().errors().keys().copied().collect()
+  inp.emitter_ref().errors().keys().copied().collect()
 }
 
 // ── The fluent forms of the two list atoms ────────────────────────────────
@@ -621,9 +621,7 @@ fn emit_then_recover<'inp, Em>(
 where
   Em: Emitter<'inp, TestLexer<'inp>, Error = E>,
 {
-  inp
-    .emitter()
-    .emit_error(Spanned::new(SimpleSpan::new(0, 0), E))?;
+  inp.emit_error(Spanned::new(SimpleSpan::new(0, 0), E))?;
   Ok(())
 }
 

@@ -17,10 +17,18 @@
 //!
 //! # The measured region excludes construction
 //!
-//! Each id is `iter_batched(setup, routine, LargeInput)`: **setup** builds the sink and
-//! drives the whole event stream, **routine** does only `finish`. Criterion does not time
-//! setup, so event construction — which is O(n) and would dilute the ratio — is out of the
-//! comparison entirely.
+//! Each id is `iter_batched(setup, routine, LargeInput)`: **setup** runs a whole lossless parse
+//! over the source and hands back the spent `Cst`, **routine** does only `finish`. Criterion
+//! does not time setup, so event construction — which is O(n) and would dilute the ratio — is
+//! out of the comparison entirely.
+//!
+//! # The streams are parsed, not hand-built
+//!
+//! A sink is minted only by `parse_lossless`, and a token event is born only from a settle, so
+//! each shape below is produced by a real drain over a source chosen to make it: `!a!a…` for
+//! the error-dense one (`!` is a lexer error, `a` a token), `aaa…` for the clean one. That is
+//! the same event stream the old hand-built setup pushed, with the reservation, mapping and
+//! validation the real path pays.
 //!
 //! # Run it with a named feature set, never `--all-features`
 //!
@@ -33,10 +41,10 @@
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use tokora::{
-  Lexer, SimpleSpan, Token,
-  cst::{CstProfile, KindValidator, Sink},
-  emitter::{CstEmitter, Emitter, Verbose},
-  span::Spanned,
+  InputRef, Lexer, SimpleSpan, Token,
+  cache::DefaultCache,
+  cst::{Cst, CstProfile, KindValidator, parse_lossless},
+  emitter::Verbose,
 };
 
 // ── A byte-per-token lossless lexer, the minimum a Sink will accept ────────────
@@ -118,7 +126,13 @@ impl<'inp> Lexer<'inp> for BLexer<'inp> {
     let byte = *self.src.as_bytes().get(self.pos)?;
     self.start = self.pos;
     self.pos += 1;
-    Some(Ok(BTok(byte)))
+    // `!` is the error-dense shape's refused byte: a recorded lexer error whose span licenses
+    // exactly one gap tile at materialization.
+    if byte == b'!' {
+      Some(Err(BErr))
+    } else {
+      Some(Ok(BTok(byte)))
+    }
   }
 
   fn bump(&mut self, n: &usize) {
@@ -146,7 +160,7 @@ impl<'a, T, K: Clone, S, Lang: ?Sized>
   }
 }
 
-type BSink<'inp> = Sink<'inp, BLexer<'inp>, Verbose<BenchErr>>;
+type BCst<'inp> = Cst<'inp, BLexer<'inp>, Verbose<BenchErr>>;
 
 const K_ROOT: u16 = 1;
 const K_NODE: u16 = 2;
@@ -165,52 +179,71 @@ fn in_bench_kind_space(kind: u16) -> bool {
   matches!(kind, K_ROOT | K_NODE | K_WRAP | K_TOK | K_ERR | K_GAP)
 }
 
-fn sink(src: &str) -> BSink<'_> {
-  let profile = CstProfile::new(
+fn profile() -> CstProfile<BTok> {
+  CstProfile::new(
     map_tok,
     KindValidator::new(in_bench_kind_space),
     K_ERR,
     K_GAP,
-  );
-  Sink::new(src, Verbose::new(), profile)
+  )
 }
 
-fn span(start: usize, end: usize) -> SimpleSpan {
-  SimpleSpan::new(start, end)
+/// The pinned context of a lossless parse over this bench's lexer.
+type BIr<'inp, 'c> = InputRef<
+  'inp,
+  'c,
+  BLexer<'inp>,
+  (
+    tokora::cst::Sink<'inp, BLexer<'inp>, Verbose<BenchErr>>,
+    DefaultCache<'inp, BLexer<'inp>>,
+  ),
+>;
+
+/// Drains every token; each settle records a `Token` event through the auto-emission hook.
+fn drain(inp: &mut BIr<'_, '_>) -> Result<(), BenchErr> {
+  while inp.next()?.is_some() {}
+  Ok(())
+}
+
+/// Drains every token, retro-wrapping each one in its own `K_WRAP` node.
+fn drain_wrapping(inp: &mut BIr<'_, '_>) -> Result<(), BenchErr> {
+  loop {
+    let mark = inp.cst_mark();
+    if inp.next()?.is_none() {
+      return Ok(());
+    }
+    inp.cst_start_at(mark, K_WRAP);
+    inp.cst_finish(K_WRAP);
+  }
+}
+
+fn run(src: &str, f: fn(&mut BIr<'_, '_>) -> Result<(), BenchErr>) -> BCst<'_> {
+  let (cst, parsed) = parse_lossless(
+    src,
+    (),
+    Verbose::<BenchErr>::new(),
+    profile(),
+    DefaultCache::<BLexer<'_>>::default(),
+    f,
+  );
+  parsed.expect("Verbose collects rather than propagates");
+  cst
 }
 
 /// `n` alternating (1-byte lexer error, 1-byte token) pairs: `2n` events, `n` gap tiles.
-fn error_dense_events(src: &str, n: usize) -> BSink<'_> {
-  let mut s = sink(src);
-  for i in 0..n {
-    let lo = 2 * i;
-    Emitter::<BLexer<'_>>::emit_lexer_error(&mut s, Spanned::new(span(lo, lo + 1), BErr))
-      .expect("verbose collects");
-    s.cst_token(&BTok(b'a'), &span(lo + 1, lo + 2));
-  }
-  s
+fn error_dense_events(src: &str) -> BCst<'_> {
+  run(src, drain)
 }
 
 /// `2n` committed tokens over a `2n`-byte source: no diagnostics, no gaps.
-fn clean_events(src: &str, n: usize) -> BSink<'_> {
-  let mut s = sink(src);
-  for i in 0..(2 * n) {
-    s.cst_token(&BTok(b'a'), &span(i, i + 1));
-  }
-  s
+fn clean_events(src: &str) -> BCst<'_> {
+  run(src, drain)
 }
 
 /// `m` retro-wrap targets, one wrap each, over an `m`-byte source.
-fn wrap_heavy_events(src: &str, m: usize) -> BSink<'_> {
-  let mut s = sink(src);
-  for i in 0..m {
-    let mark = s.cst_mark();
-    s.cst_token(&BTok(b'a'), &span(i, i + 1));
-    s.cst_start_at(mark, K_WRAP);
-    s.cst_finish(K_WRAP);
-  }
+fn wrap_heavy_events(src: &str) -> BCst<'_> {
   let _ = K_NODE;
-  s
+  run(src, drain_wrapping)
 }
 
 fn bench(c: &mut Criterion) {
@@ -226,7 +259,7 @@ fn bench(c: &mut Criterion) {
   group.throughput(Throughput::Elements(2 * N as u64));
   group.bench_function("finish_error_dense", |b| {
     b.iter_batched(
-      || error_dense_events(&error_dense_src, N),
+      || error_dense_events(&error_dense_src),
       |s| {
         let (green, _emitter) = s.finish(K_ROOT);
         green.expect("every gap is explained by its own diagnostic")
@@ -237,7 +270,7 @@ fn bench(c: &mut Criterion) {
 
   group.bench_function("finish_clean", |b| {
     b.iter_batched(
-      || clean_events(&clean_src, N),
+      || clean_events(&clean_src),
       |s| {
         let (green, _emitter) = s.finish(K_ROOT);
         green.expect("a fully covered source materializes")
@@ -249,7 +282,7 @@ fn bench(c: &mut Criterion) {
   group.throughput(Throughput::Elements(4 * M as u64));
   group.bench_function("finish_wrap_heavy", |b| {
     b.iter_batched(
-      || wrap_heavy_events(&wrap_src, M),
+      || wrap_heavy_events(&wrap_src),
       |s| {
         let (green, _emitter) = s.finish(K_ROOT);
         green.expect("well-formed single-wrap targets materialize")

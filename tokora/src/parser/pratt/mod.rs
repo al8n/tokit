@@ -1,5 +1,6 @@
 use crate::{
   Emitter, InputRef, Lexer, ParseContext, ParseInput,
+  emitter::EmitterView,
   input::{Complete, Completeness},
   span::Spanned,
 };
@@ -506,13 +507,20 @@ where
 }
 
 /// A trait for postfix fold dispatch
+///
+/// # The emitter's operations, not the emitter
+///
+/// The trailing parameter is an [`EmitterView`] rather than `&mut Ctx::Emitter`, for the reason
+/// [`Decision`](crate::Decision) gives: `&mut Ctx::Emitter` is itself an emitter, and a fold
+/// handed one could install it as the context of a second parse over a foreign buffer. Every
+/// emitting operation a fold could reach before, it reaches now under the same name.
 pub trait PrattFoldTokenPostfix<'inp, Power, L, Ctx, Lang: ?Sized = ()> {
   /// Apply the postfix fold to the operand.
   fn fold_postfix(
     &mut self,
     operand: Spanned<L::Token, L::Span>,
     operator: Spanned<L::Token, L::Span>,
-    emitter: &mut Ctx::Emitter,
+    emitter: EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   ) -> Result<Spanned<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     L: Lexer<'inp>,
@@ -526,7 +534,7 @@ where
   P: FnMut(
     Spanned<L::Token, L::Span>,
     Spanned<L::Token, L::Span>,
-    &mut Ctx::Emitter,
+    EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   )
     -> Result<Spanned<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
 {
@@ -535,7 +543,7 @@ where
     &mut self,
     operand: Spanned<L::Token, L::Span>,
     operator: Spanned<L::Token, L::Span>,
-    emitter: &mut Ctx::Emitter,
+    emitter: EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   ) -> Result<Spanned<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     L: Lexer<'inp>,
@@ -546,6 +554,9 @@ where
 }
 
 /// A trait for infix fold dispatch
+///
+/// The trailing parameter is an [`EmitterView`] rather than `&mut Ctx::Emitter` — see
+/// [`PrattFoldTokenPostfix`] for why.
 pub trait PrattFoldTokenInfix<'inp, Power, L, Ctx, Lang: ?Sized = ()> {
   /// Apply the infix fold to the operand.
   fn fold_infix(
@@ -553,7 +564,7 @@ pub trait PrattFoldTokenInfix<'inp, Power, L, Ctx, Lang: ?Sized = ()> {
     left: Spanned<L::Token, L::Span>,
     right: Spanned<L::Token, L::Span>,
     infix: Spanned<PrattInfix<L::Token, L::Token, L::Token>, L::Span>,
-    emitter: &mut Ctx::Emitter,
+    emitter: EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   ) -> Result<Spanned<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     L: Lexer<'inp>,
@@ -568,7 +579,7 @@ where
     Spanned<L::Token, L::Span>,
     Spanned<L::Token, L::Span>,
     Spanned<PrattInfix<L::Token, L::Token, L::Token>, L::Span>,
-    &mut Ctx::Emitter,
+    EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   )
     -> Result<Spanned<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
 {
@@ -578,7 +589,7 @@ where
     left: Spanned<L::Token, L::Span>,
     right: Spanned<L::Token, L::Span>,
     infix: Spanned<PrattInfix<L::Token, L::Token, L::Token>, L::Span>,
-    emitter: &mut <Ctx>::Emitter,
+    emitter: EmitterView<'_, 'inp, L, <Ctx>::Emitter, Lang>,
   ) -> Result<Spanned<L::Token, L::Span>, <<Ctx>::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     L: Lexer<'inp>,
@@ -589,13 +600,16 @@ where
 }
 
 /// A trait for prefix fold dispatch
+///
+/// The trailing parameter is an [`EmitterView`] rather than `&mut Ctx::Emitter` — see
+/// [`PrattFoldTokenPostfix`] for why.
 pub trait PrattFoldTokenPrefix<'inp, Power, L, Ctx, Lang: ?Sized = ()> {
   /// Apply the prefix fold to the operand.
   fn fold_prefix(
     &mut self,
     operator: Spanned<L::Token, L::Span>,
     operand: Spanned<L::Token, L::Span>,
-    emitter: &mut Ctx::Emitter,
+    emitter: EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   ) -> Result<Spanned<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     L: Lexer<'inp>,
@@ -609,7 +623,7 @@ where
   P: FnMut(
     Spanned<L::Token, L::Span>,
     Spanned<L::Token, L::Span>,
-    &mut Ctx::Emitter,
+    EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   )
     -> Result<Spanned<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
 {
@@ -618,7 +632,7 @@ where
     &mut self,
     operator: Spanned<L::Token, L::Span>,
     operand: Spanned<L::Token, L::Span>,
-    emitter: &mut Ctx::Emitter,
+    emitter: EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   ) -> Result<Spanned<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     L: Lexer<'inp>,

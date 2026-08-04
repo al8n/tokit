@@ -183,7 +183,8 @@ where
 
   /// Skip tokens until the predicate matches, emitting lexer errors along the way.
   ///
-  /// Returns the matched token, peeked tokens, and a mutable reference to the emitter.
+  /// Returns the matched token, peeked tokens, and the emitter's **operations** (an
+  /// [`EmitterView`] — never the emitter; see that type for why).
   ///
   /// Diagnostics travel with progress, exactly as in [`sync_through`](Self::sync_through): a
   /// match commits the skipped prefix, so its diagnostics persist. A no-match run to end of
@@ -205,7 +206,7 @@ where
     (
       Option<Spanned<L::Token, L::Span>>,
       Peeked<'p, 'inp, L, W>,
-      &'p mut Ctx::Emitter,
+      EmitterView<'p, 'inp, L, Ctx::Emitter, Lang>,
     ),
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
   >
@@ -245,7 +246,7 @@ where
       }
       // The exhausted outcomes — a poison trip committed at the durable frontier, or a
       // no-match run to end of input rewound to `snapshot` — yield no match and an empty peek.
-      Scanned::Exhausted => Ok((None, GenericArrayDeque::new(), self.session.emitter)),
+      Scanned::Exhausted => Ok((None, GenericArrayDeque::new(), self.emitter_view())),
     }
   }
 }

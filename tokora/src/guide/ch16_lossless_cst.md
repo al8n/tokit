@@ -18,8 +18,12 @@ Two crates share the work:
   [`node`](crate::parser::node()) combinators. This half is rowan-free and compiles in every
   build.
 - **[rowan](https://docs.rs/rowan)** stores the finished tree. Under the `rowan` feature,
-  the [`Sink`](crate::cst::Sink) emitter buffers the parse as a flat event stream, and
-  [`finish`](crate::cst::Sink::finish) materializes it once into a rowan green tree.
+  [`parse_lossless`](crate::cst::parse_lossless) drives the parse with a
+  [`Sink`](crate::cst::Sink) emitter minted from the same source, buffering it as a flat
+  event stream, and [`finish`](crate::cst::Cst::finish) materializes the returned
+  [`Cst`](crate::cst::Cst) once into a rowan green tree. The source is named **once**, to the
+  driver: the buffer the tree's text comes from is the buffer the parse read, by
+  construction rather than by convention.
 
 The event stream between the two is an implementation detail: you never construct, inspect,
 or replay events. (The [`cst::event`](crate::cst::event) module documents the vocabulary and
@@ -291,7 +295,7 @@ structure*. Helpers that merely consume keep the plain emitter bound.
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
   cache::DefaultCache,
-  cst::{CstProfile, KindValidator, Sink},
+  cst::{CstProfile, KindValidator, parse_lossless},
   emitter::{CstEmitter, Fatal},
   parser::{node, node_at},
   try_parse_input::ParseAttempt,
@@ -397,7 +401,7 @@ where
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -465,16 +469,20 @@ where
 
 let src = "{ user(id: 4) { name } }";
 
-// The sink wraps an ordinary emitter (fail-fast `Fatal` here) and takes the dialect
-// corner: the mapper and the two bookkeeping kinds. It stays OUTSIDE the parse — `&mut`
-// in the context seat — because materialization needs it back afterwards.
-let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
-
-let fields = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
-  .apply(selection_set)
-  .parse_str(src)
-  .unwrap();
+// `parse_lossless` mints the sink FROM `src`: the buffer the parse reads and the buffer
+// the tree's text is sliced out of are the same argument of the same call, so they cannot
+// disagree. It takes the ordinary emitter to forward to (fail-fast `Fatal` here) and the
+// dialect corner — the mapper and the two bookkeeping kinds — and hands back the spent
+// handle, because materialization happens after the parse.
+let (cst, parsed) = parse_lossless(
+  src,
+  Default::default(),
+  Fatal::<QueryError>::new(),
+  query_profile(),
+  DefaultCache::<QueryLexer<'_>>::default(),
+  selection_set,
+);
+let fields = parsed.unwrap();
 
 // The typed result, exactly as if no tree existed:
 assert_eq!(fields.len(), 1);
@@ -485,9 +493,9 @@ assert_eq!(user.args, 1);
 assert_eq!(user.children.len(), 1);
 assert_eq!(user.children[0].name, "name");
 
-// Materialize once. The sink is consumed; the inner emitter comes back with the tree,
+// Materialize once. The handle is consumed; the inner emitter comes back with the tree,
 // so collected diagnostics (chapter 7) survive materialization.
-let (green, _emitter) = sink.finish(K::Root.raw());
+let (green, _emitter) = cst.finish(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 
 // The round-trip law — the reason to build a CST at all:
@@ -631,7 +639,7 @@ the mark, including tokens committed before the wrap was conceivable.
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
 #   cache::DefaultCache,
-#   cst::{CstProfile, KindValidator, Sink},
+#   cst::{CstProfile, KindValidator, parse_lossless},
 #   emitter::{CstEmitter, Fatal},
 #   parser::{node, node_at},
 #   try_parse_input::ParseAttempt,
@@ -765,7 +773,7 @@ where
 {
   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
     // An inert mark: costs one buffer slot, promises nothing.
-    let mark = inp.emitter().cst_mark();
+    let mark = inp.cst_mark();
     let first = ident(inp)?;
     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
       // The colon was there — `first` was an alias all along. `node_at` spent the mark:
@@ -787,17 +795,20 @@ where
 }
 
 let src = "{ author: user(id: 4) { name } }";
-let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
-let fields = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
-  .apply(selection_set)
-  .parse_str(src)
-  .unwrap();
+let (cst, parsed) = parse_lossless(
+  src,
+  Default::default(),
+  Fatal::<QueryError>::new(),
+  query_profile(),
+  DefaultCache::<QueryLexer<'_>>::default(),
+  selection_set,
+);
+let fields = parsed.unwrap();
 
 assert_eq!(fields[0].alias.as_deref(), Some("author"));
 assert_eq!(fields[0].name, "user");
 
-let (green, _emitter) = sink.finish(K::Root.raw());
+let (green, _emitter) = cst.finish(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 assert_eq!(tree.text().to_string(), src);
 
@@ -921,7 +932,7 @@ formatting data *without* a tree in the dependency closure; under a sink they ar
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
 #   cache::DefaultCache,
-#   cst::{CstProfile, KindValidator, Sink},
+#   cst::{CstProfile, KindValidator, parse_lossless},
 #   emitter::{CstEmitter, Fatal},
 #   parser::{node, node_at},
 #   try_parse_input::ParseAttempt,
@@ -1012,7 +1023,7 @@ formatting data *without* a tree in the dependency closure; under a sink they ar
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -1070,13 +1081,16 @@ formatting data *without* a tree in the dependency closure; under a sink they ar
 # }
 // Comments, newlines, commas: no grammar rule mentions them, all of them survive.
 let src = "{ # every byte survives\n  a, b }";
-let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
-Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
-  .apply(selection_set)
-  .parse_str(src)
-  .unwrap();
-let (green, _emitter) = sink.finish(K::Root.raw());
+let (cst, parsed) = parse_lossless(
+  src,
+  Default::default(),
+  Fatal::<QueryError>::new(),
+  query_profile(),
+  DefaultCache::<QueryLexer<'_>>::default(),
+  selection_set,
+);
+parsed.unwrap();
+let (green, _emitter) = cst.finish(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 assert_eq!(tree.text().to_string(), src);
 
@@ -1096,14 +1110,17 @@ assert!(tokens.iter().all(|(kind, _)| *kind != SyntaxKind::Gap));
 // indistinguishable from a dropped token); the tooling door `finish_partial` tiles it, so
 // an aborted parse still round-trips its text.
 let src = "{ a % b }";
-let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
-let res = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
-  .apply(selection_set)
-  .parse_str(src);
+let (cst, res) = parse_lossless(
+  src,
+  Default::default(),
+  Fatal::<QueryError>::new(),
+  query_profile(),
+  DefaultCache::<QueryLexer<'_>>::default(),
+  selection_set,
+);
 assert_eq!(res, Err(QueryError::Lex));
 
-let (green, _emitter) = sink.finish_partial(K::Root.raw());
+let (green, _emitter) = cst.finish_partial(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 assert_eq!(tree.text().to_string(), src, "aborted parse, intact text");
 assert!(
@@ -1272,7 +1289,7 @@ nothing.
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -1430,7 +1447,7 @@ branch is abandoned, its events are truncated as if they never happened.
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
 #   cache::DefaultCache,
-#   cst::{CstProfile, KindValidator, Sink},
+#   cst::{CstProfile, KindValidator, parse_lossless},
 #   emitter::{CstEmitter, Fatal},
 #   parser::{node, node_at},
 #   try_parse_input::ParseAttempt,
@@ -1521,7 +1538,7 @@ branch is abandoned, its events are truncated as if they never happened.
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -1599,20 +1616,26 @@ where
 // Parse the same source twice: once straight, once through the declined speculation.
 let src = "{ user(id: 4) { name } }";
 
-let mut straight: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
-Parser::with_context((&mut straight, DefaultCache::<QueryLexer<'_>>::default()))
-  .apply(selection_set)
-  .parse_str(src)
-  .unwrap();
+let (straight, parsed) = parse_lossless(
+  src,
+  Default::default(),
+  Fatal::<QueryError>::new(),
+  query_profile(),
+  DefaultCache::<QueryLexer<'_>>::default(),
+  selection_set,
+);
+parsed.unwrap();
 let (green_straight, _) = straight.finish(K::Root.raw());
 
-let mut backtracked: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
-Parser::with_context((&mut backtracked, DefaultCache::<QueryLexer<'_>>::default()))
-  .apply(decline_then_parse)
-  .parse_str(src)
-  .unwrap();
+let (backtracked, parsed) = parse_lossless(
+  src,
+  Default::default(),
+  Fatal::<QueryError>::new(),
+  query_profile(),
+  DefaultCache::<QueryLexer<'_>>::default(),
+  decline_then_parse,
+);
+parsed.unwrap();
 let (green_backtracked, _) = backtracked.finish(K::Root.raw());
 
 // One timeline survived — the trees are byte-identical.
@@ -1720,7 +1743,7 @@ scan — no sync point found — rewinds its speculative events entirely.)
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
 #   cache::DefaultCache,
-#   cst::{CstProfile, KindValidator, Sink},
+#   cst::{CstProfile, KindValidator, parse_lossless},
 #   emitter::CstEmitter,
 #   parser::{node, node_at},
 #   try_parse_input::ParseAttempt,
@@ -1811,7 +1834,7 @@ scan — no sync point found — rewinds its speculative events entirely.)
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -1908,7 +1931,7 @@ where
           // sink wraps the hole's REAL tokens in the configured error node. No
           // tree-building code appears anywhere in this recovery path.
           let at = *inp.span();
-          inp.emitter().emit_error(Spanned::new(at, QueryError::Unexpected))?;
+          inp.emit_error(Spanned::new(at, QueryError::Unexpected))?;
           inp.sync_balanced(brackets, |t| {
             matches!(t.data().kind(), Tok::Ident | Tok::RBrace)
           })?;
@@ -1921,15 +1944,18 @@ where
 
 // The garbage between the two fields is not valid Query syntax.
 let src = "{ user(id: 4) 4 5 name }";
-let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(src, Verbose::<QueryError>::new(), query_profile());
-let salvaged = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
-  .apply(selection_set_recovering)
-  .parse_str(src)
-  .unwrap();
+let (cst, parsed) = parse_lossless(
+  src,
+  Default::default(),
+  Verbose::<QueryError>::new(),
+  query_profile(),
+  DefaultCache::<QueryLexer<'_>>::default(),
+  selection_set_recovering,
+);
+let salvaged = parsed.unwrap();
 assert_eq!(salvaged, 2, "`user` and `name` both survive the garbage between them");
 
-let (green, emitter) = sink.finish(K::Root.raw());
+let (green, emitter) = cst.finish(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 assert_eq!(tree.text().to_string(), src, "recovery does not break the round trip");
 
@@ -1956,7 +1982,7 @@ assert_eq!(emitter.errors().values().flatten().count(), 1);
 
 ## Materialization is a typed wall
 
-[`finish(root_kind)`](crate::cst::Sink::finish) consumes the sink, validates the
+[`finish(root_kind)`](crate::cst::Cst::finish) consumes the handle, validates the
 recorded stream, and builds the green tree — returning the inner emitter either way, so
 collected diagnostics survive materialization. It **never panics**: a stream that cannot
 become a correct tree comes back as a typed [`FinishError`](crate::cst::FinishError)
@@ -2051,7 +2077,7 @@ the wall that keeps a hand-rolled mistake loud:
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, Parser,
 #   cache::DefaultCache,
-#   cst::{CstProfile, KindValidator, Sink},
+#   cst::{CstProfile, KindValidator, parse_lossless},
 #   emitter::{CstEmitter, Fatal},
 # };
 # type QueryIn<'inp, 'x, Ctx> = InputRef<'inp, 'x, QueryLexer<'inp>, Ctx>;
@@ -2076,30 +2102,36 @@ where
   Ctx::Emitter: CstEmitter<'inp, QueryLexer<'inp>>
     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 {
-  inp.emitter().cst_start(K::SelectionSet.raw());
+  inp.cst_start(K::SelectionSet.raw());
   expect_tok(inp, Tok::LBrace)?;
   Err(QueryError::Unexpected) // abort with the node still open
 }
 
 let src = "{ user }";
-let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
-let _ = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
-  .apply(unfinished)
-  .parse_str(src);
+let (cst, _res) = parse_lossless(
+  src,
+  Default::default(),
+  Fatal::<QueryError>::new(),
+  query_profile(),
+  DefaultCache::<QueryLexer<'_>>::default(),
+  unfinished,
+);
 
 // `finish` refuses to guess what the dangling node meant:
-let (green, _emitter) = sink.finish(K::Root.raw());
+let (green, _emitter) = cst.finish(K::Root.raw());
 assert!(matches!(green, Err(FinishError::UnclosedNodes { open: 1 })));
 
 // `finish_partial` is the explicit tooling opt-in: close whatever the abort left open
 // and hand back an inspectable partial tree — the round-trip law holds on it too.
-let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
-let _ = Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
-  .apply(unfinished)
-  .parse_str(src);
-let (green, _emitter) = sink.finish_partial(K::Root.raw());
+let (cst, _res) = parse_lossless(
+  src,
+  Default::default(),
+  Fatal::<QueryError>::new(),
+  query_profile(),
+  DefaultCache::<QueryLexer<'_>>::default(),
+  unfinished,
+);
+let (green, _emitter) = cst.finish_partial(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 assert_eq!(tree.text().to_string(), src);
 assert_eq!(tree.first_child().unwrap().kind(), SyntaxKind::SelectionSet);
@@ -2240,7 +2272,7 @@ Reading this chapter's tree wants the second position:
 # use tokora::{
 #   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
 #   cache::DefaultCache,
-#   cst::{CstProfile, KindValidator, Sink},
+#   cst::{CstProfile, KindValidator, parse_lossless},
 #   emitter::{CstEmitter, Fatal},
 #   parser::{node, node_at},
 #   try_parse_input::ParseAttempt,
@@ -2345,7 +2377,7 @@ Reading this chapter's tree wants the second position:
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -2452,13 +2484,16 @@ impl FieldNode {
 }
 
 let src = "{ user(id: 4) { name } }";
-let mut sink: Sink<'_, QueryLexer<'_>, _> =
-  Sink::new(src, Fatal::<QueryError>::new(), query_profile());
-Parser::with_context((&mut sink, DefaultCache::<QueryLexer<'_>>::default()))
-  .apply(selection_set)
-  .parse_str(src)
-  .unwrap();
-let (green, _emitter) = sink.finish(K::Root.raw());
+let (cst, parsed) = parse_lossless(
+  src,
+  Default::default(),
+  Fatal::<QueryError>::new(),
+  query_profile(),
+  DefaultCache::<QueryLexer<'_>>::default(),
+  selection_set,
+);
+parsed.unwrap();
+let (green, _emitter) = cst.finish(K::Root.raw());
 let tree = rowan::SyntaxNode::<QueryLang>::new_root(green.unwrap());
 
 // One cast at the root; from there the walk is typed the rest of the way down.

@@ -661,7 +661,7 @@ fn padded_verbose_accumulates_no_errors() {
     })
     .padded()
     .parse_input(inp)?;
-    let error_count = inp.emitter().errors().len();
+    let error_count = inp.emitter_ref().errors().len();
     Ok((num, error_count))
   }
   let (num, error_count) = Parser::with_context(TriviaVerboseContext::new(Verbose::new()))

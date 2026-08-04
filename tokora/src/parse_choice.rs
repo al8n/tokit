@@ -1,6 +1,7 @@
 use crate::{
   Token, Window,
   cache::Peeked,
+  emitter::EmitterView,
   input::InputRef,
   parser::{DispatchOnKind, FusedDispatchOnKind, PeekThenChoice},
   span::Spanned,
@@ -59,7 +60,7 @@ pub trait ParseChoice<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
     Ctx: ParseContext<'inp, L, Lang>,
     H: FnMut(
       Peeked<'_, 'inp, L, W>,
-      &mut Ctx::Emitter,
+      EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
     ) -> Result<Self::Id, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
   {
     PeekThenChoice::of(self, condition)
@@ -80,7 +81,7 @@ pub trait ParseChoice<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
     Ctx: ParseContext<'inp, L, Lang>,
     H: FnMut(
       Peeked<'_, 'inp, L, W>,
-      &mut Ctx::Emitter,
+      EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
     ) -> Result<Option<Self::Id>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
   {
     PeekThenChoice::of(self, condition)

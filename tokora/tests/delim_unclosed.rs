@@ -22,6 +22,7 @@ mod common;
 
 use common::{TestLexer, Token};
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext,
   SimpleSpan, TryParseInput,
@@ -179,7 +180,7 @@ where
 
 fn decide_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -245,7 +246,7 @@ macro_rules! rw_matrix {
           .delimited::<$delim>()
           .collect()
           .parse_input(inp)?;
-        let diags = recorded_unclosed(inp.emitter());
+        let diags = recorded_unclosed(inp.emitter_ref());
         Ok((items, diags))
       }
       let (items, diags) = Parser::with_context(verbose_ctx())
@@ -366,7 +367,7 @@ fn rd_bracket_verbose_records_and_recovers() {
       .delimited::<Bracket<(), (), ()>>()
       .collect()
       .parse_input(inp)?;
-    Ok((items, recorded_unclosed(inp.emitter())))
+    Ok((items, recorded_unclosed(inp.emitter_ref())))
   }
   let (items, diags) = Parser::with_context(verbose_ctx())
     .apply(go)
@@ -419,7 +420,7 @@ fn sep_bracket_verbose_records_and_recovers() {
       .delimited::<Bracket<(), (), ()>>()
       .collect()
       .parse_input(inp)?;
-    Ok((items, recorded_unclosed(inp.emitter())))
+    Ok((items, recorded_unclosed(inp.emitter_ref())))
   }
   let (items, diags) = Parser::with_context(verbose_ctx())
     .apply(go)
@@ -471,7 +472,7 @@ fn sw_bracket_verbose_records_and_recovers() {
       .delimited::<Bracket<(), (), ()>>()
       .collect()
       .parse_input(inp)?;
-    Ok((items, recorded_unclosed(inp.emitter())))
+    Ok((items, recorded_unclosed(inp.emitter_ref())))
   }
   let (items, diags) = Parser::with_context(verbose_ctx())
     .apply(go)
@@ -682,7 +683,7 @@ where
 
 fn seq_decide_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -791,7 +792,7 @@ fn sep_at_least_zero_verbose_unclosed_first() {
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, SeqVerboseCtx<'inp>>,
   ) -> Result<(Vec<i64>, Vec<SeqE>), SeqE> {
     let items = sep_at_least_zero(inp)?;
-    Ok((items, seq_recorded(inp.emitter())))
+    Ok((items, seq_recorded(inp.emitter_ref())))
   }
   let (items, diags) = Parser::with_context(seq_verbose_ctx())
     .apply(go)
@@ -807,7 +808,7 @@ fn sep_trailing_eof_verbose_unclosed_first() {
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, SeqVerboseCtx<'inp>>,
   ) -> Result<(Vec<i64>, Vec<SeqE>), SeqE> {
     let items = sep_trailing_eof(inp)?;
-    Ok((items, seq_recorded(inp.emitter())))
+    Ok((items, seq_recorded(inp.emitter_ref())))
   }
   let (items, diags) = Parser::with_context(seq_verbose_ctx())
     .apply(go)
@@ -900,7 +901,7 @@ fn sw_at_least_zero_verbose_unclosed_first() {
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, SeqVerboseCtx<'inp>>,
   ) -> Result<(Vec<i64>, Vec<SeqE>), SeqE> {
     let items = sw_at_least_zero(inp)?;
-    Ok((items, seq_recorded(inp.emitter())))
+    Ok((items, seq_recorded(inp.emitter_ref())))
   }
   let (items, diags) = Parser::with_context(seq_verbose_ctx())
     .apply(go)
@@ -916,7 +917,7 @@ fn sw_trailing_eof_verbose_unclosed_first() {
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, SeqVerboseCtx<'inp>>,
   ) -> Result<(Vec<i64>, Vec<SeqE>), SeqE> {
     let items = sw_trailing_eof(inp)?;
-    Ok((items, seq_recorded(inp.emitter())))
+    Ok((items, seq_recorded(inp.emitter_ref())))
   }
   let (items, diags) = Parser::with_context(seq_verbose_ctx())
     .apply(go)
@@ -1017,7 +1018,7 @@ fn rw_delim_at_least_zero_verbose_unclosed_then_toofew() {
       .delimited::<Bracket<(), (), ()>>()
       .collect()
       .parse_input(inp)?;
-    Ok((items, seq_recorded(inp.emitter())))
+    Ok((items, seq_recorded(inp.emitter_ref())))
   }
   let (items, diags) = Parser::with_context(seq_verbose_ctx())
     .apply(go)
@@ -1040,7 +1041,7 @@ fn rw_delim_bounded_too_few_verbose_unclosed_then_toofew() {
       .delimited::<Bracket<(), (), ()>>()
       .collect()
       .parse_input(inp)?;
-    Ok((items, seq_recorded(inp.emitter())))
+    Ok((items, seq_recorded(inp.emitter_ref())))
   }
   let (items, diags) = Parser::with_context(seq_verbose_ctx())
     .apply(go)

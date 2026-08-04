@@ -20,6 +20,7 @@
 mod common;
 
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext,
   cache::Peeked,
@@ -143,7 +144,7 @@ impl<'inp, E> WhileEmitter<'inp> for E where
 
 fn decide_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -973,7 +974,7 @@ fn test_sep_while_zero_width_element_stops_after_one_element() {
     // element it drives never consumes, so an unguarded loop would otherwise run forever.
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Verbose<WhileError>|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Verbose<WhileError>>|
           -> Result<Action, WhileError> {
       Ok(if budget > 0 {
         budget -= 1;
@@ -994,7 +995,7 @@ fn test_sep_while_zero_width_element_stops_after_one_element() {
       .collect()
       .parse_input(inp)?;
     assert_eq!(
-      inp.emitter().errors().len(),
+      inp.emitter_ref().errors().len(),
       0,
       "a single accepted element must not re-enter the missing-separator path"
     );
@@ -1025,7 +1026,7 @@ fn test_sep_while_zero_width_element_with_leading_trivia_stops_after_one_element
   ) -> Result<Vec<i64>, WhileError> {
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Verbose<WhileError>|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Verbose<WhileError>>|
           -> Result<Action, WhileError> {
       Ok(if budget > 0 {
         budget -= 1;
@@ -1046,7 +1047,7 @@ fn test_sep_while_zero_width_element_with_leading_trivia_stops_after_one_element
       .collect()
       .parse_input(inp)?;
     assert_eq!(
-      inp.emitter().errors().len(),
+      inp.emitter_ref().errors().len(),
       0,
       "a single accepted element behind leading trivia must not re-enter the missing-separator path"
     );

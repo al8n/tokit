@@ -10,7 +10,7 @@ use core::str::Utf8Error;
 
 /// A source a green tree can be built from: one that can present its bytes as `&str`.
 ///
-/// [`Sink::finish`](super::Sink::finish) slices every token's text out of the source it was
+/// [`Cst::finish`](super::Cst::finish) slices every token's text out of the source it was
 /// constructed with, and `rowan` stores text as `&str`, so materialization needs exactly this
 /// one view and nothing else. Implementations divide cleanly:
 ///

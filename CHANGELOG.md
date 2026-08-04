@@ -51,6 +51,8 @@ numbered entry below that carries the full reasoning.
 | A dialect mapper returning an out-of-language kind reached `finish` as `Err(InvalidDialectKind)` | panics at the emit site, in every build | It is a dialect bug, not an input condition; no parse input can provoke it. | [14](#0.8.0-changed-breaking) |
 | A panic in caller code during `skip_until` lost the in-flight token and the skipped prefix | the stream is left consistent on the panic path too | Only observable to a host that catches a panic across a parse and keeps using the input. | [9](#0.8.0-changed-breaking) |
 | `Emitter::commit_token`'s observer ran before the committed position was published | runs **after** the position is published, before the replaced pair is dropped | An observer that panics no longer leaves the input naming a token the stream does not hold. | [10](#0.8.0-changed-breaking) |
+| A **wrapper** emitter over a recording `Sink` forwarded lexer errors by forwarding `emit_lexer_error` | must also forward the new `Emitter::commit_lexer_error`, exactly as it forwards `commit_token` | The input layer's own refusals now arrive through that method, and their spans are what license an untokenized byte. A wrapper that inherits the default turns them into caller reports, and the wrapped sink's `finish` then refuses a legitimately unlexable region as `UncoveredGap`. Diagnostics-only emitters are unaffected — the default forwards to `emit_lexer_error`. | [68](#0.8.0-changed-breaking) |
+| A parser or callback that reported a lexer error over an **unconsumed** region — `inp.emit_lexer_error(span)`, `view.emit_lexer_error(span)` — thereby licensed those bytes to be gap-tiled, and `finish` returned a tree | the report is delivered unchanged; it licenses nothing, so `finish` refuses the uncovered region as `UncoveredGap` | A recorded lexer-error span is a *licence*, and a caller-chosen span with nothing consumed for it is the deleted `cst_token` shape on the diagnostic channel. Materialize an unconsumed region with `Cst::finish_partial`, which tiles it. | [68](#0.8.0-changed-breaking) |
 | An `Incomplete` scan exit committed the frontier it reached | exits as it entered | A refill driver resumed at a half-consumed position. | [12](#0.8.0-changed-breaking) |
 | A terminal scanner stop (resource limit, poison boundary) reached callers as an ordinary end-of-input **decline** | surfaces as a terminal error **when your emitter accepts the diagnostic**, and recovery re-raises it instead of retrying. A *rejecting* emitter's `Err` is built from your lexer's error value and carries no mark, so recovery can still spend that trip — `MaybeTerminal`'s doc has that path and the arm it needs | Recovery was retrying against a scanner that had already given up. | [16](#0.8.0-changed-breaking) |
 | Collection drivers could stall on zero progress, or mask a terminal stop as a successful end | both exits are errors | | [17](#0.8.0-changed-breaking) |
@@ -62,7 +64,7 @@ numbered entry below that carries the full reasoning.
 | A second same-power `PrattInfix::Neither` operator in one chain folded left in silence — `7 = 1 ; 2 ; 3` returned `Ok(((7=(1;2));3))` with the **whole input consumed**, so no end-of-input check had anything to catch | the parse fails with `NonAssociativeChain`, the operator left on the input unconsumed | Handing the operator up re-associates the chain across an enclosing frame that cannot know the constraint. Not terminal: recovery may still spend it. | [41](#0.8.0-changed-breaking) |
 | Recursive descent was unbounded — a deep enough expression exhausted the native stack and **aborted the process** | a shared per-input depth budget, **64** by default, failing the parse with the always-terminal `RecursionLimitReached` | An abort carries no diagnostic and cannot be caught; a refusal names the knob that raises it. `RecursionLimiter::unlimited()` restores 0.7.3's behaviour. | [42](#0.8.0-changed-breaking) |
 | `RecursionLimiter::new` / `Default`, and `Limiter::new` / `Limiter::with_token_tracker`, defaulted to depth **500** | **500** — unchanged, so there is nothing to do here. [43](#0.8.0-changed-breaking) dropped these four to 64 during the campaign and [50](#0.8.0-changed-breaking) returned them before release; only a build tracked between the two ever saw 64 | These constructors reach code with no pratt parser in it: the same type doubles as a **lexer-side** nesting tracker in a `State` / `Extras` position, where a level costs no native stack and 64 was a number chosen for a reason that does not apply. The depth that *does* change is the input layer's, in the row above. | [43](#0.8.0-changed-breaking), [50](#0.8.0-changed-breaking) |
-| Your own `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 16 new inherent items and 6 new defaulted trait methods enter the method space. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
+| Your own `emit_error` / `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 130 new inherent items and 14 new defaulted trait methods enter the method space, and **67 of the inherent ones sit on types you already had** — that 67 is the exposure table, and it is the list to read. 38 of the 67 land on `InputRef` and `ParseState` under the emitter's own method names, which is where a 0.7.3 shortcut helper over `inp.emitter()` sat. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 | — | a new `warning: unused import` naming one of *your* combinator traits | That warning is the **only** breadcrumb the silent case gives you: the steal stranded the import. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 
 #### These fail to compile. Your build will point at every one.
@@ -84,7 +86,11 @@ numbered entry below that carries the full reasoning.
 | `impl Cache { fn rewind(…) }` | delete it | Rollback had two possible owners and they disagreed. No caller loses a capability. | [7](#0.8.0-changed-breaking) |
 | A `Cache` whose `push_front` can panic | must not panic on the restore path | Vacuously conforming before; not now. | [8](#0.8.0-changed-breaking) |
 | A `Lexer` whose `Span`/`Offset` ops can panic on the settle path | must not panic | The one window in the consume path that cannot be closed by reordering. `Clone`, not `Copy`, is still the bound. | [11](#0.8.0-changed-breaking) |
-| `Sink::new(emitter, map, ERR, GAP)` then `sink.finish(ROOT, source)` | `Sink::new(source, emitter, CstProfile::new(map, ERR, GAP))` then `sink.finish(ROOT)` | The source is bound once, at construction. | [13](#0.8.0-changed-breaking) |
+| `Sink::new(emitter, map, ERR, GAP)` then `sink.finish(ROOT, source)` | `parse_lossless(source, state, emitter, CstProfile::new(map, ERR, GAP), cache, parser)` then `cst.finish(ROOT)` | Two independent names for one buffer is what let them disagree; [13](#0.8.0-changed-breaking) named it once at `Sink::new`, and [68](#0.8.0-changed-breaking) superseded that spelling before release by making `Sink::new` crate-private and minting the sink from the source itself — only a build tracked between the two ever called `Sink::new` directly. | [13](#0.8.0-changed-breaking), [68](#0.8.0-changed-breaking) |
+| A callback parameter typed `&mut Ctx::Emitter` | `EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>` | Every `*_while` condition (`Decision::decide`), `ParseInput::peek_then`'s handler, `ParseChoice::peek_then_choice` / `peek_then_try_choice`'s handler, and the three token-level pratt folds. The view carries the emitter's own method names, so bodies do not change: **43 one-line signature changes, zero body changes, zero call-site changes** on the reference consumer. The same four getters — `peek_with_emitter`, `peek_with_emitter_terminal`, `sync_through_then_peek_with_emitter`, `sync_to_then_peek_with_emitter` — hand back a view in the tuple's second slot, so only a site that *named* that type breaks. | [68](#0.8.0-changed-breaking) |
+| `inp.emitter().emit_error(e)`, `state.emitter().cst_start(k)` | `inp.emit_error(e)`, `state.cst_start(k)` | `InputRef::emitter` is crate-private (`E0624`) and `ParseState::emitter` is deleted (`E0599`). Both handles gained the emitter's operations under the emitter's own names — 25 methods on `InputRef`, 13 on `ParseState` — so the fix is deleting `.emitter()` from the call. `InputRef::emitter_ref()` is the read-only replacement where you needed the value. **Those 38 names can also steal a same-named method of yours; see the exposure table.** | [68](#0.8.0-changed-breaking) |
+| `m.complete(inp.emitter(), KIND)` | `inp.cst_start_at(m.mark(), KIND); inp.cst_finish(KIND);` | `Marker::complete` takes `&mut E: CstEmitter` and a parse handle no longer hands one out, so `CompletedMarker` and `precede` are out of a grammar's reach too. Nothing is removed: the verb still works for code owning an emitter. The raw pair does not consume the marker, so the single-use typestate stops enforcing over that route. | [68](#0.8.0-changed-breaking) |
+| `emitter.cst_token(span, kind)` | delete it | Deleted, not deprecated. A token event is born from a settle; `Emitter::commit_token` is now the only producer. Nothing in the parse machinery ever called it. | [68](#0.8.0-changed-breaking) |
 | `emitter.cst_finish()` | `emitter.cst_finish(KIND)` | The kind the matching `cst_start` used. It is a **defaulted** method, so only callers and overriding implementors are affected. *Found by the mechanical API diff; disclosed nowhere before.* | [15](#0.8.0-changed-breaking) |
 | `Sink<'_, L, Sink<…>>` | a compile error — the inner emitter must be `ValueKeyedEmitter` | Two mark spaces claiming the same keys. | [18](#0.8.0-changed-breaking) |
 | `inp.begin_point(); … inp.commit_point();` | `let p = inp.begin_point(); … inp.commit_point(p);` | Nothing tied a settle to the point it settled. Points settle newest-first; four misuse conditions panic by name. | [19](#0.8.0-changed-breaking) |
@@ -96,8 +102,8 @@ numbered entry below that carries the full reasoning.
 | `dyn SeparatorHandler` | no longer object-safe | `OBSERVES_SEPARATORS` is an associated const. Nothing in this crate used it. | [5](#0.8.0-changed-breaking) |
 | `let (e, c) = ctx.into_components();` | `let (e, c, recursion) = …` | `InputContext` carries the recursion budget now, and a decomposition that dropped it would hand the input an unconfigured one. `..` is not available on a tuple pattern, so the compiler points at every site. | [45](#0.8.0-changed-breaking) |
 | An error type driving either pratt engine without `From<RecursionLimitReached<…>>` and `From<NonAssociativeChain<…>>` | add both | The engines **return** these two rather than emitting them, so the entry-point bounds ask for them. Two `From` impls; every example in this repo shows the shape. | [46](#0.8.0-changed-breaking) |
-| `parser.labelled("x")` resolving to your own trait's method, that trait in scope | `E0034`, when yours sits at the **same pick** | Six new defaulted names on `ParseInput` / `TryParseInput`. The fix is UFCS; rustc prints the two suggestions. | [source-breaking additions that fail *loudly*](#0.8.0-source-breaking-additions-that-fail-loudly) |
-| `use tokora::*;` — or a **module** glob such as `use tokora::error::*;` / `use tokora::input::*;` — beside another glob exporting the same name | `E0659`, or `ambiguous_glob_imports` for a *macro* name on rustc ≥ 1.95 | 16 new glob-reachable names — `select!` against `tokio::select!` is the real one. Three of them reach you only through a module glob, never the root: `RecursionLimitReached` and `NonAssociativeChain` via `tokora::error`, `Descent` via `tokora::input`. Measured on three toolchains; the remedy differs by name kind. | [source-breaking additions that fail *loudly*](#0.8.0-source-breaking-additions-that-fail-loudly) |
+| `parser.labelled("x")` resolving to your own trait's method, that trait in scope | `E0034`, when yours sits at the **same pick** | Fourteen new defaulted names on traits you already had — `ParseInput`, `TryParseInput`, `Emitter`, `SeparatorHandler`. The fix is UFCS; rustc prints the two suggestions. | [source-breaking additions that fail *loudly*](#0.8.0-source-breaking-additions-that-fail-loudly) |
+| `use tokora::*;` — or a **module** glob such as `use tokora::error::*;` / `use tokora::cst::*;` — beside another glob exporting the same name | `E0659`, or `ambiguous_glob_imports` for a *macro* name on rustc ≥ 1.95 | 53 new glob-reachable names — `select!` against `tokio::select!` is the real one. Twenty are enumerated by path in that section; **nine of those twenty reach you only through a module glob, never the root**: `dispatch_take` and `try_dispatch_take` via `tokora::parser`; `kinds`, `Cst`, `parse_lossless` and `parse_lossless_partial` via `tokora::cst`; `RecursionLimitReached` and `NonAssociativeChain` via `tokora::error`; `Descent` via `tokora::input`. `EmitterView` reaches you from the root **and** from `tokora::emitter`. Measured on three toolchains; the remedy differs by name kind. | [source-breaking additions that fail *loudly*](#0.8.0-source-breaking-additions-that-fail-loudly) |
 
 #### Additive — nothing to do, listed so you know it exists
 
@@ -127,14 +133,64 @@ five independently-numbered lists, so numeric cross-references written before th
 
 ### The new names, and why adding a name is still a break
 
-This release adds 16 glob-reachable root/module names, one new public module
-(`tokora::cst::kinds`, its own glob namespace), 6 trait-declared methods, and 16 inherent
-items — **13 receiver methods and 3 associated functions**, which resolve by different rules
-and are listed separately below for that reason. The items themselves are under
-[Added](#0.8.0-added) with the rest of the release. The lists here are generated from a
-rustdoc-JSON diff of the two sides at the `std,logos,trace,rowan` feature point; the six
-inherent items and three glob names that items [41–46](#0.8.0-changed-breaking) add were taken from
-the branch diff under the same criteria rather than from a separate hand audit.
+Measured end to end, 0.7.3 against this release, this release adds **53 glob-reachable
+root/module names**, **two new public modules** (`tokora::cst::kinds` and `tokora::dialect`,
+each its own glob namespace), **23 trait-declared items** — 15 receiver methods, 2 associated
+functions and 6 associated consts/types — and **130 inherent items — 119 receiver methods and
+11 associated functions**, which resolve by different rules and are listed separately below for
+that reason. An "inherent item" is counted once per `(name, owner type)` pair, because that pair
+is what a collision is about: the same name on two owners is two questions a consumer answers
+separately. The items themselves are under [Added](#0.8.0-added) with the rest of the release.
+
+**Only part of that can collide with something you wrote, and the split is the useful number.**
+**67 of the 130 inherent items — 64 methods and 3 associated functions — land on a type that
+already existed in 0.7.3**; the other 63 land on types this release itself introduces, where no
+extension method of yours can exist because you could not name the type. The exposure table
+below is exactly those 67. On the trait side the same split is 13 of the 15 new methods, all of
+them **defaulted**, on traits you already had (`ParseInput`, `TryParseInput`, `Emitter`,
+`SeparatorHandler`); the other two are on new traits, which have to be imported before they can
+compete.
+
+**One item accounts for 72 of the 130, and it is a different shape from the rest of this
+section.** [68](#0.8.0-changed-breaking) replaces `&mut Ctx::Emitter` with forwarded operations,
+so the emitter's own method names land, in bulk, on the handles that used to hand the emitter
+out: **25 on `InputRef`, 13 on `ParseState`, 27 on the new `EmitterView`, 7 on the new `Cst`.**
+Only the first two are in the exposure table, for the reason above. The 38 that *can* collide
+are all thin forwards of `Emitter` / `CstEmitter` methods under the emitter's own names, which
+makes them the section's own worst case rather than an unusual one: `inp.emit_error(..)` is
+exactly the shortcut a 0.7.3 consumer would have written over `inp.emitter().emit_error(..)`, on
+exactly that receiver, with exactly a compatible signature. Read *the dangerous case is the one
+that reads as safest*, below, as describing the expected outcome here and not a corner.
+
+**Where those figures come from, and the correction they carry.** All of them are
+`ci/name_collision/surface_diff.py` over rustdoc-JSON dumps of `468f7aa` (the 0.7.3 release
+commit) and this branch's tip, at the `std,logos,trace,rowan` feature point — one run, one base,
+one tool. **Earlier drafts of this section said 16 glob-reachable names, one new module, 6 trait
+methods and 16 inherent items.** Each of those was true of the diff it was taken from — a
+mid-campaign base, not 0.7.3 — and was then carried forward unchanged while the release kept
+growing, which is the "second inventory that falls behind the first" this section warns about,
+committed by this section. Re-running against 0.7.3 for [68](#0.8.0-changed-breaking) is what
+surfaced it. **The enumerated lists further down are subsets and are labelled as such**; the
+exposure table is not — it is the full 67, and the thirteen rows the re-audit added to it
+(`InputRef::{is_exhausted, next_or_stop, try_expect_map_or_stop, peek_with_emitter_terminal}`,
+`SeparatedError::{name, with_name, display_fmt}`, `UnexpectedEnd::{is_terminal, into_terminal}`,
+`MissingToken::{name, with_name}`, `Unclosed::kind`, `Transaction::rollback_abandoning_points`)
+are all new `(name, owner)` pairs on 0.7.3 types. Most were already documented elsewhere here as
+*features* and simply never listed as names that can take a call site; one,
+**`Transaction::rollback_abandoning_points` — a public method that rolls a transaction back while
+abandoning the session points opened inside it — appears nowhere else in this changelog at all.**
+*Found by the mechanical API diff; disclosed nowhere before.*
+
+**A removal is part of this accounting too**, because it hands a name *back*: a consumer's
+own `fn emitter(..)` on `InputRef` lost to tokora's inherent one in 0.7.3 and wins again here.
+Measured against 0.7.3 on the same diff, [68](#0.8.0-changed-breaking) takes five inherent
+items and one trait method off the surface — `Sink::new` (an associated function) and
+`InputRef::emitter` become crate-private, `ParseState::emitter` is deleted, `Sink::finish` and
+`Sink::finish_partial` move to `Cst` (a removal from `Sink` and an addition on `Cst`, counted
+as both), and the trait method `CstEmitter::cst_token` is deleted. A sixth,
+`Sink::with_trivia_policy`, leaves `Sink` for `Cst` on the same diff but was never in 0.7.3, so
+it is an intra-release movement rather than a break a 0.7.3 consumer can hit. The release's
+other removals are listed with the items that make them.
 
 ### The rule for new names, stated as weakly as it can honestly be stated
 
@@ -170,17 +226,33 @@ below, on one of these receiver types:**
 
 | you wrote it on | which names |
 |---|---|
-| `InputRef` | `try_expect_take`, `try_expect_take_or_stop`, `peek_head_map`, `head_satisfies`, `peek_kind`, `attempt_parse`, `spanning`, `descending`, `descend`, `recursion` |
+| `InputRef` | `try_expect_take`, `try_expect_take_or_stop`, `try_expect_map_or_stop`, `peek_head_map`, `head_satisfies`, `peek_kind`, `attempt_parse`, `spanning`, `descending`, `descend`, `recursion`, `is_exhausted`, `next_or_stop`, `peek_with_emitter_terminal` — and, from [68](#0.8.0-changed-breaking)'s forwarding surface, `emit_error`, `emit_warning`, `emit_lexer_error`, `emit_unexpected_token`, `emit_skipped_region`, `emit_too_few`, `emit_too_many`, `emit_full_container`, `emit_missing_element`, `emit_missing_separator`, `emit_missing_leading_separator`, `emit_missing_trailing_separator`, `emit_unexpected_leading_separator`, `emit_unexpected_trailing_separator`, `emit_unclosed`, `emit_unexpected_end_of_lhs`, `emit_unexpected_end_of_rhs`, `enter_label`, `exit_label`, `cst_start`, `cst_finish`, `cst_mark`, `cst_start_at`, `emitter_bound_source`, `emitter_ref` |
+| `ParseState` — the callback view, which had no row here before [68](#0.8.0-changed-breaking) gave it one | `emit_error`, `emit_warning`, `emit_lexer_error`, `emit_unexpected_token`, `emit_skipped_region`, `enter_label`, `exit_label`, `cst_start`, `cst_finish`, `cst_mark`, `cst_start_at`, `emitter_bound_source`, `emitter_ref` |
 | `ParseAttempt` | `into_option` |
 | `Ident` | `parse_except`, `try_parse_except` |
 | `InputContext`, `ParserContext` | `with_recursion_limiter` |
 | `RecursionLimiter` | `unlimited` (an associated function — see the resolution rule below) |
+| `SeparatedError` | `name`, `with_name`, `display_fmt` |
+| `MissingToken` | `name`, `with_name` |
+| `UnexpectedEnd` | `is_terminal`, `into_terminal` |
+| `Unclosed` | `kind` |
+| `Transaction` | `rollback_abandoning_points` |
 | any parser-shaped type — one implementing `ParseInput` or `TryParseInput` | `labelled`, `traced`, `list_until`, `separated1_by`, `peek_then_head`, `opt` |
 
 That is a finite question you can answer about your own code, and it is the one to answer.
 **Whether the compiler then tells you depends on how close your signature is to ours — so do
 not rely on it telling you, and do not rely on using the return value.** The remedy is UFCS:
 `MyTrait::peek_kind(inp)` pins your method by name and is immune to all of this.
+
+**The two forwarding rows are not the same disclosure as the four above them, and saying so is
+the point.** The other rows name helpers tokora happened to grow; those two name 38 methods
+that exist *because* [68](#0.8.0-changed-breaking) took `inp.emitter()` away, under the emitter's
+own method names, on the two receivers a 0.7.3 grammar already held. A consumer who wrote
+`fn emit_error(&mut self, ..)` on `InputRef` to shorten `inp.emitter().emit_error(..)` was
+writing the most natural helper available in 0.7.3, and it now competes with a tokora method of
+the same name, the same receiver and a compatible signature. If you have an extension trait over
+`InputRef` or `ParseState` at all, read its method list against those two rows rather than
+scanning for a name you remember choosing.
 
 **Why there is no shortlist of "the silent ones".** An earlier draft of this entry named
 four, measured. It was still wrong: the measurement covered one shape of consumer. Whether a
@@ -243,10 +315,12 @@ at all, and a plain struct is not either. It is not "returns `Result`" and not
 fourteen names — and it omitted `parse_except` and `try_parse_except`, which are exactly the
 two the paragraph above refuses to call safe. Any such list is the well-formedness problem
 again. **The names to check are the exposure table at the top of this section** — it lists every
-method and associated-function name this release adds, against the receiver type each one lands
-on. No count is restated here: a restated count is a second inventory that can fall behind the
-first, and this one twice did. Which of those names go silent for *your* code depends on your
-signatures, which is a thing only your code can answer.
+method and associated-function name this release adds **on a type that already existed in
+0.7.3**, against the receiver each one lands on. Names on types this release itself introduces
+are outside that question by construction, not by omission: you cannot have written an
+extension method on a type you could not name. No count is restated here: a restated count is a
+second inventory that can fall behind the first, and this one twice did. Which of those names go
+silent for *your* code depends on your signatures, which is a thing only your code can answer.
 
 What was measured, on rustc 1.87, 1.95 stable and 1.97-nightly:
 
@@ -321,15 +395,67 @@ Recorded in `ci/name_collision/disclosed.txt`, whose fourth-and-fifth-row split 
 that the earlier four ride a bounded receiver and **this one does not**: `RecursionLimiter` is a
 concrete public struct with no bound to reject anybody.
 
+#### `ParseState`'s zero-argument forwarders — four measured SILENT
+
+**You are exposed if you wrote a method of your own on `ParseState`**, the view a `map_with` /
+`and_then_with` / `validate_with` / `fold` callback is handed. That type is public in **0.7.3**
+and until [68](#0.8.0-changed-breaking) it declared **no inherent item at all** — a callback
+reached the emitter through `state.emitter()`, so `fn exit_label(&mut self)` on `ParseState`
+was the natural way to shorten that, and it now competes with a tokora method of the same name
+on the same receiver.
+
+Reproduced two-sided by `ci/name_collision/`, base `7b289bc` against this branch, rustc 1.97.1:
+
+```text
+SILENT  cst_mark/discarded              base=witness=1  head=witness=0
+SILENT  emitter_bound_source/discarded  base=witness=1  head=witness=0
+SILENT  emitter_ref/discarded           base=witness=1  head=witness=0
+SILENT  exit_label/discarded            base=witness=1  head=witness=0
+```
+
+Both sides compile, **neither emits any diagnostic**, and the two run different programs: yours
+before, tokora's after. Each `used` row is `loud` on the same probe (`E0308`), so a **discarded
+return** is the whole of the difference — and none of the four returns something
+`unused_must_use` fires on: `()`, a plain `EventMark`, an `Option`, a shared reference. Same
+discriminator as the `unused_must_use` table above — the lint, not a `#[must_use]` attribute.
+
+**Read this as "the four the harness could reach", never as "the other nine are safe".** These
+four are the whole of `ParseState`'s zero-argument set; the probe's consumer takes no arguments,
+so for the nine forwarders that take one or two the head side fails on the probe's **own arity**
+(`E0061`) and the row is filed `loud` — a verdict about the probe, not about the name. The
+question that terminates is still the exposure table at the top of this section, and the remedy
+is still UFCS: `MyTrait::exit_label(state)` pins your method by name.
+
+Recorded in `ci/name_collision/disclosed.txt`. They are disclosed on **this** branch for the
+reason `RecursionLimiter::unlimited` was: the probe's inventory is a two-sided delta, so once
+this merges the names exist on both sides, the rows leave every future plan, and the harness can
+never re-litigate them.
+
 <a id="0.8.0-source-breaking-additions-that-fail-loudly"></a>
 
 ### Source-breaking additions that fail *loudly*
 
-- **`E0034`, "multiple applicable items in scope"**, when one of the 6 new defaulted method
-  names meets a same-named method from another trait **at the same pick**, with that trait
-  in scope. Blanket-ness is irrelevant — a trait with exactly one impl for one concrete
+- **`E0034`, "multiple applicable items in scope"**, when one of the **14** new defaulted method
+  names on a trait you already had meets a same-named method from another trait **at the same
+  pick**, with that trait in scope: `labelled`, `traced`, `list_until`, `separated1_by`,
+  `peek_then_head`, `try_delimited`, `try_delimited_by_parens`, `try_delimited_by_braces`,
+  `try_delimited_by_brackets` and `try_delimited_by_angles` on `ParseInput`; `opt` on
+  `TryParseInput`; `bound_source` and `commit_lexer_error` on `Emitter`; `observe_separator` on
+  `SeparatorHandler`.
+  (`CstText::cst_text` and `MaybeTerminal::is_terminal` are the release's other two new trait
+  methods and are not in that thirteen: their traits are new, so they compete only once you
+  import them.) Blanket-ness is irrelevant — a trait with exactly one impl for one concrete
   input type collides identically. rustc prints its own disambiguation suggestions; the fix
   is UFCS.
+
+  **`commit_lexer_error` is the one name in that list the probe cannot construct, and saying
+  so is the point.** It takes `&mut self`, and the harness's three trait-method spellings
+  declare `self` or `&self` — both **earlier** picks on a non-deref receiver, so the
+  consumer's item wins on both sides and tokora's is never a candidate. The `E0034` above
+  therefore rests on the same-pick rule rather than on a measurement, and it applies to the
+  consumer who declares `&mut self`, which is the shape that competes. Recorded, with the
+  receiver walk, in `ci/name_collision/no_collision.txt` rather than left to look like a
+  clean run.
 
 - **Associated functions resolve by a different rule, and it is not the receiver walk.**
   `Ident::parse_except` and `Ident::try_parse_except` are inherent **associated functions**.
@@ -356,13 +482,26 @@ concrete public struct with no bound to reject anybody.
   yet. So this entry does not claim these two names are safe, and does not claim they are
   unsafe. It claims the earlier assertion of safety had nothing behind it.
 
-- **Ambiguity between two glob imports**, for the 16 new glob-reachable names — `Pinned`,
+- **Ambiguity between two glob imports**, for the **53** new glob-reachable names. Twenty of
+  them were enumerated by path during the campaign and probed, and they are the list below;
+  the other 33 are the new public types, traits, type aliases and functions this release adds,
+  every one of them an *item* name, so the item row of the table below governs them too — they
+  are under [Added](#0.8.0-added) rather than repeated here. The twenty: `Pinned`,
   `pinned`, `WhileHead`, `WhileKind`, `while_head`, `while_kind`, `select`, `try_select`,
-  `attempt`, `syntax_kinds` via `tokora`; `dispatch_take`, `try_dispatch_take` via
-  `tokora::parser`; `kinds` via `tokora::cst`; `RecursionLimitReached` and
-  `NonAssociativeChain` via `tokora::error`; and `Descent` via `tokora::input`. The new module
-  `tokora::cst::kinds` opens a glob namespace of its own. `select!` against `tokio::select!` or
-  `futures::select!` is the real-world instance. **The diagnostic and its remedy differ by what
+  `attempt`, `syntax_kinds` via `tokora`; `EmitterView` via `tokora` **and**
+  `tokora::emitter`; `dispatch_take`, `try_dispatch_take` via
+  `tokora::parser`; `kinds`, `Cst`, `parse_lossless` and `parse_lossless_partial` via
+  `tokora::cst`; `RecursionLimitReached` and
+  `NonAssociativeChain` via `tokora::error`; and `Descent` via `tokora::input`. The two new
+  modules, `tokora::cst::kinds` and `tokora::dialect`, each open a glob namespace of their own.
+  `select!` against `tokio::select!` or
+  `futures::select!` is the real-world instance — and the four macro names are the whole of the
+  macro row below, so the item row governs every other new name in this release, enumerated here
+  or not. The four
+  [68](#0.8.0-changed-breaking) adds are all *item* names; they were classified by kind from the
+  branch diff rather than
+  re-measured on the three toolchains, which is the same treatment items
+  [41–46](#0.8.0-changed-breaking)'s three had. **The diagnostic and its remedy differ by what
   kind of name collides, and — for macros only — by toolchain:**
 
   | Colliding name | 1.87 | 1.95 stable | 1.97 nightly |
@@ -1678,6 +1817,173 @@ everywhere else.
     first time. Spell the limit you meant with `RecursionLimiter::with_limitation` if 500 is
     still wrong for your grammar or your lexer.
 
+68. **A CST parse mints its own sink from the source it reads, and no callback anywhere in the
+    crate is handed the emitter again.** `cst::parse_lossless` and `cst::parse_lossless_partial`
+    are now the **only** doors onto a recording sink: each takes the source once and hands that
+    one argument to both the `Sink` it mints and the `Input` it drives, so the two names a
+    caller used to be able to state independently — one at `Sink::new`, one at the parse entry —
+    are the same argument of the same call. `Sink::new` is `pub(crate)` now; the type keeps its
+    public name only as the thing a spent handle wraps. What a driver hands back is not a `Sink`
+    but a `Cst<'inp, L, E>` — `finish`, `finish_partial` and the `with_trivia_policy` builder
+    move here from `Sink` — and `Cst` **deliberately implements no emitter trait**, so the
+    artefact a driver returns cannot be fed back in as a second parse's context. Minting closes
+    the construction half of the wrong-source class; the handle's missing `Emitter` impl closes
+    the return half.
+
+    **A finish-time wall against the construction half was built during this campaign and
+    removed before release.** It caught a naive wrapper, and each of three further shapes — an
+    all-diagnostic parse, pre-arming through the public `bound_source` query, and a hand-emitted
+    `cst_token` span — was then found to walk around it: every fix relocated the hole rather
+    than closing it, *because the witness was flags on the sink and the sink cannot tell who set
+    them*. See the known limitation below (revised in place for this item) for the full history
+    and for what minting still does not reach.
+
+    **The emitter never reaches a callback either, and that closes the same class from the other
+    side.** `&mut Ctx::Emitter` **is** an emitter: code holding one could wrap it in a type of
+    its own and install that wrapper as a second parse's context over a different buffer, which
+    re-opens from inside exactly the hole minting just closed at the entry. Every public callback
+    that used to take `&mut Ctx::Emitter` now takes an `EmitterView<'a, 'inp, L, E, Lang>`
+    instead: `Decision::decide` (the condition of every `*_while` combinator), `ParseInput::peek_then`'s
+    handler, `ParseChoice::peek_then_choice` and `peek_then_try_choice`'s handler, and the three
+    token-level pratt folds, `PrattFoldTokenPrefix`/`Infix`/`Postfix`. (`peek_then_head`'s own
+    handler takes no emitter parameter at all, before or after, so it is unaffected.) A view
+    implements no emitter trait, does not `Deref`, and hands back no `&mut E` — there is nothing
+    at the end of a method call to put in an emitter slot, and the value itself cannot stand in
+    one. Its 24 forwarded methods carry the emitter's own names, so a callback body written
+    against `&mut E` keeps every statement it had; only the parameter's type changes. **Five**
+    members stay off the surface — `Emitter::checkpoint`, `rewind` and `release` (the checkpoint
+    lineage the *input* owns), `Emitter::commit_token` (the auto-emission chokepoint) and
+    `Emitter::commit_lexer_error` (its refusal-side twin, added by this item — see below) — for
+    the same reason `InputRef` never gave a callback those either.
+
+    **The handle closed its own version of the same door.** `InputRef::emitter` — the `&mut Ctx::Emitter`
+    accessor — is `pub(crate)` now, and the new forwarding methods do not even route through it:
+    each reaches the emitter cell directly, the same way `emitter()` itself always did.
+    `ParseState`'s equivalent accessor is deleted outright, not narrowed — nothing in the crate
+    called that one at all. Both gained the same forwarding surface `EmitterView`
+    exposes, under the same method names, so `inp.cst_start(k)` does everything
+    `inp.emitter().cst_start(k)` used to and there is nothing left over to put in a slot.
+    `InputRef::emitter_ref` (shared) is public — **new here, not retained**: 0.7.3 and every build
+    before this one had only the `&mut` accessor, and `Input::emitter` has always been
+    crate-private, so reading a concrete emitter's own state from a grammar is a capability this
+    item *adds* while removing the mutable one. It is safe to expose for the reason the mutable
+    one was not: a `&E` cannot re-enter an emitter slot, because
+    every recording method the trait family declares takes `&mut self`. Four getters that used to
+    hand back `&mut Ctx::Emitter` outright now hand back an `EmitterView` in the same position
+    instead — `peek_with_emitter`, `peek_with_emitter_terminal`,
+    `sync_through_then_peek_with_emitter` and `sync_to_then_peek_with_emitter` keep their names
+    and their callers' destructuring; only a call site that named the tuple's second type, or
+    tried to re-wrap the reference, breaks.
+
+    **One thing the closed door takes with it: `Marker::complete` is no longer callable from a
+    parse.** It takes `&mut E` where `E: CstEmitter`, and after this item nothing public hands a
+    grammar `&mut Ctx::Emitter` — `inp.emitter()` is `pub(crate)` (`error[E0624]`) and
+    `EmitterView` is not a `CstEmitter` (`error[E0277]`), both reproduced against this branch. So
+    `CompletedMarker` and `CompletedMarker::precede`, whose only producer is `complete`, are out
+    of a grammar's reach with it. Nothing is removed or renamed: the verb still compiles for code
+    that *owns* an `E: CstEmitter` (the shipped `Fatal` / `Silent` / `Verbose` / `Ignored` all
+    implement it), and a grammar's route to the same two events is `inp.cst_start_at(mark, kind)`
+    + `inp.cst_finish(kind)` off the new forwarding surface, which this release also adds. What
+    is lost is the single-use typestate over that pair, since the raw route cannot consume the
+    marker. `Marker` is not a leak in the other direction — it consumes a `&mut E` and never
+    yields one — and the type's own docs now carry both shapes and this constraint. A
+    `complete`-shaped verb over the view is a 0.9 question, not a late change here.
+
+    **`CstEmitter::cst_token` is deleted, not deprecated.** It was the caller-chosen-span,
+    no-consumption door — a grammar could pick which source bytes a token-shaped event names
+    without any settle having happened — and nothing in the parse machinery ever called it.
+    `Emitter::commit_token`, the input layer's own auto-emission chokepoint, was always the other
+    producer of token events; with `cst_token` gone it is the **only** one.
+
+    **The same door was open on the diagnostic channel, under another name, and this item closes
+    that one too — `Emitter::commit_lexer_error` is new.** A recording sink's `finish` tiles a
+    source byte no committed token covers *only* where a recorded lexer error covers it; an
+    unexplained byte is a dropped committed token and is refused (`FinishError::UncoveredGap`).
+    So a recorded lexer-error span is not a note, it is a **licence** — and until this change
+    every route to `Emitter::emit_lexer_error` minted one, including the two that hand a
+    caller-chosen span to a sink with nothing consumed for it: `InputRef::emit_lexer_error` (and
+    `ParseState`'s re-export) and `EmitterView::emit_lexer_error`. A parser could excuse bytes it
+    had simply walked away from, and through the orphan-rule wrapper described below a **foreign**
+    parse's refusals — spans in a buffer this sink never saw — excused bytes of the original
+    source. That is the `cst_token` shape exactly: a span the caller picks, licensing coverage,
+    with nothing consumed.
+
+    The fix splits the report from the evidence rather than removing the capability, because a
+    parser must still be able to say *"this input is malformed here"* inline, with no rewind —
+    the reason the `decide` family exists at all. `Emitter::commit_lexer_error` is the input
+    layer's own door, called from its single deduped reporting site and withheld from both
+    forwarding surfaces beside `commit_token`; the recording sink overrides it to record the
+    coverage span. `Emitter::emit_lexer_error` keeps every caller it had and stays the diagnostic:
+    the report reaches the inner emitter, occupies its slot in the rewindable log, and records no
+    coverage span.
+
+    **For almost every emitter this is invisible.** `commit_lexer_error`'s default body forwards
+    to `emit_lexer_error`, so an emitter that only collects diagnostics — `Fatal`, `Verbose`,
+    `Silent`, `Ignored`, and essentially every emitter downstream — implements nothing, receives
+    every lexer error exactly as before, and cannot tell the doors apart. Two shapes must act.
+    A **wrapper** emitter forwards `commit_lexer_error` the way it forwards `commit_token`;
+    inheriting the default delivers the layer's refusals to the wrapped emitter as caller reports,
+    and a wrapped recording sink then refuses a region that was legitimately unlexable. An emitter
+    that *records* lexer-error spans as structural evidence overrides it. `LEXER_ERROR_CENSUS`
+    (`src/input/input_ref/census_tests.rs`) and `COVERAGE_EVIDENCE_CENSUS`
+    (`src/cst/sink/tests.rs`) lock the producer at one site and keep the method off the view.
+
+    **What this does not close.** `EmitterView` implements no emitter trait *in this crate*,
+    which is a fact about this crate, not a proof that no such implementation can exist: under
+    the orphan rules a downstream crate whose own lexer type appears in the parameter list may
+    write `impl Emitter for EmitterView<'_, '_, ItsLexer, Sink<…>>` and install that over a
+    foreign buffer from inside a callback. It compiles, and it was run. What such a wrapper cannot
+    reach is **either** producer of the sink's coverage machinery: `commit_token`, which is what
+    pairs a span with a byte, and `commit_lexer_error`, which is what licenses a byte to have no
+    token — neither is on the view's surface. Measured end to end: a foreign parse driven that way
+    injects a node through the forwarded `cst_start`/`cst_finish` and reports its diagnostics into
+    the log, while the sink still materializes its own text over its own coverage — no token, no
+    span, no byte and no *licence* of the foreign buffer crosses. Stating that bound in terms of
+    `commit_token` alone was incomplete through the release candidates, and the foreign-licence
+    route it missed is now pinned from outside the crate by
+    `an_orphan_view_wrapper_carries_a_foreign_lexer_error_but_licenses_no_gap`
+    (`tests/parser_node.rs`), which returned a plausible round-tripping tree before the split and
+    an `UncoveredGap` after it. The wrong-*text* class this item exists to close has no route
+    through it; the node and diagnostic channels it reaches are ones a `decide` body could already
+    reach directly, in its own parse, by design.
+
+    **`Emitter::bound_source`, `Source::REFERENT_IS_BYTES` and `SourceIdentity` are retained, not
+    retired**, and the known limitation below is corrected in place rather than left standing on
+    a promise this item breaks — see it for the reasoning: the handshake is what a wrapper on the
+    orphan route above has to forward honestly for the general constructor check to still catch a
+    foreign pairing.
+
+    **Migration.** A `decide`/`peek_then`/pratt-fold callback's emitter parameter changes type; a
+    body that only calls methods by name does not otherwise change, because the replacement type
+    is derivable from the function's own `Peeked<…>` parameter and `where` clause. Measured on
+    the reference consumer: **43 one-line signature changes across 20 files, zero body changes,
+    zero call-site changes.** A CST parse moves from `Sink::new` + `finish` to `parse_lossless` +
+    the `Cst` handle's `finish`; a context pair now holds the sink **by value** rather than by
+    `&mut`, so a `'sink` lifetime parameter disappears from any consumer type alias that named
+    one.
+
+    ```rust
+    // before
+    let sink = Sink::new(source, emitter, CstProfile::new(map_kind, ERROR, GAP));
+    // (sink installed as the input's context, driven by the grammar — omitted)
+    let (green, emitter) = sink.finish(ROOT);
+
+    // after
+    let (cst, parsed) = parse_lossless(source, state, emitter, profile, cache, grammar);
+    let (green, emitter) = cst.finish(ROOT);
+    ```
+
+    **Performance: no regression.** Eight benchmark ids, three interleaved A/B rounds pooled
+    against an archived baseline: a noise floor of 0.66–1.65% per id, and the largest excursion
+    from it is **−0.912%** — inside its own floor, on every id. A regression below ~1% would not
+    have been visible on this machine, so the honest reading is a null result, not a measured
+    improvement. An attribution check backs it: a callback-cost regression from the new
+    indirection would have moved the ids where the driver's own dispatch is ~30% of self time
+    together and away from the ids where it is ~10%, and it did not — both groups moved with the
+    noise, not against each other. Machine load 1.77–4.69 throughout.
+
+    — *(#168)*
+
 ### Debug and rendered output
 
 Every `Debug` / `Display` movement in this release, in one place, because a consumer who
@@ -1738,7 +2044,9 @@ item that carries them, and listed here only so scanning this section does not m
 (item 5), `CstProfile` and `KindValidator` (item 13), `error::NonAssociativeChain` (item 41),
 `error::RecursionLimitReached` with `input::Descent`, `InputRef::descending`,
 `InputRef::descend`, `InputRef::recursion`, `RecursionLimiter::unlimited`,
-`InputContext::with_recursion_limiter` and `ParserContext::with_recursion_limiter` (item 42). **`FromPrattError` is not on this list**:
+`InputContext::with_recursion_limiter` and `ParserContext::with_recursion_limiter` (item 42),
+`cst::parse_lossless`, `cst::parse_lossless_partial` and `cst::Cst` (item 68), `EmitterView`
+(item 68). **`FromPrattError` is not on this list**:
 item 46's two new obligations are `From` impls on your own error type, and the trait gains no
 member, so a hand-written `FromPrattError` impl compiles unchanged.
 
@@ -3746,9 +4054,10 @@ instead:
 - **A parse whose events are all diagnostics.** No token is committed, so nothing token-shaped
    exists to key on, while the lexer diagnostics' spans still license gap tiling over every
    byte.
-- **Pre-arming.** `Emitter::bound_source` is a public trait method and `InputRef::emitter()`
-   hands parser code `&mut Ctx::Emitter`, so any holder can query the binding. Nothing a sink
-   records about "I was asked" can distinguish the parse entry from anyone else.
+- **Pre-arming.** `Emitter::bound_source` is a public trait method, and — before
+   [68](#0.8.0-changed-breaking) made the accessor crate-private — `InputRef::emitter()` handed
+   parser code `&mut Ctx::Emitter`, so any holder could query the binding. Nothing a sink records
+   about "I was asked" can distinguish the parse entry from anyone else.
 - **Hand-emitted `cst_token` spans.** The manual emission door carries a span, so a grammar can
    choose which source bytes the tree shows while consuming nothing.
 
@@ -3759,12 +4068,19 @@ them*. Shipping a `FinishError` variant that names a protection with three known
 the same defect as a `## Panics` section promising a panic the code does not perform, and this
 release deleted nine of those. All four shapes are pinned by cells asserting today's answer.
 
-**What closes the class is minting the sink from the input** — `input.sink(inner, profile)` —
-which makes the binding neither hideable nor forgeable because there is nothing to hide or
-forge: the sink takes the input's own borrow. It is R8's own named successor and it needs its
-own design and adversarial cycle, which is why it is 0.9 and not a late addition here.
-
-**Witness 2 — the completeness witness — UNTOUCHED.**
+**What closes the class is minting the sink from the source, and it landed in this release
+instead of 0.9 as first planned.** [68](#0.8.0-changed-breaking) ships `cst::parse_lossless` and
+`cst::parse_lossless_partial` in place of the `input.sink(inner, profile)` shape sketched here:
+the source is named once, in the driver's own argument list, and handed to both the `Sink` it
+mints and the `Input` it drives, so the binding is neither hideable nor forgeable because there
+is nothing to hide or forge. `Sink::new` is `pub(crate)`, so bullet (1)'s wrapper has no `Sink`
+left to build over — which takes bullet (2) with it, since an all-diagnostic parse still needs a
+wrapper to hide behind. Bullet (3) closes because the query route it used,
+`InputRef::emitter()`, is crate-private now (see that bullet, revised in place). Bullet (4)
+closes the way `CstEmitter::cst_token` itself does — deleted, not walled. The returned `Cst`
+implements no emitter trait either, so the artefact cannot be re-aimed at a second parse
+regardless of which of the four a caller tried. What this leaves open is stated below, where
+this section's own "when it lands" sentence used to be.
 
 **Witness 2 — the completeness witness — UNTOUCHED.** `CstEmitter`'s contract still names no
 completeness parameter, no attempt and no input, so any holder of the emitter may append events
@@ -3785,20 +4101,44 @@ ordinary parse uses — which is why it sits on `Emitter` and is checked where a
 input. A *completeness* witness on the same contract is what closes witness 2 and what returns
 streaming CST.
 
-**A better repair exists and is deliberately not this one.** Minting the sink from the input or
-session — `input.sink(inner, profile)` — hands the sink the input's own borrow, making a foreign
-binding **unrepresentable** rather than detected, closes witness 2 at the same time, and is "the
-mechanism that restores streaming CST". It is a new public constructor surface and a consumer
-migration, so it is a feature for a later release rather than something to land in the round
-whose job is to publish. **When it lands, `Emitter::bound_source` and
-`Source::REFERENT_IS_BYTES` are retired rather than accumulated** — two mechanisms for one
-invariant is how a crate ends up with three.
+**The repair landed as [68](#0.8.0-changed-breaking), and two of its three predictions here did
+not hold.** This paragraph forecast that minting the sink from the input would close witness 2
+at the same time and would be "the mechanism that restores streaming CST". Neither happened:
+witness 2 is untouched, exactly as stated above — `CstEmitter` gained no completeness parameter
+— and streaming CST is still blocked by the `ValueKeyedEmitter` bound described in *Streaming
+CST is not in this release*, above, an axis minting never touches. Both were forecasts about a
+mechanism that had not been built yet, made on the assumption that one constructor change would
+answer two independent invariants; only the one this section is about turned out to be true.
+
+**Retained, not retired.** The same paragraph promised that landing minting would retire
+`Emitter::bound_source` and `Source::REFERENT_IS_BYTES` — *"two mechanisms for one invariant is
+how a crate ends up with three."* That assumed a closure that does not hold.
+[68](#0.8.0-changed-breaking)'s drivers pin `Sink` into the emitter slot **by name**, but the
+value they hand a callback instead of the emitter — `EmitterView`, also new there — implements no
+emitter trait only as a fact **about this crate**. Under the orphan rules, a downstream crate
+whose own lexer type appears in the parameter list may write
+`impl Emitter for EmitterView<'_, '_, ItsLexer, Sink<…>>` and install that over a second, foreign
+buffer from inside a callback — a route through a callback parameter, which is exactly what
+minting's pinned-slot trick does not reach, because that trick only pins the driver's own entry.
+`Emitter::commit_token` is off the view's surface there too, so the route still carries no token,
+no span and no byte of the foreign buffer — but it can carry a forged or absent `bound_source`
+answer, which is bullet (1) above, one level in. The handshake is what a wrapper on that route
+has to forward honestly for the general constructor check to still catch the foreign pairing;
+a wrapper that declines to forward
+it reports `None` and the seam sees nothing to refuse — the same residual disclosed for every
+wrapper since R10. And nothing about `bound_source` names `Sink` or `cst` in the first place: it
+is the general `Emitter`/`ParseContext` handshake, so any hand-rolled emitter paired with the
+ordinary `parse`/`parse_partial` entry points depends on the same check regardless of CST.
+`bound_source`, `REFERENT_IS_BYTES` and `SourceIdentity` earn their place on the route minting
+cannot reach, and stay additive infrastructure rather than a stepping stone to their own
+retirement.
 
 Refusing any of this at materialization remains **impossible**, not merely expensive: the bad
 event logs are byte-identical to logs a legal single parse could produce, so `finish` has
 nothing to discriminate on. That is why the check has to sit at the seam or nowhere.
 
-— *(R8, #123; witness 1 closed by R10)*
+— *(R8, #123; witness 1 narrowed by R10, its construction-time route closed by #168; witness 2
+still open)*
 
 ### Known limitation — `finish` does not refuse duplicate zero-width token spans
 

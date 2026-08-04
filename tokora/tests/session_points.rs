@@ -108,11 +108,10 @@ impl<'inp> Driver<'_, 'inp, '_> {
   /// Record an application diagnostic at `at` (checkpoint-tracked work, like the tokens).
   fn complain(&mut self, at: usize) {
     let span = SimpleSpan::new(at, at + 1);
-    <Verbose<SessionError> as Emitter<'inp, TestLexer<'inp>>>::emit_error(
-      self.inp.emitter(),
-      Spanned::new(span, SessionError::Speculative),
-    )
-    .expect("Verbose is non-fatal");
+    self
+      .inp
+      .emit_error(Spanned::new(span, SessionError::Speculative))
+      .expect("Verbose is non-fatal");
   }
 
   /// Decide the newest open mark: keep its work, or take it all back.
@@ -137,7 +136,13 @@ impl<'inp> Driver<'_, 'inp, '_> {
 
   /// How many diagnostics the emitter is currently holding.
   fn diagnostics(&mut self) -> usize {
-    self.inp.emitter().errors().values().map(|g| g.len()).sum()
+    self
+      .inp
+      .emitter_ref()
+      .errors()
+      .values()
+      .map(|g| g.len())
+      .sum()
   }
 }
 

@@ -207,7 +207,7 @@ macro_rules! shape_matrix {
             *d.data(),
             d.span(),
             *d.close_ref().span(),
-            recorded_unclosed(inp.emitter()),
+            recorded_unclosed(inp.emitter_ref()),
           ))
         }
         let (data, span, close_span, diags) = Parser::with_context(verbose_ctx())
@@ -351,7 +351,7 @@ fn generic_delimited_verbose_records_and_recovers() {
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
   ) -> Result<(i64, Vec<(String, usize)>), SE> {
     let d = delimited::<Paren, _, _, _, _, _, _>(parse_num)(inp)?;
-    Ok((*d.data(), recorded_unclosed(inp.emitter())))
+    Ok((*d.data(), recorded_unclosed(inp.emitter_ref())))
   }
   let (data, diags) = Parser::with_context(verbose_ctx())
     .apply(go)
@@ -585,7 +585,7 @@ fn try_parens_committed_unterminated_verbose_records_and_recovers() {
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
   ) -> Result<(Option<i64>, Vec<(String, usize)>), SE> {
     let d = try_parens(parse_num)(inp)?;
-    Ok((d.map(|d| *d.data()), recorded_unclosed(inp.emitter())))
+    Ok((d.map(|d| *d.data()), recorded_unclosed(inp.emitter_ref())))
   }
   let (data, diags) = Parser::with_context(verbose_ctx())
     .apply(go)

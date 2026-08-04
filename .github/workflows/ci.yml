@@ -7,6 +7,51 @@ name: CI
 # smoke check. Every job mirrors a command that is run by hand before pushing. The
 # orthogonal `cross`, `miri-*` and `coverage` jobs are preserved from the prior workflow.
 
+# ── THE BY-HAND GATE SET, WRITTEN OUT ───────────────────────────────────────────────────
+#
+# This file is where that set lives — there is no CONTRIBUTING.md and no gate script — so it
+# is spelled out here instead of being reconstructed from the jobs by whoever needs it next.
+# Every line exits 0 before a push:
+#
+#     cargo fmt --check
+#     cargo +stable clippy --all-features --tests --no-deps -- -D warnings
+#     cargo test --all-features
+#     cargo test --release --all-features
+#     cargo +nightly check -p tokora --tests --all-features
+#     cargo check -p tokora --no-default-features
+#     cargo bench --no-run
+#     RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+#     RUSTDOCFLAGS="-D warnings" cargo doc -p tokora --no-deps --no-default-features
+#     bash ci/changelog_structure.sh CHANGELOG.md
+#     bash ci/name_collision/run.sh <merge-base> <inventory.json>   # see that job for the
+#                                                                  # inventory it requires
+#
+# The last two are the legs this branch had to ADD, and they are here for one reason: each is
+# the only command that can see its own defect class.
+#
+#   * the bare-config rustdoc build. `--all-features` documents every item, so a link whose
+#     TARGET is feature-gated always resolves there — that leg cannot see bare-config
+#     breakage at all. Five links into the `rowan`-gated `cst` module from ungated modules
+#     passed every other gate on this branch and reddened `doc` and the mdBook workflow
+#     together. `-D warnings` is on it here for the same reason it is on the all-features
+#     leg; the job step below deliberately relies on `[lints] workspace = true` instead,
+#     which denies broken intra-doc links but not the rest of rustdoc's lints.
+#   * the name-collision probe. It needs a two-sided, GENERATED inventory, so it is the one
+#     gate that is not a bare `cargo` line — which is exactly why it was missing from this
+#     list, and why a branch that mints two new item owners (`EmitterView`, `Cst`) and gives
+#     a third (`ParseState`) its first inherent items first heard about it from CI.
+#
+# Also read: `cargo bench --no-run` has NO full mirror below. `bench (smoke)` builds and
+# test-runs ONE of the five declared bench targets (`input_scan`), so the other four —
+# `parser_combinators`, `pratt_typed`, `cst`, `backtrack` — are compiled by this by-hand leg
+# and by nothing in CI. That is a known gap, recorded rather than implied.
+#
+# All of the above is one defect wearing four faces on a single branch: a gate that passes by
+# not looking. The earlier three were a bench `cargo test` does not compile, examples it
+# skips, and lossless code only `--features rowan` builds. When a change adds a
+# configuration, a target, a feature or a public owner, ask which line above goes red if it
+# is broken — and when the answer is "none", the missing thing is the line, not the test.
+
 # `paths-ignore` deliberately does NOT carry a blanket `**.md`. The guide chapters under
 # `tokora/src/guide/` are Markdown compiled as doctests through `include_str!`, so a
 # guide-only change is a *code* change here; ignoring `**.md` meant such a PR landed with
@@ -436,6 +481,15 @@ jobs:
   # The inventory is REQUIRED and generated, never hand-listed: the first version of this
   # job passed the base ref alone, so the script probed one hard-coded name and reported
   # green over 29 it never ran. `run.sh` now refuses to start without it.
+  #
+  # This is the OTHER leg the by-hand gate list at the top of this file carries, and the one
+  # that was missing from it: because the inventory has to be generated from both sides'
+  # rustdoc JSON, this gate is not a bare `cargo` line and so never joined the by-hand set.
+  # #175 mints two new item owners (`EmitterView`, `Cst`), gives `ParseState` its first
+  # inherent items and adds a defaulted `Emitter` method — 49 rows with no template — and the
+  # first anyone heard of it was this job. To run it locally, reproduce the two steps below:
+  # generate the inventory with `surface_diff.py` from both sides' rustdoc JSON at the same
+  # feature point, then `bash ci/name_collision/run.sh <merge-base> <inventory.json>`.
   name-collision:
     name: name-collision-probe
     runs-on: ubuntu-latest
@@ -676,6 +730,12 @@ jobs:
       #
       # Acceptance is exit 0, not a diagnostic count: rustdoc aborts early, so any fixed
       # count is a floor, and a floor cannot detect a missing member.
+      #
+      # This step is one of the two legs the by-hand gate list at the TOP of this file carries
+      # — run it locally as `RUSTDOCFLAGS="-D warnings" cargo doc -p tokora --no-deps
+      # --no-default-features`. It reddened again on #175 with five links into the
+      # `rowan`-gated `cst` module from ungated modules; the all-features step above and every
+      # other local gate were green, because only this configuration can see that class.
       - name: cargo doc --no-default-features --no-deps (bare-config link resolution)
         run: cargo doc -p tokora --no-deps --no-default-features
 

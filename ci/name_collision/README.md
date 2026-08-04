@@ -137,6 +137,43 @@ that, with the two witnesses listed above. Note what it does *not* say: nothing 
 consumer written after the release. A two-sided delta harness cannot see that, on either
 side of the line.
 
+**And it happened again, four owners at once, because the templates are the one part of this
+harness that is not derived.** #168 mints `EmitterView` and `Cst`, gives the pre-existing
+`ParseState` its first inherent items, and adds `commit_lexer_error` to the pre-existing
+`Emitter` trait. Every one of those was `FATAL` — 49 rows of *incomplete verdict*, 14 on `Cst`,
+26 on `ParseState`, 6 on `EmitterView` and 3 on `Emitter` — and the
+job first said so from CI, because no local gate invokes `run.sh` at all (now written into
+`.github/workflows/ci.yml`'s by-hand gate list). Four things came out of writing them, and
+each is a rule rather than a one-off:
+
+- **A new owner and a pre-existing owner want OPPOSITE call shapes.** For a new owner the base
+  side cannot compile at all, so the only reachable verdict is `new-owner` — and that requires
+  the HEAD side to reach `witness=0`, i.e. to compile. Its call must therefore be built at the
+  item's real arity and its `used` binding at the item's real return type. For a pre-existing
+  owner the BASE side must compile, and there only the consumer's item exists, so the binding
+  stays the consumer's `-> u8` and a head-side `E0308` is the honest `loud` verdict. Getting
+  this backwards is what put 9 of `RecursionLimitReached`'s 14 rows in `INCONCL`.
+- **Which names can reach a new owner's table is bounded, not guessed.** `surface_diff.py`
+  gives each name ONE owner: the alphabetically **last** of those declaring it. `Cst` <
+  `EmitterView` < `InputRef` < `ParseState`, so the two new owners can only ever receive the
+  names they declare *alone* — every forwarder `EmitterView` shares with `InputRef` or
+  `ParseState` is routed to those. That is why their tables are complete rather than a subset
+  that happens to work today.
+- **A subject is sometimes REACHED, never constructed.** `ParseState::new` is `pub(super)` and
+  `Cst::from_sink` is `pub(crate)`, so neither can be built directly: the `ParseState` probe
+  takes its subject from a real `map_with` callback, and the `Cst` probe runs a real
+  `parse_lossless`. The latter drags in a lexer of its own, because `parse_lossless` is walled
+  at compile time to tokens declaring `SURFACES_TRIVIA` and the shared fixture's `Tok` is a
+  trivia-*skipping* logos lexer — driving `Cst` off it fails post-monomorphization on both
+  sides and every row would have read `INCONCL`.
+- **A `&mut self` trait method has no expressible competitor here, and that is recorded rather
+  than papered over.** `Emitter::commit_lexer_error` takes `&mut self`; the three
+  `trait_method` spellings declare `self` (`same_pick`) or `&self` (`later_pick_*`), which on a
+  non-deref receiver are both *earlier* picks. The consumer wins on both sides and the rows
+  score `UNPROBED` — justified by receiver walk in `no_collision.txt`, the same shape as
+  `InputRef::recursion` with the receiver kinds swapped. The spellings are named for a tokora
+  method taken **by value**; against a `&mut self` one there is no later pick to name.
+
 All of these are the same defect the harness exists to catch, one level up: **an instrument
 that verifies the case you already knew about.** The last four are a sharper version of it —
 an instrument that *refuses to answer* looks like a broken gate and gets routed around,

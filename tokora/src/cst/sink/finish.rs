@@ -33,7 +33,7 @@
 //! *span* is what licenses its gap. The token-channel wall reads that **same** evidence — it
 //! fires only where a byte is left unexplained — so the crossing stays one coupling with two
 //! readers, not two couplings. The channels are otherwise separate; this law crosses
-//! them on purpose, and only at materialization. [`finish_partial`](Sink::finish_partial)
+//! them on purpose, and only at materialization. [`Cst::finish_partial`](super::super::Cst::finish_partial)
 //! is exempt — it tiles every gap, tolerating an incomplete parse the way it tolerates open
 //! nodes (see its own boundary note on the fail-fast emitter case).
 
@@ -160,7 +160,7 @@ pub enum FinishError {
   ///   one error span and one open-then-closed document. Refusing it made a half-typed
   ///   string a crash.
   ///
-  /// A fatally-aborted parse inspected through [`finish_partial`](Sink::finish_partial)
+  /// A fatally-aborted parse inspected through [`Cst::finish_partial`](super::super::Cst::finish_partial)
   /// still has its open nodes as the abort witness and is likewise not refused.
   #[error(
     "the event stream builds structure but carries no committed token over a nonempty \
@@ -177,7 +177,7 @@ pub enum FinishError {
   /// signature the zero-token wall ([`StructureWithoutTokens`](Self::StructureWithoutTokens))
   /// cannot see because a token *did* survive — or, under a fail-fast emitter, an unconsumed
   /// tail an abort left un-diagnosed. `finish` refuses it rather than tile a plausible-but-lossy
-  /// tree; [`finish_partial`](Sink::finish_partial) tiles it (the tooling door that tolerates
+  /// tree; [`Cst::finish_partial`](super::super::Cst::finish_partial) tiles it (the tooling door that tolerates
   /// an incomplete parse). The first (leftmost) uncovered run is named.
   #[error(
     "source bytes {start}..{end} are covered by neither a committed token nor a recorded \
@@ -287,7 +287,7 @@ pub enum FinishError {
   /// for a branch the parser abandoned, which is precisely the class of silent wrongness the
   /// unconditional wall exists to remove; a host that catches the original panic and asks for
   /// the tree anyway gets this error rather than that tree. Both doors refuse — this is
-  /// corruption, not the incompleteness [`finish_partial`](Sink::finish_partial) tolerates.
+  /// corruption, not the incompleteness [`Cst::finish_partial`](super::super::Cst::finish_partial) tolerates.
   ///
   /// The fix is always at the call site: some capture is being settled twice, or a mark is
   /// being rewound to after it was released. See the `# Panics` section on
@@ -377,104 +377,9 @@ impl<'inp, L, E> Sink<'inp, L, E>
 where
   L: Lexer<'inp>,
 {
-  /// Materializes the buffered events into a green tree wrapped in `root_kind`, returning
-  /// the inner emitter either way — the sink is consumed exactly once, and the
-  /// diagnostics survive the tree.
-  ///
-  /// The text comes from the source the sink was **constructed** with (read through
-  /// [`CstText`](super::super::CstText)), so the spans and the bytes they slice cannot come
-  /// from two different buffers; a byte-backed source that is not UTF-8 is refused once, here
-  /// ([`FinishError::NonUtf8Source`]).
-  ///
-  /// The replay validates and builds in one walk: balance, close identity
-  /// ([`FinishError::MismatchedFinish`]), retro-wrap integrity, kind hygiene (the reserved
-  /// band and the root kind, refused unconditionally; every other kind, refused at the
-  /// emission doors in every build too, and re-checked here only as a debug-assertions-gated
-  /// backstop — [`FinishError::InvalidDialectKind`]), span discipline for tokens and for the
-  /// diagnostic
-  /// spans that license gaps ([`FinishError::InvalidDiagnosticSpan`]), the token-channel wall
-  /// ([`FinishError::StructureWithoutTokens`] — structure with zero committed tokens
-  /// over a nonempty source *no lexer error explains* is a severed `commit_token` channel,
-  /// not a tree), the
-  /// **gap-coverage law** (every uncovered byte tiles as a `gap_kind` token only where a
-  /// recorded lexer error explains it; an unexplained gap is a dropped committed token —
-  /// [`FinishError::UncoveredGap`]) — so on success `tree.text() == source` holds and
-  /// every gap in it is a byte the lexer legitimately refused. On the first violation the
-  /// half-built green state is dropped and a typed [`FinishError`] comes back instead;
-  /// this method **never panics**.
-  ///
-  /// One refusal precedes the walk rather than arising from it: a sink that had to degrade a
-  /// rewind it could not perform — an unpaired settle detected mid-unwind, where reporting it
-  /// would have aborted the process — refuses here
-  /// ([`FinishError::UnpairedSettle`]) instead of materializing a log that describes a
-  /// rollback that never happened.
-  ///
-  /// # Abort semantics
-  ///
-  /// - An `Incomplete` parse (needs more input) should not be materialized: keep the sink
-  ///   — the buffered events *are* the resumable state.
-  /// - A fatal abort leaves open nodes; `finish` refuses them
-  ///   ([`FinishError::UnclosedNodes`]) — [`finish_partial`](Self::finish_partial) is
-  ///   the explicit opt-in that closes them for tooling.
-  ///
-  /// # Where a gap lands
-  ///
-  /// **A gap is tiled where it opens.** An uncovered run opens the instant the token before it
-  /// settles — that is the moment the parse stopped covering the source — so the run is tiled
-  /// immediately after that token, in the node that was open then. It is in the tree before the
-  /// next event is read, so nothing that happens afterwards can move it.
-  ///
-  /// One clause covers the run that has no token before it (the source starts with bytes no
-  /// token claims): there is no such moment, so it is tiled where the walk first sees it — at
-  /// the first committed token, or, if the parse committed **no** token at all, at the end of
-  /// the walk in whatever node is open there.
-  ///
-  /// Two properties follow, and they are the whole point of stating placement this way. Both are
-  /// pinned as laws over a corpus rather than as table rows, because a hand-written "the same
-  /// stream, one token longer" is exactly the thing three rounds of this rule got wrong.
-  ///
-  /// - **Nothing that follows a run can move it.** Two streams that share a prefix through the
-  ///   token a run trails place that run in the same node — including when one of them simply
-  ///   *stops* there. Placement is never decided by whether more input happened to follow, which
-  ///   is the asymmetry this rule exists to remove: the bytes after the last committed token of
-  ///   a document join that document, exactly as an identical run mid-document does, and
-  ///   `Root[Document[Tok] Gap]` is now `Root[Document[Tok Gap]]`.
-  /// - **A diagnostic cannot move it either.** Placement reads the token and structure events
-  ///   only; a `Diag` is never consulted. That is not tidiness — a prefilled lookahead cache
-  ///   *hoists* a lexer-class diagnostic earlier in the event stream (`input_ref`'s
-  ///   cache-transparency matrix says so in as many words), so a rule that read a diagnostic's
-  ///   position would make the tree a function of how far the caller happened to peek. Coverage
-  ///   still consults every diagnostic, through the merged **set** of recorded spans, which is
-  ///   order-independent for the same reason.
-  ///
-  /// The node a run joins **widens over it**: a node spanning `0..11` before a four-byte tail
-  /// spans `0..15` after. That is the rule working, not a side effect — the node now contains
-  /// those bytes. It applies at every extent, a zero-width node included: a node whose only
-  /// content is a zero-width committed token still takes the run that token trails.
-  ///
-  /// A source with **nothing lexable in it** therefore keeps its tail at the root. There is no
-  /// token for the run to trail, so the fallback clause applies and the run tiles where the walk
-  /// ends: `Root[Document@0..0, Gap@0..len]`. That is not an exemption carved out for the
-  /// degenerate case — it is the same clause that governs a leading run, and it is forced: the
-  /// identical parse with one lexable byte appended puts that run at the root too, so any other
-  /// answer would re-open the asymmetry rather than close it.
-  ///
-  /// `tree.text() == source` holds under every placement; it is the *shape* this rule fixes.
-  /// [`finish_partial`](Self::finish_partial), which tolerates an unbalanced stream, states in
-  /// its own note the one case this rule does not reach.
-  ///
-  /// # The fail-fast boundary (precise)
-  ///
-  /// The gap-coverage guarantee holds for a **collecting** inner emitter (the lossless
-  /// case): every lexer error is recorded, with its span, before the parse moves on, so
-  /// every refused byte is explained and `finish` succeeds. Under a **fail-fast** emitter
-  /// ([`Fatal`](crate::emitter::Fatal)) the first lexer error aborts the parse, so the bytes
-  /// past it are never lexed and no diagnostic covers them: `finish` then refuses (an
-  /// [`UncoveredGap`](FinishError::UncoveredGap), or [`UnclosedNodes`](FinishError::UnclosedNodes)
-  /// if the abort left a node open). That is by design — inspect such a partial parse through
-  /// [`finish_partial`](Self::finish_partial), which tiles the un-diagnosed tail, or accept no
-  /// tree. The guarantee is stated only for the collecting case for exactly this reason.
-  pub fn finish(self, root_kind: u16) -> (Result<GreenNode, FinishError>, E)
+  /// The body of [`Cst::finish`](super::super::Cst::finish), which is the public door; this
+  /// twin is crate-private so the in-crate suites can materialize a sink they built directly.
+  pub(crate) fn finish(self, root_kind: u16) -> (Result<GreenNode, FinishError>, E)
   where
     L::Offset: TryInto<u32>,
     L::Source: CstText,
@@ -482,40 +387,9 @@ where
     self.materialize(root_kind, false)
   }
 
-  /// [`finish`](Self::finish), but the two **incompleteness** signals a partial parse leaves
-  /// are tolerated instead of refused, so tooling can inspect a fatally-aborted or truncated
-  /// parse: open nodes at the end of the stream are **closed** (not
-  /// [`UnclosedNodes`](FinishError::UnclosedNodes)), and an uncovered gap is **tiled** (not
-  /// [`UncoveredGap`](FinishError::UncoveredGap)) — the un-diagnosed tail of a fail-fast
-  /// abort becomes one `gap_kind` run so `tree.text() == source` still holds. Every other law
-  /// (balance underflow, close identity, wrap integrity, kind hygiene, span discipline —
-  /// diagnostic spans included: a malformed one is corruption, not incompleteness, and is
-  /// refused through **both** doors — and the token-channel wall for *balanced* streams, since
-  /// the zero-token severance is corruption too) is enforced identically. The exemptions are
-  /// the two ways an incomplete parse differs from a complete one; refusing them would defeat
-  /// the door.
-  ///
-  /// A **degraded rewind** ([`FinishError::UnpairedSettle`]) is refused through this door for
-  /// the same reason a malformed diagnostic span is: it is corruption, not incompleteness. The
-  /// log is not a *partial* record of the parse — it is a complete record of a branch the
-  /// parser abandoned and the sink was unable to roll back. Tooling inspecting a fatally
-  /// aborted parse is exactly the caller this door exists for, and exactly the caller that must
-  /// not be handed that tree.
-  ///
-  /// # Where a gap lands
-  ///
-  /// This door places every gap exactly where [`finish`](Self::finish) does, by the rule that
-  /// method's own *Where a gap lands* note states in full: a run is tiled where it opens, in the
-  /// node open at the token it trails. Nothing about an unbalanced stream changes that — a run
-  /// trailing a token inside a node the stream never closed still lands in that node.
-  ///
-  /// The one case only this door can reach is the run that trails **no** token: the fallback
-  /// clause tiles it at the end of the walk, and here that is **before** the open frames are
-  /// closed, so it becomes a child of the **innermost open node** rather than of the root.
-  /// `finish` never sees it, since an unbalanced stream is refused outright. `tree.text() ==
-  /// source` holds either way; it is the *placement* that differs, and tooling that walks by
-  /// node rather than by text will see it.
-  pub fn finish_partial(self, root_kind: u16) -> (Result<GreenNode, FinishError>, E)
+  /// The body of [`Cst::finish_partial`](super::super::Cst::finish_partial), which is the
+  /// public door; crate-private for the same reason as [`finish`](Self::finish).
+  pub(crate) fn finish_partial(self, root_kind: u16) -> (Result<GreenNode, FinishError>, E)
   where
     L::Offset: TryInto<u32>,
     L::Source: CstText,

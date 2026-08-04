@@ -10,6 +10,7 @@
 
 mod common;
 
+use tokora::EmitterView;
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext, SimpleSpan,
   emitter::{PrattEmitter, Verbose},
@@ -116,7 +117,11 @@ type Tok = Spanned<Token, SimpleSpan>;
 // Token-level fold functions are generic over `E` (the emitter type) so that
 // the higher-rank lifetime bound is satisfied automatically.
 
-fn tok_fold_prefix<E>(op: Tok, operand: Tok, _: &mut E) -> Result<Tok, PrattError> {
+fn tok_fold_prefix<'inp, E>(
+  op: Tok,
+  operand: Tok,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
+) -> Result<Tok, PrattError> {
   match op.into_data() {
     Token::Minus => {
       let n = tok_num(operand);
@@ -127,11 +132,11 @@ fn tok_fold_prefix<E>(op: Tok, operand: Tok, _: &mut E) -> Result<Tok, PrattErro
   }
 }
 
-fn tok_fold_infix<E>(
+fn tok_fold_infix<'inp, E>(
   left: Tok,
   right: Tok,
   infix: Spanned<PrattInfix<Token, Token, Token>, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
 ) -> Result<Tok, PrattError> {
   let l = tok_num(left);
   let r = tok_num(right);
@@ -148,7 +153,11 @@ fn tok_fold_infix<E>(
   Ok(num_tok(result))
 }
 
-fn tok_fold_postfix<E>(operand: Tok, _op: Tok, _: &mut E) -> Result<Tok, PrattError> {
+fn tok_fold_postfix<'inp, E>(
+  operand: Tok,
+  _op: Tok,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
+) -> Result<Tok, PrattError> {
   Ok(operand) // `)` consumed; pass grouped result through
 }
 
@@ -210,7 +219,7 @@ fn token_driver_returns_the_prefix_operator_after_reporting_its_missing_operand(
       tok_fold_infix::<Verbose<PrattError>>,
       tok_fold_postfix::<Verbose<PrattError>>,
     )?;
-    let recorded = inp.emitter().errors().values().flatten().count();
+    let recorded = inp.emitter_ref().errors().values().flatten().count();
     Ok((out.map(|t| t.data().clone()), recorded))
   }
 

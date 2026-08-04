@@ -17,9 +17,9 @@
 
 use rowan::{Language, NodeOrToken, SyntaxNode};
 use tokora::{
-  Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, Token as TokenT,
+  Emitter, InputRef, ParseContext, ParseInput, Token as TokenT,
   cache::DefaultCache,
-  cst::{CstProfile, KindValidator, Sink},
+  cst::{CstProfile, KindValidator, parse_lossless},
   emitter::{CstEmitter, Fatal},
   error::token::UnexpectedTokenOf,
   logos::{self, Logos},
@@ -431,15 +431,21 @@ fn main() {
     K::Error.raw(),
     K::Gap.raw(),
   );
-  let mut sink: Sink<'_, SExprLexer<'_>, _> = Sink::new(src, Fatal::<SExprError>::new(), profile);
 
-  Parser::with_context((&mut sink, DefaultCache::<SExprLexer<'_>>::default()))
-    .apply(program)
-    .parse_str(src)
-    .expect("parse succeeds");
+  // `parse_lossless` mints the sink from `src` itself: the buffer the parse reads and the
+  // buffer the tree's text is sliced out of are the same argument of the same call.
+  let (cst, parsed) = parse_lossless(
+    src,
+    Default::default(),
+    Fatal::<SExprError>::new(),
+    profile,
+    DefaultCache::<SExprLexer<'_>>::default(),
+    program,
+  );
+  parsed.expect("parse succeeds");
 
   // Materialize once. The sink is consumed; the inner emitter comes back with the tree.
-  let (green, _emitter) = sink.finish(K::Root.raw());
+  let (green, _emitter) = cst.finish(K::Root.raw());
   let tree = SyntaxNode::<SExprLang>::new_root(green.expect("well-formed tree"));
 
   // The round-trip law — the whole reason to build a CST.

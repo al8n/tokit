@@ -281,7 +281,7 @@ fn parse_state_accessors_via_map() {
       |tok: Token, mut ps: ParseState<'_, 'inp, '_, TestLexer<'inp>, Ctx>| {
         // Exercise all parse_state accessors
         let _span = ps.span();
-        let _emitter = ps.emitter();
+        let _emitter = ps.emitter_ref();
         let _state = ps.state();
         let _state_mut = ps.state_mut();
         let _slice = ps.slice();

@@ -13,6 +13,7 @@
 mod common;
 
 use common::{Power, TestLexer, Token, TokenKind};
+use tokora::EmitterView;
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext, TryParseInput,
   cache::{DefaultCache, Peeked},
@@ -676,7 +677,7 @@ fn try_fold_with_zero_width_peeking_element_stops_after_one_accumulation() {
 
 fn while_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _emitter: &mut Ctx::Emitter,
+  _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -753,7 +754,7 @@ fn try_fold_while_with_zero_width_element_stops_after_one_accumulation() {
     // Continues unconditionally, up to a budget, ignoring the peeked window entirely.
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Ctx::Emitter|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>|
           -> Result<Action, ()> {
       Ok(if budget > 0 {
         budget -= 1;

@@ -181,8 +181,9 @@ impl<O, Lang: ?Sized> From<NonAssociativeChain<O, Lang>> for ConfError {
 
 // ── Emitter-level drivers ─────────────────────────────────────────────────────
 //
-// Every driver takes `&mut Verbose<ConfError>`, so the same call works on a bare emitter,
-// on `inp.emitter()`, and on a transaction guard's `tx.emitter()`.
+// Every driver here takes `&mut Verbose<ConfError>`, so the same call works on any bare emitter.
+// The parse handle is a separate seat — it no longer hands out `&mut Verbose` — and is served by
+// the `_at` twins below `drive`.
 
 type Vb = Verbose<ConfError>;
 
@@ -234,6 +235,34 @@ fn drive(run: impl for<'inp, 'c> FnOnce(&mut ConfIr<'inp, 'c>) -> Result<(), Con
     .apply(move |inp: &mut ConfIr<'_, '_>| (run.take().expect("driven once"))(inp))
     .parse_str("12 34");
   r.expect("the conformance drivers never propagate");
+}
+
+// ── Handle-level drivers ──────────────────────────────────────────────────────
+//
+// The parse handle no longer hands out `&mut Verbose`: `InputRef::emitter` is crate-private,
+// because a `&mut Ctx::Emitter` is itself installable as *another* parse's emitter. What the
+// handle hands out instead is the emitter's **operations** — one forwarding method per channel —
+// so a driver that must run on the parse's own emitter reaches it through the handle. The read
+// side is unchanged (`emitter_ref()` is public), which is why `mark` still takes `&Vb`.
+//
+// Each of these is the same call its `&mut Vb` twin above makes, routed the one way that is left.
+
+fn control_at(inp: &mut ConfIr<'_, '_>, span: SimpleSpan) {
+  inp
+    .emit_error(Spanned::new(span, ConfError::Control))
+    .expect("Verbose collects rather than propagates");
+}
+
+fn too_few_at(inp: &mut ConfIr<'_, '_>, span: SimpleSpan) {
+  inp
+    .emit_too_few(TooFew::new(span, 1, 3))
+    .expect("Verbose collects rather than propagates");
+}
+
+fn full_container_at(inp: &mut ConfIr<'_, '_>, span: SimpleSpan) {
+  inp
+    .emit_full_container(FullContainer::new(span, 10, 5))
+    .expect("Verbose collects rather than propagates");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -297,27 +326,27 @@ fn e1a_flipped_specialized_emissions_advance_the_mark_and_snapshot_labels() {
 fn e1b_flipped_rollback_leaves_no_phantom() {
   drive(|inp| {
     let s = SimpleSpan::new(0usize, 1usize);
-    let m0 = mark(inp.emitter());
+    let m0 = mark(inp.emitter_ref());
 
     {
       let mut tx = inp.begin();
-      too_few(tx.emitter(), s);
-      control(tx.emitter(), s);
+      too_few_at(&mut tx, s);
+      control_at(&mut tx, s);
       tx.rollback();
     }
 
     assert_eq!(
-      mark(inp.emitter()),
+      mark(inp.emitter_ref()),
       m0,
       "the mark returns to the guard entry"
     );
     assert!(
-      !inp.emitter().errors().contains_key(&s),
+      !inp.emitter_ref().errors().contains_key(&s),
       "a rolled-back branch leaves no diagnostic: {:?}",
-      inp.emitter().errors().get(&s)
+      inp.emitter_ref().errors().get(&s)
     );
     assert!(
-      !inp.emitter().labels().contains_key(&s),
+      !inp.emitter_ref().labels().contains_key(&s),
       "a rolled-back branch leaves no label snapshot"
     );
     Ok(())
@@ -333,31 +362,31 @@ fn e1b_flipped_rollback_leaves_no_phantom() {
 fn e1c_flipped_rollback_unwinds_both_never_inverting() {
   drive(|inp| {
     let s = SimpleSpan::new(0usize, 1usize);
-    let m0 = mark(inp.emitter());
+    let m0 = mark(inp.emitter_ref());
 
     {
       let mut tx = inp.begin();
-      control(tx.emitter(), s);
-      too_few(tx.emitter(), s);
+      control_at(&mut tx, s);
+      too_few_at(&mut tx, s);
       tx.rollback();
     }
 
     assert_eq!(
-      mark(inp.emitter()),
+      mark(inp.emitter_ref()),
       m0,
       "the mark returns to the guard entry"
     );
     assert!(
-      !inp.emitter().errors().contains_key(&s),
+      !inp.emitter_ref().errors().contains_key(&s),
       "the rollback must remove both emissions, not swap which one it keeps: {:?}",
-      inp.emitter().errors().get(&s)
+      inp.emitter_ref().errors().get(&s)
     );
     // The parallel-map invariant, observably: the payload group and the label group at a
     // span must vanish together. Inversion breaks it — the label group empties while a
     // payload survives.
     assert_eq!(
-      inp.emitter().errors().get(&s).map(Vec::len),
-      inp.emitter().labels().get(&s).map(Vec::len),
+      inp.emitter_ref().errors().get(&s).map(Vec::len),
+      inp.emitter_ref().labels().get(&s).map(Vec::len),
       "payload group and label snapshots must stay parallel across a rollback"
     );
     Ok(())
@@ -416,13 +445,13 @@ fn retry_after_rollback_records_exactly_once() {
 
     {
       let mut tx = inp.begin();
-      too_few(tx.emitter(), s);
+      too_few_at(&mut tx, s);
       tx.rollback();
     }
-    too_few(inp.emitter(), s);
+    too_few_at(inp, s);
 
     assert_eq!(
-      inp.emitter().errors().get(&s).map(Vec::len),
+      inp.emitter_ref().errors().get(&s).map(Vec::len),
       Some(1),
       "the abandoned attempt must not leave a duplicate behind"
     );
@@ -536,16 +565,20 @@ fn t_a(span: SimpleSpan, expect: Expect, invoke: impl FnOnce(&mut Vb)) {
 /// rollback puts the mark back and removes the emission, and the logged twin recorded at the
 /// *same span* before the guard survives untouched. Pre-fix, a bypassing channel fails this on
 /// both halves at once — the mark never moved, and the rollback removed the twin instead.
-fn t_b(span: SimpleSpan, expect: Expect, invoke: impl FnOnce(&mut Vb)) {
+fn t_b(
+  span: SimpleSpan,
+  expect: Expect,
+  on_handle: impl for<'inp, 'c> FnOnce(&mut ConfIr<'inp, 'c>),
+) {
   drive(move |inp| {
-    control(inp.emitter(), span);
-    let m1 = mark(inp.emitter());
+    control_at(inp, span);
+    let m1 = mark(inp.emitter_ref());
 
     {
       let mut tx = inp.begin();
-      invoke(tx.emitter());
+      on_handle(&mut tx);
       assert_eq!(
-        mark(tx.emitter()),
+        mark(tx.emitter_ref()),
         m1 + 1,
         "the emission must advance the mark inside the branch"
       );
@@ -553,23 +586,23 @@ fn t_b(span: SimpleSpan, expect: Expect, invoke: impl FnOnce(&mut Vb)) {
     }
 
     assert_eq!(
-      mark(inp.emitter()),
+      mark(inp.emitter_ref()),
       m1,
       "the rollback must return the mark to the guard entry"
     );
     assert_eq!(
-      inp.emitter().errors().get(&span).map(Vec::len),
+      inp.emitter_ref().errors().get(&span).map(Vec::len),
       Some(1),
       "the pre-guard twin survives, alone: {:?}",
-      inp.emitter().errors().get(&span)
+      inp.emitter_ref().errors().get(&span)
     );
     assert_eq!(
-      inp.emitter().errors()[&span][0],
+      inp.emitter_ref().errors()[&span][0],
       ConfError::Control,
       "the surviving payload is the pre-guard twin, not the rolled-back emission"
     );
     assert_eq!(
-      inp.emitter().labels().get(&span).map(Vec::len),
+      inp.emitter_ref().labels().get(&span).map(Vec::len),
       Some(1),
       "the label group unwinds in lockstep with its payload group"
     );
@@ -579,18 +612,18 @@ fn t_b(span: SimpleSpan, expect: Expect, invoke: impl FnOnce(&mut Vb)) {
       // rolled-back payload is gone.
       Expect::Error(_) => {}
       Expect::Warning(_) => assert!(
-        inp.emitter().warnings().get(&span).is_none(),
+        inp.emitter_ref().warnings().get(&span).is_none(),
         "the rolled-back warning must be gone: {:?}",
-        inp.emitter().warnings().get(&span)
+        inp.emitter_ref().warnings().get(&span)
       ),
       Expect::Hole(_) => assert!(
-        inp.emitter().skipped_regions().get(&span).is_none(),
+        inp.emitter_ref().skipped_regions().get(&span).is_none(),
         "the rolled-back hole record must be gone: {:?}",
-        inp.emitter().skipped_regions().get(&span)
+        inp.emitter_ref().skipped_regions().get(&span)
       ),
     }
 
-    let diags: Vec<_> = inp.emitter().diagnostics().collect();
+    let diags: Vec<_> = inp.emitter_ref().diagnostics().collect();
     assert_eq!(diags.len(), 1, "replay agrees: exactly the surviving twin");
     assert_eq!(diags[0].payload(), Some(&ConfError::Control));
     Ok(())
@@ -601,7 +634,12 @@ fn t_b(span: SimpleSpan, expect: Expect, invoke: impl FnOnce(&mut Vb)) {
 /// produce, and how to invoke it. Each row generates T-a and T-b, and every channel name is
 /// collected into [`COVERED_CHANNELS`] for the census below.
 macro_rules! verbose_channel_conformance {
-  ($( $chan:ident => { span: $span:expr, expect: $expect:expr, invoke: $invoke:expr } ),+ $(,)?) => {
+  ($( $chan:ident => {
+    span: $span:expr,
+    expect: $expect:expr,
+    invoke: $invoke:expr,
+    on_handle: $on_handle:expr $(,)?
+  } ),+ $(,)?) => {
     /// The channels this suite covers — compared against the emitter's declared channels by
     /// `conformance_census_every_verbose_emit_channel_is_covered`.
     const COVERED_CHANNELS: &[&str] = &[$(stringify!($chan)),+];
@@ -617,7 +655,7 @@ macro_rules! verbose_channel_conformance {
 
         #[test]
         fn rewinds_exactly_and_keeps_the_presave_twin() {
-          t_b($span, $expect, $invoke);
+          t_b($span, $expect, $on_handle);
         }
       }
     )+
@@ -636,6 +674,11 @@ verbose_channel_conformance! {
         Spanned::new(SimpleSpan::new(0usize, 2usize), ()),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_lexer_error(Spanned::new(SimpleSpan::new(0usize, 2usize), ()))
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_error => {
@@ -647,6 +690,11 @@ verbose_channel_conformance! {
         Spanned::new(SimpleSpan::new(0usize, 2usize), ConfError::Direct),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_error(Spanned::new(SimpleSpan::new(0usize, 2usize), ConfError::Direct))
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_unexpected_token => {
@@ -658,6 +706,11 @@ verbose_channel_conformance! {
         UnexpectedToken::new(SimpleSpan::new(0usize, 2usize)),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_unexpected_token(UnexpectedToken::new(SimpleSpan::new(0usize, 2usize)))
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_warning => {
@@ -669,6 +722,11 @@ verbose_channel_conformance! {
         Spanned::new(SimpleSpan::new(0usize, 2usize), ConfError::Warning),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_warning(Spanned::new(SimpleSpan::new(0usize, 2usize), ConfError::Warning))
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_skipped_region => {
@@ -681,6 +739,11 @@ verbose_channel_conformance! {
         3,
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_skipped_region(SimpleSpan::new(0usize, 2usize), 3)
+        .expect("Verbose collects rather than propagates");
     }
   },
 
@@ -688,7 +751,8 @@ verbose_channel_conformance! {
   emit_full_container => {
     span: SimpleSpan::new(0usize, 2usize),
     expect: Expect::Error(ConfError::FullContainer),
-    invoke: |v: &mut Vb| full_container(v, SimpleSpan::new(0usize, 2usize))
+    invoke: |v: &mut Vb| full_container(v, SimpleSpan::new(0usize, 2usize)),
+    on_handle: |inp: &mut ConfIr<'_, '_>| full_container_at(inp, SimpleSpan::new(0usize, 2usize))
   },
   emit_missing_separator => {
     span: SimpleSpan::new(0usize, 0usize),
@@ -700,6 +764,11 @@ verbose_channel_conformance! {
         MissingToken::new(0usize),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_missing_separator(CowStr::from_static("comma"), MissingToken::new(0usize))
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_missing_element => {
@@ -711,6 +780,11 @@ verbose_channel_conformance! {
         MissingSyntax::new(0usize),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_missing_element(MissingSyntax::new(0usize))
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_missing_leading_separator => {
@@ -723,6 +797,11 @@ verbose_channel_conformance! {
         MissingToken::new(0usize),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_missing_leading_separator(CowStr::from_static("comma"), MissingToken::new(0usize))
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_missing_trailing_separator => {
@@ -735,6 +814,11 @@ verbose_channel_conformance! {
         MissingToken::new(0usize),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_missing_trailing_separator(CowStr::from_static("comma"), MissingToken::new(0usize))
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_unexpected_leading_separator => {
@@ -747,6 +831,14 @@ verbose_channel_conformance! {
         UnexpectedToken::new(SimpleSpan::new(0usize, 1usize)),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_unexpected_leading_separator(
+          CowStr::from_static("comma"),
+          UnexpectedToken::new(SimpleSpan::new(0usize, 1usize)),
+        )
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_unexpected_trailing_separator => {
@@ -759,12 +851,21 @@ verbose_channel_conformance! {
         UnexpectedToken::new(SimpleSpan::new(0usize, 1usize)),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_unexpected_trailing_separator(
+          CowStr::from_static("comma"),
+          UnexpectedToken::new(SimpleSpan::new(0usize, 1usize)),
+        )
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_too_few => {
     span: SimpleSpan::new(0usize, 2usize),
     expect: Expect::Error(ConfError::TooFew),
-    invoke: |v: &mut Vb| too_few(v, SimpleSpan::new(0usize, 2usize))
+    invoke: |v: &mut Vb| too_few(v, SimpleSpan::new(0usize, 2usize)),
+    on_handle: |inp: &mut ConfIr<'_, '_>| too_few_at(inp, SimpleSpan::new(0usize, 2usize))
   },
   emit_too_many => {
     span: SimpleSpan::new(0usize, 2usize),
@@ -775,6 +876,11 @@ verbose_channel_conformance! {
         TooMany::new(SimpleSpan::new(0usize, 2usize), 10, 5),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_too_many(TooMany::new(SimpleSpan::new(0usize, 2usize), 10, 5))
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_unexpected_end_of_lhs => {
@@ -786,6 +892,11 @@ verbose_channel_conformance! {
         UnexpectedEoLhs::eolhs(0usize),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_unexpected_end_of_lhs(UnexpectedEoLhs::eolhs(0usize))
+        .expect("Verbose collects rather than propagates");
     }
   },
   emit_unexpected_end_of_rhs => {
@@ -797,6 +908,11 @@ verbose_channel_conformance! {
         UnexpectedEoRhs::eorhs(0usize),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_unexpected_end_of_rhs(UnexpectedEoRhs::eorhs(0usize))
+        .expect("Verbose collects rather than propagates");
     }
   },
   // The control row: `emit_unclosed` already routed through the chokepoint beforehand,
@@ -810,6 +926,15 @@ verbose_channel_conformance! {
         Unclosed::<char>::new(SimpleSpan::new(0usize, 1usize), DelimiterKind::Custom("probe"), CowStr::from_static("brace")),
       )
       .expect("Verbose collects rather than propagates");
+    },
+    on_handle: |inp: &mut ConfIr<'_, '_>| {
+      inp
+        .emit_unclosed(Unclosed::<char>::new(
+          SimpleSpan::new(0usize, 1usize),
+          DelimiterKind::Custom("probe"),
+          CowStr::from_static("brace"),
+        ))
+        .expect("Verbose collects rather than propagates");
     }
   },
 }
@@ -899,11 +1024,11 @@ fn conformance_census_every_verbose_emit_channel_is_covered() {
 
 #[cfg(feature = "rowan")]
 mod sink_leg {
-  use super::{ConfError, TooFewEmitter};
+  use super::ConfError;
 
   use tokora::{
-    Emitter, InputRef, Lexer, Parse, Parser, SimpleSpan, Token, cache::DefaultCache,
-    emitter::Verbose, error::syntax::TooFew,
+    Emitter, InputRef, Lexer, SimpleSpan, Token, cache::DefaultCache, emitter::Verbose,
+    error::syntax::TooFew,
   };
 
   #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1016,8 +1141,8 @@ mod sink_leg {
   }
 
   type ConfSink<'inp> = tokora::cst::Sink<'inp, ByteLexer<'inp>, Verbose<ConfError>>;
-  type SinkCtx<'inp, 's> = (&'s mut ConfSink<'inp>, DefaultCache<'inp, ByteLexer<'inp>>);
-  type SinkIr<'inp, 's, 'c> = InputRef<'inp, 'c, ByteLexer<'inp>, SinkCtx<'inp, 's>>;
+  type SinkCtx<'inp> = (ConfSink<'inp>, DefaultCache<'inp, ByteLexer<'inp>>);
+  type SinkIr<'inp, 'c> = InputRef<'inp, 'c, ByteLexer<'inp>, SinkCtx<'inp>>;
 
   /// Under a recording sink, a rolled-back specialized emission is undone on the inner
   /// emitter too: the sink hands its captured inner reading back at `rewind`, and the inner
@@ -1030,40 +1155,41 @@ mod sink_leg {
       K_ERR,
       K_GAP,
     );
-    let mut sink: ConfSink<'_> = tokora::cst::Sink::new("ab", Verbose::new(), profile);
     let span = SimpleSpan::new(0usize, 1usize);
 
-    let res: Result<(), ConfError> = Parser::with_parser_and_context(
-      |inp: &mut SinkIr<'_, '_, '_>| {
-        let inner_before =
-          <Verbose<ConfError> as Emitter<'_, ByteLexer<'_>>>::checkpoint(inp.emitter().inner_ref());
+    let (cst, res) = tokora::cst::parse_lossless(
+      "ab",
+      (),
+      Verbose::<ConfError>::new(),
+      profile,
+      DefaultCache::<ByteLexer<'_>>::default(),
+      |inp: &mut SinkIr<'_, '_>| -> Result<(), ConfError> {
+        let inner_before = <Verbose<ConfError> as Emitter<'_, ByteLexer<'_>>>::checkpoint(
+          inp.emitter_ref().inner_ref(),
+        );
         {
           let mut tx = inp.begin();
-          <&mut ConfSink<'_> as TooFewEmitter<'_, ByteLexer<'_>>>::emit_too_few(
-            tx.emitter(),
-            TooFew::new(span, 1, 3),
-          )?;
+          tx.emit_too_few(TooFew::new(span, 1, 3))?;
           tx.rollback();
         }
-        let inner_after =
-          <Verbose<ConfError> as Emitter<'_, ByteLexer<'_>>>::checkpoint(inp.emitter().inner_ref());
+        let inner_after = <Verbose<ConfError> as Emitter<'_, ByteLexer<'_>>>::checkpoint(
+          inp.emitter_ref().inner_ref(),
+        );
         assert_eq!(
           inner_after, inner_before,
           "the sink's rewind restores the inner emitter's own reading"
         );
         assert!(
-          inp.emitter().inner_ref().errors().is_empty(),
+          inp.emitter_ref().inner_ref().errors().is_empty(),
           "the forwarded specialized diagnostic is undone with the branch: {:?}",
-          inp.emitter().inner_ref().errors()
+          inp.emitter_ref().inner_ref().errors()
         );
         Ok(())
       },
-      (&mut sink, DefaultCache::<ByteLexer<'_>>::default()),
-    )
-    .parse_str("ab");
+    );
     res.expect("the sink leg never propagates");
 
-    let (_green, emitter) = sink.finish(K_ROOT);
+    let (_green, emitter) = cst.finish(K_ROOT);
     assert!(
       emitter.errors().is_empty(),
       "nothing survives the rolled-back branch"

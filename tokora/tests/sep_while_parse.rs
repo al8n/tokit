@@ -5,6 +5,7 @@
 mod common;
 
 use common::E;
+use tokora::EmitterView;
 
 // Comprehensive tests for `sep_while/parse` code paths (non-delimited separated_while)
 // with all separator policies crossed against count modifiers (at_least, at_most, bounded).
@@ -52,7 +53,7 @@ where
 
 fn decide<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,

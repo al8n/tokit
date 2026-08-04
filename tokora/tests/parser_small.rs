@@ -11,6 +11,7 @@ mod common;
 
 use common::{TestLexer, Token, TokenKind};
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, ParseInputUnwrapExt, Parser, TryParseInput,
   cache::Peeked,
@@ -60,7 +61,7 @@ where
 
 fn while_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _emitter: &mut Ctx::Emitter,
+  _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,

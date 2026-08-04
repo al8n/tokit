@@ -124,7 +124,16 @@ detection from "hope" to "panics at the spend, at the cause."
 [`cst::Sink`](crate::cst::Sink) is where the vocabulary meets the emitter contract. It wraps an inner
 emitter `E`, forwards the *entire* emitter trait family to it (so any context bound `E` satisfies,
 `Sink<E>` satisfies too), and buffers the event stream — one rewindable timeline for tree and
-diagnostics alike. Its cells are classified by the same `CELL_CENSUS` discipline the
+diagnostics alike.
+
+A sink is **minted by the parse, never constructed beside it**:
+[`parse_lossless`](crate::cst::parse_lossless) (and its partial sibling) takes the source once and
+uses that one argument for both the sink it builds and the input it drives, so the buffer the tree's
+text is sliced out of and the buffer the parse reads cannot be two different buffers. Its `where`
+clause pins the context's emitter to `Sink` *by name*, which is what leaves a forwarding wrapper no
+slot to occupy at the entry. What comes back is a [`Cst`](crate::cst::Cst) — the spent sink, holding
+the one door to the tree, and deliberately not an emitter, so the artefact cannot be re-aimed at a
+second parse. Its cells are classified by the same `CELL_CENSUS` discipline the
 [checkpoint chapter](super::arch_checkpoint_rewind) described for the input layer: a crate-internal
 function destructures the sink exhaustively — no `..` — so a new field cannot be added without
 declaring which class it is in and what a rewind must do to it.
@@ -144,7 +153,7 @@ There is deliberately **no** `&mut` accessor to the inner emitter, only a shared
 [`inner_ref`](crate::cst::Sink::inner_ref). A caller who could drive the inner emitter's `rewind`
 directly would shear the event log from the diagnostic log with no witness — the exact desync the
 one-timeline law forbids. Ownership of the inner comes back only from materialization, which consumes
-the sink.
+the [`Cst`](crate::cst::Cst) handle.
 
 ### The mark stack, the journal, and the era ledger
 
@@ -254,7 +263,7 @@ catches the panic holds the sink it had rather than the sheared one the wall exi
 The one exception is a panic already unwinding, where raising a second one aborts the process rather
 than reporting anything: there the rewind degrades to a **total no-op** — both logs left describing
 the same history, rather than one of them rewound — and **latches**, so
-[`finish`](crate::cst::Sink::finish) and [`finish_partial`](crate::cst::Sink::finish_partial) refuse
+[`finish`](crate::cst::Cst::finish) and [`finish_partial`](crate::cst::Cst::finish_partial) refuse
 afterwards with [`UnpairedSettle`](crate::cst::FinishError::UnpairedSettle). Silence there is
 permissible only because it is recorded. The sink hands the inner only readings it can prove, or
 nothing.
@@ -271,7 +280,7 @@ violation of it.
 
 ## Materialization: one walk that builds and validates
 
-[`finish`](crate::cst::Sink::finish) consumes the sink and turns the surviving events into a rowan
+[`finish`](crate::cst::Cst::finish) consumes the sink and turns the surviving events into a rowan
 green tree in a single forward walk — driving the builder only with operations it has *already*
 checked, so rowan can never panic under it, and returning a typed
 [`FinishError`](crate::cst::FinishError) on the first violation instead. It **never panics**. The one
@@ -309,7 +318,7 @@ and the node widens over the tail. The one clause left over is a run that **no t
 source that begins with bytes no token claims — which has no such moment and so tiles where the walk
 first sees it: at the first committed token, or, with no committed token anywhere, at the end of the
 walk, in whatever node is open there. A wholly unlexable source consequently keeps its run beside the
-document node rather than inside it, and [`finish_partial`](crate::cst::Sink::finish_partial) tiles
+document node rather than inside it, and [`finish_partial`](crate::cst::Cst::finish_partial) tiles
 before it closes the frames an unbalanced stream left open, so there the fallback lands in the
 innermost **open** node.
 
@@ -336,6 +345,22 @@ tree. This is why the lexer-error span rides *in the event log* (the `error_span
 so it rewinds with its branch, and so its *span* is available to license its gap at exactly the one
 moment the channels are allowed to cross.
 
+**"Recorded" is narrower than "reported", and the narrowing is the whole guarantee.** A licence has
+to be earned by the same thing a token span is earned by — the input layer lexing those bytes and
+refusing them — so the layer's own reports reach the sink through
+[`commit_lexer_error`](crate::Emitter::commit_lexer_error), the refusal-side twin of
+`commit_token`, and *only* those carry an `error_span`. Every caller-facing spelling of the same
+report — a parser's [`InputRef::emit_lexer_error`](crate::InputRef::emit_lexer_error), a callback's
+[`EmitterView::emit_lexer_error`](crate::EmitterView::emit_lexer_error), a wrapper forwarding either
+— lands on [`Emitter::emit_lexer_error`](crate::Emitter::emit_lexer_error), takes its `Diag` slot,
+reaches the inner emitter, and records **no span**. Without that split the licence was a
+caller-chosen span with nothing consumed for it — the shape `CstEmitter::cst_token` had on the token
+channel before it was deleted — and it reached across buffers: through the orphan-rule wrapper the
+[`parse_lossless`](crate::cst::parse_lossless) docs describe, a *foreign* parse's refusals excused
+bytes of this sink's source. The capability is untouched, only its structural side effect: a
+callback can still report a malformed input inline, with no rewind, which is what the `decide`
+family exists for.
+
 Two more walls guard the same seam. A balanced stream that builds structure but carries **no committed
 token at all** over a nonempty source *no lexer error explains* is a
 [`StructureWithoutTokens`](crate::cst::FinishError): the signature of a wrapper emitter that forwarded
@@ -347,7 +372,7 @@ coverage law does, and a **lossless** grammar opens its root node before it can 
 follows — so a buffer holding nothing lexable (an unterminated string mid-edit) reaches `finish` as one
 error span, one open-then-closed node, and zero tokens. Every byte is explained there, so that tree
 tiles rather than being refused.
-And [`finish_partial`](crate::cst::Sink::finish_partial) is the tooling door for an *incomplete*
+And [`finish_partial`](crate::cst::Cst::finish_partial) is the tooling door for an *incomplete*
 parse: it **closes** open nodes rather than reporting [`UnclosedNodes`](crate::cst::FinishError), and
 **tiles** every gap rather than refusing an uncovered one — the two ways an incomplete parse
 legitimately differs from a complete one (a fatal abort leaves nodes open; a fail-fast lexer error
@@ -359,12 +384,12 @@ incompleteness signals, nothing more.
 The coverage law only closes if *every source byte reaches the sink* as a token or a reported lexer
 error. A lexer that silently skips whitespace breaks that premise: a skipped-whitespace gap would be
 **indistinguishable** from a dropped committed token, and the sink could not tell the lossless case
-from the corrupt one. So [`Sink::new`](crate::cst::Sink::new) refuses a skipping lexer at **compile
+from the corrupt one. So [`parse_lossless`](crate::cst::parse_lossless) refuses a skipping lexer at **compile
 time**: an inline-`const` assertion on `L::SURFACES_TRIVIA` fires a post-monomorphization error at the
 offending call site (at build/test/doc time — *not* under `cargo check`, which never monomorphizes the
 call). A lossless sink structurally requires a trivia-surfacing lexer; the wall makes that a
-type-level fact rather than a runtime hope. Chapter 16 demonstrates both sides of the wall as compiling
-and `compile_fail` doctests.
+type-level fact rather than a runtime hope. [`parse_lossless`](crate::cst::parse_lossless) itself
+demonstrates both sides of the wall, as a compiling and a `compile_fail` doctest.
 
 One materialization-time policy remains configurable: [`TriviaPolicy`](crate::cst::TriviaPolicy). Its
 only variant today is the provable one, `AsEmitted` — a committed trivia token materializes into
@@ -397,7 +422,7 @@ only that every one of these lowers to the append-only vocabulary above.
 
 The headline claim compiles: a speculative branch builds a *whole node* — tokens and structure, all
 recorded — then declines, and its events truncate as if they never happened; the real parse then
-builds the tree for keeps, and [`finish`](crate::cst::Sink::finish) materializes a lossless tree. The
+builds the tree for keeps, and [`finish`](crate::cst::Cst::finish) materializes a lossless tree. The
 proof is an equivalence: the same source, parsed straight and parsed through the declined speculation,
 materializes **byte-identical green trees**. That equivalence is a tested law of the sink, not an
 accident of the example. The lexer is a tiny hand-written lossless `CharLexer` — every byte surfaces
@@ -454,9 +479,9 @@ as a token, so `SURFACES_TRIVIA` is honestly `true` — and nothing but core tok
 # }
 use rowan::Language;
 use tokora::{
-  Emitter, InputRef as In, Parse, ParseContext, ParseInput, Parser,
+  Emitter, InputRef as In, ParseContext, ParseInput,
   cache::DefaultCache,
-  cst::{CstProfile, KindValidator, Sink},
+  cst::{CstProfile, KindValidator, parse_lossless},
   emitter::{CstEmitter, Fatal},
   parser::node,
 };
@@ -530,22 +555,29 @@ where
 
 let src = "1+2";
 
-// Straight drive.
-let mut straight: Sink<'_, Ln<'_>, _> =
-  Sink::new(src, Fatal::<Error>::new(), profile());
-Parser::with_context((&mut straight, DefaultCache::<Ln<'_>>::default()))
-  .apply(expr)
-  .parse_str(src)
-  .unwrap();
+// Straight drive. The driver mints the sink from `src` itself, so the buffer the tree's
+// text comes from and the buffer the parse reads are the same argument of the same call.
+let (straight, parsed) = parse_lossless(
+  src,
+  (),
+  Fatal::<Error>::new(),
+  profile(),
+  DefaultCache::<Ln<'_>>::default(),
+  expr,
+);
+parsed.unwrap();
 let (green_straight, _) = straight.finish(K::Root as u16);
 
 // Same source, through the declined speculation.
-let mut backtracked: Sink<'_, Ln<'_>, _> =
-  Sink::new(src, Fatal::<Error>::new(), profile());
-Parser::with_context((&mut backtracked, DefaultCache::<Ln<'_>>::default()))
-  .apply(decline_then_parse)
-  .parse_str(src)
-  .unwrap();
+let (backtracked, parsed) = parse_lossless(
+  src,
+  (),
+  Fatal::<Error>::new(),
+  profile(),
+  DefaultCache::<Ln<'_>>::default(),
+  decline_then_parse,
+);
+parsed.unwrap();
 let (green_backtracked, _) = backtracked.finish(K::Root as u16);
 
 // The declined branch left NO phantom: the two green trees are byte-identical.

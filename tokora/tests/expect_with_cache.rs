@@ -15,6 +15,7 @@
 mod common;
 
 use common::E;
+use tokora::EmitterView;
 
 use generic_arraydeque::typenum::U1;
 use tokora::{
@@ -105,7 +106,7 @@ where
 /// Condition for sep_while: continue if next token is a Num.
 fn decide_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,

@@ -29,3 +29,35 @@
 # template — so the template does construct collisions on `InputRef` when the receivers agree.
 recursion/used
 recursion/discarded
+
+# ── `Emitter::commit_lexer_error` — the SAME rule, in the mirror ──────────────────────────
+#
+# tokora's is `fn commit_lexer_error(&mut self, ..)` on the `Emitter` trait. The
+# `trait_method` template's consumer is `impl<T> ConsumerComb for T`, so it supplies a
+# candidate at EVERY pick, and its three spellings declare `self` (`same_pick`) or `&self`
+# (`later_pick_used`, `later_pick_discarded`). The subject is a `Silent<PErr>` VALUE, which
+# derefs to nothing, so there is exactly one step and three picks on it: by value, `&`, then
+# `&mut`. The consumer's item sits at the first or the second; tokora's sits at the third.
+# The earlier pick wins, on both sides, and tokora's item is never a candidate.
+#
+# That is the `InputRef::recursion` rows above with the receiver kinds swapped — there the
+# consumer's `&mut self` beat tokora's `&self`, here the consumer's `self`/`&self` beat
+# tokora's `&mut self`. Same rule: an earlier pick claims the call.
+#
+# Read it as a statement about the SHAPE, never as "`commit_lexer_error` cannot be stolen".
+# The three spellings are named for a tokora method taken BY VALUE — `ParseInput::labelled`,
+# where `same_pick` really is the same pick and `&self` really is a later one. Against a
+# `&mut self` trait method on a non-deref receiver there IS no later pick, so the spelling set
+# cannot express a competing consumer at all: the one that WOULD compete declares `&mut self`
+# and collides at the same pick (E0034, loud), and `trait_method` hardcodes the three above.
+# Generating it is the same unbounded enumeration the README declines twice; recording the gap
+# is the instrument this repository trusts.
+#
+# The subject is not the vacuous half of that pair. `Silent<PErr>` is the fixture's own
+# emitter — `PCtx` is built on it — so tokora really does implement `Emitter` for it, and
+# `emitter_value()` in `gen_probe.py` is what pins that down rather than leaving `recvr` to a
+# default. A subject that did NOT implement the trait would produce this same agreement while
+# meaning nothing, which is the failure `TRAITS` exists to refuse.
+commit_lexer_error/same_pick
+commit_lexer_error/later_pick_used
+commit_lexer_error/later_pick_discarded

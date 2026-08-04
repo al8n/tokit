@@ -13,6 +13,7 @@
 mod common;
 
 use common::E;
+use tokora::EmitterView;
 
 use generic_arraydeque::typenum::U1;
 use tokora::{
@@ -41,7 +42,7 @@ fn verbose_ctx() -> ParserContext<'static, TestLexer<'static>, Verbose<E>> {
 
 fn decide_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -1102,7 +1103,7 @@ fn zero_width_element_stops_after_one_element() {
   ) -> Result<Vec<i64>, E> {
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Verbose<E>|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Verbose<E>>|
           -> Result<Action, E> {
       Ok(if budget > 0 {
         budget -= 1;
@@ -1144,7 +1145,7 @@ fn zero_width_element_with_leading_trivia_stops_after_one_element() {
   ) -> Result<Vec<i64>, E> {
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Verbose<E>|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Verbose<E>>|
           -> Result<Action, E> {
       Ok(if budget > 0 {
         budget -= 1;

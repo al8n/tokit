@@ -189,8 +189,7 @@ where
     // THE line this chapter is about. Under `Fatal` this `?` propagates and the parse is
     // over; under `Verbose` the error is filed and execution simply continues to the next
     // statement. The parser does not know, and does not need to.
-    inp.emitter()
-      .emit_error(Spanned::new(at, CalcError::Unexpected))?;
+    inp.emit_error(Spanned::new(at, CalcError::Unexpected))?;
     skip_to_semi(inp)?;
     return Ok(None);
   }
@@ -246,12 +245,10 @@ where
       // An empty statement. Worth saying, not worth stopping for — so it is a *warning*,
       // and a warning is never fatal: `Fatal` drops this on the floor and carries on.
       Tok::Semi => {
-        inp.emitter()
-          .emit_warning(Spanned::new(at, CalcError::Unexpected))?;
+        inp.emit_warning(Spanned::new(at, CalcError::Unexpected))?;
       }
       _ => {
-        inp.emitter()
-          .emit_error(Spanned::new(at, CalcError::Unexpected))?;
+        inp.emit_error(Spanned::new(at, CalcError::Unexpected))?;
         skip_to_semi(inp)?;
       }
     }

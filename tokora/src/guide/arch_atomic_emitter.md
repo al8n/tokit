@@ -20,7 +20,7 @@ parse. So tokora puts that policy in one replaceable object, the **emitter**, bo
 handle alongside the scanning state, and leaves the parser writing the same line either way:
 
 ```text
-inp.emitter().emit_error(Spanned::new(at, err))?;
+inp.emit_error(Spanned::new(at, err))?;
 ```
 
 The protocol is a `Result`. `Ok(())` means the diagnostic was handled as non-fatal and parsing
@@ -71,6 +71,7 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
     fn checkpoint(&self) -> u64 { 0 }
     fn release(&mut self, checkpoint: u64) {}
     fn commit_token(&mut self, tok: &L::Token, span: &L::Span) {}
+    fn commit_lexer_error(&mut self, err: Spanned<..>) -> Result<(), Self::Error> { self.emit_lexer_error(err) }
     fn enter_label(&mut self, label: &'static str) {}
     fn exit_label(&mut self) {}
     fn bound_source(&self) -> Option<SourceIdentity> { None }
@@ -152,7 +153,7 @@ of them regardless.
 ### The one capability that binds rather than defaults
 
 [`CstEmitter`](crate::emitter::CstEmitter) is the exception worth naming, because it inverts the
-default's purpose. Its methods (`cst_start` / `cst_token` / `cst_finish`, and the retro-wrap pair
+default's purpose. Its methods (`cst_start` / `cst_finish`, and the retro-wrap pair
 `cst_mark` / `cst_start_at`) all have no-op defaults, so `Fatal` / `Verbose` / `Silent` /
 [`Ignored`](crate::emitter::Ignored) are `CstEmitter` for free and a tree-less parse compiles the
 event calls to nothing. But a tree-*producing* parse path bounds `Ctx::Emitter: CstEmitter` anyway —
@@ -236,12 +237,26 @@ How the *input* drives this trio — one save pinning both the cursor and this m
 rewinds exactly as the diagnostics do — is the [checkpoint chapter](super::arch_checkpoint_rewind)'s
 subject, developed there in full. This chapter owns only the emitter's half of the contract.
 
-One last hook belongs to the same timeline. [`commit_token`](crate::Emitter::commit_token) is called
-by the input exactly once per **settled** token — consumed, or skipped behind a scan frontier — and
-nowhere else. A diagnostics emitter inherits its no-op default; the recording sink overrides it to
-record a token event, which is what makes *every* consuming combinator tree-producing with zero
-per-combinator code. That auto-emission hook, paired with the `CstEmitter` structuring surface
-above, is what the event-stream CST chapter is about.
+Two last hooks belong to the same timeline, and they are the pair that decides what a *source byte*
+is. [`commit_token`](crate::Emitter::commit_token) is called by the input exactly once per **settled**
+token — consumed, or skipped behind a scan frontier — and nowhere else. A diagnostics emitter
+inherits its no-op default; the recording sink overrides it to record a token event, which is what
+makes *every* consuming combinator tree-producing with zero per-combinator code.
+
+[`commit_lexer_error`](crate::Emitter::commit_lexer_error) is its refusal-side twin: the input layer
+calls it, from its one deduped reporting site, for a lexer error **it** raised over bytes it lexed
+and could not tokenize. Its default body forwards to
+[`emit_lexer_error`](crate::Emitter::emit_lexer_error), so an emitter that only collects diagnostics
+implements nothing and cannot tell the two apart — every lexer error arrives exactly as it always
+did. Only an emitter that treats the *span* as structural evidence overrides it, and the recording
+sink is the one: a recorded refusal span is what licenses a byte to have no token at all, so it must
+come from the layer that refused those bytes rather than from a caller who picked a range. A wrapper
+emitter forwards this exactly as it forwards `commit_token`; inheriting the default hands the wrapped
+sink a caller-shaped report where a refusal was, and its `finish` then refuses a region that was
+legitimately unlexable.
+
+Those two auto-emission hooks, paired with the `CstEmitter` structuring surface above, are what the
+event-stream CST chapter is about.
 
 ## The built-ins as design points
 
@@ -356,7 +371,7 @@ where
       Tok::Digit(n) => out.push(n),
       // A `+` where a digit belongs. THE line the emitter reinterprets: a fatal stop under
       // `Fatal`, filed-and-continue under `Verbose`, dropped under `Silent`.
-      Tok::Plus => inp.emitter().emit_error(Spanned::new(at, Error))?,
+      Tok::Plus => inp.emit_error(Spanned::new(at, Error))?,
     }
   }
   Ok(out)

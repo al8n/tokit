@@ -12,8 +12,8 @@ use derive_more::{Display, From, Unwrap};
 use generic_arraydeque::typenum::U1;
 
 use tokora::{
-  Accumulator, Branch, Emitter, InputRef, Parse, ParseChoice, ParseContext, ParseInput, Parser,
-  Token as TokenT, TryParseInput,
+  Accumulator, Branch, Emitter, EmitterView, InputRef, Parse, ParseChoice, ParseContext,
+  ParseInput, Parser, Token as TokenT, TryParseInput,
   cache::Peeked,
   delimiter::DelimiterKind,
   emitter::{
@@ -401,7 +401,7 @@ pub enum JsonValue<'a> {
 impl<'inp> JsonValue<'inp> {
   fn decide<Ctx>(
     mut peeked: Peeked<'_, 'inp, JsonLexer<'inp>, U1>,
-    _: &mut Ctx::Emitter,
+    _: EmitterView<'_, 'inp, JsonLexer<'inp>, Ctx::Emitter>,
   ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, JsonLexer<'inp>>>::Error>
   where
     Ctx: ParseContext<'inp, JsonLexer<'inp>>,

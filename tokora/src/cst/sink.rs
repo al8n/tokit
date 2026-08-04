@@ -159,7 +159,7 @@ struct JournalEntry {
   old_forward_parent: Option<NonZeroU32>,
 }
 
-/// The ceiling on the event-log capacity [`Sink::new`] reserves up front: **65 536 events**,
+/// The ceiling on the event-log capacity `Sink::new` reserves up front: **65 536 events**,
 /// which is 2 MiB at the log's 32-byte element.
 ///
 /// A cap is what makes sizing from the source length safe rather than merely usual. One event
@@ -263,8 +263,8 @@ fn bump_witness(next: &core::sync::atomic::AtomicUsize) -> usize {
 /// emitter by shared reference only ([`inner_ref`](Self::inner_ref)); there is **no** `&mut`
 /// accessor, because a caller who could rewind the inner emitter directly would shear the
 /// event log from the diagnostic log with no witness. Materialization
-/// ([`finish`](Self::finish) / [`finish_partial`](Self::finish_partial)) consumes the sink
-/// and returns the inner emitter with the tree.
+/// ([`Cst::finish`](super::Cst::finish) / [`Cst::finish_partial`](super::Cst::finish_partial))
+/// consumes the handle and returns the inner emitter with the tree.
 ///
 /// # Inner-emitter contract: value-keyed checkpoint readings
 ///
@@ -298,27 +298,56 @@ fn bump_witness(next: &core::sync::atomic::AtomicUsize) -> usize {
 /// rewound target by value, and settles rows out of stack order under mixed raw use, all of which
 /// presuppose readings — and equal-mark rows are interchangeable only while the reading is a
 /// function of emission state. The requirement is therefore the [`ValueKeyedEmitter`] bound on
-/// this type's [`Emitter`] impl and on [`new`](Self::new), not a convention; see that trait for
+/// this type's [`Emitter`] impl and on `Sink::new`, not a convention; see that trait for
 /// the exact promise and the roster of implementors. Such an emitter belongs at the input layer's
 /// direct seam, where the settle discipline is 1:1 — the sink's own mark stack is exactly that
 /// shape, and the input layer does release it. A sink is not a value-keyed emitter either, so a
 /// sink cannot wrap a sink.
 ///
-/// # Construction
+/// # Construction: minted by the parse, never beside it
 ///
-/// The source is bound **here**, and `finish` has no source parameter, so a materialization
-/// can no longer be handed a buffer different from the one construction named. That removes
-/// the *late* half of the wrong-source class. The **early** half — that the buffer named here
-/// is the one the parser will read — is not established by the type system either: `'inp`
-/// proves both borrows outlive the sink, not that they are the same bytes.
+/// A sink cannot be built by a caller. `Sink::new` is crate-private, and the public
+/// doors are [`parse_lossless`](super::parse_lossless) and
+/// [`parse_lossless_partial`](super::parse_lossless_partial), which take the source **once**
+/// and hand that same argument to the sink they mint and to the input they drive.
 ///
-/// It is established at runtime instead. The sink overrides
-/// [`Emitter::bound_source`](crate::Emitter::bound_source) to report this buffer's offset
-/// origin, and the point at which an emitter is attached to an input compares that against the
-/// source the parse reads, **panicking** on a provable mismatch. A sink built over one buffer
-/// and driven while parsing another of the same length is refused there — pinned by
-/// `sink_bound_to_a_foreign_source_is_refused`. It cannot be refused any later: the event log
-/// such a pairing produces is byte-identical to one a legal single parse could produce.
+/// That is what closes the *early* half of the wrong-source class. The late half was already
+/// closed — materialization takes no source parameter, so it cannot be handed a different
+/// buffer than construction named — but the early half, *that the buffer named at construction
+/// is the one the parser reads*, was never a type-system fact: `'inp` proves both borrows
+/// outlive the sink, not that they are the same bytes. Two independent names could differ;
+/// one argument cannot differ from itself.
+///
+/// The drivers additionally pin `Ctx::Emitter` to `Sink` **by name**, so a forwarding wrapper
+/// has no slot to occupy at the entry, and what they return is a [`Cst`](super::Cst) rather
+/// than the sink — and a [`Cst`](super::Cst) is not an emitter, so the artefact cannot be
+/// re-aimed at a second parse.
+///
+/// ## The runtime handshake, and what remains of it
+///
+/// The sink also overrides [`Emitter::bound_source`](crate::Emitter::bound_source) to report
+/// its buffer's offset origin, and the point at which an emitter is attached to an input
+/// compares that against the source the parse reads, **panicking** on a provable mismatch —
+/// pinned by `sink_bound_to_a_foreign_source_is_refused`. With the drivers in place it is
+/// redundant for a sink obtained the intended way, and no door hands one out any more:
+/// `Sink::new` and `InputRef::emitter` are crate-private, `InputRef::emitter_ref` yields a
+/// **shared** reference, which no emitter slot can take, and the public callback traits —
+/// `Decision::decide`, the `peek_then` family, the token-level pratt folds — take an
+/// [`EmitterView`](crate::EmitterView), which implements no emitter trait.
+///
+/// What keeps the check earning its place is the boundary the type system does not reach.
+/// `EmitterView` is not an emitter *in this crate*; a downstream crate whose own lexer appears in
+/// the parameter list may implement one for it under the orphan rules, and this handshake is what
+/// stands on that route — for a wrapper that forwards `bound_source`. What such a wrapper cannot
+/// do is **reach this sink's coverage machinery**, through either of its two doors: a token event
+/// (only [`Emitter::commit_token`](crate::Emitter::commit_token) makes one, and it is not on the
+/// view's surface — nor is `CstEmitter::cst_token`, deleted for being the second) or a
+/// gap-licensing lexer-error span (only
+/// [`Emitter::commit_lexer_error`](crate::Emitter::commit_lexer_error) makes one, and it is not on
+/// the view's surface either). The view's own
+/// [`emit_lexer_error`](crate::EmitterView::emit_lexer_error) forwards the *diagnostic* and
+/// records no span, so a foreign parse driven through such a wrapper reports into this sink's log
+/// and decides nothing about which of its bytes need a token.
 ///
 /// **The refusal is conservative, and the residue is real.** It fires only where
 /// [`Source::REFERENT_IS_BYTES`](crate::Source::REFERENT_IS_BYTES) says an unequal reference
@@ -327,16 +356,16 @@ fn bump_witness(next: &core::sync::atomic::AtomicUsize) -> usize {
 /// the `smol_bytes` family) the reference addresses a variable rather than the bytes, so two
 /// clones of one buffer are two addresses and an inequality proves nothing; refusing them
 /// would turn a correct program into a panic. Those backings keep the door open, unchanged
-/// from before, and a third party closes it for their own by overriding one `const`.
+/// from before, and a third party closes it for their own by overriding one `const`. And a
+/// wrapper that simply declines to forward `bound_source` reports `None`, which the seam reads
+/// as "binds no source" — so the check sees nothing at all.
 ///
-/// [`new`](Self::new) takes the source buffer the parse runs over, the wrapped emitter, and
+/// `Sink::new` takes the source buffer the parse runs over, the wrapped emitter, and
 /// the dialect's [`CstProfile`] — the token mapper (`fn(&L::Token) -> u16` into the dialect's
 /// unified kind space — no kind bound leaks into core), the [`KindValidator`] every recorded
 /// kind is checked against, the `error_kind` used to wrap recovery holes, and the `gap_kind`
 /// used to tile uncovered source bytes at materialization (what makes `tree.text() == source`
-/// structural for every input, lexer errors included). Binding the source here rather than at
-/// [`finish`](Self::finish) removes the one way a caller could hand materialization a
-/// different buffer than the spans were measured against. Construction is **compile-time
+/// structural for every input, lexer errors included). Construction is **compile-time
 /// restricted to trivia-surfacing lexers** ([`Lexer::SURFACES_TRIVIA`]): a syntactic lexer
 /// that skips trivia cannot take the lossless door, because a skipped-whitespace gap is
 /// indistinguishable from a dropped committed token.
@@ -378,7 +407,7 @@ where
   /// no-row mark has no exact reading and is refused by the preflight instead of guessed at).
   /// Primed at the first inner-advancing touch (a forwarded diagnostic or a settled token; the
   /// rewind fallback reads it the same way), which provably equals the reading at
-  /// [`new`](Self::new): the sink
+  /// `Sink::new`: the sink
   /// exposes no `&mut` path to the inner, so the inner cannot advance before the sink's own
   /// first advancing call — and every advancing surface primes this field before forwarding.
   /// (The capture is lazy only to keep the constructor free of emitter bounds: `Emitter` is
@@ -475,8 +504,16 @@ where
 {
   /// Creates a recording sink over `source`, around `inner`, configured by `profile`.
   ///
+  /// **Crate-private: the drivers are the only minters.** A sink names the buffer its tree's
+  /// text is sliced out of, and an input names the buffer the parse reads; while a caller could
+  /// state those independently, one program could state them differently and obtain a tree whose
+  /// structure came from one source and whose text came from another. Both names now come from
+  /// the single `src` argument of [`parse_lossless`](super::parse_lossless) /
+  /// [`parse_lossless_partial`](super::parse_lossless_partial), which is where the public door
+  /// is and where every doctest for the two compile-time walls below now lives.
+  ///
   /// - `source` is the buffer the parse runs over; every token's text is sliced out of it at
-  ///   materialization, so [`finish`](Self::finish) takes no source argument of its own;
+  ///   materialization, so [`Cst::finish`](super::Cst::finish) takes no source argument of its own;
   /// - `profile` is the dialect's kind space
   ///   ([`CstProfile`](super::CstProfile)): the token mapper into the unified u16 kind space,
   ///   the [`KindValidator`](super::KindValidator) every recorded kind is checked against, the
@@ -486,169 +523,20 @@ where
   ///   validator admits it, emission asserts against it unconditionally in every build, and
   ///   materialization rejects it.
   ///
-  /// Construction is restricted at **compile time** to trivia-surfacing lexers
-  /// ([`Lexer::SURFACES_TRIVIA`] `== true`): a syntactic lexer that skips trivia cannot take
-  /// this lossless door, because a skipped-whitespace gap is indistinguishable from a
-  /// dropped committed token. The wall is an inline-`const` assertion, so it fires at
-  /// build/test/doc time (a post-monomorphization `error[E0080]` at the offending call
-  /// site) — **not** under `cargo check`, which never monomorphizes the call.
+  /// Construction is restricted at **compile time** twice over, and both walls reach the public
+  /// door through this one call:
   ///
-  /// # Compile-time wall: trivia-surfacing lexers only
-  ///
-  /// A lexer that surfaces trivia (declares [`Token::SURFACES_TRIVIA`] = `true`)
-  /// constructs a sink:
-  ///
-  /// ```rust
-  /// use tokora::{
-  ///   Lexer, SimpleSpan, Token,
-  ///   cst::{CstProfile, KindValidator, Sink},
-  ///   emitter::Verbose,
-  /// };
-  ///
-  /// #[derive(Debug, Clone, Copy)]
-  /// struct STok;
-  /// impl Token<'_> for STok {
-  ///   type Kind = u8;
-  ///   type Error = ();
-  ///   const SURFACES_TRIVIA: bool = true; // ← the declaration under test
-  ///   fn kind(&self) -> u8 { 0 }
-  ///   fn is_trivia(&self) -> bool { false }
-  /// }
-  /// # struct Lossless<'a> { src: &'a str, state: () }
-  /// # impl<'inp> Lexer<'inp> for Lossless<'inp> {
-  /// #   type State = (); type Source = str; type Token = STok;
-  /// #   type Span = SimpleSpan; type Offset = usize;
-  /// #   fn new(src: &'inp str) -> Self { Self { src, state: () } }
-  /// #   fn with_state(src: &'inp str, state: ()) -> Self { Self { src, state } }
-  /// #   fn check(&self) -> Result<(), ()> { Ok(()) }
-  /// #   fn state(&self) -> &() { &self.state }
-  /// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
-  /// #   fn into_state(self) -> () { self.state }
-  /// #   fn source(&self) -> &'inp str { self.src }
-  /// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(0, 0) }
-  /// #   fn slice(&self) -> &'inp str { "" }
-  /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
-  /// #   fn bump(&mut self, _: &usize) {}
-  /// # }
-  /// let profile = CstProfile::new(|_| 0, KindValidator::new(|k| k <= 91), 90, 91);
-  /// let _sink: Sink<'_, Lossless<'_>, Verbose<()>> = Sink::new("", Verbose::new(), profile);
-  /// ```
-  ///
-  /// The same lexer without the declaration (the default, i.e. a syntactic lexer that
-  /// skips trivia) is refused at compile time — the only difference from the example
-  /// above is the missing `SURFACES_TRIVIA` line:
-  ///
-  /// ```compile_fail
-  /// use tokora::{
-  ///   Lexer, SimpleSpan, Token,
-  ///   cst::{CstProfile, KindValidator, Sink},
-  ///   emitter::Verbose,
-  /// };
-  ///
-  /// #[derive(Debug, Clone, Copy)]
-  /// struct STok;
-  /// impl Token<'_> for STok {
-  ///   type Kind = u8;
-  ///   type Error = ();
-  ///   // no SURFACES_TRIVIA: defaults to false (a skipping, syntactic grammar)
-  ///   fn kind(&self) -> u8 { 0 }
-  ///   fn is_trivia(&self) -> bool { false }
-  /// }
-  /// # struct Syntactic<'a> { src: &'a str, state: () }
-  /// # impl<'inp> Lexer<'inp> for Syntactic<'inp> {
-  /// #   type State = (); type Source = str; type Token = STok;
-  /// #   type Span = SimpleSpan; type Offset = usize;
-  /// #   fn new(src: &'inp str) -> Self { Self { src, state: () } }
-  /// #   fn with_state(src: &'inp str, state: ()) -> Self { Self { src, state } }
-  /// #   fn check(&self) -> Result<(), ()> { Ok(()) }
-  /// #   fn state(&self) -> &() { &self.state }
-  /// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
-  /// #   fn into_state(self) -> () { self.state }
-  /// #   fn source(&self) -> &'inp str { self.src }
-  /// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(0, 0) }
-  /// #   fn slice(&self) -> &'inp str { "" }
-  /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
-  /// #   fn bump(&mut self, _: &usize) {}
-  /// # }
-  /// let profile = CstProfile::new(|_| 0, KindValidator::new(|k| k <= 91), 90, 91);
-  /// let _sink: Sink<'_, Syntactic<'_>, Verbose<()>> = Sink::new("", Verbose::new(), profile);
-  /// ```
-  ///
-  /// # Compile-time wall: value-keyed inners only
-  ///
-  /// The *Inner-emitter contract* above is in the type system: the inner must be a
-  /// [`ValueKeyedEmitter`]. A table-keyed emitter — one that allocates per-`checkpoint`
-  /// bookkeeping behind interior mutability and reclaims it per-`release` — is refused here
-  /// rather than accepted and then silently stranded (the sink's `release` forwards nothing, so
-  /// such an inner would leak one row per committed capture):
-  ///
-  /// ```compile_fail
-  /// use core::cell::RefCell;
-  /// use tokora::{
-  ///   Lexer, SimpleSpan, Token,
-  ///   cst::{CstProfile, KindValidator, Sink},
-  ///   emitter::Emitter,
-  ///   input::Cursor,
-  ///   span::Spanned,
-  /// };
-  ///
-  /// /// A table-keyed emitter: `checkpoint` allocates a row and hands back its index.
-  /// #[derive(Default)]
-  /// struct TableKeyed {
-  ///   rows: RefCell<Vec<u64>>,
-  /// }
-  ///
-  /// impl<'a, L, Lang: ?Sized> Emitter<'a, L, Lang> for TableKeyed {
-  ///   type Error = ();
-  ///   fn emit_lexer_error(
-  ///     &mut self,
-  ///     _e: Spanned<<L::Token as Token<'a>>::Error, L::Span>,
-  ///   ) -> Result<(), ()> where L: Lexer<'a> { Ok(()) }
-  ///   fn emit_unexpected_token(
-  ///     &mut self,
-  ///     _e: tokora::error::token::UnexpectedTokenOf<'a, L, Lang>,
-  ///   ) -> Result<(), ()> where L: Lexer<'a> { Ok(()) }
-  ///   fn emit_error(&mut self, _e: Spanned<(), L::Span>) -> Result<(), ()>
-  ///   where L: Lexer<'a> { Ok(()) }
-  ///   fn checkpoint(&self) -> u64 {
-  ///     let mut rows = self.rows.borrow_mut();
-  ///     rows.push(0);
-  ///     rows.len() as u64 - 1 // a KEY, not a reading of the emission state
-  ///   }
-  ///   fn rewind(&mut self, _c: &Cursor<'a, '_, L>, _m: u64) where L: Lexer<'a> {}
-  /// }
-  ///
-  /// # #[derive(Debug, Clone, Copy)]
-  /// # struct STok;
-  /// # impl Token<'_> for STok {
-  /// #   type Kind = u8;
-  /// #   type Error = ();
-  /// #   const SURFACES_TRIVIA: bool = true;
-  /// #   fn kind(&self) -> u8 { 0 }
-  /// #   fn is_trivia(&self) -> bool { false }
-  /// # }
-  /// # struct Lossless<'a> { src: &'a str, state: () }
-  /// # impl<'inp> Lexer<'inp> for Lossless<'inp> {
-  /// #   type State = (); type Source = str; type Token = STok;
-  /// #   type Span = SimpleSpan; type Offset = usize;
-  /// #   fn new(src: &'inp str) -> Self { Self { src, state: () } }
-  /// #   fn with_state(src: &'inp str, state: ()) -> Self { Self { src, state } }
-  /// #   fn check(&self) -> Result<(), ()> { Ok(()) }
-  /// #   fn state(&self) -> &() { &self.state }
-  /// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
-  /// #   fn into_state(self) -> () { self.state }
-  /// #   fn source(&self) -> &'inp str { self.src }
-  /// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(0, 0) }
-  /// #   fn slice(&self) -> &'inp str { "" }
-  /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
-  /// #   fn bump(&mut self, _: &usize) {}
-  /// # }
-  /// let profile = CstProfile::new(|_| 0, KindValidator::new(|k| k <= 91), 90, 91);
-  /// let _sink: Sink<'_, Lossless<'_>, TableKeyed> =
-  ///   Sink::new("", TableKeyed::default(), profile);
-  /// ```
+  /// - to **trivia-surfacing lexers** ([`Lexer::SURFACES_TRIVIA`] `== true`): a syntactic lexer
+  ///   that skips trivia cannot take this lossless door, because a skipped-whitespace gap is
+  ///   indistinguishable from a dropped committed token. The wall is the inline-`const`
+  ///   assertion in the body, so it fires at build/test/doc time (a post-monomorphization
+  ///   `error[E0080]` reported at the offending *driver* call site, with a note naming the
+  ///   instantiation) — **not** under `cargo check`, which never monomorphizes the call;
+  /// - to **value-keyed inner emitters** ([`ValueKeyedEmitter`]) — see the *Inner-emitter
+  ///   contract* on [`Sink`]. That one is an ordinary bound, restated on the drivers, so it
+  ///   fires at type-check time.
   #[inline]
-  pub fn new(source: &'inp L::Source, inner: E, profile: CstProfile<L::Token>) -> Self
+  pub(crate) fn new(source: &'inp L::Source, inner: E, profile: CstProfile<L::Token>) -> Self
   where
     E: ValueKeyedEmitter,
   {
@@ -688,9 +576,13 @@ where
   }
 
   /// Sets the materialization-time trivia policy (builder form).
+  ///
+  /// Crate-private with the constructor: the public builder is
+  /// [`Cst::with_trivia_policy`](super::Cst::with_trivia_policy), at the door that reads the
+  /// policy.
   #[inline(always)]
   #[must_use]
-  pub fn with_trivia_policy(mut self, policy: TriviaPolicy) -> Self {
+  pub(crate) fn with_trivia_policy(mut self, policy: TriviaPolicy) -> Self {
     self.trivia = policy;
     self
   }
@@ -700,7 +592,8 @@ where
   /// Deliberately no `&mut` counterpart: a caller who could drive the inner emitter's
   /// `rewind` directly would shear the event log from the diagnostic log with no witness.
   /// The mutable path to the inner emitter is the sink's own trait surface; ownership
-  /// comes back from [`finish`](Self::finish) / [`finish_partial`](Self::finish_partial).
+  /// comes back from [`Cst::finish`](super::Cst::finish) /
+  /// [`Cst::finish_partial`](super::Cst::finish_partial).
   #[inline(always)]
   pub const fn inner_ref(&self) -> &E {
     &self.inner
@@ -775,9 +668,11 @@ where
     );
   }
 
-  /// Records one committed token: the one body behind both doors of the token channel —
-  /// the auto-emission hook ([`Emitter::commit_token`], fed by the input layer's settle
-  /// primitive) and the raw transport ([`CstEmitter::cst_token`]).
+  /// Records one committed token. The token channel has exactly **one** door — the
+  /// auto-emission hook ([`Emitter::commit_token`], fed by the input layer's settle primitive)
+  /// — and this is its body. There is no raw transport beside it: a caller-chosen span that no
+  /// settle accounts for is the wrong-tree class nothing downstream can detect, so a grammar
+  /// cannot open this door at all.
   fn record_token(&mut self, tok: &L::Token, span: &L::Span) {
     let kind = (self.profile.mapper())(tok);
     // Emission-time mapper validity (detect-at-cause): rowan would defer a bad kind to a
@@ -890,10 +785,15 @@ where
   /// (record-then-propagate: transaction guards rewind during fatal unwinds, so a slot
   /// skipped on the `Err` edge would drop an `error_span` a later `finish` needs to cover).
   ///
-  /// `error_span` is `Some` only for a **lexer error** (the one forwarded diagnostic that
-  /// names untokenized source bytes); it is recorded into the slot so `finish`'s
+  /// `error_span` is `Some` at exactly **one** call site —
+  /// [`commit_lexer_error`](Emitter::commit_lexer_error), the input layer's own refusal over
+  /// bytes it lexed and could not tokenize — and it is recorded into the slot so `finish`'s
   /// gap-coverage law can tell a legitimately-refused byte from a dropped committed token.
-  /// Every other `emit_*` passes `None`.
+  /// Every other forwarded diagnostic passes `None`, **including the caller-facing
+  /// [`emit_lexer_error`](Emitter::emit_lexer_error)**: that one carries a span the caller chose
+  /// with nothing consumed for it, which is the `cst_token` shape on the diagnostic channel. The
+  /// asymmetry is the whole point of having two doors, and COVERAGE_EVIDENCE_CENSUS pins the
+  /// `Some(` site at exactly one.
   ///
   /// The inner emitter's rewind reading is captured on the mark-stack row at
   /// [`checkpoint`](Emitter::checkpoint), not here — a forwarded diagnostic advances the
@@ -931,6 +831,22 @@ where
 {
   type Error = E::Error;
 
+  /// The **diagnostic** door: a lexer-error report raised by a caller — a parser through
+  /// [`InputRef::emit_lexer_error`](crate::InputRef::emit_lexer_error), a callback through
+  /// [`EmitterView::emit_lexer_error`](crate::EmitterView::emit_lexer_error), a wrapper through
+  /// either. It forwards the report and occupies a `Diag` slot like every other emission, and it
+  /// records **no coverage span**: the caller chose that span, and nothing was consumed for it.
+  ///
+  /// This is the `cst_token` shape on the diagnostic channel, and it is closed the same way.
+  /// A recorded lexer-error span is what *licenses* a gap tile at materialization, so accepting a
+  /// caller's span here would let anyone who can reach this emitter excuse an uncovered byte of
+  /// the sink's own buffer — including, on the documented orphan route, a **foreign** parse whose
+  /// spans index a buffer this sink never saw. The evidence door is
+  /// [`commit_lexer_error`](Emitter::commit_lexer_error), which only the input layer calls.
+  ///
+  /// The capability is not withheld, only its structural side effect: the report still reaches
+  /// the inner emitter, so a caller can still say *"this input is malformed here"* inline, with
+  /// no rewind — which is the whole reason the `decide` family exists.
   #[inline]
   fn emit_lexer_error(
     &mut self,
@@ -939,10 +855,26 @@ where
   where
     L: Lexer<'inp>,
   {
-    // The one diagnostic that names untokenized bytes: record its span so `finish` can tell
-    // this legitimately-refused gap from a dropped committed token.
+    self.forward_diag::<Lang, _>(None, |inner| inner.emit_lexer_error(err))
+  }
+
+  /// The **evidence** door: the input layer's own lexer error, over bytes it lexed and refused.
+  ///
+  /// This is the coverage channel's one and only producer — the refusal-side twin of
+  /// [`commit_token`](Emitter::commit_token), reached from the input layer's single deduped
+  /// reporting site and from nowhere a caller can stand. The span is recorded into the `Diag`
+  /// slot so `finish`'s gap-coverage law can tell this legitimately-refused region from a dropped
+  /// committed token.
+  #[inline]
+  fn commit_lexer_error(
+    &mut self,
+    err: Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
+  ) -> Result<(), Self::Error>
+  where
+    L: Lexer<'inp>,
+  {
     self.forward_diag::<Lang, _>(Some(err.span_ref().clone()), |inner| {
-      inner.emit_lexer_error(err)
+      inner.commit_lexer_error(err)
     })
   }
 
@@ -1055,7 +987,7 @@ where
   /// violating call would otherwise have already performed by the time the wall fired. A wall
   /// placed after the damage only narrates it: a host that catches this panic would be left
   /// holding a sink whose event log had been rewound and whose inner had not, and
-  /// [`finish_partial`](Self::finish_partial) would then hand back that sheared state as a
+  /// [`Cst::finish_partial`](super::Cst::finish_partial) would then hand back that sheared state as a
   /// tree. Caught here, the sink is exactly as it was, on every channel.
   ///
   /// **The one exception is an unwind already in progress**, and it is a guard against a
@@ -1230,8 +1162,8 @@ where
   /// The auto-emission hook: the input layer settles every committed token through this
   /// one call — the consume settles via its `commit_token` primitive, the scan skips via
   /// `skip_and_report` — so the whole consume surface is tree-producing with zero per-atom
-  /// code. Records a `Token` event through the same body as the raw
-  /// [`cst_token`](CstEmitter::cst_token) transport.
+  /// code. It is the token channel's **only** door: the `Token` event exists because a token
+  /// settled, never because a caller said so.
   #[inline]
   fn commit_token(&mut self, tok: &L::Token, span: &L::Span)
   where
@@ -1337,16 +1269,6 @@ where
     });
   }
 
-  fn cst_token(&mut self, tok: &L::Token, span: &L::Span)
-  where
-    L: Lexer<'inp>,
-  {
-    // Raw transport records the event only — a *settle* reaches the inner through
-    // [`Emitter::commit_token`]; forwarding here would fabricate a settle the input layer
-    // never made (exactly-once law).
-    self.record_token(tok, span);
-  }
-
   fn cst_finish(&mut self, kind: u16)
   where
     L: Lexer<'inp>,
@@ -1357,7 +1279,7 @@ where
     // because depth cannot separate the two histories that reach this call with a node
     // still open:
     //
-    //   - LEGAL cross-checkpoint close — `cst_start(A); checkpoint m; cst_token;
+    //   - LEGAL cross-checkpoint close — `cst_start(A); checkpoint m; <token settles>;
     //     cst_finish(A)`: A was opened, never rolled back, and this finish closes it. Under
     //     commit/release both events survive balanced; under a rewind of `m` the finish
     //     truncates and A reopens (the truncate-and-reopen semantics the CstEmitter contract
@@ -1366,7 +1288,7 @@ where
     //     this narrowing fixes (see issue #98).
     //
     //   - LEAKED-FINISH misuse — `cst_start(A); checkpoint m; cst_start(B); rewind(m);
-    //     cst_token; cst_finish(B)`: the finish was meant for B, but B's start died with the
+    //     <token settles>; cst_finish(B)`: the finish was meant for B, but B's start died with the
     //     rewind, so it would silently close ancestor A instead. After the rewind the event
     //     buffer is IDENTICAL to the legal case above — depth cannot tell them apart, and
     //     neither can the whole buffer. The `kind` argument is what separates them: it

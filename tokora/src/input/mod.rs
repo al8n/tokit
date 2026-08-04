@@ -841,9 +841,12 @@ where
   ///
   /// There is [`emitter`](Self::emitter) (shared, for observation between handles) and
   /// [`into_emitter`](Self::into_emitter) (by value, once the parse is over) — and no
-  /// `emitter_mut`. Mutation during a parse goes through an [`InputRef`], whose
-  /// [`emitter`](InputRef::emitter) is the audited road every emission and every rewind already
-  /// travels. A second way in would be a second place to reason about the aggregate above.
+  /// `emitter_mut`. Both are crate-private, as is every `&mut` route to the emitter: mutation
+  /// during a parse goes through an [`InputRef`]'s forwarding methods
+  /// ([`emit_error`](InputRef::emit_error) and its neighbours), the audited road every emission
+  /// and every rewind already travels. A second way in would be a second place to reason about
+  /// the aggregate above — and, since a `&mut Ctx::Emitter` is itself installable as another
+  /// parse's emitter, a way to aim a recording sink at a buffer it was never built over.
   emitter: Ctx::Emitter,
   /// The lineage memos — the bookkeeping backtracking rewinds an abandoned continuation with:
   /// the live-checkpoint stack, the pin set, and the cache-push/checkpoint-id/savepoint counters.

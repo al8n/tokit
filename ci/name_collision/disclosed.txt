@@ -58,3 +58,47 @@ peek_then_head/later_pick_discarded
 # out of every future plan, and the harness can never re-litigate it (README, "Staleness is
 # checked only for rows this run planned").
 unlimited/discarded
+
+# ── `ParseState`'s four ZERO-ARGUMENT forwarders — a PRE-EXISTING callback view ───────────
+#
+# `ParseState` is the view a state-carrying callback (`map_with`, `and_then_with`,
+# `validate_with`, `fold`) is handed, and it has shipped since 0.7.3. What it had NOT shipped
+# is a single inherent item: the callback reached the emitter through `state.emitter()`, and
+# #168 replaced that door with thirteen forwarding methods under the emitter's own names. So
+# every consumer who wrote `fn exit_label(&mut self)` on `ParseState` to shorten
+# `state.emitter().exit_label()` — the most natural helper 0.7.3 offered — now competes with a
+# tokora method of the same name on the same receiver.
+#
+# Reproduced, two-sided, base 7b289bc against this branch, on rustc 1.97.1:
+#
+#     SILENT  cst_mark/discarded              base=witness=1  head=witness=0
+#     SILENT  emitter_bound_source/discarded  base=witness=1  head=witness=0
+#     SILENT  emitter_ref/discarded           base=witness=1  head=witness=0
+#     SILENT  exit_label/discarded            base=witness=1  head=witness=0
+#
+# Both sides compile, neither emits a diagnostic, and the two run different programs.
+#
+# WHY THESE FOUR AND NOT THE OTHER NINE: they are the whole of the zero-argument set. The
+# probe's consumer takes no arguments, so for the nine forwarders that take one or two the
+# head side fails on the PROBE's own arity (E0061) and the row is filed `loud` — a verdict
+# about the probe, not about the name (README, "What this harness does NOT test"). Read this
+# as "the four the harness could reach are silent", never as "the other nine are safe".
+#
+# WHY `discarded` AND NOT `used`: all four `used` rows are `loud` on the same template, by
+# E0308 against the consumer's `-> u8`. The discarded return is the whole of the difference,
+# and none of the four returns something `unused_must_use` fires on — `()` (`exit_label`), a
+# plain `EventMark` (`cst_mark`), an `Option` (`emitter_bound_source`, and `Option` is not
+# `#[must_use]` as a type), a shared reference (`emitter_ref`). Same discriminator as the four
+# 0.8.0 rows above: the lint, not a `#[must_use]` attribute.
+#
+# NOT a bounded receiver, and the 0.8.0 paragraph above must not be read as covering these.
+# `ParseState` is a concrete public type; there is no blanket impl to reject anybody. The
+# subject is reached rather than constructed — `ParseState::new` is `pub(super)` — so the
+# probe drives a real parse and takes the state from a `map_with` callback, which hands it
+# BY VALUE. That is what makes the row a measurement: from a by-value receiver tokora's
+# `&self` items are found at the `&T` pick and its `&mut self` items at the `&mut T` pick,
+# where an inherent item beats the consumer's trait item.
+cst_mark/discarded
+emitter_bound_source/discarded
+emitter_ref/discarded
+exit_label/discarded

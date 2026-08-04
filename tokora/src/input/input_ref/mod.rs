@@ -11,7 +11,7 @@ use mayber::{Maybe, MaybeRef};
 use crate::{
   ParseContext, Token, Window,
   cache::{CachedToken, CachedTokenOf, CachedTokenRefOf, MaybeRefCachedTokenOf, Peeked},
-  emitter::Emitter,
+  emitter::{Emitter, EmitterView},
   error::{UnexpectedEot, token::UnexpectedToken},
   span::Spanned,
   utils::Expected,
@@ -30,6 +30,7 @@ pub use session::SessionPointId;
 mod consume_cached;
 mod descent;
 mod drop_policy;
+mod emit;
 mod fold;
 mod peek;
 mod pratt;
@@ -735,8 +736,15 @@ where
 
   /// Returns a mutable reference to the emitter (borrowed through the session cell — see
   /// `input_ref::session` for why the borrow lives there).
+  ///
+  /// **Crate-private, and that is the wall.** `&mut Ctx::Emitter` *is* an emitter, so a parser
+  /// handed one can wrap it and install the wrapper as the context of a second parse over a
+  /// different buffer — the wrong-source class the lossless drivers' pinned emitter slot closes
+  /// at the entry, re-opened from inside. Callers reach the emitter's **operations** through the
+  /// forwarding methods in [`emit`](self::emit) and read its state through
+  /// [`emitter_ref`](Self::emitter_ref); neither yields a value an input can be built around.
   #[inline(always)]
-  pub const fn emitter(&mut self) -> &mut Ctx::Emitter {
+  pub(crate) const fn emitter(&mut self) -> &mut Ctx::Emitter {
     self.session.emitter
   }
 
@@ -776,6 +784,13 @@ where
   /// span's end against a high-water mark — guarantees every lexer error is reported
   /// exactly once, whether it is peeked, consumed, or both.
   ///
+  /// LEXER_ERROR_CENSUS — **the** site that raises the layer's own lexer errors, and the crate's
+  /// only caller of [`Emitter::commit_lexer_error`]. The span it hands over is the lexer's, over
+  /// bytes this layer just lexed and refused, which is what makes it evidence a recording sink
+  /// may license a gap with. Every *caller*-facing spelling (`InputRef::emit_lexer_error`,
+  /// `EmitterView::emit_lexer_error`, `ParseState::emit_lexer_error`) goes to
+  /// [`Emitter::emit_lexer_error`] instead and licenses nothing.
+  ///
   #[inline(always)]
   fn emit_lexer_error_deduped(
     &mut self,
@@ -801,7 +816,7 @@ where
     // carries on, an unraised watermark lets a later scan over the same bytes re-offer the same
     // lexer error — exactly the duplicate this ordering was chosen to close.
     *self.emitted_error_end = end;
-    self.emitter().emit_lexer_error(err)
+    self.emitter().commit_lexer_error(err)
   }
 
   /// Returns `true` if the input is poisoned by a sticky limit error.

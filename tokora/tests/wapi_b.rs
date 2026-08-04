@@ -444,7 +444,7 @@ fn pinning_preserves_send_regardless_of_the_pinned_type() {
 #[test]
 fn fluent_labelled_matches_the_free_function() {
   use tokora::{
-    emitter::{Emitter, Verbose},
+    emitter::Verbose,
     parser::labelled,
     span::{SimpleSpan, Spanned},
   };
@@ -489,16 +489,13 @@ fn fluent_labelled_matches_the_free_function() {
   // explicitly, which is what the emitter suite's own label cell does. The recording is
   // read through `inp.emitter()` during the parse, the only point it is reachable.
   fn marker<'inp>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VCtx<'inp>>) -> Result<(), E> {
-    <Verbose<E> as Emitter<'inp, TestLexer<'inp>>>::emit_error(
-      inp.emitter(),
-      Spanned::new(SimpleSpan::new(0usize, 1usize), E),
-    )
+    inp.emit_error(Spanned::new(SimpleSpan::new(0usize, 1usize), E))
   }
   fn recorded<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VCtx<'inp>>,
   ) -> Vec<&'static str> {
     inp
-      .emitter()
+      .emitter_ref()
       .labels()
       .values()
       .flatten()

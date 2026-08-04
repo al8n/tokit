@@ -30,6 +30,7 @@
 
 use core::cell::Cell;
 use std::rc::Rc;
+use tokora::EmitterView;
 
 use generic_arraydeque::typenum::{U1, U2, U4};
 use tokora::{
@@ -472,7 +473,7 @@ where
 /// gate would surface the stop and the element's latch would go untested.
 fn while_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, CErr>
 where
   Ctx: ParseContext<'inp, TLexer<'inp>>,

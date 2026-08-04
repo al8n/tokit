@@ -37,6 +37,7 @@ mod common;
 
 use common::{TestLexer, Token, TokenKind};
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext,
   SimpleSpan, TryParseInput,
@@ -188,7 +189,7 @@ where
 
 fn decide_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -356,7 +357,7 @@ macro_rules! driver_cases {
         let before = *inp.cursor().as_inner();
         let items = $go(inp)?;
         let after = *inp.cursor().as_inner();
-        let recorded: Vec<WE> = inp.emitter().errors().values().flatten().cloned().collect();
+        let recorded: Vec<WE> = inp.emitter_ref().errors().values().flatten().cloned().collect();
         Ok((items, before, after, recorded))
       }
       let (items, before, after, recorded) = Parser::with_context(verbose_ctx())
@@ -410,7 +411,15 @@ macro_rules! flagged_once_cases {
         inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
       ) -> Result<Vec<WE>, WE> {
         $go(inp)?;
-        Ok(inp.emitter().errors().values().flatten().cloned().collect())
+        Ok(
+          inp
+            .emitter_ref()
+            .errors()
+            .values()
+            .flatten()
+            .cloned()
+            .collect(),
+        )
       }
       let final_wrong: Vec<WE> = Parser::with_context(verbose_ctx())
         .apply(probe)
@@ -441,7 +450,15 @@ macro_rules! flagged_once_cases {
         inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
       ) -> Result<Vec<WE>, WE> {
         $go(inp)?;
-        Ok(inp.emitter().errors().values().flatten().cloned().collect())
+        Ok(
+          inp
+            .emitter_ref()
+            .errors()
+            .values()
+            .flatten()
+            .cloned()
+            .collect(),
+        )
       }
       let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
         .apply(probe)
@@ -524,7 +541,15 @@ fn repeated_zero_width_stall_arm_flags_wrong_opener_once() {
       .delimited_by_braces()
       .collect()
       .parse_input(inp)?;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(
+      inp
+        .emitter_ref()
+        .errors()
+        .values()
+        .flatten()
+        .cloned()
+        .collect(),
+    )
   }
   let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
     .apply(parse)
@@ -546,15 +571,16 @@ fn repeated_while_zero_width_stall_arm_flags_wrong_opener_once() {
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
   ) -> Result<Vec<WE>, WE> {
     let mut budget = 3usize;
-    let cond =
-      move |_: Peeked<'_, 'inp, TestLexer<'inp>, U1>, _: &mut Verbose<WE>| -> Result<Action, WE> {
-        Ok(if budget > 0 {
-          budget -= 1;
-          Action::Continue
-        } else {
-          Action::Stop
-        })
-      };
+    let cond = move |_: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
+                     _: EmitterView<'_, 'inp, TestLexer<'inp>, Verbose<WE>>|
+          -> Result<Action, WE> {
+      Ok(if budget > 0 {
+        budget -= 1;
+        Action::Continue
+      } else {
+        Action::Stop
+      })
+    };
     let elem =
       |_: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>| -> Result<i64, WE> { Ok(0) };
     let _: Vec<i64> = elem
@@ -562,7 +588,15 @@ fn repeated_while_zero_width_stall_arm_flags_wrong_opener_once() {
       .delimited_by_braces()
       .collect()
       .parse_input(inp)?;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(
+      inp
+        .emitter_ref()
+        .errors()
+        .values()
+        .flatten()
+        .cloned()
+        .collect(),
+    )
   }
   let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
     .apply(parse)
@@ -584,15 +618,16 @@ fn separated_while_zero_width_stall_arm_flags_wrong_opener_once() {
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
   ) -> Result<Vec<WE>, WE> {
     let mut budget = 3usize;
-    let cond =
-      move |_: Peeked<'_, 'inp, TestLexer<'inp>, U1>, _: &mut Verbose<WE>| -> Result<Action, WE> {
-        Ok(if budget > 0 {
-          budget -= 1;
-          Action::Continue
-        } else {
-          Action::Stop
-        })
-      };
+    let cond = move |_: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
+                     _: EmitterView<'_, 'inp, TestLexer<'inp>, Verbose<WE>>|
+          -> Result<Action, WE> {
+      Ok(if budget > 0 {
+        budget -= 1;
+        Action::Continue
+      } else {
+        Action::Stop
+      })
+    };
     let elem =
       |_: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>| -> Result<i64, WE> { Ok(0) };
     let _: Vec<i64> = elem
@@ -600,7 +635,15 @@ fn separated_while_zero_width_stall_arm_flags_wrong_opener_once() {
       .delimited_by_braces()
       .collect()
       .parse_input(inp)?;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(
+      inp
+        .emitter_ref()
+        .errors()
+        .values()
+        .flatten()
+        .cloned()
+        .collect(),
+    )
   }
   let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
     .apply(parse)

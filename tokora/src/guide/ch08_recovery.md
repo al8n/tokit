@@ -217,8 +217,7 @@ where
     match parsed {
       Ok(stmt) => stmts.push(stmt),
       Err(_) => {
-        inp.emitter()
-          .emit_error(Spanned::new(at, CalcError::Unexpected))?;
+        inp.emit_error(Spanned::new(at, CalcError::Unexpected))?;
         // The skip. `pred` is only consulted at depth zero, so a `;` inside `( … )` is
         // skipped over rather than mistaken for the end of the statement.
         if let Some(hole) = inp.sync_balanced(classifier, |t| matches!(t.data(), Tok::Semi))? {
