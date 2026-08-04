@@ -1,7 +1,7 @@
 #![cfg(all(feature = "rowan", feature = "std"))]
 
 //! The `node()` combinator contract over a real recording sink, driven through the public
-//! parse entry with the caller-held-sink threading (`&mut Sink` in the context seat):
+//! lossless parse entry (`parse_lossless`, which mints the sink from the source it parses):
 //!
 //! - a decline leaves **no node** (not even an empty one);
 //! - an error-path unwind leaves **no dangling start** — materialization stays balanced;
@@ -14,16 +14,14 @@
 use core::fmt;
 
 use tokora::{
-  Emitter, InputRef, Lexer, Parse, ParseInput, Parser, SimpleSpan, Token, TryParseInput,
+  InputRef, Lexer, Parse, ParseInput, Parser, SimpleSpan, Token, TryParseInput,
   cache::DefaultCache,
-  cst::FinishError,
+  cst::{CstProfile, FinishError, parse_lossless},
   emitter::{CstEmitter, Verbose},
-  error::token::{UnexpectedToken, UnexpectedTokenOf},
-  input::Cursor,
+  error::token::UnexpectedToken,
   parser::{
     PrattFoldOp, PrattInfix, PrattLHS, PrattRHS, Precedenced, node, node_at, node_opt, pratt,
   },
-  span::Spanned,
   try_parse_input::ParseAttempt,
 };
 
@@ -222,22 +220,21 @@ fn map_tok(t: &Tok) -> u16 {
 }
 
 type Sink<'inp> = tokora::cst::Sink<'inp, ByteLexer<'inp>, Verbose<TestErr>>;
-type Ctx<'inp, 's> = (&'s mut Sink<'inp>, DefaultCache<'inp, ByteLexer<'inp>>);
-type Ir<'inp, 's, 'c> = InputRef<'inp, 'c, ByteLexer<'inp>, Ctx<'inp, 's>, ()>;
+type Ctx<'inp> = (Sink<'inp>, DefaultCache<'inp, ByteLexer<'inp>>);
+type Ir<'inp, 'c> = InputRef<'inp, 'c, ByteLexer<'inp>, Ctx<'inp>, ()>;
 
 /// The fixture's kind space: the structural kinds above plus the `100 + byte` token images.
 fn in_kind_space(kind: u16) -> bool {
   matches!(kind, K_ROOT..=K_BIN | K_ERR | K_GAP) || kind >= 100
 }
 
-fn sink(src: &str) -> Sink<'_> {
-  let profile = tokora::cst::CstProfile::new(
+fn profile() -> CstProfile<Tok> {
+  CstProfile::new(
     map_tok,
     tokora::cst::KindValidator::new(in_kind_space),
     K_ERR,
     K_GAP,
-  );
-  tokora::cst::Sink::new(src, Verbose::new(), profile)
+  )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -259,26 +256,30 @@ fn tree(green: rowan::GreenNode) -> rowan::SyntaxNode<RawLang> {
   rowan::SyntaxNode::new_root(green)
 }
 
-/// Runs `parser` over `src` with a caller-held sink in the context seat, then materializes.
+/// Runs `parser` over `src` through the lossless driver, then materializes.
 fn run<O>(
   src: &str,
-  parser: impl for<'c> FnMut(&mut Ir<'_, '_, 'c>) -> Result<O, TestErr>,
+  parser: impl for<'c> FnMut(&mut Ir<'_, 'c>) -> Result<O, TestErr>,
 ) -> (
   Result<O, TestErr>,
   Result<rowan::GreenNode, tokora::cst::FinishError>,
 ) {
-  let mut s = sink(src);
-  let res =
-    Parser::with_parser_and_context(parser, (&mut s, DefaultCache::<ByteLexer<'_>>::default()))
-      .parse_str(src);
-  let (green, _emitter) = s.finish(K_ROOT);
+  let (cst, res) = parse_lossless(
+    src,
+    (),
+    Verbose::new(),
+    profile(),
+    DefaultCache::<ByteLexer<'_>>::default(),
+    parser,
+  );
+  let (green, _emitter) = cst.finish(K_ROOT);
   (res, green)
 }
 
 // ── Little parsers ──────────────────────────────────────────────────────────────
 
 /// Consumes exactly one token.
-fn take_one(inp: &mut Ir<'_, '_, '_>) -> Result<(), TestErr> {
+fn take_one(inp: &mut Ir<'_, '_>) -> Result<(), TestErr> {
   match inp.next()? {
     Some(_) => Ok(()),
     None => Err(TestErr::Boom),
@@ -286,13 +287,13 @@ fn take_one(inp: &mut Ir<'_, '_, '_>) -> Result<(), TestErr> {
 }
 
 /// Consumes exactly two tokens.
-fn take_two(inp: &mut Ir<'_, '_, '_>) -> Result<(), TestErr> {
+fn take_two(inp: &mut Ir<'_, '_>) -> Result<(), TestErr> {
   take_one(inp)?;
   take_one(inp)
 }
 
 /// Declines unless the next token is `x`; consumes it when it is.
-fn try_x(inp: &mut Ir<'_, '_, '_>) -> Result<ParseAttempt<()>, TestErr> {
+fn try_x(inp: &mut Ir<'_, '_>) -> Result<ParseAttempt<()>, TestErr> {
   Ok(match inp.try_expect(|t| t.data().0 == b'x')? {
     Some(_) => ParseAttempt::Accept(()),
     None => ParseAttempt::Decline,
@@ -300,7 +301,7 @@ fn try_x(inp: &mut Ir<'_, '_, '_>) -> Result<ParseAttempt<()>, TestErr> {
 }
 
 /// Consumes one token, then fails.
-fn boom_after_one(inp: &mut Ir<'_, '_, '_>) -> Result<(), TestErr> {
+fn boom_after_one(inp: &mut Ir<'_, '_>) -> Result<(), TestErr> {
   take_one(inp)?;
   Err(TestErr::Boom)
 }
@@ -363,14 +364,16 @@ fn node_error_unwind_leaves_no_dangling_start() {
 
   // The aborted parse's tree: `finish_partial` tiles the unconsumed `b`, closing nothing
   // (the buffer was already balanced), so the round trip holds with no node.
-  let mut s = sink("ab");
-  let res = Parser::with_parser_and_context(
-    |inp: &mut Ir<'_, '_, '_>| node(K_NODE, boom_after_one).parse_input(inp),
-    (&mut s, DefaultCache::<ByteLexer<'_>>::default()),
-  )
-  .parse_str("ab");
+  let (cst, res) = parse_lossless(
+    "ab",
+    (),
+    Verbose::new(),
+    profile(),
+    DefaultCache::<ByteLexer<'_>>::default(),
+    |inp: &mut Ir<'_, '_>| node(K_NODE, boom_after_one).parse_input(inp),
+  );
   assert_eq!(res, Err(TestErr::Boom));
-  let (green, _emitter) = s.finish_partial(K_ROOT);
+  let (green, _emitter) = cst.finish_partial(K_ROOT);
   let root = tree(green.expect("finish_partial tiles the tail"));
   assert_eq!(
     root.text().to_string(),
@@ -384,7 +387,7 @@ fn node_error_unwind_leaves_no_dangling_start() {
 #[test]
 fn nested_nodes_nest_lifo() {
   let (res, green) = run("abc", |inp| {
-    node(K_NODE, |inp: &mut Ir<'_, '_, '_>| {
+    node(K_NODE, |inp: &mut Ir<'_, '_>| {
       take_one(inp)?;
       node(K_INNER, take_one).parse_input(inp)?;
       take_one(inp)
@@ -407,7 +410,7 @@ fn nested_nodes_nest_lifo() {
 /// green trees (buffer nonces are route-dependent by design).
 #[test]
 fn backtrack_equivalence_seed_declined_wrap_vs_straight() {
-  fn straight(inp: &mut Ir<'_, '_, '_>) -> Result<(), TestErr> {
+  fn straight(inp: &mut Ir<'_, '_>) -> Result<(), TestErr> {
     node(K_NODE, take_two).parse_input(inp)
   }
 
@@ -504,7 +507,7 @@ fn node_opt_absent_records_nothing_present_wraps() {
 const PREC_SUM: i64 = 1;
 const PREC_PROD: i64 = 2;
 
-fn pratt_lhs(inp: &mut Ir<'_, '_, '_>) -> Result<PrattLHS<i64, (), i64>, TestErr> {
+fn pratt_lhs(inp: &mut Ir<'_, '_>) -> Result<PrattLHS<i64, (), i64>, TestErr> {
   match inp.next()? {
     Some(tok) if tok.data().0.is_ascii_digit() => {
       Ok(PrattLHS::Operand(i64::from(tok.data().0 - b'0')))
@@ -513,7 +516,7 @@ fn pratt_lhs(inp: &mut Ir<'_, '_, '_>) -> Result<PrattLHS<i64, (), i64>, TestErr
   }
 }
 
-fn pratt_rhs(inp: &mut Ir<'_, '_, '_>) -> Result<PrattRHS<u8, u8, u8, (), i64>, TestErr> {
+fn pratt_rhs(inp: &mut Ir<'_, '_>) -> Result<PrattRHS<u8, u8, u8, (), i64>, TestErr> {
   Ok(match inp.next()? {
     Some(tok) => match tok.data().0 {
       op @ b'+' => PrattRHS::Infix(Precedenced::new(PrattInfix::Left(op), PREC_SUM)),
@@ -527,7 +530,7 @@ fn pratt_rhs(inp: &mut Ir<'_, '_, '_>) -> Result<PrattRHS<u8, u8, u8, (), i64>, 
 }
 
 fn pratt_fold_prefix(
-  _: &mut Ir<'_, '_, '_>,
+  _: &mut Ir<'_, '_>,
   operand: i64,
   _: Precedenced<(), i64>,
 ) -> Result<i64, TestErr> {
@@ -535,7 +538,7 @@ fn pratt_fold_prefix(
 }
 
 fn pratt_fold_infix(
-  _: &mut Ir<'_, '_, '_>,
+  _: &mut Ir<'_, '_>,
   left: i64,
   right: i64,
   op: Precedenced<PrattInfix<u8, u8, u8>, i64>,
@@ -551,7 +554,7 @@ fn pratt_fold_infix(
 }
 
 fn pratt_fold_postfix(
-  _: &mut Ir<'_, '_, '_>,
+  _: &mut Ir<'_, '_>,
   operand: i64,
   _: Precedenced<(), i64>,
 ) -> Result<i64, TestErr> {
@@ -571,7 +574,6 @@ fn bin_kinds(op: PrattFoldOp<'_, (), u8, u8, u8, ()>) -> Option<u16> {
 /// compute the same `i64` they always did).
 #[test]
 fn pratt_with_cst_kinds_materializes_nested_bin_exprs() {
-  let mut s = sink("1+2*3");
   let parser = pratt(
     pratt_lhs,
     pratt_rhs,
@@ -580,12 +582,17 @@ fn pratt_with_cst_kinds_materializes_nested_bin_exprs() {
     pratt_fold_postfix,
   )
   .with_cst_kinds(bin_kinds);
-  let res =
-    Parser::with_parser_and_context(parser, (&mut s, DefaultCache::<ByteLexer<'_>>::default()))
-      .parse_str("1+2*3");
+  let (cst, res) = parse_lossless(
+    "1+2*3",
+    (),
+    Verbose::new(),
+    profile(),
+    DefaultCache::<ByteLexer<'_>>::default(),
+    parser,
+  );
   assert_eq!(res, Ok(7), "the folds still fold");
 
-  let (green, _emitter) = s.finish(K_ROOT);
+  let (green, _emitter) = cst.finish(K_ROOT);
   let root = tree(green.expect("driver-held marks balance"));
   assert_eq!(root.text().to_string(), "1+2*3");
 
@@ -613,7 +620,6 @@ fn pratt_with_cst_kinds_materializes_nested_bin_exprs() {
 /// *cycle-scoped* exit: the wrapper commits the expression guard rather than rolling it back.
 #[test]
 fn pratt_with_cst_kinds_records_no_node_for_a_non_associative_repeat() {
-  let mut s = sink("1=2=3");
   let parser = pratt(
     pratt_lhs,
     pratt_rhs,
@@ -622,9 +628,14 @@ fn pratt_with_cst_kinds_records_no_node_for_a_non_associative_repeat() {
     pratt_fold_postfix,
   )
   .with_cst_kinds(bin_kinds);
-  let res =
-    Parser::with_parser_and_context(parser, (&mut s, DefaultCache::<ByteLexer<'_>>::default()))
-      .parse_str("1=2=3");
+  let (cst, res) = parse_lossless(
+    "1=2=3",
+    (),
+    Verbose::new(),
+    profile(),
+    DefaultCache::<ByteLexer<'_>>::default(),
+    parser,
+  );
   assert_eq!(
     res,
     Err(TestErr::Unexpected),
@@ -633,7 +644,7 @@ fn pratt_with_cst_kinds_records_no_node_for_a_non_associative_repeat() {
 
   // The unconsumed handback (`=3`) is tiled rather than reported as a gap: what this cell is
   // about is which *nodes* exist, not who covers the tail.
-  let (green, _emitter) = s.finish_partial(K_ROOT);
+  let (green, _emitter) = cst.finish_partial(K_ROOT);
   let root = tree(green.expect("driver-held marks balance"));
   assert_eq!(root.text().to_string(), "1=2=3");
   let kids: Vec<_> = root.children().collect();
@@ -665,7 +676,6 @@ fn pratt_with_cst_kinds_records_no_node_for_a_non_associative_repeat() {
 /// nodes at all).
 #[test]
 fn pratt_without_cst_kinds_records_no_nodes() {
-  let mut s = sink("1+2*3");
   let parser = pratt(
     pratt_lhs,
     pratt_rhs,
@@ -673,12 +683,17 @@ fn pratt_without_cst_kinds_records_no_nodes() {
     pratt_fold_infix,
     pratt_fold_postfix,
   );
-  let res =
-    Parser::with_parser_and_context(parser, (&mut s, DefaultCache::<ByteLexer<'_>>::default()))
-      .parse_str("1+2*3");
+  let (cst, res) = parse_lossless(
+    "1+2*3",
+    (),
+    Verbose::new(),
+    profile(),
+    DefaultCache::<ByteLexer<'_>>::default(),
+    parser,
+  );
   assert_eq!(res, Ok(7));
 
-  let (green, _emitter) = s.finish(K_ROOT);
+  let (green, _emitter) = cst.finish(K_ROOT);
   let root = tree(green.expect("token-only timelines balance trivially"));
   assert_eq!(root.text().to_string(), "1+2*3");
   assert_eq!(root.children().count(), 0, "no nodes without the hook");
@@ -716,350 +731,5 @@ fn node_over_a_diagnostics_only_emitter_is_inert() {
     res,
     Ok(()),
     "the inert event channel costs nothing and changes nothing"
-  );
-}
-// ═══════════════════════════════════════════════════════════════════════════════
-// The partial-forwarding hole: structuring forwarded, token channel severed
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// The half-forwarding wrapper of the partial-forwarding hole: the generic emitter
-/// wrapper a downstream author writes by forwarding every **required** [`Emitter`]
-/// method plus the backtracking trio (the compiler and the parse demand those) and the
-/// whole [`CstEmitter`] structuring surface (the `node()` bound demands that) — while
-/// inheriting the defaulted no-op [`Emitter::commit_token`], which severs the
-/// auto-emission token channel even though every structuring event still flows.
-struct HalfForward<E> {
-  inner: E,
-}
-
-impl<'a, L, E> Emitter<'a, L> for HalfForward<E>
-where
-  L: Lexer<'a>,
-  E: Emitter<'a, L>,
-{
-  type Error = E::Error;
-
-  /// Forwarded deliberately, so this fixture models a wrapper that drops *tokens* and nothing
-  /// else. One fixture, one defect.
-  ///
-  /// Omitting it would additionally make this a wrapper that hides its inner sink's bound
-  /// source — a **separate, and currently open, residue**: the parse-entry seam check can only
-  /// compare an answer it receives, so a hidden binding reads as "this emitter binds no
-  /// source" and the pairing is accepted. Nothing downstream refuses it, which is exactly why
-  /// a fixture must not carry that defect by accident while claiming to test another. See the
-  /// four pinned residues in `cst::sink::tests`.
-  fn bound_source(&self) -> Option<tokora::source::SourceIdentity> {
-    self.inner.bound_source()
-  }
-
-  fn emit_lexer_error(
-    &mut self,
-    err: Spanned<<L::Token as Token<'a>>::Error, L::Span>,
-  ) -> Result<(), Self::Error>
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.emit_lexer_error(err)
-  }
-
-  fn emit_unexpected_token(&mut self, err: UnexpectedTokenOf<'a, L>) -> Result<(), Self::Error>
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.emit_unexpected_token(err)
-  }
-
-  fn emit_error(&mut self, err: Spanned<Self::Error, L::Span>) -> Result<(), Self::Error>
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.emit_error(err)
-  }
-
-  fn checkpoint(&self) -> u64 {
-    self.inner.checkpoint()
-  }
-
-  fn rewind(&mut self, cursor: &Cursor<'a, '_, L>, checkpoint: u64)
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.rewind(cursor, checkpoint)
-  }
-
-  fn release(&mut self, checkpoint: u64) {
-    self.inner.release(checkpoint)
-  }
-
-  // `commit_token` is NOT forwarded: the wrapper inherits the core no-op default, and
-  // every committed token silently vanishes between the input layer and the sink.
-}
-
-impl<'a, L, E> CstEmitter<'a, L> for HalfForward<E>
-where
-  L: Lexer<'a>,
-  E: CstEmitter<'a, L>,
-{
-  fn cst_start(&mut self, kind: u16)
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.cst_start(kind)
-  }
-
-  fn cst_token(&mut self, tok: &L::Token, span: &L::Span)
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.cst_token(tok, span)
-  }
-
-  fn cst_finish(&mut self, kind: u16)
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.cst_finish(kind)
-  }
-
-  fn cst_mark(&mut self) -> tokora::cst::event::EventMark
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.cst_mark()
-  }
-
-  fn cst_start_at(&mut self, mark: tokora::cst::event::EventMark, kind: u16)
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.cst_start_at(mark, kind)
-  }
-}
-
-type HfCtx<'s, 'inp> = (
-  HalfForward<&'s mut Sink<'inp>>,
-  DefaultCache<'inp, ByteLexer<'inp>>,
-);
-type HfIr<'inp, 's, 'c> = InputRef<'inp, 'c, ByteLexer<'inp>, HfCtx<'s, 'inp>, ()>;
-
-/// Consumes exactly two tokens through the half-forwarding context.
-fn hf_take_two(inp: &mut HfIr<'_, '_, '_>) -> Result<(), TestErr> {
-  for _ in 0..2 {
-    match inp.next()? {
-      Some(_) => {}
-      None => return Err(TestErr::Boom),
-    }
-  }
-  Ok(())
-}
-
-/// The finding's failing-first regression: a wrapper that forwards the structuring
-/// surface but not the committed-token hook must not produce a *silently plausible*
-/// materialization. The parse succeeds and records structure, every committed token is
-/// dropped between the input layer and the sink, and `finish` — the success door —
-/// refuses with a typed error instead of returning a gap-tiled tree with empty nodes.
-#[test]
-fn half_forwarding_wrapper_is_refused_at_finish() {
-  let mut s = sink("ab");
-  let res = Parser::with_parser_and_context(
-    |inp: &mut HfIr<'_, '_, '_>| node(K_NODE, hf_take_two).parse_input(inp),
-    (
-      HalfForward { inner: &mut s },
-      DefaultCache::<ByteLexer<'_>>::default(),
-    ),
-  )
-  .parse_str("ab");
-  assert_eq!(res, Ok(()), "the parse itself succeeds — that is the trap");
-
-  let (green, _emitter) = s.finish(K_ROOT);
-  let err = match green {
-    Err(err) => err,
-    Ok(tree_ok) => panic!(
-      "finish must refuse the severed token channel, got a plausible tree: {:?}",
-      tree(tree_ok).text()
-    ),
-  };
-  assert!(
-    matches!(err, FinishError::StructureWithoutTokens),
-    "expected StructureWithoutTokens, got {err:?}"
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// The PARTIAL-forwarding hole: structure + SOME tokens forwarded, others severed
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// The partial-forwarding sibling of [`HalfForward`]: it forwards the structuring surface
-/// and the **first** committed token, then severs the channel. Because a token *does*
-/// survive, the zero-token wall ([`FinishError::StructureWithoutTokens`]) cannot fire —
-/// the dropped tokens vanish as uncovered source bytes instead, the signature only the
-/// gap-coverage law ([`FinishError::UncoveredGap`]) catches.
-struct HalfForwardPartial<E> {
-  inner: E,
-  forwarded: usize,
-}
-
-impl<'a, L, E> Emitter<'a, L> for HalfForwardPartial<E>
-where
-  L: Lexer<'a>,
-  E: Emitter<'a, L>,
-{
-  type Error = E::Error;
-
-  /// Forwarded deliberately, so this fixture models a wrapper that drops *tokens* and nothing
-  /// else. One fixture, one defect.
-  ///
-  /// Omitting it would additionally make this a wrapper that hides its inner sink's bound
-  /// source — a **separate, and currently open, residue**: the parse-entry seam check can only
-  /// compare an answer it receives, so a hidden binding reads as "this emitter binds no
-  /// source" and the pairing is accepted. Nothing downstream refuses it, which is exactly why
-  /// a fixture must not carry that defect by accident while claiming to test another. See the
-  /// four pinned residues in `cst::sink::tests`.
-  fn bound_source(&self) -> Option<tokora::source::SourceIdentity> {
-    self.inner.bound_source()
-  }
-
-  fn emit_lexer_error(
-    &mut self,
-    err: Spanned<<L::Token as Token<'a>>::Error, L::Span>,
-  ) -> Result<(), Self::Error>
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.emit_lexer_error(err)
-  }
-
-  fn emit_unexpected_token(&mut self, err: UnexpectedTokenOf<'a, L>) -> Result<(), Self::Error>
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.emit_unexpected_token(err)
-  }
-
-  fn emit_error(&mut self, err: Spanned<Self::Error, L::Span>) -> Result<(), Self::Error>
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.emit_error(err)
-  }
-
-  fn checkpoint(&self) -> u64 {
-    self.inner.checkpoint()
-  }
-
-  fn rewind(&mut self, cursor: &Cursor<'a, '_, L>, checkpoint: u64)
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.rewind(cursor, checkpoint)
-  }
-
-  fn release(&mut self, checkpoint: u64) {
-    self.inner.release(checkpoint)
-  }
-
-  // The partial sever: the first committed token flows, every later one is dropped — so a
-  // token survives (the zero-token wall stays silent) but its peers become uncovered bytes.
-  fn commit_token(&mut self, tok: &L::Token, span: &L::Span)
-  where
-    L: Lexer<'a>,
-  {
-    if self.forwarded < 1 {
-      self.forwarded += 1;
-      self.inner.commit_token(tok, span);
-    }
-  }
-}
-
-impl<'a, L, E> CstEmitter<'a, L> for HalfForwardPartial<E>
-where
-  L: Lexer<'a>,
-  E: CstEmitter<'a, L>,
-{
-  fn cst_start(&mut self, kind: u16)
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.cst_start(kind)
-  }
-
-  fn cst_token(&mut self, tok: &L::Token, span: &L::Span)
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.cst_token(tok, span)
-  }
-
-  fn cst_finish(&mut self, kind: u16)
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.cst_finish(kind)
-  }
-
-  fn cst_mark(&mut self) -> tokora::cst::event::EventMark
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.cst_mark()
-  }
-
-  fn cst_start_at(&mut self, mark: tokora::cst::event::EventMark, kind: u16)
-  where
-    L: Lexer<'a>,
-  {
-    self.inner.cst_start_at(mark, kind)
-  }
-}
-
-type HfpCtx<'s, 'inp> = (
-  HalfForwardPartial<&'s mut Sink<'inp>>,
-  DefaultCache<'inp, ByteLexer<'inp>>,
-);
-type HfpIr<'inp, 's, 'c> = InputRef<'inp, 'c, ByteLexer<'inp>, HfpCtx<'s, 'inp>, ()>;
-
-/// Consumes exactly two tokens through the partial-forwarding context.
-fn hfp_take_two(inp: &mut HfpIr<'_, '_, '_>) -> Result<(), TestErr> {
-  for _ in 0..2 {
-    match inp.next()? {
-      Some(_) => {}
-      None => return Err(TestErr::Boom),
-    }
-  }
-  Ok(())
-}
-
-/// The finding's failing-first regression (RED→GREEN): a wrapper that forwards structure and
-/// only *some* committed tokens leaves the survivors in the tree and the dropped ones as
-/// uncovered source bytes. The zero-token wall can no longer speak (a token survived), so
-/// `finish` — the success door — must catch the loss through the gap-coverage law:
-/// `UncoveredGap` over exactly the dropped token's bytes, not a plausible gap-tiled tree.
-#[test]
-fn partial_forwarding_wrapper_is_refused_at_finish() {
-  let mut s = sink("ab");
-  let res = Parser::with_parser_and_context(
-    |inp: &mut HfpIr<'_, '_, '_>| node(K_NODE, hfp_take_two).parse_input(inp),
-    (
-      HalfForwardPartial {
-        inner: &mut s,
-        forwarded: 0,
-      },
-      DefaultCache::<ByteLexer<'_>>::default(),
-    ),
-  )
-  .parse_str("ab");
-  assert_eq!(res, Ok(()), "the parse itself succeeds — that is the trap");
-
-  let (green, _emitter) = s.finish(K_ROOT);
-  let err = match green {
-    Err(err) => err,
-    Ok(tree_ok) => panic!(
-      "finish must refuse the dropped token, got a plausible tree: {:?}",
-      tree(tree_ok).text()
-    ),
-  };
-  assert!(
-    matches!(err, FinishError::UncoveredGap { start: 1, end: 2 }),
-    "expected UncoveredGap {{ start: 1, end: 2 }} over the dropped 'b', got {err:?}"
   );
 }

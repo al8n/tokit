@@ -902,8 +902,8 @@ mod sink_leg {
   use super::{ConfError, TooFewEmitter};
 
   use tokora::{
-    Emitter, InputRef, Lexer, Parse, Parser, SimpleSpan, Token, cache::DefaultCache,
-    emitter::Verbose, error::syntax::TooFew,
+    Emitter, InputRef, Lexer, SimpleSpan, Token, cache::DefaultCache, emitter::Verbose,
+    error::syntax::TooFew,
   };
 
   #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1016,8 +1016,8 @@ mod sink_leg {
   }
 
   type ConfSink<'inp> = tokora::cst::Sink<'inp, ByteLexer<'inp>, Verbose<ConfError>>;
-  type SinkCtx<'inp, 's> = (&'s mut ConfSink<'inp>, DefaultCache<'inp, ByteLexer<'inp>>);
-  type SinkIr<'inp, 's, 'c> = InputRef<'inp, 'c, ByteLexer<'inp>, SinkCtx<'inp, 's>>;
+  type SinkCtx<'inp> = (ConfSink<'inp>, DefaultCache<'inp, ByteLexer<'inp>>);
+  type SinkIr<'inp, 'c> = InputRef<'inp, 'c, ByteLexer<'inp>, SinkCtx<'inp>>;
 
   /// Under a recording sink, a rolled-back specialized emission is undone on the inner
   /// emitter too: the sink hands its captured inner reading back at `rewind`, and the inner
@@ -1030,16 +1030,20 @@ mod sink_leg {
       K_ERR,
       K_GAP,
     );
-    let mut sink: ConfSink<'_> = tokora::cst::Sink::new("ab", Verbose::new(), profile);
     let span = SimpleSpan::new(0usize, 1usize);
 
-    let res: Result<(), ConfError> = Parser::with_parser_and_context(
-      |inp: &mut SinkIr<'_, '_, '_>| {
+    let (cst, res) = tokora::cst::parse_lossless(
+      "ab",
+      (),
+      Verbose::<ConfError>::new(),
+      profile,
+      DefaultCache::<ByteLexer<'_>>::default(),
+      |inp: &mut SinkIr<'_, '_>| -> Result<(), ConfError> {
         let inner_before =
           <Verbose<ConfError> as Emitter<'_, ByteLexer<'_>>>::checkpoint(inp.emitter().inner_ref());
         {
           let mut tx = inp.begin();
-          <&mut ConfSink<'_> as TooFewEmitter<'_, ByteLexer<'_>>>::emit_too_few(
+          <ConfSink<'_> as TooFewEmitter<'_, ByteLexer<'_>>>::emit_too_few(
             tx.emitter(),
             TooFew::new(span, 1, 3),
           )?;
@@ -1058,12 +1062,10 @@ mod sink_leg {
         );
         Ok(())
       },
-      (&mut sink, DefaultCache::<ByteLexer<'_>>::default()),
-    )
-    .parse_str("ab");
+    );
     res.expect("the sink leg never propagates");
 
-    let (_green, emitter) = sink.finish(K_ROOT);
+    let (_green, emitter) = cst.finish(K_ROOT);
     assert!(
       emitter.errors().is_empty(),
       "nothing survives the rolled-back branch"

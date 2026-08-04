@@ -18,7 +18,7 @@ use crate::{
   token::Token,
 };
 
-use super::Sink;
+use super::{Sink, TriviaPolicy};
 
 // ── A tiny real lexer: one byte per token, `!` is a lexer error ─────────────────
 
@@ -5807,8 +5807,13 @@ fn conformance_emitter_kit_refuses_a_non_forwarding_wrapper() {
 /// three published bypasses is the `## Panics` fiction this release deleted nine of, in a
 /// different medium.
 ///
-/// Flips when the sink is minted from the input, which makes the binding neither hideable nor
-/// forgeable.
+/// **Minting did not flip this**, and that is the finding minting produced. `parse_lossless`
+/// pins `Ctx::Emitter` to `Sink` by name, so a wrapper cannot occupy the seat at the *entry* —
+/// but `InputRef::emitter()` hands `&mut Sink` to parser code running inside the driver, and
+/// the un-pinned entries still take an arbitrary context. The shape below is reachable through
+/// that route, unchanged, and `a_wrapper_around_the_live_sink_still_reaches_an_unpinned_entry`
+/// pins it there. Flips when the emitter stops being handed out as `&mut Ctx::Emitter`, or when
+/// the un-pinned entries cannot take a sink-shaped emitter.
 #[test]
 fn a_non_forwarding_wrapper_is_not_caught() {
   let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
@@ -5850,7 +5855,8 @@ fn a_non_forwarding_wrapper_is_not_caught() {
 /// path even before the wall was qualified. Add a node and it was — pin 5 is that variant, and
 /// records that it no longer is.
 ///
-/// Flips when the sink is minted from the input.
+/// **Minting did not flip this either** — see pin 1's note: the wrapper moved from the entry to
+/// `InputRef::emitter()`, it did not disappear.
 #[test]
 fn an_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_caught() {
   let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
@@ -5957,7 +5963,8 @@ fn hand_emitted_cst_token_spans_reach_materialization_without_a_settle() {
 /// Recorded as an acceptance the crate does **not** want, exactly as pins 1–4 are — this cell
 /// asserts what materializes today, not a refusal anyone should read as a guarantee.
 ///
-/// Flips when the sink is minted from the input, with pins 1–4.
+/// **Minting did not flip this**, with pins 1, 2 and 4 — see pin 1's note for the route that
+/// survived.
 #[test]
 fn a_structured_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_caught() {
   let mut sink: SesSink<'_> = Sink::new("XY", Verbose::new(), profile());
@@ -6117,5 +6124,438 @@ fn the_event_log_reserves_the_doubling_chains_own_capacity() {
     super::EVENT_CAPACITY_CAP,
     "past the cap the reservation stops: the byte count is no longer evidence about the \
      event count, and a grammar with long tokens must not reserve gigabytes"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// The partial-forwarding hole: structuring forwarded, token channel severed
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// These two cells were `tests/parser_node.rs` integration tests, driven with a wrapper in the
+// context seat of the public parse entry. They live in-crate now, because `Sink::new` is
+// crate-private and the lossless drivers pin `Ctx::Emitter` to `Sink` **by name** — so a
+// wrapper can no longer occupy that seat from outside at all. What they pin is unchanged and
+// still worth pinning: the materialization walls that catch a severed token channel, whichever
+// route produced one.
+
+/// The half-forwarding wrapper: the generic emitter wrapper a downstream author writes by
+/// forwarding every **required** [`Emitter`] method plus the backtracking trio (the compiler
+/// and the parse demand those) and the whole [`CstEmitter`] structuring surface (the `node()`
+/// bound demands that) — while inheriting the defaulted no-op [`Emitter::commit_token`], which
+/// severs the auto-emission token channel even though every structuring event still flows.
+///
+/// `bound_source` **is** forwarded, so this fixture models a wrapper that drops *tokens* and
+/// nothing else. One fixture, one defect: omitting it would additionally make this a wrapper
+/// that hides its inner sink's bound source, which is a separate (and open) residue — pinned
+/// on its own by `a_non_forwarding_wrapper_is_not_caught` above.
+struct HalfForward<'a, 'inp>(&'a mut SesSink<'inp>);
+
+type HfCtx<'inp, 'e> = (HalfForward<'e, 'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
+type HfIr<'inp, 'e, 'c> = crate::InputRef<'inp, 'c, MiniLexer<'inp>, HfCtx<'inp, 'e>, ()>;
+
+impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForward<'_, 'inp> {
+  type Error = SesErr;
+
+  fn bound_source(&self) -> Option<crate::source::SourceIdentity> {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::bound_source(&*self.0)
+  }
+
+  fn emit_lexer_error(
+    &mut self,
+    err: Spanned<MiniLexErr<'inp>, MiniSpan<'inp>>,
+  ) -> Result<(), Self::Error> {
+    self.0.emit_lexer_error(err)
+  }
+
+  fn emit_unexpected_token(
+    &mut self,
+    err: crate::error::token::UnexpectedTokenOf<'inp, MiniLexer<'inp>, ()>,
+  ) -> Result<(), Self::Error> {
+    self.0.emit_unexpected_token(err)
+  }
+
+  fn emit_error(&mut self, err: Spanned<Self::Error, MiniSpan<'inp>>) -> Result<(), Self::Error> {
+    self.0.emit_error(err)
+  }
+
+  fn checkpoint(&self) -> u64 {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::checkpoint(&*self.0)
+  }
+
+  fn rewind(&mut self, cursor: &Cursor<'inp, '_, MiniLexer<'inp>>, ckp: u64) {
+    self.0.rewind(cursor, ckp)
+  }
+
+  fn release(&mut self, ckp: u64) {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::release(&mut *self.0, ckp)
+  }
+
+  // `commit_token` is DELIBERATELY not forwarded: the defaulted no-op is the sever.
+}
+
+impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for HalfForward<'_, 'inp> {
+  fn cst_start(&mut self, kind: u16) {
+    self.0.cst_start(kind);
+  }
+
+  fn cst_token(&mut self, tok: &MiniToken<'inp>, span: &MiniSpan<'inp>) {
+    self.0.cst_token(tok, span);
+  }
+
+  fn cst_finish(&mut self, kind: u16) {
+    self.0.cst_finish(kind);
+  }
+
+  fn cst_mark(&mut self) -> EventMark {
+    self.0.cst_mark()
+  }
+
+  fn cst_start_at(&mut self, mark: EventMark, kind: u16) {
+    self.0.cst_start_at(mark, kind);
+  }
+}
+
+/// The partial-forwarding sibling of [`HalfForward`]: it forwards the structuring surface and
+/// the **first** committed token, then severs the channel. Because a token *does* survive, the
+/// zero-token wall ([`FinishError::StructureWithoutTokens`]) cannot fire — the dropped tokens
+/// vanish as uncovered source bytes instead, the signature only the gap-coverage law
+/// ([`FinishError::UncoveredGap`]) catches.
+struct HalfForwardPartial<'a, 'inp> {
+  inner: &'a mut SesSink<'inp>,
+  forwarded: usize,
+}
+
+type HfpCtx<'inp, 'e> = (
+  HalfForwardPartial<'e, 'inp>,
+  DefaultCache<'inp, MiniLexer<'inp>>,
+);
+type HfpIr<'inp, 'e, 'c> = crate::InputRef<'inp, 'c, MiniLexer<'inp>, HfpCtx<'inp, 'e>, ()>;
+
+impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForwardPartial<'_, 'inp> {
+  type Error = SesErr;
+
+  fn bound_source(&self) -> Option<crate::source::SourceIdentity> {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::bound_source(&*self.inner)
+  }
+
+  fn emit_lexer_error(
+    &mut self,
+    err: Spanned<MiniLexErr<'inp>, MiniSpan<'inp>>,
+  ) -> Result<(), Self::Error> {
+    self.inner.emit_lexer_error(err)
+  }
+
+  fn emit_unexpected_token(
+    &mut self,
+    err: crate::error::token::UnexpectedTokenOf<'inp, MiniLexer<'inp>, ()>,
+  ) -> Result<(), Self::Error> {
+    self.inner.emit_unexpected_token(err)
+  }
+
+  fn emit_error(&mut self, err: Spanned<Self::Error, MiniSpan<'inp>>) -> Result<(), Self::Error> {
+    self.inner.emit_error(err)
+  }
+
+  fn checkpoint(&self) -> u64 {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::checkpoint(&*self.inner)
+  }
+
+  fn rewind(&mut self, cursor: &Cursor<'inp, '_, MiniLexer<'inp>>, ckp: u64) {
+    self.inner.rewind(cursor, ckp)
+  }
+
+  fn release(&mut self, ckp: u64) {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::release(&mut *self.inner, ckp)
+  }
+
+  // The partial sever: the first committed token flows, every later one is dropped — so a
+  // token survives (the zero-token wall stays silent) but its peers become uncovered bytes.
+  fn commit_token(&mut self, tok: &MiniToken<'inp>, span: &MiniSpan<'inp>) {
+    if self.forwarded < 1 {
+      self.forwarded += 1;
+      self.inner.commit_token(tok, span);
+    }
+  }
+}
+
+impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for HalfForwardPartial<'_, 'inp> {
+  fn cst_start(&mut self, kind: u16) {
+    self.inner.cst_start(kind);
+  }
+
+  fn cst_token(&mut self, tok: &MiniToken<'inp>, span: &MiniSpan<'inp>) {
+    self.inner.cst_token(tok, span);
+  }
+
+  fn cst_finish(&mut self, kind: u16) {
+    self.inner.cst_finish(kind);
+  }
+
+  fn cst_mark(&mut self) -> EventMark {
+    self.inner.cst_mark()
+  }
+
+  fn cst_start_at(&mut self, mark: EventMark, kind: u16) {
+    self.inner.cst_start_at(mark, kind);
+  }
+}
+
+/// A wrapper that forwards the structuring surface but not the committed-token hook must not
+/// produce a *silently plausible* materialization. The parse succeeds and records structure,
+/// every committed token is dropped between the input layer and the sink, and `finish` — the
+/// success door — refuses with a typed error instead of returning a gap-tiled tree with empty
+/// nodes.
+#[test]
+fn half_forwarding_wrapper_is_refused_at_finish() {
+  let mut sink: SesSink<'_> = Sink::new("ab", Verbose::new(), profile());
+  {
+    let mut input = crate::input::Input::<MiniLexer<'_>, HfCtx<'_, '_>, ()>::with_state_and_context(
+      "ab",
+      (),
+      crate::input::InputContext::new(
+        HalfForward(&mut sink),
+        DefaultCache::<'_, MiniLexer<'_>>::default(),
+      ),
+    );
+    let mut inp = input.as_ref();
+    use crate::ParseInput as _;
+    let res = crate::parser::node(K_NODE, |inp: &mut HfIr<'_, '_, '_>| {
+      for _ in 0..2 {
+        assert!(inp.next()?.is_some());
+      }
+      Ok(())
+    })
+    .parse_input(&mut inp);
+    assert_eq!(res, Ok(()), "the parse itself succeeds — that is the trap");
+  }
+
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let err = match green {
+    Err(err) => err,
+    Ok(tree_ok) => panic!(
+      "finish must refuse the severed token channel, got a plausible tree: {:?}",
+      text(tree_ok)
+    ),
+  };
+  assert!(
+    matches!(err, FinishError::StructureWithoutTokens),
+    "expected StructureWithoutTokens, got {err:?}"
+  );
+}
+
+/// A wrapper that forwards structure and only *some* committed tokens leaves the survivors in
+/// the tree and the dropped ones as uncovered source bytes. The zero-token wall can no longer
+/// speak (a token survived), so `finish` — the success door — must catch the loss through the
+/// gap-coverage law: `UncoveredGap` over exactly the dropped token's bytes, not a plausible
+/// gap-tiled tree.
+#[test]
+fn partial_forwarding_wrapper_is_refused_at_finish() {
+  let mut sink: SesSink<'_> = Sink::new("ab", Verbose::new(), profile());
+  {
+    let mut input =
+      crate::input::Input::<MiniLexer<'_>, HfpCtx<'_, '_>, ()>::with_state_and_context(
+        "ab",
+        (),
+        crate::input::InputContext::new(
+          HalfForwardPartial {
+            inner: &mut sink,
+            forwarded: 0,
+          },
+          DefaultCache::<'_, MiniLexer<'_>>::default(),
+        ),
+      );
+    let mut inp = input.as_ref();
+    use crate::ParseInput as _;
+    let res = crate::parser::node(K_NODE, |inp: &mut HfpIr<'_, '_, '_>| {
+      for _ in 0..2 {
+        assert!(inp.next()?.is_some());
+      }
+      Ok(())
+    })
+    .parse_input(&mut inp);
+    assert_eq!(res, Ok(()), "the parse itself succeeds — that is the trap");
+  }
+
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let err = match green {
+    Err(err) => err,
+    Ok(tree_ok) => panic!(
+      "finish must refuse the dropped token, got a plausible tree: {:?}",
+      text(tree_ok)
+    ),
+  };
+  assert!(
+    matches!(err, FinishError::UncoveredGap { start: 1, end: 2 }),
+    "expected UncoveredGap {{ start: 1, end: 2 }} over the dropped 'b', got {err:?}"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// The lossless drivers: the sink is minted from the source the parse reads
+// ═══════════════════════════════════════════════════════════════════════════════
+
+type DrvCtx<'inp> = (SesSink<'inp>, DefaultCache<'inp, MiniLexer<'inp>>);
+type DrvIr<'inp, 'c, Cmpl> = crate::InputRef<'inp, 'c, MiniLexer<'inp>, DrvCtx<'inp>, (), Cmpl>;
+
+/// Drains every token, in either completeness mode.
+fn drv_drain<'inp, Cmpl>(inp: &mut DrvIr<'inp, '_, Cmpl>) -> Result<usize, SesErr>
+where
+  Cmpl: crate::SurfaceIncomplete<'inp, MiniLexer<'inp>, DrvCtx<'inp>, ()>,
+{
+  let mut n = 0;
+  while inp.next()?.is_some() {
+    n += 1;
+  }
+  Ok(n)
+}
+
+/// The driver's whole point: one `src` argument feeds both the sink and the input, so the
+/// buffer the tree's text is sliced out of and the buffer the parse read are the same bytes.
+/// There is no second name to get wrong.
+#[test]
+fn parse_lossless_mints_the_sink_from_the_source_it_parses() {
+  let src = "a b";
+  let (cst, parsed) = crate::cst::parse_lossless(
+    src,
+    (),
+    Verbose::<SesErr>::new(),
+    profile(),
+    DefaultCache::<'_, MiniLexer<'_>>::default(),
+    drv_drain::<crate::Complete>,
+  );
+  assert_eq!(parsed, Ok(3));
+
+  let (green, emitter) = cst.finish(K_ROOT);
+  assert_eq!(text(green.expect("a covered parse materializes")), src);
+  assert!(emitter.errors().is_empty());
+}
+
+/// The partial sibling honours `is_final` exactly as `parse_partial` does: non-final, running
+/// off the end of the buffer is the frontier, not an end of input.
+#[test]
+fn parse_lossless_partial_surfaces_incomplete_while_non_final() {
+  let (cst, parsed) = crate::cst::parse_lossless_partial(
+    "ab",
+    (),
+    Verbose::<SesErr>::new(),
+    profile(),
+    DefaultCache::<'_, MiniLexer<'_>>::default(),
+    false,
+    drv_drain::<crate::Partial>,
+  );
+  assert!(
+    matches!(parsed, Err(SesErr::Incomplete(_))),
+    "non-final: the end of the buffer is the frontier, got {parsed:?}"
+  );
+  // The events recorded so far are the resumable state; the tooling door still round-trips.
+  let (green, _emitter) = cst.finish_partial(K_ROOT);
+  assert_eq!(
+    text(green.expect("finish_partial tiles what is missing")),
+    "ab"
+  );
+}
+
+/// Sealed, the same drive is an ordinary complete parse.
+#[test]
+fn parse_lossless_partial_completes_when_final() {
+  let (cst, parsed) = crate::cst::parse_lossless_partial(
+    "ab",
+    (),
+    Verbose::<SesErr>::new(),
+    profile(),
+    DefaultCache::<'_, MiniLexer<'_>>::default(),
+    true,
+    drv_drain::<crate::Partial>,
+  );
+  assert_eq!(parsed, Ok(2));
+  let (green, _emitter) = cst.finish(K_ROOT);
+  assert_eq!(
+    text(green.expect("a sealed, covered parse materializes")),
+    "ab"
+  );
+}
+
+/// The trivia policy moved from the sink's builder to the handle's, because it is read once,
+/// by materialization, and never during the parse. Setting it on the handle reaches the walk.
+#[test]
+fn cst_carries_the_trivia_policy_to_materialization() {
+  let (cst, parsed) = crate::cst::parse_lossless(
+    "a b",
+    (),
+    Verbose::<SesErr>::new(),
+    profile(),
+    DefaultCache::<'_, MiniLexer<'_>>::default(),
+    drv_drain::<crate::Complete>,
+  );
+  assert_eq!(parsed, Ok(3));
+
+  let cst = cst.with_trivia_policy(TriviaPolicy::AsEmitted);
+  assert_eq!(cst.trivia_policy(), TriviaPolicy::AsEmitted);
+  assert_eq!(cst.error_kind(), K_ERR);
+  assert_eq!(cst.gap_kind(), K_GAP);
+  assert!(cst.inner_ref().errors().is_empty());
+
+  let (green, _emitter) = cst.finish(K_ROOT);
+  assert_eq!(
+    text(green.expect("AsEmitted is the replay the walk performs")),
+    "a b"
+  );
+}
+
+/// **A PIN OF A KNOWN-OPEN RESIDUE (6 of 6): the pinned emitter slot is an *entry* wall, and
+/// the parse hands the sink back out through [`InputRef::emitter`](crate::InputRef::emitter).**
+///
+/// `parse_lossless` pins `Ctx::Emitter` to `Sink` by name, so a wrapper cannot occupy the seat
+/// *at the entry*. But a parser running inside that driver holds `&mut Sink` — `emitter()` is
+/// public and is how every parser emits — and the un-pinned entries (`parse_partial`, the
+/// `Parse` family, `PartialSession`) still take an arbitrary `Ctx`. Wrapping the live sink and
+/// driving a **different** buffer through one of them therefore still compiles.
+///
+/// A wrapper that forwards `bound_source` is caught by the runtime handshake at the parse
+/// entry. A wrapper that *hides* it — [`NonForwardingWrapper`], residue 1 — is not, so the sink
+/// records a foreign parse's structure and materializes it over its own bytes. Minting narrows
+/// who can reach a sink at all (only code already inside a lossless parse, and only by writing
+/// a full `Emitter` impl); it does not close this.
+///
+/// Flips when the emitter is no longer handed out as `&mut Ctx::Emitter`, or when the
+/// un-pinned entries cannot take a sink-shaped emitter.
+#[test]
+fn a_wrapper_around_the_live_sink_still_reaches_an_unpinned_entry() {
+  fn inner_parse<'inp>(inp: &mut DrvIr<'inp, '_, crate::Complete>) -> Result<usize, SesErr> {
+    let sink: &mut SesSink<'inp> = inp.emitter();
+    // "ZZ" is a foreign buffer of the same length as the outer "ab".
+    let mut foreign =
+      crate::input::Input::<MiniLexer<'_>, NonFwdCtx<'_, '_>, ()>::with_state_and_context(
+        "ZZ",
+        (),
+        crate::input::InputContext::new(
+          NonForwardingWrapper(sink),
+          DefaultCache::<'_, MiniLexer<'_>>::default(),
+        ),
+      );
+    let mut foreign_ref = foreign.as_ref();
+    let mut n = 0;
+    while let Ok(Some(_)) = foreign_ref.next() {
+      n += 1;
+    }
+    Ok(n)
+  }
+
+  let (cst, parsed) = crate::cst::parse_lossless(
+    "ab",
+    (),
+    Verbose::<SesErr>::new(),
+    profile(),
+    DefaultCache::<'_, MiniLexer<'_>>::default(),
+    inner_parse,
+  );
+  assert_eq!(parsed, Ok(2), "the foreign parse ran to completion");
+
+  let (green, _emitter) = cst.finish(K_ROOT);
+  assert_eq!(
+    text(green.expect("the hidden binding means nothing refused the pairing")),
+    "ab",
+    "the residue: the events came from parsing \"ZZ\" and the text is the sink's own \"ab\" — \
+     equal length, fully covered, and nothing downstream can see it"
   );
 }
