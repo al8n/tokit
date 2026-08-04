@@ -1,0 +1,432 @@
+//! The lossless parse entries: the **only** doors through which a [`Sink`] is created, driven,
+//! and handed back.
+//!
+//! # Why a driver rather than a constructor
+//!
+//! A sink names the buffer its tree's text is sliced out of; an input names the buffer the parse
+//! reads. While those were two independent names, one program could state them differently and
+//! get a tree whose structure came from one source and whose text came from another — a pairing
+//! nothing downstream can detect, because the event log it produces is byte-identical to a legal
+//! one.
+//!
+//! These drivers take the source **once** and use it for both, so the two names are the same
+//! argument of the same call. `Sink::new` is crate-private, so there is no other way to obtain
+//! a sink; and the returned [`Cst`] implements no emitter trait, so the artefact cannot be
+//! re-aimed at a second parse.
+//!
+//! # Why the emitter slot is pinned to `Sink` itself
+//!
+//! The `where` clause reads `P: ParseInput<'inp, L, O, (Sink<'inp, L, E>, C), Lang>` — the
+//! context's emitter is `Sink<'inp, L, E>` *by name*, not "some emitter that forwards to a sink".
+//! That is the whole mechanism. Every published bypass of the older finish-time wall had the same
+//! shape — *put something of my own where the emitter goes*, and let it decide what to forward —
+//! and every fix for one relocated the hole to the next, because the witness was state on the
+//! sink and the sink cannot tell who set it. Pinning the slot removes the position all three
+//! occupied, so they die together rather than one at a time: a wrapper `W(&mut Sink)` is not
+//! `Sink`, and there is nowhere else for it to sit.
+
+use crate::{
+  Cache, Complete, Emitter, Lexer, ParseContext, ParseInput, Partial, SurfaceIncomplete,
+  emitter::ValueKeyedEmitter, input::Input,
+};
+
+use super::{CstProfile, handle::Cst, sink::Sink};
+
+/// Runs `f` over `src` with a **lossless recording sink** minted from that very source, and
+/// returns the spent [`Cst`] alongside whatever `f` produced.
+///
+/// - `src` is the buffer both the parse and the tree's text come from — named once, so they
+///   cannot disagree;
+/// - `state` is the lexer's initial state;
+/// - `inner` is the emitter every diagnostic forwards to (it must be
+///   [`ValueKeyedEmitter`] — see the *Inner-emitter contract* on [`Sink`]);
+/// - `profile` is the dialect's kind space ([`CstProfile`]): the token mapper into the unified
+///   `u16` kind space, the [`KindValidator`](super::KindValidator) every recorded kind is checked
+///   against, the `error_kind` wrapped around a recovery hole's skipped tokens, and the
+///   `gap_kind` tiled over source bytes no committed token covers;
+/// - `cache` is the lookahead cache, exactly as any other context supplies it;
+/// - `f` is the parser — any [`ParseInput`] over the pinned context.
+///
+/// The result is returned **beside** the tree rather than through it: a parse that failed still
+/// produced events worth materializing (that is what
+/// [`finish_partial`](Cst::finish_partial) is for), so the handle is unconditional and the
+/// `Result` is `f`'s own.
+///
+/// # The emitter slot is pinned
+///
+/// `Ctx::Emitter` is `Sink<'inp, L, E>` by name. A wrapper that forwards some emissions and
+/// hides others cannot be installed here, because there is no slot for it to occupy — see the
+/// module-level note for why that is what closes the class rather than another wall.
+///
+/// # Compile-time wall: trivia-surfacing lexers only
+///
+/// A lossless tree tiles every uncovered source byte, so it must be able to tell a byte the
+/// lexer *refused* from a byte a committed token was *dropped* for. A trivia-skipping lexer
+/// makes the two indistinguishable, so this door is restricted at **compile time** to lexers
+/// declaring [`Lexer::SURFACES_TRIVIA`]. The wall is an inline-`const` assertion inside
+/// `Sink::new`, and it fires through this call: a post-monomorphization `error[E0080]`
+/// reported at the offending `parse_lossless` call site, with a note naming the instantiation.
+/// It therefore fires at build/test/doc time — **not** under `cargo check`, which never
+/// monomorphizes the call.
+///
+/// A lexer that surfaces trivia drives fine:
+///
+/// ```rust
+/// use tokora::{
+///   Emitter, InputRef, Lexer, ParseContext, SimpleSpan, Token,
+///   cache::DefaultCache,
+///   cst::{CstProfile, KindValidator, parse_lossless},
+///   emitter::Verbose,
+/// };
+///
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// # struct MiniErr;
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized>
+/// #   From<tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>> for MiniErr
+/// # {
+/// #   fn from(_: tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>) -> Self { Self }
+/// # }
+/// #[derive(Debug, Clone, Copy)]
+/// struct MiniTok(u8);
+/// impl Token<'_> for MiniTok {
+///   type Kind = u8;
+///   type Error = MiniErr;
+///   const SURFACES_TRIVIA: bool = true; // ← the declaration under test
+///   fn kind(&self) -> u8 { self.0 }
+///   fn is_trivia(&self) -> bool { self.0 == b' ' }
+/// }
+/// # struct Mini<'a> { src: &'a str, tok_start: usize, pos: usize, state: () }
+/// # impl<'inp> Lexer<'inp> for Mini<'inp> {
+/// #   type State = (); type Source = str; type Token = MiniTok;
+/// #   type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'inp str) -> Self { Self { src, tok_start: 0, pos: 0, state: () } }
+/// #   fn with_state(src: &'inp str, state: ()) -> Self {
+/// #     Self { src, tok_start: 0, pos: 0, state }
+/// #   }
+/// #   fn check(&self) -> Result<(), MiniErr> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> () { self.state }
+/// #   fn source(&self) -> &'inp str { self.src }
+/// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(self.tok_start, self.pos) }
+/// #   fn slice(&self) -> &'inp str { &self.src[self.tok_start..self.pos] }
+/// #   fn lex(&mut self) -> Option<Result<MiniTok, MiniErr>> {
+/// #     let byte = *self.src.as_bytes().get(self.pos)?;
+/// #     self.tok_start = self.pos;
+/// #     self.pos += 1;
+/// #     Some(Ok(MiniTok(byte)))
+/// #   }
+/// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
+/// # }
+/// # const K_ROOT: u16 = 1;
+/// # const K_TOK: u16 = 10;
+/// # const K_ERR: u16 = 90;
+/// # const K_GAP: u16 = 91;
+/// /// Drain every token; the sink records each committed one.
+/// fn drain<'inp, Ctx>(inp: &mut InputRef<'inp, '_, Mini<'inp>, Ctx>) -> Result<usize, MiniErr>
+/// where
+///   Ctx: ParseContext<'inp, Mini<'inp>>,
+///   Ctx::Emitter: Emitter<'inp, Mini<'inp>, (), Error = MiniErr>,
+/// {
+///   let mut n = 0;
+///   while inp.next()?.is_some() {
+///     n += 1;
+///   }
+///   Ok(n)
+/// }
+///
+/// let src = "ab c";
+/// let profile = CstProfile::new(
+///   |_: &MiniTok| K_TOK,
+///   KindValidator::new(|k| matches!(k, K_ROOT | K_TOK | K_ERR | K_GAP)),
+///   K_ERR,
+///   K_GAP,
+/// );
+///
+/// let (cst, parsed) = parse_lossless(
+///   src,
+///   (),
+///   Verbose::<MiniErr>::new(),
+///   profile,
+///   DefaultCache::<Mini<'_>>::new(),
+///   drain,
+/// );
+/// assert_eq!(parsed, Ok(4));
+///
+/// let (green, _diagnostics) = cst.finish(K_ROOT);
+/// // The round-trip law: the text came from the same buffer the parse read.
+/// assert_eq!(green.unwrap().to_string(), src);
+/// ```
+///
+/// The same driver with the `SURFACES_TRIVIA` declaration removed — the only difference — is
+/// refused at monomorphization:
+///
+/// ```rust,compile_fail
+/// # use tokora::{
+/// #   Emitter, InputRef, Lexer, ParseContext, SimpleSpan, Token,
+/// #   cache::DefaultCache,
+/// #   cst::{CstProfile, KindValidator, parse_lossless},
+/// #   emitter::Verbose,
+/// # };
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// # struct MiniErr;
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized>
+/// #   From<tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>> for MiniErr
+/// # {
+/// #   fn from(_: tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>) -> Self { Self }
+/// # }
+/// #[derive(Debug, Clone, Copy)]
+/// struct MiniTok(u8);
+/// impl Token<'_> for MiniTok {
+///   type Kind = u8;
+///   type Error = MiniErr;
+///   // no SURFACES_TRIVIA: defaults to false (a skipping, syntactic grammar)
+///   fn kind(&self) -> u8 { self.0 }
+///   fn is_trivia(&self) -> bool { self.0 == b' ' }
+/// }
+/// # struct Mini<'a> { src: &'a str, tok_start: usize, pos: usize, state: () }
+/// # impl<'inp> Lexer<'inp> for Mini<'inp> {
+/// #   type State = (); type Source = str; type Token = MiniTok;
+/// #   type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'inp str) -> Self { Self { src, tok_start: 0, pos: 0, state: () } }
+/// #   fn with_state(src: &'inp str, state: ()) -> Self {
+/// #     Self { src, tok_start: 0, pos: 0, state }
+/// #   }
+/// #   fn check(&self) -> Result<(), MiniErr> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> () { self.state }
+/// #   fn source(&self) -> &'inp str { self.src }
+/// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(self.tok_start, self.pos) }
+/// #   fn slice(&self) -> &'inp str { &self.src[self.tok_start..self.pos] }
+/// #   fn lex(&mut self) -> Option<Result<MiniTok, MiniErr>> {
+/// #     let byte = *self.src.as_bytes().get(self.pos)?;
+/// #     self.tok_start = self.pos;
+/// #     self.pos += 1;
+/// #     Some(Ok(MiniTok(byte)))
+/// #   }
+/// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
+/// # }
+/// # const K_ROOT: u16 = 1;
+/// # const K_TOK: u16 = 10;
+/// # const K_ERR: u16 = 90;
+/// # const K_GAP: u16 = 91;
+/// # fn drain<'inp, Ctx>(inp: &mut InputRef<'inp, '_, Mini<'inp>, Ctx>) -> Result<usize, MiniErr>
+/// # where
+/// #   Ctx: ParseContext<'inp, Mini<'inp>>,
+/// #   Ctx::Emitter: Emitter<'inp, Mini<'inp>, (), Error = MiniErr>,
+/// # {
+/// #   let mut n = 0;
+/// #   while inp.next()?.is_some() { n += 1; }
+/// #   Ok(n)
+/// # }
+/// # let profile = CstProfile::new(
+/// #   |_: &MiniTok| K_TOK,
+/// #   KindValidator::new(|k| matches!(k, K_ROOT | K_TOK | K_ERR | K_GAP)),
+/// #   K_ERR,
+/// #   K_GAP,
+/// # );
+/// let (_cst, _parsed) = parse_lossless(
+///   "ab c",
+///   (),
+///   Verbose::<MiniErr>::new(),
+///   profile,
+///   DefaultCache::<Mini<'_>>::new(),
+///   drain,
+/// );
+/// ```
+///
+/// # Compile-time wall: value-keyed inner emitters only
+///
+/// The *Inner-emitter contract* on [`Sink`] is in the type system, and this is where it is
+/// spent: `inner` must be a [`ValueKeyedEmitter`]. A **table-keyed** emitter — one that
+/// allocates per-`checkpoint` bookkeeping behind interior mutability and expects to reclaim it
+/// per-`release` — is refused here rather than accepted and then silently stranded (the sink's
+/// `release` forwards nothing, so such an inner would leak one row per committed capture):
+///
+/// ```rust,compile_fail
+/// use core::cell::RefCell;
+/// use tokora::{
+///   Emitter, InputRef, Lexer, ParseContext, SimpleSpan, Token,
+///   cache::DefaultCache,
+///   cst::{CstProfile, KindValidator, parse_lossless},
+///   input::Cursor,
+///   span::Spanned,
+/// };
+///
+/// /// A table-keyed emitter: `checkpoint` allocates a row and hands back its index.
+/// #[derive(Default)]
+/// struct TableKeyed {
+///   rows: RefCell<Vec<u64>>,
+/// }
+///
+/// impl<'a, L, Lang: ?Sized> Emitter<'a, L, Lang> for TableKeyed {
+///   type Error = MiniErr;
+///   fn emit_lexer_error(
+///     &mut self,
+///     _e: Spanned<<L::Token as Token<'a>>::Error, L::Span>,
+///   ) -> Result<(), MiniErr> where L: Lexer<'a> { Ok(()) }
+///   fn emit_unexpected_token(
+///     &mut self,
+///     _e: tokora::error::token::UnexpectedTokenOf<'a, L, Lang>,
+///   ) -> Result<(), MiniErr> where L: Lexer<'a> { Ok(()) }
+///   fn emit_error(&mut self, _e: Spanned<MiniErr, L::Span>) -> Result<(), MiniErr>
+///   where L: Lexer<'a> { Ok(()) }
+///   fn checkpoint(&self) -> u64 {
+///     let mut rows = self.rows.borrow_mut();
+///     rows.push(0);
+///     rows.len() as u64 - 1 // a KEY, not a reading of the emission state
+///   }
+///   fn rewind(&mut self, _c: &Cursor<'a, '_, L>, _m: u64) where L: Lexer<'a> {}
+/// }
+///
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// # struct MiniErr;
+/// # #[derive(Debug, Clone, Copy)]
+/// # struct MiniTok(u8);
+/// # impl Token<'_> for MiniTok {
+/// #   type Kind = u8;
+/// #   type Error = MiniErr;
+/// #   const SURFACES_TRIVIA: bool = true;
+/// #   fn kind(&self) -> u8 { self.0 }
+/// #   fn is_trivia(&self) -> bool { self.0 == b' ' }
+/// # }
+/// # struct Mini<'a> { src: &'a str, tok_start: usize, pos: usize, state: () }
+/// # impl<'inp> Lexer<'inp> for Mini<'inp> {
+/// #   type State = (); type Source = str; type Token = MiniTok;
+/// #   type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'inp str) -> Self { Self { src, tok_start: 0, pos: 0, state: () } }
+/// #   fn with_state(src: &'inp str, state: ()) -> Self {
+/// #     Self { src, tok_start: 0, pos: 0, state }
+/// #   }
+/// #   fn check(&self) -> Result<(), MiniErr> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> () { self.state }
+/// #   fn source(&self) -> &'inp str { self.src }
+/// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(self.tok_start, self.pos) }
+/// #   fn slice(&self) -> &'inp str { &self.src[self.tok_start..self.pos] }
+/// #   fn lex(&mut self) -> Option<Result<MiniTok, MiniErr>> {
+/// #     let byte = *self.src.as_bytes().get(self.pos)?;
+/// #     self.tok_start = self.pos;
+/// #     self.pos += 1;
+/// #     Some(Ok(MiniTok(byte)))
+/// #   }
+/// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
+/// # }
+/// # const K_ROOT: u16 = 1;
+/// # const K_TOK: u16 = 10;
+/// # const K_ERR: u16 = 90;
+/// # const K_GAP: u16 = 91;
+/// # fn drain<'inp, Ctx>(inp: &mut InputRef<'inp, '_, Mini<'inp>, Ctx>) -> Result<usize, MiniErr>
+/// # where
+/// #   Ctx: ParseContext<'inp, Mini<'inp>>,
+/// #   Ctx::Emitter: Emitter<'inp, Mini<'inp>, (), Error = MiniErr>,
+/// # {
+/// #   let mut n = 0;
+/// #   while inp.next()?.is_some() { n += 1; }
+/// #   Ok(n)
+/// # }
+/// # let profile = CstProfile::new(
+/// #   |_: &MiniTok| K_TOK,
+/// #   KindValidator::new(|k| matches!(k, K_ROOT | K_TOK | K_ERR | K_GAP)),
+/// #   K_ERR,
+/// #   K_GAP,
+/// # );
+/// let (_cst, _parsed) = parse_lossless(
+///   "ab c",
+///   (),
+///   TableKeyed::default(),
+///   profile,
+///   DefaultCache::<Mini<'_>>::new(),
+///   drain,
+/// );
+/// ```
+#[inline]
+pub fn parse_lossless<'inp, L, Lang, E, C, O, P>(
+  src: &'inp L::Source,
+  state: L::State,
+  inner: E,
+  profile: CstProfile<L::Token>,
+  cache: C,
+  mut f: P,
+) -> (
+  Cst<'inp, L, E>,
+  Result<O, <E as Emitter<'inp, L, Lang>>::Error>,
+)
+where
+  L: Lexer<'inp>,
+  Lang: ?Sized,
+  E: Emitter<'inp, L, Lang> + ValueKeyedEmitter,
+  C: Cache<'inp, L, Lang>,
+  P: ParseInput<'inp, L, O, (Sink<'inp, L, E>, C), Lang>,
+{
+  let ctx = (Sink::new(src, inner, profile), cache);
+  let mut input = Input::<L, (Sink<'inp, L, E>, C), Lang, Complete>::with_state_and_context(
+    src,
+    state,
+    ParseContext::provide(ctx),
+  );
+  let parsed = f.parse_input(&mut input.as_ref());
+  (Cst::from_sink(input.into_emitter()), parsed)
+}
+
+/// The [`Partial`] sibling of [`parse_lossless`]: the same pinned sink, driven in Sans-I/O
+/// partial mode.
+///
+/// `is_final` states whether `src` is the last chunk, exactly as
+/// [`parse_partial`](crate::parse_partial)'s does; while it is `false` the
+/// [frontier rules](crate::input) are active, so consuming across the end of the buffer
+/// surfaces an [`Incomplete`](crate::error::Incomplete) on the `Err` channel instead of an
+/// end-of-input. Everything else — the pinned emitter slot, the source named once, the returned
+/// [`Cst`] — is identical to the complete driver.
+///
+/// # Materializing an incomplete parse
+///
+/// Use [`finish_partial`](Cst::finish_partial), not [`finish`](Cst::finish): a truncated parse
+/// leaves open nodes and an un-diagnosed tail, and those are the two signals the partial door
+/// tolerates. A parse that ended `Incomplete` and will be *retried* over a longer buffer should
+/// materialize neither — drop the handle and drive again over the larger slice, exactly as
+/// [`parse_partial`](crate::parse_partial)'s refill loop does.
+///
+/// # Cost
+///
+/// Each call builds a fresh input **and a fresh sink** over the current buffer, so a refill loop
+/// re-lexes and re-records the whole prefix every attempt: cumulative work is
+/// **Θ(Σ attempt lengths)**, the same triangular figure
+/// [`parse_partial`](crate::parse_partial) documents, with the event log on top of the lexing.
+#[inline]
+pub fn parse_lossless_partial<'inp, L, Lang, E, C, O, P>(
+  src: &'inp L::Source,
+  state: L::State,
+  inner: E,
+  profile: CstProfile<L::Token>,
+  cache: C,
+  is_final: bool,
+  mut f: P,
+) -> (
+  Cst<'inp, L, E>,
+  Result<O, <E as Emitter<'inp, L, Lang>>::Error>,
+)
+where
+  L: Lexer<'inp>,
+  Lang: ?Sized,
+  E: Emitter<'inp, L, Lang> + ValueKeyedEmitter,
+  C: Cache<'inp, L, Lang>,
+  Partial: SurfaceIncomplete<'inp, L, (Sink<'inp, L, E>, C), Lang>,
+  P: ParseInput<'inp, L, O, (Sink<'inp, L, E>, C), Lang, Partial>,
+{
+  let ctx = (Sink::new(src, inner, profile), cache);
+  let mut input = Input::<L, (Sink<'inp, L, E>, C), Lang, Partial>::with_state_and_context(
+    src,
+    state,
+    ParseContext::provide(ctx),
+  );
+  // The driver states the world fact BEFORE the parser ever sees a handle, exactly as
+  // `parse_partial` does: `seal` takes `&mut Input`, so `f` cannot end the stream at any depth.
+  if is_final {
+    input.seal();
+  }
+  let parsed = f.parse_input(&mut input.as_ref());
+  (Cst::from_sink(input.into_emitter()), parsed)
+}
