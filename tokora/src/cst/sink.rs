@@ -339,9 +339,15 @@ fn bump_witness(next: &core::sync::atomic::AtomicUsize) -> usize {
 /// `EmitterView` is not an emitter *in this crate*; a downstream crate whose own lexer appears in
 /// the parameter list may implement one for it under the orphan rules, and this handshake is what
 /// stands on that route — for a wrapper that forwards `bound_source`. What such a wrapper cannot
-/// do is carry a token: [`Emitter::commit_token`](crate::Emitter::commit_token) is not on the
-/// view's surface, and since `CstEmitter::cst_token` was deleted it is the only producer of token
-/// events.
+/// do is **reach this sink's coverage machinery**, through either of its two doors: a token event
+/// (only [`Emitter::commit_token`](crate::Emitter::commit_token) makes one, and it is not on the
+/// view's surface — nor is `CstEmitter::cst_token`, deleted for being the second) or a
+/// gap-licensing lexer-error span (only
+/// [`Emitter::commit_lexer_error`](crate::Emitter::commit_lexer_error) makes one, and it is not on
+/// the view's surface either). The view's own
+/// [`emit_lexer_error`](crate::EmitterView::emit_lexer_error) forwards the *diagnostic* and
+/// records no span, so a foreign parse driven through such a wrapper reports into this sink's log
+/// and decides nothing about which of its bytes need a token.
 ///
 /// **The refusal is conservative, and the residue is real.** It fires only where
 /// [`Source::REFERENT_IS_BYTES`](crate::Source::REFERENT_IS_BYTES) says an unequal reference
@@ -779,10 +785,15 @@ where
   /// (record-then-propagate: transaction guards rewind during fatal unwinds, so a slot
   /// skipped on the `Err` edge would drop an `error_span` a later `finish` needs to cover).
   ///
-  /// `error_span` is `Some` only for a **lexer error** (the one forwarded diagnostic that
-  /// names untokenized source bytes); it is recorded into the slot so `finish`'s
+  /// `error_span` is `Some` at exactly **one** call site —
+  /// [`commit_lexer_error`](Emitter::commit_lexer_error), the input layer's own refusal over
+  /// bytes it lexed and could not tokenize — and it is recorded into the slot so `finish`'s
   /// gap-coverage law can tell a legitimately-refused byte from a dropped committed token.
-  /// Every other `emit_*` passes `None`.
+  /// Every other forwarded diagnostic passes `None`, **including the caller-facing
+  /// [`emit_lexer_error`](Emitter::emit_lexer_error)**: that one carries a span the caller chose
+  /// with nothing consumed for it, which is the `cst_token` shape on the diagnostic channel. The
+  /// asymmetry is the whole point of having two doors, and COVERAGE_EVIDENCE_CENSUS pins the
+  /// `Some(` site at exactly one.
   ///
   /// The inner emitter's rewind reading is captured on the mark-stack row at
   /// [`checkpoint`](Emitter::checkpoint), not here — a forwarded diagnostic advances the
@@ -820,6 +831,22 @@ where
 {
   type Error = E::Error;
 
+  /// The **diagnostic** door: a lexer-error report raised by a caller — a parser through
+  /// [`InputRef::emit_lexer_error`](crate::InputRef::emit_lexer_error), a callback through
+  /// [`EmitterView::emit_lexer_error`](crate::EmitterView::emit_lexer_error), a wrapper through
+  /// either. It forwards the report and occupies a `Diag` slot like every other emission, and it
+  /// records **no coverage span**: the caller chose that span, and nothing was consumed for it.
+  ///
+  /// This is the `cst_token` shape on the diagnostic channel, and it is closed the same way.
+  /// A recorded lexer-error span is what *licenses* a gap tile at materialization, so accepting a
+  /// caller's span here would let anyone who can reach this emitter excuse an uncovered byte of
+  /// the sink's own buffer — including, on the documented orphan route, a **foreign** parse whose
+  /// spans index a buffer this sink never saw. The evidence door is
+  /// [`commit_lexer_error`](Emitter::commit_lexer_error), which only the input layer calls.
+  ///
+  /// The capability is not withheld, only its structural side effect: the report still reaches
+  /// the inner emitter, so a caller can still say *"this input is malformed here"* inline, with
+  /// no rewind — which is the whole reason the `decide` family exists.
   #[inline]
   fn emit_lexer_error(
     &mut self,
@@ -828,10 +855,26 @@ where
   where
     L: Lexer<'inp>,
   {
-    // The one diagnostic that names untokenized bytes: record its span so `finish` can tell
-    // this legitimately-refused gap from a dropped committed token.
+    self.forward_diag::<Lang, _>(None, |inner| inner.emit_lexer_error(err))
+  }
+
+  /// The **evidence** door: the input layer's own lexer error, over bytes it lexed and refused.
+  ///
+  /// This is the coverage channel's one and only producer — the refusal-side twin of
+  /// [`commit_token`](Emitter::commit_token), reached from the input layer's single deduped
+  /// reporting site and from nowhere a caller can stand. The span is recorded into the `Diag`
+  /// slot so `finish`'s gap-coverage law can tell this legitimately-refused region from a dropped
+  /// committed token.
+  #[inline]
+  fn commit_lexer_error(
+    &mut self,
+    err: Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
+  ) -> Result<(), Self::Error>
+  where
+    L: Lexer<'inp>,
+  {
     self.forward_diag::<Lang, _>(Some(err.span_ref().clone()), |inner| {
-      inner.emit_lexer_error(err)
+      inner.commit_lexer_error(err)
     })
   }
 

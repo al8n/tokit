@@ -733,3 +733,183 @@ fn node_over_a_diagnostics_only_emitter_is_inert() {
     "the inert event channel costs nothing and changes nothing"
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// The gap-licensing door: a caller-raised lexer error is a diagnostic, not evidence
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// `finish`'s gap-coverage law tiles a source byte no committed token covers only where a
+// **recorded lexer-error diagnostic** covers it — that span is the one thing that licenses a
+// gap, and licensing is *structural*: it decides whether the tree round-trips or the
+// materialization is refused. So the span has to come from the same place the token spans do —
+// the input layer, over bytes it lexed and refused — and from nowhere else.
+//
+// Two doors reach the recording sink's `Emitter::emit_lexer_error` with a **caller-chosen** span
+// and no consumption behind it: the handle's forwarder (`InputRef::emit_lexer_error`, and
+// `ParseState`'s re-export of it) and `EmitterView`'s, which is what a callback holds and what a
+// downstream crate can wrap under the orphan rules. That is the exact shape the deleted
+// `CstEmitter::cst_token` had on the token channel — a span the caller picks, nothing consumed —
+// and both cells below pin it shut: the report still reaches the diagnostic log, and it licenses
+// nothing.
+//
+// Both cells are **falsifiable**: each asserts the refusal that the base branch did *not*
+// produce. Run against the pre-fix tree, each returned `Ok` with the uncovered byte tiled as
+// `K_GAP` — the plausible tree the coverage law exists to refuse.
+//
+// **And it is two doors, not three.** `finish`'s verdict is a function of exactly three things —
+// the recorded `Token` spans, the recorded `Diag` spans, and the bound source's length — so the
+// question "what else can reach coverage?" is answerable by inspection rather than by hope. Every
+// other span-carrying method on the two forwarding surfaces records `error_span: None`:
+// `emit_unexpected_token`, `emit_error`, `emit_warning`, `emit_skipped_region`, and the twelve
+// capability channels (`emit_too_few` / `too_many` / `full_container`, the six separator members,
+// `emit_unclosed`, and the two pratt end-of-operand reports). `emit_skipped_region` is the one
+// with a *structural* effect besides its slot — it brackets already-buffered token events in an
+// `error_kind` node — and that effect adds no token and no span, so it moves no byte's coverage.
+// `cst_start` / `cst_finish` / `cst_mark` / `cst_start_at` carry a kind and no span at all.
+// COVERAGE_EVIDENCE_CENSUS (`src/cst/sink/tests.rs`) is the standing form of that enumeration.
+
+/// The unconsumed byte both cells attack: `run` drives `ab`, consumes only `a`, and `b` is a
+/// perfectly lexable token the parse simply never took. `finish` must call that out.
+fn consume_only_the_first(inp: &mut Ir<'_, '_>) -> Result<(), TestErr> {
+  take_one(inp)
+}
+
+/// **The handle route.** A parser that raises a lexer error over bytes it never consumed must
+/// not thereby license them: `inp.emit_lexer_error(span)` is a *report*, and the report is
+/// delivered — but `finish` still refuses the uncovered `b`.
+///
+/// Falsified by an `Ok` tree (the pre-fix verdict) or by a missing diagnostic.
+#[test]
+fn a_handle_raised_lexer_error_reports_without_licensing_the_gap() {
+  let (cst, res) = parse_lossless(
+    "ab",
+    (),
+    Verbose::new(),
+    profile(),
+    DefaultCache::<ByteLexer<'_>>::default(),
+    |inp: &mut Ir<'_, '_>| {
+      consume_only_the_first(inp)?;
+      // The attack: a caller-chosen span over the byte the parse is about to walk away from.
+      inp.emit_lexer_error(tokora::span::Spanned::new(
+        SimpleSpan::new(1usize, 2),
+        LexErr,
+      ))
+    },
+  );
+  assert_eq!(res, Ok(()), "the parse itself succeeds — that is the trap");
+
+  let (green, emitter) = cst.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("the caller's report licenses nothing"),
+    FinishError::UncoveredGap { start: 1, end: 2 },
+    "a caller-chosen span must not excuse a byte no token covers"
+  );
+  assert_eq!(
+    emitter.errors().len(),
+    1,
+    "the capability is intact: the report still reached the diagnostic log"
+  );
+}
+
+type ViewOfSink<'a, 'inp> = tokora::EmitterView<'a, 'inp, ByteLexer<'inp>, Sink<'inp>>;
+type ByteSpan<'inp> = <ByteLexer<'inp> as Lexer<'inp>>::Span;
+type ByteLexErr<'inp> = <<ByteLexer<'inp> as Lexer<'inp>>::Token as Token<'inp>>::Error;
+
+/// The orphan impl the crate documents as reachable: foreign trait, foreign `Self`, and the
+/// **local** `ByteLexer` in the parameter list with no uncovered type parameter before it. It
+/// forwards the four members the trait requires onto the view and inherits every default —
+/// including `bound_source`, which is the point.
+struct Orphan<'a, 'inp>(ViewOfSink<'a, 'inp>);
+
+impl<'inp> tokora::Emitter<'inp, ByteLexer<'inp>> for Orphan<'_, 'inp> {
+  type Error = TestErr;
+
+  fn emit_lexer_error(
+    &mut self,
+    err: tokora::span::Spanned<ByteLexErr<'inp>, ByteSpan<'inp>>,
+  ) -> Result<(), TestErr> {
+    self.0.emit_lexer_error(err)
+  }
+
+  fn emit_unexpected_token(
+    &mut self,
+    err: tokora::error::token::UnexpectedTokenOf<'inp, ByteLexer<'inp>, ()>,
+  ) -> Result<(), TestErr> {
+    self.0.emit_unexpected_token(err)
+  }
+
+  fn emit_error(
+    &mut self,
+    err: tokora::span::Spanned<TestErr, ByteSpan<'inp>>,
+  ) -> Result<(), TestErr> {
+    self.0.emit_error(err)
+  }
+
+  fn rewind(&mut self, _cursor: &tokora::input::Cursor<'inp, '_, ByteLexer<'inp>>, _ckp: u64) {}
+}
+
+type OrphanCtx<'a, 'inp> = (Orphan<'a, 'inp>, DefaultCache<'inp, ByteLexer<'inp>>);
+
+/// The foreign parse's whole grammar: drain it, and let the input layer raise the refusals.
+fn drain_foreign<'inp>(
+  fin: &mut InputRef<'inp, '_, ByteLexer<'inp>, OrphanCtx<'_, 'inp>, ()>,
+) -> Result<(), TestErr> {
+  while let Ok(Some(_)) = fin.next() {}
+  Ok(())
+}
+
+/// **The orphan-view route**, end to end, from outside the crate.
+///
+/// `EmitterView` implements no emitter trait *in this crate*, but a downstream crate whose own
+/// lexer appears in the parameter list may implement one for it (`ByteLexer` is local here, and
+/// no uncovered type parameter precedes it) and install that wrapper as the emitter of a
+/// **second parse over a foreign buffer**. The second parse's own input layer then raises
+/// genuine lexer errors — whose spans are offsets into the *foreign* buffer — and forwards them
+/// through the view into the original sink.
+///
+/// The foreign buffer `z!` is chosen so its refused byte sits at offset `1..2`, exactly where the
+/// original source's unconsumed `b` sits. Pre-fix, that foreign error licensed the original
+/// source's byte and `finish` returned a plausible `ab` tree. It must not.
+///
+/// `bound_source` is deliberately **not** forwarded — the documented residue of the runtime
+/// handshake — so the second parse's attach-time source check sees an emitter that binds no
+/// source and says nothing. That is what makes this route reachable at all, and why the wall has
+/// to be the one below.
+#[test]
+fn an_orphan_view_wrapper_carries_a_foreign_lexer_error_but_licenses_no_gap() {
+  let (cst, res) = parse_lossless(
+    "ab",
+    (),
+    Verbose::new(),
+    profile(),
+    DefaultCache::<ByteLexer<'_>>::default(),
+    |inp: &mut Ir<'_, '_>| {
+      consume_only_the_first(inp)?;
+      // The one public door onto the view, taken from inside the original parse.
+      let (_peeked, view) = inp.peek_with_emitter::<tokora::utils::typenum::U1>()?;
+      // A second parse, over a buffer this sink never saw, emitting into it. Drained: `z`
+      // lexes, `!` does not — and the layer reports the refusal itself, with its own span,
+      // through the wrapper and into the original sink.
+      let _ = tokora::parser::parse_with(
+        drain_foreign,
+        "z!",
+        (Orphan(view), DefaultCache::<ByteLexer<'_>>::default()),
+      );
+      Ok(())
+    },
+  );
+  assert_eq!(res, Ok(()), "the parse itself succeeds — that is the trap");
+
+  let (green, emitter) = cst.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("a foreign buffer's refusal licenses nothing here"),
+    FinishError::UncoveredGap { start: 1, end: 2 },
+    "the original source's `b` is covered by no token and explained by no lexer error of \
+     its own"
+  );
+  assert_eq!(
+    emitter.errors().len(),
+    1,
+    "the foreign diagnostic still arrived: the channel is forwarded, not severed"
+  );
+}

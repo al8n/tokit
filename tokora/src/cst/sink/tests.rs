@@ -792,7 +792,7 @@ fn hole_wrap_brackets_the_buffered_suffix() {
   sink.record_token(&MiniTok(b'x'), &span(0, 1));
   // The hole's tokens, with a crossed lexer error between them (a Diag slot).
   sink.record_token(&MiniTok(b'a'), &span(1, 2));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
   sink.record_token(&MiniTok(b'b'), &span(3, 4));
 
@@ -911,20 +911,52 @@ fn count(hay: &str, needle: &str) -> usize {
 fn cst_forward_census_one_helper_carries_every_channel() {
   let src = include_str!("../sink.rs");
 
-  // The forwarded channels: 5 core Emitter + TooFew/TooMany/FullContainer +
-  // SeparatedEmitter (2) + the 4 leading/trailing refinements + PrattEmitter (2)
-  // + UnclosedEmitter (1 — the delimiter door, once absent from the sink and therefore
-  // absent from this count too; the two omissions hid each other).
+  // The forwarded channels: 6 core Emitter (the four diagnostic `emit_*`, `emit_skipped_region`,
+  // and `commit_lexer_error` — the input layer's own refusal, which is the *evidence* twin of
+  // `emit_lexer_error`) + TooFew/TooMany/FullContainer + SeparatedEmitter (2) + the 4
+  // leading/trailing refinements + PrattEmitter (2) + UnclosedEmitter (1 — the delimiter door,
+  // once absent from the sink and therefore absent from this count too; the two omissions hid
+  // each other).
   let calls = count(src, "self.forward_diag::<");
   assert!(
-    calls == 17,
-    "CST_FORWARD_CENSUS drift: {calls} forward_diag call sites, expected 17. A new \
+    calls == 18,
+    "CST_FORWARD_CENSUS drift: {calls} forward_diag call sites, expected 18. A new \
      forwarded channel must route through the one helper AND bump this census in the \
      same commit (grep CST_FORWARD_CENSUS)."
   );
   assert!(
     count(src, "fn forward_diag") == 1,
     "CST_FORWARD_CENSUS drift: the helper must be defined exactly once"
+  );
+
+  // COVERAGE_EVIDENCE_CENSUS — the gap-licensing door is exactly ONE.
+  //
+  // `finish`'s coverage verdict reads exactly two things out of the event log: `Token` spans and
+  // `Diag { error_span: Some(_) }` spans. The token half already has a one-door census above
+  // (`self.inner.commit_token` == 1, and `Event::Token` is built only in `record_token`). This is
+  // the other half: a `Some(..)` argument to the forward helper is the ONLY way a span becomes
+  // gap-licensing evidence, and it must sit in `commit_lexer_error` — the surface the input layer
+  // reaches and no caller can. Every other forwarded diagnostic passes `None`.
+  //
+  // A second `Some(` site would re-open the finding this census was written for: a caller-chosen
+  // span, with nothing consumed for it, excusing an uncovered byte of the sink's own buffer.
+  let evidence = count(src, "self.forward_diag::<Lang, _>(Some(");
+  assert!(
+    evidence == 1,
+    "COVERAGE_EVIDENCE_CENSUS drift: {evidence} sites record a gap-licensing span, expected \
+     exactly 1 (Emitter::commit_lexer_error). A span becomes coverage evidence only where the \
+     INPUT LAYER refused the bytes it names; a caller-chosen span licenses nothing."
+  );
+  let body = src
+    .split_once("fn commit_lexer_error")
+    .expect("the sink overrides the evidence door")
+    .1;
+  assert!(
+    body
+      .split_once("\n  }")
+      .is_some_and(|(head, _)| head.contains("self.forward_diag::<Lang, _>(Some(")),
+    "COVERAGE_EVIDENCE_CENSUS drift: the one gap-licensing site must live in \
+     `commit_lexer_error`"
   );
 
   // No emit bypasses the helper: the only `self.inner` touches are the helper's own
@@ -993,11 +1025,15 @@ fn cst_forward_census_one_helper_carries_every_channel() {
 fn cst_composition_census_every_family_method_is_overridden() {
   let src = include_str!("../sink.rs");
 
-  // (a) The 28-method inventory: 12 core Emitter + 4 CstEmitter + 12 capability emit_*.
+  // (a) The 29-method inventory: 13 core Emitter + 4 CstEmitter + 12 capability emit_*.
   // Each must appear as an `fn <name>` impl in the sink; a missing one is a severed channel.
   let overridden = [
-    // 12 core Emitter
+    // 13 core Emitter
     "emit_lexer_error",
+    // The evidence twin of the line above, and the sink is exactly the emitter that has to tell
+    // them apart: this one records the gap-licensing span, `emit_lexer_error` records none.
+    // Inheriting the default here would collapse the two doors back into one.
+    "commit_lexer_error",
     "emit_unexpected_token",
     "emit_error",
     "emit_warning",
@@ -1037,8 +1073,8 @@ fn cst_composition_census_every_family_method_is_overridden() {
   ];
   assert_eq!(
     overridden.len(),
-    28,
-    "the family inventory is 12 core + 4 CstEmitter + 12 capability = 28"
+    29,
+    "the family inventory is 13 core + 4 CstEmitter + 12 capability = 29"
   );
 
   // DERIVED, and at the TYPE level rather than by string matching — the half a hand-written
@@ -1081,7 +1117,7 @@ fn cst_composition_census_every_family_method_is_overridden() {
     ..core.find("impl<'a, L, U, Lang: ?Sized> Emitter").unwrap()];
   assert_eq!(
     count(trait_body, "  fn "),
-    12,
+    13,
     "core Emitter method count drifted: classify the new method (override + forward, or a \
      documented inherit) and update this census"
   );
@@ -1507,6 +1543,52 @@ fn finish_builds_the_straight_tree() {
   assert_eq!(text(green), "a");
 }
 
+/// **The two lexer-error doors differ by exactly one thing, and it is the coverage span.**
+///
+/// `Emitter::commit_lexer_error` is the input layer's — the layer lexed those bytes and refused
+/// them, so the span is evidence and rides the `Diag` slot. `Emitter::emit_lexer_error` is
+/// everyone else's (a parser through `InputRef`, a callback through `EmitterView`, a wrapper
+/// through either): the caller chose that span with nothing consumed for it, so the slot carries
+/// `None`. Both forward the diagnostic; both occupy a log position; only one licenses a gap.
+///
+/// This is the event-level statement of the finding closed in this round. Its behavioural halves
+/// are `a_handle_raised_lexer_error_reports_without_licensing_the_gap` and
+/// `an_orphan_view_wrapper_carries_a_foreign_lexer_error_but_licenses_no_gap` in
+/// `tests/parser_node.rs`, driven from outside the crate; the structural one is
+/// COVERAGE_EVIDENCE_CENSUS above.
+#[test]
+fn only_the_input_layers_lexer_error_carries_a_coverage_span() {
+  use crate::cst::event::Event;
+
+  let mut sink = verbose_sink("ab");
+  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
+    .expect("verbose collects");
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+    .expect("verbose collects");
+
+  let spans: std::vec::Vec<Option<(usize, usize)>> = sink
+    .events()
+    .iter()
+    .map(|event| match event {
+      Event::Diag { error_span } => error_span.as_ref().map(|s| (*s.start_ref(), *s.end_ref())),
+      other => panic!("only Diag slots here, got {other:?}"),
+    })
+    .collect();
+  assert_eq!(
+    spans,
+    std::vec![None, Some((1usize, 2usize))],
+    "the caller's report records no coverage span; the layer's records its own"
+  );
+
+  let (green, emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("byte 0 is explained by nothing"),
+    FinishError::UncoveredGap { start: 0, end: 1 },
+    "the caller-raised report over `a` licenses nothing, while the layer's over `b` does"
+  );
+  assert_eq!(emitter.errors().len(), 2, "both reports reached the log");
+}
+
 /// THE round-trip law, structural: an input with a lexer error (its bytes covered by no
 /// committed token, since a skipped error settles nothing) still satisfies
 /// `tree.text() == source` — the uncovered bytes tile as `gap_kind` tokens.
@@ -1515,7 +1597,7 @@ fn round_trip_with_a_lexer_error_is_structural() {
   let mut sink = verbose_sink("a!c");
   // Source "a!c": the `!` is a lexer error — a diagnostic, never a token event.
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.record_token(&MiniTok(b'c'), &span(2, 3));
   let (green, emitter) = sink.finish(K_ROOT);
@@ -1559,7 +1641,7 @@ fn a_trailing_gap_joins_the_node_of_the_token_it_trails() {
   let mut sink = verbose_sink("a!b");
   sink.cst_start(K_NODE);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.record_token(&MiniTok(b'b'), &span(2, 3));
   sink.cst_finish(K_NODE);
@@ -1573,7 +1655,7 @@ fn a_trailing_gap_joins_the_node_of_the_token_it_trails() {
   let mut sink = verbose_sink("a!");
   sink.cst_start(K_NODE);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -1624,7 +1706,7 @@ fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
   let mut sink = verbose_sink("a!");
   sink.cst_start(K_NODE);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -1637,7 +1719,7 @@ fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
   sink.cst_start(K_NODE);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   let (green, _emitter) = sink.finish(K_ROOT);
   let hoisted = green.expect("the covering diagnostic licenses the gap");
@@ -1658,7 +1740,7 @@ fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
   let mut sink = verbose_sink("a!");
   sink.cst_start(K_NODE);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_NODE);
   let _unwrapped = sink.cst_mark();
@@ -1679,7 +1761,7 @@ fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
   sink.record_token(&MiniTok(b'c'), &span(3, 4));
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -1694,7 +1776,7 @@ fn moving_the_lexer_error_across_the_close_does_not_move_the_gap() {
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
@@ -1728,7 +1810,7 @@ fn a_trailing_gap_lands_at_the_depth_of_the_token_it_trails() {
     sink.cst_start(K_NODE);
     sink.cst_start(K_LIST);
     sink.record_token(&MiniTok(b'a'), &span(0, 1));
-    Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(1, 2), MiniErr))
+    Emitter::<MiniLexer<'_>>::commit_lexer_error(sink, Spanned::new(span(1, 2), MiniErr))
       .expect("verbose collects");
     sink.cst_finish(K_LIST);
   };
@@ -1766,7 +1848,7 @@ fn a_trailing_gap_lands_at_the_depth_of_the_token_it_trails() {
   sink.cst_start(K_LIST);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_LIST);
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -1784,7 +1866,7 @@ fn a_trailing_gap_lands_at_the_depth_of_the_token_it_trails() {
   sink.cst_finish(K_NODE);
   sink.cst_start(K_LIST);
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_LIST);
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -1815,7 +1897,7 @@ fn a_trailing_gap_stays_at_the_root_when_the_token_it_trails_did() {
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
   let (green, _emitter) = sink.finish(K_ROOT);
   let green = green.expect("explained trailing gap");
@@ -1828,7 +1910,7 @@ fn a_trailing_gap_stays_at_the_root_when_the_token_it_trails_did() {
 
   // The root has NO children: nothing lexable, and no structure over it either.
   let mut sink = verbose_sink("!");
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
     .expect("verbose collects");
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
@@ -1858,7 +1940,7 @@ fn a_trailing_gap_stays_at_the_root_when_the_token_it_trails_did() {
 #[test]
 fn a_leading_gap_tiles_at_the_first_token_that_follows_it() {
   let mut sink = verbose_sink("!b");
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
     .expect("verbose collects");
   sink.cst_start(K_NODE);
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
@@ -1877,7 +1959,7 @@ fn a_leading_gap_tiles_at_the_first_token_that_follows_it() {
   // diagnostic's slot is never read.
   let mut sink = verbose_sink("!b");
   sink.cst_start(K_NODE);
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
     .expect("verbose collects");
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
   sink.cst_finish(K_NODE);
@@ -1921,7 +2003,7 @@ fn a_leading_gap_tiles_at_the_first_token_that_follows_it() {
 #[test]
 fn a_source_with_nothing_lexable_keeps_its_gap_at_the_root_either_way() {
   let mut sink = verbose_sink("ab");
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(0, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_start(K_NODE);
   sink.cst_finish(K_NODE);
@@ -1947,7 +2029,7 @@ fn a_source_with_nothing_lexable_keeps_its_gap_at_the_root_either_way() {
   // is still a root child — so the first half must place it at the root too, or placement would
   // once again turn on whether a lexable byte followed.
   let mut sink = verbose_sink("abc");
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(0, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_start(K_NODE);
   sink.cst_finish(K_NODE);
@@ -1965,7 +2047,7 @@ fn a_source_with_nothing_lexable_keeps_its_gap_at_the_root_either_way() {
   let mut sink = verbose_sink("ab");
   sink.cst_start(K_NODE);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(1, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -2017,8 +2099,11 @@ fn placement_drive(
       PlacementOp::Finish(kind) => sink.cst_finish(kind),
       PlacementOp::Tok(byte, lo, hi) => sink.record_token(&MiniTok(byte), &span(lo, hi)),
       PlacementOp::Diag(lo, hi) => {
-        Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(lo, hi), MiniErr))
-          .expect("verbose collects");
+        Emitter::<MiniLexer<'_>>::commit_lexer_error(
+          &mut sink,
+          Spanned::new(span(lo, hi), MiniErr),
+        )
+        .expect("verbose collects");
       }
       PlacementOp::Mark => {
         let _abandoned = sink.cst_mark();
@@ -2325,7 +2410,7 @@ fn finish_partial_places_a_balanced_trailing_gap_exactly_as_finish_does() {
   let balanced = |sink: &mut VerboseSink<'_>| {
     sink.cst_start(K_NODE);
     sink.record_token(&MiniTok(b'a'), &span(0, 1));
-    Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(1, 2), MiniErr))
+    Emitter::<MiniLexer<'_>>::commit_lexer_error(sink, Spanned::new(span(1, 2), MiniErr))
       .expect("verbose collects");
     sink.cst_finish(K_NODE);
   };
@@ -2442,10 +2527,10 @@ fn uncovered_gap_refused_by_finish_tiled_by_partial() {
 #[test]
 fn leading_and_trailing_gaps_tile() {
   let mut sink = verbose_sink("abc");
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
     .expect("verbose collects");
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(2, 3), MiniErr))
     .expect("verbose collects");
   let (green, _emitter) = sink.finish(K_ROOT);
   assert_eq!(
@@ -2554,7 +2639,7 @@ fn token_channel_wall_boundaries() {
 fn structure_without_tokens_is_legal_where_a_lexer_error_explains_every_byte() {
   // Explained: one error over the whole source, one open-then-closed node, no tokens.
   let mut sink = verbose_sink("ab");
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 2), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(0, 2), MiniErr))
     .expect("verbose collects");
   sink.cst_start(K_NODE);
   sink.cst_finish(K_NODE);
@@ -2582,7 +2667,7 @@ fn structure_without_tokens_is_legal_where_a_lexer_error_explains_every_byte() {
   // Partially explained is still the severed channel: one byte with no covering error is
   // enough, and the wall — not `UncoveredGap` — is what reports it.
   let mut sink = verbose_sink("ab");
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(0, 1), MiniErr))
     .expect("verbose collects");
   sink.cst_start(K_NODE);
   sink.cst_finish(K_NODE);
@@ -4350,8 +4435,11 @@ fn error_dense_w(n: usize) -> (u64, u64, u64) {
   let mut sink = verbose_sink(&src);
   for i in 0..n {
     let lo = 2 * i;
-    Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(lo, lo + 1), MiniErr))
-      .expect("verbose collects");
+    Emitter::<MiniLexer<'_>>::commit_lexer_error(
+      &mut sink,
+      Spanned::new(span(lo, lo + 1), MiniErr),
+    )
+    .expect("verbose collects");
     sink.record_token(&MiniTok(b'a'), &span(lo + 1, lo + 2));
   }
   super::finish::w::reset();
@@ -4512,7 +4600,7 @@ fn diag_starting_after_covered_keeps_the_tree_lossless() {
   // H1: source "abcde", events Token[0,1) · Diag[2,3) · Token[4,5).
   let h1 = |sink: &mut VerboseSink<'_>| {
     sink.record_token(&MiniTok(b'a'), &span(0, 1));
-    Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(2, 3), MiniErr))
+    Emitter::<MiniLexer<'_>>::commit_lexer_error(sink, Spanned::new(span(2, 3), MiniErr))
       .expect("verbose collects");
     sink.record_token(&MiniTok(b'e'), &span(4, 5));
   };
@@ -4546,7 +4634,7 @@ fn diag_absorbing_to_source_end_still_refuses_the_dropped_token() {
   // H2: source "abcd", events Token[0,1) · Diag[2,4).
   let h2 = |sink: &mut VerboseSink<'_>| {
     sink.record_token(&MiniTok(b'a'), &span(0, 1));
-    Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(2, 4), MiniErr))
+    Emitter::<MiniLexer<'_>>::commit_lexer_error(sink, Spanned::new(span(2, 4), MiniErr))
       .expect("verbose collects");
   };
 
@@ -4618,7 +4706,7 @@ fn partially_explained_run_names_todays_span() {
   // "abcdef" / Token[0,1) · Diag[3,4) · Token[5,6): [1,3) is unexplained, [3,4) is named.
   let h = |sink: &mut VerboseSink<'_>| {
     sink.record_token(&MiniTok(b'a'), &span(0, 1));
-    Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(3, 4), MiniErr))
+    Emitter::<MiniLexer<'_>>::commit_lexer_error(sink, Spanned::new(span(3, 4), MiniErr))
       .expect("verbose collects");
     sink.record_token(&MiniTok(b'f'), &span(5, 6));
   };
@@ -4883,7 +4971,7 @@ fn out_of_space_root_kind_refused_through_the_public_door() {
 fn malformed_diag_span_refused_by_both_doors() {
   let malformed = |sink: &mut VerboseSink<'_>| {
     // `0..99` over a 3-byte source: an end far past the source end.
-    Emitter::<MiniLexer<'_>>::emit_lexer_error(sink, Spanned::new(span(0, 99), MiniErr))
+    Emitter::<MiniLexer<'_>>::commit_lexer_error(sink, Spanned::new(span(0, 99), MiniErr))
       .expect("verbose collects");
     sink.record_token(&MiniTok(b'c'), &span(2, 3));
   };
@@ -5084,7 +5172,7 @@ fn no_ok_tree_panics_a_conforming_language() {
   Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(3, 4), 1).expect("collects");
 
   // A refused byte: the sink synthesizes the K_GAP tile itself.
-  Emitter::<MiniLexer<'_>>::emit_lexer_error(&mut sink, Spanned::new(span(4, 5), MiniErr))
+  Emitter::<MiniLexer<'_>>::commit_lexer_error(&mut sink, Spanned::new(span(4, 5), MiniErr))
     .expect("verbose collects");
   sink.cst_finish(K_NODE);
 
@@ -5344,6 +5432,16 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'i
     err: Spanned<MiniLexErr<'inp>, MiniSpan<'inp>>,
   ) -> Result<(), Self::Error> {
     self.0.emit_lexer_error(err)
+  }
+
+  // Forwarded like `commit_token`: the input layer's own refusals must reach the sink AS
+  // refusals, or the coverage evidence they carry is lost and a legitimately unlexable region
+  // stops being explained.
+  fn commit_lexer_error(
+    &mut self,
+    err: Spanned<MiniLexErr<'inp>, MiniSpan<'inp>>,
+  ) -> Result<(), Self::Error> {
+    self.0.commit_lexer_error(err)
   }
 
   fn emit_unexpected_token(
@@ -6224,6 +6322,16 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForward<'_, 'inp> {
     self.0.emit_lexer_error(err)
   }
 
+  // Forwarded like `commit_token`: the input layer's own refusals must reach the sink AS
+  // refusals, or the coverage evidence they carry is lost and a legitimately unlexable region
+  // stops being explained.
+  fn commit_lexer_error(
+    &mut self,
+    err: Spanned<MiniLexErr<'inp>, MiniSpan<'inp>>,
+  ) -> Result<(), Self::Error> {
+    self.0.commit_lexer_error(err)
+  }
+
   fn emit_unexpected_token(
     &mut self,
     err: crate::error::token::UnexpectedTokenOf<'inp, MiniLexer<'inp>, ()>,
@@ -6296,6 +6404,16 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForwardPartial<'_, 'inp
     err: Spanned<MiniLexErr<'inp>, MiniSpan<'inp>>,
   ) -> Result<(), Self::Error> {
     self.inner.emit_lexer_error(err)
+  }
+
+  // Forwarded like `commit_token`: the input layer's own refusals must reach the sink AS
+  // refusals, or the coverage evidence they carry is lost and a legitimately unlexable region
+  // stops being explained.
+  fn commit_lexer_error(
+    &mut self,
+    err: Spanned<MiniLexErr<'inp>, MiniSpan<'inp>>,
+  ) -> Result<(), Self::Error> {
+    self.inner.commit_lexer_error(err)
   }
 
   fn emit_unexpected_token(
@@ -6578,5 +6696,10 @@ fn cst_carries_the_trivia_policy_to_materialization() {
 //
 // What is NOT closed is stated there too, under "What this does not close": a downstream crate
 // can implement `Emitter` for `EmitterView<'_, '_, ItsOwnLexer, Sink<..>>` within the orphan
-// rules. `commit_token` is not on the view's surface, so no such implementation can carry a token
-// — and a token is what pairs a span with a byte.
+// rules. What such an implementation cannot reach is either producer of this sink's coverage
+// machinery: `commit_token` (a token is what pairs a span with a byte) and `commit_lexer_error`
+// (a recorded refusal span is what licenses a byte to have no token). Neither is on the view's
+// surface. The second one was found open a round after the first was shut, and its cross-crate
+// pin is `an_orphan_view_wrapper_carries_a_foreign_lexer_error_but_licenses_no_gap` in
+// `tests/parser_node.rs`, with the event-level statement at
+// `only_the_input_layers_lexer_error_carries_a_coverage_span` above.

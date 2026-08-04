@@ -577,6 +577,47 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
     let _ = (tok, span);
   }
 
+  /// Observes one lexer error **the input layer itself raised**, over bytes it lexed and
+  /// refused — the refusal-side twin of [`commit_token`](Self::commit_token).
+  ///
+  /// The input layer calls this instead of [`emit_lexer_error`](Self::emit_lexer_error) from its
+  /// one deduped reporting site and nowhere else; every other route to a lexer-error report — a
+  /// parser's own [`InputRef::emit_lexer_error`](crate::InputRef::emit_lexer_error), a callback's
+  /// [`EmitterView::emit_lexer_error`](crate::EmitterView::emit_lexer_error), an emitter a caller
+  /// drives directly — arrives at `emit_lexer_error`. So the two doors are not two spellings of
+  /// one report: this one carries the layer's own span, and the span of a byte the layer refused
+  /// is the *only* evidence a byte was legitimately left untokenized.
+  ///
+  /// # Contract: forwarded by default, and a wrapper must forward it too
+  ///
+  /// The default body delegates to [`emit_lexer_error`](Self::emit_lexer_error), so an emitter
+  /// that only cares about *diagnostics* — every emitter in this crate except the recording
+  /// `Sink`, and almost every emitter downstream — implements nothing, sees every lexer error
+  /// exactly as it always did, and cannot tell the doors apart. Only an emitter that treats the
+  /// span as **structural evidence** overrides it. A wrapper emitter must forward this the way it
+  /// forwards `commit_token`: inheriting the default turns the layer's refusals into ordinary
+  /// caller reports for whatever it wraps, which for a recording sink means a legitimately
+  /// unlexable region stops being explained (`cst::FinishError::UncoveredGap`).
+  ///
+  /// # Why the distinction is structural and not stylistic
+  ///
+  /// The recording sink's materialization tiles a source byte no committed token covers **only**
+  /// where a recorded lexer error covers it; an unexplained byte is a dropped committed token and
+  /// is refused. That makes a recorded span a licence, and a licence has to be earned by the same
+  /// thing token spans are earned by — the input layer lexing those bytes and refusing them. A
+  /// caller-chosen span with no consumption behind it is the shape `CstEmitter::cst_token` had on
+  /// the token channel before it was deleted, and it is withheld here for the identical reason.
+  #[inline(always)]
+  fn commit_lexer_error(
+    &mut self,
+    err: Spanned<<L::Token as Token<'a>>::Error, L::Span>,
+  ) -> Result<(), Self::Error>
+  where
+    L: Lexer<'a>,
+  {
+    self.emit_lexer_error(err)
+  }
+
   /// Pushes a diagnostic label onto the emitter's open-label stack, opening a
   /// *"while parsing X"* context for the duration of a [`labelled`](crate::labelled)
   /// sub-parse.
@@ -779,6 +820,20 @@ where
     L: Lexer<'a>,
   {
     (**self).commit_token(tok, span)
+  }
+
+  /// Forwarded, and load-bearing for the same reason `commit_token` is: a wrapper that inherited
+  /// the default would deliver the input layer's own refusals to the wrapped emitter as ordinary
+  /// caller reports, and a recording sink would stop explaining legitimately unlexable bytes.
+  #[inline(always)]
+  fn commit_lexer_error(
+    &mut self,
+    err: Spanned<<L::Token as Token<'a>>::Error, L::Span>,
+  ) -> Result<(), Self::Error>
+  where
+    L: Lexer<'a>,
+  {
+    (**self).commit_lexer_error(err)
   }
 
   #[inline(always)]

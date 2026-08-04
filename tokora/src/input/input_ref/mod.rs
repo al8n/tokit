@@ -784,6 +784,13 @@ where
   /// span's end against a high-water mark — guarantees every lexer error is reported
   /// exactly once, whether it is peeked, consumed, or both.
   ///
+  /// LEXER_ERROR_CENSUS — **the** site that raises the layer's own lexer errors, and the crate's
+  /// only caller of [`Emitter::commit_lexer_error`]. The span it hands over is the lexer's, over
+  /// bytes this layer just lexed and refused, which is what makes it evidence a recording sink
+  /// may license a gap with. Every *caller*-facing spelling (`InputRef::emit_lexer_error`,
+  /// `EmitterView::emit_lexer_error`, `ParseState::emit_lexer_error`) goes to
+  /// [`Emitter::emit_lexer_error`] instead and licenses nothing.
+  ///
   #[inline(always)]
   fn emit_lexer_error_deduped(
     &mut self,
@@ -809,7 +816,7 @@ where
     // carries on, an unraised watermark lets a later scan over the same bytes re-offer the same
     // lexer error — exactly the duplicate this ordering was chosen to close.
     *self.emitted_error_end = end;
-    self.emitter().emit_lexer_error(err)
+    self.emitter().commit_lexer_error(err)
   }
 
   /// Returns `true` if the input is poisoned by a sticky limit error.

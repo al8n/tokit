@@ -30,9 +30,9 @@
 //!
 //! # What is deliberately *not* forwarded
 //!
-//! Four `Emitter` members have exactly one lawful caller — the input layer itself — and the
-//! `SETTLE_CENSUS` / `RELEASE_CENSUS` source censuses in `census_tests.rs` exist to keep it
-//! that way:
+//! Five `Emitter` members have exactly one lawful caller — the input layer itself — and the
+//! `SETTLE_CENSUS` / `RELEASE_CENSUS` / `LEXER_ERROR_CENSUS` source censuses in `census_tests.rs`
+//! exist to keep it that way:
 //!
 //! - [`Emitter::checkpoint`], [`Emitter::rewind`] and [`Emitter::release`] are the emitter half
 //!   of the handle's own checkpoint lineage. A caller-driven call desynchronizes the emitter
@@ -45,6 +45,12 @@
 //!   that *settles*. Forwarding it would hand back the caller-chosen-span, no-consumption door
 //!   that removing `CstEmitter::cst_token` closed: a span in the log that no committed token
 //!   accounts for.
+//! - [`Emitter::commit_lexer_error`] is the same door on the diagnostic channel: the input
+//!   layer's own refusal, over bytes it lexed and could not tokenize. A recording sink treats its
+//!   span as the licence to tile those bytes as a gap, so forwarding it would let a parser decide
+//!   which source bytes need no token — which is the `cst_token` shape exactly.
+//!   [`emit_lexer_error`](InputRef::emit_lexer_error) below is the caller's door onto the same
+//!   report, and records no coverage span.
 //!
 //! Everything else is forwarded verbatim: the rest of [`Emitter`], the whole [`CstEmitter`]
 //! structuring surface, and the twelve capability channels the collecting combinators emit
@@ -108,6 +114,17 @@ where
   /// The input layer's own lexer-error reports are deduped against a watermark; a report raised
   /// here is not, so a caller re-reporting a region the layer already reported produces two
   /// diagnostics rather than one. Noisy, never silent.
+  ///
+  /// # It reports; it does not license
+  ///
+  /// A recording [`Sink`](crate::cst::Sink) tiles a source byte no committed token covers only
+  /// where a lexer error the *input layer* raised covers it. The span handed over here is the
+  /// caller's, with no consumption behind it, so the sink records the diagnostic and no coverage
+  /// span: an uncovered byte stays uncovered and `finish` still refuses it
+  /// ([`FinishError::UncoveredGap`](crate::cst::FinishError::UncoveredGap)). An unconsumed region
+  /// is materialized through
+  /// [`Cst::finish_partial`](crate::cst::Cst::finish_partial), which tiles it — not by reporting
+  /// a lexer error over it.
   #[inline(always)]
   pub fn emit_lexer_error(
     &mut self,

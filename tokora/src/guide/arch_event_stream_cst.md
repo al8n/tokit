@@ -345,6 +345,22 @@ tree. This is why the lexer-error span rides *in the event log* (the `error_span
 so it rewinds with its branch, and so its *span* is available to license its gap at exactly the one
 moment the channels are allowed to cross.
 
+**"Recorded" is narrower than "reported", and the narrowing is the whole guarantee.** A licence has
+to be earned by the same thing a token span is earned by — the input layer lexing those bytes and
+refusing them — so the layer's own reports reach the sink through
+[`commit_lexer_error`](crate::Emitter::commit_lexer_error), the refusal-side twin of
+`commit_token`, and *only* those carry an `error_span`. Every caller-facing spelling of the same
+report — a parser's [`InputRef::emit_lexer_error`](crate::InputRef::emit_lexer_error), a callback's
+[`EmitterView::emit_lexer_error`](crate::EmitterView::emit_lexer_error), a wrapper forwarding either
+— lands on [`Emitter::emit_lexer_error`](crate::Emitter::emit_lexer_error), takes its `Diag` slot,
+reaches the inner emitter, and records **no span**. Without that split the licence was a
+caller-chosen span with nothing consumed for it — the shape `CstEmitter::cst_token` had on the token
+channel before it was deleted — and it reached across buffers: through the orphan-rule wrapper the
+[`parse_lossless`](crate::cst::parse_lossless) docs describe, a *foreign* parse's refusals excused
+bytes of this sink's source. The capability is untouched, only its structural side effect: a
+callback can still report a malformed input inline, with no rewind, which is what the `decide`
+family exists for.
+
 Two more walls guard the same seam. A balanced stream that builds structure but carries **no committed
 token at all** over a nonempty source *no lexer error explains* is a
 [`StructureWithoutTokens`](crate::cst::FinishError): the signature of a wrapper emitter that forwarded

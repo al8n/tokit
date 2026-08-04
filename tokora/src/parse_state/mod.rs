@@ -80,6 +80,10 @@ where
 
   /// Emits a lexer error — [`Emitter::emit_lexer_error`](crate::Emitter::emit_lexer_error),
   /// forwarded through the handle.
+  ///
+  /// A *report*, not a licence: over a recording sink the span handed over here records no
+  /// gap-coverage evidence, because the caller chose it and nothing was consumed for it. See
+  /// [`InputRef::emit_lexer_error`](crate::InputRef::emit_lexer_error).
   #[inline(always)]
   pub fn emit_lexer_error(
     &mut self,

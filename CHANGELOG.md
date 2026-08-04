@@ -51,6 +51,8 @@ numbered entry below that carries the full reasoning.
 | A dialect mapper returning an out-of-language kind reached `finish` as `Err(InvalidDialectKind)` | panics at the emit site, in every build | It is a dialect bug, not an input condition; no parse input can provoke it. | [14](#0.8.0-changed-breaking) |
 | A panic in caller code during `skip_until` lost the in-flight token and the skipped prefix | the stream is left consistent on the panic path too | Only observable to a host that catches a panic across a parse and keeps using the input. | [9](#0.8.0-changed-breaking) |
 | `Emitter::commit_token`'s observer ran before the committed position was published | runs **after** the position is published, before the replaced pair is dropped | An observer that panics no longer leaves the input naming a token the stream does not hold. | [10](#0.8.0-changed-breaking) |
+| A **wrapper** emitter over a recording `Sink` forwarded lexer errors by forwarding `emit_lexer_error` | must also forward the new `Emitter::commit_lexer_error`, exactly as it forwards `commit_token` | The input layer's own refusals now arrive through that method, and their spans are what license an untokenized byte. A wrapper that inherits the default turns them into caller reports, and the wrapped sink's `finish` then refuses a legitimately unlexable region as `UncoveredGap`. Diagnostics-only emitters are unaffected — the default forwards to `emit_lexer_error`. | [68](#0.8.0-changed-breaking) |
+| A parser or callback that reported a lexer error over an **unconsumed** region — `inp.emit_lexer_error(span)`, `view.emit_lexer_error(span)` — thereby licensed those bytes to be gap-tiled, and `finish` returned a tree | the report is delivered unchanged; it licenses nothing, so `finish` refuses the uncovered region as `UncoveredGap` | A recorded lexer-error span is a *licence*, and a caller-chosen span with nothing consumed for it is the deleted `cst_token` shape on the diagnostic channel. Materialize an unconsumed region with `Cst::finish_partial`, which tiles it. | [68](#0.8.0-changed-breaking) |
 | An `Incomplete` scan exit committed the frontier it reached | exits as it entered | A refill driver resumed at a half-consumed position. | [12](#0.8.0-changed-breaking) |
 | A terminal scanner stop (resource limit, poison boundary) reached callers as an ordinary end-of-input **decline** | surfaces as a terminal error **when your emitter accepts the diagnostic**, and recovery re-raises it instead of retrying. A *rejecting* emitter's `Err` is built from your lexer's error value and carries no mark, so recovery can still spend that trip — `MaybeTerminal`'s doc has that path and the arm it needs | Recovery was retrying against a scanner that had already given up. | [16](#0.8.0-changed-breaking) |
 | Collection drivers could stall on zero progress, or mask a terminal stop as a successful end | both exits are errors | | [17](#0.8.0-changed-breaking) |
@@ -62,7 +64,7 @@ numbered entry below that carries the full reasoning.
 | A second same-power `PrattInfix::Neither` operator in one chain folded left in silence — `7 = 1 ; 2 ; 3` returned `Ok(((7=(1;2));3))` with the **whole input consumed**, so no end-of-input check had anything to catch | the parse fails with `NonAssociativeChain`, the operator left on the input unconsumed | Handing the operator up re-associates the chain across an enclosing frame that cannot know the constraint. Not terminal: recovery may still spend it. | [41](#0.8.0-changed-breaking) |
 | Recursive descent was unbounded — a deep enough expression exhausted the native stack and **aborted the process** | a shared per-input depth budget, **64** by default, failing the parse with the always-terminal `RecursionLimitReached` | An abort carries no diagnostic and cannot be caught; a refusal names the knob that raises it. `RecursionLimiter::unlimited()` restores 0.7.3's behaviour. | [42](#0.8.0-changed-breaking) |
 | `RecursionLimiter::new` / `Default`, and `Limiter::new` / `Limiter::with_token_tracker`, defaulted to depth **500** | **500** — unchanged, so there is nothing to do here. [43](#0.8.0-changed-breaking) dropped these four to 64 during the campaign and [50](#0.8.0-changed-breaking) returned them before release; only a build tracked between the two ever saw 64 | These constructors reach code with no pratt parser in it: the same type doubles as a **lexer-side** nesting tracker in a `State` / `Extras` position, where a level costs no native stack and 64 was a number chosen for a reason that does not apply. The depth that *does* change is the input layer's, in the row above. | [43](#0.8.0-changed-breaking), [50](#0.8.0-changed-breaking) |
-| Your own `emit_error` / `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 130 new inherent items and 13 new defaulted trait methods enter the method space, and **67 of the inherent ones sit on types you already had** — that 67 is the exposure table, and it is the list to read. 38 of the 67 land on `InputRef` and `ParseState` under the emitter's own method names, which is where a 0.7.3 shortcut helper over `inp.emitter()` sat. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
+| Your own `emit_error` / `peek_kind` / `labelled` / `opt` / … resolved to *your* method | may resolve to tokora's, with **no diagnostic at the call site** | 130 new inherent items and 14 new defaulted trait methods enter the method space, and **67 of the inherent ones sit on types you already had** — that 67 is the exposure table, and it is the list to read. 38 of the 67 land on `InputRef` and `ParseState` under the emitter's own method names, which is where a 0.7.3 shortcut helper over `inp.emitter()` sat. Whether yours still wins is decided by rustc's **pick order**, not by inherent-ness. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 | — | a new `warning: unused import` naming one of *your* combinator traits | That warning is the **only** breadcrumb the silent case gives you: the steal stranded the import. | [source-breaking additions that can change behaviour with *no diagnostic at the call site*](#0.8.0-source-breaking-additions-that-can-change-behaviour-with-no-diagnostic-at-the-call-site) |
 
 #### These fail to compile. Your build will point at every one.
@@ -100,7 +102,7 @@ numbered entry below that carries the full reasoning.
 | `dyn SeparatorHandler` | no longer object-safe | `OBSERVES_SEPARATORS` is an associated const. Nothing in this crate used it. | [5](#0.8.0-changed-breaking) |
 | `let (e, c) = ctx.into_components();` | `let (e, c, recursion) = …` | `InputContext` carries the recursion budget now, and a decomposition that dropped it would hand the input an unconfigured one. `..` is not available on a tuple pattern, so the compiler points at every site. | [45](#0.8.0-changed-breaking) |
 | An error type driving either pratt engine without `From<RecursionLimitReached<…>>` and `From<NonAssociativeChain<…>>` | add both | The engines **return** these two rather than emitting them, so the entry-point bounds ask for them. Two `From` impls; every example in this repo shows the shape. | [46](#0.8.0-changed-breaking) |
-| `parser.labelled("x")` resolving to your own trait's method, that trait in scope | `E0034`, when yours sits at the **same pick** | Thirteen new defaulted names on traits you already had — `ParseInput`, `TryParseInput`, `Emitter`, `SeparatorHandler`. The fix is UFCS; rustc prints the two suggestions. | [source-breaking additions that fail *loudly*](#0.8.0-source-breaking-additions-that-fail-loudly) |
+| `parser.labelled("x")` resolving to your own trait's method, that trait in scope | `E0034`, when yours sits at the **same pick** | Fourteen new defaulted names on traits you already had — `ParseInput`, `TryParseInput`, `Emitter`, `SeparatorHandler`. The fix is UFCS; rustc prints the two suggestions. | [source-breaking additions that fail *loudly*](#0.8.0-source-breaking-additions-that-fail-loudly) |
 | `use tokora::*;` — or a **module** glob such as `use tokora::error::*;` / `use tokora::cst::*;` — beside another glob exporting the same name | `E0659`, or `ambiguous_glob_imports` for a *macro* name on rustc ≥ 1.95 | 53 new glob-reachable names — `select!` against `tokio::select!` is the real one. Twenty are enumerated by path in that section; **nine of those twenty reach you only through a module glob, never the root**: `dispatch_take` and `try_dispatch_take` via `tokora::parser`; `kinds`, `Cst`, `parse_lossless` and `parse_lossless_partial` via `tokora::cst`; `RecursionLimitReached` and `NonAssociativeChain` via `tokora::error`; `Descent` via `tokora::input`. `EmitterView` reaches you from the root **and** from `tokora::emitter`. Measured on three toolchains; the remedy differs by name kind. | [source-breaking additions that fail *loudly*](#0.8.0-source-breaking-additions-that-fail-loudly) |
 
 #### Additive — nothing to do, listed so you know it exists
@@ -397,12 +399,13 @@ concrete public struct with no bound to reject anybody.
 
 ### Source-breaking additions that fail *loudly*
 
-- **`E0034`, "multiple applicable items in scope"**, when one of the **13** new defaulted method
+- **`E0034`, "multiple applicable items in scope"**, when one of the **14** new defaulted method
   names on a trait you already had meets a same-named method from another trait **at the same
   pick**, with that trait in scope: `labelled`, `traced`, `list_until`, `separated1_by`,
   `peek_then_head`, `try_delimited`, `try_delimited_by_parens`, `try_delimited_by_braces`,
   `try_delimited_by_brackets` and `try_delimited_by_angles` on `ParseInput`; `opt` on
-  `TryParseInput`; `bound_source` on `Emitter`; `observe_separator` on `SeparatorHandler`.
+  `TryParseInput`; `bound_source` and `commit_lexer_error` on `Emitter`; `observe_separator` on
+  `SeparatorHandler`.
   (`CstText::cst_text` and `MaybeTerminal::is_terminal` are the release's other two new trait
   methods and are not in that thirteen: their traits are new, so they compete only once you
   import them.) Blanket-ness is irrelevant — a trait with exactly one impl for one concrete
@@ -1802,9 +1805,10 @@ everywhere else.
     implements no emitter trait, does not `Deref`, and hands back no `&mut E` — there is nothing
     at the end of a method call to put in an emitter slot, and the value itself cannot stand in
     one. Its 24 forwarded methods carry the emitter's own names, so a callback body written
-    against `&mut E` keeps every statement it had; only the parameter's type changes. Four
+    against `&mut E` keeps every statement it had; only the parameter's type changes. **Five**
     members stay off the surface — `Emitter::checkpoint`, `rewind` and `release` (the checkpoint
-    lineage the *input* owns) and `Emitter::commit_token` (the auto-emission chokepoint) — for
+    lineage the *input* owns), `Emitter::commit_token` (the auto-emission chokepoint) and
+    `Emitter::commit_lexer_error` (its refusal-side twin, added by this item — see below) — for
     the same reason `InputRef` never gave a callback those either.
 
     **The handle closed its own version of the same door.** `InputRef::emitter` — the `&mut Ctx::Emitter`
@@ -1846,16 +1850,57 @@ everywhere else.
     `Emitter::commit_token`, the input layer's own auto-emission chokepoint, was always the other
     producer of token events; with `cst_token` gone it is the **only** one.
 
+    **The same door was open on the diagnostic channel, under another name, and this item closes
+    that one too — `Emitter::commit_lexer_error` is new.** A recording sink's `finish` tiles a
+    source byte no committed token covers *only* where a recorded lexer error covers it; an
+    unexplained byte is a dropped committed token and is refused (`FinishError::UncoveredGap`).
+    So a recorded lexer-error span is not a note, it is a **licence** — and until this change
+    every route to `Emitter::emit_lexer_error` minted one, including the two that hand a
+    caller-chosen span to a sink with nothing consumed for it: `InputRef::emit_lexer_error` (and
+    `ParseState`'s re-export) and `EmitterView::emit_lexer_error`. A parser could excuse bytes it
+    had simply walked away from, and through the orphan-rule wrapper described below a **foreign**
+    parse's refusals — spans in a buffer this sink never saw — excused bytes of the original
+    source. That is the `cst_token` shape exactly: a span the caller picks, licensing coverage,
+    with nothing consumed.
+
+    The fix splits the report from the evidence rather than removing the capability, because a
+    parser must still be able to say *"this input is malformed here"* inline, with no rewind —
+    the reason the `decide` family exists at all. `Emitter::commit_lexer_error` is the input
+    layer's own door, called from its single deduped reporting site and withheld from both
+    forwarding surfaces beside `commit_token`; the recording sink overrides it to record the
+    coverage span. `Emitter::emit_lexer_error` keeps every caller it had and stays the diagnostic:
+    the report reaches the inner emitter, occupies its slot in the rewindable log, and records no
+    coverage span.
+
+    **For almost every emitter this is invisible.** `commit_lexer_error`'s default body forwards
+    to `emit_lexer_error`, so an emitter that only collects diagnostics — `Fatal`, `Verbose`,
+    `Silent`, `Ignored`, and essentially every emitter downstream — implements nothing, receives
+    every lexer error exactly as before, and cannot tell the doors apart. Two shapes must act.
+    A **wrapper** emitter forwards `commit_lexer_error` the way it forwards `commit_token`;
+    inheriting the default delivers the layer's refusals to the wrapped emitter as caller reports,
+    and a wrapped recording sink then refuses a region that was legitimately unlexable. An emitter
+    that *records* lexer-error spans as structural evidence overrides it. `LEXER_ERROR_CENSUS`
+    (`src/input/input_ref/census_tests.rs`) and `COVERAGE_EVIDENCE_CENSUS`
+    (`src/cst/sink/tests.rs`) lock the producer at one site and keep the method off the view.
+
     **What this does not close.** `EmitterView` implements no emitter trait *in this crate*,
     which is a fact about this crate, not a proof that no such implementation can exist: under
     the orphan rules a downstream crate whose own lexer type appears in the parameter list may
     write `impl Emitter for EmitterView<'_, '_, ItsLexer, Sink<…>>` and install that over a
-    foreign buffer from inside a callback. It compiles, and it was run. But `commit_token` is not
-    on the view's surface, so measured end to end: a foreign parse driven that way injects a node
-    through the forwarded `cst_start`/`cst_finish` while the sink still materializes its own
-    text — no token, no span, no byte of the foreign buffer crosses. The wrong-*text* class this
-    item exists to close has no route through it; the node and diagnostic channels it reaches are
-    ones a `decide` body could already reach directly, in its own parse, by design.
+    foreign buffer from inside a callback. It compiles, and it was run. What such a wrapper cannot
+    reach is **either** producer of the sink's coverage machinery: `commit_token`, which is what
+    pairs a span with a byte, and `commit_lexer_error`, which is what licenses a byte to have no
+    token — neither is on the view's surface. Measured end to end: a foreign parse driven that way
+    injects a node through the forwarded `cst_start`/`cst_finish` and reports its diagnostics into
+    the log, while the sink still materializes its own text over its own coverage — no token, no
+    span, no byte and no *licence* of the foreign buffer crosses. Stating that bound in terms of
+    `commit_token` alone was incomplete through the release candidates, and the foreign-licence
+    route it missed is now pinned from outside the crate by
+    `an_orphan_view_wrapper_carries_a_foreign_lexer_error_but_licenses_no_gap`
+    (`tests/parser_node.rs`), which returned a plausible round-tripping tree before the split and
+    an `UncoveredGap` after it. The wrong-*text* class this item exists to close has no route
+    through it; the node and diagnostic channels it reaches are ones a `decide` body could already
+    reach directly, in its own parse, by design.
 
     **`Emitter::bound_source`, `Source::REFERENT_IS_BYTES` and `SourceIdentity` are retained, not
     retired**, and the known limitation below is corrected in place rather than left standing on

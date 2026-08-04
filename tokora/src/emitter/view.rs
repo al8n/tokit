@@ -38,8 +38,8 @@
 //!
 //! # What is deliberately *not* forwarded
 //!
-//! The same four [`Emitter`] members [`InputRef`](crate::InputRef) withholds, for the same
-//! reasons, and the `SETTLE_CENSUS` / `RELEASE_CENSUS` source censuses in
+//! The same five [`Emitter`] members [`InputRef`](crate::InputRef) withholds, for the same
+//! reasons, and the `SETTLE_CENSUS` / `RELEASE_CENSUS` / `LEXER_ERROR_CENSUS` source censuses in
 //! `input_ref/census_tests.rs` exist to keep it that way:
 //!
 //! - [`Emitter::checkpoint`], [`Emitter::rewind`] and [`Emitter::release`] are the emitter half of
@@ -51,11 +51,20 @@
 //!   deleted for being the second — so withholding it is what keeps a byte of one buffer from ever
 //!   being paired with a span decided by another. It is also the caller-chosen-span,
 //!   no-consumption door: a span in the log that no committed token accounts for.
+//! - [`Emitter::commit_lexer_error`] is that same door on the **diagnostic** channel, and it was
+//!   found open one round after `cst_token` was shut. A recording sink's materialization tiles a
+//!   source byte no token covers only where a recorded lexer error covers it, so a recorded span
+//!   is a *licence*, not a note — and a licence a caller picks is a caller deciding which bytes of
+//!   the sink's buffer need no token. So the layer's own refusals come through this member, which
+//!   is not here, and everyone else's come through [`emit_lexer_error`](Self::emit_lexer_error),
+//!   which is: the report is delivered, and it licenses nothing.
 //!
-//! Everything else is forwarded verbatim: the rest of [`Emitter`], the whole [`CstEmitter`]
-//! structuring surface, and the capability channels the collecting combinators emit through, each
-//! under its own method-level bound so a diagnostics-only context is unaffected. The capability was
-//! never the problem.
+//! Everything else is forwarded verbatim: the rest of [`Emitter`] — the whole diagnostic surface,
+//! [`emit_lexer_error`](Self::emit_lexer_error) included — the whole [`CstEmitter`] structuring
+//! surface, and the capability channels the collecting combinators emit through, each under its own
+//! method-level bound so a diagnostics-only context is unaffected. The capability was never the
+//! problem: a callback must be able to say *"this input is malformed here"* inline, without
+//! rewinding, which is the whole reason the `decide` family exists.
 
 use core::marker::PhantomData;
 
@@ -99,13 +108,24 @@ use crate::{
 /// this type are both foreign, but `MyLexer` is local and no uncovered type parameter precedes it
 /// — and install *that* over a second buffer.
 ///
-/// What such an implementation can forward is bounded by the surface below, and
-/// [`Emitter::commit_token`] is not on it. `commit_token` is the auto-emission chokepoint and,
-/// since `CstEmitter::cst_token` was deleted, the **only** producer of token events: a token is
-/// what pairs a span with a byte, so a second parse driven that way contributes no token, no span
-/// and no byte of its own buffer. It reaches the diagnostic and node channels — which a callback
-/// body can already reach directly through this same surface, by design — and the tree still
-/// materializes over the buffer its sink was minted from.
+/// What such an implementation can forward is bounded by the surface below, and the two members
+/// that decide what a source byte *is* are not on it:
+///
+/// - [`Emitter::commit_token`], the auto-emission chokepoint and — since `CstEmitter::cst_token`
+///   was deleted — the only producer of token events. A token is what pairs a span with a byte, so
+///   a second parse driven this way contributes no token, no span and no byte of its own buffer.
+/// - [`Emitter::commit_lexer_error`], the only producer of **gap-coverage evidence**. Saying that
+///   `commit_token` was the only door onto the sink's structural machinery was, for one round,
+///   incomplete: a recorded lexer error's span licenses a gap tile, so a foreign parse whose input
+///   layer reported *its own* refusals through such a wrapper was excusing bytes of this sink's
+///   buffer that this parse never covered. The forwarded
+///   [`emit_lexer_error`](Self::emit_lexer_error) records no coverage span, so that route now
+///   delivers a diagnostic and nothing structural.
+///
+/// What is left is the diagnostic and node channels — which a callback body can already reach
+/// directly through this same surface, by design — and the tree still materializes over the buffer
+/// its sink was minted from, covered by exactly the bytes that parse's own tokens and its own
+/// lexer's refusals account for.
 pub struct EmitterView<'a, 'inp, L, E, Lang: ?Sized = ()>
 where
   L: Lexer<'inp>,
@@ -182,6 +202,15 @@ where
   /// The input layer's own lexer-error reports are deduped against a watermark; a report raised
   /// here is not, so a caller re-reporting a region the layer already reported produces two
   /// diagnostics rather than one. Noisy, never silent.
+  ///
+  /// # It reports; it does not license
+  ///
+  /// A recording [`Sink`](crate::cst::Sink) tiles a source byte no committed token covers only
+  /// where a lexer error **the input layer raised** covers it. A report raised here carries a span
+  /// the *caller* chose, with nothing consumed for it, so the sink records the diagnostic and no
+  /// coverage span: an uncovered byte stays uncovered and `finish` still refuses it
+  /// ([`FinishError::UncoveredGap`](crate::cst::FinishError::UncoveredGap)). The evidence door is
+  /// [`Emitter::commit_lexer_error`], which is deliberately not on this surface.
   #[inline(always)]
   pub fn emit_lexer_error(
     &mut self,

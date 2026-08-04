@@ -1105,13 +1105,28 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// what the two cells above pin. It is not a proof that no such implementation can exist: a
 /// downstream crate whose own lexer type appears in the parameter list may write
 /// `impl Emitter<'_, MyLexer<'_>> for EmitterView<'_, '_, MyLexer<'_>, Sink<..>>` within the
-/// orphan rules, and install *that* over a foreign buffer. What such an implementation can
-/// forward is bounded by the view's surface, and [`Emitter::commit_token`] — the auto-emission
-/// chokepoint, and since `CstEmitter::cst_token` was deleted the **only** producer of token
-/// events — is not on it. So a foreign parse driven that way contributes no token, no span and
-/// no byte of its own buffer; it reaches the node and diagnostic channels, which the condition
-/// could already reach directly and by design. The wrong-*text* class the drivers exist to close
-/// has no route through it.
+/// orphan rules, and install *that* over a foreign buffer.
+///
+/// What such an implementation can forward is bounded by the view's surface, and **both** members
+/// that decide what a source byte is are off it:
+///
+/// - [`Emitter::commit_token`] — the auto-emission chokepoint, and since `CstEmitter::cst_token`
+///   was deleted the only producer of token events. A foreign parse driven this way contributes
+///   no token, no span and no byte of its own buffer.
+/// - [`Emitter::commit_lexer_error`] — the only producer of **gap-coverage evidence**. Stating
+///   the guarantee in terms of `commit_token` alone was incomplete for one round: a recorded
+///   lexer-error span *licenses* an untokenized byte, and a foreign parse's input layer reports
+///   its own refusals, in its own buffer's coordinates. Through a wrapper that forwarded them,
+///   those spans excused bytes of *this* sink's source that this parse never covered.
+///   The view's [`emit_lexer_error`](crate::EmitterView::emit_lexer_error) records the diagnostic
+///   and no span, so the route now carries a report and no licence. Pinned end to end, from
+///   outside the crate, by `an_orphan_view_wrapper_carries_a_foreign_lexer_error_but_licenses_no_gap`
+///   in `tests/parser_node.rs`.
+///
+/// What is left reachable is the node and diagnostic channels, which the condition could already
+/// reach directly and by design. The wrong-*text* class the drivers exist to close has no route
+/// through it: a materialized tree's text is this buffer, covered by this parse's own tokens and
+/// explained by this parse's own lexer's refusals, or `finish` refuses it.
 #[inline]
 pub fn parse_lossless<'inp, L, Lang, E, C, O, P>(
   src: &'inp L::Source,
