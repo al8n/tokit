@@ -17,9 +17,9 @@
 
 use rowan::{Language, NodeOrToken, SyntaxNode};
 use tokora::{
-  Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, Token as TokenT,
+  Emitter, InputRef, ParseContext, ParseInput, Token as TokenT,
   cache::DefaultCache,
-  cst::{CstProfile, KindValidator, Sink},
+  cst::{CstProfile, KindValidator, parse_lossless},
   emitter::{CstEmitter, Fatal},
   error::token::UnexpectedTokenOf,
   logos::{self, Logos},
@@ -644,12 +644,19 @@ fn parse_to_tree(src: &str) -> SyntaxNode<CExprLang> {
     K::Error.raw(),
     K::Gap.raw(),
   );
-  let mut sink: Sink<'_, CExprLexer<'_>, _> = Sink::new(src, Fatal::<CExprError>::new(), profile);
-  Parser::with_context((&mut sink, DefaultCache::<CExprLexer<'_>>::default()))
-    .apply(program)
-    .parse_str(src)
-    .expect("parse succeeds");
-  let (green, _emitter) = sink.finish(K::Root.raw());
+
+  // `parse_lossless` mints the sink from `src` itself: the buffer the parse reads and the
+  // buffer the tree's text is sliced out of are the same argument of the same call.
+  let (cst, parsed) = parse_lossless(
+    src,
+    Default::default(),
+    Fatal::<CExprError>::new(),
+    profile,
+    DefaultCache::<CExprLexer<'_>>::default(),
+    program,
+  );
+  parsed.expect("parse succeeds");
+  let (green, _emitter) = cst.finish(K::Root.raw());
   SyntaxNode::<CExprLang>::new_root(green.expect("well-formed tree"))
 }
 

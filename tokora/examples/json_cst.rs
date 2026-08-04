@@ -17,9 +17,9 @@
 
 use rowan::{Language, NodeOrToken, SyntaxNode};
 use tokora::{
-  Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, Token as TokenT,
+  Emitter, InputRef, ParseContext, ParseInput, Token as TokenT,
   cache::DefaultCache,
-  cst::{CstProfile, KindValidator, Sink},
+  cst::{CstProfile, KindValidator, parse_lossless},
   emitter::{CstEmitter, Fatal},
   error::token::UnexpectedTokenOf,
   logos::{self, Logos},
@@ -381,14 +381,20 @@ fn main() {
     K::Error.raw(),
     K::Gap.raw(),
   );
-  let mut sink: Sink<'_, JsonLexer<'_>, _> = Sink::new(src, Fatal::<JsonError>::new(), profile);
 
-  Parser::with_context((&mut sink, DefaultCache::<JsonLexer<'_>>::default()))
-    .apply(document)
-    .parse_str(src)
-    .expect("parse succeeds");
+  // `parse_lossless` mints the sink from `src` itself: the buffer the parse reads and the
+  // buffer the tree's text is sliced out of are the same argument of the same call.
+  let (cst, parsed) = parse_lossless(
+    src,
+    Default::default(),
+    Fatal::<JsonError>::new(),
+    profile,
+    DefaultCache::<JsonLexer<'_>>::default(),
+    document,
+  );
+  parsed.expect("parse succeeds");
 
-  let (green, _emitter) = sink.finish(K::Root.raw());
+  let (green, _emitter) = cst.finish(K::Root.raw());
   let tree = SyntaxNode::<JsonLang>::new_root(green.expect("well-formed tree"));
 
   assert_eq!(tree.text().to_string(), src, "lossless round trip");
