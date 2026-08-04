@@ -16,14 +16,12 @@
 //! not a value: `inp.cst_start(k)` does everything `inp.emitter().cst_start(k)` did, and there
 //! is nothing to put in an emitter slot at the end of it.
 //!
-//! **This is a wall on the handle, not on the class.** Several public callback traits still take
-//! the emitter as a *parameter*, by `&mut`, and hand it to caller-written code:
-//! `Decision::decide(peeked, emitter)` — the condition of every `*_while` combinator — and the
-//! token-level pratt folds (`PrattFoldTokenPrefix` / `Infix` / `Postfix`). A wrapper around the
-//! live emitter is still expressible there; see the residue pin
-//! `a_wrapper_around_the_live_sink_still_reaches_a_callback_parameter` in `cst::sink::tests`.
-//! Those signatures want the same treatment this one got: a forwarding view rather than the
-//! value.
+//! **The callback parameters got the same treatment.** `Decision::decide` — the condition of
+//! every `*_while` combinator — the `peek_then` family's handlers, and the token-level pratt folds
+//! (`PrattFoldTokenPrefix` / `Infix` / `Postfix`) used to take `&mut Ctx::Emitter` and hand it to
+//! caller-written code. Each now receives an [`EmitterView`](crate::EmitterView): the same
+//! operations, under the same names, in a value that implements no emitter trait and so cannot
+//! occupy an emitter slot.
 //!
 //! [`emitter_ref`](InputRef::emitter_ref) remains public and hands back `&Ctx::Emitter` — the
 //! door for reading a concrete emitter's own state mid-parse (a collecting emitter's diagnostics,
@@ -53,6 +51,16 @@
 //! through (`TooFewEmitter`, `SeparatedEmitter`, `UnclosedEmitter`, `PrattEmitter`, …), each
 //! under its own method-level bound so a diagnostics-only context is unaffected. The capability
 //! was never the problem.
+//!
+//! # One surface, two exposures
+//!
+//! The bodies below are **delegations to [`EmitterView`](crate::EmitterView)**, the same value the
+//! callback traits receive — not a second implementation of the same forwarding. The handle's
+//! surface and the callback's surface are therefore the *same* surface, and a member added to or
+//! withheld from one is added to or withheld from both. The two `&self` readers
+//! ([`emitter_ref`](InputRef::emitter_ref) and
+//! [`emitter_bound_source`](InputRef::emitter_bound_source)) are the exception, and only because a
+//! view is built from a `&mut` borrow that a `&self` method does not have.
 
 use super::*;
 
@@ -85,6 +93,16 @@ where
     &*self.session.emitter
   }
 
+  /// The parse's emitter **operations**, as the value every callback receives.
+  ///
+  /// Crate-private, and it does not need to be more: the forwarding methods below *are* this
+  /// view's methods, reached one call shorter. It exists so the handle and the callback traits
+  /// share one implementation of the forwarding rather than two that can drift.
+  #[inline(always)]
+  pub(crate) fn emitter_view(&mut self) -> EmitterView<'_, 'inp, L, Ctx::Emitter, Lang> {
+    EmitterView::new(self.session.emitter)
+  }
+
   /// Emits a lexer error — [`Emitter::emit_lexer_error`], forwarded.
   ///
   /// The input layer's own lexer-error reports are deduped against a watermark; a report raised
@@ -95,7 +113,7 @@ where
     &mut self,
     err: Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-    self.session.emitter.emit_lexer_error(err)
+    self.emitter_view().emit_lexer_error(err)
   }
 
   /// Emits an unexpected-token report — [`Emitter::emit_unexpected_token`], forwarded.
@@ -108,7 +126,7 @@ where
     &mut self,
     err: UnexpectedTokenOf<'inp, L, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-    self.session.emitter.emit_unexpected_token(err)
+    self.emitter_view().emit_unexpected_token(err)
   }
 
   /// Emits an application error — [`Emitter::emit_error`], forwarded.
@@ -117,7 +135,7 @@ where
     &mut self,
     err: Spanned<<Ctx::Emitter as Emitter<'inp, L, Lang>>::Error, L::Span>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-    self.session.emitter.emit_error(err)
+    self.emitter_view().emit_error(err)
   }
 
   /// Emits a warning — [`Emitter::emit_warning`], forwarded.
@@ -126,7 +144,7 @@ where
     &mut self,
     warning: Spanned<<Ctx::Emitter as Emitter<'inp, L, Lang>>::Error, L::Span>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-    self.session.emitter.emit_warning(warning)
+    self.emitter_view().emit_warning(warning)
   }
 
   /// Emits a recovery-hole note — [`Emitter::emit_skipped_region`], forwarded.
@@ -139,7 +157,7 @@ where
     span: L::Span,
     skipped: usize,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-    self.session.emitter.emit_skipped_region(span, skipped)
+    self.emitter_view().emit_skipped_region(span, skipped)
   }
 
   /// Pushes a diagnostic label — [`Emitter::enter_label`], forwarded.
@@ -148,19 +166,24 @@ where
   /// pairs them through a drop guard.
   #[inline(always)]
   pub fn enter_label(&mut self, label: &'static str) {
-    self.session.emitter.enter_label(label);
+    self.emitter_view().enter_label(label);
   }
 
   /// Pops the innermost diagnostic label — [`Emitter::exit_label`], forwarded.
   #[inline(always)]
   pub fn exit_label(&mut self) {
-    self.session.emitter.exit_label();
+    self.emitter_view().exit_label();
   }
 
   /// The source the emitter is bound to, if any — [`Emitter::bound_source`], forwarded.
   ///
   /// A query, not an emission: it answers for anyone who can reach the emitter, which is why
   /// no sink-side witness built on it can encode *who* asked.
+  ///
+  /// One of the two `&self` readers that do **not** delegate to
+  /// [`EmitterView`](crate::EmitterView): a view is built from a `&mut` borrow, which a shared
+  /// method has not got. The view carries the same method under the emitter's own name,
+  /// `bound_source`.
   #[inline(always)]
   pub fn emitter_bound_source(&self) -> Option<crate::source::SourceIdentity> {
     Emitter::<'inp, L, Lang>::bound_source(&*self.session.emitter)
@@ -175,7 +198,7 @@ where
   where
     Ctx::Emitter: CstEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.cst_start(kind);
+    self.emitter_view().cst_start(kind);
   }
 
   /// Closes the innermost open CST node — [`CstEmitter::cst_finish`], forwarded.
@@ -184,7 +207,7 @@ where
   where
     Ctx::Emitter: CstEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.cst_finish(kind);
+    self.emitter_view().cst_finish(kind);
   }
 
   /// Appends a retro-wrap anchor — [`CstEmitter::cst_mark`], forwarded.
@@ -193,7 +216,7 @@ where
   where
     Ctx::Emitter: CstEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.cst_mark()
+    self.emitter_view().cst_mark()
   }
 
   /// Retro-opens a node of `kind` at `mark` — [`CstEmitter::cst_start_at`], forwarded.
@@ -202,7 +225,7 @@ where
   where
     Ctx::Emitter: CstEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.cst_start_at(mark, kind);
+    self.emitter_view().cst_start_at(mark, kind);
   }
 
   /// [`TooFewEmitter::emit_too_few`], forwarded.
@@ -212,9 +235,9 @@ where
     err: crate::error::syntax::TooFew<L::Span, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::TooFewEmitter<'inp, L, Lang>,
+    Ctx::Emitter: TooFewEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.emit_too_few(err)
+    self.emitter_view().emit_too_few(err)
   }
 
   /// [`TooManyEmitter::emit_too_many`], forwarded.
@@ -224,9 +247,9 @@ where
     err: crate::error::syntax::TooMany<L::Span, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::TooManyEmitter<'inp, L, Lang>,
+    Ctx::Emitter: TooManyEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.emit_too_many(err)
+    self.emitter_view().emit_too_many(err)
   }
 
   /// [`FullContainerEmitter::emit_full_container`], forwarded.
@@ -236,9 +259,9 @@ where
     err: crate::error::syntax::FullContainer<L::Span, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::FullContainerEmitter<'inp, L, Lang>,
+    Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.emit_full_container(err)
+    self.emitter_view().emit_full_container(err)
   }
 
   /// [`SeparatedEmitter::emit_missing_separator`], forwarded.
@@ -249,9 +272,9 @@ where
     err: crate::error::token::MissingTokenOf<'inp, L, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::SeparatedEmitter<'inp, L, Lang>,
+    Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.emit_missing_separator(name, err)
+    self.emitter_view().emit_missing_separator(name, err)
   }
 
   /// [`SeparatedEmitter::emit_missing_element`], forwarded.
@@ -261,9 +284,9 @@ where
     err: crate::error::syntax::MissingSyntaxOf<'inp, L, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::SeparatedEmitter<'inp, L, Lang>,
+    Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.emit_missing_element(err)
+    self.emitter_view().emit_missing_element(err)
   }
 
   /// [`MissingLeadingSeparatorEmitter::emit_missing_leading_separator`], forwarded.
@@ -274,11 +297,10 @@ where
     err: crate::error::token::MissingTokenOf<'inp, L, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::MissingLeadingSeparatorEmitter<'inp, L, Lang>,
+    Ctx::Emitter: MissingLeadingSeparatorEmitter<'inp, L, Lang>,
   {
     self
-      .session
-      .emitter
+      .emitter_view()
       .emit_missing_leading_separator(name, err)
   }
 
@@ -290,11 +312,10 @@ where
     err: crate::error::token::MissingTokenOf<'inp, L, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::MissingTrailingSeparatorEmitter<'inp, L, Lang>,
+    Ctx::Emitter: MissingTrailingSeparatorEmitter<'inp, L, Lang>,
   {
     self
-      .session
-      .emitter
+      .emitter_view()
       .emit_missing_trailing_separator(name, err)
   }
 
@@ -306,11 +327,10 @@ where
     err: UnexpectedTokenOf<'inp, L, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>,
+    Ctx::Emitter: UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>,
   {
     self
-      .session
-      .emitter
+      .emitter_view()
       .emit_unexpected_leading_separator(name, err)
   }
 
@@ -322,11 +342,10 @@ where
     err: UnexpectedTokenOf<'inp, L, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>,
+    Ctx::Emitter: UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>,
   {
     self
-      .session
-      .emitter
+      .emitter_view()
       .emit_unexpected_trailing_separator(name, err)
   }
 
@@ -337,10 +356,10 @@ where
     err: crate::error::Unclosed<Delimiter, L::Span, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::UnclosedEmitter<'inp, L, Lang>,
+    Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: crate::emitter::FromUnclosed<'inp, L, Lang>,
   {
-    self.session.emitter.emit_unclosed(err)
+    self.emitter_view().emit_unclosed(err)
   }
 
   /// [`PrattEmitter::emit_unexpected_end_of_lhs`], forwarded.
@@ -350,9 +369,9 @@ where
     err: crate::error::UnexpectedEoLhs<L::Offset, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::PrattEmitter<'inp, L, Lang>,
+    Ctx::Emitter: PrattEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.emit_unexpected_end_of_lhs(err)
+    self.emitter_view().emit_unexpected_end_of_lhs(err)
   }
 
   /// [`PrattEmitter::emit_unexpected_end_of_rhs`], forwarded.
@@ -362,8 +381,8 @@ where
     err: crate::error::UnexpectedEoRhs<L::Offset, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
-    Ctx::Emitter: crate::emitter::PrattEmitter<'inp, L, Lang>,
+    Ctx::Emitter: PrattEmitter<'inp, L, Lang>,
   {
-    self.session.emitter.emit_unexpected_end_of_rhs(err)
+    self.emitter_view().emit_unexpected_end_of_rhs(err)
   }
 }

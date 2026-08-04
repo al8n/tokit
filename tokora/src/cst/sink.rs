@@ -329,12 +329,19 @@ fn bump_witness(next: &core::sync::atomic::AtomicUsize) -> usize {
 /// its buffer's offset origin, and the point at which an emitter is attached to an input
 /// compares that against the source the parse reads, **panicking** on a provable mismatch —
 /// pinned by `sink_bound_to_a_foreign_source_is_refused`. With the drivers in place it is
-/// redundant for a sink obtained the intended way, and the handle no longer hands one out
-/// (`Sink::new` and `InputRef::emitter` are crate-private; `InputRef::emitter_ref` yields a
-/// **shared** reference, which no emitter slot can take). It is **not** redundant, because the
-/// handle is not the only door: the public callback traits — `Decision::decide` and the
-/// token-level pratt folds — still take `&mut Ctx::Emitter` as a parameter and hand the live
-/// sink to caller-written code. That route is live, and this check is the only thing on it.
+/// redundant for a sink obtained the intended way, and no door hands one out any more:
+/// `Sink::new` and `InputRef::emitter` are crate-private, `InputRef::emitter_ref` yields a
+/// **shared** reference, which no emitter slot can take, and the public callback traits —
+/// `Decision::decide`, the `peek_then` family, the token-level pratt folds — take an
+/// [`EmitterView`](crate::EmitterView), which implements no emitter trait.
+///
+/// What keeps the check earning its place is the boundary the type system does not reach.
+/// `EmitterView` is not an emitter *in this crate*; a downstream crate whose own lexer appears in
+/// the parameter list may implement one for it under the orphan rules, and this handshake is what
+/// stands on that route — for a wrapper that forwards `bound_source`. What such a wrapper cannot
+/// do is carry a token: [`Emitter::commit_token`](crate::Emitter::commit_token) is not on the
+/// view's surface, and since `CstEmitter::cst_token` was deleted it is the only producer of token
+/// events.
 ///
 /// **The refusal is conservative, and the residue is real.** It fires only where
 /// [`Source::REFERENT_IS_BYTES`](crate::Source::REFERENT_IS_BYTES) says an unequal reference

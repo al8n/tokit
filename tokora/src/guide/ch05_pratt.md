@@ -72,15 +72,16 @@ parameters and satisfy the bound for free. So: write the folds as `fn`s. Their s
 the argument order, the operator comes *last* for infix and postfix but *first* for prefix:
 
 ```text
-fn fold_prefix (operator, operand,                  &mut E) -> Result<Spanned<Tok, Span>, Error>
-fn fold_infix  (left,     right,    infix_operator, &mut E) -> Result<Spanned<Tok, Span>, Error>
-fn fold_postfix(operand,  operator,                 &mut E) -> Result<Spanned<Tok, Span>, Error>
+fn fold_prefix (operator, operand,                  EmitterView) -> Result<Spanned<Tok, Span>, Error>
+fn fold_infix  (left,     right,    infix_operator, EmitterView) -> Result<Spanned<Tok, Span>, Error>
+fn fold_postfix(operand,  operator,                 EmitterView) -> Result<Spanned<Tok, Span>, Error>
 ```
 
 ## Calc's expression engine
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};
+# use tokora::EmitterView;
 # #[derive(Clone, Debug, Default, PartialEq)]
 # struct LexError;
 # impl From<()> for LexError { fn from(_: ()) -> Self { LexError } }
@@ -207,10 +208,10 @@ impl PrattToken<'_, i64> for Tok {
 // ── The folds. Named `fn`s, not closures. The token-level API's currency is
 //    `Spanned<Tok, Span>`, so a computed value goes back in as a `Tok::Int`.
 
-fn fold_prefix<E>(
+fn fold_prefix<'inp, E>(
   op: Spanned<Tok, SimpleSpan>,
   operand: Spanned<Tok, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>,
 ) -> Result<Spanned<Tok, SimpleSpan>, CalcError> {
   let (span, op) = op.into_components();
   match op {
@@ -222,11 +223,11 @@ fn fold_prefix<E>(
   }
 }
 
-fn fold_infix<E>(
+fn fold_infix<'inp, E>(
   left: Spanned<Tok, SimpleSpan>,
   right: Spanned<Tok, SimpleSpan>,
   infix: Spanned<PrattInfix<Tok, Tok, Tok>, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>,
 ) -> Result<Spanned<Tok, SimpleSpan>, CalcError> {
   let span = left.span();
   let (l, r) = (int(left)?, int(right)?);
@@ -250,10 +251,10 @@ fn fold_infix<E>(
   Ok(Spanned::new(span, Tok::Int(value)))
 }
 
-fn fold_postfix<E>(
+fn fold_postfix<'inp, E>(
   operand: Spanned<Tok, SimpleSpan>,
   _close: Spanned<Tok, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>,
 ) -> Result<Spanned<Tok, SimpleSpan>, CalcError> {
   Ok(operand) // `)` closed its group; the value flows on.
 }

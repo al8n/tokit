@@ -376,9 +376,9 @@ Named `fn`s (see above). Note the operator position: **first** for prefix, **las
 and postfix; the emitter is always last.
 
 ```text
-fn fold_prefix (operator, operand,                          &mut Emitter) -> Result<Spanned<Token, Span>, Error>
-fn fold_infix  (left,     right,   Spanned<PrattInfix<…>>,  &mut Emitter) -> Result<Spanned<Token, Span>, Error>
-fn fold_postfix(operand,  operator,                         &mut Emitter) -> Result<Spanned<Token, Span>, Error>
+fn fold_prefix (operator, operand,                          EmitterView) -> Result<Spanned<Token, Span>, Error>
+fn fold_infix  (left,     right,   Spanned<PrattInfix<…>>,  EmitterView) -> Result<Spanned<Token, Span>, Error>
+fn fold_postfix(operand,  operator,                         EmitterView) -> Result<Spanned<Token, Span>, Error>
 ```
 
 ### `PrattEmitter`
@@ -403,7 +403,7 @@ re-encoding each result as a `Digit` token.
 ```rust
 # use core::convert::Infallible;
 # use tokora::{
-#   FatalContext, InputRef, Lexer, Parse, Parser, SimpleSpan, Token,
+#   EmitterView, FatalContext, InputRef, Lexer, Parse, Parser, SimpleSpan, Token,
 #   emitter::Fatal,
 #   error::{UnexpectedEnd, token::UnexpectedToken},
 #   span::{Span as _, Spanned},
@@ -488,10 +488,10 @@ impl PrattToken<'_, (), i64> for Tok {
 }
 
 // The folds. Named `fn`s; token-level currency is `Spanned<Tok, Span>`.
-fn fold_prefix(
+fn fold_prefix<'a>(
   op: Spanned<Tok, SimpleSpan>,
   operand: Spanned<Tok, SimpleSpan>,
-  _: &mut Fatal<Error>,
+  _: EmitterView<'_, 'a, CharLexer<'a>, Fatal<Error>>,
 ) -> Result<Spanned<Tok, SimpleSpan>, Error> {
   let (span, op) = op.into_components();
   Ok(match op {
@@ -499,11 +499,11 @@ fn fold_prefix(
     _ => operand, // `(` grouping: the inner value flows straight through
   })
 }
-fn fold_infix(
+fn fold_infix<'a>(
   left: Spanned<Tok, SimpleSpan>,
   right: Spanned<Tok, SimpleSpan>,
   op: Spanned<PrattInfix<Tok, Tok, Tok>, SimpleSpan>,
-  _: &mut Fatal<Error>,
+  _: EmitterView<'_, 'a, CharLexer<'a>, Fatal<Error>>,
 ) -> Result<Spanned<Tok, SimpleSpan>, Error> {
   let span = left.span();
   let (a, b) = (int(left), int(right));
@@ -518,10 +518,10 @@ fn fold_infix(
   };
   Ok(Spanned::new(span, Tok::Digit(v)))
 }
-fn fold_postfix(
+fn fold_postfix<'a>(
   operand: Spanned<Tok, SimpleSpan>,
   _close: Spanned<Tok, SimpleSpan>,
-  _: &mut Fatal<Error>,
+  _: EmitterView<'_, 'a, CharLexer<'a>, Fatal<Error>>,
 ) -> Result<Spanned<Tok, SimpleSpan>, Error> {
   Ok(operand) // `)` closed its group; the value flows on
 }

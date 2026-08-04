@@ -1,4 +1,4 @@
-use crate::{TryParseInput, span::Span as _, try_parse_input::ParseAttempt};
+use crate::{TryParseInput, emitter::EmitterView, span::Span as _, try_parse_input::ParseAttempt};
 
 use super::*;
 
@@ -133,7 +133,7 @@ where
   P: ParseInput<'inp, L, O, Ctx, Lang>,
   D: FnMut(
     Peeked<'_, 'inp, L, W>,
-    &mut Ctx::Emitter,
+    EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,

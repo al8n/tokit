@@ -101,8 +101,9 @@ where
 
   /// Skip tokens until the predicate matches, emitting lexer errors along the way.
   ///
-  /// Returns peeked tokens and a mutable reference to the emitter. A fatal emitter rejection
-  /// mid-skip commits the token that tripped it, exactly as in [`sync_to`](Self::sync_to).
+  /// Returns peeked tokens and the emitter's **operations** (an [`EmitterView`] — never the
+  /// emitter; see that type for why). A fatal emitter rejection mid-skip
+  /// commits the token that tripped it, exactly as in [`sync_to`](Self::sync_to).
   #[inline(always)]
   #[allow(clippy::type_complexity)]
   pub fn sync_to_then_peek_with_emitter<'p, F, Exp, W>(
@@ -110,7 +111,10 @@ where
     mut pred: F,
     mut exp: Exp,
   ) -> Result<
-    (Peeked<'p, 'inp, L, W>, &'p mut Ctx::Emitter),
+    (
+      Peeked<'p, 'inp, L, W>,
+      EmitterView<'p, 'inp, L, Ctx::Emitter, Lang>,
+    ),
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
   >
   where
@@ -126,7 +130,7 @@ where
     // return the empty peek.
     match self.skip_until::<SyncTo, _, _>(&mut pred, &mut exp, ())? {
       Scanned::Found(_) => self.peek_with_emitter::<W>(),
-      Scanned::Exhausted => Ok((GenericArrayDeque::new(), self.session.emitter)),
+      Scanned::Exhausted => Ok((GenericArrayDeque::new(), self.emitter_view())),
     }
   }
 }

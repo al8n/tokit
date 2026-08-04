@@ -361,26 +361,32 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// [`emitter_ref`](crate::InputRef::emitter_ref) to *read* the emitter. A method call is not a
 /// value; there is nothing left at the end of one to put in an emitter slot.
 ///
-/// ## The residue, stated: callback parameters still hand it out
+/// ## And not by a callback parameter either
 ///
-/// The handle is not the only door, and the rest are **open**. Several public callback traits
-/// take the emitter as a *parameter*, by `&mut`, and hand it to code the caller wrote:
+/// The handle was not the only door. Several public callback traits took the emitter as a
+/// *parameter*, by `&mut`, and handed it to code the caller wrote:
 /// `Decision::decide(peeked, emitter)` — the condition of every `*_while` combinator
 /// ([`repeated_while`](crate::ParseInput::repeated_while),
 /// [`separated_while`](crate::ParseInput::separated_while),
-/// [`fold_while`](crate::ParseInput::fold_while), `peek_then`) — and the token-level pratt folds
+/// [`fold_while`](crate::ParseInput::fold_while)) — the `peek_then` family
+/// ([`peek_then`](crate::ParseInput::peek_then),
+/// [`peek_then_choice`](crate::ParseChoice::peek_then_choice)), and the token-level pratt folds
 /// [`PrattFoldTokenPrefix`](crate::parser::PrattFoldTokenPrefix),
 /// [`PrattFoldTokenInfix`](crate::parser::PrattFoldTokenInfix) and
 /// [`PrattFoldTokenPostfix`](crate::parser::PrattFoldTokenPostfix). Under this driver
-/// `Ctx::Emitter` is `Sink`, so an ordinary `*_while` condition is handed the live sink by
-/// `&mut`, and the wrong-source class is reachable through it exactly as it was through the
-/// handle. `bound_source` and its runtime handshake are what stand between that route and a
-/// silent wrong tree — for a wrapper that forwards the binding; a wrapper that hides it is caught
-/// by nothing. The in-crate cell
-/// `a_wrapper_around_the_live_sink_still_reaches_a_callback_parameter` pins it, materialized
-/// tree and all.
+/// `Ctx::Emitter` *is* `Sink`, so an ordinary `*_while` condition used to be handed the live sink
+/// by `&mut`, and the wrong-source class was reachable through it exactly as it had been through
+/// the handle.
 ///
-/// What follows is therefore a wall on the handle, not on the class.
+/// Every one of those now receives an [`EmitterView`](crate::EmitterView): the emitter's
+/// operations, under the emitter's own names, in a value that implements no emitter trait. The
+/// two `compile_fail` cells below are the old attack in both of its spellings — the parameter
+/// typed as the sink, and the parameter typed as the view and then wrapped — and the runnable
+/// cell after them is what a condition may still do, which is everything it could do before.
+///
+/// What follows is therefore a wall on the class, not only on the handle. It is **not** a claim
+/// that the sink is unreachable by construction from outside the crate: see *What this does not
+/// close* at the end of this section.
 ///
 /// Wrapper emitters remain perfectly expressible, and installable — over an emitter the caller
 /// owns:
@@ -619,6 +625,493 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// let (green, _diagnostics) = cst.finish(K_ROOT);
 /// assert_eq!(green.unwrap().to_string(), "ab");
 /// ```
+///
+/// ### The callback route, refused at the signature
+///
+/// This is `a_wrapper_around_the_live_sink_still_reaches_a_callback_parameter` — the in-crate cell
+/// that pinned this hole while it was open — transcribed onto the public surface. An ordinary
+/// `repeated_while` condition asks for the live sink by `&mut`, wraps it in a
+/// `bound_source`-hiding emitter, and drives the foreign buffer `"ZZ"` through the un-pinned
+/// [`parse_with`](crate::parse_with). It used to compile, run, and materialize `"ZZ"`'s structure
+/// over `"ab"`'s bytes. The condition's second parameter is no longer `&mut Sink`, so it is
+/// refused before any of that:
+///
+/// ```rust,compile_fail
+/// use tokora::{
+///   Accumulator, Emitter, InputRef, Lexer, ParseInput, SimpleSpan, Token,
+///   cache::{DefaultCache, Peeked},
+///   cst::{CstProfile, KindValidator, Sink, parse_lossless},
+///   emitter::Verbose,
+///   input::Cursor,
+///   parse_with,
+///   parser::Action,
+///   span::Spanned,
+///   utils::typenum::U1,
+/// };
+///
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// # struct MiniErr;
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized>
+/// #   From<tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>> for MiniErr
+/// # {
+/// #   fn from(_: tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>) -> Self { Self }
+/// # }
+/// #[derive(Debug, Clone, Copy)]
+/// struct MiniTok(u8);
+/// impl Token<'_> for MiniTok {
+///   type Kind = u8;
+///   type Error = MiniErr;
+///   const SURFACES_TRIVIA: bool = true; // ← the declaration under test
+///   fn kind(&self) -> u8 { self.0 }
+///   fn is_trivia(&self) -> bool { self.0 == b' ' }
+/// }
+/// # struct Mini<'a> { src: &'a str, tok_start: usize, pos: usize, state: () }
+/// # impl<'inp> Lexer<'inp> for Mini<'inp> {
+/// #   type State = (); type Source = str; type Token = MiniTok;
+/// #   type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'inp str) -> Self { Self { src, tok_start: 0, pos: 0, state: () } }
+/// #   fn with_state(src: &'inp str, state: ()) -> Self {
+/// #     Self { src, tok_start: 0, pos: 0, state }
+/// #   }
+/// #   fn check(&self) -> Result<(), MiniErr> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> () { self.state }
+/// #   fn source(&self) -> &'inp str { self.src }
+/// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(self.tok_start, self.pos) }
+/// #   fn slice(&self) -> &'inp str { &self.src[self.tok_start..self.pos] }
+/// #   fn lex(&mut self) -> Option<Result<MiniTok, MiniErr>> {
+/// #     let byte = *self.src.as_bytes().get(self.pos)?;
+/// #     self.tok_start = self.pos;
+/// #     self.pos += 1;
+/// #     Some(Ok(MiniTok(byte)))
+/// #   }
+/// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
+/// # }
+/// # const K_ROOT: u16 = 1;
+/// # const K_TOK: u16 = 10;
+/// # const K_ERR: u16 = 90;
+/// # const K_GAP: u16 = 91;
+/// struct Wrapper<E>(E);
+///
+/// type MSpan<'a> = <Mini<'a> as Lexer<'a>>::Span;
+/// type MLexErr<'a> = <<Mini<'a> as Lexer<'a>>::Token as Token<'a>>::Error;
+///
+/// impl<'inp, E> Emitter<'inp, Mini<'inp>> for Wrapper<E>
+/// where
+///   E: Emitter<'inp, Mini<'inp>, (), Error = MiniErr>,
+/// {
+///   type Error = MiniErr;
+///   fn emit_lexer_error(
+///     &mut self,
+///     e: Spanned<MLexErr<'inp>, MSpan<'inp>>,
+///   ) -> Result<(), MiniErr> {
+///     self.0.emit_lexer_error(e)
+///   }
+///   fn emit_unexpected_token(
+///     &mut self,
+///     e: tokora::error::token::UnexpectedTokenOf<'inp, Mini<'inp>, ()>,
+///   ) -> Result<(), MiniErr> {
+///     self.0.emit_unexpected_token(e)
+///   }
+///   fn emit_error(&mut self, e: Spanned<MiniErr, MSpan<'inp>>) -> Result<(), MiniErr> {
+///     self.0.emit_error(e)
+///   }
+///   fn rewind(&mut self, cursor: &Cursor<'inp, '_, Mini<'inp>>, mark: u64) {
+///     self.0.rewind(cursor, mark)
+///   }
+///   // `bound_source` deliberately NOT forwarded: the runtime handshake never fires.
+/// }
+///
+/// type MiniSink<'inp> = Sink<'inp, Mini<'inp>, Verbose<MiniErr>>;
+/// type LosslessCtx<'inp> = (MiniSink<'inp>, DefaultCache<'inp, Mini<'inp>>);
+/// type ForeignCtx<'inp, 'e> = (
+///   Wrapper<&'e mut MiniSink<'inp>>,
+///   DefaultCache<'inp, Mini<'inp>>,
+/// );
+///
+/// fn foreign<'inp>(
+///   inp: &mut InputRef<'inp, '_, Mini<'inp>, ForeignCtx<'inp, '_>>,
+/// ) -> Result<usize, MiniErr> {
+///   let mut n = 0;
+///   while inp.next()?.is_some() {
+///     n += 1;
+///   }
+///   Ok(n)
+/// }
+///
+/// fn step<'inp>(
+///   inp: &mut InputRef<'inp, '_, Mini<'inp>, LosslessCtx<'inp>>,
+/// ) -> Result<(), MiniErr> {
+///   let _ = inp.next()?;
+///   Ok(())
+/// }
+///
+/// // THE SIGNATURE. A `*_while` condition asking for the live sink by `&mut` is not a
+/// // `Decision` any more: the second parameter is an `EmitterView`, which is not an emitter.
+/// fn decide<'inp>(
+///   _peeked: Peeked<'_, 'inp, Mini<'inp>, U1>,
+///   emitter: &mut MiniSink<'inp>,
+/// ) -> Result<Action, MiniErr> {
+///   let ctx: ForeignCtx<'inp, '_> = (Wrapper(emitter), DefaultCache::<Mini<'_>>::new());
+///   // "ZZ" is a foreign buffer of the same length as the sink's own "ab".
+///   let _ = parse_with(foreign, "ZZ", ctx);
+///   Ok(Action::Stop)
+/// }
+///
+/// fn attack<'inp>(
+///   inp: &mut InputRef<'inp, '_, Mini<'inp>, LosslessCtx<'inp>>,
+/// ) -> Result<Vec<()>, MiniErr> {
+///   (step as fn(&mut InputRef<'inp, '_, Mini<'inp>, LosslessCtx<'inp>>) -> _)
+///     .repeated_while::<_, U1>(
+///       decide as fn(Peeked<'_, 'inp, Mini<'inp>, U1>, &mut MiniSink<'inp>) -> _,
+///     )
+///     .collect()
+///     .parse_input(inp)
+/// }
+///
+/// # let profile = CstProfile::new(
+/// #   |_: &MiniTok| K_TOK,
+/// #   KindValidator::new(|k| matches!(k, K_ROOT | K_TOK | K_ERR | K_GAP)),
+/// #   K_ERR,
+/// #   K_GAP,
+/// # );
+/// let (_cst, _parsed) = parse_lossless(
+///   "ab",
+///   (),
+///   Verbose::<MiniErr>::new(),
+///   profile,
+///   DefaultCache::<Mini<'_>>::new(),
+///   attack,
+/// );
+/// ```
+///
+/// ### The same attack, with the parameter spelled correctly
+///
+/// Renaming a parameter type closes nothing on its own; the wall is that the value handed over
+/// **is not an emitter**. So here is the identical attack with the condition's signature written
+/// the way the trait now demands — an [`EmitterView`](crate::EmitterView) — trying to install
+/// that view instead. `Wrapper<E>` is an emitter only when `E` is one, and a view never is, so
+/// the context cannot be built:
+///
+/// ```rust,compile_fail
+/// use tokora::{
+///   Accumulator, Emitter, EmitterView, InputRef, Lexer, ParseInput, SimpleSpan, Token,
+///   cache::{DefaultCache, Peeked},
+///   cst::{CstProfile, KindValidator, Sink, parse_lossless},
+///   emitter::Verbose,
+///   input::Cursor,
+///   parse_with,
+///   parser::Action,
+///   span::Spanned,
+///   utils::typenum::U1,
+/// };
+///
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// # struct MiniErr;
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized>
+/// #   From<tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>> for MiniErr
+/// # {
+/// #   fn from(_: tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>) -> Self { Self }
+/// # }
+/// #[derive(Debug, Clone, Copy)]
+/// struct MiniTok(u8);
+/// impl Token<'_> for MiniTok {
+///   type Kind = u8;
+///   type Error = MiniErr;
+///   const SURFACES_TRIVIA: bool = true; // ← the declaration under test
+///   fn kind(&self) -> u8 { self.0 }
+///   fn is_trivia(&self) -> bool { self.0 == b' ' }
+/// }
+/// # struct Mini<'a> { src: &'a str, tok_start: usize, pos: usize, state: () }
+/// # impl<'inp> Lexer<'inp> for Mini<'inp> {
+/// #   type State = (); type Source = str; type Token = MiniTok;
+/// #   type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'inp str) -> Self { Self { src, tok_start: 0, pos: 0, state: () } }
+/// #   fn with_state(src: &'inp str, state: ()) -> Self {
+/// #     Self { src, tok_start: 0, pos: 0, state }
+/// #   }
+/// #   fn check(&self) -> Result<(), MiniErr> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> () { self.state }
+/// #   fn source(&self) -> &'inp str { self.src }
+/// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(self.tok_start, self.pos) }
+/// #   fn slice(&self) -> &'inp str { &self.src[self.tok_start..self.pos] }
+/// #   fn lex(&mut self) -> Option<Result<MiniTok, MiniErr>> {
+/// #     let byte = *self.src.as_bytes().get(self.pos)?;
+/// #     self.tok_start = self.pos;
+/// #     self.pos += 1;
+/// #     Some(Ok(MiniTok(byte)))
+/// #   }
+/// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
+/// # }
+/// # const K_ROOT: u16 = 1;
+/// # const K_TOK: u16 = 10;
+/// # const K_ERR: u16 = 90;
+/// # const K_GAP: u16 = 91;
+/// struct Wrapper<E>(E);
+///
+/// type MSpan<'a> = <Mini<'a> as Lexer<'a>>::Span;
+/// type MLexErr<'a> = <<Mini<'a> as Lexer<'a>>::Token as Token<'a>>::Error;
+///
+/// impl<'inp, E> Emitter<'inp, Mini<'inp>> for Wrapper<E>
+/// where
+///   E: Emitter<'inp, Mini<'inp>, (), Error = MiniErr>,
+/// {
+///   type Error = MiniErr;
+///   fn emit_lexer_error(
+///     &mut self,
+///     e: Spanned<MLexErr<'inp>, MSpan<'inp>>,
+///   ) -> Result<(), MiniErr> {
+///     self.0.emit_lexer_error(e)
+///   }
+///   fn emit_unexpected_token(
+///     &mut self,
+///     e: tokora::error::token::UnexpectedTokenOf<'inp, Mini<'inp>, ()>,
+///   ) -> Result<(), MiniErr> {
+///     self.0.emit_unexpected_token(e)
+///   }
+///   fn emit_error(&mut self, e: Spanned<MiniErr, MSpan<'inp>>) -> Result<(), MiniErr> {
+///     self.0.emit_error(e)
+///   }
+///   fn rewind(&mut self, cursor: &Cursor<'inp, '_, Mini<'inp>>, mark: u64) {
+///     self.0.rewind(cursor, mark)
+///   }
+///   // `bound_source` deliberately NOT forwarded: the runtime handshake never fires.
+/// }
+///
+/// type MiniSink<'inp> = Sink<'inp, Mini<'inp>, Verbose<MiniErr>>;
+/// type LosslessCtx<'inp> = (MiniSink<'inp>, DefaultCache<'inp, Mini<'inp>>);
+/// // The context the attack wants to build: a wrapper around the VIEW rather than the sink.
+/// type ForeignCtx<'a, 'inp> = (
+///   Wrapper<EmitterView<'a, 'inp, Mini<'inp>, MiniSink<'inp>>>,
+///   DefaultCache<'inp, Mini<'inp>>,
+/// );
+///
+/// fn foreign<'inp>(
+///   inp: &mut InputRef<'inp, '_, Mini<'inp>, ForeignCtx<'_, 'inp>>,
+/// ) -> Result<usize, MiniErr> {
+///   let mut n = 0;
+///   while inp.next()?.is_some() {
+///     n += 1;
+///   }
+///   Ok(n)
+/// }
+///
+/// fn step<'inp>(
+///   inp: &mut InputRef<'inp, '_, Mini<'inp>, LosslessCtx<'inp>>,
+/// ) -> Result<(), MiniErr> {
+///   let _ = inp.next()?;
+///   Ok(())
+/// }
+///
+/// fn decide<'inp>(
+///   _peeked: Peeked<'_, 'inp, Mini<'inp>, U1>,
+///   emitter: EmitterView<'_, 'inp, Mini<'inp>, MiniSink<'inp>>,
+/// ) -> Result<Action, MiniErr> {
+///   // THE LINE. `Wrapper<E>` needs `E: Emitter`, and an `EmitterView` implements no emitter
+///   // trait — so this tuple is not a `ParseContext` and there is nothing to install.
+///   let ctx: ForeignCtx<'_, 'inp> = (Wrapper(emitter), DefaultCache::<Mini<'_>>::new());
+///   let _ = parse_with(foreign, "ZZ", ctx);
+///   Ok(Action::Stop)
+/// }
+///
+/// fn attack<'inp>(
+///   inp: &mut InputRef<'inp, '_, Mini<'inp>, LosslessCtx<'inp>>,
+/// ) -> Result<Vec<()>, MiniErr> {
+///   (step as fn(&mut InputRef<'inp, '_, Mini<'inp>, LosslessCtx<'inp>>) -> _)
+///     .repeated_while::<_, U1>(
+///       decide
+///         as fn(
+///           Peeked<'_, 'inp, Mini<'inp>, U1>,
+///           EmitterView<'_, 'inp, Mini<'inp>, MiniSink<'inp>>,
+///         ) -> _,
+///     )
+///     .collect()
+///     .parse_input(inp)
+/// }
+///
+/// # let profile = CstProfile::new(
+/// #   |_: &MiniTok| K_TOK,
+/// #   KindValidator::new(|k| matches!(k, K_ROOT | K_TOK | K_ERR | K_GAP)),
+/// #   K_ERR,
+/// #   K_GAP,
+/// # );
+/// let (_cst, _parsed) = parse_lossless(
+///   "ab",
+///   (),
+///   Verbose::<MiniErr>::new(),
+///   profile,
+///   DefaultCache::<Mini<'_>>::new(),
+///   attack,
+/// );
+/// ```
+///
+/// ### What a condition may still do: decide *and* report, without a rewind
+///
+/// The point of [`Decision`](crate::Decision) is peek → decide → act with no restore, and
+/// reporting inline is half of that. The view carries every emitting operation the emitter had,
+/// under the emitter's own names, so a condition that used to write `emitter.emit_warning(..)`
+/// writes exactly that still — only the parameter's type moved. The condition below reports
+/// through the view, opens and closes a CST node through it, and returns an
+/// [`Action`](crate::parser::Action), in one pass over the peeked window; the drive then carries
+/// on from where the peek left the input, with nothing rolled back:
+///
+/// ```rust
+/// use tokora::{
+///   CstEmitter, Decision, Emitter, EmitterView, InputRef, Lexer, ParseContext, SimpleSpan, Token,
+///   cache::{DefaultCache, Peeked},
+///   cst::{CstProfile, KindValidator, Sink, parse_lossless},
+///   emitter::Verbose,
+///   parser::Action,
+///   span::Spanned,
+///   utils::typenum::U1,
+/// };
+///
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// # struct MiniErr;
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized>
+/// #   From<tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>> for MiniErr
+/// # {
+/// #   fn from(_: tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>) -> Self { Self }
+/// # }
+/// #[derive(Debug, Clone, Copy)]
+/// struct MiniTok(u8);
+/// impl Token<'_> for MiniTok {
+///   type Kind = u8;
+///   type Error = MiniErr;
+///   const SURFACES_TRIVIA: bool = true; // ← the declaration under test
+///   fn kind(&self) -> u8 { self.0 }
+///   fn is_trivia(&self) -> bool { self.0 == b' ' }
+/// }
+/// # struct Mini<'a> { src: &'a str, tok_start: usize, pos: usize, state: () }
+/// # impl<'inp> Lexer<'inp> for Mini<'inp> {
+/// #   type State = (); type Source = str; type Token = MiniTok;
+/// #   type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'inp str) -> Self { Self { src, tok_start: 0, pos: 0, state: () } }
+/// #   fn with_state(src: &'inp str, state: ()) -> Self {
+/// #     Self { src, tok_start: 0, pos: 0, state }
+/// #   }
+/// #   fn check(&self) -> Result<(), MiniErr> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> () { self.state }
+/// #   fn source(&self) -> &'inp str { self.src }
+/// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(self.tok_start, self.pos) }
+/// #   fn slice(&self) -> &'inp str { &self.src[self.tok_start..self.pos] }
+/// #   fn lex(&mut self) -> Option<Result<MiniTok, MiniErr>> {
+/// #     let byte = *self.src.as_bytes().get(self.pos)?;
+/// #     self.tok_start = self.pos;
+/// #     self.pos += 1;
+/// #     Some(Ok(MiniTok(byte)))
+/// #   }
+/// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
+/// # }
+/// # const K_ROOT: u16 = 1;
+/// # const K_TOK: u16 = 10;
+/// # const K_ERR: u16 = 90;
+/// # const K_GAP: u16 = 91;
+/// const K_NOTE: u16 = 11;
+///
+/// type MiniSink<'inp> = Sink<'inp, Mini<'inp>, Verbose<MiniErr>>;
+/// type LosslessCtx<'inp> = (MiniSink<'inp>, DefaultCache<'inp, Mini<'inp>>);
+///
+/// fn step<'inp, Ctx>(inp: &mut InputRef<'inp, '_, Mini<'inp>, Ctx>) -> Result<(), MiniErr>
+/// where
+///   Ctx: ParseContext<'inp, Mini<'inp>>,
+///   Ctx::Emitter: Emitter<'inp, Mini<'inp>, Error = MiniErr>,
+/// {
+///   let _ = inp.next()?;
+///   Ok(())
+/// }
+///
+/// // An ordinary `*_while` condition: continue while the head is `a`; on anything else report
+/// // and stop — inline, no rewind.
+/// fn decide<'inp, Ctx>(
+///   mut peeked: Peeked<'_, 'inp, Mini<'inp>, U1>,
+///   mut emitter: EmitterView<'_, 'inp, Mini<'inp>, Ctx::Emitter>,
+/// ) -> Result<Action, MiniErr>
+/// where
+///   Ctx: ParseContext<'inp, Mini<'inp>>,
+///   Ctx::Emitter: Emitter<'inp, Mini<'inp>, Error = MiniErr> + CstEmitter<'inp, Mini<'inp>>,
+/// {
+///   use tokora::cache::PeekedTokenExt as _;
+///   match peeked.pop_front() {
+///     Some(t) if t.token().kind() == b'a' => Ok(Action::Continue),
+///     Some(t) => {
+///       let span = *t.span();
+///       // Every emitting channel the emitter had, under the same name.
+///       emitter.emit_warning(Spanned::new(span, MiniErr))?;
+///       // The CST structuring surface too — the same one the handle forwards.
+///       emitter.cst_start(K_NOTE);
+///       emitter.cst_finish(K_NOTE);
+///       Ok(Action::Stop)
+///     }
+///     None => Ok(Action::Stop),
+///   }
+/// }
+///
+/// // Driven as a `Decision` — the trait every `*_while` combinator bounds its condition by.
+/// fn run<'inp>(
+///   inp: &mut InputRef<'inp, '_, Mini<'inp>, LosslessCtx<'inp>>,
+/// ) -> Result<usize, MiniErr> {
+///   let mut taken = 0;
+///   loop {
+///     let action = {
+///       let (peeked, view) = inp.peek_with_emitter::<U1>()?;
+///       let mut cond = decide::<LosslessCtx<'inp>>;
+///       Decision::<Mini<'inp>, MiniSink<'inp>, U1>::decide(&mut cond, peeked, view)?
+///     };
+///     match action {
+///       Action::Continue => {
+///         step(inp)?;
+///         taken += 1;
+///       }
+///       Action::Stop => break,
+///     }
+///   }
+///   // Nothing was rewound: the parse carries on over the rest of its own buffer.
+///   while inp.next()?.is_some() {}
+///   Ok(taken)
+/// }
+///
+/// let profile = CstProfile::new(
+///   |_: &MiniTok| K_TOK,
+///   KindValidator::new(|k| matches!(k, K_ROOT | K_TOK | K_NOTE | K_ERR | K_GAP)),
+///   K_ERR,
+///   K_GAP,
+/// );
+/// let (cst, parsed) = parse_lossless(
+///   "aab",
+///   (),
+///   Verbose::<MiniErr>::new(),
+///   profile,
+///   DefaultCache::<Mini<'_>>::new(),
+///   run,
+/// );
+/// assert_eq!(parsed, Ok(2));
+///
+/// let (green, diagnostics) = cst.finish(K_ROOT);
+/// // The report the condition raised inline is in the log ...
+/// assert_eq!(diagnostics.warnings().len(), 1);
+/// // ... and the round-trip law still holds: the text is the buffer the parse read.
+/// assert_eq!(green.unwrap().to_string(), "aab");
+/// ```
+///
+/// ### What this does not close
+///
+/// [`EmitterView`](crate::EmitterView) implements no emitter trait *in this crate*, and that is
+/// what the two cells above pin. It is not a proof that no such implementation can exist: a
+/// downstream crate whose own lexer type appears in the parameter list may write
+/// `impl Emitter<'_, MyLexer<'_>> for EmitterView<'_, '_, MyLexer<'_>, Sink<..>>` within the
+/// orphan rules, and install *that* over a foreign buffer. What such an implementation can
+/// forward is bounded by the view's surface, and [`Emitter::commit_token`] — the auto-emission
+/// chokepoint, and since `CstEmitter::cst_token` was deleted the **only** producer of token
+/// events — is not on it. So a foreign parse driven that way contributes no token, no span and
+/// no byte of its own buffer; it reaches the node and diagnostic channels, which the condition
+/// could already reach directly and by design. The wrong-*text* class the drivers exist to close
+/// has no route through it.
 #[inline]
 pub fn parse_lossless<'inp, L, Lang, E, C, O, P>(
   src: &'inp L::Source,

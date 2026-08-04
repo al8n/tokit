@@ -11,7 +11,7 @@ use mayber::{Maybe, MaybeRef};
 use crate::{
   ParseContext, Token, Window,
   cache::{CachedToken, CachedTokenOf, CachedTokenRefOf, MaybeRefCachedTokenOf, Peeked},
-  emitter::Emitter,
+  emitter::{Emitter, EmitterView},
   error::{UnexpectedEot, token::UnexpectedToken},
   span::Spanned,
   utils::Expected,

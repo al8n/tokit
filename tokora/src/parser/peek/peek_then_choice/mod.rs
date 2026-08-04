@@ -1,4 +1,6 @@
-use crate::{ParseChoice, TryParseInput, span::Span as _, try_parse_input::ParseAttempt};
+use crate::{
+  ParseChoice, TryParseInput, emitter::EmitterView, span::Span as _, try_parse_input::ParseAttempt,
+};
 
 use super::*;
 
@@ -102,7 +104,7 @@ where
   P: ParseChoice<'inp, L, O, Ctx, Lang>,
   H: FnMut(
     Peeked<'_, 'inp, L, W>,
-    &mut Ctx::Emitter,
+    EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   ) -> Result<P::Id, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
@@ -140,7 +142,7 @@ where
   P: ParseChoice<'inp, L, O, Ctx, Lang>,
   H: FnMut(
     Peeked<'_, 'inp, L, W>,
-    &mut Ctx::Emitter,
+    EmitterView<'_, 'inp, L, Ctx::Emitter, Lang>,
   ) -> Result<Option<P::Id>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,

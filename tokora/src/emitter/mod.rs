@@ -18,6 +18,7 @@ pub use pratt::*;
 pub use repeated::*;
 pub use separated::*;
 pub use severity::*;
+pub use view::EmitterView;
 
 mod cst;
 mod delimited;
@@ -26,6 +27,7 @@ mod pratt;
 mod repeated;
 mod separated;
 mod severity;
+mod view;
 
 /// A trait for handling and emitting errors during tokenization and parsing.
 ///

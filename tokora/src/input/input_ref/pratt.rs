@@ -216,7 +216,7 @@ where
           return Ok(Some(tok));
         };
 
-        fold_prefix.fold_prefix(tok, operand, this.emitter())?
+        fold_prefix.fold_prefix(tok, operand, this.emitter_view())?
       }
     };
 
@@ -245,7 +245,7 @@ where
     //   at once, and the first of them cannot hold at all. Restoring a stall guard here would be
     //   dead code; the invariant that makes it dead is the three bullets around this one.
     // * **No fold can move the input.** The token folds take `Spanned` tokens and the
-    //   emitter; none of the three is handed an [`InputRef`], so no fold can advance the
+    //   emitter's operations; none of the three is handed an [`InputRef`], so no fold can advance the
     //   cursor into a stalled report's place, nor rewind behind a committed one.
     // * **Every descent is preceded by a commit.** The recursive call happens only in the
     //   `TokRhs::Infix` arm, after that operator token is committed, and the lexer contract
@@ -320,7 +320,7 @@ where
       };
 
       match rhs {
-        TokRhs::Postfix => lhs = fold_postfix.fold_postfix(lhs, tok, this.emitter())?,
+        TokRhs::Postfix => lhs = fold_postfix.fold_postfix(lhs, tok, this.emitter_view())?,
         TokRhs::Infix(infix, lpower) => {
           let is_neither = matches!(infix, PrattInfix::Neither(_));
           let floor = if matches!(infix, PrattInfix::Right(_)) {
@@ -350,7 +350,7 @@ where
             };
             Spanned::new(span, infix)
           };
-          lhs = fold_infix.fold_infix(lhs, rhs, infix, this.emitter())?;
+          lhs = fold_infix.fold_infix(lhs, rhs, infix, this.emitter_view())?;
           prev_op_is_neither = if is_neither { Some(lpower) } else { None };
         }
       }

@@ -6551,104 +6551,32 @@ fn cst_carries_the_trivia_policy_to_materialization() {
   );
 }
 
-// The `InputRef::emitter()` half of the old residue-6 pin is closed, and its pin moved to a
-// medium that can hold it: this file is inside the crate, where `emitter()` is still callable, so
-// the cell went on compiling here no matter what the public surface said. Its replacement is the
-// `compile_fail` pair in `cst::parse_lossless`'s "The sink is not handed out by the handle"
-// section — the same wrapper, the same un-pinned entry, the same foreign buffer, refused at
-// `inp.emitter()`.
+// RESIDUE 6 IS CLOSED, AND ITS PIN LIVES WHERE IT CAN HOLD.
 //
-// The residue itself is NOT closed. It has a second route, and that route is below.
-
-/// **A PIN OF A KNOWN-OPEN RESIDUE: the emitter is still handed to *callback* code, so a wrapper
-/// around the live sink still reaches an un-pinned entry.**
-///
-/// Closing [`InputRef::emitter`](crate::InputRef) and deleting `ParseState::emitter` shut the two
-/// doors a parser reaches *directly*. They are not the only doors. Several public callback traits
-/// take the emitter as a **parameter**, by `&mut`, and hand it to code the consumer wrote:
-///
-/// - `Decision::decide(peeked, emitter: &mut E)` — the condition of every `*_while` combinator
-///   (`repeated_while`, `separated_while`, `fold_while`, `try_fold_while`, `peek_then`);
-/// - `PrattFoldTokenPrefix` / `PrattFoldTokenInfix` / `PrattFoldTokenPostfix` — the token-level
-///   pratt folds, `emitter: &mut Ctx::Emitter` in each.
-///
-/// Under [`parse_lossless`](crate::cst::parse_lossless) `Ctx::Emitter` **is** `Sink`, so an
-/// ordinary `repeated_while` condition is handed the live sink by `&mut` — and `&mut Sink` is an
-/// emitter, which is the whole of the attack. The cell below is that attack end to end: the sink
-/// is minted over `"ab"`, the condition wraps it in a `bound_source`-hiding wrapper, drives the
-/// foreign buffer `"ZZ"` through the un-pinned [`parse_with`](crate::parse_with), and the tree
-/// materializes with `"ZZ"`'s structure over `"ab"`'s bytes.
-///
-/// Nothing about this is exotic: the second parameter of a `*_while` condition is `&mut
-/// Ctx::Emitter` in the crate's own reference tests (`decide_num_rw` in
-/// `tests/parser_repeated_while.rs` spells it exactly that way).
-///
-/// **This is why the `bound_source` runtime handshake must not retire.** It is the only thing
-/// that catches this route — and only for a wrapper that *forwards* `bound_source`; one that
-/// hides it, as here, is caught by nothing.
-///
-/// Flips when the callback traits stop taking `&mut Ctx::Emitter` — i.e. when they are handed a
-/// forwarding view that implements no emitter trait, exactly as the handle now is.
-#[test]
-fn a_wrapper_around_the_live_sink_still_reaches_a_callback_parameter() {
-  use crate::{
-    ParseInput, cache::Peeked, parse_input::Accumulator, parser::Action, utils::typenum::U1,
-  };
-
-  fn foreign<'inp>(
-    inp: &mut crate::InputRef<'inp, '_, MiniLexer<'inp>, NonFwdCtx<'inp, '_>>,
-  ) -> Result<usize, SesErr> {
-    let mut n = 0;
-    while inp.next()?.is_some() {
-      n += 1;
-    }
-    Ok(n)
-  }
-
-  fn step(inp: &mut DrvIr<'_, '_, crate::Complete>) -> Result<(), SesErr> {
-    let _ = inp.next()?;
-    Ok(())
-  }
-
-  /// An ordinary `repeated_while` condition. Its second parameter is the parse's emitter.
-  fn decide<'inp>(
-    _peeked: Peeked<'_, 'inp, MiniLexer<'inp>, U1>,
-    emitter: &mut SesSink<'inp>,
-  ) -> Result<Action, SesErr> {
-    let ctx: NonFwdCtx<'inp, '_> = (
-      NonForwardingWrapper(emitter),
-      DefaultCache::<'_, MiniLexer<'_>>::default(),
-    );
-    // "ZZ" is a foreign buffer of the same length as the outer "ab".
-    let read = crate::parse_with(foreign, "ZZ", ctx);
-    assert_eq!(read, Ok(2), "the foreign parse ran to completion");
-    Ok(Action::Stop)
-  }
-
-  fn attack<'inp>(inp: &mut DrvIr<'inp, '_, crate::Complete>) -> Result<Vec<()>, SesErr> {
-    (step as fn(&mut DrvIr<'inp, '_, crate::Complete>) -> Result<(), SesErr>)
-      .repeated_while::<_, U1>(
-        decide as fn(Peeked<'_, 'inp, MiniLexer<'inp>, U1>, &mut SesSink<'inp>) -> _,
-      )
-      .collect()
-      .parse_input(inp)
-  }
-
-  let (cst, parsed) = crate::cst::parse_lossless(
-    "ab",
-    (),
-    Verbose::<SesErr>::new(),
-    profile(),
-    DefaultCache::<'_, MiniLexer<'_>>::default(),
-    attack,
-  );
-  assert!(parsed.is_ok(), "the outer parse succeeded: {parsed:?}");
-
-  let (green, _emitter) = cst.finish(K_ROOT);
-  assert_eq!(
-    text(green.expect("the hidden binding means nothing refused the pairing")),
-    "ab",
-    "the residue: the events came from parsing \"ZZ\" through a callback parameter and the \
-     text is the sink's own \"ab\" — the handle's door is shut and this one is not"
-  );
-}
+// Both halves of it — `InputRef::emitter()` and the callback parameters — were once pinned by
+// in-crate cells here, and neither could be. This file is *inside* the crate, where
+// `InputRef::emitter()` is still callable and `Sink::new` is still reachable, so a cell mounted
+// here goes on compiling no matter what the public surface says. A wall that only outsiders hit
+// has to be pinned from outside.
+//
+// Their replacement is the `compile_fail` family in `cst::parse_lossless`'s "The sink is not
+// handed out by the handle" section, compiled as its own crate against the published API:
+//
+// - the handle route — the same wrapper, the same un-pinned entry, the same foreign buffer,
+//   refused at `inp.emitter()`;
+// - the callback route — the ex-cell
+//   `a_wrapper_around_the_live_sink_still_reaches_a_callback_parameter` transcribed verbatim,
+//   refused because a `*_while` condition's second parameter is no longer `&mut Sink`;
+// - the callback route respelled — the same attack with the parameter written as the
+//   `EmitterView` the trait now demands, refused because a view implements no emitter trait and
+//   so cannot be wrapped into a context. That one is the wall itself; the first two are the
+//   shapes it stops.
+//
+// A runnable cell beside them shows what a condition may still do — report inline, structure
+// inline, and stop — because what it is handed is the emitter's whole emitting surface under the
+// emitter's own names.
+//
+// What is NOT closed is stated there too, under "What this does not close": a downstream crate
+// can implement `Emitter` for `EmitterView<'_, '_, ItsOwnLexer, Sink<..>>` within the orphan
+// rules. `commit_token` is not on the view's surface, so no such implementation can carry a token
+// — and a token is what pairs a span with a byte.

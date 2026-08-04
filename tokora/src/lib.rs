@@ -48,7 +48,7 @@ pub use logos_0_14 as logos;
 pub use cache::{Cache, DefaultCache};
 pub use check::Check;
 pub use dialect::{Dialect, DialectErrorOf, DialectInput, DialectSlice, LangOf, LexerOf};
-pub use emitter::{ComposableEmitter, CstEmitter, Emitter, PolicyComposableEmitter};
+pub use emitter::{ComposableEmitter, CstEmitter, Emitter, EmitterView, PolicyComposableEmitter};
 pub use input::{
   Balance, Commit, Complete, Completeness, DelimClass, DropPolicy, Hole, InputRef, Partial,
   Rollback, SurfaceIncomplete, Transaction, parse_partial,

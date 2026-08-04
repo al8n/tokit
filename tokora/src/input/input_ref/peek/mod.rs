@@ -168,7 +168,11 @@ where
     self.peek_with_emitter::<W>().map(|(peeked, _)| peeked)
   }
 
-  /// Peeks tokens to fill the provided buffer and returns the emitter.
+  /// Peeks tokens to fill the provided buffer and returns the emitter's **operations**.
+  ///
+  /// The second half is an [`EmitterView`], not the emitter: the value a `*_while` condition is
+  /// handed. Returning `&mut Ctx::Emitter` here would be the same door
+  /// `InputRef::emitter` is crate-private to shut — see [`EmitterView`] for the class.
   ///
   /// Reserves the same one owned window as [`peek`](Self::peek), cache hit or miss, and panics
   /// on the same broken-`Cache` condition — see its stack-footprint and panics sections.
@@ -176,7 +180,10 @@ where
   pub fn peek_with_emitter<'p, W>(
     &'p mut self,
   ) -> Result<
-    (Peeked<'p, 'inp, L, W>, &'p mut Ctx::Emitter),
+    (
+      Peeked<'p, 'inp, L, W>,
+      EmitterView<'p, 'inp, L, Ctx::Emitter, Lang>,
+    ),
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
   >
   where
@@ -185,7 +192,7 @@ where
     let mut peeked = GenericArrayDeque::new();
     self
       .peek_with_emitter_inner::<W>(&mut peeked, &mut false)
-      .map(|emitter| (peeked, emitter))
+      .map(|emitter| (peeked, EmitterView::new(emitter)))
   }
 
   /// Peeks tokens to fill the window and reports whether the fill was cut short by a **terminal
@@ -210,7 +217,11 @@ where
   pub fn peek_with_emitter_terminal<'p, W>(
     &'p mut self,
   ) -> Result<
-    (Peeked<'p, 'inp, L, W>, bool, &'p mut Ctx::Emitter),
+    (
+      Peeked<'p, 'inp, L, W>,
+      bool,
+      EmitterView<'p, 'inp, L, Ctx::Emitter, Lang>,
+    ),
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
   >
   where
@@ -220,10 +231,14 @@ where
     let mut terminal = false;
     self
       .peek_with_emitter_inner::<W>(&mut peeked, &mut terminal)
-      .map(|emitter| (peeked, terminal, emitter))
+      .map(|emitter| (peeked, terminal, EmitterView::new(emitter)))
   }
 
   /// Internal implementation for peeking tokens.
+  ///
+  /// This one still hands back `&mut Ctx::Emitter`: it is private, and its two public callers wrap
+  /// the reference in an [`EmitterView`] on the way out. The wall is at the crate boundary, not
+  /// inside the fill.
   ///
   /// `terminal` is set to `true` iff the fill returned a window shorter than requested because of a
   /// terminal scanner stop (a fresh trip, or a pre-latched poison boundary) rather than a genuine

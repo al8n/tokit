@@ -5,6 +5,7 @@ use generic_arraydeque::typenum::U1;
 use crate::{
   Accumulator, ComposableParseContext, Decision, Emitter, ErrorOf, Lexer, ParseInput, Window,
   cache::{Peeked, PeekedTokenExt},
+  emitter::EmitterView,
   input::InputRef,
   parser::Action,
   punct::Punctuator,
@@ -27,7 +28,11 @@ where
   W: Window,
 {
   #[inline(always)]
-  fn decide(&mut self, mut toks: Peeked<'_, 'inp, L, W>, _: &mut E) -> Result<Action, E::Error>
+  fn decide(
+    &mut self,
+    mut toks: Peeked<'_, 'inp, L, W>,
+    _: EmitterView<'_, 'inp, L, E, Lang>,
+  ) -> Result<Action, E::Error>
   where
     W: Window,
   {
