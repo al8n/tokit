@@ -53,7 +53,10 @@ use super::*;
 /// These are transport methods with the `enter_label`-class contract: route through the
 /// blessed combinators (`node(kind, p)`-shaped bracketing,
 /// [`Marker`](crate::cst::event::Marker) for retro-wraps) rather than calling the pair by
-/// hand. A hand-rolled unbalanced [`cst_start`](Self::cst_start) /
+/// hand. `Marker`'s spend verb takes `&mut E`, which a parse handle does not hand out, so a
+/// *grammar* gets the mark from `Marker` and the wrap from its handle's own
+/// `cst_start_at`/`cst_finish` — see that type's docs for both shapes.
+/// A hand-rolled unbalanced [`cst_start`](Self::cst_start) /
 /// [`cst_finish`](Self::cst_finish) is not detected at emit time — it is detected at the
 /// sink's materialization, which refuses to build a wrong tree (typed error, never a panic).
 /// Two shapes are worth naming:
