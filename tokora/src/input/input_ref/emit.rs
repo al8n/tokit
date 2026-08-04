@@ -117,13 +117,34 @@ where
   ///
   /// # It reports; it does not license
   ///
-  /// A recording [`Sink`](crate::cst::Sink) tiles a source byte no committed token covers only
+  #[cfg_attr(
+    feature = "rowan",
+    doc = " A recording [`Sink`](crate::cst::Sink) tiles a source byte no committed token covers only"
+  )]
+  #[cfg_attr(
+    not(feature = "rowan"),
+    doc = " A recording `Sink` tiles a source byte no committed token covers only"
+  )]
   /// where a lexer error the *input layer* raised covers it. The span handed over here is the
   /// caller's, with no consumption behind it, so the sink records the diagnostic and no coverage
   /// span: an uncovered byte stays uncovered and `finish` still refuses it
-  /// ([`FinishError::UncoveredGap`](crate::cst::FinishError::UncoveredGap)). An unconsumed region
+  #[cfg_attr(
+    feature = "rowan",
+    doc = " ([`FinishError::UncoveredGap`](crate::cst::FinishError::UncoveredGap)). An unconsumed region"
+  )]
+  #[cfg_attr(
+    not(feature = "rowan"),
+    doc = " (`FinishError::UncoveredGap`). An unconsumed region"
+  )]
   /// is materialized through
-  /// [`Cst::finish_partial`](crate::cst::Cst::finish_partial), which tiles it — not by reporting
+  #[cfg_attr(
+    feature = "rowan",
+    doc = " [`Cst::finish_partial`](crate::cst::Cst::finish_partial), which tiles it — not by reporting"
+  )]
+  #[cfg_attr(
+    not(feature = "rowan"),
+    doc = " `Cst::finish_partial`, which tiles it — not by reporting"
+  )]
   /// a lexer error over it.
   #[inline(always)]
   pub fn emit_lexer_error(

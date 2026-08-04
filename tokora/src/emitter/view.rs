@@ -205,11 +205,25 @@ where
   ///
   /// # It reports; it does not license
   ///
-  /// A recording [`Sink`](crate::cst::Sink) tiles a source byte no committed token covers only
+  #[cfg_attr(
+    feature = "rowan",
+    doc = " A recording [`Sink`](crate::cst::Sink) tiles a source byte no committed token covers only"
+  )]
+  #[cfg_attr(
+    not(feature = "rowan"),
+    doc = " A recording `Sink` tiles a source byte no committed token covers only"
+  )]
   /// where a lexer error **the input layer raised** covers it. A report raised here carries a span
   /// the *caller* chose, with nothing consumed for it, so the sink records the diagnostic and no
   /// coverage span: an uncovered byte stays uncovered and `finish` still refuses it
-  /// ([`FinishError::UncoveredGap`](crate::cst::FinishError::UncoveredGap)). The evidence door is
+  #[cfg_attr(
+    feature = "rowan",
+    doc = " ([`FinishError::UncoveredGap`](crate::cst::FinishError::UncoveredGap)). The evidence door is"
+  )]
+  #[cfg_attr(
+    not(feature = "rowan"),
+    doc = " (`FinishError::UncoveredGap`). The evidence door is"
+  )]
   /// [`Emitter::commit_lexer_error`], which is deliberately not on this surface.
   #[inline(always)]
   pub fn emit_lexer_error(
