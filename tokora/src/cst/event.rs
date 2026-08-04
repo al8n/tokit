@@ -54,8 +54,8 @@ use crate::{Lexer, emitter::CstEmitter};
 ///
 /// The value is `u16::MAX`, and the slot is **reserved across the whole shared kind space**:
 /// a dialect's unified kind enum (node kinds and token images alike) must never map anything
-/// to it. The recording sink debug-asserts the reservation at emission time and rejects it
-/// with a typed error at materialization.
+/// to it. The recording sink asserts the reservation at emission time — unconditionally, in
+/// every build — and rejects it with a typed error at materialization.
 pub const TOMBSTONE: u16 = u16::MAX;
 
 /// One entry of the flat CST event log.

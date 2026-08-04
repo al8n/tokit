@@ -120,8 +120,9 @@ pub enum FinishError {
   },
 
   /// An event carries the reserved tombstone kind (`u16::MAX`) where a real kind is
-  /// required — the dialect mapper or a raw caller leaked the reserved band. The
-  /// emission-time debug assert is the detect-at-cause form; this is the release wall.
+  /// required — the dialect mapper or a raw caller leaked the reserved band.
+  /// `record_token`, `cst_start`, and `cst_start_at` each `assert!` against it,
+  /// unconditionally, in every build — the detect-at-cause form; this is the release wall.
   #[error("event at index {index} carries the reserved tombstone kind (u16::MAX)")]
   ReservedKind {
     /// The buffer index of the offending event.
