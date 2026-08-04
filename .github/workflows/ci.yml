@@ -486,7 +486,7 @@ jobs:
   # that was missing from it: because the inventory has to be generated from both sides'
   # rustdoc JSON, this gate is not a bare `cargo` line and so never joined the by-hand set.
   # #175 mints two new item owners (`EmitterView`, `Cst`), gives `ParseState` its first
-  # inherent items and adds a defaulted `Emitter` method — 47 rows with no template — and the
+  # inherent items and adds a defaulted `Emitter` method — 49 rows with no template — and the
   # first anyone heard of it was this job. To run it locally, reproduce the two steps below:
   # generate the inventory with `surface_diff.py` from both sides' rustdoc JSON at the same
   # feature point, then `bash ci/name_collision/run.sh <merge-base> <inventory.json>`.

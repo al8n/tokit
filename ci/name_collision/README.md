@@ -140,7 +140,8 @@ side of the line.
 **And it happened again, four owners at once, because the templates are the one part of this
 harness that is not derived.** #168 mints `EmitterView` and `Cst`, gives the pre-existing
 `ParseState` its first inherent items, and adds `commit_lexer_error` to the pre-existing
-`Emitter` trait. Every one of those was `FATAL` — 47 rows of *incomplete verdict* — and the
+`Emitter` trait. Every one of those was `FATAL` — 49 rows of *incomplete verdict*, 14 on `Cst`,
+26 on `ParseState`, 6 on `EmitterView` and 3 on `Emitter` — and the
 job first said so from CI, because no local gate invokes `run.sh` at all (now written into
 `.github/workflows/ci.yml`'s by-hand gate list). Four things came out of writing them, and
 each is a rule rather than a one-off:
