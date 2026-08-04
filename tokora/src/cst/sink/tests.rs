@@ -2662,12 +2662,16 @@ fn reserved_kind_is_refused_at_finish() {
   );
 }
 
-/// F-A7 at cause: the emission-time debug assert catches a mapper that leaks the
-/// reserved band, at the commit that used it.
-#[cfg(debug_assertions)]
+/// F-A7 at cause: the emission-time assert catches a mapper that leaks the reserved band,
+/// at the commit that used it.
+///
+/// Deliberately NOT `cfg(debug_assertions)`-gated: `record_token`'s admission check is a
+/// plain `assert!`, unconditional in every build (unlike `cst_finish`'s neighbouring
+/// global-underflow `debug_assert!`), so this panic must reproduce under
+/// `cargo test --release` too.
 #[test]
 #[should_panic(expected = "reserved tombstone kind")]
-fn tombstone_mapper_debug_asserts_at_emission() {
+fn tombstone_mapper_asserts_at_emission_in_every_build() {
   fn bad_map(_: &MiniTok) -> u16 {
     TOMBSTONE
   }

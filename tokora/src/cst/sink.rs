@@ -483,7 +483,8 @@ where
   ///   `error_kind` wrapped around a recovery hole's skipped tokens, and the `gap_kind` tiled
   ///   over source bytes no committed token covers (what makes `tree.text() == source`
   ///   structural for every input). The [`TOMBSTONE`] value is reserved throughout: no
-  ///   validator admits it, emission debug-asserts against it, and materialization rejects it.
+  ///   validator admits it, emission asserts against it unconditionally in every build, and
+  ///   materialization rejects it.
   ///
   /// Construction is restricted at **compile time** to trivia-surfacing lexers
   /// ([`Lexer::SURFACES_TRIVIA`] `== true`): a syntactic lexer that skips trivia cannot take
@@ -1714,10 +1715,13 @@ where
     }
   }
 
-  /// Test-only raw event injection: the corruption shapes the emission-time debug asserts
-  /// refuse (an orphan finish, a reserved kind, a stale wrap target) must still be
-  /// constructible in debug builds, because the materialization walls they test are the
-  /// **release** line of defense.
+  /// Test-only raw event injection: constructs the corrupt shapes the emission-time checks
+  /// refuse, so the materialization walls that backstop them — the **release** line of
+  /// defense — can be exercised at all. The three checks do not share a build gate: an
+  /// orphan finish (`cst_finish`'s `debug_assert!`) is debug-only, while a reserved kind and
+  /// a stale wrap target (`record_token`/`cst_start`/`cst_start_at`'s and `validate_mark`'s
+  /// plain `assert!`s) are unconditional — refused in every build — so this hook is their
+  /// only bypass at all, not merely their debug-build bypass.
   pub(crate) fn push_raw_event_for_tests(&mut self, event: Event<L::Span>) {
     self.events.push(event);
   }
