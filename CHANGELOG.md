@@ -3965,18 +3965,27 @@ added because something got through the previous set.
   written and never run anywhere. It was expected to need a monthly cadence; measured, it costs
   **0.10s in release** (0.85s in debug — the ratio is what says it is doing the work), so the
   whole cost is a build this job has already paid.
-- **Miri covers the `unstable-raw` surface**, `--lib` only. The raw twins are the surface two
-  rounds reordered around capture windows, and unit-level is where their coverage is;
-  interpreting 94 integration targets a second time is hours for almost nothing.
+- **Miri covers the `unstable-raw` surface.** The raw twins are the surface two rounds
+  reordered around capture windows — precisely the unsafe-adjacent shape Miri exists to see —
+  and no configuration Miri interpreted before this release enabled them. The second pass runs
+  the lib unit tests *and* the whole integration suite again under `logos,unstable-raw`; both
+  Miri matrices are sharded by test target, so that cost is spread across shards rather than
+  serialised into one cell.
 - **The sanitizer script has a caller.** `ci/sanitizer.sh` existed, worked, and was referenced
   by no job — so it had never run on any branch of this campaign. That is the same class as a
   configuration CI compiles and never executes, one level up: not a gate that covers nothing, a
-  gate that nothing invokes. ASan and TSan are now one job each; the target moved from a
-  hard-coded constant into the matrix, because which sanitizers exist is a property of the
-  target.
-- **The reference consumer is checked at a pinned ref**, on demand and weekly. Per-round human
-  discipline for the whole campaign, and this is the last round, so it becomes infrastructure
-  or it stops happening.
+  gate that nothing invokes. ASan and TSan are now one matrix cell each, and the target moved
+  from a constant inside the script to an argument the workflow passes, because which
+  sanitizers exist is a property of the target.
+- **Every public name this release adds is probed against its real owner.** One byte-identical
+  consumer is compiled against the merge base and against the branch, over an inventory
+  generated from both sides' rustdoc JSON rather than hand-listed, and the gate fails on the
+  outcome no diagnostic reports: both sides compile, neither warns, and the witness disagrees.
+  What CI does **not** do is build a real downstream crate. A job that cloned one at a pinned
+  ref was written for this release and removed before it shipped — it never ran on a push or a
+  pull request, and `continue-on-error` kept it from failing the build on the schedules where
+  it did run — so a source-level break that only an independent consumer can witness is caught
+  by that consumer's own CI, not here.
 
 ### Streaming CST is not in this release
 
