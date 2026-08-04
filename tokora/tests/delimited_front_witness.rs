@@ -490,7 +490,7 @@ fn drive_blackhole(src: &'static str) -> std::vec::Vec<D> {
       .collect()
       .parse_input(inp);
     let _ = r;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(inp.emitter_ref().errors().values().flatten().cloned().collect())
   };
   Parser::with_context(ParserContext::new(Verbose::new()))
     .apply(probe)
@@ -556,7 +556,7 @@ fn drive_catching_state_mut(src: &'static str) -> std::vec::Vec<D> {
       .collect()
       .parse_input(inp);
     let _ = r;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(inp.emitter_ref().errors().values().flatten().cloned().collect())
   };
   Parser::with_context(vctx())
     .apply(probe)
@@ -608,7 +608,7 @@ fn drive_catching(src: &'static str) -> std::vec::Vec<D> {
       .collect()
       .parse_input(inp);
     let _ = r;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(inp.emitter_ref().errors().values().flatten().cloned().collect())
   };
   Parser::with_context(vctx())
     .apply(probe)
@@ -653,7 +653,7 @@ macro_rules! run_family {
            -> Result<std::vec::Vec<D>, D> {
             let outcome: Result<std::vec::Vec<i64>, D> = if surgery { $surgery } else { $plain };
             let _ = outcome;
-            Ok($inp.emitter().errors().values().flatten().cloned().collect())
+            Ok($inp.emitter_ref().errors().values().flatten().cloned().collect())
           };
       Parser::with_context(vctx())
         .apply(probe)

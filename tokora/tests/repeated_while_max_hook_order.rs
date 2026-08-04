@@ -241,7 +241,13 @@ fn at_most_boundary_continue_then_element_error_records_no_too_many() {
       "the real element error must surface — no element was ever successfully parsed"
     );
 
-    let recorded: Vec<Diag> = inp.emitter().errors().values().flatten().cloned().collect();
+    let recorded: Vec<Diag> = inp
+      .emitter_ref()
+      .errors()
+      .values()
+      .flatten()
+      .cloned()
+      .collect();
     assert_eq!(
       recorded,
       Vec::<Diag>::new(),
@@ -298,7 +304,13 @@ fn bounded_boundary_continue_then_element_error_records_no_too_many() {
       "the real element error must surface — no element was ever successfully parsed"
     );
 
-    let recorded: Vec<Diag> = inp.emitter().errors().values().flatten().cloned().collect();
+    let recorded: Vec<Diag> = inp
+      .emitter_ref()
+      .errors()
+      .values()
+      .flatten()
+      .cloned()
+      .collect();
     assert_eq!(
       recorded,
       Vec::<Diag>::new(),
@@ -352,7 +364,13 @@ fn at_most_genuine_overflow_still_reports_too_many_once() {
       .parse_input(inp);
     assert_eq!(result, Ok(vec![1, 2, 3, 4]));
 
-    let recorded: Vec<Diag> = inp.emitter().errors().values().flatten().cloned().collect();
+    let recorded: Vec<Diag> = inp
+      .emitter_ref()
+      .errors()
+      .values()
+      .flatten()
+      .cloned()
+      .collect();
     assert_eq!(
       recorded,
       vec![Diag::TooMany(3, 2)],
@@ -377,7 +395,13 @@ fn bounded_genuine_overflow_still_reports_too_many_once() {
       .parse_input(inp);
     assert_eq!(result, Ok(vec![1, 2, 3, 4]));
 
-    let recorded: Vec<Diag> = inp.emitter().errors().values().flatten().cloned().collect();
+    let recorded: Vec<Diag> = inp
+      .emitter_ref()
+      .errors()
+      .values()
+      .flatten()
+      .cloned()
+      .collect();
     assert_eq!(
       recorded,
       vec![Diag::TooMany(3, 2)],
@@ -416,7 +440,13 @@ fn delimited_at_most_boundary_continue_then_element_error_records_no_too_many() 
       "the real element error must surface — no element was ever successfully parsed"
     );
 
-    let recorded: Vec<Diag> = inp.emitter().errors().values().flatten().cloned().collect();
+    let recorded: Vec<Diag> = inp
+      .emitter_ref()
+      .errors()
+      .values()
+      .flatten()
+      .cloned()
+      .collect();
     assert!(
       !recorded.iter().any(|d| matches!(d, Diag::TooMany(..))),
       "the delimited driver has no mid-loop hook to misfire; unexpected TooMany: {recorded:?}"

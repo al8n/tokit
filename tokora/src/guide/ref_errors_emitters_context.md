@@ -475,7 +475,7 @@ where
         None => {
             // The one line the emitter reinterprets: under `Fatal` this `?` ends the parse;
             // under `Verbose` the diagnostic is filed and we return a recovered value.
-            inp.emitter().emit_error(Spanned::new(at, Error))?;
+            inp.emit_error(Spanned::new(at, Error))?;
             Ok(0)
         }
     }

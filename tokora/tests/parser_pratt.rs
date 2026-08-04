@@ -210,7 +210,7 @@ fn token_driver_returns_the_prefix_operator_after_reporting_its_missing_operand(
       tok_fold_infix::<Verbose<PrattError>>,
       tok_fold_postfix::<Verbose<PrattError>>,
     )?;
-    let recorded = inp.emitter().errors().values().flatten().count();
+    let recorded = inp.emitter_ref().errors().values().flatten().count();
     Ok((out.map(|t| t.data().clone()), recorded))
   }
 

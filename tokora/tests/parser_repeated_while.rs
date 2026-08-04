@@ -1098,7 +1098,7 @@ fn test_repeated_while_full_container_verbose_records_and_terminates() {
     assert_eq!(out, Some(1));
     // The overflow was recorded rather than aborting the parse — and recorded exactly once,
     // however many later pushes the full container went on to refuse.
-    let recorded: usize = inp.emitter().errors().values().map(|v| v.len()).sum();
+    let recorded: usize = inp.emitter_ref().errors().values().map(|v| v.len()).sum();
     assert_eq!(
       recorded, 1,
       "a full container reports its refusal once per construct, not once per dropped element"

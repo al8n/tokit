@@ -117,7 +117,7 @@ fn cache_is_accessible() {
   Parser::new().apply(parse).parse_str("42").unwrap();
 }
 
-// ── InputRef::emitter ───────────────────────────────────────────────────────
+// ── InputRef::emitter_ref ───────────────────────────────────────────────────
 
 #[test]
 fn emitter_is_accessible() {
@@ -126,7 +126,7 @@ fn emitter_is_accessible() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
   {
-    let _ = inp.emitter();
+    let _ = inp.emitter_ref();
     Ok(())
   }
   Parser::new().apply(parse).parse_str("42").unwrap();

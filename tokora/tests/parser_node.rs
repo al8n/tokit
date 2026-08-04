@@ -17,7 +17,7 @@ use tokora::{
   InputRef, Lexer, Parse, ParseInput, Parser, SimpleSpan, Token, TryParseInput,
   cache::DefaultCache,
   cst::{CstProfile, FinishError, parse_lossless},
-  emitter::{CstEmitter, Verbose},
+  emitter::Verbose,
   error::token::UnexpectedToken,
   parser::{
     PrattFoldOp, PrattInfix, PrattLHS, PrattRHS, Precedenced, node, node_at, node_opt, pratt,
@@ -445,7 +445,7 @@ fn backtrack_equivalence_seed_declined_wrap_vs_straight() {
 #[test]
 fn node_at_wraps_from_the_caller_mark() {
   let (res, green) = run("a:", |inp| {
-    let mark = inp.emitter().cst_mark();
+    let mark = inp.cst_mark();
     take_one(inp)?; // the name, committed before the wrap is known
     node_at(mark, K_WRAP, take_one).parse_input(inp) // `:` decides: it was an alias
   });
@@ -465,7 +465,7 @@ fn node_at_wraps_from_the_caller_mark() {
 #[test]
 fn node_at_error_unwind_spends_nothing() {
   let (res, green) = run("ab", |inp| {
-    let mark = inp.emitter().cst_mark();
+    let mark = inp.cst_mark();
     take_one(inp)?;
     node_at(mark, K_WRAP, boom_after_one).parse_input(inp)
   });

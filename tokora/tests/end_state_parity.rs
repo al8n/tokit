@@ -199,7 +199,7 @@ macro_rules! parity {
         let _out: $out = $build;
         Ok(
           $inp
-            .emitter()
+            .emitter_ref()
             .errors()
             .values()
             .flatten()

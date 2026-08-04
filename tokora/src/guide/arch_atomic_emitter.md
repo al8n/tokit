@@ -20,7 +20,7 @@ parse. So tokora puts that policy in one replaceable object, the **emitter**, bo
 handle alongside the scanning state, and leaves the parser writing the same line either way:
 
 ```text
-inp.emitter().emit_error(Spanned::new(at, err))?;
+inp.emit_error(Spanned::new(at, err))?;
 ```
 
 The protocol is a `Result`. `Ok(())` means the diagnostic was handled as non-fatal and parsing
@@ -152,7 +152,7 @@ of them regardless.
 ### The one capability that binds rather than defaults
 
 [`CstEmitter`](crate::emitter::CstEmitter) is the exception worth naming, because it inverts the
-default's purpose. Its methods (`cst_start` / `cst_token` / `cst_finish`, and the retro-wrap pair
+default's purpose. Its methods (`cst_start` / `cst_finish`, and the retro-wrap pair
 `cst_mark` / `cst_start_at`) all have no-op defaults, so `Fatal` / `Verbose` / `Silent` /
 [`Ignored`](crate::emitter::Ignored) are `CstEmitter` for free and a tree-less parse compiles the
 event calls to nothing. But a tree-*producing* parse path bounds `Ctx::Emitter: CstEmitter` anyway —
@@ -356,7 +356,7 @@ where
       Tok::Digit(n) => out.push(n),
       // A `+` where a digit belongs. THE line the emitter reinterprets: a fatal stop under
       // `Fatal`, filed-and-continue under `Verbose`, dropped under `Silent`.
-      Tok::Plus => inp.emitter().emit_error(Spanned::new(at, Error))?,
+      Tok::Plus => inp.emit_error(Spanned::new(at, Error))?,
     }
   }
   Ok(out)

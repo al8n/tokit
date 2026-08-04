@@ -1298,9 +1298,7 @@ fn a_recording_emitter_sees_the_repeat_as_an_error_and_keeps_its_earlier_log() {
     let out = lhs(inp)?;
     if matches!(out, PrattLHS::Operand(_)) {
       let span = tokora::SimpleSpan::new(at, at);
-      inp
-        .emitter()
-        .emit_error(tokora::span::Spanned::new(span, LimErr::Note(at)))?;
+      inp.emit_error(tokora::span::Spanned::new(span, LimErr::Note(at)))?;
     }
     Ok(out)
   }
@@ -2231,9 +2229,7 @@ fn a_pre_trip_diagnostic_survives_the_trip() {
   {
     let at = inp.span().end();
     let span = tokora::SimpleSpan::new(at, at);
-    inp
-      .emitter()
-      .emit_error(tokora::span::Spanned::new(span, LimErr::Note(at)))?;
+    inp.emit_error(tokora::span::Spanned::new(span, LimErr::Note(at)))?;
     lhs(inp)
   }
 

@@ -2266,6 +2266,19 @@ impl<'inp> Emitter<'inp, TestLexer<'inp>> for TrackingEmitter {
   fn release(&mut self, _: u64) {
     self.releases += 1;
   }
+
+  /// The token channel. It lives on the CORE trait rather than on `CstEmitter` — a settle is
+  /// the only way a token event is born — so its `&mut U` forwarding gap is the same W3 class
+  /// as the structuring methods below, and is counted with them.
+  fn commit_token(
+    &mut self,
+    _: &<TestLexer<'inp> as Lexer<'inp>>::Token,
+    _: &<TestLexer<'inp> as Lexer<'inp>>::Span,
+  ) where
+    TestLexer<'inp>: Lexer<'inp>,
+  {
+    self.cst_events += 1;
+  }
 }
 
 impl<'inp> PrattEmitter<'inp, TestLexer<'inp>> for TrackingEmitter {
@@ -2908,14 +2921,6 @@ impl<'inp> CstEmitter<'inp, TestLexer<'inp>> for TrackingEmitter {
     self.cst_events += 1;
   }
 
-  fn cst_token(
-    &mut self,
-    _: &<TestLexer<'inp> as Lexer<'inp>>::Token,
-    _: &<TestLexer<'inp> as Lexer<'inp>>::Span,
-  ) {
-    self.cst_events += 1;
-  }
-
   fn cst_finish(&mut self, _: u16) {
     self.cst_events += 1;
   }
@@ -2945,15 +2950,22 @@ fn cst_emitter_mut_ref_start() {
   );
 }
 
+/// `CstEmitter` has no `cst_token` — a token event is born from a **settle**, and the settle
+/// hook is [`Emitter::commit_token`] on the core trait. Its `&mut U` forward carries the same
+/// W3 hazard as the structuring methods above (forward the structure, inherit the token no-op,
+/// get a tree with no leaves), so it is driven through the blanket here beside them.
 #[test]
-fn cst_emitter_mut_ref_token() {
+fn emitter_mut_ref_commit_token() {
   let mut emitter = TrackingEmitter::new();
   let mut r: &mut TrackingEmitter = &mut emitter;
   let tok = Token::Num(7);
   let span = SimpleSpan::new(0usize, 1usize);
-  <&mut TrackingEmitter as CstEmitter<'_, TestLexer<'_>>>::cst_token(&mut r, &tok, &span);
+  <&mut TrackingEmitter as Emitter<'_, TestLexer<'_>>>::commit_token(&mut r, &tok, &span);
   assert_eq!(emitter.cst_events, 1);
-  assert_eq!(emitter.calls, 0);
+  assert_eq!(
+    emitter.calls, 0,
+    "a settle must not masquerade as an emission"
+  );
 }
 
 #[test]

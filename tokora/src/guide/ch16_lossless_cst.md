@@ -401,7 +401,7 @@ where
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -773,7 +773,7 @@ where
 {
   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
     // An inert mark: costs one buffer slot, promises nothing.
-    let mark = inp.emitter().cst_mark();
+    let mark = inp.cst_mark();
     let first = ident(inp)?;
     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
       // The colon was there — `first` was an alias all along. `node_at` spent the mark:
@@ -1023,7 +1023,7 @@ formatting data *without* a tree in the dependency closure; under a sink they ar
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -1289,7 +1289,7 @@ nothing.
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -1538,7 +1538,7 @@ branch is abandoned, its events are truncated as if they never happened.
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -1834,7 +1834,7 @@ scan — no sync point found — rewinds its speculative events entirely.)
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),
@@ -1931,7 +1931,7 @@ where
           // sink wraps the hole's REAL tokens in the configured error node. No
           // tree-building code appears anywhere in this recovery path.
           let at = *inp.span();
-          inp.emitter().emit_error(Spanned::new(at, QueryError::Unexpected))?;
+          inp.emit_error(Spanned::new(at, QueryError::Unexpected))?;
           inp.sync_balanced(brackets, |t| {
             matches!(t.data().kind(), Tok::Ident | Tok::RBrace)
           })?;
@@ -2102,7 +2102,7 @@ where
   Ctx::Emitter: CstEmitter<'inp, QueryLexer<'inp>>
     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 {
-  inp.emitter().cst_start(K::SelectionSet.raw());
+  inp.cst_start(K::SelectionSet.raw());
   expect_tok(inp, Tok::LBrace)?;
   Err(QueryError::Unexpected) // abort with the node still open
 }
@@ -2377,7 +2377,7 @@ Reading this chapter's tree wants the second position:
 #     + Emitter<'inp, QueryLexer<'inp>, Error = QueryError>,
 # {
 #   node(K::Field.raw(), |inp: &mut QueryIn<'inp, '_, Ctx>| {
-#     let mark = inp.emitter().cst_mark();
+#     let mark = inp.cst_mark();
 #     let first = ident(inp)?;
 #     let (alias, name) = match node_at(mark, K::Alias.raw(), try_colon).try_parse_input(inp)? {
 #       ParseAttempt::Accept(()) => (Some(first), ident(inp)?),

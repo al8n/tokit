@@ -1512,9 +1512,7 @@ where
   Ctx::Emitter: Emitter<'inp, CountLexer<'inp>, Error = RetErr>,
 {
   if LHS_DIAG.with(|c| c.replace(false)) {
-    inp
-      .emitter()
-      .emit_error(Spanned::new(SimpleSpan::new(0, 1), RetErr))?;
+    inp.emit_error(Spanned::new(SimpleSpan::new(0, 1), RetErr))?;
   }
   measured_lhs(inp)
 }
@@ -1546,7 +1544,7 @@ where
   Ctx: ParseContext<'inp, CountLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, CountLexer<'inp>, Error = RetErr>,
 {
-  inp.emitter().emit_error(Spanned::new(
+  inp.emit_error(Spanned::new(
     SimpleSpan::new(PRE_EXPR_DIAG, PRE_EXPR_DIAG + 1),
     RetErr,
   ))
@@ -1709,9 +1707,7 @@ where
   Ctx::Emitter: Emitter<'inp, CountLexer<'inp>, Error = RetErr>,
 {
   if LHS_DIAG.with(|c| c.replace(false)) {
-    inp
-      .emitter()
-      .emit_error(Spanned::new(SimpleSpan::new(0, 1), RetErr))?;
+    inp.emit_error(Spanned::new(SimpleSpan::new(0, 1), RetErr))?;
   }
   Ok(PrattLHS::Prefix(Precedenced::new((), CARET)))
 }

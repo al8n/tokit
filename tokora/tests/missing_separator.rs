@@ -158,7 +158,7 @@ fn require_trailing_verbose_records_zero_width_span() {
       .require_trailing()
       .collect()
       .parse_input(inp)?;
-    let errs = inp.emitter().errors();
+    let errs = inp.emitter_ref().errors();
     assert_eq!(errs.len(), 1, "one missing-trailing-separator error");
     // "1,2,3" ends at offset 5; the error is recorded at the zero-width span there.
     assert!(
@@ -193,7 +193,7 @@ fn require_surrounded_verbose_records_both_zero_width_spans() {
       .require_leading()
       .collect()
       .parse_input(inp)?;
-    let errs = inp.emitter().errors();
+    let errs = inp.emitter_ref().errors();
     assert_eq!(errs.len(), 2, "missing leading and trailing separators");
     // Leading missing at the start (offset 0), trailing missing at the end (offset 5).
     assert!(errs.contains_key(&SimpleSpan::new(0usize, 0usize)));
@@ -317,7 +317,7 @@ fn driver_end_to_end_names_the_separator() {
       .collect()
       .parse_input(inp)?;
 
-    let collected: Vec<&NamedError> = inp.emitter().errors().values().flatten().collect();
+    let collected: Vec<&NamedError> = inp.emitter_ref().errors().values().flatten().collect();
     assert_eq!(
       collected,
       vec![&NamedError::MissingSeparator(Some("COMMA".to_string()))],

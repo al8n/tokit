@@ -994,7 +994,7 @@ fn test_sep_while_zero_width_element_stops_after_one_element() {
       .collect()
       .parse_input(inp)?;
     assert_eq!(
-      inp.emitter().errors().len(),
+      inp.emitter_ref().errors().len(),
       0,
       "a single accepted element must not re-enter the missing-separator path"
     );
@@ -1046,7 +1046,7 @@ fn test_sep_while_zero_width_element_with_leading_trivia_stops_after_one_element
       .collect()
       .parse_input(inp)?;
     assert_eq!(
-      inp.emitter().errors().len(),
+      inp.emitter_ref().errors().len(),
       0,
       "a single accepted element behind leading trivia must not re-enter the missing-separator path"
     );

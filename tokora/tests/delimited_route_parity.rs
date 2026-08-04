@@ -319,7 +319,13 @@ where
   let probe =
     move |inp: &mut InputRef<'static, '_, TestLexer<'static>, VCtx<'static>>| -> Result<Vec<R>, R> {
       let outcome = p(inp);
-      let mut rows: Vec<R> = inp.emitter().errors().values().flatten().cloned().collect();
+      let mut rows: Vec<R> = inp
+        .emitter_ref()
+        .errors()
+        .values()
+        .flatten()
+        .cloned()
+        .collect();
       if let Err(e) = outcome {
         rows.push(e);
       }

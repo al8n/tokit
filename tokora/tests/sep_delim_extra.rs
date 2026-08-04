@@ -204,7 +204,7 @@ fn at_least_violation_inside_delim_records_too_few() {
       .delimited::<Bracket<(), (), ()>>()
       .collect()
       .parse_input(inp)?;
-    let errs = inp.emitter().errors();
+    let errs = inp.emitter_ref().errors();
     let count = errs.values().map(|v| v.len()).sum();
     assert!(
       !errs.is_empty(),
@@ -240,7 +240,7 @@ fn default_policy_trailing_separator_inside_delim_records_diagnostic() {
       .delimited::<Bracket<(), (), ()>>()
       .collect()
       .parse_input(inp)?;
-    let errs = inp.emitter().errors();
+    let errs = inp.emitter_ref().errors();
     let count = errs.values().map(|v| v.len()).sum();
     assert!(
       !errs.is_empty(),

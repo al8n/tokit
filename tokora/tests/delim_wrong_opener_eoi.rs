@@ -356,7 +356,7 @@ macro_rules! driver_cases {
         let before = *inp.cursor().as_inner();
         let items = $go(inp)?;
         let after = *inp.cursor().as_inner();
-        let recorded: Vec<WE> = inp.emitter().errors().values().flatten().cloned().collect();
+        let recorded: Vec<WE> = inp.emitter_ref().errors().values().flatten().cloned().collect();
         Ok((items, before, after, recorded))
       }
       let (items, before, after, recorded) = Parser::with_context(verbose_ctx())
@@ -410,7 +410,15 @@ macro_rules! flagged_once_cases {
         inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
       ) -> Result<Vec<WE>, WE> {
         $go(inp)?;
-        Ok(inp.emitter().errors().values().flatten().cloned().collect())
+        Ok(
+          inp
+            .emitter_ref()
+            .errors()
+            .values()
+            .flatten()
+            .cloned()
+            .collect(),
+        )
       }
       let final_wrong: Vec<WE> = Parser::with_context(verbose_ctx())
         .apply(probe)
@@ -441,7 +449,15 @@ macro_rules! flagged_once_cases {
         inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VerboseCtx<'inp>>,
       ) -> Result<Vec<WE>, WE> {
         $go(inp)?;
-        Ok(inp.emitter().errors().values().flatten().cloned().collect())
+        Ok(
+          inp
+            .emitter_ref()
+            .errors()
+            .values()
+            .flatten()
+            .cloned()
+            .collect(),
+        )
       }
       let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
         .apply(probe)
@@ -524,7 +540,15 @@ fn repeated_zero_width_stall_arm_flags_wrong_opener_once() {
       .delimited_by_braces()
       .collect()
       .parse_input(inp)?;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(
+      inp
+        .emitter_ref()
+        .errors()
+        .values()
+        .flatten()
+        .cloned()
+        .collect(),
+    )
   }
   let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
     .apply(parse)
@@ -562,7 +586,15 @@ fn repeated_while_zero_width_stall_arm_flags_wrong_opener_once() {
       .delimited_by_braces()
       .collect()
       .parse_input(inp)?;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(
+      inp
+        .emitter_ref()
+        .errors()
+        .values()
+        .flatten()
+        .cloned()
+        .collect(),
+    )
   }
   let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
     .apply(parse)
@@ -600,7 +632,15 @@ fn separated_while_zero_width_stall_arm_flags_wrong_opener_once() {
       .delimited_by_braces()
       .collect()
       .parse_input(inp)?;
-    Ok(inp.emitter().errors().values().flatten().cloned().collect())
+    Ok(
+      inp
+        .emitter_ref()
+        .errors()
+        .values()
+        .flatten()
+        .cloned()
+        .collect(),
+    )
   }
   let recorded: Vec<WE> = Parser::with_context(verbose_ctx())
     .apply(parse)
