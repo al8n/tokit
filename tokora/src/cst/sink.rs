@@ -328,11 +328,13 @@ fn bump_witness(next: &core::sync::atomic::AtomicUsize) -> usize {
 /// The sink also overrides [`Emitter::bound_source`](crate::Emitter::bound_source) to report
 /// its buffer's offset origin, and the point at which an emitter is attached to an input
 /// compares that against the source the parse reads, **panicking** on a provable mismatch —
-/// pinned by `sink_bound_to_a_foreign_source_is_refused`. With the drivers in place that check
-/// is redundant for a sink obtained the intended way. It still covers the one path minting
-/// does not: a parser running *inside* a driver can reach the live sink through
-/// [`InputRef::emitter`](crate::InputRef::emitter) and hand it to an un-pinned entry
-/// ([`parse_partial`](crate::parse_partial), [`Parse`](crate::Parse)) over a foreign buffer.
+/// pinned by `sink_bound_to_a_foreign_source_is_refused`. With the drivers in place it is
+/// redundant for a sink obtained the intended way, and the handle no longer hands one out
+/// (`Sink::new` and `InputRef::emitter` are crate-private; `InputRef::emitter_ref` yields a
+/// **shared** reference, which no emitter slot can take). It is **not** redundant, because the
+/// handle is not the only door: the public callback traits — `Decision::decide` and the
+/// token-level pratt folds — still take `&mut Ctx::Emitter` as a parameter and hand the live
+/// sink to caller-written code. That route is live, and this check is the only thing on it.
 ///
 /// **The refusal is conservative, and the residue is real.** It fires only where
 /// [`Source::REFERENT_IS_BYTES`](crate::Source::REFERENT_IS_BYTES) says an unequal reference
@@ -653,9 +655,11 @@ where
     );
   }
 
-  /// Records one committed token: the one body behind both doors of the token channel —
-  /// the auto-emission hook ([`Emitter::commit_token`], fed by the input layer's settle
-  /// primitive) and the raw transport ([`CstEmitter::cst_token`]).
+  /// Records one committed token. The token channel has exactly **one** door — the
+  /// auto-emission hook ([`Emitter::commit_token`], fed by the input layer's settle primitive)
+  /// — and this is its body. There is no raw transport beside it: a caller-chosen span that no
+  /// settle accounts for is the wrong-tree class nothing downstream can detect, so a grammar
+  /// cannot open this door at all.
   fn record_token(&mut self, tok: &L::Token, span: &L::Span) {
     let kind = (self.profile.mapper())(tok);
     // Emission-time mapper validity (detect-at-cause): rowan would defer a bad kind to a
@@ -1108,8 +1112,8 @@ where
   /// The auto-emission hook: the input layer settles every committed token through this
   /// one call — the consume settles via its `commit_token` primitive, the scan skips via
   /// `skip_and_report` — so the whole consume surface is tree-producing with zero per-atom
-  /// code. Records a `Token` event through the same body as the raw
-  /// [`cst_token`](CstEmitter::cst_token) transport.
+  /// code. It is the token channel's **only** door: the `Token` event exists because a token
+  /// settled, never because a caller said so.
   #[inline]
   fn commit_token(&mut self, tok: &L::Token, span: &L::Span)
   where
@@ -1215,16 +1219,6 @@ where
     });
   }
 
-  fn cst_token(&mut self, tok: &L::Token, span: &L::Span)
-  where
-    L: Lexer<'inp>,
-  {
-    // Raw transport records the event only — a *settle* reaches the inner through
-    // [`Emitter::commit_token`]; forwarding here would fabricate a settle the input layer
-    // never made (exactly-once law).
-    self.record_token(tok, span);
-  }
-
   fn cst_finish(&mut self, kind: u16)
   where
     L: Lexer<'inp>,
@@ -1235,7 +1229,7 @@ where
     // because depth cannot separate the two histories that reach this call with a node
     // still open:
     //
-    //   - LEGAL cross-checkpoint close — `cst_start(A); checkpoint m; cst_token;
+    //   - LEGAL cross-checkpoint close — `cst_start(A); checkpoint m; <token settles>;
     //     cst_finish(A)`: A was opened, never rolled back, and this finish closes it. Under
     //     commit/release both events survive balanced; under a rewind of `m` the finish
     //     truncates and A reopens (the truncate-and-reopen semantics the CstEmitter contract
@@ -1244,7 +1238,7 @@ where
     //     this narrowing fixes (see issue #98).
     //
     //   - LEAKED-FINISH misuse — `cst_start(A); checkpoint m; cst_start(B); rewind(m);
-    //     cst_token; cst_finish(B)`: the finish was meant for B, but B's start died with the
+    //     <token settles>; cst_finish(B)`: the finish was meant for B, but B's start died with the
     //     rewind, so it would silently close ancestor A instead. After the rewind the event
     //     buffer is IDENTICAL to the legal case above — depth cannot tell them apart, and
     //     neither can the whole buffer. The `kind` argument is what separates them: it

@@ -69,11 +69,11 @@ use super::*;
 /// [`cst_finish`](Self::cst_finish) takes the kind of the node it means to close, and a
 /// recording sink checks that kind against the frame the finish actually lands on
 /// (`cst::FinishError::MismatchedFinish`). The shape this exists for is the **leaked finish**:
-/// `cst_start(A); checkpoint m; cst_start(B); rewind(m); cst_token; cst_finish(B)`. B's start
-/// died with the rewind, so the finish would otherwise close ancestor A silently, and the
+/// `cst_start(A); checkpoint m; cst_start(B); rewind(m); <token settles>; cst_finish(B)`. B's
+/// start died with the rewind, so the finish would otherwise close ancestor A silently, and the
 /// resulting event buffer is byte-identical to the legal cross-checkpoint close
-/// `cst_start(A); checkpoint m; cst_token; cst_finish(A)` — no property of the buffer, depth
-/// included, separates them. The kind argument does.
+/// `cst_start(A); checkpoint m; <token settles>; cst_finish(A)` — no property of the buffer,
+/// depth included, separates them. The kind argument does.
 ///
 /// The residue is honest: identity **by kind** is weak. A leaked finish that closes a
 /// same-kind ancestor still passes the check, and is then caught only if the stream ends
@@ -94,21 +94,13 @@ pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
     let _ = kind;
   }
 
-  /// Records one **committed** token: the token itself (the recording sink maps it to a
-  /// u16 through its dialect-supplied mapper — no kind bound leaks into core) and its
-  /// span.
-  ///
-  /// Exactly-once law: this fires when a token settles — consumed, or skipped behind a
-  /// scan frontier — and nowhere else. Peeks, declines, `unconsume`, position writes, and
-  /// rejected error items record nothing. Reference-taking on purpose: a no-op emitter's
-  /// call sites compute nothing.
-  #[inline(always)]
-  fn cst_token(&mut self, tok: &L::Token, span: &L::Span)
-  where
-    L: Lexer<'a>,
-  {
-    let _ = (tok, span);
-  }
+  // There is deliberately **no** `cst_token` here. Tokens reach the event stream through
+  // exactly one door — the defaulted [`Emitter::commit_token`] on the core trait, which the
+  // input layer calls once per token that *settles* (consumed, or skipped behind a scan
+  // frontier). A second, raw door carrying a caller-chosen span and consuming nothing let a
+  // grammar decide which source bytes the tree shows without any settle having happened, and
+  // nothing downstream could tell the difference: the resulting log is byte-identical to one a
+  // legal parse could produce. Recording is the input layer's to trigger, not the grammar's.
 
   /// Closes the innermost open node (stack discipline; see the module docs of
   /// [`cst::event`](crate::cst::event) for the derived depth model).
@@ -174,14 +166,6 @@ where
     L: Lexer<'a>,
   {
     (**self).cst_start(kind)
-  }
-
-  #[inline(always)]
-  fn cst_token(&mut self, tok: &L::Token, span: &L::Span)
-  where
-    L: Lexer<'a>,
-  {
-    (**self).cst_token(tok, span)
   }
 
   #[inline(always)]
