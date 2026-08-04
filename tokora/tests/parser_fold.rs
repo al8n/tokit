@@ -9,6 +9,7 @@ mod common;
 
 use common::{TestLexer, Token, TokenKind};
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, TryParseInput,
   cache::Peeked,
@@ -60,7 +61,7 @@ where
 // Uses same pattern as decide_num in parser_sep_while.rs.
 fn while_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _emitter: &mut Ctx::Emitter,
+  _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -308,7 +309,7 @@ fn fold_while_zero_width_element_stops_after_one_accumulation() {
     // Continues unconditionally, up to a budget, ignoring the peeked window entirely.
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Ctx::Emitter|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>|
           -> Result<Action, ()> {
       Ok(if budget > 0 {
         budget -= 1;
@@ -383,7 +384,7 @@ fn try_fold_while_zero_width_element_stops_after_one_accumulation() {
   {
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Ctx::Emitter|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>|
           -> Result<Action, ()> {
       Ok(if budget > 0 {
         budget -= 1;
@@ -448,7 +449,7 @@ fn rfold_while_zero_width_element_does_not_buffer_unboundedly() {
   {
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Ctx::Emitter|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>|
           -> Result<Action, ()> {
       Ok(if budget > 0 {
         budget -= 1;
@@ -646,7 +647,7 @@ fn fold_while_zero_width_element_with_leading_trivia_stops_after_one_accumulatio
   {
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Ctx::Emitter|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>|
           -> Result<Action, ()> {
       Ok(if budget > 0 {
         budget -= 1;
@@ -673,7 +674,7 @@ fn try_fold_while_zero_width_element_with_leading_trivia_stops_after_one_accumul
   {
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Ctx::Emitter|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>|
           -> Result<Action, ()> {
       Ok(if budget > 0 {
         budget -= 1;
@@ -700,7 +701,7 @@ fn rfold_while_zero_width_element_with_leading_trivia_does_not_buffer_unboundedl
   {
     let mut budget = 5usize;
     let cond = move |_peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     _emitter: &mut Ctx::Emitter|
+                     _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>|
           -> Result<Action, ()> {
       Ok(if budget > 0 {
         budget -= 1;

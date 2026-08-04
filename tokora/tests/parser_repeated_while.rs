@@ -21,6 +21,7 @@
 mod common;
 
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Accumulator, Emitter, InputRef, Lexer, Parse, ParseContext, ParseInput, Parser, ParserContext,
   Token as TokenTrait,
@@ -255,7 +256,7 @@ impl<'inp, E> RWEmitterBound<'inp> for E where
 
 fn decide_num_rw<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,

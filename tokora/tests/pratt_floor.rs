@@ -21,6 +21,7 @@
 mod common;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
+use tokora::EmitterView;
 
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, SimpleSpan,
@@ -652,21 +653,29 @@ fn num_of(tok: &Tok) -> i64 {
   }
 }
 
-fn tok_fold_prefix<E>(_op: Tok, operand: Tok, _: &mut E) -> Result<Tok, FloorError> {
+fn tok_fold_prefix<'inp, E>(
+  _op: Tok,
+  operand: Tok,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
+) -> Result<Tok, FloorError> {
   Ok(operand)
 }
 
-fn tok_fold_postfix<E>(operand: Tok, _op: Tok, _: &mut E) -> Result<Tok, FloorError> {
+fn tok_fold_postfix<'inp, E>(
+  operand: Tok,
+  _op: Tok,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
+) -> Result<Tok, FloorError> {
   Ok(operand)
 }
 
 /// Evaluates the fold: `*` multiplies, `+` adds. The result is a synthetic `Num` token
 /// spanning the folded region, so the parse's shape is readable off the final value.
-fn dense_fold_infix<E>(
+fn dense_fold_infix<'inp, E>(
   left: Tok,
   right: Tok,
   infix: Spanned<PrattInfix<Token, Token, Token>, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
 ) -> Result<Tok, FloorError> {
   let (span, op) = infix.into_components();
   let (l, r) = (num_of(&left), num_of(&right));
@@ -775,11 +784,11 @@ impl PrattToken<'_, i64, u8> for Token {
 
 /// Records the shape of the fold tree in the value: each fold appends its right operand's
 /// digit, so one fold over `1 ; 2` reads `12` and a second over `; 3` reads `123`.
-fn chain_fold_infix<E>(
+fn chain_fold_infix<'inp, E>(
   left: Tok,
   right: Tok,
   infix: Spanned<PrattInfix<Token, Token, Token>, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
 ) -> Result<Tok, FloorError> {
   let value = num_of(&left) * 10 + num_of(&right);
   Ok(Spanned::new(infix.into_span(), Token::Num(value)))

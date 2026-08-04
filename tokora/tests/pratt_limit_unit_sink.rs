@@ -56,6 +56,7 @@
 mod common;
 
 use core::cell::Cell;
+use tokora::EmitterView;
 
 use tokora::{
   Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext,
@@ -191,19 +192,27 @@ impl PrattToken<'_, i64, Power> for Token {
 
 type Tok = tokora::span::Spanned<Token, tokora::SimpleSpan>;
 
-fn tok_fold_prefix<E>(_op: Tok, operand: Tok, _: &mut E) -> Result<Tok, ()> {
+fn tok_fold_prefix<'inp, E>(
+  _op: Tok,
+  operand: Tok,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
+) -> Result<Tok, ()> {
   Ok(operand)
 }
 
-fn tok_fold_postfix<E>(operand: Tok, _op: Tok, _: &mut E) -> Result<Tok, ()> {
+fn tok_fold_postfix<'inp, E>(
+  operand: Tok,
+  _op: Tok,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
+) -> Result<Tok, ()> {
   Ok(operand)
 }
 
-fn tok_fold_infix<E>(
+fn tok_fold_infix<'inp, E>(
   left: Tok,
   _right: Tok,
   _infix: tokora::span::Spanned<PrattInfix<Token, Token, Token>, tokora::SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
 ) -> Result<Tok, ()> {
   Ok(left)
 }

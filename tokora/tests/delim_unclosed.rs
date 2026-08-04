@@ -22,6 +22,7 @@ mod common;
 
 use common::{TestLexer, Token};
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Accumulator, Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext,
   SimpleSpan, TryParseInput,
@@ -179,7 +180,7 @@ where
 
 fn decide_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -682,7 +683,7 @@ where
 
 fn seq_decide_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,

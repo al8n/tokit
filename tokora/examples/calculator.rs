@@ -17,7 +17,7 @@
 //! | `^`    | infix  | right | 4          |
 
 use tokora::{
-  Emitter, InputRef, Parse, ParseContext, Parser, SimpleSpan, Token as TokenT,
+  Emitter, EmitterView, InputRef, Parse, ParseContext, Parser, SimpleSpan, Token as TokenT,
   emitter::PrattEmitter,
   error::{NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs, UnexpectedEoRhs},
   logos::{self, Logos},
@@ -256,10 +256,10 @@ impl PrattToken<'_, f64, Power> for Token {
 // Computed f64 values are encoded back into Token::Num so the Spanned<Token, Span>
 // result type used by the token-level API carries the result.
 
-fn fold_prefix<E>(
+fn fold_prefix<'inp, E>(
   op: Spanned<Token, SimpleSpan>,
   operand: Spanned<Token, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>,
 ) -> Result<Spanned<Token, SimpleSpan>, CalcError> {
   let (span, op_tok) = op.into_components();
   match op_tok {
@@ -275,11 +275,11 @@ fn fold_prefix<E>(
   }
 }
 
-fn fold_infix<E>(
+fn fold_infix<'inp, E>(
   left: Spanned<Token, SimpleSpan>,
   right: Spanned<Token, SimpleSpan>,
   infix: Spanned<PrattInfix<Token, Token, Token>, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>,
 ) -> Result<Spanned<Token, SimpleSpan>, CalcError> {
   let (span, left_tok) = left.into_components();
   let l = match left_tok {
@@ -304,10 +304,10 @@ fn fold_infix<E>(
   Ok(Spanned::new(span, Token::Num(result)))
 }
 
-fn fold_postfix<E>(
+fn fold_postfix<'inp, E>(
   operand: Spanned<Token, SimpleSpan>,
   _op: Spanned<Token, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, CalcLexer<'inp>, E>,
 ) -> Result<Spanned<Token, SimpleSpan>, CalcError> {
   Ok(operand) // `)` consumed; pass the grouped result through
 }

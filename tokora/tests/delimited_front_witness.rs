@@ -34,6 +34,7 @@
 //! suppressing anything.
 
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Accumulator, Emitter, InputRef, Lexer, Parse, ParseContext, ParseInput, Parser, ParserContext,
   SimpleSpan, Token, TryParseInput,
@@ -415,7 +416,7 @@ where
 /// where the surgery happens) and then the loop to end so the close probe is reached.
 fn decide_once<'inp>(
   _peeked: Peeked<'_, 'inp, FlipLexer<'inp>, U1>,
-  _: &mut Verbose<D>,
+  _: EmitterView<'_, 'inp, FlipLexer<'inp>, Verbose<D>>,
 ) -> Result<Action, D> {
   Ok(if ONCE.with(|c| c.replace(true)) {
     Action::Stop

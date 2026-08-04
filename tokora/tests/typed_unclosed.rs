@@ -7,6 +7,7 @@ mod common;
 
 use common::{TestLexer, Token, TokenKind};
 use generic_arraydeque::typenum::U1;
+use tokora::EmitterView;
 use tokora::{
   Accumulator, FatalContext, InputRef, Parse, ParseContext, ParseInput, Parser, SimpleSpan,
   cache::Peeked,
@@ -175,7 +176,13 @@ fn number<'inp>(
 
 fn decide_number<'inp>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut <Ctx<'inp> as ParseContext<'inp, TestLexer<'inp>, CustomLang>>::Emitter,
+  _: EmitterView<
+    '_,
+    'inp,
+    TestLexer<'inp>,
+    <Ctx<'inp> as ParseContext<'inp, TestLexer<'inp>, CustomLang>>::Emitter,
+    CustomLang,
+  >,
 ) -> Result<Action, TypedError> {
   Ok(match peeked.pop_front() {
     None => Action::Stop,

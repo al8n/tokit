@@ -37,6 +37,7 @@
 use core::cell::Cell;
 use std::rc::Rc;
 use std::vec::Vec;
+use tokora::EmitterView;
 
 use generic_arraydeque::GenericArrayDeque;
 use generic_arraydeque::typenum::{U1, U8};
@@ -325,7 +326,7 @@ where
 /// circuits before the condition is consulted).
 fn decide_word<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, PcLex<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, PcLex<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, PcLex<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, PcLex<'inp>>,

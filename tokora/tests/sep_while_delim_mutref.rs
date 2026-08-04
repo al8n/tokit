@@ -10,6 +10,7 @@
 mod common;
 
 use common::E;
+use tokora::EmitterView;
 
 use generic_arraydeque::typenum::U1;
 use tokora::{
@@ -39,7 +40,7 @@ fn full_ctx() -> ParserContext<'static, TestLexer<'static>, Fatal<E>> {
 
 fn decide_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -103,7 +104,7 @@ macro_rules! sw_delim_mutref_tests {
           parse_num(inp)
         };
         let cond = |peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-                     emitter: &mut Ctx::Emitter|
+                     emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>|
          -> Result<Action, E> { decide_num::<Ctx>(peeked, emitter) };
         let sw = SeparatedWhile::new::<Comma>(&mut f, cond);
         let wrap_fn: fn(

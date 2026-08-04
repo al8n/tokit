@@ -16,6 +16,7 @@
 
 mod common;
 
+use tokora::EmitterView;
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser,
   emitter::PrattEmitter,
@@ -511,19 +512,27 @@ impl PrattToken<'_, i64, Power> for Token {
 
 type Tok = tokora::span::Spanned<Token, tokora::SimpleSpan>;
 
-fn tok_fold_prefix<E>(_op: Tok, operand: Tok, _: &mut E) -> Result<Tok, EndError> {
+fn tok_fold_prefix<'inp, E>(
+  _op: Tok,
+  operand: Tok,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
+) -> Result<Tok, EndError> {
   Ok(operand)
 }
 
-fn tok_fold_postfix<E>(operand: Tok, _op: Tok, _: &mut E) -> Result<Tok, EndError> {
+fn tok_fold_postfix<'inp, E>(
+  operand: Tok,
+  _op: Tok,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
+) -> Result<Tok, EndError> {
   Ok(operand)
 }
 
-fn tok_fold_infix<E>(
+fn tok_fold_infix<'inp, E>(
   left: Tok,
   right: Tok,
   infix: tokora::span::Spanned<PrattInfix<Token, Token, Token>, tokora::SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
 ) -> Result<Tok, EndError> {
   let value = match (left.data(), right.data()) {
     (Token::Num(l), Token::Num(r)) => l + r,

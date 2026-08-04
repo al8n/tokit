@@ -22,6 +22,7 @@
 mod common;
 
 use common::{E, TestLexer, Token};
+use tokora::EmitterView;
 use tokora::{
   Accumulator, InputRef, Lexer, Parse, ParseInput, Parser, ParserContext, TryParseInput,
   cache::Peeked,
@@ -139,7 +140,7 @@ fn parse_num<'inp>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VCtx<'inp>>) ->
 
 fn decide_num<'inp>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Verbose<E>,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Verbose<E>>,
 ) -> Result<Action, E> {
   Ok(match peeked.pop_front() {
     None => Action::Stop,

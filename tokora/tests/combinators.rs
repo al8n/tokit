@@ -6,6 +6,7 @@
 mod common;
 
 use common::E;
+use tokora::EmitterView;
 
 use common::{TestLexer, Token, TokenKind};
 use generic_arraydeque::typenum::U1;
@@ -141,7 +142,7 @@ where
 
 fn while_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _emitter: &mut Ctx::Emitter,
+  _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
@@ -504,7 +505,7 @@ fn repeated_stops_on_non_num() {
 
 fn while_num_e<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _emitter: &mut Ctx::Emitter,
+  _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,

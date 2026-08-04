@@ -16,6 +16,7 @@
 
 use core::cell::Cell;
 use std::rc::Rc;
+use tokora::EmitterView;
 
 use generic_arraydeque::typenum::U2;
 use tokora::{
@@ -326,7 +327,7 @@ fn no_progress_guard_surfaces_a_mid_window_terminal_stop() {
     inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, Silent<CErr>>>,
   ) -> Result<Vec<i64>, CErr> {
     let cond = |mut peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
-                _emitter: &mut Silent<CErr>|
+                _emitter: EmitterView<'_, 'inp, TLexer<'inp>, Silent<CErr>>|
      -> Result<Action, CErr> {
       Ok(match peeked.pop_front() {
         Some(tok) if matches!(tok.token(), Tok::Num(_)) => Action::Continue,
@@ -371,7 +372,7 @@ fn separator_diagnostic_does_not_preempt_a_mid_window_terminal_stop() {
     inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, SeparatorFatal>>,
   ) -> Result<Vec<i64>, CErr> {
     let cond = |mut peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
-                _emitter: &mut SeparatorFatal|
+                _emitter: EmitterView<'_, 'inp, TLexer<'inp>, SeparatorFatal>|
      -> Result<Action, CErr> {
       Ok(match peeked.pop_front() {
         Some(tok) if matches!(tok.token(), Tok::Num(_)) => Action::Continue,
@@ -424,7 +425,7 @@ fn condition_error_does_not_preempt_a_mid_window_terminal_stop() {
     inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, Silent<CErr>>>,
   ) -> Result<Vec<i64>, CErr> {
     let cond = |mut peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
-                _emitter: &mut Silent<CErr>|
+                _emitter: EmitterView<'_, 'inp, TLexer<'inp>, Silent<CErr>>|
      -> Result<Action, CErr> {
       if peeked.len() < 2 {
         return Err(CErr::Ordinary);

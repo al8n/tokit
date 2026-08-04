@@ -26,6 +26,7 @@
 
 use core::cell::Cell;
 use std::rc::Rc;
+use tokora::EmitterView;
 
 use generic_arraydeque::typenum::{U1, U2, U4};
 use tokora::{
@@ -382,7 +383,7 @@ where
 /// While-list decision: continue while the next token is a `Num`.
 fn while_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TLexer<'inp>, Ctx::Emitter>,
 ) -> Result<Action, CErr>
 where
   Ctx: ParseContext<'inp, TLexer<'inp>>,
@@ -954,7 +955,7 @@ fn while_condition_error_does_not_preempt_a_terminal_stop() {
     inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, Silent<CErr>>>,
   ) -> Result<Vec<i64>, CErr> {
     let cond = |mut peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
-                _: &mut Silent<CErr>|
+                _: EmitterView<'_, 'inp, TLexer<'inp>, Silent<CErr>>|
      -> Result<Action, CErr> {
       if peeked.len() < 2 {
         return Err(CErr::Ordinary);
@@ -997,7 +998,7 @@ fn while_zero_width_continue_does_not_swallow_a_terminal_stop() {
     inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, Silent<CErr>>>,
   ) -> Result<Vec<i64>, CErr> {
     let cond = |_peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
-                _: &mut Silent<CErr>|
+                _: EmitterView<'_, 'inp, TLexer<'inp>, Silent<CErr>>|
      -> Result<Action, CErr> { Ok(Action::Continue) };
     let elem = |_inp: &mut InputRef<
       'inp,
@@ -1032,7 +1033,7 @@ fn delim_while_condition_error_does_not_preempt_a_terminal_stop() {
     inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, Silent<CErr>>>,
   ) -> Result<Vec<i64>, CErr> {
     let cond = |mut peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
-                _: &mut Silent<CErr>|
+                _: EmitterView<'_, 'inp, TLexer<'inp>, Silent<CErr>>|
      -> Result<Action, CErr> {
       if peeked.len() < 2 {
         return Err(CErr::Ordinary);
@@ -1078,7 +1079,7 @@ fn delim_while_zero_width_continue_does_not_swallow_a_terminal_stop() {
     inp: &mut InputRef<'inp, '_, TLexer<'inp>, ParserContext<'inp, TLexer<'inp>, Silent<CErr>>>,
   ) -> Result<Vec<i64>, CErr> {
     let cond = |_peeked: Peeked<'_, 'inp, TLexer<'inp>, U2>,
-                _: &mut Silent<CErr>|
+                _: EmitterView<'_, 'inp, TLexer<'inp>, Silent<CErr>>|
      -> Result<Action, CErr> { Ok(Action::Continue) };
     let elem = |_inp: &mut InputRef<
       'inp,

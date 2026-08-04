@@ -124,6 +124,7 @@
 mod common;
 
 use core::cell::Cell;
+use tokora::EmitterView;
 
 use generic_arraydeque::typenum::U1;
 use tokora::{
@@ -962,7 +963,7 @@ macro_rules! trip_suite {
       /// collection.
       fn always_continue<'inp, Ctx>(
         _peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-        _emitter: &mut Ctx::Emitter,
+        _emitter: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter>,
       ) -> Result<Action, <Ctx::Emitter as Emitter<'inp, TestLexer<'inp>>>::Error>
       where
         Ctx: ParseContext<'inp, TestLexer<'inp>>,

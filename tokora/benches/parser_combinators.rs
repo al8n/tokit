@@ -31,8 +31,8 @@ use std::hint::black_box;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use tokora::{
-  Accumulator, Balance, Emitter, InputRef, Parse, ParseChoice, ParseContext, ParseInput,
-  ParseTokenChoice, Parser, SimpleSpan, Token, TryParseInput,
+  Accumulator, Balance, Emitter, EmitterView, InputRef, Parse, ParseChoice, ParseContext,
+  ParseInput, ParseTokenChoice, Parser, SimpleSpan, Token, TryParseInput,
   emitter::{
     FullContainerEmitter, PrattEmitter, SeparatedEmitter, UnexpectedLeadingSeparatorEmitter,
     UnexpectedTrailingSeparatorEmitter,
@@ -486,10 +486,10 @@ impl PrattToken<'_, i64> for BenchTok {
 /// Named `fn`s, not closures: the fold bounds are higher-ranked over the emitter borrow,
 /// which a closure cannot satisfy. Values are wrapped back into `Int`, and every operator
 /// is wrapping/saturating so the fixture can never trip an overflow.
-fn fold_prefix<E>(
+fn fold_prefix<'inp, E>(
   op: Spanned<BenchTok, SimpleSpan>,
   operand: Spanned<BenchTok, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, BenchLexer<'inp>, E>,
 ) -> Result<Spanned<BenchTok, SimpleSpan>, BenchError> {
   let (span, op) = op.into_components();
   match op {
@@ -502,11 +502,11 @@ fn fold_prefix<E>(
   }
 }
 
-fn fold_infix<E>(
+fn fold_infix<'inp, E>(
   left: Spanned<BenchTok, SimpleSpan>,
   right: Spanned<BenchTok, SimpleSpan>,
   infix: Spanned<PrattInfix<BenchTok, BenchTok, BenchTok>, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, BenchLexer<'inp>, E>,
 ) -> Result<Spanned<BenchTok, SimpleSpan>, BenchError> {
   let span = left.span();
   let (l, r) = (int_of(&left), int_of(&right));
@@ -524,10 +524,10 @@ fn fold_infix<E>(
   Ok(Spanned::new(span, BenchTok::Int(value)))
 }
 
-fn fold_postfix<E>(
+fn fold_postfix<'inp, E>(
   operand: Spanned<BenchTok, SimpleSpan>,
   _close: Spanned<BenchTok, SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, BenchLexer<'inp>, E>,
 ) -> Result<Spanned<BenchTok, SimpleSpan>, BenchError> {
   Ok(operand)
 }

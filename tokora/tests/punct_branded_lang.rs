@@ -22,6 +22,7 @@
 mod common;
 
 use common::{TestLexer, Token};
+use tokora::EmitterView;
 
 use tokora::{
   Accumulator, Emitter, InputRef, Lexer, Parse, ParseContext, ParseInput, Parser, ParserContext,
@@ -155,7 +156,7 @@ where
 
 fn decide_num<'inp, Ctx>(
   mut peeked: Peeked<'_, 'inp, TestLexer<'inp>, U1>,
-  _: &mut Ctx::Emitter,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, Ctx::Emitter, TestLang>,
 ) -> Result<Action, BE>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>, TestLang>,

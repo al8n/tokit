@@ -35,6 +35,7 @@
 
 mod common;
 
+use tokora::EmitterView;
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, ParseInput, Parser, ParserContext, Token as TokenT,
   emitter::{Fatal, PrattEmitter, Verbose},
@@ -582,21 +583,29 @@ impl PrattToken<'_, i64, Power> for Token {
 
 type Tok = tokora::span::Spanned<Token, tokora::SimpleSpan>;
 
-fn tok_fold_prefix<E>(_op: Tok, operand: Tok, _: &mut E) -> Result<Tok, LimErr> {
+fn tok_fold_prefix<'inp, E>(
+  _op: Tok,
+  operand: Tok,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
+) -> Result<Tok, LimErr> {
   Ok(operand)
 }
 
-fn tok_fold_postfix<E>(operand: Tok, _op: Tok, _: &mut E) -> Result<Tok, LimErr> {
+fn tok_fold_postfix<'inp, E>(
+  operand: Tok,
+  _op: Tok,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
+) -> Result<Tok, LimErr> {
   Ok(operand)
 }
 
 /// Records the fold tree's shape in the value: each fold appends the right operand's digit, so
 /// one fold over `1 ; 2` reads `12` and a second over `; 3` reads `123`.
-fn tok_fold_infix<E>(
+fn tok_fold_infix<'inp, E>(
   left: Tok,
   right: Tok,
   infix: tokora::span::Spanned<PrattInfix<Token, Token, Token>, tokora::SimpleSpan>,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, TestLexer<'inp>, E>,
 ) -> Result<Tok, LimErr> {
   let value = match (left.data(), right.data()) {
     (Token::Num(l), Token::Num(r)) => l * 10 + r,
@@ -1944,30 +1953,30 @@ impl PrattToken<'_, i64, Power> for TriviaToken {
 
 type TriviaTok = tokora::span::Spanned<TriviaToken, tokora::SimpleSpan>;
 
-fn trivia_tok_fold_prefix<E>(
+fn trivia_tok_fold_prefix<'inp, E>(
   _op: TriviaTok,
   operand: TriviaTok,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, TriviaLexer<'inp>, E>,
 ) -> Result<TriviaTok, LimErr> {
   Ok(operand)
 }
 
-fn trivia_tok_fold_postfix<E>(
+fn trivia_tok_fold_postfix<'inp, E>(
   operand: TriviaTok,
   _op: TriviaTok,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, TriviaLexer<'inp>, E>,
 ) -> Result<TriviaTok, LimErr> {
   Ok(operand)
 }
 
-fn trivia_tok_fold_infix<E>(
+fn trivia_tok_fold_infix<'inp, E>(
   left: TriviaTok,
   right: TriviaTok,
   infix: tokora::span::Spanned<
     PrattInfix<TriviaToken, TriviaToken, TriviaToken>,
     tokora::SimpleSpan,
   >,
-  _: &mut E,
+  _: EmitterView<'_, 'inp, TriviaLexer<'inp>, E>,
 ) -> Result<TriviaTok, LimErr> {
   let value = match (left.data(), right.data()) {
     (TriviaToken::Num(l), TriviaToken::Num(r)) => l * 10 + r,
