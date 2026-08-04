@@ -104,6 +104,12 @@ const SOURCES: &[(&str, &str)] = &[
   // front, captures no checkpoint), which is exactly what registering it pins: a settle or a front
   // read added here would now move a count instead of arriving unseen.
   ("descent.rs", include_str!("descent.rs")),
+  // Added by the emitter-forwarding wall: the handle's `emit_*` / `cst_*` surface. Every count
+  // it contributes is **zero**, and that is exactly what registering it pins — the four members
+  // the input layer owns (`checkpoint`, `rewind`, `release`, `commit_token`) are deliberately not
+  // forwarded, so a forwarder added for one of them would move a count here instead of arriving
+  // unseen.
+  ("emit.rs", include_str!("emit.rs")),
   ("session.rs", include_str!("session.rs")),
   ("drop_policy.rs", include_str!("drop_policy.rs")),
   ("trace.rs", include_str!("trace.rs")),

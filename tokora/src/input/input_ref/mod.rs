@@ -30,6 +30,7 @@ pub use session::SessionPointId;
 mod consume_cached;
 mod descent;
 mod drop_policy;
+mod emit;
 mod fold;
 mod peek;
 mod pratt;
@@ -735,8 +736,15 @@ where
 
   /// Returns a mutable reference to the emitter (borrowed through the session cell — see
   /// `input_ref::session` for why the borrow lives there).
+  ///
+  /// **Crate-private, and that is the wall.** `&mut Ctx::Emitter` *is* an emitter, so a parser
+  /// handed one can wrap it and install the wrapper as the context of a second parse over a
+  /// different buffer — the wrong-source class the lossless drivers' pinned emitter slot closes
+  /// at the entry, re-opened from inside. Callers reach the emitter's **operations** through the
+  /// forwarding methods in [`emit`](self::emit) and read its state through
+  /// [`emitter_ref`](Self::emitter_ref); neither yields a value an input can be built around.
   #[inline(always)]
-  pub const fn emitter(&mut self) -> &mut Ctx::Emitter {
+  pub(crate) const fn emitter(&mut self) -> &mut Ctx::Emitter {
     self.session.emitter
   }
 

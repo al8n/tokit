@@ -1,4 +1,4 @@
-use super::{input::Cursor, *};
+use super::{input::Cursor, span::Spanned, *};
 
 /// The view of a parse a state-carrying combinator callback is handed:
 /// [`map_with`](crate::ParseInput::map_with),
@@ -8,9 +8,10 @@ use super::{input::Cursor, *};
 ///
 /// It answers the four questions a callback has about that region — its [`span`](Self::span), its
 /// source [`slice`](Self::slice), the lexer [`state`](Self::state) it was read under, and the
-/// [`emitter`](Self::emitter) to report against — and nothing else. In particular it does **not**
-/// consume tokens: the sub-parser already did, and a callback that could parse more would be a
-/// parser, not a callback.
+/// emission surface to report against ([`emit_error`](Self::emit_error) and its neighbours,
+/// forwarded from the emitter, plus [`emitter_ref`](Self::emitter_ref) to read one) — and nothing
+/// else. In particular it does **not** consume tokens: the sub-parser already did, and a callback
+/// that could parse more would be a parser, not a callback.
 ///
 /// Speculation lives on the input handle, not here. Reach for the transaction guards
 /// ([`InputRef::begin`](crate::InputRef::begin),
@@ -63,10 +64,129 @@ where
     self.inp.span_since(&self.start)
   }
 
-  /// Returns a mutable reference to an emitter.
+  // `emitter(&mut self) -> &mut Ctx::Emitter` is **gone**, not narrowed. It was a pure
+  // re-export of the handle's own accessor, and `&mut Ctx::Emitter` is itself an emitter: a
+  // callback handed one can wrap it and install the wrapper as the context of a second parse
+  // over a different buffer. Nothing in the crate used this door, so there is nothing left for
+  // a `pub(crate)` version to serve — the operations below are the surface.
+
+  /// The parse's emitter, by **shared** reference — the callback's door for reading a concrete
+  /// emitter's own state (see [`InputRef::emitter_ref`](crate::InputRef::emitter_ref) for why a
+  /// shared reference is not an emitter slot).
   #[inline(always)]
-  pub const fn emitter(&mut self) -> &mut Ctx::Emitter {
-    self.inp.emitter()
+  pub const fn emitter_ref(&self) -> &Ctx::Emitter {
+    self.inp.emitter_ref()
+  }
+
+  /// Emits a lexer error — [`Emitter::emit_lexer_error`](crate::Emitter::emit_lexer_error),
+  /// forwarded through the handle.
+  #[inline(always)]
+  pub fn emit_lexer_error(
+    &mut self,
+    err: Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
+  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
+    self.inp.emit_lexer_error(err)
+  }
+
+  /// Emits an unexpected-token report —
+  /// [`Emitter::emit_unexpected_token`](crate::Emitter::emit_unexpected_token), forwarded.
+  #[inline(always)]
+  pub fn emit_unexpected_token(
+    &mut self,
+    err: crate::error::token::UnexpectedTokenOf<'inp, L, Lang>,
+  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
+    self.inp.emit_unexpected_token(err)
+  }
+
+  /// Emits an application error — [`Emitter::emit_error`](crate::Emitter::emit_error),
+  /// forwarded. The usual reason a validating callback exists.
+  #[inline(always)]
+  pub fn emit_error(
+    &mut self,
+    err: Spanned<<Ctx::Emitter as Emitter<'inp, L, Lang>>::Error, L::Span>,
+  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
+    self.inp.emit_error(err)
+  }
+
+  /// Emits a warning — [`Emitter::emit_warning`](crate::Emitter::emit_warning), forwarded.
+  #[inline(always)]
+  pub fn emit_warning(
+    &mut self,
+    warning: Spanned<<Ctx::Emitter as Emitter<'inp, L, Lang>>::Error, L::Span>,
+  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
+    self.inp.emit_warning(warning)
+  }
+
+  /// Emits a recovery-hole note —
+  /// [`Emitter::emit_skipped_region`](crate::Emitter::emit_skipped_region), forwarded.
+  #[inline(always)]
+  pub fn emit_skipped_region(
+    &mut self,
+    span: L::Span,
+    skipped: usize,
+  ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
+    self.inp.emit_skipped_region(span, skipped)
+  }
+
+  /// Pushes a diagnostic label — [`Emitter::enter_label`](crate::Emitter::enter_label),
+  /// forwarded.
+  #[inline(always)]
+  pub fn enter_label(&mut self, label: &'static str) {
+    self.inp.enter_label(label);
+  }
+
+  /// Pops the innermost diagnostic label — [`Emitter::exit_label`](crate::Emitter::exit_label),
+  /// forwarded.
+  #[inline(always)]
+  pub fn exit_label(&mut self) {
+    self.inp.exit_label();
+  }
+
+  /// The source the emitter is bound to, if any —
+  /// [`Emitter::bound_source`](crate::Emitter::bound_source), forwarded.
+  #[inline(always)]
+  pub fn emitter_bound_source(&self) -> Option<crate::source::SourceIdentity> {
+    self.inp.emitter_bound_source()
+  }
+
+  /// Opens a CST node of `kind` —
+  /// [`CstEmitter::cst_start`](crate::emitter::CstEmitter::cst_start), forwarded.
+  #[inline(always)]
+  pub fn cst_start(&mut self, kind: u16)
+  where
+    Ctx::Emitter: crate::emitter::CstEmitter<'inp, L, Lang>,
+  {
+    self.inp.cst_start(kind);
+  }
+
+  /// Closes the innermost open CST node —
+  /// [`CstEmitter::cst_finish`](crate::emitter::CstEmitter::cst_finish), forwarded.
+  #[inline(always)]
+  pub fn cst_finish(&mut self, kind: u16)
+  where
+    Ctx::Emitter: crate::emitter::CstEmitter<'inp, L, Lang>,
+  {
+    self.inp.cst_finish(kind);
+  }
+
+  /// Appends a retro-wrap anchor —
+  /// [`CstEmitter::cst_mark`](crate::emitter::CstEmitter::cst_mark), forwarded.
+  #[inline(always)]
+  pub fn cst_mark(&mut self) -> crate::cst::event::EventMark
+  where
+    Ctx::Emitter: crate::emitter::CstEmitter<'inp, L, Lang>,
+  {
+    self.inp.cst_mark()
+  }
+
+  /// Retro-opens a node of `kind` at `mark` —
+  /// [`CstEmitter::cst_start_at`](crate::emitter::CstEmitter::cst_start_at), forwarded.
+  #[inline(always)]
+  pub fn cst_start_at(&mut self, mark: crate::cst::event::EventMark, kind: u16)
+  where
+    Ctx::Emitter: crate::emitter::CstEmitter<'inp, L, Lang>,
+  {
+    self.inp.cst_start_at(mark, kind);
   }
 
   /// Returns the state of the lexer.
