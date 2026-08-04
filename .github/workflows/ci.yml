@@ -1,17 +1,9 @@
 name: CI
 
-# The `Gate` jobs below encode the exact local gate discipline this branch developed:
-# formatting, the targeted clippy passes, the full and valve-off test flavors, the
-# release-profile suites (where debug-only nets vanish), the `cargo hack` per-feature
-# clippy matrix, the no-std / bare-metal builds, the deny-warnings doc build, and a bench
-# smoke check. Every job mirrors a command that is run by hand before pushing. The
-# orthogonal `cross`, `miri-*` and `coverage` jobs are preserved from the prior workflow.
-
-# ── THE BY-HAND GATE SET, WRITTEN OUT ───────────────────────────────────────────────────
+# ── THE BY-HAND GATE SET ────────────────────────────────────────────────────────────────
 #
-# This file is where that set lives — there is no CONTRIBUTING.md and no gate script — so it
-# is spelled out here instead of being reconstructed from the jobs by whoever needs it next.
-# Every line exits 0 before a push:
+# There is no CONTRIBUTING.md and no gate script, so the set lives here. Every line exits 0
+# before a push:
 #
 #     cargo fmt --check
 #     cargo +stable clippy --all-features --tests --no-deps -- -D warnings
@@ -26,37 +18,31 @@ name: CI
 #     bash ci/name_collision/run.sh <merge-base> <inventory.json>   # see that job for the
 #                                                                  # inventory it requires
 #
-# The last two are the legs this branch had to ADD, and they are here for one reason: each is
-# the only command that can see its own defect class.
+# Three of those lines look redundant beside a broader command and are not — each catches a
+# class no other line in the set can:
 #
-#   * the bare-config rustdoc build. `--all-features` documents every item, so a link whose
-#     TARGET is feature-gated always resolves there — that leg cannot see bare-config
-#     breakage at all. Five links into the `rowan`-gated `cst` module from ungated modules
-#     passed every other gate on this branch and reddened `doc` and the mdBook workflow
-#     together. `-D warnings` is on it here for the same reason it is on the all-features
-#     leg; the job step below deliberately relies on `[lints] workspace = true` instead,
-#     which denies broken intra-doc links but not the rest of rustdoc's lints.
-#   * the name-collision probe. It needs a two-sided, GENERATED inventory, so it is the one
-#     gate that is not a bare `cargo` line — which is exactly why it was missing from this
-#     list, and why a branch that mints two new item owners (`EmitterView`, `Cst`) and gives
-#     a third (`ParseState`) its first inherent items first heard about it from CI.
+#   * `cargo bench --no-run` is the only line that compiles the benches — `cargo test` does
+#     not — and it has no full mirror below: `bench (smoke)` builds ONE of the five declared
+#     bench targets, so `parser_combinators`, `pratt_typed`, `cst` and `backtrack` are
+#     compiled by this by-hand leg and by nothing in CI (#163). A known gap, recorded rather
+#     than implied.
+#   * the bare-config rustdoc build is the only leg that sees bare-config intra-doc breakage:
+#     `--all-features` documents every item, so a link whose TARGET is feature-gated always
+#     resolves there.
+#   * the name-collision probe needs a two-sided, GENERATED inventory rather than a fixed
+#     command line — which is why it went missing from this list, and why a branch that minted
+#     new item owners first heard about it from CI.
 #
-# Also read: `cargo bench --no-run` has NO full mirror below. `bench (smoke)` builds and
-# test-runs ONE of the five declared bench targets (`input_scan`), so the other four —
-# `parser_combinators`, `pratt_typed`, `cst`, `backtrack` — are compiled by this by-hand leg
-# and by nothing in CI. That is a known gap, recorded rather than implied.
-#
-# All of the above is one defect wearing four faces on a single branch: a gate that passes by
-# not looking. The earlier three were a bench `cargo test` does not compile, examples it
-# skips, and lossless code only `--features rowan` builds. When a change adds a
-# configuration, a target, a feature or a public owner, ask which line above goes red if it
-# is broken — and when the answer is "none", the missing thing is the line, not the test.
+# Features work the same way: only the `--all-features` / `--features rowan` legs compile the
+# `rowan`-gated lossless path, so a configuration no line above names is a configuration
+# nothing compiles. When a change adds a configuration, a target, a feature or a public owner,
+# ask which line goes red if it breaks — and when the answer is "none", the missing thing is
+# the line, not the test.
 
-# `paths-ignore` deliberately does NOT carry a blanket `**.md`. The guide chapters under
-# `tokora/src/guide/` are Markdown compiled as doctests through `include_str!`, so a
-# guide-only change is a *code* change here; ignoring `**.md` meant such a PR landed with
-# zero CI. `CHANGELOG.md` is likewise gated — by the `changelog` job below. Only the root
-# prose files are ignored.
+# `paths-ignore` deliberately does NOT carry a blanket `**.md`: the guide chapters under
+# `tokora/src/guide/` are Markdown compiled as doctests through `include_str!` and `README.md`
+# is `include_str!`'d into the crate root, so those are *code* changes here. `CHANGELOG.md` is
+# gated by the `changelog` job below.
 on:
   push:
     branches:
@@ -77,21 +63,13 @@ on:
     - cron: "0 1 1 * *"
 
 concurrency:
-  # One in-flight run per workflow per ref. A push that supersedes an earlier one cancels it,
-  # so a branch's CI reflects its tip rather than a queue of stale commits.
-  #
-  # `main` also suffixes its group with the commit SHA, which is what actually gets every main
-  # commit a verdict. `cancel-in-progress: false` on its own does not: it only cancels a run that
-  # has already STARTED, and says nothing about one that is merely PENDING. When a new run is
-  # queued into a group that already has one in progress, GitHub does not queue a second — it
-  # cancels whichever run was already pending in that group (if any) and makes the new run the
-  # pending one instead, regardless of `cancel-in-progress`. The Miri matrices make main's runs
-  # slow enough to still be pending when the next push lands, so with one group shared across
-  # every push, each push cancelled its own still-pending predecessor; three main runs were
-  # confirmed cancelled at the exact moment a successor run was created, one within 24 seconds.
-  # Keying the group on `github.sha` for main gives every commit its own group, so no main run
-  # can ever be pending behind another and none can be cancelled this way. `pages.yml`'s deploy
-  # job additionally carries its own `github-pages` group that must not be interrupted.
+  # One in-flight run per workflow per ref, so a branch's CI reflects its tip rather than a queue
+  # of stale commits — except on `main`, where the group is keyed on the commit SHA so that every
+  # main commit gets its own group and its own verdict. Do NOT collapse that back to one group per
+  # ref: `cancel-in-progress: false` does not protect a main run on its own, because a run queued
+  # into a group that already has one in progress cancels whichever run was PENDING there
+  # regardless of that setting, and the Miri matrices keep main's runs pending long enough for the
+  # next push to do exactly that.
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -104,18 +82,14 @@ env:
 
 jobs:
   # ── Gate: changelog structure ───────────────────────────────────────────────
-  # The one load-bearing release artifact with no compiler. A rebase once resolved
-  # `CHANGELOG.md` as a verbatim union — textually correct, no conflict markers — and
-  # silently ate a `### Changed (breaking)` heading, filing six breaking changes under
-  # `### Performance`. Every job below passed, because nothing reads a changelog.
-  # Seconds, no toolchain, deterministic: this one is a merge-blocker, not advisory.
+  # The one load-bearing release artifact no compiler, linter or test reads. Merge-blocker, not
+  # advisory: it costs seconds and needs no toolchain.
   #
-  # The self-test runs FIRST, and it is not optional. That checker has twice been caught
-  # passing on a changelog that was already broken, so a green from it means nothing until
-  # something has watched it go red. The self-test injects one defect at a time into the real
-  # CHANGELOG.md and requires each to red with the diagnosis it was planted to provoke, under
-  # every awk on the runner, with byte-identical output. Running it before the gate means a
-  # broken checker reports itself by name instead of as a confusing verdict on the changelog.
+  # The self-test runs FIRST and is not optional. It injects one defect at a time into the real
+  # CHANGELOG.md and requires each to red with the diagnosis it was planted to provoke; the
+  # checker has twice been caught passing on an already-broken changelog, so a green from it
+  # means nothing until something has watched it go red. Running it first also means a broken
+  # checker reports itself by name rather than as a confusing verdict on the changelog.
   changelog:
     name: changelog structure
     runs-on: ubuntu-latest
@@ -180,15 +154,12 @@ jobs:
         run: rustup toolchain install 1.87 --no-self-update --profile minimal
       - name: cargo +1.87 check -p tokora --all-features
         run: cargo +1.87 check -p tokora --all-features
-      # The trybuild pins (tests/diagnostics.rs): the committed `.stderr` files are pinned to this
-      # toolchain and the test skips itself on any other rustc, so this job is the only
-      # place the trybuild half runs. The file-only half runs in every `test` job.
+      # The trybuild half of `tests/diagnostics.rs` runs here and nowhere else: its committed
+      # `.stderr` files are pinned to 1.87 and the harness returns early on any other rustc.
       #
-      # exit 0 is NOT the pass condition here. The harness returns early on any rustc
-      # that is not 1.87 and the test then passes having compiled nothing — a skip is
-      # indistinguishable from a pass, and every compile-time rail routed through this file
-      # would retire silently the first time this job's toolchain drifts. The harness prints
-      # its executed-case count; this step asserts on the count.
+      # So exit 0 is NOT the pass condition — a skip is indistinguishable from a pass, and every
+      # compile-time rail routed through that file would retire silently the first time this
+      # job's toolchain drifts. The step asserts on the executed-case count the harness prints.
       - name: cargo +1.87 test --test diagnostics (asserting a nonzero executed-case count)
         run: |
           set -euo pipefail
@@ -250,12 +221,8 @@ jobs:
       - name: cargo test -p tokora --features logos,std
         run: cargo test -p tokora --features logos,std
 
-  # ── Gate: release profile (the profile where debug_assertions-gated nets
-  #    vanish). Filtered to `--lib` — the crate's own unit-test suites, where the
-  #    guard / stacked / parse_state session / sync / recover / raw-checkpoint
-  #    invariants live — plus the matching integration binaries. The remaining
-  #    ~60 integration binaries are already exercised by the debug `test` job;
-  #    compiling them in release too would not add coverage of a debug-only net. ─
+  # ── Gate: release profile — the profile where `debug_assertions`-gated nets ─
+  #    vanish, so it is the only place a release-only divergence can show.
   test-release:
     name: test (release)
     runs-on: ubuntu-latest
@@ -275,45 +242,22 @@ jobs:
         run: rustup update stable --no-self-update && rustup default stable
       - name: cargo test --release -p tokora --all-features --lib
         run: cargo test --release -p tokora --all-features --lib
-      # This job's release coverage was once a curated five-suite list. The debug/release
-      # divergences this crate has had to fix live substantially in integration suites that list
-      # did NOT name — the terminal-stop families, the delimiter suites, the probe-close cell —
-      # so a release-only regression in any of them passed CI. Release suites were run locally
-      # instead; this makes that coverage infrastructure rather than habit.
-      #
-      # Cost, measured before pinning rather than argued: a COLD build plus run of all 94
-      # integration targets is **89s wall / 364s CPU** locally. It parallelises well, so a
-      # slower runner scales on wall clock roughly with core count; even at 5x this is minutes,
-      # against the ~20min fallback threshold that would have justified keeping a curated list.
-      # No fallback is needed and none is configured.
+      # The WHOLE integration suite, not a curated list of suites: the debug/release divergences
+      # this crate has had to fix live substantially in integration targets such a list did not
+      # name, so a release-only regression in any of them passed CI.
       - name: cargo test --release -p tokora --all-features --tests
         run: cargo test --release -p tokora --all-features --tests
-      # The deep fuzz sweep, seeds 0..50_000. It is `#[ignore]`d and had never run
-      # anywhere — not in CI, not in the normal suite.
-      #
-      # The plan was a cron-only job on the assumption it is throughput-bound. **Measured, it is
-      # not**: 0.10s in release and 0.85s in debug for all 50 000 seeds (the 8.5x ratio is what
-      # says it is doing the work rather than short-circuiting). The whole cost is the build,
-      # which this job has already paid two steps above.
-      #
-      # So it runs per-PR rather than monthly, which is strictly more coverage for ~0.1s. A
-      # measurement that overturns the plan in the cheap direction is still a measurement.
+      # The `#[ignore]`d deep fuzz sweep, seeds 0..50_000, which nothing else in CI runs. Per-PR
+      # rather than on a cron because it is not throughput-bound — ~0.1s in release, on top of a
+      # build this job has already paid for two steps above.
       - name: cargo test --release --all-features -- --ignored fuzz_deep_run
         run: cargo test --release -p tokora --all-features --lib -- --ignored --exact fuzz::tests::fuzz_deep_run
 
   # ── Gate: per-version logos parity ──────────────────────────────────────────
-  # The crate advertises three logos majors and RUNTIME parity across them had never once been
-  # executed: the `hack --each-feature` matrix clippy-checks each version but runs no tests, and
-  # every test job pins the newest. Compile parity held by shared macro body, which is exactly
-  # the kind of "it must be fine" that keeps turning out not to be.
-  #
-  # It is not fine. The first run of these cells was RED on a pre-existing dead-code failure:
-  # `scan_probe`'s readers are `logos`-gated while the module was only `std`-gated,
-  # so a `std, logos_0_N` test build had two unused functions and `#![deny(warnings)]` refused
-  # it. No job compiles that configuration, so nothing had ever said so — the second
-  # never-executed configuration found broken on arrival.
-  #
-  # Cost: ~11s and ~13s locally, the shape of the existing valve-off job.
+  # The crate advertises three logos majors, and this is the only job that RUNS tests against
+  # 0.14 and 0.15: the `hack --each-feature` matrix only clippy-checks each version, and every
+  # other test job pins the newest. `fail-fast: false` so one version's failure does not hide
+  # the other's result.
   logos-versions:
     name: logos parity (0.14, 0.15)
     runs-on: ubuntu-latest
@@ -339,16 +283,14 @@ jobs:
         run: cargo test -p tokora --no-default-features --features std,${{ matrix.logos }}
 
   # ── Gate: mechanical public-API diff against the last published version ─────
-  # ADVISORY-RED, deliberately, and the reason is stated because "advisory" usually means
-  # "ignored": both tools ride rustdoc-JSON on a pinned nightly, so a toolchain bump can redden
-  # this job without the crate changing. It blocks nothing until it has a quiet week on main.
+  # `continue-on-error` is deliberate and the reason is written down because "advisory" usually
+  # decays into "ignored": the tool rides rustdoc-JSON on a pinned nightly, so a toolchain bump
+  # can redden this job without the crate changing. It blocks nothing until it has a quiet week
+  # on main.
   #
-  # It earns its place regardless. The recall-shaped sources a changelog is normally
-  # reconstructed from — PR bodies, commit messages, surface greps — are structurally blind to
-  # bound additions and to derived-`Debug` movement. In this release two of those three sources
-  # turned out not to EXIST for the earliest commits (empty PR bodies, bare subject lines), and
-  # this diff found two breaking changes that would otherwise have shipped undisclosed:
-  # `CstEmitter::cst_finish` gaining a parameter, and `fuzz::Op` gaining a variant mid-list.
+  # It is here because the recall-shaped sources a changelog is otherwise reconstructed from —
+  # PR bodies, commit messages, surface greps — are structurally blind to bound additions and to
+  # derived-`Debug` movement, which this diff sees.
   semver-checks:
     name: semver-checks (advisory)
     runs-on: ubuntu-latest
@@ -364,29 +306,18 @@ jobs:
       - name: cargo semver-checks against the published baseline
         run: cargo semver-checks check-release -p tokora --all-features
 
-  # ── Gate: name-collision probe ────────────────────────────────────
-  # Adding a public name is not additive at the source level. Four successively more
-  # precise statements of *when* a collision is loud were each falsified by a spelling
-  # nobody had written down.
+  # ── Gate: name-collision probe ──────────────────────────────────────────────
+  # Adding a public name is not additive at the source level, and no rule about *when* a
+  # collision is loud has survived contact with the spellings. So this job checks no rule: it
+  # derives the inventory of names the branch adds, compiles one byte-identical consumer against
+  # the merge base and against the branch — **against each name's real owner** — and fails on
+  # the outcome no diagnostic can report: both sides compile, neither warns, and the runtime
+  # witness disagrees.
   #
-  # So this job does not check a rule. It derives the inventory of names this branch adds,
-  # then compiles one byte-identical consumer against the merge base and against the
-  # branch — **against each name's real owner** — and fails only on the outcome no
-  # diagnostic can report: both sides compile, neither warns, and the runtime witness
-  # disagrees.
-  #
-  # The inventory is REQUIRED and generated, never hand-listed: the first version of this
-  # job passed the base ref alone, so the script probed one hard-coded name and reported
-  # green over 29 it never ran. `run.sh` now refuses to start without it.
-  #
-  # This is the OTHER leg the by-hand gate list at the top of this file carries, and the one
-  # that was missing from it: because the inventory has to be generated from both sides'
-  # rustdoc JSON, this gate is not a bare `cargo` line and so never joined the by-hand set.
-  # #175 mints two new item owners (`EmitterView`, `Cst`), gives `ParseState` its first
-  # inherent items and adds a defaulted `Emitter` method — 49 rows with no template — and the
-  # first anyone heard of it was this job. To run it locally, reproduce the two steps below:
-  # generate the inventory with `surface_diff.py` from both sides' rustdoc JSON at the same
-  # feature point, then `bash ci/name_collision/run.sh <merge-base> <inventory.json>`.
+  # The inventory is REQUIRED and generated, never hand-listed; `run.sh` refuses to start
+  # without it, because a probe over one hard-coded name reports green over every name it never
+  # ran. Generating it from both sides' rustdoc JSON is also why this gate is not a bare `cargo`
+  # line and so is easy to leave out of a local run — reproduce it as the two steps below.
   name-collision:
     name: name-collision-probe
     runs-on: ubuntu-latest
@@ -405,26 +336,17 @@ jobs:
           echo "base=$base" >> "$GITHUB_ENV"
           feat="std,logos,trace,rowan"
           mkdir -p /tmp/nc && git worktree add /tmp/nc/base "$base"
-          # `Cargo.lock` is gitignored. The prior scheme generated it ONCE from head's
-          # manifest and copied it into base, so `--locked` below could prove the two
-          # `cargo doc` runs saw the same dependency graph — but that shared lock goes
-          # unsatisfiable the moment the PR edits base's manifest at all, and a manifest
-          # edit is a class, not one shape: a `[dependencies]` requirement change and a
-          # bare package-`version` bump both do it, because both change what the copied
-          # lock is checked against. Seen concretely on the 0.8.0 release PR (#134, zero
-          # `.rs` files in the diff): the shared lock came from head's 0.8.0 manifest,
-          # base was still 0.7.3, and `--locked` refused base for a version bump alone.
+          # `Cargo.lock` is gitignored, and each side must resolve its OWN lock: one lock
+          # generated from head and copied into base goes unsatisfiable the moment the PR
+          # edits base's manifest at all — a bare package-`version` bump is enough, and
+          # `--locked` then refuses base outright.
           #
-          # So each side resolves its OWN lock from its OWN manifest — no copy, nothing to
-          # go stale. Stopping there would silently give up what the shared lock existed
-          # to prove, though: that neither side's name-collision finding is an artifact of
-          # the two `cargo doc` runs linking different versions of some third crate. The
-          # comparison below restores that guarantee explicitly instead of assuming it —
-          # every `[[package]]` triple (name, version, source) must match across both
-          # locks, with exactly one allowed exception: tokora's own entry, whose version is
-          # the one manifest edit this job exists to permit. `--locked` stays on both
-          # `cargo doc` calls so a re-resolution during doc generation is refused rather
-          # than silently accepted.
+          # The comparison below is what that copied lock used to prove, made explicit: every
+          # `[[package]]` triple (name, version, source) must match across both locks, with
+          # tokora's own version the one allowed difference, so that a finding cannot be an
+          # artifact of the two `cargo doc` runs linking different versions of some third
+          # crate. Deleting it gives that guarantee up silently. `--locked` stays on both
+          # `cargo doc` calls so a re-resolution during doc generation is refused.
           cargo generate-lockfile
           ( cd /tmp/nc/base && cargo generate-lockfile )
           python3 - <<'PY'
@@ -487,18 +409,10 @@ jobs:
         run: bash ci/name_collision/run.sh "$base" /tmp/nc/inventory.json
 
   # ── Gate: sanitizers ────────────────────────────────────────────────────────
-  # `ci/sanitizer.sh` existed and had **no caller**: no job in this file referenced it, so it
-  # had never run on any branch of this campaign. That is the same class as a configuration CI
-  # compiles and never executes — one level up. Not a gate that covers nothing; a gate nothing
-  # invokes.
-  #
-  # It does work: ASan and TSan both come back clean across the full test surface. That is the
-  # argument for wiring it — a script that exists, works, and has never been invoked is the
-  # cheapest coverage in the repo.
-  #
-  # One leg per job so an unsupported sanitizer reports as one red cell rather than aborting the
-  # run. `leak` and `memory` are deliberately not in the matrix: they are unsupported on some
-  # targets, and an expected-failure cell inverts silently the day support lands.
+  # One sanitizer per cell, `fail-fast: false`, so an unsupported sanitizer reports as one red
+  # cell rather than aborting the run. `leak` and `memory` are deliberately NOT in the matrix:
+  # they are unsupported on some targets, and an expected-failure cell inverts silently the day
+  # support lands.
   #
   # If a leg fails at BUILD time with an ABI or interceptor mismatch, read `ci/sanitizer.sh`'s
   # header before filing it: the thread leg needs `-Zbuild-std` for an instrumented `std`, and
@@ -578,21 +492,18 @@ jobs:
         run: cargo check --target thumbv6m-none-eabi --no-default-features
       - name: cargo check --target thumbv6m-none-eabi --no-default-features --features alloc
         run: cargo check --target thumbv6m-none-eabi --no-default-features --features alloc
-      # From compile-only to RUNTIME. `cargo build --no-default-features` above gates a
-      # production-code no_std violation, but it does not compile test targets at all, so a
-      # `Vec`/`vec!` violation in a test — which is where one has actually been found — slips
-      # past it, and nothing no_std-shaped had ever *executed*. These two host runs execute the
-      # no_std tiers of the crate's own code (the harness links std; the crate paths under test
-      # do not). The first run of the first of these was red on a dead-code warning nobody could
-      # have seen, which is the whole argument for the cell.
+      # Compile-only to RUNTIME: `cargo build --no-default-features` above compiles no test
+      # targets at all, so a `Vec`/`vec!` violation in a test — where one has actually been
+      # found — slips past it. These two host runs execute the no_std tiers of the crate's own
+      # code (the harness links std; the crate paths under test do not).
       - name: cargo test -p tokora --no-default-features
         run: cargo test -p tokora --no-default-features
       - name: cargo test -p tokora --no-default-features --features alloc
         run: cargo test -p tokora --no-default-features --features alloc
-      # The positive cell for CAS-less targets: `bstr` is the CAS-less-safe backing, pinned on the real CAS-less
-      # target. The three CAS-needing backings (`bytes`, `hipstr`, `smol_bytes`) are documented
-      # on their guide rows rather than pinned as expected-failures — an expected-fail cell
-      # inverts silently the day upstream fixes it.
+      # The positive cell for CAS-less targets: `bstr` is the CAS-less-safe backing, pinned on
+      # the real CAS-less target. The three CAS-needing backings (`bytes`, `hipstr`,
+      # `smol_bytes`) are documented on their guide rows rather than pinned here as
+      # expected-failures — an expected-fail cell inverts silently the day upstream fixes it.
       - name: cargo check --target thumbv6m-none-eabi --no-default-features --features alloc,bstr_1
         run: cargo check --target thumbv6m-none-eabi --no-default-features --features alloc,bstr_1
 
@@ -618,30 +529,26 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --all-features --no-deps
-      # The all-features step above documents every item, so a link whose TARGET is
-      # feature-gated always resolves there — it can never see the bare configuration's
-      # broken links. That configuration had 39 of them, and the docs had never been built
-      # in it: `cargo doc --no-default-features` exited 101 with `could not document
-      # tokora`. No RUSTDOCFLAGS is needed here — `[lints] workspace = true` already denies
-      # `rustdoc::broken_intra_doc_links`, so the exit status is the assertion.
+      # The ONLY leg that can see bare-config intra-doc breakage — links into a `rowan`-gated
+      # module from ungated ones have reddened it while every other gate stayed green. The
+      # all-features step above documents every item, so a link whose TARGET is feature-gated
+      # always resolves there.
       #
-      # Acceptance is exit 0, not a diagnostic count: rustdoc aborts early, so any fixed
-      # count is a floor, and a floor cannot detect a missing member.
-      #
-      # This step is one of the two legs the by-hand gate list at the TOP of this file carries
-      # — run it locally as `RUSTDOCFLAGS="-D warnings" cargo doc -p tokora --no-deps
-      # --no-default-features`. It reddened again on #175 with five links into the
-      # `rowan`-gated `cst` module from ungated modules; the all-features step above and every
-      # other local gate were green, because only this configuration can see that class.
+      # No RUSTDOCFLAGS needed: the crate's own `#![deny(missing_docs, warnings)]` in
+      # `tokora/src/lib.rs` is what turns rustdoc's broken-link warnings into errors here.
+      # Acceptance is exit 0 and must stay exit 0, never a diagnostic count: rustdoc aborts
+      # early, so any count is a floor and a floor cannot detect a missing member.
       - name: cargo doc --no-default-features --no-deps (bare-config link resolution)
         run: cargo doc -p tokora --no-deps --no-default-features
 
   # ── Gate: bench SMOKE only ──────────────────────────────────────────────────
   #
-  # This compiles the benches and runs each once in test mode (`-- --test`); it is
-  # NOT a timed regression gate. GitHub runners are far too noisy for the ±2%
-  # regression discipline these benches are held to locally — a timing gate here
-  # would flap. Regression numbers are gathered on dedicated hardware, off-CI.
+  # Compiles ONE of the five declared bench targets — `input_scan` — and runs it once in test
+  # mode (`-- --test`). `parser_combinators`, `pratt_typed`, `cst` and `backtrack` are compiled
+  # by nothing in CI; only the by-hand `cargo bench --no-run` covers them (#163).
+  #
+  # NOT a timed regression gate: GitHub runners are far too noisy for the ±2% discipline these
+  # benches are held to locally, so regression numbers are gathered off-CI.
   bench-smoke:
     name: bench (smoke)
     runs-on: ubuntu-latest
@@ -662,7 +569,7 @@ jobs:
       - name: cargo bench --bench input_scan --features logos -- --test
         run: cargo bench --bench input_scan --features logos -- --test
 
-  # ── Preserved: cross-compile smoke across extra platforms ───────────────────
+  # ── Gate: cross-compile smoke across extra platforms ────────────────────────
   cross:
     name: cross
     strategy:
@@ -703,40 +610,21 @@ jobs:
           rustup target add ${{ matrix.target }}
           cargo build --target ${{ matrix.target }}
 
-  # ── Preserved: Miri — the shard plan the two Miri matrices are built from ───
-  # Miri set this workflow's wall clock single-handedly. On the last fully green run the six
-  # Miri cells were 437 of ~490 job-minutes, the worst of them
-  # (`miri-tb-x86_64-unknown-linux-gnu`) at 116.9 minutes against 9 for the next-longest job in
-  # the file. So Miri, and only Miri, is sharded.
+  # ── Gate: Miri — the shard plan the two Miri matrices are built from ────────
+  # Miri sets this workflow's wall clock on its own, so Miri and only Miri is sharded.
   #
-  # This job exists for three reasons, all of them about the shard list rather than about speed.
+  # The shard COUNT lives in `ci/miri_shard.py` and the LIST is generated from it here, so the
+  # matrices below never spell out `[0, 1, 2, 3]`: a count and a list written down separately can
+  # disagree silently, dropping a quarter of the suite from Miri while every job stays green.
   #
-  # First, single-sourcing. The shard COUNT lives in `ci/miri_shard.py` and the shard LIST is
-  # generated from it here, so the matrices below never spell out `[0, 1, 2, 3]`. A count and a
-  # list written down separately can disagree, and the disagreement that matters is silent: drop
-  # a shard from the list, leave the count alone, and a quarter of the suite stops being
-  # interpreted under Miri while every remaining job stays green.
+  # `ci/miri_shard.py` re-proves the whole partition inside every Miri job anyway; running it
+  # here first makes a broken plan red in seconds, once and readably, rather than after
+  # `cargo miri setup` in every cell. `selftest` runs before `plan` for the reason the changelog
+  # self-test runs before its gate: a self-test CI never exercises rots, and a green `plan`
+  # proves nothing about a guard nobody has watched fail on cue.
   #
-  # Second, speed of the guard itself. `ci/miri_shard.py` re-proves the whole partition —
-  # enumerated count above zero, `cargo metadata` agreeing with `tokora/tests/`, every shard
-  # non-empty, the union equal to the enumerated list with nothing doubled — and it runs that
-  # proof inside every Miri job anyway. Running it here first means a broken plan reddens in
-  # about fifteen seconds instead of after `cargo miri setup`, and it reddens once with a
-  # readable message instead of once per cell.
-  #
-  # Third, the guard's own correctness. `ci/miri_shard.py selftest` exercises guard (5) (a
-  # `[[test]]` block that quietly repoints an existing target's name at a different file) and
-  # guard (8)/`emit_flags` (a target literally named e.g. `--help`, which must reach cargo fused
-  # as `--test=--help` rather than as a bare word cargo would read as its own help flag) against
-  # mocked `cargo metadata` JSON and a throwaway `tests/` tree — never the real manifest, never a
-  # real cargo invocation. It runs here, before `plan`, for the same reason
-  # `ci/changelog_structure_selftest.sh` runs before `ci/changelog_structure.sh`: a self-test CI
-  # never exercises rots silently, and a green `plan` proves nothing about a guard nobody has
-  # watched fail on cue.
-  #
-  # It needs `cargo metadata --no-deps` and nothing else: no `rustup` step, because the runner
-  # image ships a default stable toolchain and this job must not add minutes to the head of the
-  # critical path it exists to shorten.
+  # No `rustup` step on purpose — it needs `cargo metadata --no-deps` and nothing else, and must
+  # not add minutes to the head of the critical path it exists to shorten.
   miri-shard-plan:
     name: miri shard plan
     runs-on: ubuntu-latest
@@ -750,12 +638,10 @@ jobs:
         id: plan
         run: python3 ci/miri_shard.py plan
 
-  # ── Preserved: Miri (Tree Borrows) ──────────────────────────────────────────
-  # `fail-fast: false` on both Miri matrices, because sharding changes what a fast failure
-  # costs. With one cell per target a cancelled sibling was a cancelled sibling; now the first
-  # shard to go red cancels every other shard on every target, throws away the macOS runners
-  # they were holding, and leaves the report saying nothing about the rest of the suite — so
-  # the next push re-runs the whole thing to learn what a completed run would already have said.
+  # ── Gate: Miri (Tree Borrows) ───────────────────────────────────────────────
+  # `fail-fast: false` on both Miri matrices, because sharding changes what a fast failure costs:
+  # the first shard to go red would otherwise cancel every other shard on every target, leaving
+  # a report that says nothing about the rest of the suite and a next push that re-runs all of it.
   miri-tb:
     name: miri-tb-${{ matrix.target }}-shard${{ matrix.shard }}
     needs: miri-shard-plan
@@ -801,7 +687,7 @@ jobs:
         run: |
           bash ci/miri_tb.sh ${{ matrix.target }} ${{ matrix.cfg }} ${{ matrix.shard }}
 
-  # ── Preserved: Miri (Stacked Borrows) ───────────────────────────────────────
+  # ── Gate: Miri (Stacked Borrows) ────────────────────────────────────────────
   miri-sb:
     name: miri-sb-${{ matrix.target }}-shard${{ matrix.shard }}
     needs: miri-shard-plan
@@ -847,7 +733,7 @@ jobs:
         run: |
           bash ci/miri_sb.sh ${{ matrix.target }} ${{ matrix.cfg }} ${{ matrix.shard }}
 
-  # ── Preserved: coverage (gated on the fast gates passing) ───────────────────
+  # ── Gate: coverage (gated on the fast gates passing) ────────────────────────
   coverage:
     name: coverage
     runs-on: ubuntu-latest
