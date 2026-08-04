@@ -84,7 +84,7 @@ numbered entry below that carries the full reasoning.
 | `impl Cache { fn rewind(…) }` | delete it | Rollback had two possible owners and they disagreed. No caller loses a capability. | [7](#0.8.0-changed-breaking) |
 | A `Cache` whose `push_front` can panic | must not panic on the restore path | Vacuously conforming before; not now. | [8](#0.8.0-changed-breaking) |
 | A `Lexer` whose `Span`/`Offset` ops can panic on the settle path | must not panic | The one window in the consume path that cannot be closed by reordering. `Clone`, not `Copy`, is still the bound. | [11](#0.8.0-changed-breaking) |
-| `Sink::new(emitter, map, ERR, GAP)` then `sink.finish(ROOT, source)` | `Sink::new(source, emitter, CstProfile::new(map, ERR, GAP))` then `sink.finish(ROOT)` | The source is bound once, at construction. | [13](#0.8.0-changed-breaking) |
+| `Sink::new(emitter, map, ERR, GAP)` then `sink.finish(ROOT, source)` | `parse_lossless(source, state, emitter, CstProfile::new(map, ERR, GAP), cache, parser)` then `cst.finish(ROOT)` | Two independent names for one buffer is what let them disagree; [13](#0.8.0-changed-breaking) named it once at `Sink::new`, and [68](#0.8.0-changed-breaking) superseded that spelling before release by making `Sink::new` crate-private and minting the sink from the source itself — only a build tracked between the two ever called `Sink::new` directly. | [13](#0.8.0-changed-breaking), [68](#0.8.0-changed-breaking) |
 | `emitter.cst_finish()` | `emitter.cst_finish(KIND)` | The kind the matching `cst_start` used. It is a **defaulted** method, so only callers and overriding implementors are affected. *Found by the mechanical API diff; disclosed nowhere before.* | [15](#0.8.0-changed-breaking) |
 | `Sink<'_, L, Sink<…>>` | a compile error — the inner emitter must be `ValueKeyedEmitter` | Two mark spaces claiming the same keys. | [18](#0.8.0-changed-breaking) |
 | `inp.begin_point(); … inp.commit_point();` | `let p = inp.begin_point(); … inp.commit_point(p);` | Nothing tied a settle to the point it settled. Points settle newest-first; four misuse conditions panic by name. | [19](#0.8.0-changed-breaking) |
@@ -1678,6 +1678,113 @@ everywhere else.
     first time. Spell the limit you meant with `RecursionLimiter::with_limitation` if 500 is
     still wrong for your grammar or your lexer.
 
+68. **A CST parse mints its own sink from the source it reads, and no callback anywhere in the
+    crate is handed the emitter again.** `cst::parse_lossless` and `cst::parse_lossless_partial`
+    are now the **only** doors onto a recording sink: each takes the source once and hands that
+    one argument to both the `Sink` it mints and the `Input` it drives, so the two names a
+    caller used to be able to state independently — one at `Sink::new`, one at the parse entry —
+    are the same argument of the same call. `Sink::new` is `pub(crate)` now; the type keeps its
+    public name only as the thing a spent handle wraps. What a driver hands back is not a `Sink`
+    but a `Cst<'inp, L, E>` — `finish`, `finish_partial` and the `with_trivia_policy` builder
+    move here from `Sink` — and `Cst` **deliberately implements no emitter trait**, so the
+    artefact a driver returns cannot be fed back in as a second parse's context. Minting closes
+    the construction half of the wrong-source class; the handle's missing `Emitter` impl closes
+    the return half.
+
+    **A finish-time wall against the construction half was built during this campaign and
+    removed before release.** It caught a naive wrapper, and each of three further shapes — an
+    all-diagnostic parse, pre-arming through the public `bound_source` query, and a hand-emitted
+    `cst_token` span — was then found to walk around it: every fix relocated the hole rather
+    than closing it, *because the witness was flags on the sink and the sink cannot tell who set
+    them*. See the known limitation below (revised in place for this item) for the full history
+    and for what minting still does not reach.
+
+    **The emitter never reaches a callback either, and that closes the same class from the other
+    side.** `&mut Ctx::Emitter` **is** an emitter: code holding one could wrap it in a type of
+    its own and install that wrapper as a second parse's context over a different buffer, which
+    re-opens from inside exactly the hole minting just closed at the entry. Every public callback
+    that used to take `&mut Ctx::Emitter` now takes an `EmitterView<'a, 'inp, L, E, Lang>`
+    instead: `Decision::decide` (the condition of every `*_while` combinator), `ParseInput::peek_then`'s
+    handler, `ParseChoice::peek_then_choice` and `peek_then_try_choice`'s handler, and the three
+    token-level pratt folds, `PrattFoldTokenPrefix`/`Infix`/`Postfix`. (`peek_then_head`'s own
+    handler takes no emitter parameter at all, before or after, so it is unaffected.) A view
+    implements no emitter trait, does not `Deref`, and hands back no `&mut E` — there is nothing
+    at the end of a method call to put in an emitter slot, and the value itself cannot stand in
+    one. Its 24 forwarded methods carry the emitter's own names, so a callback body written
+    against `&mut E` keeps every statement it had; only the parameter's type changes. Four
+    members stay off the surface — `Emitter::checkpoint`, `rewind` and `release` (the checkpoint
+    lineage the *input* owns) and `Emitter::commit_token` (the auto-emission chokepoint) — for
+    the same reason `InputRef` never gave a callback those either.
+
+    **The handle closed its own version of the same door.** `InputRef::emitter` — the `&mut Ctx::Emitter`
+    accessor — is `pub(crate)` now, and the new forwarding methods do not even route through it:
+    each reaches the emitter cell directly, the same way `emitter()` itself always did.
+    `ParseState`'s equivalent accessor is deleted outright, not narrowed — nothing in the crate
+    called that one at all. Both gained the same forwarding surface `EmitterView`
+    exposes, under the same method names, so `inp.cst_start(k)` does everything
+    `inp.emitter().cst_start(k)` used to and there is nothing left over to put in a slot.
+    `InputRef::emitter_ref` (shared) stays public: a `&E` cannot re-enter an emitter slot, because
+    every recording method the trait family declares takes `&mut self`. Four getters that used to
+    hand back `&mut Ctx::Emitter` outright now hand back an `EmitterView` in the same position
+    instead — `peek_with_emitter`, `peek_with_emitter_terminal`,
+    `sync_through_then_peek_with_emitter` and `sync_to_then_peek_with_emitter` keep their names
+    and their callers' destructuring; only a call site that named the tuple's second type, or
+    tried to re-wrap the reference, breaks.
+
+    **`CstEmitter::cst_token` is deleted, not deprecated.** It was the caller-chosen-span,
+    no-consumption door — a grammar could pick which source bytes a token-shaped event names
+    without any settle having happened — and nothing in the parse machinery ever called it.
+    `Emitter::commit_token`, the input layer's own auto-emission chokepoint, was always the other
+    producer of token events; with `cst_token` gone it is the **only** one.
+
+    **What this does not close.** `EmitterView` implements no emitter trait *in this crate*,
+    which is a fact about this crate, not a proof that no such implementation can exist: under
+    the orphan rules a downstream crate whose own lexer type appears in the parameter list may
+    write `impl Emitter for EmitterView<'_, '_, ItsLexer, Sink<…>>` and install that over a
+    foreign buffer from inside a callback. It compiles, and it was run. But `commit_token` is not
+    on the view's surface, so measured end to end: a foreign parse driven that way injects a node
+    through the forwarded `cst_start`/`cst_finish` while the sink still materializes its own
+    text — no token, no span, no byte of the foreign buffer crosses. The wrong-*text* class this
+    item exists to close has no route through it; the node and diagnostic channels it reaches are
+    ones a `decide` body could already reach directly, in its own parse, by design.
+
+    **`Emitter::bound_source`, `Source::REFERENT_IS_BYTES` and `SourceIdentity` are retained, not
+    retired**, and the known limitation below is corrected in place rather than left standing on
+    a promise this item breaks — see it for the reasoning: the handshake is what a wrapper on the
+    orphan route above has to forward honestly for the general constructor check to still catch a
+    foreign pairing.
+
+    **Migration.** A `decide`/`peek_then`/pratt-fold callback's emitter parameter changes type; a
+    body that only calls methods by name does not otherwise change, because the replacement type
+    is derivable from the function's own `Peeked<…>` parameter and `where` clause. Measured on
+    the reference consumer: **43 one-line signature changes across 20 files, zero body changes,
+    zero call-site changes.** A CST parse moves from `Sink::new` + `finish` to `parse_lossless` +
+    the `Cst` handle's `finish`; a context pair now holds the sink **by value** rather than by
+    `&mut`, so a `'sink` lifetime parameter disappears from any consumer type alias that named
+    one.
+
+    ```rust
+    // before
+    let sink = Sink::new(source, emitter, CstProfile::new(map_kind, ERROR, GAP));
+    // (sink installed as the input's context, driven by the grammar — omitted)
+    let (green, emitter) = sink.finish(ROOT);
+
+    // after
+    let (cst, parsed) = parse_lossless(source, state, emitter, profile, cache, grammar);
+    let (green, emitter) = cst.finish(ROOT);
+    ```
+
+    **Performance: no regression.** Eight benchmark ids, three interleaved A/B rounds pooled
+    against an archived baseline: a noise floor of 0.66–1.65% per id, and the largest excursion
+    from it is **−0.912%** — inside its own floor, on every id. A regression below ~1% would not
+    have been visible on this machine, so the honest reading is a null result, not a measured
+    improvement. An attribution check backs it: a callback-cost regression from the new
+    indirection would have moved the ids where the driver's own dispatch is ~30% of self time
+    together and away from the ids where it is ~10%, and it did not — both groups moved with the
+    noise, not against each other. Machine load 1.77–4.69 throughout.
+
+    — *(#168)*
+
 ### Debug and rendered output
 
 Every `Debug` / `Display` movement in this release, in one place, because a consumer who
@@ -1738,7 +1845,9 @@ item that carries them, and listed here only so scanning this section does not m
 (item 5), `CstProfile` and `KindValidator` (item 13), `error::NonAssociativeChain` (item 41),
 `error::RecursionLimitReached` with `input::Descent`, `InputRef::descending`,
 `InputRef::descend`, `InputRef::recursion`, `RecursionLimiter::unlimited`,
-`InputContext::with_recursion_limiter` and `ParserContext::with_recursion_limiter` (item 42). **`FromPrattError` is not on this list**:
+`InputContext::with_recursion_limiter` and `ParserContext::with_recursion_limiter` (item 42),
+`cst::parse_lossless`, `cst::parse_lossless_partial` and `cst::Cst` (item 68), `EmitterView`
+(item 68). **`FromPrattError` is not on this list**:
 item 46's two new obligations are `From` impls on your own error type, and the trait gains no
 member, so a hand-written `FromPrattError` impl compiles unchanged.
 
@@ -3746,9 +3855,10 @@ instead:
 - **A parse whose events are all diagnostics.** No token is committed, so nothing token-shaped
    exists to key on, while the lexer diagnostics' spans still license gap tiling over every
    byte.
-- **Pre-arming.** `Emitter::bound_source` is a public trait method and `InputRef::emitter()`
-   hands parser code `&mut Ctx::Emitter`, so any holder can query the binding. Nothing a sink
-   records about "I was asked" can distinguish the parse entry from anyone else.
+- **Pre-arming.** `Emitter::bound_source` is a public trait method, and — before
+   [68](#0.8.0-changed-breaking) made the accessor crate-private — `InputRef::emitter()` handed
+   parser code `&mut Ctx::Emitter`, so any holder could query the binding. Nothing a sink records
+   about "I was asked" can distinguish the parse entry from anyone else.
 - **Hand-emitted `cst_token` spans.** The manual emission door carries a span, so a grammar can
    choose which source bytes the tree shows while consuming nothing.
 
@@ -3759,12 +3869,19 @@ them*. Shipping a `FinishError` variant that names a protection with three known
 the same defect as a `## Panics` section promising a panic the code does not perform, and this
 release deleted nine of those. All four shapes are pinned by cells asserting today's answer.
 
-**What closes the class is minting the sink from the input** — `input.sink(inner, profile)` —
-which makes the binding neither hideable nor forgeable because there is nothing to hide or
-forge: the sink takes the input's own borrow. It is R8's own named successor and it needs its
-own design and adversarial cycle, which is why it is 0.9 and not a late addition here.
-
-**Witness 2 — the completeness witness — UNTOUCHED.**
+**What closes the class is minting the sink from the source, and it landed in this release
+instead of 0.9 as first planned.** [68](#0.8.0-changed-breaking) ships `cst::parse_lossless` and
+`cst::parse_lossless_partial` in place of the `input.sink(inner, profile)` shape sketched here:
+the source is named once, in the driver's own argument list, and handed to both the `Sink` it
+mints and the `Input` it drives, so the binding is neither hideable nor forgeable because there
+is nothing to hide or forge. `Sink::new` is `pub(crate)`, so bullet (1)'s wrapper has no `Sink`
+left to build over — which takes bullet (2) with it, since an all-diagnostic parse still needs a
+wrapper to hide behind. Bullet (3) closes because the query route it used,
+`InputRef::emitter()`, is crate-private now (see that bullet, revised in place). Bullet (4)
+closes the way `CstEmitter::cst_token` itself does — deleted, not walled. The returned `Cst`
+implements no emitter trait either, so the artefact cannot be re-aimed at a second parse
+regardless of which of the four a caller tried. What this leaves open is stated below, where
+this section's own "when it lands" sentence used to be.
 
 **Witness 2 — the completeness witness — UNTOUCHED.** `CstEmitter`'s contract still names no
 completeness parameter, no attempt and no input, so any holder of the emitter may append events
@@ -3785,20 +3902,44 @@ ordinary parse uses — which is why it sits on `Emitter` and is checked where a
 input. A *completeness* witness on the same contract is what closes witness 2 and what returns
 streaming CST.
 
-**A better repair exists and is deliberately not this one.** Minting the sink from the input or
-session — `input.sink(inner, profile)` — hands the sink the input's own borrow, making a foreign
-binding **unrepresentable** rather than detected, closes witness 2 at the same time, and is "the
-mechanism that restores streaming CST". It is a new public constructor surface and a consumer
-migration, so it is a feature for a later release rather than something to land in the round
-whose job is to publish. **When it lands, `Emitter::bound_source` and
-`Source::REFERENT_IS_BYTES` are retired rather than accumulated** — two mechanisms for one
-invariant is how a crate ends up with three.
+**The repair landed as [68](#0.8.0-changed-breaking), and two of its three predictions here did
+not hold.** This paragraph forecast that minting the sink from the input would close witness 2
+at the same time and would be "the mechanism that restores streaming CST". Neither happened:
+witness 2 is untouched, exactly as stated above — `CstEmitter` gained no completeness parameter
+— and streaming CST is still blocked by the `ValueKeyedEmitter` bound described in *Streaming
+CST is not in this release*, above, an axis minting never touches. Both were forecasts about a
+mechanism that had not been built yet, made on the assumption that one constructor change would
+answer two independent invariants; only the one this section is about turned out to be true.
+
+**Retained, not retired.** The same paragraph promised that landing minting would retire
+`Emitter::bound_source` and `Source::REFERENT_IS_BYTES` — *"two mechanisms for one invariant is
+how a crate ends up with three."* That assumed a closure that does not hold.
+[68](#0.8.0-changed-breaking)'s drivers pin `Sink` into the emitter slot **by name**, but the
+value they hand a callback instead of the emitter — `EmitterView`, also new there — implements no
+emitter trait only as a fact **about this crate**. Under the orphan rules, a downstream crate
+whose own lexer type appears in the parameter list may write
+`impl Emitter for EmitterView<'_, '_, ItsLexer, Sink<…>>` and install that over a second, foreign
+buffer from inside a callback — a route through a callback parameter, which is exactly what
+minting's pinned-slot trick does not reach, because that trick only pins the driver's own entry.
+`Emitter::commit_token` is off the view's surface there too, so the route still carries no token,
+no span and no byte of the foreign buffer — but it can carry a forged or absent `bound_source`
+answer, which is bullet (1) above, one level in. The handshake is what a wrapper on that route
+has to forward honestly for the general constructor check to still catch the foreign pairing;
+a wrapper that declines to forward
+it reports `None` and the seam sees nothing to refuse — the same residual disclosed for every
+wrapper since R10. And nothing about `bound_source` names `Sink` or `cst` in the first place: it
+is the general `Emitter`/`ParseContext` handshake, so any hand-rolled emitter paired with the
+ordinary `parse`/`parse_partial` entry points depends on the same check regardless of CST.
+`bound_source`, `REFERENT_IS_BYTES` and `SourceIdentity` earn their place on the route minting
+cannot reach, and stay additive infrastructure rather than a stepping stone to their own
+retirement.
 
 Refusing any of this at materialization remains **impossible**, not merely expensive: the bad
 event logs are byte-identical to logs a legal single parse could produce, so `finish` has
 nothing to discriminate on. That is why the check has to sit at the seam or nowhere.
 
-— *(R8, #123; witness 1 closed by R10)*
+— *(R8, #123; witness 1 narrowed by R10, its construction-time route closed by #168; witness 2
+still open)*
 
 ### Known limitation — `finish` does not refuse duplicate zero-width token spans
 
