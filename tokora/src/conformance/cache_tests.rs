@@ -375,6 +375,20 @@ const DUPLICATING_PEEK: u8 = 35;
 /// so the failure it produces carries the `built by with_options` tag and cannot be confused
 /// with a failure on the `C::new()` pass.
 const WRONG_WITH_OPTIONS: u8 = 36;
+/// A refused `push_front` hands back a **resident** entry instead of the token it was offered,
+/// and keeps the offered one — but only at capacity 1 (#180 part A, item 10).
+///
+/// [`SWAPPING_REFUSAL`] is the same violation without the capacity gate, and check 5's
+/// round-trip catches it at any capacity of 2 or more. The gate is what makes this cell a
+/// statement about capacity 1 alone, which `check_push_front` returned at its first line for and
+/// never drove: the prepend ORDER is not observable there — the seeding `push_back` fills the
+/// cache, so no front push can be accepted — but the refusal half is, and nothing else in the
+/// kit reaches it on this arm. Check 3 drives the round-trip for `push_back`; check 2 and the
+/// empty-cache front-push check only ever drive front pushes that are accepted.
+///
+/// Reached through the capacity-1 `with_options` pass, so its failure carries the `built by
+/// with_options` tag.
+const FRONT_REFUSAL_SWAP_AT_CAP_ONE: u8 = 37;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -471,6 +485,15 @@ where
     tok: CachedTokenOf<'a, L>,
   ) -> Result<CachedTokenRefOf<'_, 'a, L>, CachedTokenOf<'a, L>> {
     if D == LYING_RETAINS_FRONT || self.items.len() == self.cap {
+      // A warranted refusal on the front arm that corrupts its own round-trip, at capacity 1 and
+      // nowhere else. Not routed through `refuse`, which `push_back` shares: the whole point of
+      // the cell is that the defect lives on THIS arm, at the one capacity check 5 never drove.
+      if D == FRONT_REFUSAL_SWAP_AT_CAP_ONE && self.cap == 1 {
+        if let Some(other) = self.items.pop_back() {
+          self.items.push_back(tok);
+          return Err(other);
+        }
+      }
       return Err(self.refuse(tok));
     }
     if D == COLD_START_PUSH_FRONT && !self.warmed.get() {
@@ -1072,6 +1095,16 @@ fn cache_kit_catches_a_peek_that_serves_one_token_repeatedly() {
 #[should_panic(expected = "built by with_options")]
 fn cache_kit_catches_a_wrong_with_options() {
   run_queue::<WRONG_WITH_OPTIONS>();
+}
+
+/// #180 part A, item 10: check 5 returned at its first line for `cap < 2`, so capacity 1 — the
+/// one capacity where EVERY front push is refused — was never driven at all. The prepend order
+/// is genuinely not observable there, but the refusal half is, and no other check reaches it on
+/// the `push_front` arm. Caught by check 5's round-trip, on the capacity-1 pass.
+#[test]
+#[should_panic(expected = "a refused push_front returned a DIFFERENT token")]
+fn cache_kit_catches_a_corrupt_front_refusal_at_capacity_one() {
+  run_queue::<FRONT_REFUSAL_SWAP_AT_CAP_ONE>();
 }
 
 /// #180 part A, item 5: `pop_front_if`/`try_pop_front_if` were never called by the kit, so an

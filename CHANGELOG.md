@@ -3688,6 +3688,18 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    "what it deliberately does not check" section rather than left implied.
    — *(#180)*
 
+75. **The cache conformance kit's `push_front` check returned at its first line for capacity 1,
+   so the one capacity at which every front push is refused was never driven at all.** The
+   prepend *order* genuinely is not observable there — the seeding `push_back` fills the cache,
+   so nothing can be prepended — but the refusal is, and nothing else in the kit reaches a
+   refused push on that arm: check 3 drives the round-trip for `push_back`, and the two checks
+   that drive accepted front pushes never see one refused. A cache that corrupts a refused
+   `push_front` — hands back a resident entry and swallows the token it was offered — was
+   therefore invisible at capacity 1, which is precisely the capacity where every front push is
+   refused. Check 5 now returns only at capacity 0, and asserts at capacity 1 that the refusal
+   half was actually reached.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,

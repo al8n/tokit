@@ -53,7 +53,11 @@
 //!    is behind it has the right front, the right back and the right length. And the refusal law
 //!    is driven at the **empty** cache too, at every nonzero capacity — the one state the
 //!    prepend driver cannot reach, because it has to seed the cache with a `push_back` before
-//!    there is anything to prepend before.
+//!    there is anything to prepend before. And it is driven at **capacity 1**, where the seeding
+//!    push fills the cache and so every front push after it is refused: the prepend order is not
+//!    observable at that capacity, but the refusal is the only thing observable there, and no
+//!    other check reaches a refused push on this arm — check 3 drives the round-trip for
+//!    `push_back`, and the two accepted-front-push checks never see one refused.
 //! 6. **Bounded, pure `peek`** — appends exactly `min(len, the buffer's REMAINING capacity at
 //!    call time)` entries, oldest first, each resident token once, leaving whatever the buffer
 //!    already held untouched; changes no observable; and answers identically when called twice
@@ -832,13 +836,16 @@ where
   // ── 5. push_front prepends ──────────────────────────────────────────────────────
 
   fn check_push_front(&self, cap: usize) {
-    if cap < 2 {
+    if cap == 0 {
+      // Always full, so a front push is refused with a warrant and there is no residency for a
+      // prepend to be observed against. Check 5's refusal law at capacity 0 is check 3's.
       return;
     }
     let name = self.label();
     let corpus = self.corpus(cap.saturating_add(1));
     let mut cache = self.make();
     let mut resident: Vec<L::Span> = Vec::new();
+    let mut refusals = 0usize;
 
     // One at the back, then everything else at the front: each must land BEFORE the rest.
     let mut it = corpus.into_iter();
@@ -889,15 +896,32 @@ where
             "tokora cache conformance [{name} refusal-round-trip]: a refused push_front returned a DIFFERENT token: pushed {span:?}, got back {back_span:?}"
           );
           self.assert_resident(&cache, cap, &resident, "after a refused push_front");
+          refusals += 1;
           continue;
         }
       }
       self.assert_resident(&cache, cap, &resident, "after push_front");
     }
-    assert!(
-      resident.len() > 1,
-      "tokora cache conformance [{name} push-front]: no push_front was ever accepted at capacity {cap}, so the prepend law was never observed"
-    );
+    // Capacity 1 is the one capacity where the loop above is expected to accept nothing: the
+    // seeding `push_back` fills the cache, so every front push after it meets a full one. This
+    // check used to return at its first line for `cap < 2` and skip that capacity entirely
+    // (#180 part A, item 10) — but "no prepend ORDER to observe" is not "nothing to observe".
+    // What is left is the refusal half, and nothing else in the kit reaches it on this arm:
+    // check 3 drives the round-trip for `push_back`, check 2 and `check_empty_push_front` only
+    // ever drive front pushes that are ACCEPTED. So a cache that corrupts a refused front push —
+    // hands back a resident entry and swallows the offered token — was invisible at capacity 1,
+    // which is exactly the capacity where every front push is refused.
+    if cap == 1 {
+      assert!(
+        refusals > 0,
+        "tokora cache conformance kit bug [{name} push-front]: at capacity 1 the driver never reached a refused push_front, so the one half of check 5 this capacity can express was not observed"
+      );
+    } else {
+      assert!(
+        resident.len() > 1,
+        "tokora cache conformance [{name} push-front]: no push_front was ever accepted at capacity {cap}, so the prepend law was never observed"
+      );
+    }
 
     // ── the whole sequence, not its two ends ──────────────────────────────────────
     //
