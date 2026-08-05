@@ -20,7 +20,7 @@ use mayber::Maybe;
 
 use super::cache::CacheHarness;
 use crate::{
-  Lexer, Token,
+  Lexer, Span, Token,
   cache::{
     Cache, CachedToken, CachedTokenOf, CachedTokenRefOf, DefaultCache, MaybeRefCachedTokenOf,
   },
@@ -262,6 +262,19 @@ const WRONG_OWNED_PEEK: u8 = 23;
 /// already established was empty — so a constant-`true` override was indistinguishable from a
 /// correct one, at every capacity, in every existing test.
 const LYING_IS_EMPTY: u8 = 24;
+/// `span()` names the back end of the LAST-`push_back`'d token, forever — `pop_back` does not
+/// invalidate it (#180 part A, item 3). `front()`/`back()`/`len()` stay correct throughout;
+/// only the combined `span()` diverges, and only after a `pop_back`. Before this issue's fix,
+/// `check_span` called `span()` exactly once per `run()`, immediately after a full `filled()` —
+/// a residency this defect is correct at, since nothing has popped anything yet — so nothing
+/// before this cell could tell it apart from a conforming cache.
+const STALE_SPAN_AFTER_POP_BACK: u8 = 25;
+/// `clear()` genuinely empties the cache — every check-1 observable is correct immediately
+/// after it — but also poisons it: every `push_back` after a `clear()` is refused, with room to
+/// spare, forever (#180 part A, item 2). Before this issue's fix nothing after `check_clear`
+/// ever tried to use the cache again, so a `clear` that empties the cache and permanently
+/// disables it passed exactly like one that only empties it.
+const POISONING_CLEAR: u8 = 26;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -283,6 +296,13 @@ where
   warmed: Cell<bool>,
   /// Counts the `push_front` calls this cache has accepted.
   front_pushes: Cell<usize>,
+  /// The span of the most recent `push_back`, updated on every accepted one and never cleared
+  /// or refreshed by a pop. Read only by [`STALE_SPAN_AFTER_POP_BACK`]'s `span()` override,
+  /// which uses it as the combined span's end — correct up to the first `pop_back`, stale after.
+  last_pushed_back_span: Option<L::Span>,
+  /// Set by `clear()` under [`POISONING_CLEAR`] and never unset — every `push_back` after that
+  /// checks it and refuses, regardless of capacity.
+  poisoned: bool,
 }
 
 // `L::Token: Clone` is what the two stale-residency cells cost: `STALE_RESIDENCY_PEEK`'s
@@ -311,6 +331,8 @@ where
       prefilled: Cell::new(false),
       warmed: Cell::new(false),
       front_pushes: Cell::new(0),
+      last_pushed_back_span: None,
+      poisoned: false,
     }
   }
 
@@ -377,10 +399,16 @@ where
     &mut self,
     tok: CachedTokenOf<'a, L>,
   ) -> Result<CachedTokenRefOf<'_, 'a, L>, CachedTokenOf<'a, L>> {
+    if D == POISONING_CLEAR && self.poisoned {
+      return Err(self.refuse(tok));
+    }
     if self.items.len() == self.cap {
       return Err(self.refuse(tok));
     }
     self.warmed.set(true);
+    // Read before the move below, for `STALE_SPAN_AFTER_POP_BACK`'s `span()` override — see
+    // that constant's doc for why this is never cleared or refreshed by a pop.
+    self.last_pushed_back_span = Some((*tok.token().span_ref()).clone());
     self.items.push_back(tok);
     Ok(self.items.back().expect("just pushed").as_ref())
   }
@@ -422,6 +450,11 @@ where
   fn clear(&mut self) {
     self.items.clear();
     self.graveyard.clear();
+    if D == POISONING_CLEAR {
+      // The cache is genuinely empty right after this — every check-1 observable answers
+      // correctly — but `push_back` refuses everything from here on regardless of capacity.
+      self.poisoned = true;
+    }
   }
 
   fn peek<'p, W>(
@@ -562,6 +595,28 @@ where
   fn back(&self) -> Option<CachedTokenRefOf<'_, 'a, L>> {
     self.items.back().map(CachedToken::as_ref)
   }
+
+  fn span(&self) -> Option<L::Span> {
+    if D == STALE_SPAN_AFTER_POP_BACK {
+      let front = self.items.front()?;
+      // The live front, paired with the end of the LAST push_back rather than the current
+      // back — correct until the first pop_back, stale after, exactly like a cache that reads
+      // `span()`'s end off a value nothing keeps in sync with `pop_back`.
+      let end = self
+        .last_pushed_back_span
+        .as_ref()
+        .expect("non-empty items implies at least one accepted push_back")
+        .end();
+      return Some(L::Span::new(front.token().span_ref().start(), end));
+    }
+    match (self.items.front(), self.items.back()) {
+      (Some(first), Some(last)) => Some(L::Span::new(
+        first.token().span_ref().start(),
+        last.token().span_ref().end(),
+      )),
+      _ => None,
+    }
+  }
 }
 
 impl<'a, L, const D: u8> Queue<'a, L, D>
@@ -620,6 +675,23 @@ fn cache_kit_catches_a_wrong_owned_peek() {
 #[should_panic(expected = "empty-invariants")]
 fn cache_kit_catches_a_lying_is_empty() {
   run_queue::<LYING_IS_EMPTY>();
+}
+
+/// #180 part A, item 3: `span()` was checked at exactly one residency (a full, never-popped
+/// cache) — `STALE_SPAN_AFTER_POP_BACK` is correct there and wrong only after a `pop_back`,
+/// which the check before this fixture never drove.
+#[test]
+#[should_panic(expected = "combined-span")]
+fn cache_kit_catches_a_stale_span_after_pop_back() {
+  run_queue::<STALE_SPAN_AFTER_POP_BACK>();
+}
+
+/// #180 part A, item 2: `clear()` was never reused afterward, so a `clear` that empties the
+/// cache but also permanently disables future pushes passed exactly like a conforming one.
+#[test]
+#[should_panic(expected = "clear]")]
+fn cache_kit_catches_a_poisoning_clear() {
+  run_queue::<POISONING_CLEAR>();
 }
 
 #[test]

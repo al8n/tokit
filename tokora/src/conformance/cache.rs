@@ -68,8 +68,15 @@
 //!    the live run on the first path and behind it on the second, and only the sweep that drains
 //!    that end reads them. `pop_back` is the input layer's restore path. `peek_one` agrees with
 //!    `front`, and answers nothing where there is no front.
-//! 7. **`clear`** — returns the cache to the check-1 state.
-//! 8. **`span`** — the combined span runs from the front entry's start to the back entry's end.
+//! 7. **`clear`** — returns the cache to the check-1 state, AND the cache stays usable
+//!    afterward: it is refilled with `cap` fresh pushes and checked against check 3's oracle,
+//!    so a `clear` that empties the cache but also permanently disables it (poisons it, zeroes
+//!    its capacity) does not pass by never being asked to accept another token.
+//! 8. **`span`** — the combined span runs from the front entry's start to the back entry's end,
+//!    swept at every residency check 6 sweeps (full, and partially drained from both ends), not
+//!    checked once against a freshly filled cache: a `span` that is correct immediately after a
+//!    fill and stale after any pop is indistinguishable from a conforming one at the one
+//!    residency a single check reaches.
 //!
 //! The kit adapts to capacity: it runs every check a cache of that capacity can express, so the
 //! capacity-0 `()` cache, the capacity-1 `Option` cache and an arbitrarily wide ring are all
@@ -316,11 +323,13 @@ where
   // ── 1. empty invariants ─────────────────────────────────────────────────────────
 
   fn check_empty(&self, cap: usize, when: &str) {
-    let cache = C::new();
-    self.assert_empty(&cache, cap, when);
+    let mut cache = C::new();
+    self.assert_empty(&mut cache, cap, when);
   }
 
-  fn assert_empty(&self, cache: &C, cap: usize, when: &str) {
+  /// Takes `cache` by `&mut` specifically so its own pop methods can be probed below — see
+  /// there for why a fresh `C::new()` used to stand in for it and what that missed.
+  fn assert_empty(&self, cache: &mut C, cap: usize, when: &str) {
     let name = self.name;
     assert!(
       cache.len() == 0,
@@ -348,9 +357,13 @@ where
       cache.span().is_none(),
       "tokora cache conformance [{name} empty-invariants/{when}]: span() answered on an empty cache"
     );
-    let mut probe = C::new();
+    // The cache UNDER TEST, not a fresh `C::new()`: at `check_empty`'s call site the two are the
+    // same cache anyway, but at `check_clear`'s they are not, and a fresh cache answering for
+    // one it never touched proves nothing about whether THIS cache's pop methods still work —
+    // or still refuse to answer — after whatever produced its current empty state (#180 part A,
+    // item 2).
     assert!(
-      probe.pop_front().is_none() && probe.pop_back().is_none(),
+      cache.pop_front().is_none() && cache.pop_back().is_none(),
       "tokora cache conformance [{name} empty-invariants/{when}]: a pop answered on an empty cache"
     );
     assert!(
@@ -1117,28 +1130,102 @@ where
   fn check_clear(&self, cap: usize) {
     let (mut cache, _) = self.filled(cap);
     cache.clear();
-    self.assert_empty(&cache, cap, "after clear()");
+    self.assert_empty(&mut cache, cap, "after clear()");
+
+    // The cache is never touched again after `clear()` without this: a `clear` that leaves it
+    // permanently unable to accept a push — poisoned, its capacity zeroed, disabled outright —
+    // passes everything above, since nothing above tries to use it again (#180 part A, item 2).
+    // Reuse it: push back `cap` tokens and confirm they land exactly the way a first fill would.
+    let name = self.name;
+    let mut want = Vec::with_capacity(cap);
+    for tok in self.corpus(cap) {
+      let span = span_of::<L>(&tok);
+      assert!(
+        cache.push_back(tok).is_ok(),
+        "tokora cache conformance [{name} clear]: push_back() was refused while refilling a cache clear() just emptied — clear() must not leave the cache permanently unable to accept pushes"
+      );
+      want.push(span);
+    }
+    self.assert_resident(
+      &cache,
+      cap,
+      &want,
+      "after refilling a cache clear() just emptied",
+    );
   }
 
   // ── 8. the combined span ────────────────────────────────────────────────────────
 
+  /// Sweeps every residency [`check_peek`](Self::check_peek) does — a full cache, and partially
+  /// drained from both the front and the back — rather than checking `span()` once against a
+  /// freshly filled cache and never again. A `span()` that is correct only immediately after a
+  /// fill and stale after any pop (#180 part A, item 3) passed the single-residency check the
+  /// same way [`STALE_RESIDENCY_PEEK`] passed `peek`'s: the one residency driven was the one
+  /// residency the defect cannot be told apart from a conforming cache at.
   fn check_span(&self, cap: usize) {
     if cap == 0 {
       return;
     }
     let name = self.name;
-    let (cache, want) = self.filled(cap);
-    let combined = cache.span().unwrap_or_else(|| {
-      panic!(
-        "tokora cache conformance [{name} combined-span]: span() is empty with {} entries resident",
+
+    // Drained from the FRONT: the consuming path, leaving the resident suffix.
+    for popped in 0..=cap {
+      let (mut cache, filled) = self.filled_to_capacity(cap);
+      for i in 0..popped {
+        assert!(
+          cache.pop_front().is_some(),
+          "tokora cache conformance [{name} combined-span]: pop_front() answered None after {i} of {popped} pops off a cache filled to its capacity {cap}"
+        );
+      }
+      let want = &filled[popped..];
+      let state = if popped == 0 {
+        format!("a full cache: {} of {cap} resident", want.len())
+      } else {
+        format!(
+          "a partly drained cache: {} of {cap} resident, after {popped} pop_front(s) off a full one",
+          want.len()
+        )
+      };
+      self.assert_span_at(&cache, want, &state);
+    }
+
+    // Drained from the BACK: the restore path, leaving the resident prefix.
+    for popped in 1..=cap {
+      let (mut cache, filled) = self.filled_to_capacity(cap);
+      for i in 0..popped {
+        assert!(
+          cache.pop_back().is_some(),
+          "tokora cache conformance [{name} combined-span]: pop_back() answered None after {i} of {popped} pops off a cache filled to its capacity {cap}"
+        );
+      }
+      let want = &filled[..cap - popped];
+      let state = format!(
+        "a partly drained cache: {} of {cap} resident, after {popped} pop_back(s) off a full one — the input layer's restore path",
         want.len()
-      )
-    });
-    let expect_start = want[0].start_ref();
-    let expect_end = want[want.len() - 1].end_ref();
-    assert!(
-      combined.start_ref() == expect_start && combined.end_ref() == expect_end,
-      "tokora cache conformance [{name} combined-span]: span() is {combined:?}, expected {expect_start:?}..{expect_end:?} — the front entry's start to the back entry's end"
-    );
+      );
+      self.assert_span_at(&cache, want, &state);
+    }
+  }
+
+  /// Check 8 against a cache holding exactly `want`: `span()` runs from the front entry's start
+  /// to the back entry's end, and is absent exactly when nothing is resident (the latter is
+  /// also [`assert_empty`](Self::assert_empty)'s concern; asserted here too so every residency
+  /// [`check_span`](Self::check_span) visits — including the fully drained one — is covered by
+  /// the same oracle instead of splitting the empty case out).
+  fn assert_span_at(&self, cache: &C, want: &[L::Span], state: &str) {
+    let name = self.name;
+    match (want.first(), want.last(), cache.span()) {
+      (Some(first), Some(last), Some(combined)) => assert!(
+        combined.start_ref() == first.start_ref() && combined.end_ref() == last.end_ref(),
+        "tokora cache conformance [{name} combined-span] against {state}: span() is {combined:?}, expected {:?}..{:?} — the front entry's start to the back entry's end",
+        first.start_ref(),
+        last.end_ref()
+      ),
+      (None, None, None) => {}
+      (_, _, got) => panic!(
+        "tokora cache conformance [{name} combined-span] against {state}: span() presence disagrees with the {} resident entr(ies) it should be built from — got {got:?}",
+        want.len()
+      ),
+    }
   }
 }
