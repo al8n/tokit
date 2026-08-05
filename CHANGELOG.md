@@ -3662,6 +3662,18 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    does not override it is correct wherever `peek` is. Both halves now have one.
    — *(#180)*
 
+73. **`front()` and `back()` were checked for presence and never for identity outside the empty
+   state, so a cache whose specialized span accessors were right and whose entry accessors were
+   wrong passed the cache conformance kit.** `assert_resident` — the oracle every residency check
+   in the kit runs through — read `front_span()`/`back_span()` and nothing else, and nothing
+   required the two pairs to name the same entry. `front_span`/`back_span` are *default* methods
+   derived from `front`/`back`, so a cache that gets only `front` wrong was already caught; what
+   was not is a cache that specializes the span accessors off a head and tail index, which is
+   what a ring does to avoid building a `CachedTokenRef`, and then disagrees. The entry is the
+   half that carries the token and the `L::State` a restore resumes from. `assert_resident` now
+   reads `front()`/`back()` themselves against the same expectation.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,

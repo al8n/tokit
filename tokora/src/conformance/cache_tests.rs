@@ -320,6 +320,21 @@ const WRONG_PEEK_ONE: u8 = 31;
 /// nothing changed in between is answered wrongly. Before this issue's fix `peek_one` was called
 /// exactly once per residency the kit visits, so a second answer had nothing to disagree with.
 const IMPURE_PEEK_ONE: u8 = 32;
+/// `front()` hands back the **back** entry while `front_span()` still names the front one
+/// (#180 part A, item 8).
+///
+/// `front_span` is a DEFAULT method — `self.front().map(|t| t.token().span())` — so a cache that
+/// gets `front` wrong and leaves `front_span` alone is caught by the span check the kit has
+/// always run. This cell overrides **both**, which is what the gap actually needs: `front_span`
+/// is exactly the accessor a ring specializes off its head index rather than paying to build a
+/// `CachedTokenRef`, and once it is specialized the two can disagree. Everything the kit read
+/// outside the empty state was the span half, so the reference half — the one that carries the
+/// token and the `L::State` a restore resumes from — was checked for presence and nothing else.
+/// Correct at `len <= 1`, where front and back are the same entry.
+const WRONG_FRONT_IDENTITY: u8 = 33;
+/// [`WRONG_FRONT_IDENTITY`] at the other end: `back()` hands back the **front** entry while
+/// `back_span()` still names the back one (#180 part A, item 8).
+const WRONG_BACK_IDENTITY: u8 = 34;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -712,11 +727,45 @@ where
   }
 
   fn front(&self) -> Option<CachedTokenRefOf<'_, 'a, L>> {
+    if D == WRONG_FRONT_IDENTITY {
+      // The wrong END, while `front_span` below keeps naming the right one.
+      return self.items.back().map(CachedToken::as_ref);
+    }
     self.items.front().map(CachedToken::as_ref)
   }
 
   fn back(&self) -> Option<CachedTokenRefOf<'_, 'a, L>> {
+    if D == WRONG_BACK_IDENTITY {
+      return self.items.front().map(CachedToken::as_ref);
+    }
     self.items.back().map(CachedToken::as_ref)
+  }
+
+  // `front_span`/`back_span` are DEFAULT methods composed from `front`/`back`, so without these
+  // two overrides the cells above would break the span accessors too and be caught by a check
+  // that has always existed. Specializing them — reading the head and tail entries directly,
+  // which is what a ring does to avoid building a `CachedTokenRef` — is what lets the reference
+  // half and the span half disagree, and that disagreement is the gap (#180 part A, item 8).
+  fn front_span<'s>(&'s self) -> Option<&'s L::Span>
+  where
+    'a: 's,
+  {
+    self
+      .items
+      .front()
+      .map(CachedToken::as_ref)
+      .map(|t| *t.token().span())
+  }
+
+  fn back_span<'s>(&'s self) -> Option<&'s L::Span>
+  where
+    'a: 's,
+  {
+    self
+      .items
+      .back()
+      .map(CachedToken::as_ref)
+      .map(|t| *t.token().span())
   }
 
   fn span(&self) -> Option<L::Span> {
@@ -902,6 +951,23 @@ fn cache_kit_catches_a_wrong_peek_one() {
 #[should_panic(expected = "pure-peek-one")]
 fn cache_kit_catches_an_impure_peek_one() {
   run_queue::<IMPURE_PEEK_ONE>();
+}
+
+/// #180 part A, item 8: outside the empty state the kit read `front_span()`/`back_span()` and
+/// never `front()`/`back()` themselves, so a cache whose specialized span accessors are right
+/// and whose entry accessors are wrong was certified. The entry is what carries the token and
+/// the `L::State` a restore resumes from.
+#[test]
+#[should_panic(expected = "front() names")]
+fn cache_kit_catches_a_front_that_names_the_wrong_entry() {
+  run_queue::<WRONG_FRONT_IDENTITY>();
+}
+
+/// [`cache_kit_catches_a_front_that_names_the_wrong_entry`] at the other end of the queue.
+#[test]
+#[should_panic(expected = "back() names")]
+fn cache_kit_catches_a_back_that_names_the_wrong_entry() {
+  run_queue::<WRONG_BACK_IDENTITY>();
 }
 
 /// #180 part A, item 5: `pop_front_if`/`try_pop_front_if` were never called by the kit, so an

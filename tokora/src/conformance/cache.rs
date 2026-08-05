@@ -40,7 +40,11 @@
 //!    correct one at every OTHER residency this kit drives.
 //! 4. **Order** — `pop_front` removes the oldest and `pop_back` the newest, and `front`/`back`
 //!    view those same two entries without removing them. The input layer's restore path is built
-//!    on the `pop_back` half.
+//!    on the `pop_back` half. `front`/`back` are read **themselves**, at every residency the kit
+//!    builds, and not only through `front_span`/`back_span`: those two are *default* methods
+//!    derived from these, but a cache is free to specialize them off a head and tail index, and
+//!    then the entry a caller reads — the one carrying the token and the `L::State` a restore
+//!    resumes from — can name a different slot than the span accessor does.
 //! 5. **`push_front` prepends** — before every resident entry, with the same refusal
 //!    round-trip, and the same requirement that a refusal be **warranted**: a push is refused
 //!    only by a full cache, on this arm exactly as on `push_back`'s. The prepend order is
@@ -603,6 +607,38 @@ where
       (None, None) => {}
       (a, b) => panic!(
         "tokora cache conformance [{name} fifo-append] {when}: back presence disagrees — expected {a:?}, got {b:?}"
+      ),
+    }
+    // `front()` and `back()` name the same two entries `front_span()` and `back_span()` do.
+    //
+    // Outside the empty state the kit read those two accessors and nothing else, so `front`/`back`
+    // were checked for PRESENCE (in `assert_empty`) and never for identity (#180 part A, item 8).
+    // `front_span`/`back_span` are DEFAULT methods derived from `front`/`back`, so a cache that
+    // overrides only `front` is already caught by the span check above — but `front_span` is
+    // exactly the accessor a ring specializes off its head index rather than paying for a
+    // `CachedTokenRef`, and a cache that overrides BOTH, with the cheap span half right and the
+    // reference half wrong, had nothing to answer to. The entry a caller reads through `front()`
+    // carries the token and the `L::State` a restore resumes from; the span half alone does not.
+    let front_ref: Option<L::Span> = cache.front().map(|t| (**t.token().span_ref()).clone());
+    match (want.first(), &front_ref) {
+      (Some(expected), Some(got)) => assert!(
+        got == expected,
+        "tokora cache conformance [{name} edge-identity] {when}: front() names {got:?}, expected the OLDEST resident entry {expected:?} — the same entry front_span() must name"
+      ),
+      (None, None) => {}
+      (a, b) => panic!(
+        "tokora cache conformance [{name} edge-identity] {when}: front() presence disagrees — expected {a:?}, got {b:?}"
+      ),
+    }
+    let back_ref: Option<L::Span> = cache.back().map(|t| (**t.token().span_ref()).clone());
+    match (want.last(), &back_ref) {
+      (Some(expected), Some(got)) => assert!(
+        got == expected,
+        "tokora cache conformance [{name} edge-identity] {when}: back() names {got:?}, expected the NEWEST resident entry {expected:?} — the same entry back_span() must name"
+      ),
+      (None, None) => {}
+      (a, b) => panic!(
+        "tokora cache conformance [{name} edge-identity] {when}: back() presence disagrees — expected {a:?}, got {b:?}"
       ),
     }
   }
