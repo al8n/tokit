@@ -12,8 +12,9 @@
 //! closes on both exits — [`cst_finish`](crate::emitter::CstEmitter::cst_finish) on success,
 //! [`cst_demote`](crate::emitter::CstEmitter::cst_demote) (spending the mark `cst_start` handed
 //! back) on failure. An open node therefore exists **only inside the frame**, and both exits
-//! close it. Two events per node instead of three, and no tombstone whose only purpose is to be
-//! named later.
+//! close it, both by appending. **Two events per successful node instead of three**, and no
+//! tombstone whose only purpose is to be named later; the failing exit costs one event more
+//! than the retro shape's unspent mark, on the path that is about to be discarded or refused.
 //!
 //! **Retro — every other impl.** [`Node`] as a [`TryParseInput`], [`node_at`] in both shapes,
 //! and [`node_opt`] mint an inert tombstone mark
@@ -27,22 +28,30 @@
 //! operator not yet read.
 //!
 //! Both shapes are the `labelled` finish-on-both-exits discipline made structural rather than
-//! dutiful, and on every non-success **return** — a decline or an `Err` — the two shapes leave
-//! the identical event buffer:
+//! dutiful, and on every non-success **return** — a decline or an `Err` — the two shapes
+//! **materialize identically**:
 //!
 //! - a **decline** leaves the tombstone unspent — no node, not even an empty one (the
 //!   optional-`Description` shape wants exactly this: see [`node_opt`]);
-//! - an **error-path unwind** (`?`-propagation out of the sub-parser) leaves an inert
-//!   tombstone — the retro bracket by never spending its mark, the up-front bracket by
-//!   demoting its start back to one — so there is no dangling `Start` for a later finish to
-//!   mispair with; the enclosing rollback, if any, truncates that slot with the rest of the
-//!   abandoned branch;
+//! - an **error-path unwind** (`?`-propagation out of the sub-parser) leaves nothing the tree
+//!   can see — the retro bracket by never spending its mark, the up-front bracket by appending
+//!   a demote event that materialization applies to its own start — so there is no dangling
+//!   `Start` for a later finish to mispair with; the enclosing rollback, if any, truncates
+//!   both the demote and the slot with the rest of the abandoned branch. The two buffers are
+//!   not byte-identical here (the up-front shape carries the demote event) and converge at
+//!   materialization, where the demoted slot becomes exactly the inert tombstone the retro
+//!   shape left;
 //! - a **success** wraps precisely the region recorded since entry. The buffers differ here
 //!   and always did — three events for the retro shape, two for the up-front one — and
 //!   converge only at materialization, which hoists a retro-wrap to its target and builds the
 //!   same tree from either;
 //! - a **panic** is the one non-success exit outside this equivalence, and the only one where
 //!   the two shapes' residues genuinely differ. See *The panic residue* below.
+//!
+//! Both of the up-front bracket's exits are **appends**, which is what makes the bracket
+//! answer a rollback the same way whichever exit it took: a session point rolled back into the
+//! window between `cst_start` and the exit truncates that exit and the node is open again,
+//! success and failure alike. One bracket, two exits, one rollback law.
 //!
 //! # The panic residue
 //!
@@ -92,14 +101,23 @@
 //! validates every spend — stale marks (a mark whose branch was rolled back) **panic in
 //! every build**, and a wrap that would cross another node's boundary is a typed
 //! materialization error, never a silently wrong tree. The up-front bracket's handback is
-//! validated on the same wall: a demote of a stale, foreign, already-**demoted** or
-//! wrong-kind mark panics in every build too, as does a demote naming the reserved tombstone
-//! kind. The one misuse that wall cannot see is a demote of a start whose node was already
-//! finished — the slot cannot witness a finish appended above it — and that one is caught at
-//! the misuse site in debug builds and refused at materialization in release, typed and
-//! through both doors; see
-//! [`cst_demote`](crate::emitter::CstEmitter::cst_demote) for why it can never be a silently
+//! validated on the same wall: a demote of a stale, foreign or wrong-kind mark panics in every
+//! build too, as does a demote naming the reserved tombstone kind. The misuses that wall
+//! cannot see are the two the *slot* cannot witness — a demote of a start already finished,
+//! and a second demote of one start, both of which sit above the slot as appended events —
+//! and both are caught at the misuse site in debug builds and refused at materialization in
+//! release, typed and through both doors; see
+//! [`cst_demote`](crate::emitter::CstEmitter::cst_demote) for why neither can be a silently
 //! wrong tree.
+//!
+//! The debug recount behind those two is *positional*, so it also fires on a third shape that
+//! is **not** a misuse: two raw brackets whose exits **interleave** — an enclosing start
+//! demoted while an inner one is still open. Release admits that order and materialises exactly
+//! the tree the innermost-first order builds, so **debug enforces innermost-first closings on
+//! the raw surface while release admits the out-of-order shape**. The heading above is why no
+//! grammar meets it: `node` and `node_opt` close inside their own frame, so their exits nest by
+//! construction and cannot interleave. It is reachable only by hand-rolling `cst_start` /
+//! `cst_demote` pairs, and there the fix is to emit the closings innermost-first.
 //!
 //! # Trivia lands inside
 //!

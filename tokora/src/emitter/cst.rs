@@ -67,9 +67,10 @@ use super::*;
 ///   [`cst_finish`](Self::cst_finish) on success, [`cst_demote`](Self::cst_demote) on
 ///   failure — the latter spending the mark `cst_start` handed back, which is why it hands
 ///   one back at all;
-/// - a **session point rolled back across a finished node** truncates the finish but not the
-///   start — legal, and reported by materialization as a leftover open, per the
-///   `begin_point` settle-your-points clause.
+/// - a **session point rolled back across a closed node** truncates the closing event but not
+///   the start — legal, and reported by materialization as a leftover open, per the
+///   `begin_point` settle-your-points clause. Both exits are appends, so this reads the same
+///   whichever one the bracket took: the rollback truncates it and the node is open again.
 ///
 /// # Identity by kind: what [`cst_finish`](Self::cst_finish)'s argument catches
 ///
@@ -99,8 +100,8 @@ pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// # The handback, and who needs it
   ///
   /// The returned mark exists for the **both-exits bracket**: `node(kind, p)` names the kind
-  /// up front and, when `p` returns `Err`, spends the mark on `cst_demote` so the opened slot
-  /// reverts to an inert tombstone. A caller that never fails — or that closes with
+  /// up front and, when `p` returns `Err`, spends the mark on `cst_demote`, which appends the
+  /// event that un-opens the slot. A caller that never fails — or that closes with
   /// `cst_finish` on every path — may discard it; an unspent start mark costs nothing beyond
   /// the open node it names, which the stream must still balance.
   ///
@@ -151,22 +152,31 @@ pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   }
 
   /// Un-opens the node [`cst_start`](Self::cst_start) appended at `mark`: the **failing
-  /// exit** of an up-front bracket, which reverts the slot to an inert tombstone so the
-  /// stream carries no dangling open node.
+  /// exit** of an up-front bracket, so the stream carries no dangling open node.
   ///
   /// `kind` is the kind the matching `cst_start` was given — the same identity-by-kind
-  /// argument [`cst_finish`](Self::cst_finish) takes, checked here at the emit site rather
-  /// than at materialization because the mark names the exact slot to check.
+  /// argument [`cst_finish`](Self::cst_finish) takes, checked here at the emit site because
+  /// the mark names the exact slot to check.
   ///
-  /// A demoted slot is indistinguishable from a never-spent [`cst_mark`](Self::cst_mark)
-  /// tombstone — the error path of the up-front bracket produces the byte-identical event
-  /// buffer the retro bracket's error path produces — so it materializes into nothing and
-  /// pairs with no finish. Indistinguishable is meant literally, and it cuts both ways: the
-  /// mark is *not* inert afterwards. It still names a live tombstone, so
-  /// [`cst_start_at`](Self::cst_start_at) will accept it, and that is coherent rather than a
-  /// gap — retro-wrapping the abandoned region under an error kind is exactly what recovery
-  /// tooling wants a failed bracket to leave behind. What the mark can no longer do is demote
-  /// again: the slot no longer holds a start of its kind.
+  /// # Append-only, like every other structural decision
+  ///
+  /// A recording sink **appends** an event naming the slot; it does not rewrite the slot. That
+  /// is what gives the bracket's two exits *one* rollback law. Both exits are appends, so a
+  /// rollback whose target lands between the start and the exit truncates the exit and the
+  /// open node returns — the truncate-and-reopen semantics the *session point rolled back
+  /// across a finished node* clause already blesses for `cst_finish`, now equally true of the
+  /// failing exit. An in-place rewrite would not truncate: the rollback would keep the slot
+  /// *and* the rewrite, and the node the restore contract promised was open again would be
+  /// silently gone from the tree.
+  ///
+  /// Materialization applies the demotion, so the abandoned node **materializes identically**
+  /// to a never-spent [`cst_mark`](Self::cst_mark) tombstone: into nothing, pairing with no
+  /// finish. The error paths of the two brackets converge there rather than in the buffer.
+  /// During the parse the slot still holds its real-kind `StartNode`, which has one visible
+  /// consequence: the mark is **not** a retro-wrap anchor afterwards —
+  /// [`cst_start_at`](Self::cst_start_at) refuses it at the tombstone wall, as it refuses any
+  /// start mark. Recovery tooling that wants to wrap an abandoned region takes its own
+  /// `cst_mark` (or the retro bracket) rather than reusing a spent start mark.
   ///
   /// # Panics
   ///
@@ -174,23 +184,37 @@ pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// bounds, era not invalidated by a later truncation, `kind` not the reserved
   /// [`TOMBSTONE`](crate::cst::event::TOMBSTONE), and the slot still holding a `StartNode` of
   /// exactly `kind` — and panics otherwise. This is the savepoint posture
-  /// [`cst_start_at`](Self::cst_start_at) already takes: a stale, foreign, wrong-kind or
-  /// already-**demoted** spend is a parser bug, and rewriting whatever else sits at that index
-  /// is the wrong-tree class nothing downstream can detect. The kind check is what makes a
-  /// `cst_mark` tombstone unspendable here, the mirror of `cst_start_at`'s tombstone wall
-  /// refusing a start mark; the reserved-kind check keeps that true even when the demote
-  /// *names* the tombstone kind, which no `cst_start` could ever have opened.
+  /// [`cst_start_at`](Self::cst_start_at) already takes: a stale, foreign or wrong-kind spend
+  /// is a parser bug, and naming whatever else sits at that index is the wrong-tree class
+  /// nothing downstream can detect. The kind check is what makes a `cst_mark` tombstone
+  /// unspendable here, the mirror of `cst_start_at`'s tombstone wall refusing a start mark;
+  /// the reserved-kind check keeps that true even when the demote *names* the tombstone kind,
+  /// which no `cst_start` could ever have opened.
   ///
-  /// One misuse is deliberately **not** an every-build panic: demoting a start whose node was
-  /// already **finished**. The slot cannot witness its own close — the finish is appended above
-  /// it — so proving it at the wall would put a scan on the failure path of every grammar. It
-  /// is caught at the two tiers this crate calibrates such checks to instead. A **debug** build
-  /// panics here, at the misuse site, on an exact recount of the events above the mark. A
-  /// **release** build refuses at materialization, typed: the demote removes one frame push and
-  /// no pop, so the replay walk underflows and answers `cst::FinishError::OrphanFinish` — or
-  /// `MismatchedFinish`, when kinds misalign first — through `Cst::finish` **and**
-  /// `Cst::finish_partial` alike, because they are one walk and the partial door relaxes
-  /// end-of-stream opens rather than balance. A silently wrong tree is not among the outcomes.
+  /// Two misuses are deliberately **not** every-build panics, and for one reason: the slot is
+  /// unchanged by a demote, so it cannot witness that it has already been closed. Demoting a
+  /// start whose node was already **finished**, and demoting the same start **twice**, both
+  /// pass the wall in a release build; proving either at the wall would put a scan on the
+  /// failure path of every grammar. They are caught at the two tiers this crate calibrates such
+  /// checks to. A **debug** build panics here, at the misuse site, on an exact recount of the
+  /// events above the mark — a surviving finish and a prior demote are both `−1` there. A
+  /// **release** build refuses at materialization, typed, through `Cst::finish` **and**
+  /// `Cst::finish_partial` alike: `cst::FinishError::OrphanFinish` (or `MismatchedFinish`, when
+  /// kinds misalign first) for the finished-then-demoted residue, whose pops exceed its pushes;
+  /// `cst::FinishError::StaleDemote` for the double demote, refused by the canonicalization
+  /// pass when the second event finds a target the first already tombstoned. A silently wrong
+  /// tree is not among the outcomes.
+  ///
+  /// That debug recount is positional, so it fires on a **third** shape too, and this one is
+  /// not a misuse: demoting a start while a `Demote` of an **enclosing** start already sits
+  /// above it — two brackets whose exits **interleave** instead of nesting. Release admits that
+  /// order and materialises exactly the tree the innermost-first order builds, because
+  /// canonicalization tombstones both slots either way. So the debug tier is deliberately
+  /// **stricter** than the contract: **debug enforces innermost-first closings on this raw
+  /// surface; release admits the out-of-order shape and materialises the same tree.** A grammar
+  /// cannot trip it — `node(kind, p)` mints and spends its mark inside one call frame, so
+  /// nested brackets close last-in-first-out structurally — and a raw caller that hits it
+  /// should emit the two closings innermost-first.
   #[inline(always)]
   fn cst_demote(&mut self, mark: EventMark, kind: u16)
   where

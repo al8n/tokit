@@ -20,7 +20,7 @@ use tokora::{
   emitter::Verbose,
   error::token::UnexpectedToken,
   parser::{
-    PrattFoldOp, PrattInfix, PrattLHS, PrattRHS, Precedenced, node, node_at, node_opt, pratt,
+    Empty, PrattFoldOp, PrattInfix, PrattLHS, PrattRHS, Precedenced, node, node_at, node_opt, pratt,
   },
   try_parse_input::ParseAttempt,
 };
@@ -987,5 +987,204 @@ fn an_orphan_view_wrapper_carries_a_foreign_lexer_error_but_licenses_no_gap() {
     emitter.errors().len(),
     1,
     "the foreign diagnostic still arrived: the channel is forwarded, not severed"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// The up-front bracket under a session point: one bracket, two exits, one rollback law
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The sink suite holds these three laws at the event level. Here they are through the PUBLIC
+// surface only, because that is where the adversarial finding lived: `EventMark` is a
+// deliberately unbranded `Copy` POD (a pratt driver holds one across arbitrarily many folds),
+// so the raw bracket — `ParseState::cst_start` / `cst_demote` — composes freely with session
+// points, which are public and non-lexical by design. A driver can therefore roll back INTO a
+// bracket's own window, and both exits have to answer that the same way.
+
+/// **The reachability pin that decided the remedy.** A live emitter row can sit ABOVE an
+/// up-front bracket's slot at demote time, on a fully supported and completely harmless
+/// history: the inner parser opens a session point and `?`-fails out without settling it —
+/// the documented-legal abandonment shape, whose bookkeeping the handle's drop reclaims.
+///
+/// This is why the two cheap remedies were rejected. "Refuse the demote when a live row sits
+/// above the slot" would panic *here*, on code that ends with a correct tree and never rewinds
+/// into the window at all.
+#[test]
+fn a_live_point_above_the_slot_at_demote_time_is_a_legal_and_harmless_history() {
+  let (res, green) = run("ab", |inp| {
+    let r: Result<(), TestErr> = node(K_NODE, |ii: &mut Ir<'_, '_>| {
+      // Supported public API, abandoned by the early return below, exactly as the session
+      // docs bless. Its emitter row is live — and above the bracket's slot — when the Err arm
+      // demotes.
+      let _abandoned = ii.begin_point();
+      take_one(ii)?; // consumes 'a' through the open point (progress: kept)
+      Err(TestErr::Boom)
+    })
+    .parse_input(inp);
+    assert_eq!(r, Err(TestErr::Boom), "the bracket failed and demoted");
+    // No rollback anywhere: the driver accepts the kept progress and parses on.
+    take_one(inp) // consumes 'b'
+  });
+  assert_eq!(res, Ok(()));
+  let green = green.expect("a completely lawful parse: finish succeeds");
+  let root = tree(green);
+  assert_eq!(root.text(), "ab");
+  assert!(
+    root.children().all(|c| c.kind() != K_NODE),
+    "the failed bracket correctly leaves no node"
+  );
+}
+
+/// **The finding, inverted, at the public surface.** The raw bracket takes its FAILING exit
+/// below a session point, and the driver then rolls back into the window. Every documented duty
+/// is upheld — the bracket takes exactly one closing exit, and the point settles newest-first —
+/// so `restore`'s contract ("the buffer as it was when the mark was captured") says the node is
+/// open again and `finish` must refuse `UnclosedNodes`.
+///
+/// It now does. Under the eager in-place rewrite this same drive returned a *tree* with the node
+/// silently gone: the rollback discarded the demote's own evidence but kept its effect, leaving
+/// a balanced buffer with one fewer node than the checkpoint promised, undetectable by anything
+/// downstream.
+#[test]
+fn raw_bracket_failing_exit_below_a_point_is_exactly_restored_by_the_rollback() {
+  let (res, green) = run("ab", |inp| {
+    let m_cell = core::cell::Cell::new(None);
+    // 1. Open the bracket through the public raw surface.
+    Empty::new()
+      .map_with(|_o, mut st| m_cell.set(Some(st.cst_start(K_NODE))))
+      .parse_input(inp)?;
+    // 2. A session point ABOVE the slot.
+    let id = inp.begin_point();
+    // 3. Content.
+    take_one(inp)?; // 'a'
+    // 4. The failing exit, below the point.
+    Empty::new()
+      .map_with(|_o, mut st| st.cst_demote(m_cell.get().expect("stashed"), K_NODE))
+      .parse_input(inp)?;
+    // 5. Roll back INTO the (slot, demote] window.
+    inp.rollback_point(id);
+    // 6. Continue; per the restore law the node is open again.
+    take_one(inp)?; // 'a'
+    take_one(inp) // 'b'
+  });
+  assert_eq!(res, Ok(()));
+  let err = green.expect_err("typed: the reopened node is correctly reported open");
+  assert!(
+    matches!(err, FinishError::UnclosedNodes { .. }),
+    "unexpected refusal shape: {err:?}"
+  );
+}
+
+/// The SUCCESS exit under the IDENTICAL drive — one line differs from the cell above, and the
+/// two now answer identically. This is the precedent the failing exit was made to match: the
+/// finish is an append, the rollback truncates it, the node is open again, and `finish` gives
+/// the typed refusal the law promises.
+#[test]
+fn raw_bracket_success_exit_below_a_point_is_exactly_restored_by_the_rollback() {
+  let (res, green) = run("ab", |inp| {
+    let m_cell = core::cell::Cell::new(None);
+    Empty::new()
+      .map_with(|_o, mut st| m_cell.set(Some(st.cst_start(K_NODE))))
+      .parse_input(inp)?;
+    let id = inp.begin_point();
+    take_one(inp)?; // 'a'
+    // The SUCCESS exit, below the point.
+    Empty::new()
+      .map_with(|_o, mut st| st.cst_finish(K_NODE))
+      .parse_input(inp)?;
+    inp.rollback_point(id);
+    take_one(inp)?; // 'a'
+    take_one(inp) // 'b'
+  });
+  assert_eq!(res, Ok(()));
+  let err = green.expect_err("typed: the reopened node is correctly reported open");
+  assert!(
+    matches!(err, FinishError::UnclosedNodes { .. }),
+    "unexpected refusal shape: {err:?}"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Two raw brackets: innermost-first closings are the contract, and debug says so
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// `node()` mints and spends its mark inside one call frame, so its exits nest structurally and
+// a grammar can never reach the shape below. The raw surface can: `cst_start` hands back a
+// `Copy` mark, so two brackets' closings can be emitted in either order. These two cells pin
+// which order the surface asks for and what the other one costs.
+
+/// The **interleaved** order — the enclosing start demoted while the inner one is still open —
+/// is refused at the emit site in a debug build. The dip is positional: the ancestor's `Demote`
+/// sits above the inner slot with its paired `+1` *below* it, so the inner node was closed by
+/// nothing.
+///
+/// This is a strictness choice rather than early detection: release admits the same order and
+/// materialises the identical both-abandoned tree, which
+/// `interleaved_and_innermost_first_demotes_materialize_the_same_tree` in the sink suite pins
+/// directly. The cell exists so the *emit-site* half of that statement is checked too, and it
+/// drives the raw surface the way a caller would.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "closings INTERLEAVE instead of nesting")]
+fn raw_interleaved_bracket_exits_panic_in_debug() {
+  let _ = run("ab", |inp| {
+    let outer = core::cell::Cell::new(None);
+    let inner = core::cell::Cell::new(None);
+    Empty::new()
+      .map_with(|_o, mut st| outer.set(Some(st.cst_start(K_NODE))))
+      .parse_input(inp)?;
+    Empty::new()
+      .map_with(|_o, mut st| inner.set(Some(st.cst_start(K_INNER))))
+      .parse_input(inp)?;
+    take_one(inp)?; // 'a', inside both
+    // The ENCLOSING bracket's failing exit, emitted while the inner node is still open.
+    Empty::new()
+      .map_with(|_o, mut st| st.cst_demote(outer.get().expect("stashed"), K_NODE))
+      .parse_input(inp)?;
+    // …and now the inner one. Its slot is untouched and passes every content check; only the
+    // suffix recount sees that an ancestor already closed out from under it.
+    Empty::new()
+      .map_with(|_o, mut st| st.cst_demote(inner.get().expect("stashed"), K_INNER))
+      .parse_input(inp)?;
+    take_one(inp) // 'b'
+  });
+}
+
+/// The **innermost-first** order under the identical drive — one pair of lines swapped — is
+/// admitted in every build, and both brackets abandon: no node at all, and the two tokens land
+/// loose in the root with losslessness intact.
+#[test]
+fn raw_innermost_first_bracket_exits_are_admitted_and_abandon_both() {
+  let (res, green) = run("ab", |inp| {
+    let outer = core::cell::Cell::new(None);
+    let inner = core::cell::Cell::new(None);
+    Empty::new()
+      .map_with(|_o, mut st| outer.set(Some(st.cst_start(K_NODE))))
+      .parse_input(inp)?;
+    Empty::new()
+      .map_with(|_o, mut st| inner.set(Some(st.cst_start(K_INNER))))
+      .parse_input(inp)?;
+    take_one(inp)?; // 'a', inside both
+    Empty::new()
+      .map_with(|_o, mut st| st.cst_demote(inner.get().expect("stashed"), K_INNER))
+      .parse_input(inp)?;
+    Empty::new()
+      .map_with(|_o, mut st| st.cst_demote(outer.get().expect("stashed"), K_NODE))
+      .parse_input(inp)?;
+    take_one(inp) // 'b'
+  });
+  assert_eq!(res, Ok(()));
+  let green = green.expect("innermost-first closings are the contract, in every build");
+  let root = tree(green);
+  assert_eq!(root.text(), "ab", "losslessness holds");
+  assert_eq!(
+    root.children().count(),
+    0,
+    "both brackets took their failing exit: neither node materializes"
+  );
+  assert_eq!(
+    root.children_with_tokens().count(),
+    2,
+    "the two tokens are loose in the root"
   );
 }

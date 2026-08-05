@@ -92,6 +92,28 @@ pub enum FinishError {
     target: u64,
   },
 
+  /// A `Demote`'s target is not a live, un-demoted `StartNode` — out of bounds, a slot
+  /// holding some other event, a `cst_mark` tombstone, or a slot a **prior** `Demote` already
+  /// claimed.
+  ///
+  /// The last of those is the one a caller can actually reach: `cst_demote` appends rather
+  /// than rewrites, so the slot cannot witness an earlier demote of itself and the emission
+  /// wall cannot refuse a **double demote** in a release build. It is refused here instead,
+  /// by the canonicalization pass — the release half of the two-tier calibration whose
+  /// at-cause half is `cst_demote`'s debug suffix scan (the prior `Demote`'s −1 dips the
+  /// running sum). Both materialization doors refuse: canonicalization runs before the walk,
+  /// and `finish_partial` tolerates incompleteness, not a corrupt stream.
+  #[error(
+    "demote event at index {index} targets {target}, which is not a live open node start (a \
+     double demote, or a target that is not this bracket's own start)"
+  )]
+  StaleDemote {
+    /// The buffer index of the `Demote` event.
+    index: u64,
+    /// The target it names.
+    target: u64,
+  },
+
   /// A tombstone's `forward_parent` pointer does not name a `StartAt` targeting it — the
   /// dangling-pointer shape of an abandoned wrap that escaped the undo journal. With the
   /// journal reverse-replayed on every rewind this is unreachable; it is checked anyway,
@@ -426,12 +448,30 @@ where
       );
     }
 
-    let events = self.events;
+    let mut events = self.events;
+    let has_demotes = self.demotes;
     let profile = self.profile;
     let inner = self.inner;
     // TriviaPolicy::AsEmitted is the only variant today: the replay below IS that policy
     // (tokens land in whichever node is open at their buffer position).
     let TriviaPolicy::AsEmitted = self.trivia;
+
+    // The canonicalization pass, and the one place an interior kind write is unconditionally
+    // safe: the sink has been consumed, so no `EventMark` and no checkpoint row can still be
+    // live, and nothing can observe the buffer between here and the walk.
+    //
+    // The latch keeps the pass off a parse that never took a failing bracket exit — which is
+    // EVERY parse of a predictive grammar, and is measured rather than assumed. The latch can
+    // only ever be over-set (see `Sink::demotes`), so skipping here provably skips a pass with
+    // nothing to do; the assert holds that direction rather than trusting it.
+    debug_assert!(
+      has_demotes || !events.iter().any(|ev| matches!(ev, Event::Demote { .. })),
+      "the demote latch was clear over a buffer holding a Demote: canonicalization would be \
+       skipped and an abandoned node would materialize"
+    );
+    if has_demotes && let Err(err) = canonicalize_demotes(&mut events) {
+      return (Err(err), inner);
+    }
 
     // The source is the one the sink was constructed with, so the spans and the text they
     // slice can never come from different buffers. A byte-backed source validates here, once,
@@ -451,6 +491,63 @@ where
     };
     (result, inner)
   }
+}
+
+/// Applies every surviving [`Event::Demote`] to its target, turning the abandoned node's
+/// `StartNode` into the inert tombstone an unspent `cst_mark` would have left — the one pass
+/// that makes the failing exit's *appended* event equivalent to the eager rewrite it replaced.
+///
+/// # Why here, and why it is not the banned interior write
+///
+/// The law forbids rewriting an earlier slot **during the parse**, because a truncation that
+/// erases the deciding branch does not erase the slot the decision was written on. This pass
+/// runs on the buffer `materialize` **owns**: the sink is consumed, every `EventMark` is
+/// unspendable, every checkpoint row is gone, and no rewind can follow. It is the same bucket
+/// the hole wrap's floored splice sits in — "provably beyond every live mark" — made absolute
+/// rather than argued.
+///
+/// # What it refuses
+///
+/// A `Demote` whose target is not a live, un-demoted `StartNode`. Through the validated
+/// emission surface exactly one shape reaches that: a **double demote**, whose second event
+/// finds the slot its predecessor already tombstoned. `cst_demote` cannot refuse it in a
+/// release build — appending leaves the slot unchanged, so the emission wall has nothing to
+/// read — so this is the release half of that misuse's two-tier calibration (the debug half is
+/// `cst_demote`'s own suffix scan, where the prior `Demote`'s −1 dips the running sum). Every
+/// other shape — an out-of-range target, a target holding a token, a `cst_mark` tombstone, a
+/// real-kind start carrying a `forward_parent` — is unreachable through the emission walls and
+/// refused here as the backstop for the raw in-crate injection hook.
+///
+/// # Cost
+///
+/// One linear pass over the owned buffer with a single well-predicted branch per event, ahead
+/// of a walk that reads the same events again. It is deliberately **not** ticked into the
+/// [`W`](w) instrument: `W`'s obligation is over [`replay`] and its helpers, and folding an
+/// out-of-walk pass into that counter would move its bounds for a reason unrelated to the
+/// walk's own shape. It is linear by construction and stated here instead.
+fn canonicalize_demotes<S>(events: &mut [Event<S>]) -> Result<(), FinishError> {
+  for index in 0..events.len() {
+    // `target` is a `Copy` scalar, so this read releases its borrow before the write below.
+    let Event::Demote { target } = events[index] else {
+      continue;
+    };
+    // A `forward_parent` on the target is refused with the rest: only `cst_start_at` writes
+    // that field and its wall demands a tombstone, so a real-kind start can never carry one —
+    // and a tombstoned target that does is a slot this demote does not own.
+    match events.get_mut(target as usize) {
+      Some(Event::StartNode {
+        kind,
+        forward_parent: None,
+      }) if *kind != TOMBSTONE => *kind = TOMBSTONE,
+      _ => {
+        return Err(FinishError::StaleDemote {
+          index: index as u64,
+          target,
+        });
+      }
+    }
+  }
+  Ok(())
 }
 
 /// Converts one span endpoint, mapping failures to the event's typed error.
@@ -952,6 +1049,14 @@ where
           return Err(FinishError::DanglingForwardParent { index: *target });
         }
       }
+      // Structural silence, exactly like an unwrapped tombstone or a `StartAt` declaration:
+      // canonicalization has already applied this event to its target (and refused it if the
+      // target was not the demote's own live start), so the slot it names is a tombstone the
+      // walk will skip or has already skipped. It deliberately does NOT force a pending gap
+      // tile — it touches the builder not at all, so the run still belongs to the node the
+      // trailing token settled in, which is the placement the eager in-place demote produced
+      // by emitting no event whatsoever. That equality is what keeps the corpus hashes exact.
+      Event::Demote { .. } => {}
       Event::Diag {
         error_span: Some(span),
       } => {
