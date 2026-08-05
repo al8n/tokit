@@ -3621,6 +3621,23 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    a non-empty cache instead of never.
    — *(#180)*
 
+70. **`clear()` and `span()` had the same one-shot blind spot in the cache conformance kit, in
+   two different shapes.** `check_clear` filled a cache, cleared it, asserted the check-1
+   invariants, and never touched it again — so a `clear` that empties the cache and also
+   **permanently disables it** (refuses every push afterward, with capacity to spare) passed
+   exactly like one that only empties it. It now refills the cleared cache with `cap` fresh
+   pushes and checks the refill against check 3's oracle. Separately, `assert_empty`'s own pop
+   probe called `pop_front`/`pop_back` on a throwaway `C::new()` rather than on the cache
+   `check_clear` had just emptied, so neither call site actually asked the CACHE UNDER TEST
+   whether its own pops still answered; `assert_empty` now takes that cache by `&mut` and probes
+   it directly.
+
+   `check_span` called `span()` exactly once, immediately after a fresh fill — a residency at
+   which `span()` cannot yet be stale, so a `span` that is correct there and never updated after
+   a `pop_back` passed unnoticed. It now sweeps every residency `peek`'s check already sweeps:
+   full, and partially drained from both the front and the back.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,
