@@ -863,6 +863,237 @@ fn hole_wrap_rewinds_with_the_log() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// #177 — the wrap start is FLOORED at the youngest positional fact
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// `wrap_hole` splices with `insert`, so every index at or above the wrap start shifts by
+// one — and checkpoint marks ARE event-buffer indices. A splice below a live mark renames
+// it, and the rewind that follows tears the `Start`/`Finish` pair apart. None of these four
+// cells is gated on `debug_assertions`, in either direction: the whole point of the floor is
+// that it is a structural bound present in every build, so every one of them must hold
+// identically in debug and in release. (Before the floor, the first cell PASSED in release
+// while asserting a corrupt log and PANICKED in debug — the exact profile divergence #160
+// set out to eliminate.)
+
+/// The reported condition, inverted. A caller-chosen span reaches back over a token
+/// committed before a live checkpoint; the wrap start is floored at the mark, so the rewind
+/// restores the pre-checkpoint log **exactly** instead of leaving an orphan error start
+/// where a committed token used to be.
+#[test]
+fn hole_wrap_floors_at_the_youngest_live_row() {
+  let mut sink = verbose_sink("a j");
+  sink.record_token(&MiniTok(b'a'), &span(0, 1)); // idx 0 — committed
+  sink.record_token(&MiniTok(b' '), &span(1, 2)); // idx 1 — committed trivia
+  let before = sink.events().to_vec();
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // mark 2
+  sink.record_token(&MiniTok(b'j'), &span(2, 3)); // idx 2 — the junk this transaction skipped
+
+  // The span widens BACKWARD over the already-committed trivia at idx 1 — the shape an
+  // IDE-facing recoverer produces when it reports "everything from the whitespace onward".
+  Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(1, 3), 1).expect("collects");
+
+  assert_eq!(
+    sink.events(),
+    &[
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(1, 2)
+      },
+      Event::StartNode {
+        kind: K_ERR,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(2, 3)
+      },
+      Event::FinishNode { kind: K_ERR },
+      Event::Diag { error_span: None },
+    ],
+    "the wrap starts AT the mark, not below it: the committed trivia stays outside"
+  );
+
+  rewind(&mut sink, ckp);
+  assert_eq!(
+    sink.events(),
+    &before[..],
+    "rewind is exact — before the floor this left `[T_a, StartNode(K_ERR)]`, a committed \
+     token replaced by an unbalanced error start"
+  );
+}
+
+/// Suffix discipline is untouched: when the span covers only tokens this transaction
+/// settled, the floor is not the binding constraint and the whole hole is wrapped. This is
+/// the shape every in-crate `sync_balanced` recovery produces.
+#[test]
+fn hole_wrap_covers_a_post_checkpoint_hole_whole() {
+  let mut sink = verbose_sink("xyab");
+  sink.record_token(&MiniTok(b'x'), &span(0, 1)); // idx 0
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // mark 1 — the floor
+  sink.record_token(&MiniTok(b'y'), &span(1, 2)); // idx 1 — settled, outside the hole
+  sink.record_token(&MiniTok(b'a'), &span(2, 3)); // idx 2 — the hole
+  sink.record_token(&MiniTok(b'b'), &span(3, 4)); // idx 3 — the hole
+
+  Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(2, 4), 2).expect("collects");
+
+  assert_eq!(
+    sink.events(),
+    &[
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(1, 2)
+      },
+      Event::StartNode {
+        kind: K_ERR,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(2, 3)
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(3, 4)
+      },
+      Event::FinishNode { kind: K_ERR },
+      Event::Diag { error_span: None },
+    ],
+    "wrap start 2 sits strictly above the floor 1 — the span's own reach binds, not the floor"
+  );
+  let _ = ckp;
+}
+
+/// No capture at all: the floor is 0 and the wrap may start at the very first event, which
+/// is what an unguarded top-level recovery has always done.
+#[test]
+fn hole_wrap_with_no_rows_floors_at_zero() {
+  let mut sink = verbose_sink("ab");
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+
+  Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(0, 2), 2).expect("collects");
+
+  assert_eq!(
+    sink.events(),
+    &[
+      Event::StartNode {
+        kind: K_ERR,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(1, 2)
+      },
+      Event::FinishNode { kind: K_ERR },
+      Event::Diag { error_span: None },
+    ],
+    "an empty mark stack floors at 0 — the whole buffer is wrappable"
+  );
+}
+
+/// The boundary itself: the wrap starts at exactly the mark index. A row with `mark == at`
+/// names the prefix `0..at`, which an insert *at* `at` leaves byte-for-byte alone — so the
+/// rewind is still exact at the tightest legal splice point.
+#[test]
+fn hole_wrap_at_the_floor_boundary_rewinds_exactly() {
+  let mut sink = verbose_sink("ab");
+  sink.record_token(&MiniTok(b'a'), &span(0, 1)); // idx 0
+  let before = sink.events().to_vec();
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // mark 1 == the eventual wrap start
+  sink.record_token(&MiniTok(b'b'), &span(1, 2)); // idx 1
+
+  Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(1, 2), 1).expect("collects");
+
+  assert_eq!(
+    sink.events(),
+    &[
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+      Event::StartNode {
+        kind: K_ERR,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(1, 2)
+      },
+      Event::FinishNode { kind: K_ERR },
+      Event::Diag { error_span: None },
+    ],
+    "at == floor == 1: the splice lands exactly on the mark"
+  );
+
+  rewind(&mut sink, ckp);
+  assert_eq!(
+    sink.events(),
+    &before[..],
+    "rewind to a mark the splice sat on is still exact"
+  );
+}
+
+/// The floor's second term. `release` promotes a committed row to `Sink::floor`, and that
+/// memo can sit **above** the innermost live row — so a floor read off `rows.last()` alone
+/// would still let the splice cross a frozen `(mark, depth)` prefix. Nothing tears, but the
+/// depth memo goes stale: `derived_depth` keeps summing from a prefix that no longer holds
+/// the events it was frozen over, and `cst_finish`'s global-underflow check then fires on a
+/// buffer whose node genuinely is open.
+#[test]
+fn hole_wrap_floors_at_the_released_floor_too() {
+  let mut sink = verbose_sink("abcde");
+  sink.cst_start(K_NODE); // idx 0 — depth +1, still open at the end
+  sink.record_token(&MiniTok(b'a'), &span(0, 1)); // idx 1
+  let outer = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // mark 2 — stays live
+  let before = sink.events().to_vec();
+  sink.record_token(&MiniTok(b'b'), &span(1, 2)); // idx 2
+  sink.record_token(&MiniTok(b'c'), &span(2, 3)); // idx 3
+  sink.record_token(&MiniTok(b'd'), &span(3, 4)); // idx 4
+  let inner = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // mark 5
+  Emitter::<MiniLexer<'_>>::release(&mut sink, inner); // committed → Sink::floor = mark 5
+  sink.record_token(&MiniTok(b'e'), &span(4, 5)); // idx 5
+
+  // Reaches down to idx 3: at or above `rows.last()` (mark 2), below the released floor (5).
+  Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(2, 5), 3).expect("collects");
+
+  assert_eq!(
+    sink.events().len(),
+    9,
+    "start, four tokens, the wrap's start, the junk token, the wrap's finish, the Diag"
+  );
+  assert_eq!(
+    sink.events()[5],
+    Event::StartNode {
+      kind: K_ERR,
+      forward_parent: None
+    },
+    "the wrap starts at the RELEASED floor (5), not at the live row (2)"
+  );
+
+  // Would panic with "global underflow" on a staled memo — K_NODE is open, depth is 1.
+  sink.cst_finish(K_NODE);
+
+  rewind(&mut sink, outer);
+  assert_eq!(
+    sink.events(),
+    &before[..],
+    "the surviving live row rewinds exactly"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // The &mut threading shape — events flow through the blanket impl
 // ═══════════════════════════════════════════════════════════════════════════════
 

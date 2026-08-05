@@ -699,16 +699,69 @@ where
   /// The hole wrap: brackets the already-buffered token events of a recovery hole in a
   /// `Start(error_kind) … Finish` pair at the recovery site.
   ///
-  /// The hole's tokens are the buffer's suffix by construction (they settled during the
-  /// scan, after every live mark was captured, and the scanner runs no user code), so the
-  /// wrap is a prefix-preserving splice: one insert at the first hole token, one appended
-  /// finish. Interleaved `Diag` slots (lexer errors crossed while skipping) ride inside
-  /// the wrap unchanged — they are invisible to materialization. If no buffered token
-  /// event lies inside the hole span (no auto-emission configured, or a direct call),
-  /// there is nothing to wrap and no node is made.
+  /// The wrap is a **prefix-preserving** splice — one insert at the first wrapped token, one
+  /// appended finish — and it stays prefix-preserving because the backward scan is *floored*
+  /// at the youngest positional fact the sink holds, not because the caller's span is trusted
+  /// to sit above it. See the floor note in the body for what the floor is and why it is a
+  /// bound rather than an assertion. Interleaved `Diag` slots (lexer errors crossed while
+  /// skipping) ride inside the wrap unchanged — they are invisible to materialization. If no
+  /// buffered token event lies inside the hole span at or above the floor (no auto-emission
+  /// configured, a direct call, or a caller span that reaches only below the floor), there is
+  /// nothing to wrap and no node is made.
+  ///
+  /// The floor bounds the wrap's **structural** authority only. A caller-chosen span wider
+  /// than the caller's own transaction still reaches the diagnostic channel verbatim and
+  /// unchanged; only the `error_kind` node it induces is narrowed, to the tokens that settled
+  /// within the transaction reporting the hole.
   fn wrap_hole(&mut self, span: &L::Span) {
+    // ── THE SCAN FLOOR — the wrap start is BOUNDED, never merely asserted ──────────────
+    //
+    // The splice below is an `insert`, so every index at or above it shifts by one, and the
+    // sink's own bookkeeping is **positional**: a checkpoint mark IS an event-buffer length,
+    // the released-floor memo freezes a `(mark, depth)` pair over a prefix, and the undo
+    // journal names indices. A splice below any of them renames it. The journal is fixed up
+    // explicitly at the end of this method; the other two are made unreachable here, by
+    // construction, and that asymmetry is forced rather than a preference: the splice would
+    // put the `Start` below a mark and its `Finish` above it, so EVERY truncation point
+    // between them tears the pair. No row arithmetic repairs that — a `+1` fixup just makes
+    // the rewind keep an orphan `Start`. The start has to be bounded before the fact.
+    //
+    // `rows` is sorted non-decreasing (rows are pushed at the then-current length and every
+    // truncation pops the rows above it), so `last()` is the youngest LIVE capture.
+    // `self.floor` is a COMMITTED row that `release` promoted, and it can sit **above**
+    // `rows.last()` — a guard opened above an older live capture and then committed leaves
+    // exactly that shape — so the floor is the max of the two, not the row stack alone.
+    // Dropping the `self.floor` term stales the depth memo instead of the row: `derived_depth`
+    // would go on adding the deltas above a mark whose prefix no longer holds the events it
+    // was frozen over, and `cst_finish`'s global-underflow check then fires on a buffer whose
+    // node really is open.
+    //
+    // In-crate this costs nothing. `sync_balanced` is the only in-crate producer of an
+    // `emit_skipped_region` call, and its span covers exactly the tokens its own scan just
+    // settled — those postdate every capture, live or released — so `at >= floor` already
+    // held for it and the floor never narrows a recovery this crate drives. The floor governs
+    // the PUBLIC door (`InputRef`/`EmitterView`/`ParseState::emit_skipped_region`), whose span
+    // is the caller's own and is under no such discipline: a recoverer that widens its
+    // reported span backward over already-committed tokens gets the wrap narrowed to its own
+    // transaction, and the report itself forwarded untouched.
+    //
+    // `EventMark`s need no term of their own here — but ONLY because `cst_mark`
+    // *materializes* a tombstone `StartNode` and this scan breaks on any structural event, so
+    // `at` is always above every tombstone and every `StartAt` target. **If a future design
+    // ever de-materialises marks — hands out an index with no event standing behind it — that
+    // immunity is gone and the floor must be extended to cover them.**
+    let floor = self
+      .rows
+      .borrow()
+      .last()
+      .map_or(0, |row| row.mark)
+      .max(self.floor.mark) as usize;
+
     let mut wrap_start: Option<usize> = None;
     for (idx, ev) in self.events.iter().enumerate().rev() {
+      if idx < floor {
+        break;
+      }
       match ev {
         Event::Diag { .. } => continue,
         Event::Token { span: s, .. }
@@ -719,21 +772,10 @@ where
         _ => break,
       }
     }
+    // `at >= floor` by construction — the loop never looks below it.
     let Some(at) = wrap_start else {
       return;
     };
-
-    // The splice preserves every prefix a live mark can name: the first hole token
-    // postdates every live capture (scan discipline), so nothing below `at` moves.
-    debug_assert!(
-      self
-        .rows
-        .borrow()
-        .last()
-        .is_none_or(|row| row.mark <= at as u64),
-      "hole wrap would splice below a live checkpoint mark; the scan discipline \
-       guarantees the hole's tokens postdate every live capture"
-    );
 
     let error_kind = self.profile.error_kind();
     self.events.insert(
@@ -746,8 +788,9 @@ where
     self.events.push(Event::FinishNode { kind: error_kind });
 
     // Keep the undo journal exact across the splice: positions at or above the insert point
-    // shift by one. (Journal entries cannot reference the spliced region — marks and their
-    // tombstones all predate the scan — but the bump is exact anyway.)
+    // shift by one. (Journal entries cannot reference the spliced region — every entry names
+    // a tombstone or a `StartAt`, both structural events the scan breaks on, so all of them
+    // sit strictly below `at` — but the bump is exact anyway.)
     for entry in &mut self.journal {
       if entry.at_len > at as u64 {
         entry.at_len += 1;
@@ -925,6 +968,15 @@ where
   /// Wraps the hole's already-buffered token events in an `error_kind` node at the
   /// recovery site (empty holes and token-less holes produce no node), then forwards the
   /// one-per-hole diagnostic to the inner emitter through the census helper.
+  ///
+  /// **Span semantics.** The wrap brackets only those hole tokens that settled *within the
+  /// transaction reporting the hole* — the buffered tokens at or above the youngest live
+  /// checkpoint. A `span` reaching back over tokens committed before that checkpoint reaches
+  /// the diagnostic channel unchanged, but exerts no structural authority over them: the
+  /// `error_kind` node stops at the transaction boundary. Checkpoint marks are event-buffer
+  /// positions, and a node spliced beneath one would rename it, so `wrap_hole`'s backward scan
+  /// is floored. This costs the crate's own recovery nothing (the scan's span never reaches
+  /// below a live capture); it bounds a caller running its own recovery loop.
   fn emit_skipped_region(&mut self, span: L::Span, skipped: usize) -> Result<(), Self::Error>
   where
     L: Lexer<'inp>,

@@ -263,6 +263,13 @@ where
   }
 
   /// Emits a recovery-hole note — [`Emitter::emit_skipped_region`], forwarded.
+  ///
+  /// **Span semantics.** Under a CST sink this call also has a structural effect: the hole's
+  /// buffered tokens are bracketed in an error node, and that bracket covers only the hole
+  /// tokens that settled **within the transaction reporting the hole** — at or above the
+  /// youngest live checkpoint. A wider `span` still reaches the diagnostic channel verbatim;
+  /// it exerts no structural authority over tokens committed before that checkpoint, because
+  /// checkpoint marks are event-log positions and a node spliced beneath one would rename it.
   #[inline(always)]
   pub fn emit_skipped_region(&mut self, span: L::Span, skipped: usize) -> Result<(), E::Error> {
     self.emitter.emit_skipped_region(span, skipped)

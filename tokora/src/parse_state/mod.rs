@@ -155,6 +155,11 @@ where
 
   /// Emits a recovery-hole note —
   /// [`Emitter::emit_skipped_region`](crate::Emitter::emit_skipped_region), forwarded.
+  ///
+  /// **Span semantics.** Under a CST sink the error node this induces covers only the hole
+  /// tokens that settled **within the transaction reporting the hole** — at or above the
+  /// youngest live checkpoint. A wider `span` reaches the diagnostic channel verbatim and is
+  /// structurally inert below that boundary; see the trait method for why.
   #[inline(always)]
   pub fn emit_skipped_region(
     &mut self,
