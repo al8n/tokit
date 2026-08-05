@@ -65,6 +65,83 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   write is for the sites where the gate and the item are apart — the re-exports of a gated
   module's contents above all, where the label has to name the gate on the `pub use`.
 
+- **The cache conformance kit now certifies whole cached *entries*, not spans — so a cache that
+  certified under 0.8.0 can go red under 0.9.0, and that red is the kit seeing more, not a kit
+  regression.** Every oracle in `tokora::conformance::cache` used to compare `L::Span` and
+  nothing else: `front`, `back`, `pop_front`, `pop_back`, `peek`, `peek_one`, the token a refused
+  push hands back, `push_many`'s overflow and the entry a `pop_front_if` predicate is given were
+  all read through a projection that discarded the token and the `L::State`. A cache that
+  returned the right spans while permuting or corrupting what sat beside them passed every check,
+  in full — and 0.8.0 said so, in the kit's own *what it deliberately does not check* section.
+
+  That was not a cosmetic hole. `L::State` is the half the input layer restores a lexer **from**:
+  `InputRef::resume` reads the newest retained entry, clones its state and rebuilds the lexer with
+  `Lexer::with_state` + `bump`, and the rollback path reads the same field off the entries
+  `pop_back` hands out. A third-party cache with right spans and wrong states did not merely fail
+  to be certified — it was certified, and then corrupted every restore that resumed from it.
+
+  The kit's observable is now the triple `(L::Span, L::Token, L::State)`, compared componentwise
+  wherever an entry, an entry reference or a peeked entry is read back, with a separate message
+  per component so a failure says which of the three diverged. `Cache::span` stays span-valued,
+  because a combined span is synthesized from two endpoints and has no entry behind it.
+
+  Some values were read as *presence* rather than read at all, and that turned out to be the same
+  hole one level down. Two of them mattered. The peek-mutate-peek driver — the only one in the kit
+  that pops an instance it has already peeked — bound each popped entry, asserted it was `Some`
+  and threw it away, which left the whole defect class alive on the peek-then-consume path the
+  severity argument above rests on. And **every** push in the kit reduced its result to
+  `is_ok()`, discarding the reference `push_back`/`push_front` promise on success: a cache can
+  store the offered entry perfectly and hand back a reference assembled from a different resident,
+  and nothing downstream can tell, because everything downstream reads storage.
+
+  Enumerating the *shapes* a value arrives in — `Some`, `None`, `Ok`, `Err`-expected,
+  `Err`-unexpected — turned out not to be enough, because a single call site can be two shapes at
+  once: checks 3 and 5 each have one push whose refusal is sometimes legitimate and sometimes not,
+  so an enumeration organised by shape classified them once and never saw the other branch. That
+  is the same hole four review rounds in a row, each closed by hand and each followed by another.
+  All five sites are closed here, and every read of a `Cache` return value in the kit now goes
+  through one of a handful of comparing helpers, so the sites are few and each one's disposition
+  is visible at the call. What is **not** here is a mechanical guard that fails when a call turns
+  up at a site the kit has not accounted for — the enumeration is still one made by hand, and the
+  scanner that would make it not be is #221.
+
+  The last of those sites was a **classification** error rather than a missed call, and it is
+  worth stating because it is the shape the rest of this entry keeps circling. Check 9's
+  false-predicate arm — `pop_front_if` driven with a predicate that declines — was filed among
+  the kit's *absence is the law* exceptions and threw its predicate's argument away. For the
+  arm's **return** that filing is right: `None` is the whole answer. But `pop_front_if` and
+  `try_pop_front_if` are the only two `Cache` methods that run **caller code**, and they hand an
+  entry over *before* they learn what to return, so a `None` says nothing about what the
+  predicate was shown. A cache could keep storage conforming, decline correctly, leave residency
+  untouched, and still run the caller's validation predicate against a token or an `L::State`
+  from a position that entry never occupied — certified. Every arm that runs a predicate against
+  a non-empty cache now records its argument and compares it. The two empty-cache probes stay
+  absence-only on a different footing, stated where they live: their law is that the predicate
+  must never run, asserted directly beside them, so on a conforming path nothing is handed to
+  anyone.
+
+  **Two compile-time breaks, for kit users only.** `CacheHarness` now requires
+  `L::Token: PartialEq` and `L::State: PartialEq`. They sit on the harness and not on the `Token`
+  or `State` traits, so no production implementor — and no logos `Extras` — is taxed to serve a
+  test kit; the cost falls where the kit is used. Migration is to derive `PartialEq`, or to
+  certify against a discriminating toy lexer, which is sound because a cache is generic over the
+  entries it stores. Neither break can be silent: both surface as compile errors.
+
+  **What the kit can and cannot discriminate is now stated exactly.** A substitution — an entry
+  that differs from the one stored at that position — is always caught. A permutation of values
+  that were already equal is not, so the discrimination is the pairwise distinctness of the tokens
+  and the states *your corpus carries*. Spans are pairwise distinct from any source, so the
+  ordering laws are unaffected; a single token variant with no payload, or a lexer whose
+  `L::State` is `()`, makes that half of the comparison vacuous. A constant state is not a gap for
+  that lexer — a single-valued state cannot be re-associated — but it is a gap for a cache
+  intended for stateful lexers and certified under a stateless one, and `CacheHarness::new`'s docs
+  now say so.
+
+  Nothing outside the kit moves: `Cache`, `Lexer`, `State`, `Token`, `CachedToken`,
+  `PeekedTokenExt` and the whole input layer are untouched, no public API is added, and
+  `CachedToken` gains no `PartialEq` impl (the kit compares componentwise for the message quality
+  that buys).
+
 ### Changed
 
 - **MSRV raised to 1.95.** The previous floor, 1.87, was not a forced minimum — the crate

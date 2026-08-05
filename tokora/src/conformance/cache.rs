@@ -18,6 +18,21 @@
 //!
 //! # What it checks
 //!
+//! The kit's fundamental observable is the **cached entry** — the triple
+//! (`L::Span`, `L::Token`, `L::State`) that a [`CachedToken`] carries. Wherever a check reads an
+//! entry back out of a cache — through `front`, `back`, `pop_front`, `pop_back`, `peek`,
+//! `peek_one`, the token a refused push hands back, `push_many`'s overflow, or the entry a
+//! `pop_front_if` predicate is given — all three components are compared, componentwise, against
+//! what the kit stored at that position, each with its own message.
+//!
+//! The `L::State` half is the one with teeth. It is what the input layer restores a lexer
+//! **from**: `InputRef::lexer` rebuilds the lexer at the lookahead frontier out of the state the
+//! newest retained entry carries ([`crate::Lexer::with_state`] + [`crate::Lexer::bump`]), and
+//! the rollback path reads the same field off the entries
+//! `pop_back` hands out. A cache that returns the right spans beside the wrong states does not
+//! merely fail to be certified: until #183 it **passed**, in full, and then corrupted every
+//! restore that resumed from it.
+//!
 //! Each check is one law from the [`Cache`] trait contract:
 //!
 //! 1. **Empty invariants** — a fresh cache is empty on every observable at once: `len` 0,
@@ -86,7 +101,11 @@
 //!    every residency down to empty — because a sweep that builds a fresh cache per residency
 //!    only ever asks a cache its FIRST question, and a `peek` that memoises its first answer and
 //!    serves it after later pops is pure, is correct at the residency it latched, and is
-//!    otherwise invisible. And the bound and order are read through **three window types**, not
+//!    otherwise invisible. Those pops are the only ones in the kit that run on an already-peeked
+//!    instance, so the **entry** each of them returns is compared there too: a `peek` that leaves
+//!    a cached lookahead frontier behind and lets a later pop report its `L::State` out of that
+//!    instead of out of the entry it removed keeps every span and every residency correct, and
+//!    hands the caller a lexer position no entry ever had. And the bound and order are read through **three window types**, not
 //!    one: `peek` is generic over `W` and may read `W::CAPACITY` off it, so a single fixed window
 //!    leaves a branch on that parameter unreachable — the single-slot fast path the trait invites
 //!    (`peek_one`'s default body is `peek::<U1>`), and the truncating path a cache takes when the
@@ -126,14 +145,18 @@
 //!    `true` (or `Ok(())`) answer removes exactly the front entry, matching what a bare
 //!    `pop_front` would return from an identically filled cache. Against an empty cache, both
 //!    answer `None` and the predicate never runs at all — there is no front to hand it. The
-//!    predicate's **argument** is recorded and compared on **both** methods, not only on
-//!    `pop_front_if`: the two `try_pop_front_if` closures used to throw it away, so everything the
-//!    check asserted about that method was its return value and its residency — and an override
-//!    that ran the caller's validation predicate against `back()` and then produced the conforming
-//!    return and the conforming residency satisfied all of it. That is a cache whose
-//!    caller-supplied predicate decides whether to remove or retain the front on the strength of
-//!    unrelated lookahead, certified by a check whose own prose named the property it was not
-//!    testing.
+//!    predicate's **argument** is recorded and compared at **every arm that runs it** — both
+//!    methods, and the DECLINING answer as well as the accepting one. It took two findings to get
+//!    there. The two `try_pop_front_if` closures used to throw the argument away, so everything
+//!    the check asserted about that method was its return value and its residency. Then the
+//!    `pop_front_if` arm driven with a `false` predicate turned out to do the same, because a
+//!    site that answers `None` had been filed under "absence is the law" — a classification made
+//!    on what the call RETURNS, when what makes these two methods different is that they hand an
+//!    entry to caller code BEFORE they know what to return. Either way an override that ran the
+//!    caller's validation predicate against `back()` and then produced the conforming return and
+//!    the conforming residency satisfied all of it. That is a cache whose caller-supplied
+//!    predicate decides whether to remove or retain the front on the strength of unrelated
+//!    lookahead, certified by a check whose own prose named the property it was not testing.
 //! 10. **`push_many`** — accepts tokens in order until the cache is full, then hands the
 //!     remainder back through the returned iterator, unchanged and in the order they arrived.
 //!
@@ -190,30 +213,43 @@
 //! catches, and one silent total-capacity fixture that the kit is asserted to **accept**, so
 //! this paragraph stops being true the moment that assertion starts failing.
 //!
+//! **What an empty cache's `pop_front_if`/`try_pop_front_if` predicate is SHOWN, if it wrongly
+//! runs at all.** These two methods are the only ones on `Cache` that hand an entry to caller
+//! code, and they do it before they know what to return — so for them a `None` return is not
+//! evidence that nothing was handed over. Every arm the kit drives against a *non-empty* cache
+//! therefore records the predicate's argument and compares it, the declining arm included. The
+//! two empty-cache probes do not: their law is that the predicate must **never run**, which is
+//! asserted directly, and a cache that runs one has already failed on the louder violation. What
+//! the kit does not then say is which entry it conjured to run it with. No cache is certified
+//! because of this — reaching the case requires failing the check — and it is written down here
+//! rather than left implied, because the round that closed the declining arm found it by
+//! noticing that exactly this sentence had never been written for it.
+//!
 //! **The non-panicking restore path** cannot be checked by running code: the input layer calls
 //! `pop_front`, `pop_back`, `clear`, `front`, `front_span` and `len` from guard drops that may
 //! run mid-unwind, where a panic aborts the process. A test cannot survive its own witness. The
 //! law is on the trait; this kit exercises those six operations so a panicking one fails *here*,
 //! in a test, rather than in a consumer's rollback.
 //!
-//! **Every oracle in this file compares spans, never tokens or state.** `span_of` takes a
-//! `CachedToken` and returns only its `L::Span`, discarding the token and the `L::State` half —
-//! and every check built on `front`, `back`, `pop_front`, `pop_back` or `peek` compares exactly
-//! that: the span it gets back against the spans the corpus lexed, never the token or the state
-//! sitting beside it in the same value. So a cache that returns the right spans while permuting
-//! or corrupting the tokens or the states behind them passes every check in this kit, in full.
+//! **A permutation of entries that are equal to begin with.** Every oracle compares the whole
+//! entry — span, token and state — so a *substitution*, an entry that differs from the one the
+//! kit stored at that position, is always caught. What no comparison can see is a permutation of
+//! values that were already indistinguishable. The kit's discrimination is therefore exactly the
+//! **pairwise distinctness of the tokens and the states your corpus carries**.
 //!
-//! That matters because `L::State` is not incidental payload: it is the half the input layer
-//! restores the lexer *from*. `InputRef::lexer` rebuilds the lexer at the lookahead frontier from
-//! exactly the state the newest retained token carries. A third-party cache with the right spans
-//! and the wrong states does not merely fail to be certified by this kit — it passes, and then
-//! corrupts every restore that resumes from the state it handed back.
+//! Spans are pairwise distinct from every source, because `corpus` lexes successive items and
+//! successive items occupy successive positions — so the ordering laws never lose discrimination,
+//! whatever the kit is pointed at. Tokens and states are not free that way. A corpus of one
+//! fieldless token variant has one inhabitant, so a token comparison over it is vacuous; a lexer
+//! whose `L::State` is `()` — which is every logos `Extras` that was not given one — makes the
+//! state comparison vacuous in the same way.
 //!
-//! It is not closed here. Closing it needs a **heterogeneous** corpus — the in-tree corpus
-//! (`cache_tests.rs`'s `CTok`) is a single token kind, so even a token-identity comparison could
-//! not discriminate a permuted or substituted token today — **and** every oracle in this file
-//! changed to compare more than spans. That is a change to the kit's fundamental observable,
-//! deliberately deferred rather than rushed before a release.
+//! A constant state is not a gap for **that** lexer: a single-valued state has nothing to be
+//! re-associated with, so a cache cannot corrupt it. It is a gap for a cache **intended for
+//! stateful lexers** and certified under a stateless one, which is the one combination this
+//! paragraph exists to warn about. Certify such a cache under a corpus whose tokens and states
+//! are pairwise distinct — see [`new`](CacheHarness::new) — and the entry comparison discriminates
+//! every re-association a cache can make.
 //!
 //! # Violation posture
 //!
@@ -232,9 +268,25 @@ use mayber::Maybe;
 
 use crate::{
   Lexer, Span, Window,
-  cache::{Cache, CachedToken, CachedTokenOf, MaybeRefCachedTokenOf, PeekedTokenExt},
+  cache::{
+    Cache, CachedToken, CachedTokenOf, CachedTokenRefOf, MaybeRefCachedTokenOf, PeekedTokenExt,
+  },
   span::Spanned,
 };
+
+/// One peeked entry, flattened out of [`Maybe`]'s two arms into the triple the kit compares.
+///
+/// `peek` may hand back a borrow of a resident entry or an owned clone — [`Cache::peek`]'s own
+/// contract allows either — and the kit reads both arms the same way: the span and the token
+/// through [`PeekedTokenExt`], the state through [`peeked_state`]. Cloning the three components
+/// out is also what makes the purity law expressible, since [`CachedToken`] has no `PartialEq`
+/// (the kit compares componentwise, for the message quality that buys) and a `Maybe` holding a
+/// borrow cannot outlive the `peek` call that produced it.
+type PeekedTriple<'inp, L> = (
+  <L as Lexer<'inp>>::Span,
+  <L as Lexer<'inp>>::Token,
+  <L as Lexer<'inp>>::State,
+);
 
 /// The peek window the kit peeks through. Four is enough to distinguish "bounded by the buffer"
 /// from "bounded by the residency" on both sides of the default cache capacity, and to give the
@@ -298,12 +350,51 @@ impl Prefill {
 
 /// The span of a cached token, owned. `token()` hands back a `Spanned<&T, &Span>`, so the span
 /// arrives double-borrowed and has to be dereferenced once before it can be cloned.
+///
+/// Since #183 the kit's observable is the whole entry, not the span — see
+/// [`assert_entry_eq`](CacheHarness::assert_entry_eq). This projection stays for the two jobs that
+/// are genuinely span-valued: building the expectation lists the span-level laws read
+/// ([`assert_span_at`](CacheHarness::assert_span_at)'s combined span, the `front_span`/`back_span`
+/// accessors), and putting spans in failure messages, where they are the vocabulary a reader
+/// locates an entry by.
 fn span_of<'inp, L>(tok: &CachedTokenOf<'inp, L>) -> L::Span
 where
   L: Lexer<'inp>,
 {
   (*tok.token().span_ref()).clone()
 }
+
+/// The `L::State` a peeked entry carries, whichever arm of [`Maybe`] it arrived on.
+///
+/// [`PeekedTokenExt`] reaches the token and the span arm-blind and deliberately does not reach the
+/// state: giving it a third accessor would need a third type parameter on that trait, a breaking
+/// change to a released public surface for a convenience nothing on the restore path needs. So
+/// the kit matches the arm itself. Third parties can read the same fact through public API — match
+/// the [`Maybe`] and call [`CachedToken::state`] — so this checks a publicly observable value, not
+/// a crate-private one.
+fn peeked_state<'s, 'r, 'inp, L>(entry: &'s MaybeRefCachedTokenOf<'r, 'inp, L>) -> &'s L::State
+where
+  L: Lexer<'inp>,
+  'r: 's,
+{
+  match entry {
+    Maybe::Ref(borrowed) => borrowed.state,
+    Maybe::Owned(owned) => &owned.state,
+  }
+}
+
+/// The consequence sentence the `back()` and `pop_back` state comparisons carry, and nothing else
+/// does.
+///
+/// Those are the two reads the input layer's **restore** path makes: `InputRef::resume` takes
+/// `cache().back()`, clones its `L::State` and rebuilds the lexer with `Lexer::with_state` +
+/// `bump`, and the rollback drops an abandoned continuation with a run of `pop_back` calls. A
+/// wrong state at either of them is not a cosmetic divergence — it is a lexer rebuilt from a state
+/// no position in the source ever had.
+const RESTORE_NOTE: &str = " This entry's `L::State` is what `InputRef::lexer` restores the lexer from (`with_state` + `bump`), so a right span with a wrong state beside it passes nothing here: it corrupts every restore that resumes from it.";
+
+/// No consequence sentence — every state comparison that is not on the restore path.
+const NO_NOTE: &str = "";
 
 /// A conformance harness that drives a [`Cache`] implementation `C` against the cache contract.
 ///
@@ -382,6 +473,14 @@ impl<'inp, L, C, Lang> CacheHarness<'inp, L, C, Lang>
 where
   L: Lexer<'inp>,
   L::State: Clone,
+  // The kit's observable is the whole cached entry, so the token and the state have to be
+  // comparable (#183). Both bounds sit HERE, on the harness, and not on `Lexer::Token` or on
+  // `State`: a supertrait would tax every production implementor — including every logos
+  // `Extras` — to serve a test kit. A kit user that hits them derives `PartialEq`, or certifies
+  // against a discriminating toy lexer, which is sound because a cache is generic over the
+  // entries it stores.
+  L::Token: PartialEq,
+  L::State: PartialEq,
   Lang: ?Sized,
   C: Cache<'inp, L, Lang>,
 {
@@ -391,6 +490,16 @@ where
   /// the checks build, plus the tokens past it that check 6 prefills the peek buffer with — and
   /// at least two in any case, since a queue law about ordering is not observable on one element.
   /// `run` says so, with the number, if it does not.
+  ///
+  /// **Variety matters as much as length.** The kit compares whole entries — span, token and
+  /// state — so what it can discriminate is bounded by how distinguishable the corpus is. A
+  /// source whose tokens are all one fieldless variant has one token value in it, and a lexer
+  /// whose `L::State` never changes has one state value in it; against either, that half of the
+  /// comparison cannot fail. Spans are pairwise distinct from any source, so the ordering laws
+  /// hold up regardless. Point the kit at a source whose tokens carry distinct payloads, under a
+  /// lexer whose state advances as it lexes, and every re-association a cache can make is
+  /// visible. The module docs' *what it deliberately does not check* section states the bound
+  /// exactly.
   #[must_use]
   pub fn new(source: &'inp L::Source) -> Self {
     Self {
@@ -544,18 +653,575 @@ where
 
   /// A fresh cache holding the first `n` corpus tokens, pushed back to front-order.
   ///
-  /// Returns the cache and the spans it should be holding, so every later assertion compares
-  /// against a list the kit built rather than against the cache's own answer.
-  fn filled(&self, n: usize) -> (C, Vec<L::Span>) {
+  /// Returns the cache and the **entries** it should be holding, so every later assertion
+  /// compares against a list the kit built rather than against the cache's own answer. Each entry
+  /// is cloned before the push and the clone is what is kept: the cache takes the original by
+  /// value, and what the kit needs afterwards is the whole triple — span, token and state — not
+  /// the span projection it kept before #183.
+  fn filled(&self, n: usize) -> (C, Vec<CachedTokenOf<'inp, L>>) {
     let mut cache = self.make();
     let mut want = Vec::new();
-    for tok in self.corpus(n) {
-      let span = span_of::<L>(&tok);
-      if cache.push_back(tok).is_ok() {
-        want.push(span);
+    for (i, tok) in self.corpus(n).into_iter().enumerate() {
+      // A refusal here is expected — `filled` is driven past the capacity — so this is the arm
+      // that keeps what was accepted rather than the one that asserts acceptance. Either way the
+      // `Ok` reference is read: see [`checked_push`](Self::checked_push).
+      if let Ok(placed) = self.checked_push_back(
+        &mut cache,
+        tok,
+        &format!("push_back #{i} filling a fresh cache"),
+      ) {
+        want.push(placed);
       }
     }
     (cache, want)
+  }
+
+  // ── every value a `Cache` method hands back is read, not counted ─────────────────
+  //
+  // A value reduced to `is_ok()`/`is_some()` is a value the kit did not check, and #183's own
+  // review found that class twice in two rounds — first a pop whose entry was discarded
+  // (`check_peek_across_mutations`), then a push whose returned reference was (every push in the
+  // kit). Both were invisible for the same reason: everything downstream observes **storage**,
+  // and neither the popped entry nor the returned reference is storage.
+  //
+  // So the class is closed rather than the occurrences — and closed by ENUMERATION, not by
+  // looking harder, which is the difference between a class that is finished and one that keeps
+  // producing findings. A `Cache` method returns an `Option` or a `Result`, so there are exactly
+  // four shapes a value can arrive in, and every one of them is now accounted for:
+  //
+  //   * `Option::Some`  — compared, through the entry comparison below.
+  //   * `Option::None`  — presence-only, at twelve sites, because **absence is the law under
+  //                       test**: a drained cache that must not answer, an empty cache that must
+  //                       not answer. Nothing came back, so presence is not a weaker check there
+  //                       — it is the whole check. Each carries a comment at the site.
+  //
+  //                       That bound is on the RETURN, and #183's ninth round found it being
+  //                       read as a bound on the CALL. `pop_front_if` and `try_pop_front_if` —
+  //                       the only two `Cache` methods that run CALLER CODE, which is a closed
+  //                       list read off the trait rather than an inspection of this file — hand
+  //                       an entry over *before* they learn what to return. A `None` therefore
+  //                       says nothing about what the predicate was shown, and check 9's
+  //                       DECLINING arm is compared rather than counted for exactly that
+  //                       reason: it used to sit in this bullet, and a cache could answer
+  //                       `None`, remove nothing, keep every span in place, and still run the
+  //                       caller's validation predicate against an entry it never held there.
+  //
+  //                       The two empty-cache probes stay in this bullet on a different footing
+  //                       and are sound: their law is that the predicate must NOT RUN at all,
+  //                       asserted directly beside them, so on any conforming path nothing is
+  //                       handed to anyone. A cache that runs one anyway fails on the run, the
+  //                       louder violation; what it was shown is then not compared, which is
+  //                       claim accuracy and not a certification any cache can pass.
+  //   * `Result::Ok`    — compared, by [`checked_push`](Self::checked_push).
+  //   * `Result::Err`   — compared. At the sites that drive a refusal ON PURPOSE (checks 3 and 5)
+  //                       the caller compares it in its own round-trip wording; at the sites that
+  //                       expected acceptance,
+  //                       [`unexpected_refusal`](Self::unexpected_refusal) compares it before the
+  //                       refusal panic can discard it.
+  //
+  // There is no fifth shape. But an enumeration by shape is not an enumeration by SITE, and that
+  // is where four review rounds in a row went wrong: a single call site can be two shapes at
+  // once — checks 3 and 5 each have one `push_back`/`push_front` whose `Err` is *sometimes*
+  // legitimate and sometimes not — so an enumeration organised by shape classified them once, as
+  // "expected refusal", and never saw the other branch.
+  //
+  // So the account above is an enumeration by hand, and it stays one here: nothing in this crate
+  // fails when a call to one of these methods appears at a site this comment does not know about.
+  // What keeps that residue small is the helpers below — every read of a `Cache` return value in
+  // the kit goes through one of them, so the sites are few and each one's disposition is visible
+  // at the call. A mechanical guard that scans this file and fails on an unregistered site is
+  // #221, and is deliberately not part of this change.
+
+  /// The `Ok` arm of an accepted push, compared against the entry that was offered.
+  ///
+  /// [`Cache::push_back`] and [`Cache::push_front`] both promise `Ok` with **a reference to the
+  /// cached token**, so that reference is a contract value like any other — and until #183's
+  /// second review round every push in this kit reduced it to `is_ok()`. A cache can store the
+  /// offered entry perfectly and hand back a reference assembled from a *different* resident, and
+  /// nothing downstream can tell: `front`, `back`, the pops and `peek` all read storage, which is
+  /// correct, while the value the caller was actually handed is not.
+  ///
+  /// Both push arms and all sixteen push sites route through this **one** comparison, which is
+  /// what lets a single mutant pin the read everywhere it happens. On success the caller gets its
+  /// own offered entry back as the expectation to keep — the same value it handed over, now
+  /// checked against what the cache says it placed. A refusal is passed straight through: the
+  /// round-trip is a different law, asserted by the callers that drive a refusal on purpose.
+  fn checked_push(
+    &self,
+    result: Result<CachedTokenRefOf<'_, 'inp, L>, CachedTokenOf<'inp, L>>,
+    expectation: CachedTokenOf<'inp, L>,
+    site: &str,
+  ) -> Result<CachedTokenOf<'inp, L>, CachedTokenOf<'inp, L>> {
+    let name = self.label();
+    match result {
+      Ok(placed) => {
+        let placed_span = (**placed.token().span_ref()).clone();
+        let offered_span = span_of::<L>(&expectation);
+        self.assert_ref_entry_eq(
+          &placed,
+          &expectation,
+          &format!("accepted-push {site}"),
+          format_args!(
+            "tokora cache conformance [{name} accepted-push] {site}: the push was accepted and returned a reference to {placed_span:?}, expected the entry it was just handed, {offered_span:?}. `push_back`/`push_front` promise `Ok` with a reference to the token they cached."
+          ),
+          NO_NOTE,
+        );
+        Ok(expectation)
+      }
+      Err(returned) => Err(returned),
+    }
+  }
+
+  /// The one place in the kit that calls [`Cache::push_back`], and the one place that decides
+  /// what an `Err` from it means.
+  ///
+  /// `must_accept` is the caller's expectation at THIS push, which is what the two mixed sites
+  /// (checks 3 and 5) need: the same call there can produce a warranted refusal or an
+  /// unwarranted one, and until #183's fifth review round the unwarranted branch asserted its
+  /// way out before the returned entry reached any comparison. The split is:
+  ///
+  /// * accepted — the `Ok` reference is compared against the offered entry
+  ///   ([`checked_push`](Self::checked_push)), and the offered entry is handed back as the
+  ///   caller's expectation;
+  /// * refused where a refusal is legitimate — passed straight through, because the round-trip
+  ///   is a different law and the caller asserts it in its own wording (that is where
+  ///   `REFUSAL_STATE_SWAP` and `REFUSAL_TOKEN_SWAP` fire, and moving the comparison here would
+  ///   steal their site);
+  /// * refused where the contract required acceptance —
+  ///   [`unexpected_refusal`](Self::unexpected_refusal), which compares the entry and then
+  ///   panics with the site's own refusal wording.
+  fn push_back_expecting(
+    &self,
+    cache: &mut C,
+    tok: CachedTokenOf<'inp, L>,
+    site: &str,
+    must_accept: bool,
+    refusal: core::fmt::Arguments<'_>,
+  ) -> Result<CachedTokenOf<'inp, L>, CachedTokenOf<'inp, L>> {
+    let offered = tok.clone();
+    match self.checked_push(cache.push_back(tok), offered.clone(), site) {
+      Ok(placed) => Ok(placed),
+      Err(returned) => {
+        if must_accept {
+          self.unexpected_refusal(returned, offered, site, refusal)
+        } else {
+          Err(returned)
+        }
+      }
+    }
+  }
+
+  /// [`push_back_expecting`](Self::push_back_expecting) on the prepend arm, and the one place in
+  /// the kit that calls [`Cache::push_front`].
+  fn push_front_expecting(
+    &self,
+    cache: &mut C,
+    tok: CachedTokenOf<'inp, L>,
+    site: &str,
+    must_accept: bool,
+    refusal: core::fmt::Arguments<'_>,
+  ) -> Result<CachedTokenOf<'inp, L>, CachedTokenOf<'inp, L>> {
+    let offered = tok.clone();
+    match self.checked_push(cache.push_front(tok), offered.clone(), site) {
+      Ok(placed) => Ok(placed),
+      Err(returned) => {
+        if must_accept {
+          self.unexpected_refusal(returned, offered, site, refusal)
+        } else {
+          Err(returned)
+        }
+      }
+    }
+  }
+
+  /// A `push_back` at a site where a refusal is a case to handle rather than a violation.
+  fn checked_push_back(
+    &self,
+    cache: &mut C,
+    tok: CachedTokenOf<'inp, L>,
+    site: &str,
+  ) -> Result<CachedTokenOf<'inp, L>, CachedTokenOf<'inp, L>> {
+    self.push_back_expecting(
+      cache,
+      tok,
+      site,
+      false,
+      format_args!("refusal is legitimate here"),
+    )
+  }
+
+  /// A `push_back` the contract says cannot be refused, with the site's own refusal wording.
+  ///
+  /// Returns the entry the caller offered, once the accepted push's `Ok` reference has been
+  /// checked against it — so the expectation lists the callers build are the same values they
+  /// handed over, and the cache has agreed it placed them.
+  fn accepted_push_back(
+    &self,
+    cache: &mut C,
+    tok: CachedTokenOf<'inp, L>,
+    site: &str,
+    refusal: core::fmt::Arguments<'_>,
+  ) -> CachedTokenOf<'inp, L> {
+    match self.push_back_expecting(cache, tok, site, true, refusal) {
+      Ok(placed) => placed,
+      Err(_) => unreachable!(
+        "push_back_expecting diverges through unexpected_refusal when must_accept is set"
+      ),
+    }
+  }
+
+  /// [`accepted_push_back`](Self::accepted_push_back) on the prepend arm.
+  fn accepted_push_front(
+    &self,
+    cache: &mut C,
+    tok: CachedTokenOf<'inp, L>,
+    site: &str,
+    refusal: core::fmt::Arguments<'_>,
+  ) -> CachedTokenOf<'inp, L> {
+    match self.push_front_expecting(cache, tok, site, true, refusal) {
+      Ok(placed) => placed,
+      Err(_) => unreachable!(
+        "push_front_expecting diverges through unexpected_refusal when must_accept is set"
+      ),
+    }
+  }
+
+  /// The refusal a site did not expect: the entry that came back is **compared first**, and the
+  /// site's own refusal message is the panic that follows.
+  ///
+  /// The refusal is the louder violation and the message the callers pin names it, so it is what
+  /// this ends on. But the value handed back is still a value the kit received, and dropping it
+  /// on the way to the panic was the last place in the kit that took a `Cache` return and looked
+  /// only at its shape.
+  ///
+  /// **Deliberately not in [`checked_push`](Self::checked_push)'s `Err` arm.** The sites that
+  /// drive a refusal *on purpose* — check 3's and check 5's round-trips — already compare there,
+  /// in their own wording, and that is where `REFUSAL_STATE_SWAP` and `REFUSAL_TOKEN_SWAP` fire.
+  /// Moving the comparison up into the shared helper would run it twice and would relocate those
+  /// two cells' firing site, unpinning the round-trip messages their `expected` strings name —
+  /// the same pin-theft that `STATE_LAG` nearly suffered when the accepted-push comparison was
+  /// added. So it lives here, on the path no caller compares, and nowhere else.
+  ///
+  /// No cache reaches this by conforming: getting here needs a refusal the contract does not
+  /// allow *and* a corrupted return, and the refusal alone already fails the kit. It closes a
+  /// claim rather than a hole — see the shape enumeration in the module docs.
+  fn unexpected_refusal(
+    &self,
+    returned: CachedTokenOf<'inp, L>,
+    offered: CachedTokenOf<'inp, L>,
+    site: &str,
+    refusal: core::fmt::Arguments<'_>,
+  ) -> ! {
+    let name = self.label();
+    let returned_span = span_of::<L>(&returned);
+    let offered_span = span_of::<L>(&offered);
+    self.assert_owned_entry_eq(
+      &returned,
+      &offered,
+      &format!("unexpected-refusal {site}"),
+      format_args!(
+        "tokora cache conformance [{name} unexpected-refusal] {site}: the push was refused when the contract required it be accepted, and it handed back {returned_span:?} rather than the entry it was offered, {offered_span:?}. A refusal must hand the caller its token unchanged, warranted or not."
+      ),
+      NO_NOTE,
+    );
+    panic!("{refusal}")
+  }
+
+  /// A pop whose answer the kit already knows: it must answer, and it must answer with `want`.
+  /// The one place in the kit that calls [`Cache::pop_front`] for a value it intends to keep.
+  ///
+  /// The residency sweeps drive runs of pops purely to *reach* a residency, and until #183's
+  /// second review round each of those asserted `is_some()` and threw the entry away. The entry
+  /// is never unknown at those sites — it is the next one off the end being drained — so there is
+  /// nothing to justify not comparing it, and a pop that removes the right entry while returning
+  /// a wrong one is precisely the class this kit exists to catch.
+  fn drained_front(
+    &self,
+    cache: &mut C,
+    want: &CachedTokenOf<'inp, L>,
+    site: &str,
+    absent: core::fmt::Arguments<'_>,
+    tail: &str,
+  ) -> CachedTokenOf<'inp, L> {
+    let popped = cache.pop_front();
+    self.drained(popped, want, site, absent, tail, NO_NOTE)
+  }
+
+  /// [`drained_front`](Self::drained_front) at the other end, and the one place the kit calls
+  /// [`Cache::pop_back`] for a value it intends to keep.
+  ///
+  /// The restore note is not a parameter here: `pop_back` **is** the input layer's rollback
+  /// path, at every site, so the note belongs to the end rather than to the caller — one fewer
+  /// thing a new drain can forget.
+  fn drained_back(
+    &self,
+    cache: &mut C,
+    want: &CachedTokenOf<'inp, L>,
+    site: &str,
+    absent: core::fmt::Arguments<'_>,
+    tail: &str,
+  ) -> CachedTokenOf<'inp, L> {
+    let popped = cache.pop_back();
+    self.drained(popped, want, site, absent, tail, RESTORE_NOTE)
+  }
+
+  /// The shared body of the two drains above: the pop must answer, and it must answer with
+  /// `want` in all three components.
+  ///
+  /// `tail` is the site's own explanatory sentence, appended to a uniform lede so each drain
+  /// keeps the rationale it had before the routing — what a wrong answer means at *that* site —
+  /// while the lede and the entry comparison stay in one place.
+  fn drained(
+    &self,
+    popped: Option<CachedTokenOf<'inp, L>>,
+    want: &CachedTokenOf<'inp, L>,
+    site: &str,
+    absent: core::fmt::Arguments<'_>,
+    tail: &str,
+    state_note: &str,
+  ) -> CachedTokenOf<'inp, L> {
+    let name = self.label();
+    let Some(popped) = popped else {
+      panic!("{absent}")
+    };
+    let got_span = span_of::<L>(&popped);
+    let want_span = span_of::<L>(want);
+    self.assert_owned_entry_eq(
+      &popped,
+      want,
+      site,
+      format_args!(
+        "tokora cache conformance [{name} drain] {site}: the pop removed {got_span:?}, expected {want_span:?}.{tail}"
+      ),
+      state_note,
+    );
+    popped
+  }
+
+  /// The `front()` edge read, compared in full — and the one place the kit calls
+  /// [`Cache::front`].
+  fn assert_front_entry(&self, cache: &C, want: Option<&CachedTokenOf<'inp, L>>, when: &str) {
+    let name = self.label();
+    match (want, cache.front()) {
+      (Some(expected), Some(got)) => {
+        let expected_span = span_of::<L>(expected);
+        let got_span = (**got.token().span_ref()).clone();
+        self.assert_ref_entry_eq(
+          &got,
+          expected,
+          &format!("edge-identity front() {when}"),
+          format_args!(
+            "tokora cache conformance [{name} edge-identity] {when}: front() names {got_span:?}, expected the OLDEST resident entry {expected_span:?} — the same entry front_span() must name"
+          ),
+          NO_NOTE,
+        );
+      }
+      (None, None) => {}
+      (a, b) => panic!(
+        "tokora cache conformance [{name} edge-identity] {when}: front() presence disagrees — expected {:?}, got {:?}",
+        a.map(span_of::<L>),
+        b.map(|t| (**t.token().span_ref()).clone())
+      ),
+    }
+  }
+
+  /// The `back()` edge read — the entry `InputRef::resume` rebuilds a lexer from, which is why
+  /// its state message carries [`RESTORE_NOTE`]. The one place the kit calls [`Cache::back`].
+  fn assert_back_entry(&self, cache: &C, want: Option<&CachedTokenOf<'inp, L>>, when: &str) {
+    let name = self.label();
+    match (want, cache.back()) {
+      (Some(expected), Some(got)) => {
+        let expected_span = span_of::<L>(expected);
+        let got_span = (**got.token().span_ref()).clone();
+        self.assert_ref_entry_eq(
+          &got,
+          expected,
+          &format!("edge-identity back() {when}"),
+          format_args!(
+            "tokora cache conformance [{name} edge-identity] {when}: back() names {got_span:?}, expected the NEWEST resident entry {expected_span:?} — the same entry back_span() must name"
+          ),
+          RESTORE_NOTE,
+        );
+      }
+      (None, None) => {}
+      (a, b) => panic!(
+        "tokora cache conformance [{name} edge-identity] {when}: back() presence disagrees — expected {:?}, got {:?}",
+        a.map(span_of::<L>),
+        b.map(|t| (**t.token().span_ref()).clone())
+      ),
+    }
+  }
+
+  /// `peek_one` as the triple the kit compares — the one place it is called for a value.
+  fn peeked_one(&self, cache: &C) -> Option<PeekedTriple<'inp, L>> {
+    cache.peek_one().map(|one| Self::triple(&one))
+  }
+
+  /// `pop_front_if` driven with a **recording** predicate, its argument compared against the
+  /// front entry before anything else is asserted. The one place the kit calls it for a value.
+  ///
+  /// Routed rather than written inline at each site so the predicate argument cannot be
+  /// discarded by a future edit: the closure lives here, and the comparison is unconditional.
+  fn recording_pop_front_if(
+    &self,
+    cache: &mut C,
+    want_front: &CachedTokenOf<'inp, L>,
+    answer: bool,
+    site: &str,
+    lede: &str,
+  ) -> Option<CachedTokenOf<'inp, L>> {
+    let seen: Cell<Option<PeekedTriple<'inp, L>>> = Cell::new(None);
+    let popped = cache.pop_front_if(|tok| {
+      seen.set(Some(Self::ref_triple(&tok)));
+      answer
+    });
+    self.assert_recorded_predicate_arg(seen.take().as_ref(), want_front, site, lede);
+    popped
+  }
+
+  /// [`recording_pop_front_if`](Self::recording_pop_front_if)'s twin on the fallible arm.
+  fn recording_try_pop_front_if(
+    &self,
+    cache: &mut C,
+    want_front: &CachedTokenOf<'inp, L>,
+    outcome: Result<(), &'static str>,
+    site: &str,
+    lede: &str,
+  ) -> Option<Result<CachedTokenOf<'inp, L>, &'static str>> {
+    let seen: Cell<Option<PeekedTriple<'inp, L>>> = Cell::new(None);
+    let popped = cache.try_pop_front_if::<&'static str, _>(|tok| {
+      seen.set(Some(Self::ref_triple(&tok)));
+      outcome
+    });
+    self.assert_recorded_predicate_arg(seen.take().as_ref(), want_front, site, lede);
+    popped
+  }
+
+  // ── the entry comparison every oracle reads its answers through ─────────────────
+
+  /// The kit's fundamental comparison: a cached entry is the triple (span, token, state), and a
+  /// cache that hands one back has to hand back all three of them (#183).
+  ///
+  /// `span_msg` is the calling site's own span-half message, kept **verbatim** from before the
+  /// entry observable existed, so the cells that pin its wording (`front() names`, `OLDEST
+  /// FIRST`, `a refused push_back returned a DIFFERENT token`, …) keep matching. The token and
+  /// state halves get tags of their own — `entry-token` and `entry-state` — so each of the three
+  /// components fails with its own greppable message and a mutant can pin exactly the comparison
+  /// it exists to exercise.
+  ///
+  /// **Span first, always.** A defect that moves an entry to the wrong position corrupts all
+  /// three components at once, and it is an *ordering* violation; reporting it as a token
+  /// mismatch would bury the diagnosis and break every existing expectation. The token and state
+  /// halves therefore only ever speak about an entry the span half has already agreed is the
+  /// right one.
+  ///
+  /// `state_note` is [`RESTORE_NOTE`] at the `back()`/`pop_back` sites and [`NO_NOTE`] everywhere
+  /// else.
+  fn assert_entry_eq(
+    &self,
+    got: (&L::Span, &L::Token, &L::State),
+    want: &CachedTokenOf<'inp, L>,
+    site: &str,
+    span_msg: core::fmt::Arguments<'_>,
+    state_note: &str,
+  ) {
+    let name = self.label();
+    let (got_span, got_token, got_state) = got;
+    // Bound rather than chained: `token()` builds a `Spanned<&T, &Span>` by value, so reading
+    // through it in the assertion below would borrow from a temporary that is gone by the time
+    // the message is formatted.
+    let want_entry = want.token();
+    let want_span: &L::Span = want_entry.span_ref();
+    let want_token: &L::Token = want_entry.data();
+    assert!(got_span == want_span, "{span_msg}");
+    assert!(
+      got_token == want_token,
+      "tokora cache conformance [{name} entry-token] {site}: the entry at {want_span:?} is a DIFFERENT token from the one stored there — expected {want_token:?}, got {got_token:?}. A cached entry is the triple (span, token, state); a right span with someone else's token beside it is a permuted cache, not a conforming one."
+    );
+    assert!(
+      got_state == want.state(),
+      "tokora cache conformance [{name} entry-state] {site}: the entry at {want_span:?} carries a DIFFERENT L::State from the one stored there — expected {:?}, got {got_state:?}.{state_note}",
+      want.state()
+    );
+  }
+
+  /// [`assert_entry_eq`](Self::assert_entry_eq) against an **owned** entry — what `pop_front`,
+  /// `pop_back`, a refused push and `push_many`'s overflow iterator hand back.
+  fn assert_owned_entry_eq(
+    &self,
+    got: &CachedTokenOf<'inp, L>,
+    want: &CachedTokenOf<'inp, L>,
+    site: &str,
+    span_msg: core::fmt::Arguments<'_>,
+    state_note: &str,
+  ) {
+    self.assert_entry_eq(
+      (*got.token().span_ref(), *got.token().data(), got.state()),
+      want,
+      site,
+      span_msg,
+      state_note,
+    );
+  }
+
+  /// [`assert_entry_eq`](Self::assert_entry_eq) against a **borrowed** entry — what `front`,
+  /// `back` and the `pop_front_if` predicates are handed.
+  ///
+  /// `CachedTokenRefOf`'s own parameters are already references, so every accessor adds one more
+  /// level than the owned form does; that is the whole of the extra `*`s here.
+  fn assert_ref_entry_eq(
+    &self,
+    got: &CachedTokenRefOf<'_, 'inp, L>,
+    want: &CachedTokenOf<'inp, L>,
+    site: &str,
+    span_msg: core::fmt::Arguments<'_>,
+    state_note: &str,
+  ) {
+    self.assert_entry_eq(
+      (**got.token().span_ref(), **got.token().data(), *got.state()),
+      want,
+      site,
+      span_msg,
+      state_note,
+    );
+  }
+
+  /// [`assert_entry_eq`](Self::assert_entry_eq) against one **peeked** entry, flattened to the
+  /// triple by [`peeked_entries_through`](Self::peeked_entries_through) so that the borrowed and
+  /// owned arms of [`Maybe`] are read the same way.
+  fn assert_peeked_entry_eq(
+    &self,
+    got: &PeekedTriple<'inp, L>,
+    want: &CachedTokenOf<'inp, L>,
+    site: &str,
+    span_msg: core::fmt::Arguments<'_>,
+  ) {
+    self.assert_entry_eq((&got.0, &got.1, &got.2), want, site, span_msg, NO_NOTE);
+  }
+
+  /// The token and state halves of a whole peeked run, position by position.
+  ///
+  /// The span half is compared by the caller, as one vector against another, because that is the
+  /// assertion whose wording check 6's cells pin (`OLDEST FIRST`) and whose message shows the
+  /// reader the run rather than one entry of it. This walks the same positions afterwards, so a
+  /// re-association inside a run whose spans are all in the right place still fails.
+  fn assert_peeked_run_eq(
+    &self,
+    got: &[PeekedTriple<'inp, L>],
+    want: &[CachedTokenOf<'inp, L>],
+    site: &str,
+  ) {
+    for (i, (entry, expected)) in got.iter().zip(want).enumerate() {
+      self.assert_peeked_entry_eq(
+        entry,
+        expected,
+        site,
+        format_args!(
+          "tokora cache conformance kit bug [{} bounded-peek] {site}: position {i} of the peeked run has a span the vector comparison above should already have rejected",
+          self.label()
+        ),
+      );
+    }
   }
 
   // ── 1. empty invariants ─────────────────────────────────────────────────────────
@@ -583,9 +1249,17 @@ where
       "tokora cache conformance [{name} empty-invariants/{when}]: remaining() is {}, expected the empty-cache capacity {cap}. `remaining` must be exactly how many more push_back calls will be accepted.",
       cache.remaining()
     );
+    // Presence-only by construction, here and for the three probes below: the law under test is
+    // that these do NOT answer, so there is no entry behind any of them for the entry comparison
+    // to read. This is the documented exception to "every value a Cache method hands back is
+    // read" — absence is the whole observable, not a weaker view of one.
     assert!(
-      cache.front().is_none() && cache.back().is_none(),
-      "tokora cache conformance [{name} empty-invariants/{when}]: front()/back() answered on an empty cache"
+      cache.front().is_none(),
+      "tokora cache conformance [{name} empty-invariants/{when}]: front()/back() answered on an empty cache — front() did"
+    );
+    assert!(
+      cache.back().is_none(),
+      "tokora cache conformance [{name} empty-invariants/{when}]: front()/back() answered on an empty cache — back() did"
     );
     assert!(
       cache.front_span().is_none() && cache.back_span().is_none(),
@@ -600,16 +1274,23 @@ where
     // one it never touched proves nothing about whether THIS cache's pop methods still work —
     // or still refuse to answer — after whatever produced its current empty state (#180 part A,
     // item 2).
+    // One assertion per end rather than one `&&` over both: `&&` short-circuits, so a cache that
+    // wrongly answers on `pop_front` would leave `pop_back` unprobed and its own defect unnamed.
+    // Split, each end is called and each failure says which one answered.
     assert!(
-      cache.pop_front().is_none() && cache.pop_back().is_none(),
-      "tokora cache conformance [{name} empty-invariants/{when}]: a pop answered on an empty cache"
+      cache.pop_front().is_none(),
+      "tokora cache conformance [{name} empty-invariants/{when}]: a pop answered on an empty cache — pop_front() did"
+    );
+    assert!(
+      cache.pop_back().is_none(),
+      "tokora cache conformance [{name} empty-invariants/{when}]: a pop answered on an empty cache — pop_back() did"
     );
     assert!(
       cache.peek_one().is_none(),
       "tokora cache conformance [{name} empty-invariants/{when}]: peek_one() answered on an empty cache"
     );
     assert!(
-      self.peeked_spans(cache).is_empty(),
+      self.peeked_entries(cache).is_empty(),
       "tokora cache conformance [{name} empty-invariants/{when}]: peek() appended entries from an empty cache"
     );
   }
@@ -638,15 +1319,20 @@ where
       .corpus(1)
       .pop()
       .expect("run() checked the corpus is non-empty");
-    let first_span = span_of::<L>(&first);
-    assert!(
-      fresh.push_front(first).is_ok(),
-      "tokora cache conformance [{name} retains-front]: the FIRST operation on a fresh cache — a push_front while it is empty — was refused while RETAINS_FRONT is declared true. The input layer compiles its parked-slot fallback OUT on that declaration, so a refusal here loses the token — declare `false` or retain the front."
+    // The whole entry, cloned before the push hands the original to the cache: what
+    // `assert_resident` compares is the triple, so the expectation has to carry all of it.
+    let want_first = self.accepted_push_front(
+      &mut fresh,
+      first,
+      "push_front into a fresh cache, retains-front",
+      format_args!(
+        "tokora cache conformance [{name} retains-front]: the FIRST operation on a fresh cache — a push_front while it is empty — was refused while RETAINS_FRONT is declared true. The input layer compiles its parked-slot fallback OUT on that declaration, so a refusal here loses the token — declare `false` or retain the front."
+      ),
     );
     self.assert_resident(
       &fresh,
       cap,
-      core::slice::from_ref(&first_span),
+      core::slice::from_ref(&want_first),
       "after the first-ever operation, a push_front into a fresh cache",
     );
 
@@ -654,16 +1340,33 @@ where
     // drained once, and then stops, is the same violation reached from the other side.
     let mut cache = self.make();
     let tok = self.corpus(1).pop().expect("the corpus is non-empty");
-    assert!(
-      cache.push_back(tok).is_ok(),
-      "tokora cache conformance [{name} retains-front]: push_back into an empty cache was refused while RETAINS_FRONT is true"
+    let seeded = self.accepted_push_back(
+      &mut cache,
+      tok,
+      "push_back seeding an empty cache, retains-front",
+      format_args!(
+        "tokora cache conformance [{name} retains-front]: push_back into an empty cache was refused while RETAINS_FRONT is true"
+      ),
     );
-    let popped = cache
-      .pop_front()
-      .expect("just pushed one entry, so a pop must answer");
-    assert!(
-      cache.push_front(popped).is_ok(),
-      "tokora cache conformance [{name} retains-front]: push_front into an emptied cache was refused while RETAINS_FRONT is declared true. The input layer compiles its parked-slot fallback OUT on that declaration, so a refusal here loses the token — declare `false` or retain the front."
+    // The entry the pop hands back is the one that was just pushed, and it is compared as such:
+    // it is re-pushed on the next line and becomes the residency the caller then reasons about,
+    // so a corrupt pop here would seed the expectation with its own corruption.
+    let popped = self.drained_front(
+      &mut cache,
+      &seeded,
+      "retains-front pop_front off a one-entry cache",
+      format_args!(
+        "tokora cache conformance [{name} retains-front]: the pop that empties a one-entry cache answered None"
+      ),
+      " The entry is re-pushed on the next line and becomes the residency this check then reasons about, so a corrupt pop here would seed the expectation with its own corruption.",
+    );
+    self.accepted_push_front(
+      &mut cache,
+      popped,
+      "push_front into an emptied cache, retains-front",
+      format_args!(
+        "tokora cache conformance [{name} retains-front]: push_front into an emptied cache was refused while RETAINS_FRONT is declared true. The input layer compiles its parked-slot fallback OUT on that declaration, so a refusal here loses the token — declare `false` or retain the front."
+      ),
     );
   }
 
@@ -701,15 +1404,18 @@ where
       .corpus(1)
       .pop()
       .expect("run() checked the corpus is non-empty");
-    let span = span_of::<L>(&tok);
-    assert!(
-      fresh.push_front(tok).is_ok(),
-      "tokora cache conformance [{name} push-front/into-empty]: a push_front into an EMPTY cache — the first operation this one has seen, with all {cap} slots free — was REFUSED. A push is refused only when the cache is FULL, on this arm exactly as on push_back's, and an empty cache with capacity is not full. RETAINS_FRONT is declared {declares}, which decides what the refusal costs the input layer (a parked slot, or a lost token where the fallback is compiled out), not whether it is allowed."
+    let want_fresh = self.accepted_push_front(
+      &mut fresh,
+      tok,
+      "push_front into a fresh, empty cache",
+      format_args!(
+        "tokora cache conformance [{name} push-front/into-empty]: a push_front into an EMPTY cache — the first operation this one has seen, with all {cap} slots free — was REFUSED. A push is refused only when the cache is FULL, on this arm exactly as on push_back's, and an empty cache with capacity is not full. RETAINS_FRONT is declared {declares}, which decides what the refusal costs the input layer (a parked slot, or a lost token where the fallback is compiled out), not whether it is allowed."
+      ),
     );
     self.assert_resident(
       &fresh,
       cap,
-      core::slice::from_ref(&span),
+      core::slice::from_ref(&want_fresh),
       "after a push_front into a fresh, empty cache",
     );
 
@@ -717,22 +1423,38 @@ where
     // established lazily and then torn down again with the entry that established it.
     let mut used = self.make();
     let tok = self.corpus(1).pop().expect("the corpus is non-empty");
-    assert!(
-      used.push_back(tok).is_ok(),
-      "tokora cache conformance [{name} push-front/into-empty]: push_back into an empty cache with {cap} slots free was refused"
+    let seeded = self.accepted_push_back(
+      &mut used,
+      tok,
+      "push_back seeding an empty cache, push-front/into-empty",
+      format_args!(
+        "tokora cache conformance [{name} push-front/into-empty]: push_back into an empty cache with {cap} slots free was refused"
+      ),
     );
-    let popped = used
-      .pop_front()
-      .expect("just pushed one entry, so a pop must answer");
-    let span = span_of::<L>(&popped);
-    assert!(
-      used.push_front(popped).is_ok(),
-      "tokora cache conformance [{name} push-front/into-empty]: a push_front into a cache that was filled and then emptied — all {cap} slots free again — was REFUSED. A push is refused only when the cache is FULL, and this one holds nothing."
+    // Compared against what was seeded, for the reason `check_retains_front`'s twin is: the
+    // popped entry is re-pushed and becomes the expectation this check then asserts against, so
+    // a corrupt pop would otherwise define its own correctness.
+    let popped = self.drained_front(
+      &mut used,
+      &seeded,
+      "push-front/into-empty pop_front off a one-entry cache",
+      format_args!(
+        "tokora cache conformance [{name} push-front/into-empty]: the pop that empties a one-entry cache answered None"
+      ),
+      " The entry is re-pushed on the next line and becomes the residency this check then reasons about.",
+    );
+    let want_used = self.accepted_push_front(
+      &mut used,
+      popped,
+      "push_front into a used, emptied cache",
+      format_args!(
+        "tokora cache conformance [{name} push-front/into-empty]: a push_front into a cache that was filled and then emptied — all {cap} slots free again — was REFUSED. A push is refused only when the cache is FULL, and this one holds nothing."
+      ),
     );
     self.assert_resident(
       &used,
       cap,
-      core::slice::from_ref(&span),
+      core::slice::from_ref(&want_used),
       "after a push_front into a used, emptied cache",
     );
   }
@@ -743,31 +1465,47 @@ where
     let name = self.label();
     let mut cache = self.make();
     let corpus = self.corpus(cap.saturating_add(1).max(2));
-    let mut resident: Vec<L::Span> = Vec::new();
+    let mut resident: Vec<CachedTokenOf<'inp, L>> = Vec::new();
 
     for (i, tok) in corpus.into_iter().enumerate() {
+      let offered = tok.clone();
       let span = span_of::<L>(&tok);
       let expect_accept = resident.len() < cap;
-      match cache.push_back(tok) {
-        Ok(_) => {
+      // The mixed site: this same call can produce a warranted refusal or an unwarranted one, and
+      // `must_accept` is what tells the router which. Before #183's fifth review round the
+      // unwarranted branch asserted its way out below and the returned entry was never compared.
+      let refusal = format!(
+        "tokora cache conformance [{name} exact-length]: push_back #{i} was REFUSED with {} of {cap} slots used; `remaining` promised it would be accepted",
+        resident.len()
+      );
+      match self.push_back_expecting(
+        &mut cache,
+        tok,
+        &format!("push_back #{i}"),
+        expect_accept,
+        format_args!("{refusal}"),
+      ) {
+        Ok(placed) => {
           assert!(
             expect_accept,
             "tokora cache conformance [{name} exact-length]: push_back #{i} was ACCEPTED with {} entries resident and a capacity of {cap}; `remaining` had already reached 0, so this push contradicts it",
             resident.len()
           );
-          resident.push(span);
+          resident.push(placed);
         }
         Err(returned) => {
-          assert!(
-            !expect_accept,
-            "tokora cache conformance [{name} exact-length]: push_back #{i} was REFUSED with {} of {cap} slots used; `remaining` promised it would be accepted",
-            resident.len()
-          );
           // The refusal round-trip: the token comes back unchanged, and nothing moved.
+          // "Unchanged" is the whole ENTRY — a refusal that hands back the offered span with
+          // somebody else's token or state beside it has changed it (#183).
           let back_span = span_of::<L>(&returned);
-          assert!(
-            back_span == span,
-            "tokora cache conformance [{name} refusal-round-trip]: a refused push_back returned a DIFFERENT token: pushed span {span:?}, got back {back_span:?}. A refusal must hand the caller its token unchanged."
+          self.assert_owned_entry_eq(
+            &returned,
+            &offered,
+            "refusal-round-trip push_back",
+            format_args!(
+              "tokora cache conformance [{name} refusal-round-trip]: a refused push_back returned a DIFFERENT token: pushed span {span:?}, got back {back_span:?}. A refusal must hand the caller its token unchanged."
+            ),
+            NO_NOTE,
           );
           self.assert_resident(&cache, cap, &resident, "after a refused push_back");
         }
@@ -782,7 +1520,12 @@ where
   }
 
   /// The four length/edge observables against the list the kit is tracking.
-  fn assert_resident(&self, cache: &C, cap: usize, want: &[L::Span], when: &str) {
+  ///
+  /// `want` is the list of **entries** the cache should be holding. The counts and the
+  /// `front_span`/`back_span` laws read only their spans, which is all those accessors return;
+  /// the `front()`/`back()` reads below compare the whole entry, because that is what those two
+  /// return and what a restore then resumes from (#183).
+  fn assert_resident(&self, cache: &C, cap: usize, want: &[CachedTokenOf<'inp, L>], when: &str) {
     let name = self.label();
     assert!(
       cache.len() == want.len(),
@@ -812,7 +1555,12 @@ where
       cap - want.len(),
       want.len()
     );
-    match (want.first(), cache.front_span()) {
+    // The two span accessors, against the spans of the entries the kit is tracking. These are
+    // span-valued by signature — `front_span`/`back_span` return `&L::Span` and nothing else — so
+    // the entry comparison has no purchase here; it belongs to the `front()`/`back()` reads below.
+    let want_front_span = want.first().map(span_of::<L>);
+    let want_back_span = want.last().map(span_of::<L>);
+    match (want_front_span.as_ref(), cache.front_span()) {
       (Some(expected), Some(got)) => assert!(
         got == expected,
         "tokora cache conformance [{name} fifo-append] {when}: front is {got:?}, expected the OLDEST resident entry {expected:?}"
@@ -822,7 +1570,7 @@ where
         "tokora cache conformance [{name} fifo-append] {when}: front presence disagrees — expected {a:?}, got {b:?}"
       ),
     }
-    match (want.last(), cache.back_span()) {
+    match (want_back_span.as_ref(), cache.back_span()) {
       (Some(expected), Some(got)) => assert!(
         got == expected,
         "tokora cache conformance [{name} fifo-append] {when}: back is {got:?}, expected the NEWEST resident entry {expected:?}. `push_back` appends after every resident entry."
@@ -841,29 +1589,12 @@ where
     // exactly the accessor a ring specializes off its head index rather than paying for a
     // `CachedTokenRef`, and a cache that overrides BOTH, with the cheap span half right and the
     // reference half wrong, had nothing to answer to. The entry a caller reads through `front()`
-    // carries the token and the `L::State` a restore resumes from; the span half alone does not.
-    let front_ref: Option<L::Span> = cache.front().map(|t| (**t.token().span_ref()).clone());
-    match (want.first(), &front_ref) {
-      (Some(expected), Some(got)) => assert!(
-        got == expected,
-        "tokora cache conformance [{name} edge-identity] {when}: front() names {got:?}, expected the OLDEST resident entry {expected:?} — the same entry front_span() must name"
-      ),
-      (None, None) => {}
-      (a, b) => panic!(
-        "tokora cache conformance [{name} edge-identity] {when}: front() presence disagrees — expected {a:?}, got {b:?}"
-      ),
-    }
-    let back_ref: Option<L::Span> = cache.back().map(|t| (**t.token().span_ref()).clone());
-    match (want.last(), &back_ref) {
-      (Some(expected), Some(got)) => assert!(
-        got == expected,
-        "tokora cache conformance [{name} edge-identity] {when}: back() names {got:?}, expected the NEWEST resident entry {expected:?} — the same entry back_span() must name"
-      ),
-      (None, None) => {}
-      (a, b) => panic!(
-        "tokora cache conformance [{name} edge-identity] {when}: back() presence disagrees — expected {a:?}, got {b:?}"
-      ),
-    }
+    // carries the token and the `L::State` a restore resumes from; the span half alone does not —
+    // which is why since #183 these two reads compare the whole entry and not its span. A ring
+    // that assembles its edge references out of a span array and a state array, one index apart,
+    // answers the span half perfectly.
+    self.assert_front_entry(cache, want.first(), when);
+    self.assert_back_entry(cache, want.last(), when);
   }
 
   // ── 4. pop order ────────────────────────────────────────────────────────────────
@@ -886,19 +1617,24 @@ where
           )
         })
         .clone();
-      let popped = cache
-        .pop_front()
-        .unwrap_or_else(|| panic!("tokora cache conformance [{name} order]: pop_front() is empty with {} entries still to pop", want.len() - i));
-      let got = span_of::<L>(&popped);
-      assert!(
-        got == *expected,
-        "tokora cache conformance [{name} order]: pop_front #{i} returned {got:?}, expected the OLDEST resident entry {expected:?}"
+      let popped = self.drained_front(
+        &mut cache,
+        expected,
+        &format!("order pop_front #{i}"),
+        format_args!(
+          "tokora cache conformance [{name} order]: pop_front() is empty with {} entries still to pop",
+          want.len() - i
+        ),
+        " `pop_front` removes the OLDEST resident entry.",
       );
+      let got = span_of::<L>(&popped);
       assert!(
         viewed == got,
         "tokora cache conformance [{name} order]: front() viewed {viewed:?} but pop_front() removed {got:?}; they must name the same entry"
       );
     }
+    // Presence-only, and the law: after a full drain there is no entry left for a pop to return,
+    // so absence is the whole observable. (Documented exception — see `checked_push`.)
     assert!(
       cache.pop_front().is_none(),
       "tokora cache conformance [{name} order]: pop_front() still answers after every resident entry was drained"
@@ -914,19 +1650,20 @@ where
           panic!("tokora cache conformance [{name} order]: back() is empty mid-drain")
         })
         .clone();
-      let popped = cache.pop_back().unwrap_or_else(|| {
-        panic!("tokora cache conformance [{name} order]: pop_back() is empty mid-drain")
-      });
-      let got = span_of::<L>(&popped);
-      assert!(
-        got == *expected,
-        "tokora cache conformance [{name} order]: pop_back #{i} returned {got:?}, expected the NEWEST resident entry {expected:?}. The input layer drops an abandoned continuation's entries with a run of pop_back calls, so a pop_back that is not newest-first drops the wrong tokens."
+      let popped = self.drained_back(
+        &mut cache,
+        expected,
+        &format!("order pop_back #{i}"),
+        format_args!("tokora cache conformance [{name} order]: pop_back() is empty mid-drain"),
+        " `pop_back` removes the NEWEST resident entry. The input layer drops an abandoned continuation's entries with a run of pop_back calls, so a pop_back that is not newest-first drops the wrong tokens.",
       );
+      let got = span_of::<L>(&popped);
       assert!(
         viewed == got,
         "tokora cache conformance [{name} order]: back() viewed {viewed:?} but pop_back() removed {got:?}; they must name the same entry"
       );
     }
+    // Presence-only, and the law — see the `pop_front` twin above.
     assert!(
       cache.pop_back().is_none(),
       "tokora cache conformance [{name} order]: pop_back() still answers after every resident entry was drained"
@@ -944,29 +1681,44 @@ where
     let name = self.label();
     let corpus = self.corpus(cap.saturating_add(1));
     let mut cache = self.make();
-    let mut resident: Vec<L::Span> = Vec::new();
+    let mut resident: Vec<CachedTokenOf<'inp, L>> = Vec::new();
     let mut refusals = 0usize;
 
     // One at the back, then everything else at the front: each must land BEFORE the rest.
     let mut it = corpus.into_iter();
     let first = it.next().expect("the corpus has at least two tokens");
-    let first_span = span_of::<L>(&first);
-    assert!(
-      cache.push_back(first).is_ok(),
-      "tokora cache conformance [{name} push-front]: the first push_back into an empty cache was refused"
+    let want_first = self.accepted_push_back(
+      &mut cache,
+      first,
+      "push_back seeding the prepend driver",
+      format_args!(
+        "tokora cache conformance [{name} push-front]: the first push_back into an empty cache was refused"
+      ),
     );
-    resident.push(first_span);
+    resident.push(want_first);
 
     for (i, tok) in it.enumerate() {
+      let offered = tok.clone();
       let span = span_of::<L>(&tok);
       let full = resident.len() == cap;
-      match cache.push_front(tok) {
-        Ok(_) => {
+      // The prepend arm's mixed site — see the `push_back` twin in check 3.
+      let refusal = format!(
+        "tokora cache conformance [{name} exact-length]: push_front #{i} was REFUSED with {} of {cap} slots used; a push is refused only when the cache is FULL. The input layer's put-back lands here: a refusal parks the token in the fallback slot (or panics outright, where RETAINS_FRONT is declared), so refusing early spends a resource the cache had no need of.",
+        resident.len()
+      );
+      match self.push_front_expecting(
+        &mut cache,
+        tok,
+        &format!("push_front #{i}"),
+        !full,
+        format_args!("{refusal}"),
+      ) {
+        Ok(placed) => {
           assert!(
             !full,
             "tokora cache conformance [{name} exact-length]: push_front #{i} was accepted at capacity {cap}"
           );
-          resident.insert(0, span.clone());
+          resident.insert(0, placed);
           // The prepend law itself, before the generic residency check: the entry just pushed
           // must be the one `front` names.
           match cache.front_span() {
@@ -982,18 +1734,19 @@ where
         Err(returned) => {
           // A refusal has to be EARNED, exactly as on the `push_back` arm: a cache that hands
           // the token back with room still left has refused nothing it was entitled to refuse.
-          // Without this the two halves of the same law were asymmetric, and the round-trip and
-          // residency checks below — which a cache that simply declines everything satisfies
-          // trivially — were the whole of what a refusal had to survive.
-          assert!(
-            full,
-            "tokora cache conformance [{name} exact-length]: push_front #{i} was REFUSED with {} of {cap} slots used; a push is refused only when the cache is FULL. The input layer's put-back lands here: a refusal parks the token in the fallback slot (or panics outright, where RETAINS_FRONT is declared), so refusing early spends a resource the cache had no need of.",
-            resident.len()
-          );
+          // That assertion now lives in the router above, as the `refusal` message it panics
+          // with when `must_accept` holds — same wording, but reached only *after* the returned
+          // entry has been compared. Re-asserting `full` here would be an assertion that cannot
+          // fail, since the router diverges on every refusal this arm would have caught.
           let back_span = span_of::<L>(&returned);
-          assert!(
-            back_span == span,
-            "tokora cache conformance [{name} refusal-round-trip]: a refused push_front returned a DIFFERENT token: pushed {span:?}, got back {back_span:?}"
+          self.assert_owned_entry_eq(
+            &returned,
+            &offered,
+            "refusal-round-trip push_front",
+            format_args!(
+              "tokora cache conformance [{name} refusal-round-trip]: a refused push_front returned a DIFFERENT token: pushed {span:?}, got back {back_span:?}"
+            ),
+            NO_NOTE,
           );
           self.assert_resident(&cache, cap, &resident, "after a refused push_front");
           refusals += 1;
@@ -1040,18 +1793,21 @@ where
     for depth in 1..cap {
       let (mut mixed, order) = self.front_built(cap, depth);
       for (i, expected) in order.iter().enumerate() {
-        let popped = mixed.pop_front().unwrap_or_else(|| {
-          panic!(
+        let order_spans = Self::spans_of(&order);
+        self.drained_front(
+          &mut mixed,
+          expected,
+          &format!("push-front/full-order at depth {depth} position {i}"),
+          format_args!(
             "tokora cache conformance [{name} push-front/full-order at depth {depth}]: pop_front() is empty at position {i} of the {} entries one push_back and {depth} push_front(s) put in",
             order.len()
-          )
-        });
-        let got = span_of::<L>(&popped);
-        assert!(
-          got == *expected,
-          "tokora cache conformance [{name} push-front/full-order at depth {depth}]: position {i} of the drained sequence is {got:?}, expected {expected:?}. After one push_back and {depth} push_front(s) the resident order is {order:?} — the front pushes newest-first, then the token that went to the back. `push_front` places its token before every resident entry and MOVES NONE OF THEM; front, back and len do not say that between them, since a push_front that permutes the interior leaves all three right."
+          ),
+          &format!(
+            " After one push_back and {depth} push_front(s) the resident order is {order_spans:?} — the front pushes newest-first, then the token that went to the back. `push_front` places its token before every resident entry and MOVES NONE OF THEM; front, back and len do not say that between them, since a push_front that permutes the interior leaves all three right."
+          ),
         );
       }
+      // Presence-only, and the law: nothing is left to return. (Documented exception.)
       assert!(
         mixed.pop_front().is_none(),
         "tokora cache conformance [{name} push-front/full-order at depth {depth}]: pop_front() still answers after all {} entries were drained",
@@ -1072,18 +1828,21 @@ where
       // A second cache at the same depth, since the drain above consumed the first.
       let (mut mixed, order) = self.front_built(cap, depth);
       for (i, expected) in order.iter().rev().enumerate() {
-        let popped = mixed.pop_back().unwrap_or_else(|| {
-          panic!(
+        let order_spans = Self::spans_of(&order);
+        self.drained_back(
+          &mut mixed,
+          expected,
+          &format!("push-front/full-order-from-the-back at depth {depth} pop_back #{i}"),
+          format_args!(
             "tokora cache conformance [{name} push-front/full-order-from-the-back at depth {depth}]: pop_back() is empty at position {i} of the {} entries one push_back and {depth} push_front(s) put in",
             order.len()
-          )
-        });
-        let got = span_of::<L>(&popped);
-        assert!(
-          got == *expected,
-          "tokora cache conformance [{name} push-front/full-order-from-the-back at depth {depth}]: pop_back #{i} returned {got:?}, expected {expected:?}. After one push_back and {depth} push_front(s) the resident order is {order:?}, so a newest-first drain must hand those back in reverse. Every other pop_back the kit drives runs against a cache built by push_back alone; this one runs against a residency a push_front built."
+          ),
+          &format!(
+            " After one push_back and {depth} push_front(s) the resident order is {order_spans:?}, so a newest-first drain must hand those back in reverse. Every other pop_back the kit drives runs against a cache built by push_back alone; this one runs against a residency a push_front built."
+          ),
         );
       }
+      // Presence-only, and the law: nothing is left to return. (Documented exception.)
       assert!(
         mixed.pop_back().is_none(),
         "tokora cache conformance [{name} push-front/full-order-from-the-back at depth {depth}]: pop_back() still answers after all {} entries were drained",
@@ -1111,18 +1870,21 @@ where
     for n in 2..=cap {
       let (mut mixed, order) = self.interleaved(cap, n);
       for (i, expected) in order.iter().enumerate() {
-        let popped = mixed.pop_front().unwrap_or_else(|| {
-          panic!(
+        let order_spans = Self::spans_of(&order);
+        self.drained_front(
+          &mut mixed,
+          expected,
+          &format!("push-front/interleaved-order at length {n} position {i}"),
+          format_args!(
             "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: pop_front() is empty at position {i} of the {} entries the alternating build put in",
             order.len()
-          )
-        });
-        let got = span_of::<L>(&popped);
-        assert!(
-          got == *expected,
-          "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: position {i} of the drained sequence is {got:?}, expected {expected:?}. Alternating push_front and push_back from empty, starting at the front, leaves the resident order {order:?} — each prepend before every entry then resident, each append after every entry then resident. Neither arm may move an entry the other one placed."
+          ),
+          &format!(
+            " Alternating push_front and push_back from empty, starting at the front, leaves the resident order {order_spans:?} — each prepend before every entry then resident, each append after every entry then resident. Neither arm may move an entry the other one placed."
+          ),
         );
       }
+      // Presence-only, and the law: nothing is left to return. (Documented exception.)
       assert!(
         mixed.pop_front().is_none(),
         "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: pop_front() still answers after all {} entries were drained",
@@ -1143,7 +1905,7 @@ where
   /// rather than a case to handle. Both arms' laws are already established before this runs:
   /// check 3 for the append, and — for the very first push, which goes to the front of an empty
   /// cache — [`check_empty_push_front`](Self::check_empty_push_front).
-  fn interleaved(&self, cap: usize, n: usize) -> (C, Vec<L::Span>) {
+  fn interleaved(&self, cap: usize, n: usize) -> (C, Vec<CachedTokenOf<'inp, L>>) {
     let name = self.label();
     let corpus = self.corpus(n);
     assert!(
@@ -1153,28 +1915,41 @@ where
     );
 
     let mut cache = self.make();
-    let mut order: Vec<L::Span> = Vec::new();
+    let mut order: Vec<CachedTokenOf<'inp, L>> = Vec::new();
     for (i, tok) in corpus.into_iter().enumerate() {
-      let span = span_of::<L>(&tok);
       let to_front = i % 2 == 0;
-      let accepted = if to_front {
-        cache.push_front(tok).is_ok()
-      } else {
-        cache.push_back(tok).is_ok()
-      };
       let arm = if to_front { "push_front" } else { "push_back" };
-      assert!(
-        accepted,
+      let site = format!("{arm} #{i} building an interleaved residency");
+      // Built as a `String` rather than held as `format_args!`: a `fmt::Arguments` bound to a
+      // local borrows temporaries that are dropped at the end of that `let`, which the MSRV
+      // (1.87) rejects even where a newer rustc's temporary-lifetime rules accept it. Passing it
+      // through `format_args!("{refusal}")` keeps one copy of the wording for both arms.
+      let refusal = format!(
         "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: {arm} #{i} was REFUSED with {} of {cap} slots used; a push is refused only when the cache is FULL",
         order.len()
       );
-      if to_front {
-        order.insert(0, span);
+      let placed = if to_front {
+        self.accepted_push_front(&mut cache, tok, &site, format_args!("{refusal}"))
       } else {
-        order.push(span);
+        self.accepted_push_back(&mut cache, tok, &site, format_args!("{refusal}"))
+      };
+      if to_front {
+        order.insert(0, placed);
+      } else {
+        order.push(placed);
       }
     }
     (cache, order)
+  }
+
+  /// The spans of a list of entries, for the messages that show the reader a whole sequence.
+  ///
+  /// The expectation lists are entries since #183; a message that printed them whole would have
+  /// to `Debug` a token and a state per position, which buries the ordering it is trying to show.
+  /// So the *sequence* messages stay span-valued and the *entry* messages
+  /// ([`assert_entry_eq`](Self::assert_entry_eq)) name one component at a time.
+  fn spans_of(entries: &[CachedTokenOf<'inp, L>]) -> Vec<L::Span> {
+    entries.iter().map(span_of::<L>).collect()
   }
 
   /// A fresh cache in the shape [`check_push_front`](Self::check_push_front) builds — one
@@ -1184,7 +1959,7 @@ where
   /// `depth` is bounded by `cap - 1`, so every push here has room and a refusal is a violation
   /// rather than a case to handle — the warranted-refusal law itself is checked by the caller,
   /// which drives one push past the capacity.
-  fn front_built(&self, cap: usize, depth: usize) -> (C, Vec<L::Span>) {
+  fn front_built(&self, cap: usize, depth: usize) -> (C, Vec<CachedTokenOf<'inp, L>>) {
     let name = self.label();
     let want = depth.saturating_add(1);
     let corpus = self.corpus(want);
@@ -1195,23 +1970,29 @@ where
     );
 
     let mut cache = self.make();
-    let mut order: Vec<L::Span> = Vec::new();
+    let mut order: Vec<CachedTokenOf<'inp, L>> = Vec::new();
     let mut it = corpus.into_iter();
     let back = it.next().expect("the corpus was just checked non-empty");
-    let back_span = span_of::<L>(&back);
-    assert!(
-      cache.push_back(back).is_ok(),
-      "tokora cache conformance [{name} push-front/full-order at depth {depth}]: the seeding push_back into an empty cache was refused at capacity {cap}"
+    let want_back = self.accepted_push_back(
+      &mut cache,
+      back,
+      &format!("push_back seeding a front-built residency at depth {depth}"),
+      format_args!(
+        "tokora cache conformance [{name} push-front/full-order at depth {depth}]: the seeding push_back into an empty cache was refused at capacity {cap}"
+      ),
     );
-    order.push(back_span);
+    order.push(want_back);
     for (i, tok) in it.enumerate() {
-      let span = span_of::<L>(&tok);
-      assert!(
-        cache.push_front(tok).is_ok(),
-        "tokora cache conformance [{name} push-front/full-order at depth {depth}]: push_front #{i} was REFUSED with {} of {cap} slots used; a push is refused only when the cache is FULL",
-        order.len()
+      let placed = self.accepted_push_front(
+        &mut cache,
+        tok,
+        &format!("push_front #{i} building a front-built residency at depth {depth}"),
+        format_args!(
+          "tokora cache conformance [{name} push-front/full-order at depth {depth}]: push_front #{i} was REFUSED with {} of {cap} slots used; a push is refused only when the cache is FULL",
+          order.len()
+        ),
       );
-      order.insert(0, span);
+      order.insert(0, placed);
     }
     (cache, order)
   }
@@ -1253,10 +2034,18 @@ where
     // Drained from the FRONT: the consuming path, leaving the resident suffix.
     for popped in 0..=cap {
       let (mut cache, filled) = self.filled_to_capacity(cap);
-      for i in 0..popped {
-        assert!(
-          cache.pop_front().is_some(),
-          "tokora cache conformance [{name} bounded-peek]: pop_front() answered None after {i} of {popped} pops off a cache filled to its capacity {cap}"
+      for (i, expected) in filled.iter().take(popped).enumerate() {
+        // The kit knows which entry each of these removes — `filled[i]`, oldest first — so the
+        // pop is compared rather than counted, even though its only job here is to reach a
+        // residency.
+        self.drained_front(
+          &mut cache,
+          expected,
+          &format!("bounded-peek/front-sweep pop_front #{i}"),
+          format_args!(
+            "tokora cache conformance [{name} bounded-peek]: pop_front() answered None after {i} of {popped} pops off a cache filled to its capacity {cap}"
+          ),
+          " These pops only exist to reach a residency, which is exactly why the entry they return was thrown away before #183.",
         );
       }
       let want = &filled[popped..];
@@ -1279,9 +2068,16 @@ where
     for popped in 1..=cap {
       let (mut cache, filled) = self.filled_to_capacity(cap);
       for i in 0..popped {
-        assert!(
-          cache.pop_back().is_some(),
-          "tokora cache conformance [{name} bounded-peek]: pop_back() answered None after {i} of {popped} pops off a cache filled to its capacity {cap}"
+        // Newest first, so the i-th removes `filled[cap - 1 - i]`. This is the restore path, so
+        // the state message carries the restore note.
+        self.drained_back(
+          &mut cache,
+          &filled[cap - 1 - i],
+          &format!("bounded-peek/back-sweep pop_back #{i}"),
+          format_args!(
+            "tokora cache conformance [{name} bounded-peek]: pop_back() answered None after {i} of {popped} pops off a cache filled to its capacity {cap}"
+          ),
+          " These pops only exist to reach a residency.",
         );
       }
       let want = &filled[..cap - popped];
@@ -1310,13 +2106,19 @@ where
   /// not the other is a real shape (the input layer's rollback pops the back, its consume path
   /// the front). Everything each state is then checked for is [`check_peek_at`](Self::check_peek_at)'s
   /// whole body, unchanged, so this adds a driver rather than an oracle.
+  ///
+  /// The pops themselves are an oracle, though, and are the one thing here that is not
+  /// `check_peek_at`'s: each popped **entry** is compared in full before `want` is shortened.
+  /// Every other drain in the kit runs on an instance that has never been peeked, so this is the
+  /// only place a `peek` that leaves state behind can be caught poisoning a later pop — see the
+  /// comment on the comparison itself.
   fn check_peek_across_mutations(&self, cap: usize) {
     if cap == 0 {
       return;
     }
     let name = self.label();
     let (mut cache, filled) = self.filled_to_capacity(cap);
-    let mut want: Vec<L::Span> = filled;
+    let mut want: Vec<CachedTokenOf<'inp, L>> = filled;
     self.check_peek_at(
       &cache,
       cap,
@@ -1328,16 +2130,36 @@ where
     let mut from_front = true;
     while !want.is_empty() {
       let end = if from_front { "pop_front" } else { "pop_back" };
-      let popped = if from_front {
-        cache.pop_front()
+      // The popped ENTRY, not merely its presence.
+      //
+      // This is the only drain in the kit that runs on an instance the kit has **already
+      // peeked**, and until #183's review it read nothing but `is_some()` — the value was bound,
+      // discarded, and `want` was shortened blindly. So a cache whose `peek` leaves state behind
+      // (a cached lookahead frontier, a memoised run) and whose later pops report out of it was
+      // invisible here: it removes the right entry, so the residency stays right; it returns the
+      // right span, so every span-level law stays right; and the token and the `L::State` the
+      // caller actually resumes from come from a different position. That is the #183 defect
+      // class on the peek-then-consume path — which is the path the issue's severity argument
+      // rests on, since `InputRef::resume` is lookahead followed by a rebuild — and no mutant on
+      // any return path could reach it while the value was thrown away.
+      let expected = if from_front {
+        want.first().expect("the loop guard says want is non-empty")
       } else {
-        cache.pop_back()
+        want.last().expect("the loop guard says want is non-empty")
       };
-      assert!(
-        popped.is_some(),
+      let which = if from_front { "OLDEST" } else { "NEWEST" };
+      let site = format!("bounded-peek/across-mutations {end}() #{pops}");
+      let absent = format_args!(
         "tokora cache conformance [{name} bounded-peek]: {end}() answered None with {} of {cap} entries still resident",
         want.len()
       );
+      let tail =
+        format!(" It is the {which} resident entry, off an instance this kit has ALREADY peeked.");
+      if from_front {
+        self.drained_front(&mut cache, expected, &site, absent, &tail);
+      } else {
+        self.drained_back(&mut cache, expected, &site, absent, &tail);
+      }
       if from_front {
         want.remove(0);
       } else {
@@ -1363,7 +2185,7 @@ where
   ///
   /// Check 3 drives the same fill one token further and would have failed already; this says so
   /// in the kit's own words rather than as a slice index panic.
-  fn filled_to_capacity(&self, cap: usize) -> (C, Vec<L::Span>) {
+  fn filled_to_capacity(&self, cap: usize) -> (C, Vec<CachedTokenOf<'inp, L>>) {
     let name = self.label();
     let (cache, filled) = self.filled(cap);
     assert!(
@@ -1376,12 +2198,13 @@ where
 
   /// Check 6 in full — bound, order, purity, `peek_one`, and the prefilled-buffer sweep —
   /// against a cache holding exactly `want`. `state` names the residency in every message.
-  fn check_peek_at(&self, cache: &C, cap: usize, want: &[L::Span], state: &str) {
+  fn check_peek_at(&self, cache: &C, cap: usize, want: &[CachedTokenOf<'inp, L>], state: &str) {
     let name = self.label();
     let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
     let bound = window.min(want.len());
+    let want_spans = Self::spans_of(want);
 
-    let first = self.peeked_spans(cache);
+    let first = self.peeked_entries(cache);
     assert!(
       first.len() == bound,
       "tokora cache conformance [{name} bounded-peek] against {state}: peek() appended {} entries into an empty {window}-slot buffer, expected exactly min(len, the buffer's remaining capacity) = {bound}. The bound is the cache's CURRENT length, not the room its backing store has: an entry that has been popped is not lookahead any more.",
@@ -1396,18 +2219,28 @@ where
     // cannot fail is not a check (#180 part A, item 9). What the clause was missing is a fixture
     // that violates it and nothing else, which `DUPLICATING_PEEK` in `cache_tests.rs` now is: the
     // right count, the right first entry, the front served `bound` times over.
+    let first_spans: Vec<L::Span> = first.iter().map(|e| e.0.clone()).collect();
     assert!(
-      first == want[..bound],
-      "tokora cache conformance [{name} bounded-peek] against {state}: peek() appended {first:?}, expected the resident prefix OLDEST FIRST {:?}",
-      &want[..bound]
+      first_spans == want_spans[..bound],
+      "tokora cache conformance [{name} bounded-peek] against {state}: peek() appended {first_spans:?}, expected the resident prefix OLDEST FIRST {:?}",
+      &want_spans[..bound]
+    );
+    // …and the other two thirds of every entry the run just landed. The vector comparison above
+    // is the ORDER law and keeps its own wording; this is the entry law (#183), and it is what
+    // separates a `peek` that serves the right run from one that serves the right spans with
+    // re-associated tokens or states behind them.
+    self.assert_peeked_run_eq(
+      &first,
+      &want[..bound],
+      &format!("bounded-peek against {state}"),
     );
 
     // Purity: the cache is unchanged, and a second peek reads the same.
     self.assert_resident(cache, cap, want, &format!("after peek() against {state}"));
-    let second = self.peeked_spans(cache);
+    let second = self.peeked_entries(cache);
     assert!(
       second == first,
-      "tokora cache conformance [{name} pure-peek] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure."
+      "tokora cache conformance [{name} pure-peek] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure. The comparison is over whole (span, token, state) entries, so a peek that is stable in its spans and unstable in the tokens or the states behind them disagrees here too."
     );
 
     // `peek_one` is the single-slot case: it names the front, and it names nothing where a
@@ -1419,14 +2252,25 @@ where
     // residency — so a `peek_one` that is correct once and wrong on every repeat had nothing to
     // disagree with. `peek` has been held to that since the kit existed, three lines above; this
     // is the same law on the method composed from it (#180 part A, item 4).
-    let one_first: Option<L::Span> = cache.peek_one().map(|one| one.span().clone());
+    // Taken as an owned TRIPLE rather than an owned span, for the same reason the run above is:
+    // `peek_one` names an entry, and naming the right span while carrying somebody else's state
+    // is exactly the shape #183 exists to reject. The purity comparison below then covers all
+    // three components too.
+    let one_first: Option<PeekedTriple<'inp, L>> = self.peeked_one(cache);
     match (&one_first, want.first()) {
-      (Some(got), Some(expected)) => assert!(
-        got == expected,
-        "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() named {got:?}, expected the front entry {expected:?}"
+      (Some(got), Some(expected)) => self.assert_peeked_entry_eq(
+        got,
+        expected,
+        &format!("bounded-peek peek_one() against {state}"),
+        format_args!(
+          "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() named {:?}, expected the front entry {:?}",
+          got.0,
+          span_of::<L>(expected)
+        ),
       ),
       (Some(got), None) => panic!(
-        "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() answered {got:?} with NOTHING resident"
+        "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() answered {:?} with NOTHING resident",
+        got.0
       ),
       (None, Some(_)) => panic!(
         "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() is empty with {} entries resident",
@@ -1434,7 +2278,7 @@ where
       ),
       (None, None) => {}
     }
-    let one_second: Option<L::Span> = cache.peek_one().map(|one| one.span().clone());
+    let one_second: Option<PeekedTriple<'inp, L>> = self.peeked_one(cache);
     assert!(
       one_second == one_first,
       "tokora cache conformance [{name} pure-peek-one] against {state}: two peek_one() calls on an unchanged cache disagreed: {one_first:?} then {one_second:?}. `peek_one` takes &self and must be logically pure, exactly as `peek` must."
@@ -1502,26 +2346,33 @@ where
   /// Only the empty-buffer shape: the prefilled sweep above already varies the room left, at
   /// [`PeekWindow`], and what this adds is the other axis — the value of `W` itself. `peek_one`
   /// is not re-driven either; it takes no window.
-  fn check_peek_window<W>(&self, cache: &C, want: &[L::Span], state: &str)
+  fn check_peek_window<W>(&self, cache: &C, want: &[CachedTokenOf<'inp, L>], state: &str)
   where
     W: Window,
   {
     let name = self.label();
     let window = <<W as Window>::CAPACITY as Unsigned>::USIZE;
     let bound = window.min(want.len());
+    let want_spans = Self::spans_of(want);
 
-    let first = self.peeked_spans_through::<W>(cache);
+    let first = self.peeked_entries_through::<W>(cache);
     assert!(
       first.len() == bound,
       "tokora cache conformance [{name} bounded-peek/window {window}] against {state}: peek() appended {} entries into an empty {window}-slot buffer, expected exactly min(len, the buffer's remaining capacity) = {bound}. `peek` is generic over W and this is a window the kit's own PeekWindow is not: the bound is the same law at every one of them.",
       first.len()
     );
+    let first_spans: Vec<L::Span> = first.iter().map(|e| e.0.clone()).collect();
     assert!(
-      first == want[..bound],
-      "tokora cache conformance [{name} bounded-peek/window {window}] against {state}: peek() appended {first:?}, expected the resident prefix OLDEST FIRST {:?}. A cache may not read W::CAPACITY and answer differently for it.",
-      &want[..bound]
+      first_spans == want_spans[..bound],
+      "tokora cache conformance [{name} bounded-peek/window {window}] against {state}: peek() appended {first_spans:?}, expected the resident prefix OLDEST FIRST {:?}. A cache may not read W::CAPACITY and answer differently for it.",
+      &want_spans[..bound]
     );
-    let second = self.peeked_spans_through::<W>(cache);
+    self.assert_peeked_run_eq(
+      &first,
+      &want[..bound],
+      &format!("bounded-peek/window {window} against {state}"),
+    );
+    let second = self.peeked_entries_through::<W>(cache);
     assert!(
       second == first,
       "tokora cache conformance [{name} pure-peek/window {window}] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure at every window, not only at the kit's own."
@@ -1542,7 +2393,7 @@ where
     &self,
     cache: &C,
     cap: usize,
-    want: &[L::Span],
+    want: &[CachedTokenOf<'inp, L>],
     depth: usize,
     from: Prefill,
     state: &str,
@@ -1551,23 +2402,40 @@ where
     let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
     let tag = from.tag();
     let prefill = self.prefill(cap, depth, from);
-    let prefill_spans: Vec<L::Span> = prefill.iter().map(|tok| span_of::<L>(tok)).collect();
+    // Cloned BEFORE the entries move into the buffer: the "peek left the prefix untouched"
+    // assertion compares whole entries since #183, so the expectation has to be the whole entry
+    // and not the span projection the kit kept before.
+    let prefill_want: Vec<CachedTokenOf<'inp, L>> = prefill.clone();
+    let prefill_spans = Self::spans_of(&prefill_want);
+    let want_spans = Self::spans_of(want);
     let remaining_at_prefill = window - depth;
     let prefilled_bound = remaining_at_prefill.min(want.len());
-    let (prefix_after, appended) = self.peeked_spans_after_prefill(cache, prefill);
+    let (prefix_after, appended) = self.peeked_entries_after_prefill(cache, prefill);
+    let prefix_spans: Vec<L::Span> = prefix_after.iter().map(|e| e.0.clone()).collect();
     assert!(
-      prefix_after == prefill_spans,
-      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() changed the {depth} entr(ies) already in the buffer ahead of it — got {prefix_after:?}, expected them untouched, {prefill_spans:?}. `peek` appends BEHIND what the buffer already holds; it neither overwrites nor reorders it."
+      prefix_spans == prefill_spans,
+      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() changed the {depth} entr(ies) already in the buffer ahead of it — got {prefix_spans:?}, expected them untouched, {prefill_spans:?}. `peek` appends BEHIND what the buffer already holds; it neither overwrites nor reorders it."
+    );
+    self.assert_peeked_run_eq(
+      &prefix_after,
+      &prefill_want,
+      &format!("bounded-peek/{tag} at depth {depth} untouched prefix against {state}"),
     );
     assert!(
       appended.len() == prefilled_bound,
       "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() appended {} entries into a buffer already holding {depth} of {window} slots, expected exactly min(len, buffer's REMAINING capacity) = {prefilled_bound}.",
       appended.len()
     );
+    let appended_spans: Vec<L::Span> = appended.iter().map(|e| e.0.clone()).collect();
     assert!(
-      appended == want[..prefilled_bound],
-      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() appended {appended:?}, expected the resident prefix OLDEST FIRST {:?}. Every resident entry is served, whatever the buffer already holds: `peek` is not entitled to decide the caller has one of them already.",
-      &want[..prefilled_bound]
+      appended_spans == want_spans[..prefilled_bound],
+      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() appended {appended_spans:?}, expected the resident prefix OLDEST FIRST {:?}. Every resident entry is served, whatever the buffer already holds: `peek` is not entitled to decide the caller has one of them already.",
+      &want_spans[..prefilled_bound]
+    );
+    self.assert_peeked_run_eq(
+      &appended,
+      &want[..prefilled_bound],
+      &format!("bounded-peek/{tag} at depth {depth} against {state}"),
     );
 
     // Purity on THIS path too. The prefilled buffer is a different route through a cache's
@@ -1583,7 +2451,7 @@ where
       &format!("after prefilled peek() at depth {depth} against {state}"),
     );
     let (prefix_again, appended_again) =
-      self.peeked_spans_after_prefill(cache, self.prefill(cap, depth, from));
+      self.peeked_entries_after_prefill(cache, self.prefill(cap, depth, from));
     assert!(
       prefix_again == prefix_after && appended_again == appended,
       "tokora cache conformance [{name} pure-peek/{tag} at depth {depth}] against {state}: two prefilled peeks on an unchanged cache disagreed: prefix {prefix_after:?} then {prefix_again:?}, appended {appended:?} then {appended_again:?}. `peek` takes &self and must be logically pure against every shape of buffer, not only against an empty one."
@@ -1644,37 +2512,47 @@ where
     corpus.split_off(cap)
   }
 
-  /// The spans `peek` appends, in order, into a fresh, empty buffer of the kit's own window.
-  fn peeked_spans(&self, cache: &C) -> Vec<L::Span> {
-    self.peeked_spans_through::<PeekWindow>(cache)
+  /// One peeked entry as the triple the kit compares, arm-blind: the span and the token through
+  /// [`PeekedTokenExt`], the state through [`peeked_state`].
+  fn triple(entry: &MaybeRefCachedTokenOf<'_, 'inp, L>) -> PeekedTriple<'inp, L> {
+    (
+      entry.span().clone(),
+      entry.token().clone(),
+      peeked_state::<L>(entry).clone(),
+    )
   }
 
-  /// [`peeked_spans`](Self::peeked_spans) through an arbitrary window, which is what
+  /// The entries `peek` appends, in order, into a fresh, empty buffer of the kit's own window.
+  fn peeked_entries(&self, cache: &C) -> Vec<PeekedTriple<'inp, L>> {
+    self.peeked_entries_through::<PeekWindow>(cache)
+  }
+
+  /// [`peeked_entries`](Self::peeked_entries) through an arbitrary window, which is what
   /// [`check_peek_window`](Self::check_peek_window) needs and what the kit had no way to express
   /// while every buffer it built was a [`PeekWindow`] one.
-  fn peeked_spans_through<W>(&self, cache: &C) -> Vec<L::Span>
+  fn peeked_entries_through<W>(&self, cache: &C) -> Vec<PeekedTriple<'inp, L>>
   where
     W: Window,
   {
     let mut buf: GenericArrayDeque<MaybeRefCachedTokenOf<'_, 'inp, L>, W::CAPACITY> =
       GenericArrayDeque::new();
     cache.peek::<W>(&mut buf);
-    buf.iter().map(|entry| entry.span().clone()).collect()
+    buf.iter().map(Self::triple).collect()
   }
 
-  /// The prefilled-buffer counterpart of [`peeked_spans`](Self::peeked_spans): loads `prefill`
-  /// into the buffer first, calls `peek`, then splits the result into the spans standing where
-  /// the original prefix was (to check `peek` left it alone) and the spans `peek` appended
-  /// behind it, in order. This is the other shape the real call site hands `Cache::peek` —
-  /// already holding a parked token or staged overflow, where [`peeked_spans`](Self::peeked_spans)
-  /// is the empty-`buf` shape a cache hit or an overflow-free fill hands over — see
-  /// [`check_peek`](Self::check_peek) for what that shape catches, and for the one thing it
-  /// provably cannot.
-  fn peeked_spans_after_prefill(
+  /// The prefilled-buffer counterpart of [`peeked_entries`](Self::peeked_entries): loads
+  /// `prefill` into the buffer first, calls `peek`, then splits the result into the entries
+  /// standing where the original prefix was (to check `peek` left it alone) and the entries
+  /// `peek` appended behind it, in order. This is the other shape the real call site hands
+  /// `Cache::peek` — already holding a parked token or staged overflow, where
+  /// [`peeked_entries`](Self::peeked_entries) is the empty-`buf` shape a cache hit or an
+  /// overflow-free fill hands over — see [`check_peek`](Self::check_peek) for what that shape
+  /// catches, and for the one thing it provably cannot.
+  fn peeked_entries_after_prefill(
     &self,
     cache: &C,
     prefill: Vec<CachedTokenOf<'inp, L>>,
-  ) -> (Vec<L::Span>, Vec<L::Span>) {
+  ) -> (Vec<PeekedTriple<'inp, L>>, Vec<PeekedTriple<'inp, L>>) {
     let prefill_len = prefill.len();
     let mut buf: GenericArrayDeque<
       MaybeRefCachedTokenOf<'_, 'inp, L>,
@@ -1687,9 +2565,9 @@ where
       );
     }
     cache.peek::<PeekWindow>(&mut buf);
-    let mut spans = buf.iter().map(|entry| entry.span().clone());
-    let prefix = spans.by_ref().take(prefill_len).collect();
-    let appended = spans.collect();
+    let mut entries = buf.iter().map(Self::triple);
+    let prefix = entries.by_ref().take(prefill_len).collect();
+    let appended = entries.collect();
     (prefix, appended)
   }
 
@@ -1706,13 +2584,16 @@ where
     // Reuse it: push back `cap` tokens and confirm they land exactly the way a first fill would.
     let name = self.label();
     let mut want = Vec::with_capacity(cap);
-    for tok in self.corpus(cap) {
-      let span = span_of::<L>(&tok);
-      assert!(
-        cache.push_back(tok).is_ok(),
-        "tokora cache conformance [{name} clear]: push_back() was refused while refilling a cache clear() just emptied — clear() must not leave the cache permanently unable to accept pushes"
+    for (i, tok) in self.corpus(cap).into_iter().enumerate() {
+      let placed = self.accepted_push_back(
+        &mut cache,
+        tok,
+        &format!("push_back #{i} refilling a cleared cache"),
+        format_args!(
+          "tokora cache conformance [{name} clear]: push_back() was refused while refilling a cache clear() just emptied — clear() must not leave the cache permanently unable to accept pushes"
+        ),
       );
-      want.push(span);
+      want.push(placed);
     }
     self.assert_resident(
       &cache,
@@ -1739,10 +2620,15 @@ where
     // Drained from the FRONT: the consuming path, leaving the resident suffix.
     for popped in 0..=cap {
       let (mut cache, filled) = self.filled_to_capacity(cap);
-      for i in 0..popped {
-        assert!(
-          cache.pop_front().is_some(),
-          "tokora cache conformance [{name} combined-span]: pop_front() answered None after {i} of {popped} pops off a cache filled to its capacity {cap}"
+      for (i, expected) in filled.iter().take(popped).enumerate() {
+        self.drained_front(
+          &mut cache,
+          expected,
+          &format!("combined-span/front-sweep pop_front #{i}"),
+          format_args!(
+            "tokora cache conformance [{name} combined-span]: pop_front() answered None after {i} of {popped} pops off a cache filled to its capacity {cap}"
+          ),
+          " These pops only exist to reach a residency.",
         );
       }
       let want = &filled[popped..];
@@ -1754,16 +2640,21 @@ where
           want.len()
         )
       };
-      self.assert_span_at(&cache, want, &state);
+      self.assert_span_at(&cache, &Self::spans_of(want), &state);
     }
 
     // Drained from the BACK: the restore path, leaving the resident prefix.
     for popped in 1..=cap {
       let (mut cache, filled) = self.filled_to_capacity(cap);
       for i in 0..popped {
-        assert!(
-          cache.pop_back().is_some(),
-          "tokora cache conformance [{name} combined-span]: pop_back() answered None after {i} of {popped} pops off a cache filled to its capacity {cap}"
+        self.drained_back(
+          &mut cache,
+          &filled[cap - 1 - i],
+          &format!("combined-span/back-sweep pop_back #{i}"),
+          format_args!(
+            "tokora cache conformance [{name} combined-span]: pop_back() answered None after {i} of {popped} pops off a cache filled to its capacity {cap}"
+          ),
+          " These pops only exist to reach a residency.",
         );
       }
       let want = &filled[..cap - popped];
@@ -1771,7 +2662,7 @@ where
         "a partly drained cache: {} of {cap} resident, after {popped} pop_back(s) off a full one — the input layer's restore path",
         want.len()
       );
-      self.assert_span_at(&cache, want, &state);
+      self.assert_span_at(&cache, &Self::spans_of(want), &state);
     }
   }
 
@@ -1780,6 +2671,11 @@ where
   /// also [`assert_empty`](Self::assert_empty)'s concern; asserted here too so every residency
   /// [`check_span`](Self::check_span) visits — including the fully drained one — is covered by
   /// the same oracle instead of splitting the empty case out).
+  ///
+  /// **The one oracle #183 left span-valued, and deliberately.** `Cache::span` returns an
+  /// `Option<L::Span>` — a span *synthesized* from two endpoints, with no entry behind it — so
+  /// there is no token and no state to compare. `want` is therefore a span list here where every
+  /// other oracle takes entries; the callers project with [`spans_of`](Self::spans_of).
   fn assert_span_at(&self, cache: &C, want: &[L::Span], state: &str) {
     let name = self.label();
     match (want.first(), want.last(), cache.span()) {
@@ -1837,7 +2733,7 @@ where
   /// [`filled`](Self::filled), but from corpus index `offset` rather than from the start — so
   /// that the tokens before it are available to prefill a peek buffer with spans that precede the
   /// whole residency.
-  fn filled_from(&self, offset: usize, n: usize) -> (C, Vec<L::Span>) {
+  fn filled_from(&self, offset: usize, n: usize) -> (C, Vec<CachedTokenOf<'inp, L>>) {
     let name = self.label();
     let want_len = offset.saturating_add(n);
     let mut corpus = self.corpus(want_len);
@@ -1849,12 +2745,15 @@ where
     let mut cache = self.make();
     let mut want = Vec::with_capacity(n);
     for (i, tok) in corpus.split_off(offset).into_iter().enumerate() {
-      let span = span_of::<L>(&tok);
-      assert!(
-        cache.push_back(tok).is_ok(),
-        "tokora cache conformance [{name} bounded-peek]: push_back #{i} was REFUSED while filling a fresh cache to {n} of its capacity {n}; a push is refused only when the cache is FULL"
+      let placed = self.accepted_push_back(
+        &mut cache,
+        tok,
+        &format!("push_back #{i} filling from corpus offset {offset}"),
+        format_args!(
+          "tokora cache conformance [{name} bounded-peek]: push_back #{i} was REFUSED while filling a fresh cache to {n} of its capacity {n}; a push is refused only when the cache is FULL"
+        ),
       );
-      want.push(span);
+      want.push(placed);
     }
     (cache, want)
   }
@@ -1900,7 +2799,7 @@ where
         "a WRAPPED residency: {cap} of {cap} resident after {rotation} pop_front(s) and {rotation} push_back(s), so a ring's live run starts at slot {rotation} and runs past the end of its array"
       );
       self.check_peek_at(&cache, cap, &want, &state);
-      self.assert_span_at(&cache, &want, &state);
+      self.assert_span_at(&cache, &Self::spans_of(&want), &state);
     }
   }
 
@@ -1913,24 +2812,32 @@ where
   /// a combined span from a later start to an earlier end is not a value a `Span` implementation
   /// is obliged to be able to construct. A cache's residency is always in source order, and so is
   /// this one.
-  fn rotated(&self, cap: usize, rotation: usize) -> (C, Vec<L::Span>) {
+  fn rotated(&self, cap: usize, rotation: usize) -> (C, Vec<CachedTokenOf<'inp, L>>) {
     let name = self.label();
     let (mut cache, filled) = self.filled_to_capacity(cap);
-    for i in 0..rotation {
-      assert!(
-        cache.pop_front().is_some(),
-        "tokora cache conformance [{name} wrapped-run]: pop_front() answered None after {i} of {rotation} pops off a cache filled to its capacity {cap}"
+    for (i, expected) in filled.iter().take(rotation).enumerate() {
+      self.drained_front(
+        &mut cache,
+        expected,
+        &format!("wrapped-run pop_front #{i}"),
+        format_args!(
+          "tokora cache conformance [{name} wrapped-run]: pop_front() answered None after {i} of {rotation} pops off a cache filled to its capacity {cap}"
+        ),
+        " These pops only exist to rotate the ring.",
       );
     }
-    let mut want: Vec<L::Span> = filled[rotation..].to_vec();
+    let mut want: Vec<CachedTokenOf<'inp, L>> = filled[rotation..].to_vec();
     for (i, tok) in self.beyond_residency(cap, rotation).into_iter().enumerate() {
-      let span = span_of::<L>(&tok);
-      assert!(
-        cache.push_back(tok).is_ok(),
-        "tokora cache conformance [{name} wrapped-run]: push_back #{i} was REFUSED while topping a cache back up to its capacity {cap} with {} of {cap} slots used; a push is refused only when the cache is FULL",
-        want.len()
+      let placed = self.accepted_push_back(
+        &mut cache,
+        tok,
+        &format!("push_back #{i} topping up a wrapped residency"),
+        format_args!(
+          "tokora cache conformance [{name} wrapped-run]: push_back #{i} was REFUSED while topping a cache back up to its capacity {cap} with {} of {cap} slots used; a push is refused only when the cache is FULL",
+          want.len()
+        ),
       );
-      want.push(span);
+      want.push(placed);
     }
     (cache, want)
   }
@@ -1948,6 +2855,13 @@ where
 
     // Empty cache: the predicate must not run at all — there is no front to hand it — and both
     // methods answer `None` regardless of what the predicate would have said.
+    //
+    // Presence-only, and the law, for these two probes ONLY — not for the false-predicate probe
+    // further down, which discarded its argument until #183 round 9 on the strength of this same
+    // sentence. What makes these two sound is not that they answer `None`; it is that the
+    // predicate must never run, which is asserted on its own line right after each call. On the
+    // conforming path no entry is handed to anyone, so there is nothing to compare.
+    // (Documented exception — see `checked_push`.)
     let mut empty = self.make();
     let ran = Cell::new(false);
     assert!(
@@ -1984,17 +2898,34 @@ where
       return;
     }
 
-    // A false predicate removes nothing and leaves every observable untouched.
+    // A false predicate removes nothing and leaves every observable untouched — and is handed the
+    // front entry on the way to being told so.
     //
-    // This closure discards its argument, and is the only live-front predicate in this check that
-    // does. `pop_front_if`'s recording assertion is the true-predicate arm below; recording here
-    // as well would be the same test run twice, because a cache cannot answer these two calls
-    // differently. `F: FnOnce` is called exactly once, so the entry handed to the predicate is
-    // settled before the `true`/`false` that separates the arms exists, and both caches are built
-    // by the same `filled(cap)` and are in the same state when the call arrives.
+    // The RETURN here is an absence law: `None` is the whole answer, and there is no entry behind
+    // it. The predicate ARGUMENT is not, and classifying the whole site by its return is what left
+    // this arm reading its argument not at all until #183's ninth round. `pop_front_if` hands
+    // caller code a real entry *before* it learns the predicate's answer, so absence covers what
+    // comes back and covers nothing about what went out: a cache can keep storage conforming,
+    // answer `None` correctly, leave residency untouched, and still show the declining predicate
+    // someone else's token or state — and every other oracle here would agree it conformed.
+    //
+    // The old justification for discarding it was that the true-predicate arm below already pins
+    // this read, since `F: FnOnce` settles the entry before the `true`/`false` exists. That is an
+    // argument about a CONFORMING cache. These are two separate monomorphisations of
+    // `pop_front_if`, driven on two separately built instances, and an override is free to differ
+    // between them — the same adversary `POP_FRONT_IF_PREDICATES_ON_THE_BACK` already assumes one
+    // call shape away.
     let (mut cache_f, want_f) = self.filled(cap);
+    let declined = self.recording_pop_front_if(
+      &mut cache_f,
+      &want_f[0],
+      false,
+      "pop-front-if pop_front_if()'s false-predicate argument",
+      "pop_front_if()'s false predicate was handed",
+    );
+    // Presence-only, and the law, for the RETURN: a false predicate must remove nothing.
     assert!(
-      cache_f.pop_front_if(|_| false).is_none(),
+      declined.is_none(),
       "tokora cache conformance [{name} pop-front-if]: pop_front_if() removed an entry despite a false predicate"
     );
     self.assert_resident(
@@ -2013,18 +2944,15 @@ where
     // the conforming residency satisfied every one of them — a cache that decides whether to
     // remove or retain the front on the strength of unrelated lookahead, certified.
     let (mut cache_e, want_e) = self.filled(cap);
-    let seen_e = Cell::new(None);
-    let result = cache_e.try_pop_front_if::<&str, _>(|tok| {
-      // The extra `*` is the same double-borrow `pop_front_if`'s recording predicate pays; see
-      // the comment there.
-      seen_e.set(Some((**tok.token().span_ref()).clone()));
-      Err("no")
-    });
-    let saw_e = seen_e.take();
-    assert!(
-      saw_e == Some(want_e[0].clone()),
-      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if()'s Err-path predicate was handed {saw_e:?}, expected the front entry {:?}",
-      want_e[0]
+    // The predicate's closure lives in the router, so the entry it is handed is recorded and
+    // compared unconditionally — it cannot be discarded by an edit here, which is what it was
+    // before #183.
+    let result = self.recording_try_pop_front_if(
+      &mut cache_e,
+      &want_e[0],
+      Err("no"),
+      "pop-front-if try_pop_front_if()'s Err-path predicate argument",
+      "try_pop_front_if()'s Err-path predicate was handed",
     );
     assert!(
       matches!(result, Some(Err("no"))),
@@ -2037,28 +2965,20 @@ where
       "after try_pop_front_if() with an Err predicate",
     );
 
-    // A true predicate sees the FRONT entry's span, and removes exactly it.
+    // A true predicate sees the FRONT entry, and removes exactly it.
     let (mut cache_t, want_t) = self.filled(cap);
-    let seen = Cell::new(None);
-    let popped_span = cache_t
-      .pop_front_if(|tok| {
-        // `tok`'s own generic params are already references (`CachedTokenRefOf`), so `.token()`
-        // and `.span_ref()` each add one more — double what `span_of` derefs for an OWNED
-        // `CachedTokenOf`, hence the extra `*` here.
-        seen.set(Some((**tok.token().span_ref()).clone()));
-        true
-      })
-      .map(|tok| span_of::<L>(&tok));
-    let saw = seen.take();
-    assert!(
-      saw == Some(want_t[0].clone()),
-      "tokora cache conformance [{name} pop-front-if]: pop_front_if()'s predicate was handed {saw:?}, expected the front entry {:?}",
-      want_t[0]
+    let popped = self.recording_pop_front_if(
+      &mut cache_t,
+      &want_t[0],
+      true,
+      "pop-front-if pop_front_if()'s predicate argument",
+      "pop_front_if()'s predicate was handed",
     );
-    assert!(
-      popped_span == Some(want_t[0].clone()),
-      "tokora cache conformance [{name} pop-front-if]: pop_front_if() with a true predicate returned {popped_span:?}, expected the front entry {:?}",
-      want_t[0]
+    self.assert_returned_front(
+      popped.as_ref(),
+      &want_t[0],
+      "pop-front-if pop_front_if() with a true predicate",
+      "pop_front_if() with a true predicate returned",
     );
     self.assert_resident(
       &cache_t,
@@ -2076,24 +2996,20 @@ where
     // later driver that reorders the two, or drives one at a residency the other does not reach,
     // does not silently lose it.
     let (mut cache_ok, want_ok) = self.filled(cap);
-    let seen_ok = Cell::new(None);
-    let popped_ok = cache_ok
-      .try_pop_front_if::<&str, _>(|tok| {
-        seen_ok.set(Some((**tok.token().span_ref()).clone()));
-        Ok(())
-      })
-      .and_then(Result::ok)
-      .map(|tok| span_of::<L>(&tok));
-    let saw_ok = seen_ok.take();
-    assert!(
-      saw_ok == Some(want_ok[0].clone()),
-      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if()'s Ok-path predicate was handed {saw_ok:?}, expected the front entry {:?}",
-      want_ok[0]
-    );
-    assert!(
-      popped_ok == Some(want_ok[0].clone()),
-      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if() with an Ok(()) predicate returned {popped_ok:?}, expected the front entry {:?}",
-      want_ok[0]
+    let popped_ok = self
+      .recording_try_pop_front_if(
+        &mut cache_ok,
+        &want_ok[0],
+        Ok(()),
+        "pop-front-if try_pop_front_if()'s Ok-path predicate argument",
+        "try_pop_front_if()'s Ok-path predicate was handed",
+      )
+      .and_then(Result::ok);
+    self.assert_returned_front(
+      popped_ok.as_ref(),
+      &want_ok[0],
+      "pop-front-if try_pop_front_if() with an Ok(()) predicate",
+      "try_pop_front_if() with an Ok(()) predicate returned",
     );
     self.assert_resident(
       &cache_ok,
@@ -2101,6 +3017,79 @@ where
       &want_ok[1..],
       "after try_pop_front_if() with an Ok(()) predicate",
     );
+  }
+
+  /// One recorded `pop_front_if`/`try_pop_front_if` predicate argument against the front entry.
+  ///
+  /// `lede` is the site's own wording, kept verbatim from before #183 because two cells pin it
+  /// (`pop_front_if()'s predicate was handed`, `try_pop_front_if()'s Err-path predicate was
+  /// handed`). Presence is checked here rather than at the call site so that "the predicate never
+  /// ran" reports as itself instead of as a mismatch against `None`.
+  fn assert_recorded_predicate_arg(
+    &self,
+    saw: Option<&PeekedTriple<'inp, L>>,
+    want: &CachedTokenOf<'inp, L>,
+    site: &str,
+    lede: &str,
+  ) {
+    let name = self.label();
+    let Some(saw) = saw else {
+      panic!(
+        "tokora cache conformance [{name} pop-front-if]: {lede} nothing — the predicate never ran, or recorded no entry, against a cache whose front is {:?}",
+        span_of::<L>(want)
+      )
+    };
+    self.assert_peeked_entry_eq(
+      saw,
+      want,
+      site,
+      format_args!(
+        "tokora cache conformance [{name} pop-front-if]: {lede} {:?}, expected the front entry {:?}",
+        saw.0,
+        span_of::<L>(want)
+      ),
+    );
+  }
+
+  /// One `pop_front_if`/`try_pop_front_if` return value against the front entry, in full.
+  ///
+  /// `lede` is the site's own wording, kept verbatim for the same reason
+  /// [`assert_recorded_predicate_arg`](Self::assert_recorded_predicate_arg)'s is.
+  fn assert_returned_front(
+    &self,
+    got: Option<&CachedTokenOf<'inp, L>>,
+    want: &CachedTokenOf<'inp, L>,
+    site: &str,
+    lede: &str,
+  ) {
+    let name = self.label();
+    let Some(got) = got else {
+      panic!(
+        "tokora cache conformance [{name} pop-front-if]: {lede} None, expected the front entry {:?}",
+        span_of::<L>(want)
+      )
+    };
+    self.assert_owned_entry_eq(
+      got,
+      want,
+      site,
+      format_args!(
+        "tokora cache conformance [{name} pop-front-if]: {lede} {:?}, expected the front entry {:?}",
+        span_of::<L>(got),
+        span_of::<L>(want)
+      ),
+      NO_NOTE,
+    );
+  }
+
+  /// A borrowed entry — a `front`/`back` reference or a predicate argument — as the triple, so it
+  /// can be recorded in a [`Cell`] and compared after the borrow it came from has ended.
+  fn ref_triple(entry: &CachedTokenRefOf<'_, 'inp, L>) -> PeekedTriple<'inp, L> {
+    (
+      (**entry.token().span_ref()).clone(),
+      (**entry.token().data()).clone(),
+      (*entry.state()).clone(),
+    )
   }
 
   // ── 10. push_many ────────────────────────────────────────────────────────────────
@@ -2119,7 +3108,10 @@ where
       "tokora cache conformance [{name}]: the source lexed {} token(s), but push_many's check needs {want_len} — 2 more than the capacity {cap}, to exercise the overflow return. This is a kit-usage problem, not a cache defect: lengthen the source.",
       corpus.len()
     );
-    let all_spans: Vec<L::Span> = corpus.iter().map(span_of::<L>).collect();
+    // Cloned before `push_many` takes the originals by value: the overflow comparison below is
+    // over whole entries since #183, so the expectation has to be the whole entry.
+    let all: Vec<CachedTokenOf<'inp, L>> = corpus.clone();
+    let all_spans = Self::spans_of(&all);
 
     let mut cache = self.make();
     let overflow: Vec<_> = cache.push_many(corpus.into_iter()).collect();
@@ -2130,10 +3122,23 @@ where
       all_spans.len() - cap,
       &all_spans[cap..]
     );
+    // "Unchanged" is the whole entry: a `push_many` that hands back the right spans in the right
+    // order with re-associated tokens or states behind them has changed what it refused (#183).
+    for (i, (got, expected)) in overflow.iter().zip(&all[cap..]).enumerate() {
+      self.assert_owned_entry_eq(
+        got,
+        expected,
+        &format!("push-many overflow entry #{i}"),
+        format_args!(
+          "tokora cache conformance kit bug [{name} push-many]: overflow entry #{i} has a span the vector comparison above should already have rejected"
+        ),
+        NO_NOTE,
+      );
+    }
     self.assert_resident(
       &cache,
       cap,
-      &all_spans[..cap],
+      &all[..cap],
       "after push_many() with 2 more tokens than capacity",
     );
   }

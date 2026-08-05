@@ -28,29 +28,70 @@ use crate::{
   },
   error::token::UnexpectedToken,
   lexer::LogosLexer,
+  span::Spanned,
 };
 
-// ── The corpus lexer: one-letter words, so every capacity fills and then refuses ─────
+// ── The corpus lexer: alternating kinds, distinct payloads, an advancing state ────────
 
-#[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
-#[logos(crate = crate::logos, skip r"[ \t]+")]
-enum CTok {
-  #[regex(r"[a-z]+")]
-  Word,
+/// The corpus lexer's state: a counter every token callback bumps, so the `L::State` cached
+/// beside each corpus token is a **different value at every position** (`lexed` runs 1..=12 over
+/// [`SRC`]).
+///
+/// Before #183 this was `()` — logos' default `Extras`, which is what a lexer gets when it is not
+/// given one — and a single-valued state makes the kit's state comparison vacuous: there is
+/// nothing for a cache to re-associate wrongly. Every state mutant below rests on this counter,
+/// and [`corpus_is_pairwise_distinct_on_all_three_axes`] is what stops a later `SRC` edit from
+/// quietly taking it away again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct CState {
+  lexed: u32,
 }
 
-impl core::fmt::Display for CTok {
+impl crate::State for CState {
+  type Error = ();
+
+  fn check(&self) -> Result<(), Self::Error> {
+    Ok(())
+  }
+}
+
+/// Two token kinds, **alternating** over [`SRC`], each carrying its own source slice.
+///
+/// Both halves matter, and they are different properties. Alternating *kinds* is what makes a
+/// neighbour swap visible; distinct *payloads* are what make a swap between two same-kind entries
+/// at a distance visible, since the payload is the slice and no two positions share one. Before
+/// #183 this enum was a single fieldless variant — one inhabitant — so a token comparison over it
+/// could not have failed even if the kit had made one.
+#[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+#[logos(crate = crate::logos, skip r"[ \t]+", extras = CState)]
+enum CTok<'a> {
+  #[regex(r"[a-z]+", |lex| { lex.extras.lexed += 1; lex.slice() })]
+  Word(&'a str),
+  #[regex(r"[0-9]+", |lex| { lex.extras.lexed += 1; lex.slice() })]
+  Num(&'a str),
+}
+
+impl core::fmt::Display for CTok<'_> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.write_str("word")
+    match self {
+      Self::Word(s) => write!(f, "word {s}"),
+      Self::Num(s) => write!(f, "num {s}"),
+    }
   }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct CKind;
+enum CKind {
+  Word,
+  Num,
+}
 
 impl core::fmt::Display for CKind {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.write_str("word")
+    match self {
+      Self::Word => f.write_str("word"),
+      Self::Num => f.write_str("num"),
+    }
   }
 }
 
@@ -71,12 +112,15 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, L
   }
 }
 
-impl Token<'_> for CTok {
+impl<'a> Token<'a> for CTok<'a> {
   type Kind = CKind;
   type Error = CErr;
 
   fn kind(&self) -> CKind {
-    CKind
+    match self {
+      Self::Word(_) => CKind::Word,
+      Self::Num(_) => CKind::Num,
+    }
   }
 
   fn is_trivia(&self) -> bool {
@@ -84,13 +128,20 @@ impl Token<'_> for CTok {
   }
 }
 
-type CLex<'a> = LogosLexer<'a, CTok>;
+type CLex<'a> = LogosLexer<'a, CTok<'a>>;
 
 /// The corpus every cell runs over: twelve items — the widest capacity the cells use (8) plus a
 /// full 4-slot peek window behind it. The capacity is what makes every cache here fill and then
 /// refuse; the window is what the kit's peek prefill draws on, at every depth up to a buffer with
 /// no room left, from tokens the cache under test is not itself holding.
-const SRC: &str = "a b c d e f g h i j k l";
+///
+/// **Heterogeneous on all three axes** since #183. Spans are pairwise distinct from any source;
+/// the alternation of letters and digits makes the token *kinds* alternate, the slices make the
+/// token *values* pairwise distinct, and [`CState`]'s counter makes the states pairwise distinct.
+/// That is what gives the entry comparison anything to discriminate — see
+/// [`corpus_is_pairwise_distinct_on_all_three_axes`], which fails if a later edit takes any of it
+/// away.
+const SRC: &str = "a 1 b 2 c 3 d 4 e 5 f 6";
 
 // ── The built-ins ───────────────────────────────────────────────────────────────────
 
@@ -534,6 +585,196 @@ const TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK: u8 = 46;
 /// Correct at `len <= 1`, where front and back are the same entry.
 const POP_FRONT_IF_PREDICATES_ON_THE_BACK: u8 = 47;
 
+// ── #183: the entry observable — cells that corrupt the token or the state and nothing else ──
+//
+// Every cell from here down leaves the SPANS of everything it touches exactly where a conforming
+// cache would put them. That is the point: each is invisible to a kit that compares spans, which
+// is what this kit did until #183, and each fires on exactly one of the two comparisons the entry
+// observable adds. A generic fixture cannot fabricate an `L::State` value — but it can
+// **re-associate** the ones it was handed, and that is the real defect class: a struct-of-arrays
+// cache with index skew, an implementor pairing `state[i - 1]` with `token[i]`.
+//
+// The gates are the file's existing convention: each conforms at `len <= 1`, where the entry a
+// neighbour skew reaches for is the entry itself.
+
+/// The storage flagship: `push_back` stores the incoming span and token faithfully and stores the
+/// **previously accepted entry's** `L::State` beside them (the first push into an empty cache
+/// keeps its own, so there is nothing to lag behind).
+///
+/// So every span and every token in the cache is right, at every residency, and `back().state` —
+/// the exact value `InputRef::resume` clones to rebuild a lexer with `with_state` + `bump` — is
+/// always one entry behind. A ring that keeps its states in a parallel array and writes them at
+/// the pre-increment index has this shape. It fires at the first two-resident residency check 3
+/// builds, on the `back()` edge read, which is where the restore consequence is stated.
+const STATE_LAG: u8 = 48;
+/// `front()`/`back()` hand back references assembled out of **two** entries: the right span and
+/// token, with the neighbour's `L::State` beside them. `front_span`/`back_span` are untouched.
+///
+/// [`WRONG_FRONT_IDENTITY`]'s successor one level deeper. That cell made the reference name the
+/// wrong slot outright, which the span half of the edge-identity read catches; this one makes the
+/// reference name the right slot and carry the wrong state, which nothing before #183 could see —
+/// even the #180 fix compared only the reference's span.
+const EDGE_STATE_SKEW: u8 = 49;
+/// [`EDGE_STATE_SKEW`] on the other half: `front()`/`back()` return the right span and the right
+/// state with the **neighbour's token** between them.
+const EDGE_TOKEN_SKEW: u8 = 50;
+/// `pop_front`/`pop_back` remove the right entry and return it with the `L::State` of the entry
+/// that is now at that end. Honest when the pop emptied the cache, since there is no neighbour
+/// left to borrow from.
+///
+/// The `pop_back` half is the input layer's rollback path, which drops an abandoned continuation
+/// with a run of `pop_back` calls; a caller that resumes from one of those states resumes from a
+/// position the lexer never occupied.
+const POP_STATE_SKEW: u8 = 51;
+/// [`POP_STATE_SKEW`] on the token half: the right entry with the remaining neighbour's token.
+const POP_TOKEN_SKEW: u8 = 52;
+/// [`OWNED_PEEK`] with the states re-associated: every `Maybe::Owned` clone it serves carries the
+/// **front entry's** state rather than the one stored at its own position.
+///
+/// Position 0 is right by coincidence — the front is the first expected entry — exactly as
+/// [`WRONG_OWNED_PEEK`]'s first entry is, and every entry behind it carries a state no cache ever
+/// stored there. Spans and tokens are correct throughout, so the bound, the order and the
+/// exact-sequence assertion all pass.
+const OWNED_PEEK_STATE_SKEW: u8 = 53;
+/// [`WRONG_OWNED_PEEK`] **minus the span corruption**: owned clones with the right spans and the
+/// right states, and every token the front entry's.
+///
+/// This is the owned-arm instance of the same span-only comparison #183 is about. Its sibling is
+/// caught today because cloning the whole front entry moves the spans too; take that away and the
+/// kit had nothing left to notice.
+const OWNED_PEEK_TOKEN_SKEW: u8 = 54;
+/// `peek_one` answers with an owned entry carrying the front's span and token and the **back's**
+/// state. Correct at `len <= 1`, where the two ends are the same entry.
+///
+/// `peek_one` names the entry the next `pop_front` will return, so a parser that peeks one and
+/// resumes from what it was shown resumes from the wrong end of its own lookahead.
+const PEEK_ONE_STATE_SKEW: u8 = 55;
+/// [`PEEK_ONE_STATE_SKEW`] on the token half: the front's span and state with the back's token.
+const PEEK_ONE_TOKEN_SKEW: u8 = 56;
+/// A refused push hands back the offered span and token with a **resident** entry's `L::State`.
+///
+/// Span-identical to the token that was offered, so the refusal round-trip saw nothing wrong with
+/// it before #183 — and the input layer's put-back path parks exactly this value and later
+/// restores a lexer from it.
+const REFUSAL_STATE_SWAP: u8 = 57;
+/// `push_many`'s overflow iterator hands back entries with the right spans, in the right order,
+/// carrying a **resident** entry's `L::State`.
+///
+/// The override lives in `push_many` alone, so `push_back` — and therefore check 3's refusal
+/// round-trip — stays conforming and this cell reports at its own site.
+const PUSH_MANY_STATE_SWAP: u8 = 58;
+/// `try_pop_front_if` hands its predicate a reference carrying the front's span and token with
+/// the **back's** `L::State`; the removal and the return value are the conforming ones, computed
+/// from the front.
+///
+/// [`TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK`] one level deeper: that cell hands over the wrong
+/// entry, which the span half catches; this one hands over the right entry with a state the
+/// caller's validation predicate was never meant to see. A predicate that reads the state to
+/// decide whether to consume is deciding on the wrong lexer position.
+///
+/// Scoped to `try_pop_front_if` as of #183's ninth round. It skewed both methods before, which
+/// looked like twice the coverage and was not: `F: FnOnce` puts the defect on every arm, so the
+/// first recording assertion to run reports it and the others are never reached — the
+/// `pop_front_if` half could not fire while a `try_pop_front_if` arm ran earlier.
+/// [`POP_FRONT_IF_PREDICATE_ARG_STATE_SKEW`] is the sibling that covers the other method.
+const PREDICATE_ARG_STATE_SKEW: u8 = 59;
+/// [`REFUSAL_STATE_SWAP`] on the token half: the offered span and state come back with a
+/// **resident** entry's token between them.
+///
+/// Required by the #183 cross-model gate. The refusal round-trip compares the whole entry, and
+/// its state sibling corrupts only the state — so without this cell the token half at that site
+/// would be a comparison nothing could fail, which is the defect class the issue exists to close.
+const REFUSAL_TOKEN_SWAP: u8 = 60;
+/// [`PUSH_MANY_STATE_SWAP`] on the token half: overflow entries come back with the right spans
+/// and the right states and a **resident** entry's token. Required by the #183 cross-model gate,
+/// for the reason [`REFUSAL_TOKEN_SWAP`] is.
+const PUSH_MANY_TOKEN_SWAP: u8 = 61;
+/// [`PREDICATE_ARG_STATE_SKEW`] on the token half: `try_pop_front_if`'s predicate is handed the
+/// front's span and state with the **back's** token. Required by the #183 cross-model gate, for
+/// the reason [`REFUSAL_TOKEN_SWAP`] is, and scoped to the same method as its state sibling.
+const PREDICATE_ARG_TOKEN_SKEW: u8 = 62;
+/// `peek` caches a **lookahead frontier** — the `L::State` of the newest entry in the run it just
+/// served — and every later pop on that instance reports that cached state instead of the state
+/// of the entry it actually removed.
+///
+/// Caching the frontier is not the mistake; it is the exact value `InputRef::resume` wants out of
+/// `back()`. Serving it from a **pop** is. The entry removed is the right one from the right end,
+/// so the residency is correct at every step; the span returned is the removed entry's own, so
+/// every span-level law is correct; only the `L::State` the caller resumes from belongs to a
+/// different position.
+///
+/// Reachable at exactly one site, which is the point. Every other drain in the kit runs on an
+/// instance that has never been peeked — `check_pop_order`, `check_push_front`'s three drains and
+/// the residency sweeps in checks 6 and 8 all pop a cache built fresh and peek it, if at all,
+/// only afterwards — so the frontier is unset and this cell is conforming there. Only
+/// `check_peek_across_mutations` peeks an instance and then pops it, and until #183's review that
+/// drain bound the popped value and checked it for **presence alone**: no mutant on any return
+/// path could reach a value the kit discarded.
+///
+/// Honest at `len <= 1`, where the newest entry and the one a pop removes are the same one.
+const POST_PEEK_POP_STATE_SKEW: u8 = 63;
+/// Stores the offered entry **perfectly** and returns an `Ok` reference assembled from a
+/// different resident: the pushed entry's span and token beside its neighbour's `L::State`.
+///
+/// [`Cache::push_back`](crate::cache::Cache::push_back) and
+/// [`push_front`](crate::cache::Cache::push_front) promise `Ok` with *a reference to the cached
+/// token*, so this violates the contract outright — and it is invisible to everything downstream,
+/// because `front`, `back`, the pops and `peek` all read **storage**, and storage here is
+/// flawless. The only observable that diverges is the value the push call itself handed back,
+/// which every push in this kit reduced to `is_ok()` until #183's second review round.
+///
+/// Both push arms are corrupted, and both route through the kit's single accepted-push
+/// comparison, so this one cell pins that read wherever it happens. Gated on a neighbour existing
+/// after the push, so a push into an empty cache — the only push several checks ever make — is
+/// conforming.
+const WRONG_ACCEPTED_PUSH_REF: u8 = 64;
+/// Refuses a `push_back` it had room to accept **and** corrupts the entry it hands back: the
+/// offered span and token with a resident's `L::State` between them.
+///
+/// The compound is the point. A refusal with room to spare is already a violation the kit fails,
+/// and the entry the refusal returns was the last `Cache` return value the kit received and did
+/// not read — the `accepted_push_*` wrappers took `Err`, panicked on the refusal, and dropped the
+/// value. So this cell cannot certify: any cache reaching it fails on the refusal regardless.
+/// What it pins is that the kit **looks** before it panics, which is what makes the module docs'
+/// shape enumeration true rather than nearly true.
+///
+/// Gated on a `push_front` having been accepted on this instance, which is what puts the first
+/// hit at `interleaved`'s `push_back #1` — an `accepted_push_*` site — rather than at check 3's
+/// or check 5's loops, where a refusal is a case the caller handles and compares in its own
+/// wording. That separation is what keeps this cell off `REFUSAL_STATE_SWAP`'s and
+/// `REFUSAL_TOKEN_SWAP`'s firing sites.
+const UNEXPECTED_REFUSAL_ENTRY_SWAP: u8 = 65;
+/// [`UNEXPECTED_REFUSAL_ENTRY_SWAP`] at the **mixed** `push_back` site: refuses with room to
+/// spare from the moment the cache holds anything, and corrupts the entry it hands back.
+///
+/// Check 3's push is the site where the same call can produce a warranted refusal or an
+/// unwarranted one, and until #183's fifth round the unwarranted branch asserted its way out
+/// before the returned entry reached any comparison — the wrapper-level fix from round 4 did not
+/// reach it, because this site never goes through `accepted_push_back`. Fires at check 3's second
+/// push, the first `push_back` in the kit that lands on a non-empty cache with room left.
+const EARLY_PUSH_BACK_REFUSAL_ENTRY_SWAP: u8 = 66;
+/// The prepend twin: refuses a `push_front` with room to spare and corrupts what it hands back.
+///
+/// Fires in check 5's loop, at the first front push after the seeding append — the other mixed
+/// site, and the other half of what round 5 closes.
+const EARLY_PUSH_FRONT_REFUSAL_ENTRY_SWAP: u8 = 67;
+/// [`PREDICATE_ARG_STATE_SKEW`] on the `pop_front_if` arm: the predicate is handed the front's
+/// span and token with the **back's** `L::State`, and everything downstream — the removal, the
+/// return value, the residency — is the conforming behaviour computed from the front.
+///
+/// From #183's ninth round, and it is the cell for the hole that round found. Check 9's
+/// **declining** arm — a `false` predicate, which must remove nothing and answer `None` — used to
+/// throw its predicate's argument away, because the site had been classified by its RETURN. The
+/// return is genuinely an absence law; the argument is not, and `pop_front_if` hands caller code
+/// a real entry before it learns the answer. So a cache could show the declining predicate
+/// someone else's `L::State`, answer `None`, leave residency untouched, and be certified.
+///
+/// This is the mutant that makes the new comparison bite, and it lands **on the declining arm**:
+/// it is the first recording predicate check 9 runs, so this cell reports there rather than at
+/// the true-predicate arm below it. It fails on the entry comparison and not on residency —
+/// nothing is removed — which is what distinguishes it from `WRONG_POP_FRONT_IF`.
+const POP_FRONT_IF_PREDICATE_ARG_STATE_SKEW: u8 = 68;
+
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
 where
@@ -577,6 +818,24 @@ where
   /// cache's life. `RefCell` rather than `Cell` because it is read in place, and populated inside
   /// `peek`, which takes `&self`.
   memo: RefCell<Option<VecDeque<CachedTokenOf<'a, L>>>>,
+  /// The lookahead frontier [`POST_PEEK_POP_STATE_SKEW`]'s `peek` caches — the newest served
+  /// entry's `L::State` — and which every later pop on that instance then reports instead of the
+  /// state of the entry it removed. `RefCell` for the same reason [`memo`](Self::memo) is: it is
+  /// written inside `peek`, which takes `&self`, and `L::State` need not be `Copy`.
+  ///
+  /// Reset by `clear`, as a real cache's would be. Nothing but the pops read it, so every other
+  /// observable of every other cell is untouched.
+  frontier_state: RefCell<Option<L::State>>,
+  /// The entry [`STATE_LAG`] was last **offered**, kept so that cell's accepted-push return can
+  /// be honest while its storage is not.
+  ///
+  /// That is the shape the cell is about and the shape a struct-of-arrays cache actually has: the
+  /// state array is written at the wrong index, and the reference handed back is assembled from
+  /// the values the push was just given rather than read back out of the store. Keeping the two
+  /// apart is also what keeps the cell pinning the `back()` edge read — where the restore
+  /// consequence is stated — instead of stealing the accepted-push pin from
+  /// [`WRONG_ACCEPTED_PUSH_REF`].
+  last_offered: Option<CachedTokenOf<'a, L>>,
   /// A ring's head index, kept purely so that [`WRAPPED_RUN_PEEK`] and [`WRAPPED_RUN_SPAN`] can
   /// ask whether the live run has wrapped past the end of the backing array — `head + len > cap`.
   ///
@@ -655,6 +914,14 @@ where
     if D == COLD_START_PUSH_FRONT && !self.warmed.get() {
       return Err(self.refuse(tok));
     }
+    // Check 5's mixed site: a refusal with room, carrying a corrupted entry. Reached only after
+    // the fullness check above, so warranted refusals stay honest and this cell cannot land on
+    // the round-trip site `REFUSAL_STATE_SWAP` names.
+    if D == EARLY_PUSH_FRONT_REFUSAL_ENTRY_SWAP
+      && let Some(resident) = self.items.back()
+    {
+      return Err(Self::with_state(&tok, resident.state.clone()));
+    }
     // A refusal by an EMPTY cache with every slot free — reached only after the full check
     // above, so nothing about the refusal's shape is wrong; what is missing is the fullness that
     // would have warranted it, at the one state check 5 has to seed its way past.
@@ -683,6 +950,12 @@ where
       // `push_back` left there ever moves, which is what makes every point observable the kit
       // reads — front, back, len, remaining — agree with a conforming cache.
       self.items.swap(1, 2);
+    }
+    // The prepend arm's twin of the accepted-push skew above.
+    if D == WRONG_ACCEPTED_PUSH_REF && self.items.len() >= 2 {
+      let own = self.items.front().expect("len >= 2");
+      let neighbour = self.items.get(1).expect("len >= 2");
+      return Ok(Self::ref_with_foreign_state(own, neighbour));
     }
     Ok(self.items.front().expect("just pushed").as_ref())
   }
@@ -719,7 +992,9 @@ where
         self.graveyard.push_front(tok.clone());
       }
     }
-    popped
+    // #183: the restore path's own pop, handing back the right entry with the new back's state or
+    // token beside it.
+    self.skew_popped(popped, self.items.back())
   }
 
   fn pop_front_if<F>(&mut self, predicate: F) -> Option<CachedTokenOf<'a, L>>
@@ -745,6 +1020,26 @@ where
       if let Some(peeked) = self.items.back().map(CachedToken::as_ref)
         && predicate(peeked)
       {
+        return self.pop_front_impl();
+      }
+      return None;
+    }
+    // #183: the predicate is handed the RIGHT entry with the back's state beside it. The removal
+    // and the return value below are the conforming ones, taken from the front, so only what the
+    // caller's validation predicate was shown diverges.
+    //
+    // `pop_front_if`'s own selector, separate from `try_pop_front_if`'s below. One selector used
+    // to skew both methods, which read as covering both and could only ever report at one of
+    // them: `F: FnOnce` makes the defect present on every arm, so the FIRST recording assertion
+    // to run consumes it and no later one is reached. Split, each method's predicate-argument
+    // read is pinned by a mutant that can actually land on it (#183 round 9).
+    if D == POP_FRONT_IF_PREDICATE_ARG_STATE_SKEW && self.items.len() >= 2 {
+      let answer = {
+        let front = self.items.front().expect("len >= 2");
+        let back = self.items.back().expect("len >= 2");
+        predicate(Self::ref_with_foreign_state(front, back))
+      };
+      if answer {
         return self.pop_front_impl();
       }
       return None;
@@ -783,6 +1078,26 @@ where
       }
       return None;
     }
+    // The same #183 skew on this arm, under `try_pop_front_if`'s OWN selectors — a caller's
+    // validation predicate is run against the entry either method hands over, so each method
+    // carries a mutant of its own rather than sharing one that only the earlier arm can consume.
+    // `POP_FRONT_IF_PREDICATE_ARG_STATE_SKEW` is the sibling on the other method.
+    if (D == PREDICATE_ARG_STATE_SKEW || D == PREDICATE_ARG_TOKEN_SKEW) && self.items.len() >= 2 {
+      let answer = {
+        let front = self.items.front().expect("len >= 2");
+        let back = self.items.back().expect("len >= 2");
+        let skewed = if D == PREDICATE_ARG_STATE_SKEW {
+          Self::ref_with_foreign_state(front, back)
+        } else {
+          Self::ref_with_foreign_token(front, back)
+        };
+        predicate(skewed)
+      };
+      return match answer {
+        Ok(()) => self.pop_front_impl().map(Ok),
+        Err(e) => Some(Err(e)),
+      };
+    }
     if let Some(peeked) = self.items.front().map(CachedToken::as_ref) {
       return match predicate(peeked) {
         Ok(()) => self.pop_front_impl().map(Ok),
@@ -802,10 +1117,23 @@ where
         // The refused token is dropped instead of handed back through the overflow iterator —
         // `push_back` above still ran, so residency up to capacity is unaffected; only the
         // overflow report is silently swallowed.
-        None
-      } else {
-        refused
+        return None;
       }
+      // #183: the overflow comes back at the right spans, in the right order, with a RESIDENT
+      // entry's state (or token) substituted. The override is HERE and not in `push_back`, so
+      // check 3's refusal round-trip stays conforming and this cell can only report at
+      // `push_many`'s own site.
+      if D == PUSH_MANY_STATE_SWAP || D == PUSH_MANY_TOKEN_SWAP {
+        let over = refused?;
+        let Some(resident) = self.items.back() else {
+          return Some(over);
+        };
+        return Some(match D {
+          PUSH_MANY_STATE_SWAP => Self::with_state(&over, resident.state.clone()),
+          _ => Self::with_token(&over, resident.token.data.clone()),
+        });
+      }
+      refused
     })
   }
 
@@ -821,6 +1149,8 @@ where
     // A ring's `clear` puts the head back at slot zero, so a cleared cache does not start out
     // wrapped.
     self.head = 0;
+    // A cleared cache has no lookahead frontier, so a real cache would drop it here too.
+    *self.frontier_state.borrow_mut() = None;
     if D == POISONING_CLEAR {
       // The cache is genuinely empty right after this — every check-1 observable answers
       // correctly — but `push_back` refuses everything from here on regardless of capacity.
@@ -842,6 +1172,15 @@ where
     let tainted = self.prefilled.get();
     if !buf.is_empty() {
       self.prefilled.set(true);
+    }
+    // Cached before any of the branches below, so it is set on every peek this instance answers
+    // however it answers it. Caching the newest served entry's state is a reasonable thing for a
+    // cache to do — it is the value `InputRef::resume` reads off `back()`; the defect is in
+    // `skew_popped`, which reports it out of a POP.
+    if D == POST_PEEK_POP_STATE_SKEW
+      && let Some(back) = self.items.back()
+    {
+      *self.frontier_state.borrow_mut() = Some(back.state.clone());
     }
     // The window off the TYPE, not off the buffer. `buf.capacity()` is the same number, but the
     // two cells below are statements about a cache that branches on its `W` parameter, and this
@@ -1031,6 +1370,32 @@ where
       }
       return;
     }
+    if D == OWNED_PEEK_STATE_SKEW || D == OWNED_PEEK_TOKEN_SKEW {
+      // #183 on the owned arm: the run, the order and the bound are `OWNED_PEEK`'s, and every
+      // clone carries the FRONT entry's state (or token) instead of the one stored at its own
+      // position. Position 0 is right by coincidence and everything behind it is a value no cache
+      // ever stored there — with the spans left exactly where a conforming peek puts them, which
+      // is the whole difference from `WRONG_OWNED_PEEK`.
+      //
+      // Guarded on `fill > 0` for the same reason that cell is: an empty cache or a full buffer
+      // must still append nothing.
+      if fill > 0 {
+        let front = self
+          .items
+          .front()
+          .expect("fill > 0 implies at least one resident entry")
+          .clone();
+        for tok in self.items.iter().take(fill) {
+          let served = if D == OWNED_PEEK_STATE_SKEW {
+            Self::with_state(tok, front.state.clone())
+          } else {
+            Self::with_token(tok, front.token.data.clone())
+          };
+          buf.push_back(Maybe::Owned(served));
+        }
+      }
+      return;
+    }
     for tok in self.items.iter().take(fill) {
       buf.push_back(Maybe::Ref(tok.as_ref()));
     }
@@ -1056,6 +1421,19 @@ where
         return None;
       }
     }
+    // #183: the FRONT entry — the right one — served through the owned arm with the BACK's state
+    // (or token) beside it. Correct at `len <= 1`, where the two ends are the same entry, and
+    // pure, since it is a function of the residency alone.
+    if (D == PEEK_ONE_STATE_SKEW || D == PEEK_ONE_TOKEN_SKEW) && self.items.len() >= 2 {
+      let front = self.items.front().expect("len >= 2");
+      let back = self.items.back().expect("len >= 2");
+      let served = if D == PEEK_ONE_STATE_SKEW {
+        Self::with_state(front, back.state.clone())
+      } else {
+        Self::with_token(front, back.token.data.clone())
+      };
+      return Some(Maybe::Owned(served));
+    }
     self.items.front().map(|tok| Maybe::Ref(tok.as_ref()))
   }
 
@@ -1064,12 +1442,32 @@ where
       // The wrong END, while `front_span` below keeps naming the right one.
       return self.items.back().map(CachedToken::as_ref);
     }
+    // #183: the right END, assembled with the neighbour's state or token. Gated on a neighbour
+    // existing, so `len <= 1` is conforming — at one resident entry the front IS its own
+    // neighbour and there is nothing to skew.
+    if self.items.len() >= 2 {
+      let own = self.items.front().expect("len >= 2");
+      let neighbour = self.items.get(1).expect("len >= 2");
+      if let Some(skewed) = Self::skewed_edge(own, neighbour) {
+        return Some(skewed);
+      }
+    }
     self.items.front().map(CachedToken::as_ref)
   }
 
   fn back(&self) -> Option<CachedTokenRefOf<'_, 'a, L>> {
     if D == WRONG_BACK_IDENTITY {
       return self.items.front().map(CachedToken::as_ref);
+    }
+    // [`front`](Self::front)'s #183 skew at the other end — and the end that matters most, since
+    // `back()` is the entry `InputRef::resume` rebuilds a lexer from.
+    let len = self.items.len();
+    if len >= 2 {
+      let own = self.items.back().expect("len >= 2");
+      let neighbour = self.items.get(len - 2).expect("len >= 2");
+      if let Some(skewed) = Self::skewed_edge(own, neighbour) {
+        return Some(skewed);
+      }
     }
     self.items.back().map(CachedToken::as_ref)
   }
@@ -1163,6 +1561,8 @@ where
       stashed: None,
       peek_one_at_len: Cell::new(None),
       memo: RefCell::new(None),
+      frontier_state: RefCell::new(None),
+      last_offered: None,
       head: 0,
     }
   }
@@ -1173,6 +1573,100 @@ where
     self.head + self.items.len() > self.cap
   }
 
+  // ── #183: the four re-associations every entry cell below is built out of ──────────
+  //
+  // A fixture generic over `L` cannot invent an `L::State` or an `L::Token`; what it can do is
+  // pair one entry's span with another entry's state or token, which is exactly the defect a
+  // struct-of-arrays cache with index skew has. These four constructors are the whole of the
+  // machinery, so every cell below is a gate and one call.
+
+  /// A clone of `entry` carrying `state` instead of its own — the span and the token untouched.
+  fn with_state(entry: &CachedTokenOf<'a, L>, state: L::State) -> CachedTokenOf<'a, L> {
+    let mut out = entry.clone();
+    out.state = state;
+    out
+  }
+
+  /// A clone of `entry` carrying `token` instead of its own — the span and the state untouched.
+  fn with_token(entry: &CachedTokenOf<'a, L>, token: L::Token) -> CachedTokenOf<'a, L> {
+    let mut out = entry.clone();
+    out.token.data = token;
+    out
+  }
+
+  /// A reference-shaped entry assembled out of two resident ones: `own`'s span and token beside
+  /// `state_from`'s state. What a cache that reads its edges out of parallel arrays, one index
+  /// apart, hands a caller.
+  fn ref_with_foreign_state<'s>(
+    own: &'s CachedTokenOf<'a, L>,
+    state_from: &'s CachedTokenOf<'a, L>,
+  ) -> CachedTokenRefOf<'s, 'a, L> {
+    CachedToken::new(
+      Spanned::new(&own.token.span, &own.token.data),
+      &state_from.state,
+    )
+  }
+
+  /// [`ref_with_foreign_state`](Self::ref_with_foreign_state) on the other half: `own`'s span and
+  /// state beside `token_from`'s token.
+  fn ref_with_foreign_token<'s>(
+    own: &'s CachedTokenOf<'a, L>,
+    token_from: &'s CachedTokenOf<'a, L>,
+  ) -> CachedTokenRefOf<'s, 'a, L> {
+    CachedToken::new(
+      Spanned::new(&own.token.span, &token_from.token.data),
+      &own.state,
+    )
+  }
+
+  /// The two edge cells' shared body: the entry at one end of the queue, handed back with its
+  /// neighbour's state ([`EDGE_STATE_SKEW`]) or its neighbour's token ([`EDGE_TOKEN_SKEW`]).
+  /// `None` when neither cell is selected or the queue is too short for a neighbour to exist, in
+  /// which case the caller answers conformingly.
+  fn skewed_edge<'s>(
+    own: &'s CachedTokenOf<'a, L>,
+    neighbour: &'s CachedTokenOf<'a, L>,
+  ) -> Option<CachedTokenRefOf<'s, 'a, L>> {
+    match D {
+      EDGE_STATE_SKEW => Some(Self::ref_with_foreign_state(own, neighbour)),
+      EDGE_TOKEN_SKEW => Some(Self::ref_with_foreign_token(own, neighbour)),
+      _ => None,
+    }
+  }
+
+  /// The two pop cells' shared body: the right entry, carrying the state ([`POP_STATE_SKEW`]) or
+  /// the token ([`POP_TOKEN_SKEW`]) of whatever is left at that end of the queue.
+  ///
+  /// Honest when the pop emptied the cache — there is no neighbour to borrow from, and a cell
+  /// that answered wrongly there would be caught by a residency the entry comparison does not
+  /// need to reach.
+  fn skew_popped(
+    &self,
+    popped: Option<CachedTokenOf<'a, L>>,
+    neighbour: Option<&CachedTokenOf<'a, L>>,
+  ) -> Option<CachedTokenOf<'a, L>> {
+    let tok = popped?;
+    // [`POST_PEEK_POP_STATE_SKEW`]: the state an earlier `peek` on THIS instance cached, reported
+    // by every pop after it. Gated on a peek having happened rather than on the residency — the
+    // frontier is what makes it wrong, and there is no frontier until something peeked. Cloned
+    // out of the `RefCell` before the `if let` so no borrow guard outlives the scrutinee.
+    if D == POST_PEEK_POP_STATE_SKEW {
+      let frontier = self.frontier_state.borrow().clone();
+      return match frontier {
+        Some(frontier) => Some(Self::with_state(&tok, frontier)),
+        None => Some(tok),
+      };
+    }
+    let Some(neighbour) = neighbour else {
+      return Some(tok);
+    };
+    match D {
+      POP_STATE_SKEW => Some(Self::with_state(&tok, neighbour.state.clone())),
+      POP_TOKEN_SKEW => Some(Self::with_token(&tok, neighbour.token.data.clone())),
+      _ => Some(tok),
+    }
+  }
+
   /// The refusal round-trip — or, under `SWAPPING_REFUSAL`, its violation: the caller is handed a
   /// resident entry instead of the token it offered, which silently swallows that token.
   fn refuse(&mut self, tok: CachedTokenOf<'a, L>) -> CachedTokenOf<'a, L> {
@@ -1181,6 +1675,18 @@ where
     {
       self.items.push_back(tok);
       return other;
+    }
+    // #183: the offered token comes back at its own span, with a RESIDENT entry's state or token
+    // substituted. Span-identical to what was offered, so the round-trip saw nothing wrong with
+    // it while it compared spans — and the input layer parks this value and later restores from
+    // it.
+    if (D == REFUSAL_STATE_SWAP || D == REFUSAL_TOKEN_SWAP)
+      && let Some(resident) = self.items.back()
+    {
+      return match D {
+        REFUSAL_STATE_SWAP => Self::with_state(&tok, resident.state.clone()),
+        _ => Self::with_token(&tok, resident.token.data.clone()),
+      };
     }
     tok
   }
@@ -1203,10 +1709,50 @@ where
     if self.items.len() == self.cap {
       return Err(self.refuse(tok));
     }
+    // #183 round 4: a refusal the contract does not allow — there is room — reached only once a
+    // prepend has landed on this instance, which is the gate that puts the first hit on an
+    // `accepted_push_*` site rather than on the two loops that drive refusals deliberately.
+    //
+    // The corruption is applied HERE and not in `refuse`, which the capacity check above shares:
+    // routing it through there would corrupt the WARRANTED refusals too, and this cell would
+    // land on check 3's round-trip — `REFUSAL_STATE_SWAP`'s site — instead of on the unexpected
+    // one it exists for. (It did, the first time this cell was written.)
+    if D == UNEXPECTED_REFUSAL_ENTRY_SWAP && self.front_pushes.get() > 0 {
+      return Err(match self.items.back() {
+        Some(resident) => Self::with_state(&tok, resident.state.clone()),
+        None => tok,
+      });
+    }
+    // The same shape at check 3's MIXED site: refuse with room from the first non-empty cache,
+    // and corrupt the entry handed back. Reached before any `accepted_push_back`, so it lands on
+    // the branch round 4's wrapper-level fix could not see.
+    if D == EARLY_PUSH_BACK_REFUSAL_ENTRY_SWAP
+      && let Some(resident) = self.items.back()
+    {
+      return Err(Self::with_state(&tok, resident.state.clone()));
+    }
     self.warmed.set(true);
     // Read before the move below, for `STALE_SPAN_AFTER_POP_BACK`'s `span()` override — see
     // that constant's doc for why this is never cleared or refreshed by a pop.
     self.last_pushed_back_span = Some((*tok.token().span_ref()).clone());
+    // #183's storage flagship: the span and the token go in faithfully, and the state that goes
+    // in beside them is the previously accepted entry's. The first push into an empty cache has
+    // no predecessor and keeps its own, which is why check 3's first residency is conforming and
+    // the second is not.
+    //
+    // The `Ok` reference this arm returns is built from the entry it was OFFERED, not read back
+    // out of the store — see `last_offered`. That keeps the cell's single divergence in storage,
+    // where its doc says it is, so it pins the `back()` edge read rather than the accepted-push
+    // read that `WRONG_ACCEPTED_PUSH_REF` exists for.
+    if D == STATE_LAG {
+      let lagged = match self.items.back() {
+        Some(prev) => Self::with_state(&tok, prev.state.clone()),
+        None => tok.clone(),
+      };
+      self.last_offered = Some(tok);
+      self.items.push_back(lagged);
+      return Ok(self.last_offered.as_ref().expect("just set").as_ref());
+    }
     self.items.push_back(tok);
     if D == INTERLEAVED_PUSH_BACK_REORDERS && self.front_pushes.get() > 0 && self.items.len() > 3 {
       // A slot computed from a head index a `push_front` has since moved. Interior only — index 2
@@ -1214,6 +1760,14 @@ where
       // the head nor the tail this push just established ever moves. Gated on a prepend having
       // happened at all, which is what no driver in the kit ever put in front of a `push_back`.
       self.items.swap(1, 2);
+    }
+    // #183 round 3: storage above is faithful; the reference handed back is not. Assembled from
+    // the entry just pushed and its neighbour's state, so nothing that reads the store can see it.
+    if D == WRONG_ACCEPTED_PUSH_REF && self.items.len() >= 2 {
+      let n = self.items.len();
+      let own = self.items.get(n - 1).expect("len >= 2");
+      let neighbour = self.items.get(n - 2).expect("len >= 2");
+      return Ok(Self::ref_with_foreign_state(own, neighbour));
     }
     Ok(self.items.back().expect("just pushed").as_ref())
   }
@@ -1248,7 +1802,9 @@ where
         self.graveyard.push_back(tok.clone());
       }
     }
-    popped
+    // #183: the right entry with the new front's state or token beside it, under the two pop
+    // cells and nowhere else.
+    self.skew_popped(popped, self.items.front())
   }
 }
 
@@ -1445,8 +2001,16 @@ fn cache_kit_catches_a_try_pop_front_if_that_predicates_on_the_back() {
 /// `try_pop_front_if` finding is an assertion missing where the property is claimed, and this is
 /// the same property claimed by an assertion with no mutant behind it. Both halves of check 9's
 /// "the predicate sees the front entry" are witnessed as of this pair.
+///
+/// The `expected` string names the **declining** arm as of #183's ninth round, and this is the
+/// one firing site in the kit that round moved. It is the same assertion on the same method —
+/// `assert_recorded_predicate_arg`'s span half, reached through `recording_pop_front_if` — at an
+/// earlier call: the false-predicate arm did not read its argument at all before that round, so
+/// the true-predicate arm below was the first `pop_front_if` that looked. Closing the hole put a
+/// reader in front of it. The move was found by the before/after firing-message diff rather than
+/// reasoned about, and the vacated arm still carries the identical routed assertion.
 #[test]
-#[should_panic(expected = "pop_front_if()'s predicate was handed")]
+#[should_panic(expected = "pop_front_if()'s false predicate was handed")]
 fn cache_kit_catches_a_pop_front_if_that_predicates_on_the_back() {
   run_queue::<POP_FRONT_IF_PREDICATES_ON_THE_BACK>();
 }
@@ -1756,4 +2320,360 @@ fn cache_kit_catches_a_memoising_peek() {
 #[should_panic(expected = "push-front/into-empty")]
 fn cache_kit_catches_a_push_front_refused_by_an_empty_cache() {
   run_queue::<EMPTY_REFUSING_PUSH_FRONT>();
+}
+
+// ── #183: the entry observable, and the fifteen cells that keep it from being vacuous ────
+//
+// Every cell below leaves the spans of everything it touches where a conforming cache would put
+// them, so **every one of them passed the kit in full before #183**. Each pins exactly one of the
+// two comparisons the entry observable adds, at one site, through the `entry-token` and
+// `entry-state` message tags: an `expected` string that named only the site would match the span
+// half too and prove nothing.
+
+/// The corpus is the substrate every entry cell below stands on, and it is silent when it breaks:
+/// a `SRC` edit that reintroduced a repeated token payload, or a lexer change that stopped the
+/// state advancing, would leave every mutant here *passing* — the kit would compare, and the
+/// comparison would be vacuous, which is the exact defect class #183 exists to close, one level
+/// down.
+///
+/// So the distinctness is asserted directly, off the lexer rather than through the kit: twelve
+/// items, pairwise distinct spans, tokens and states, with the kinds alternating so that a
+/// neighbour skew is visible on the kind and not only on the payload.
+#[test]
+fn corpus_is_pairwise_distinct_on_all_three_axes() {
+  let mut lexer = <CLex<'_> as Lexer<'_>>::new(SRC);
+  let mut spans = Vec::new();
+  let mut tokens = Vec::new();
+  let mut states = Vec::new();
+  while spans.len() < 12 {
+    let Some(res) = lexer.lex() else { break };
+    let span = lexer.span();
+    let state = *lexer.state();
+    let tok = res.expect("the corpus source lexes cleanly");
+    spans.push(span);
+    tokens.push(tok);
+    states.push(state);
+  }
+  assert_eq!(
+    spans.len(),
+    12,
+    "SRC must lex to the twelve items the widest capacity (8) plus a full 4-slot peek window \
+     needs; it lexed {} — every `beyond_residency`/`filled_from` demand in the kit is bounded by \
+     capacity + window, so a shorter SRC turns cell failures into kit-usage panics",
+    spans.len()
+  );
+  for i in 0..spans.len() {
+    assert_eq!(
+      tokens[i].kind(),
+      if i % 2 == 0 { CKind::Word } else { CKind::Num },
+      "SRC's token kinds must alternate, so a cache that swaps two neighbours is visible on the \
+       kind and not only on the payload; position {i} is {:?}",
+      tokens[i].kind()
+    );
+    assert_eq!(
+      states[i].lexed,
+      u32::try_from(i).expect("twelve fits") + 1,
+      "the corpus state must advance once per token, so the state cached beside each entry is \
+       that entry's own"
+    );
+    for j in (i + 1)..spans.len() {
+      assert_ne!(
+        spans[i], spans[j],
+        "corpus spans must be pairwise distinct: positions {i} and {j} share one"
+      );
+      assert_ne!(
+        tokens[i], tokens[j],
+        "corpus tokens must be pairwise distinct, or the kit's token comparison cannot \
+         discriminate a swap between positions {i} and {j}"
+      );
+      assert_ne!(
+        states[i], states[j],
+        "corpus states must be pairwise distinct, or the kit's state comparison cannot \
+         discriminate a re-association between positions {i} and {j}"
+      );
+    }
+  }
+}
+
+/// Mutant 1, the storage flagship: `push_back` stores every span and every token faithfully and
+/// stores the **previous** entry's `L::State` beside them.
+///
+/// The expected message names the `back()` edge read, which is the entry `InputRef::resume`
+/// rebuilds a lexer from and the one whose state message carries the restore consequence. It
+/// fires at the first two-resident residency check 3 builds — the shallowest residency at which a
+/// lag is a lag at all.
+#[test]
+#[should_panic(expected = "entry-state] edge-identity back()")]
+fn cache_kit_catches_a_push_back_that_stores_the_previous_entrys_state() {
+  run_queue::<STATE_LAG>();
+}
+
+/// Mutant 2: `front()`/`back()` name the right slot and carry the neighbour's state.
+///
+/// The expected message names the `front()` read, which is the first edge the residency oracle
+/// compares. `WRONG_FRONT_IDENTITY` is the same accessor caught by the span half; this cell is
+/// what is left of that defect once the span is right, and nothing before #183 could see it.
+#[test]
+#[should_panic(expected = "entry-state] edge-identity front()")]
+fn cache_kit_catches_an_edge_reference_carrying_the_neighbours_state() {
+  run_queue::<EDGE_STATE_SKEW>();
+}
+
+/// Mutant 3: [`EDGE_STATE_SKEW`] on the token half.
+#[test]
+#[should_panic(expected = "entry-token] edge-identity front()")]
+fn cache_kit_catches_an_edge_reference_carrying_the_neighbours_token() {
+  run_queue::<EDGE_TOKEN_SKEW>();
+}
+
+/// Mutant 4: `pop_front`/`pop_back` return the right entry with the remaining neighbour's state.
+///
+/// The expected message names check 4's first `pop_front`, which is the first pop in the whole
+/// kit that leaves a neighbour behind — the pops in checks 2 and 5's empty-cache drivers empty
+/// the cache, and this cell is honest there by construction.
+#[test]
+#[should_panic(expected = "entry-state] order pop_front #0")]
+fn cache_kit_catches_a_pop_that_returns_the_neighbours_state() {
+  run_queue::<POP_STATE_SKEW>();
+}
+
+/// Mutant 5: [`POP_STATE_SKEW`] on the token half.
+#[test]
+#[should_panic(expected = "entry-token] order pop_front #0")]
+fn cache_kit_catches_a_pop_that_returns_the_neighbours_token() {
+  run_queue::<POP_TOKEN_SKEW>();
+}
+
+/// Mutant 6: the owned peek arm serves the right run with every state replaced by the front's.
+///
+/// The expected message names the empty-buffer peek at the full cache — `bounded-peek against`,
+/// which is the run comparison and not `peek_one`'s or the prefilled sweep's. Position 0 is right
+/// by coincidence, exactly as `WRONG_OWNED_PEEK`'s is, so it takes a residency of two before the
+/// kit is asked anything at all.
+#[test]
+#[should_panic(expected = "entry-state] bounded-peek against")]
+fn cache_kit_catches_an_owned_peek_that_serves_one_state_for_every_entry() {
+  run_queue::<OWNED_PEEK_STATE_SKEW>();
+}
+
+/// Mutant 7: `WRONG_OWNED_PEEK` **minus the span corruption** — the owned-arm instance of the
+/// span-only comparison #183 is about.
+#[test]
+#[should_panic(expected = "entry-token] bounded-peek against")]
+fn cache_kit_catches_an_owned_peek_that_serves_one_token_for_every_entry() {
+  run_queue::<OWNED_PEEK_TOKEN_SKEW>();
+}
+
+/// Mutant 8: `peek_one` names the front and carries the back's state.
+///
+/// The expected message names `peek_one()` specifically, so this cell cannot be satisfied by the
+/// run comparison above it — `peek` is untouched here, and a cell whose `expected` said only
+/// `bounded-peek` would not have said which of the two it pinned.
+#[test]
+#[should_panic(expected = "entry-state] bounded-peek peek_one()")]
+fn cache_kit_catches_a_peek_one_that_carries_the_backs_state() {
+  run_queue::<PEEK_ONE_STATE_SKEW>();
+}
+
+/// Mutant 9: [`PEEK_ONE_STATE_SKEW`] on the token half.
+#[test]
+#[should_panic(expected = "entry-token] bounded-peek peek_one()")]
+fn cache_kit_catches_a_peek_one_that_carries_the_backs_token() {
+  run_queue::<PEEK_ONE_TOKEN_SKEW>();
+}
+
+/// Mutant 10: a refused push hands the offered token back at its own span with a resident's
+/// state.
+///
+/// `SWAPPING_REFUSAL` is the same site caught by the span half — it hands back a whole different
+/// entry. This is what survives when the span is right, and it is the value the input layer's
+/// put-back parks and later restores a lexer from.
+#[test]
+#[should_panic(expected = "entry-state] refusal-round-trip push_back")]
+fn cache_kit_catches_a_refusal_that_swaps_in_a_residents_state() {
+  run_queue::<REFUSAL_STATE_SWAP>();
+}
+
+/// Mutant 13 (added by the #183 cross-model gate): the refusal round-trip's **token** half.
+///
+/// Without this cell that half would be a comparison nothing in the suite could fail: mutant 10
+/// corrupts only the state, and no other cell reaches a refused push's return value at all.
+#[test]
+#[should_panic(expected = "entry-token] refusal-round-trip push_back")]
+fn cache_kit_catches_a_refusal_that_swaps_in_a_residents_token() {
+  run_queue::<REFUSAL_TOKEN_SWAP>();
+}
+
+/// Mutant 11: `push_many`'s overflow comes back at the right spans, in order, with a resident's
+/// state.
+///
+/// The override is in `push_many` alone, so check 3's refusal round-trip stays conforming and the
+/// cell reports at its own site — which is what makes the `expected` string a pin on **this**
+/// comparison rather than on the refusal one.
+#[test]
+#[should_panic(expected = "entry-state] push-many overflow entry #0")]
+fn cache_kit_catches_a_push_many_that_rewrites_the_overflows_state() {
+  run_queue::<PUSH_MANY_STATE_SWAP>();
+}
+
+/// Mutant 14 (added by the #183 cross-model gate): the `push_many` overflow's **token** half, for
+/// the reason [`cache_kit_catches_a_refusal_that_swaps_in_a_residents_token`] exists.
+#[test]
+#[should_panic(expected = "entry-token] push-many overflow entry #0")]
+fn cache_kit_catches_a_push_many_that_rewrites_the_overflows_token() {
+  run_queue::<PUSH_MANY_TOKEN_SWAP>();
+}
+
+/// Mutant 12: `try_pop_front_if` hands its predicate the front entry carrying the back's state,
+/// and is otherwise conforming.
+///
+/// The expected message names the **Err** path, which is the first of check 9's two
+/// `try_pop_front_if` recording predicates to run. `TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK` is
+/// the same site caught by the span half; this is a predicate shown the right token at a lexer
+/// position it never occupied.
+///
+/// Scoped to `try_pop_front_if` in #183's ninth round, when the declining `pop_front_if` arm
+/// gained a reader and became the first recording predicate in the check. This mutant used to
+/// skew both methods and could only ever report at whichever ran first, so the `pop_front_if`
+/// half was coverage-shaped and never fired; scoping it here keeps this cell on the site its
+/// `expected` has always named, and [`cache_kit_catches_a_declining_predicate_shown_the_backs_state`]
+/// pins the other method for real.
+#[test]
+#[should_panic(
+  expected = "entry-state] pop-front-if try_pop_front_if()'s Err-path predicate argument"
+)]
+fn cache_kit_catches_a_predicate_shown_the_backs_state() {
+  run_queue::<PREDICATE_ARG_STATE_SKEW>();
+}
+
+/// Mutant 15 (added by the #183 cross-model gate): the predicate argument's **token** half, for
+/// the reason [`cache_kit_catches_a_refusal_that_swaps_in_a_residents_token`] exists.
+#[test]
+#[should_panic(
+  expected = "entry-token] pop-front-if try_pop_front_if()'s Err-path predicate argument"
+)]
+fn cache_kit_catches_a_predicate_shown_the_backs_token() {
+  run_queue::<PREDICATE_ARG_TOKEN_SKEW>();
+}
+
+/// Mutant 16, from #183's own adversarial review: `peek` caches a lookahead frontier and every
+/// later pop on that instance reports its `L::State` instead of the removed entry's.
+///
+/// This is the #183 defect class surviving **inside** the #183 fix, on the peek-then-consume path
+/// the issue's severity argument rests on. It is also the one site the PR's residual-coverage
+/// argument did not cover: that argument is about comparisons reached through a return path some
+/// other mutant already corrupts, and this one was reached by nothing, because
+/// `check_peek_across_mutations` bound its popped value and asserted `is_some()` on it. **A
+/// discarded value cannot be pinned by a mutant on any return path** — the only fix is to compare
+/// it, which is what the drain now does.
+///
+/// The expected message names the drain's **first** pop. Every other drain in the kit pops an
+/// instance that has never been peeked, so the frontier is unset and this fixture is conforming at
+/// all of them — which is what makes the `expected` string a pin on the across-mutations drain
+/// specifically, and not on `check_pop_order`'s.
+///
+/// Only the state half is a cell of its own, and deliberately. The comparison goes through the
+/// shared [`CacheHarness::assert_entry_eq`](super::cache) helper, so the removable units here are
+/// the whole call — which this cell catches — and the helper's token branch, which seven cells
+/// above already pin. A token sibling would re-pin a branch that is pinned, not a site that is
+/// not; the state half is the one to spend the cell on, since `L::State` is what a resume rebuilds
+/// the lexer from.
+#[test]
+#[should_panic(expected = "entry-state] bounded-peek/across-mutations pop_front() #0")]
+fn cache_kit_catches_a_peek_that_poisons_the_state_of_later_pops() {
+  run_queue::<POST_PEEK_POP_STATE_SKEW>();
+}
+
+/// Mutant 17, from #183's third review round: the push stores perfectly and returns an `Ok`
+/// reference assembled from a different resident.
+///
+/// Rounds 2 and 3 found the same class in two places — a value a `Cache` method handed back that
+/// the kit reduced to presence: first a popped entry, then an accepted push's reference. So the
+/// kit now reads **every** such value, and this cell is what keeps the push half of that from
+/// being a check nothing can fail. The contract is explicit — `Ok` carries *a reference to the
+/// cached token* — and the violation is invisible to every other oracle here, because they all
+/// observe storage and this cell's storage is flawless.
+///
+/// The expected message names `push_back #1` in check 3, which is the first accepted push in the
+/// whole kit that lands with a neighbour already resident: every earlier one goes into an empty
+/// cache, where the entry pushed and the entry beside it are the same one and this cell is
+/// conforming.
+///
+/// One cell for both arms, because both route through the kit's single accepted-push comparison —
+/// the same granularity argument the two rounds before this one recorded: the removable units are
+/// that one call, which this pins, and the shared entry helper's branches, which nine cells above
+/// already pin.
+#[test]
+#[should_panic(expected = "entry-state] accepted-push push_back #1")]
+fn cache_kit_catches_an_accepted_push_that_returns_the_wrong_reference() {
+  run_queue::<WRONG_ACCEPTED_PUSH_REF>();
+}
+
+/// Mutant 18, from #183's fourth review round, and the one that finishes the class: a push
+/// refused with room to spare that also corrupts the entry it hands back.
+///
+/// The `accepted_push_*` wrappers used to take `Err`, panic on the refusal and drop the returned
+/// value — the last `Cache` return in the kit read for its shape and not its contents. This cell
+/// is what makes the fix bite, and the `expected` string is the evidence for **which** assertion
+/// fires: `entry-state] unexpected-refusal`, the entry comparison, not the refusal panic that
+/// follows it. Without the comparison the refusal message would be all that ever appeared.
+///
+/// It is a claim-accuracy cell rather than a coverage one, and says so plainly: reaching it needs
+/// a refusal the contract forbids, which the kit already fails on. No cache is certified because
+/// of this. What was untrue before it is the kit's claim that every value a `Cache` method hands
+/// back is compared or is a documented exception — and an enumeration with an unlisted third case
+/// is the same defect class as an oracle that does not look, one level up.
+#[test]
+#[should_panic(
+  expected = "entry-state] unexpected-refusal push_back #1 building an interleaved residency"
+)]
+fn cache_kit_catches_an_unwarranted_refusal_that_corrupts_the_returned_entry() {
+  run_queue::<UNEXPECTED_REFUSAL_ENTRY_SWAP>();
+}
+
+/// Mutant 19, from #183's fifth review round: the **mixed** `push_back` site.
+///
+/// Round 4 put the unexpected-refusal comparison in the `accepted_push_*` wrappers, which was
+/// right and incomplete — check 3's push never goes through a wrapper, because a refusal there is
+/// sometimes legitimate. The same call, two meanings, and the unwarranted one asserted its way
+/// out before the entry was read. The comparison now lives in `push_back_expecting`, told which
+/// meaning applies by `must_accept`, and this cell is what makes that bite.
+///
+/// The `expected` string carries a trailing colon so it pins **this** site: mutant 18's message
+/// continues `push_back #1 building an interleaved residency`, and a bare `#1` would match both.
+#[test]
+#[should_panic(expected = "entry-state] unexpected-refusal push_back #1:")]
+fn cache_kit_catches_an_early_push_back_refusal_that_corrupts_the_returned_entry() {
+  run_queue::<EARLY_PUSH_BACK_REFUSAL_ENTRY_SWAP>();
+}
+
+/// Mutant 20: the prepend twin of mutant 19, at check 5's mixed site.
+#[test]
+#[should_panic(expected = "entry-state] unexpected-refusal push_front #0:")]
+fn cache_kit_catches_an_early_push_front_refusal_that_corrupts_the_returned_entry() {
+  run_queue::<EARLY_PUSH_FRONT_REFUSAL_ENTRY_SWAP>();
+}
+
+/// Mutant 21, from #183's ninth review round: the **declining** `pop_front_if` predicate is shown
+/// the back's `L::State`, and everything else about the call conforms.
+///
+/// The round's finding was a classification error, not a missing assertion. Check 9's
+/// false-predicate arm sat among the kit's absence exceptions — "it returns `None`, so there is
+/// no entry to compare" — which is true of the RETURN and says nothing about the ARGUMENT.
+/// `pop_front_if` hands caller code a real entry *before* it learns the answer, so a cache can
+/// answer `None` correctly, remove nothing, keep every span in place, and still run the caller's
+/// validation predicate against a lexer position that entry never occupied.
+///
+/// The `expected` string names `false-predicate argument`, which pins the declining arm
+/// specifically: `POP_FRONT_IF_PREDICATE_ARG_STATE_SKEW` is wrong on every `pop_front_if` arm —
+/// `F: FnOnce` settles the entry before the answer exists — and this is simply the first of them
+/// the kit now reads.
+///
+/// It fails on the **entry comparison**, not on residency, and that is the whole point of the
+/// cell: `WRONG_POP_FRONT_IF` already covers a declining call that removes something. This one
+/// removes nothing, so every residency and return oracle in check 9 agrees it conformed.
+#[test]
+#[should_panic(expected = "entry-state] pop-front-if pop_front_if()'s false-predicate argument")]
+fn cache_kit_catches_a_declining_predicate_shown_the_backs_state() {
+  run_queue::<POP_FRONT_IF_PREDICATE_ARG_STATE_SKEW>();
 }
