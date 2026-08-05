@@ -963,6 +963,15 @@ where
       "tokora cache conformance [{name} bounded-peek] against {state}: peek() appended {} entries into an empty {window}-slot buffer, expected exactly min(len, the buffer's remaining capacity) = {bound}. The bound is the cache's CURRENT length, not the room its backing store has: an entry that has been popped is not lookahead any more.",
       first.len()
     );
+    // This one assertion carries three of check 6's clauses at once: the ORDER (oldest first),
+    // the CONTENT (these entries and no others), and "**each resident token once**". The third
+    // has no assertion of its own and does not get one: `corpus` lexes successive tokens, so the
+    // spans in `want` are pairwise distinct at every capacity and from every source, and an
+    // appended run that equals `want[..bound]` is therefore distinct by construction. A separate
+    // distinctness check could not be made to fail while this one passes, and an assertion that
+    // cannot fail is not a check (#180 part A, item 9). What the clause was missing is a fixture
+    // that violates it and nothing else, which `DUPLICATING_PEEK` in `cache_tests.rs` now is: the
+    // right count, the right first entry, the front served `bound` times over.
     assert!(
       first == want[..bound],
       "tokora cache conformance [{name} bounded-peek] against {state}: peek() appended {first:?}, expected the resident prefix OLDEST FIRST {:?}",

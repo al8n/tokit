@@ -335,6 +335,21 @@ const WRONG_FRONT_IDENTITY: u8 = 33;
 /// [`WRONG_FRONT_IDENTITY`] at the other end: `back()` hands back the **front** entry while
 /// `back_span()` still names the back one (#180 part A, item 8).
 const WRONG_BACK_IDENTITY: u8 = 34;
+/// `peek` serves the front entry `bound` times over instead of walking the residency once — the
+/// direct witness for check 6's "**each resident token once**" clause (#180 part A, item 9).
+///
+/// The clause had no fixture of its own. It is carried by the exact-sequence assertion
+/// (`peek() appended {first:?}, expected the resident prefix OLDEST FIRST`) rather than by a
+/// distinctness check of its own, and that assertion catches this cell unchanged — see
+/// [`CacheHarness::check_peek_at`](super::cache) for why a separate distinctness assertion is
+/// **not** added: with the corpus spans pairwise distinct, an appended run that equals the
+/// resident prefix is distinct by construction, so such an assertion could not be made to fail.
+/// [`WRONG_OWNED_PEEK`] is the same defect on the OWNED arm; this one is on the borrowed arm
+/// every built-in cache actually takes.
+///
+/// Correct at every bound of 0 or 1, where "serve the front repeatedly" and "walk the residency
+/// once" are the same instruction.
+const DUPLICATING_PEEK: u8 = 35;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -669,6 +684,19 @@ where
       }
       return;
     }
+    if D == DUPLICATING_PEEK && fill > 0 {
+      // The right count, the right first entry, the right arm — and the SAME resident token
+      // served `fill` times over rather than each resident token once. Guarded on `fill > 0` so
+      // an empty cache or a full buffer still appends nothing, like a conforming `peek`.
+      let repeated = self
+        .items
+        .front()
+        .expect("fill > 0 implies at least one resident entry");
+      for _ in 0..fill {
+        buf.push_back(Maybe::Ref(repeated.as_ref()));
+      }
+      return;
+    }
     if D == OWNED_PEEK {
       // The owned arm, otherwise correct: same bound, same order, same source — a clone of the
       // entry at its own position, not a borrow of it.
@@ -968,6 +996,16 @@ fn cache_kit_catches_a_front_that_names_the_wrong_entry() {
 #[should_panic(expected = "back() names")]
 fn cache_kit_catches_a_back_that_names_the_wrong_entry() {
   run_queue::<WRONG_BACK_IDENTITY>();
+}
+
+/// #180 part A, item 9: check 6's "each resident token once" clause had no fixture of its own —
+/// it was implied by the exact-sequence assertion and never witnessed. This is the witness. No
+/// new assertion goes with it: see [`DUPLICATING_PEEK`] and `check_peek_at` for why a
+/// distinctness check of its own provably could not be made to fail.
+#[test]
+#[should_panic(expected = "OLDEST FIRST")]
+fn cache_kit_catches_a_peek_that_serves_one_token_repeatedly() {
+  run_queue::<DUPLICATING_PEEK>();
 }
 
 /// #180 part A, item 5: `pop_front_if`/`try_pop_front_if` were never called by the kit, so an
