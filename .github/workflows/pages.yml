@@ -30,11 +30,15 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # One in-flight run per workflow per ref. A push that supersedes an earlier one cancels it,
-  # so a branch's CI reflects its tip rather than a queue of stale commits. Never on `main`:
-  # there a cancelled run would leave the released commit without a verdict, and `pages.yml`'s
-  # deploy job additionally carries its own `github-pages` group that must not be interrupted.
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # One in-flight run per workflow per ref, so a branch's CI reflects its tip rather than a queue
+  # of stale commits — except on `main`, where the group is keyed on the commit SHA so that every
+  # main commit gets its own group and its own verdict. Do NOT collapse that back to one group per
+  # ref: `cancel-in-progress: false` does not protect a main run on its own, because a run queued
+  # into a group that already has one in progress cancels whichever run was PENDING there
+  # regardless of that setting (see ci.yml, whose runs this exact way lost real main verdicts).
+  # The `deploy` job below additionally carries its own `github-pages` group that must not be
+  # interrupted.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
