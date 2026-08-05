@@ -115,6 +115,13 @@ quarter of the suite from CI without reddening anything.
 Sorting is Python's, not the shell's: `sort(1)` is locale-dependent and the runners are not all
 the same OS, so a shell sort could hand two runners different partitions for the same list.
 
+`selftest` (below) exercises every guard above except (1). That one guard is the live
+`cargo metadata` subprocess call succeeding at all — by design the selftest never shells out to
+cargo or reads the real workspace, so there is nothing for it to fail in that specific way. The
+other seven are all driven with mocked metadata, a throwaway tree, or a hand-built shard list,
+because `verify_targets` and `verify_partition` take that input as plain arguments rather than
+reading it themselves.
+
 Modes:
 
     plan                    validate, print the partition, and emit `shards=[…]` to
@@ -122,10 +129,10 @@ Modes:
     flags <shard> logos     `[--lib ]--test=a --test=b …` for the `logos` pass.
     flags <shard> raw       `[--lib ]--test=a --test=b …` for the `logos,unstable-raw` pass.
     flags <shard> doc       `--doc` if this shard owns the doctests, else the literal `SKIP`.
-    selftest                exercise guard (5) and guard (8)/`emit_flags` against mocked
-                            `cargo metadata` JSON and a throwaway `tests/` tree — no real cargo
-                            invocation, no edit to the real manifest. Exits non-zero if any
-                            case fails.
+    selftest                exercise every testable guard — (2) through (8), skipping only (1)
+                            — against mocked `cargo metadata` JSON, hand-built shard lists, and
+                            a throwaway `tests/` tree; no real cargo invocation, no edit to the
+                            real manifest. Exits non-zero if any case fails.
 
 `doc` reports `SKIP` rather than printing nothing because an empty string and a crashed helper
 look identical to a shell, and one of them must not be read as "no doctests to run".
@@ -538,10 +545,28 @@ def partition(names: list[str]) -> list[list[str]]:
         shard_cost[s] += TARGET_WEIGHTS.get(n, DEFAULT_WEIGHT)
     shards = [sorted(shard) for shard in shards]
 
-    # (7) Every shard re-proves the whole partition, not just its own slice.
+    verify_partition(names, shards)
+    return shards
+
+
+def verify_partition(names: list[str], shards: list[list[str]]) -> None:
+    """Guard (7): every shard non-empty, the shards pairwise disjoint, and their union equal to
+    `names`. Split out of `partition()` so the selftest can drive it directly against a
+    deliberately broken `shards` list — an empty shard, a duplicate, an omitted or a phantom
+    name — without needing a broken assignment algorithm to produce one. Each of the four checks
+    below is independent and ordered so that a case built to isolate one of them cannot also
+    trip an earlier one first: see `mode_selftest` for the fixtures that exercise each in
+    isolation.
+
+    `names` MUST already be sorted, the way `enumerate_targets` documents its return value —
+    the union check compares `sorted(flat) != names` and a `names` that is not itself sorted
+    fails that comparison regardless of whether the partition is actually complete. The one
+    real caller, `partition()`, always satisfies this; a hand-built `names` list passed here
+    directly (as the selftest's guard (7) fixtures do) must be sorted too.
+    """
     for s, shard in enumerate(shards):
         if not shard:
-            die(f"shard {s} of {SHARD_TOTAL} enumerated zero targets")
+            die(f"shard {s} of {len(shards)} enumerated zero targets")
 
     flat = [n for shard in shards for n in shard]
     if len(flat) != len(names):
@@ -555,8 +580,6 @@ def partition(names: list[str]) -> list[list[str]]:
     if sorted(flat) != names:
         omitted = sorted(set(names) - set(flat))
         die(f"the union of the shards is not the enumerated list; omitted: {omitted}")
-
-    return shards
 
 
 def emit_flags(shard: int, unit: str, shards: list[list[str]]) -> None:
@@ -623,9 +646,11 @@ def mode_plan(names: list[str], shards: list[list[str]]) -> None:
 
 
 def mode_selftest() -> None:
-    """Regression tests for guard (5) and guard (8)/`emit_flags`, run against mocked `cargo
-    metadata` JSON and a throwaway `tests/` tree. Never shells out to cargo, never touches the
-    real manifest or the real `tokora/tests/`.
+    """Regression tests for every testable guard: (2)-(8) except (1), which needs a real
+    `cargo metadata` invocation to fail and is exempt by design (see the module header). Run
+    against mocked `cargo metadata` JSON, hand-built shard lists for `verify_partition`, and a
+    throwaway `tests/` tree. Never shells out to cargo, never touches the real manifest or the
+    real `tokora/tests/`.
 
     In the spirit of `ci/changelog_structure_selftest.sh`: a green case proves the guard does
     not refuse by default, and each red case proves the SPECIFIC guard fires — not just that
@@ -693,6 +718,88 @@ def mode_selftest() -> None:
                     }
                 ]
             }
+
+        # RED — guard (2): zero packages named `tokora`. A stale package filter (e.g. after a
+        # workspace rename) must not read as "a package with no tests" — it must name the count
+        # it actually found instead.
+        meta_no_pkg = {"packages": [{"name": "not-tokora", "targets": []}]}
+        code, err = run(verify_targets, meta_no_pkg, tmp)
+        check(
+            "guard(2) red: zero packages named tokora is refused",
+            code != 0 and "exactly one workspace package" in err and "found 0" in err,
+            err,
+        )
+
+        # RED — guard (2): two packages named `tokora`. Cannot happen from real cargo output,
+        # but the guard counts rather than assumes, so a mock can still drive it.
+        meta_two_pkg = {
+            "packages": [
+                {"name": PACKAGE, "targets": []},
+                {"name": PACKAGE, "targets": []},
+            ]
+        }
+        code, err = run(verify_targets, meta_two_pkg, tmp)
+        check(
+            "guard(2) red: two packages named tokora is refused",
+            code != 0 and "exactly one workspace package" in err and "found 2" in err,
+            err,
+        )
+
+        # RED — guard (3): the one `tokora` package exists but declares zero `test`-kind
+        # targets. The positive control the header names: without this, "the query matched
+        # nothing" and "the crate has no integration tests" render as the same green.
+        meta_no_tests = {
+            "packages": [
+                {
+                    "name": PACKAGE,
+                    "targets": [{"name": "tokora", "kind": ["lib"], "src_path": str(foo)}],
+                }
+            ]
+        }
+        code, err = run(verify_targets, meta_no_tests, tmp)
+        check(
+            "guard(3) red: a package with zero test-kind targets is refused",
+            code != 0 and "ZERO integration test targets" in err,
+            err,
+        )
+
+        # RED — guard (4): metadata omits a target the tree implies (`bar`). `bar` is never a
+        # path-comparison candidate here, so this cannot be guard (5) firing instead.
+        meta_missing_bar = {
+            "packages": [
+                {
+                    "name": PACKAGE,
+                    "targets": [{"name": "foo", "kind": ["test"], "src_path": str(foo)}],
+                }
+            ]
+        }
+        code, err = run(verify_targets, meta_missing_bar, tmp)
+        check(
+            "guard(4) red: metadata missing a tree-implied target is refused",
+            code != 0 and "disagree about the integration suite" in err and "'bar'" in err,
+            err,
+        )
+
+        # RED — guard (4): metadata names a target the tree does not imply at all (`ghost` is
+        # never written under `tests_dir`). The complementary direction from the case above.
+        meta_extra_ghost = {
+            "packages": [
+                {
+                    "name": PACKAGE,
+                    "targets": [
+                        {"name": "foo", "kind": ["test"], "src_path": str(foo)},
+                        {"name": "bar", "kind": ["test"], "src_path": str(bar)},
+                        {"name": "ghost", "kind": ["test"], "src_path": str(foo)},
+                    ],
+                }
+            ]
+        }
+        code, err = run(verify_targets, meta_extra_ghost, tmp)
+        check(
+            "guard(4) red: metadata naming a target absent from the tree is refused",
+            code != 0 and "disagree about the integration suite" in err and "'ghost'" in err,
+            err,
+        )
 
         # GREEN — names AND paths agree with tokora/tests/: guard (5) must not refuse this.
         code, err = run(verify_targets, meta_with_foo_at(foo), tmp)
@@ -803,6 +910,89 @@ def mode_selftest() -> None:
             "emit_flags green: ordinary names still join as --test=<name>",
             out.split() == ["--test=alpha", "--test=beta"],
             out,
+        )
+
+        # ── guard (6): SHARD_TOTAL bounds, driven through partition() ───────────────────────
+        # `partition()` reads the module-level SHARD_TOTAL directly (never as a parameter), so
+        # these three cases save and restore it exactly like the PATH_EXCEPTIONS cases above
+        # save and restore that global — never left mutated for a case after this one, or for a
+        # real `plan`/`flags` call later in the same process.
+        global SHARD_TOTAL
+        saved_shard_total = SHARD_TOTAL
+        try:
+            SHARD_TOTAL = 0
+            code, err = run(partition, ["a", "b"])
+            check(
+                "guard(6) red: SHARD_TOTAL < 1 is refused",
+                code != 0 and "SHARD_TOTAL must be >= 1" in err,
+                err,
+            )
+
+            SHARD_TOTAL = 5
+            code, err = run(partition, ["a", "b"])
+            check(
+                "guard(6) red: SHARD_TOTAL greater than the target count is refused",
+                code != 0 and "only 2 integration test targets exist" in err,
+                err,
+            )
+
+            SHARD_TOTAL = 2
+            code, err = run(partition, ["a", "b", "c", "d"])
+            check("guard(6) green: SHARD_TOTAL within bounds is accepted", code == 0, err)
+        finally:
+            SHARD_TOTAL = saved_shard_total
+
+        # ── guard (7): verify_partition, driven directly with a deliberately broken `shards` ──
+        # `partition()` itself can never produce most of these — LPT cannot emit an empty
+        # shard, a duplicate or a phantom name from valid input — so each fixture below is
+        # hand-built to reach exactly one of guard (7)'s four checks, in an order that proves
+        # the earlier checks in `verify_partition` do not fire first and mask it.
+        #
+        # MUST be alphabetically sorted (see verify_partition's docstring) — an unsorted names4
+        # would fail the union check even for a genuinely complete partition, for a reason
+        # having nothing to do with coverage. This was caught by the green case below going red
+        # for the wrong reason on the first version of this fixture.
+        names4 = ["alpha", "beta", "delta", "gamma"]
+
+        # GREEN: a valid, hand-built partition must not be refused.
+        code, err = run(verify_partition, names4, [["alpha", "beta"], ["gamma", "delta"]])
+        check("guard(7) green: a correct partition is accepted", code == 0, err)
+
+        # RED: an empty shard.
+        code, err = run(verify_partition, names4, [["alpha", "beta", "gamma", "delta"], []])
+        check(
+            "guard(7) red: an empty shard is refused",
+            code != 0 and "enumerated zero targets" in err,
+            err,
+        )
+
+        # RED: undercount with no duplicate (one shard silently drops `delta`) — isolates the
+        # size check from the duplicate check below it: no shard is empty, no name repeats.
+        code, err = run(verify_partition, names4, [["alpha", "beta"], ["gamma"]])
+        check(
+            "guard(7) red: a shard list smaller than the enumerated list is refused",
+            code != 0 and "partition size 3 != enumerated size 4" in err,
+            err,
+        )
+
+        # RED: a duplicate, sized to still equal len(names4) so the size check above does not
+        # fire first — `beta` appears twice, `delta` not at all.
+        code, err = run(verify_partition, names4, [["alpha", "beta"], ["beta", "gamma"]])
+        check(
+            "guard(7) red: a name assigned to two shards is refused",
+            code != 0 and "beta" in err and "more than one shard" in err,
+            err,
+        )
+
+        # RED: a phantom name outside names4, standing in for a dropped real name (`delta`),
+        # sized and duplicate-free so only the union-equality check can fire.
+        code, err = run(verify_partition, names4, [["alpha", "beta"], ["gamma", "phantom"]])
+        check(
+            "guard(7) red: a name outside the enumerated list is refused",
+            code != 0
+            and "union of the shards is not the enumerated list" in err
+            and "delta" in err,
+            err,
         )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
