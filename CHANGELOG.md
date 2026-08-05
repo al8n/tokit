@@ -3754,6 +3754,28 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    already caught by the residency oracle, so those are not re-driven.)
    — *(#180)*
 
+80. **Every prefilled `peek` the cache conformance kit drove put entries in the buffer whose spans
+   came *after* the residency — the inverse of what the input layer actually hands over.**
+   `InputRef`'s peek fill pushes the parked token before it calls in, because the parked token is
+   the front of the stream: it heads the window and the cache fills in behind it. So at the real
+   call site the buffer holds what comes **first**, and the kit had never once built that shape.
+   That is the one arrangement in which a cache can talk itself into treating the buffer as a
+   prefix of its own run and skipping an entry it decides the caller already holds — a "do not
+   serve the parked token twice" dedup, keyed on a span comparison that is simply false in the
+   arrangement the kit did build. Check 6 now sweeps the prefill depth in **both** relations,
+   building the residency one peek window into the corpus so the tokens before it are available
+   to prefill from; this costs no extra source, since the kit already asks for the capacity plus a
+   window.
+
+   Recorded because the issue this closes predicted the opposite: it named a `peek` that *sorts or
+   merges by span* as the invisible case. That one is caught, and was already — measured, not
+   argued. Because the old prefill's spans are the greater ones, a correct append leaves the
+   buffer **unsorted**, so any sort visibly reorders it and the untouched-prefix assertion fires
+   at depth 1. In the newly added relation the correct append is already ascending, so a sort is
+   the identity and invisible there. The two arrangements catch different defect classes, which is
+   why both are kept.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,

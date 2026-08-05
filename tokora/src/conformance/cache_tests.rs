@@ -24,6 +24,7 @@ use crate::{
   Lexer, Span, Token,
   cache::{
     Cache, CachedToken, CachedTokenOf, CachedTokenRefOf, DefaultCache, MaybeRefCachedTokenOf,
+    PeekedTokenExt,
   },
   error::token::UnexpectedToken,
   lexer::LogosLexer,
@@ -483,6 +484,23 @@ const WRAPPED_RUN_PEEK: u8 = 43;
 /// after a `pop_back` and right at every wrapped residency, since the rotation ends with a
 /// `push_back` that refreshes what it reads.
 const WRAPPED_RUN_SPAN: u8 = 44;
+/// `peek` reads the buffer it was handed as a **prefix of its own run** whenever the spans say it
+/// could be one, and starts one entry late — the "the caller already holds the parked token, do
+/// not serve it twice" mistake (#180 part B, item 6).
+///
+/// The condition is a span comparison: if the last entry already in the buffer ends at or before
+/// the front resident entry starts, this cache concludes the buffer is the head of the same
+/// stream and skips its own front. And that condition is **exactly the one the kit could never
+/// make true**. Every prefilled driver drew its prefill from
+/// [`beyond_residency`](super::cache) — corpus tokens PAST the residency — so the buffer's spans
+/// were always *greater* than every resident one, and the relation between the two was one fixed
+/// value in every call the kit ever made.
+///
+/// It is also the inverse of the real one. `InputRef`'s peek fill pushes the parked token first
+/// because "the parked token is the front of the stream, so it heads the window and the cache
+/// fills in behind it" — so at the call site the buffer's entries **precede** the residency, and
+/// that is the arrangement in which a cache can talk itself into deduplicating.
+const PARKED_PREFIX_SKIPPING_PEEK: u8 = 45;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -890,6 +908,26 @@ where
         .expect("fill > 0 implies at least one resident entry");
       for _ in 0..fill {
         buf.push_back(Maybe::Ref(repeated.as_ref()));
+      }
+      return;
+    }
+    if D == PARKED_PREFIX_SKIPPING_PEEK {
+      // "The caller already holds the head of the stream." Read off the spans: if what is
+      // already in the buffer ends at or before this cache's front begins, treat it as a prefix
+      // of the same run and start one entry late. Against a buffer whose entries come AFTER the
+      // residency — the only arrangement the kit ever built — the test is false and this is a
+      // conforming `peek`.
+      let already_ahead = match (buf.iter().next_back(), self.items.front()) {
+        (Some(last), Some(front)) => last.span().end() <= front.token().span_ref().start(),
+        _ => false,
+      };
+      for tok in self
+        .items
+        .iter()
+        .skip(usize::from(already_ahead))
+        .take(fill)
+      {
+        buf.push_back(Maybe::Ref(tok.as_ref()));
       }
       return;
     }
@@ -1508,6 +1546,21 @@ fn cache_kit_catches_a_peek_bounded_by_the_backing_store() {
 #[should_panic(expected = "after 1 pop_back(s) off a full one")]
 fn cache_kit_catches_a_peek_bounded_by_the_backing_store_after_a_tail_drain() {
   run_queue::<STALE_TAIL_RESIDENCY_PEEK>();
+}
+
+/// #180 part B, item 6: every prefill the kit built came from PAST the residency, so the buffer's
+/// spans were always the greater ones and the relation between the two was one fixed value in
+/// every call `peek` ever received here — and the inverse of the one the real call site produces,
+/// where the parked token heads the window and the cache fills in behind it.
+///
+/// The expected message names the reversed arrangement at its shallowest depth. This fixture is
+/// conforming in the original arrangement — its span test is simply false there — so this test
+/// failing means the kit is back to prefilling only with tokens that come after the residency,
+/// where a `peek` that decides the caller already holds its own front cannot act on it.
+#[test]
+#[should_panic(expected = "bounded-peek/prefilled-with-earlier-tokens at depth 1")]
+fn cache_kit_catches_a_peek_that_skips_a_prefix_it_thinks_the_caller_holds() {
+  run_queue::<PARKED_PREFIX_SKIPPING_PEEK>();
 }
 
 /// #180 part B, item 5: the ring never wrapped. `filled` pushes back into an empty cache, so the

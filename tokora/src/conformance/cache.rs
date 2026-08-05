@@ -92,7 +92,15 @@
 //!    (`peek_one`'s default body is `peek::<U1>`), and the truncating path a cache takes when the
 //!    residency does not fit in the window, which never runs while the window is as wide as every
 //!    residency driven. Sweeping the prefill depth does not stand in for this: that varies the
-//!    room LEFT in the buffer, not the type. `peek_one` agrees with
+//!    room LEFT in the buffer, not the type. The prefilled half is also driven with the buffer's
+//!    entries **before** the residency in source order, not only after it: that relation was one
+//!    fixed value in every prefilled call the kit made, and the value it was fixed at is the
+//!    inverse of the real one — the peek fill pushes the parked token first, because the parked
+//!    token is the front of the stream. Both are now driven, and they catch different things: a
+//!    `peek` that sorts or merges the buffer by span is caught by the *later* arrangement, where
+//!    a correct append leaves the buffer unsorted, and a `peek` that reads the buffer as a prefix
+//!    of its own run and skips an entry it decides the caller already holds can only act in the
+//!    *earlier* one. `peek_one` agrees with
 //!    `front`, answers nothing where there is no front, and — like `peek` — answers **the same
 //!    on a second call** against an unchanged cache: it takes `&self`, so the two calls are the
 //!    same question.
@@ -247,6 +255,38 @@ type PeekWindowOne = U1;
 /// short of `back`, and the one place `peek` can walk in the wrong direction — is reached here
 /// and nowhere else.
 type PeekWindowMid = U3;
+
+/// Where the entries a prefilled `peek` finds already in the buffer sit **relative to the
+/// residency**, in source order.
+///
+/// Until #180 part B, item 6 this was one fixed value: every prefill the kit built came from past
+/// the residency, so the buffer's spans were always greater than every resident one, and a `peek`
+/// that reasons about the two — sorting, merging, or deciding the caller already holds its own
+/// front — was answering the same question in every call the kit made. Both relations are now
+/// driven, and the one the real call site has is [`Earlier`](Prefill::Earlier).
+#[derive(Clone, Copy)]
+enum Prefill {
+  /// Corpus tokens **past** the residency. The kit's original prefill, and the one that keeps
+  /// "`peek` left the buffer alone" honest at the residencies the sweeps build: a `peek` that
+  /// clears the buffer and re-appends its own run cannot land the prefill's spans by coincidence,
+  /// because the cache's front is a token the prefill does not contain.
+  Later,
+  /// Corpus tokens **before** the residency, which is the relation `InputRef`'s peek fill
+  /// actually produces: the parked token is the front of the stream, so it heads the window and
+  /// the cache fills in behind it. A cache that reads the buffer as a prefix of its own run —
+  /// and skips an entry it decides the caller already has — can only do so in this arrangement.
+  Earlier,
+}
+
+impl Prefill {
+  /// The message tag, so a failure says which of the two arrangements it is talking about.
+  const fn tag(self) -> &'static str {
+    match self {
+      Self::Later => "prefilled",
+      Self::Earlier => "prefilled-with-earlier-tokens",
+    }
+  }
+}
 
 /// The span of a cached token, owned. `token()` hands back a `Spanned<&T, &Span>`, so the span
 /// arrives double-borrowed and has to be dereferenced once before it can be cloned.
@@ -471,6 +511,7 @@ where
     self.check_clear(cap);
     self.check_span(cap);
     self.check_wrapped_ring(cap);
+    self.check_peek_behind_earlier_entries(cap);
     self.check_pop_front_if(cap);
     self.check_push_many(cap);
   }
@@ -1429,7 +1470,7 @@ where
     // that leaves NO room at all, which is the only shape where the bound is asked to come out
     // zero.
     for depth in 1..=window {
-      self.check_prefilled_peek(cache, cap, want, depth, state);
+      self.check_prefilled_peek(cache, cap, want, depth, Prefill::Later, state);
     }
 
     // ── and the same law through a window that is NOT the kit's own ───────────────
@@ -1495,27 +1536,29 @@ where
     cap: usize,
     want: &[L::Span],
     depth: usize,
+    from: Prefill,
     state: &str,
   ) {
     let name = self.label();
     let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
-    let prefill = self.beyond_residency(cap, depth);
+    let tag = from.tag();
+    let prefill = self.prefill(cap, depth, from);
     let prefill_spans: Vec<L::Span> = prefill.iter().map(|tok| span_of::<L>(tok)).collect();
     let remaining_at_prefill = window - depth;
     let prefilled_bound = remaining_at_prefill.min(want.len());
     let (prefix_after, appended) = self.peeked_spans_after_prefill(cache, prefill);
     assert!(
       prefix_after == prefill_spans,
-      "tokora cache conformance [{name} bounded-peek/prefilled at depth {depth}] against {state}: peek() changed the {depth} entr(ies) already in the buffer ahead of it — got {prefix_after:?}, expected them untouched, {prefill_spans:?}. `peek` appends BEHIND what the buffer already holds; it neither overwrites nor reorders it."
+      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() changed the {depth} entr(ies) already in the buffer ahead of it — got {prefix_after:?}, expected them untouched, {prefill_spans:?}. `peek` appends BEHIND what the buffer already holds; it neither overwrites nor reorders it."
     );
     assert!(
       appended.len() == prefilled_bound,
-      "tokora cache conformance [{name} bounded-peek/prefilled at depth {depth}] against {state}: peek() appended {} entries into a buffer already holding {depth} of {window} slots, expected exactly min(len, buffer's REMAINING capacity) = {prefilled_bound}.",
+      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() appended {} entries into a buffer already holding {depth} of {window} slots, expected exactly min(len, buffer's REMAINING capacity) = {prefilled_bound}.",
       appended.len()
     );
     assert!(
       appended == want[..prefilled_bound],
-      "tokora cache conformance [{name} bounded-peek/prefilled at depth {depth}] against {state}: peek() appended {appended:?}, expected the resident prefix OLDEST FIRST {:?}",
+      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() appended {appended:?}, expected the resident prefix OLDEST FIRST {:?}. Every resident entry is served, whatever the buffer already holds: `peek` is not entitled to decide the caller has one of them already.",
       &want[..prefilled_bound]
     );
 
@@ -1532,10 +1575,10 @@ where
       &format!("after prefilled peek() at depth {depth} against {state}"),
     );
     let (prefix_again, appended_again) =
-      self.peeked_spans_after_prefill(cache, self.beyond_residency(cap, depth));
+      self.peeked_spans_after_prefill(cache, self.prefill(cap, depth, from));
     assert!(
       prefix_again == prefix_after && appended_again == appended,
-      "tokora cache conformance [{name} pure-peek/prefilled at depth {depth}] against {state}: two prefilled peeks on an unchanged cache disagreed: prefix {prefix_after:?} then {prefix_again:?}, appended {appended:?} then {appended_again:?}. `peek` takes &self and must be logically pure against every shape of buffer, not only against an empty one."
+      "tokora cache conformance [{name} pure-peek/{tag} at depth {depth}] against {state}: two prefilled peeks on an unchanged cache disagreed: prefix {prefix_after:?} then {prefix_again:?}, appended {appended:?} then {appended_again:?}. `peek` takes &self and must be logically pure against every shape of buffer, not only against an empty one."
     );
     self.assert_resident(
       cache,
@@ -1543,6 +1586,31 @@ where
       want,
       &format!("after a second prefilled peek() at depth {depth} against {state}"),
     );
+  }
+
+  /// The `depth` prefill entries for one of the two arrangements — see [`Prefill`].
+  fn prefill(&self, cap: usize, depth: usize, from: Prefill) -> Vec<CachedTokenOf<'inp, L>> {
+    match from {
+      Prefill::Later => self.beyond_residency(cap, depth),
+      Prefill::Earlier => self.before_residency(depth),
+    }
+  }
+
+  /// The **first** `depth` corpus tokens — spans that precede every entry of the residency
+  /// [`check_peek_behind_earlier_entries`](Self::check_peek_behind_earlier_entries) builds, which
+  /// starts a full peek window into the corpus for exactly that reason.
+  ///
+  /// This is the arrangement the real call site produces, and the one no driver in this kit ever
+  /// built (#180 part B, item 6).
+  fn before_residency(&self, depth: usize) -> Vec<CachedTokenOf<'inp, L>> {
+    let name = self.label();
+    let corpus = self.corpus(depth);
+    assert!(
+      corpus.len() == depth,
+      "tokora cache conformance [{name}]: the source lexed {} token(s), but the kit needs {depth} of them BEFORE the residency for a peek-buffer prefill whose spans precede it. This is a kit-usage problem, not a cache defect: lengthen the source.",
+      corpus.len()
+    );
+    corpus
   }
 
   /// `depth` consecutive corpus tokens the cache under test is **not** holding: corpus indices
@@ -1719,6 +1787,68 @@ where
         want.len()
       ),
     }
+  }
+
+  // ── check 6 where the buffer's entries come BEFORE the residency ────────────────
+
+  /// Check 6's prefilled half with the span relation between the buffer and the residency
+  /// **reversed** — every entry already in the buffer precedes every resident one.
+  ///
+  /// Until this ran, that relation was one fixed value in the whole kit: the prefill came from
+  /// [`beyond_residency`](Self::beyond_residency), corpus tokens past the residency, so the
+  /// buffer's spans were always the *greater* ones (#180 part B, item 6). A `peek` that reasons
+  /// about the two — that sorts or merges by span, or that reads the buffer as a prefix of its
+  /// own run and skips an entry it decides the caller already holds — was asked the same question
+  /// every time, and answered it the same way a conforming cache would.
+  ///
+  /// The fixed value was also the **inverse of the real one**. `InputRef`'s peek fill pushes the
+  /// parked token before it calls in, because the parked token is the front of the stream: it
+  /// heads the window and the cache fills in behind it. So at the call site the buffer holds what
+  /// comes *first*, which is the one arrangement in which a cache can talk itself into
+  /// deduplicating against it.
+  ///
+  /// Reaching it costs no extra corpus. The residency is built one full peek window into the
+  /// corpus instead of at its start, which leaves that window free to prefill from and needs
+  /// exactly the `capacity + window` tokens [`run_pass`](Self::run_pass) already demands. One
+  /// residency — the full cache — and the same depth sweep, since what is under test here is the
+  /// span relation and not the depth.
+  fn check_peek_behind_earlier_entries(&self, cap: usize) {
+    if cap == 0 {
+      return;
+    }
+    let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
+    let (cache, want) = self.filled_from(window, cap);
+    let state = format!(
+      "a full cache of {cap} built from the corpus tokens PAST the prefill, so every entry already in the buffer PRECEDES every resident one — the span relation the input layer's own peek fill produces, and the inverse of the one every other prefilled driver here builds"
+    );
+    for depth in 1..=window {
+      self.check_prefilled_peek(&cache, cap, &want, depth, Prefill::Earlier, &state);
+    }
+  }
+
+  /// [`filled`](Self::filled), but from corpus index `offset` rather than from the start — so
+  /// that the tokens before it are available to prefill a peek buffer with spans that precede the
+  /// whole residency.
+  fn filled_from(&self, offset: usize, n: usize) -> (C, Vec<L::Span>) {
+    let name = self.label();
+    let want_len = offset.saturating_add(n);
+    let mut corpus = self.corpus(want_len);
+    assert!(
+      corpus.len() == want_len,
+      "tokora cache conformance [{name}]: the source lexed {} token(s), but the kit needs {want_len} to fill a cache of {n} starting {offset} token(s) into the corpus. This is a kit-usage problem, not a cache defect: lengthen the source.",
+      corpus.len()
+    );
+    let mut cache = self.make();
+    let mut want = Vec::with_capacity(n);
+    for (i, tok) in corpus.split_off(offset).into_iter().enumerate() {
+      let span = span_of::<L>(&tok);
+      assert!(
+        cache.push_back(tok).is_ok(),
+        "tokora cache conformance [{name} bounded-peek]: push_back #{i} was REFUSED while filling a fresh cache to {n} of its capacity {n}; a push is refused only when the cache is FULL"
+      );
+      want.push(span);
+    }
+    (cache, want)
   }
 
   // ── checks 6 and 8 where a ring has WRAPPED ─────────────────────────────────────
