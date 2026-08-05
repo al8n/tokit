@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::{
-  error::UnexpectedEot,
+  error::{UnexpectedEot, token::UnexpectedToken},
   punct::*,
   token::{PunctuatorToken, PunctuatorTokenExt},
   try_parse_input::ParseAttempt,

@@ -1,3 +1,6 @@
+// The cardinality checks below are `many`'s: `Minimum`/`Maximum` are its bound markers and the
+// three `check` helpers are called only by its drivers. `With` itself is substrate.
+#[cfg(feature = "many")]
 use crate::{
   emitter::{SeparatedEmitter, TooFewEmitter, TooManyEmitter},
   error::syntax::{TooFew, TooMany},
@@ -87,6 +90,7 @@ impl<P, S, Cmpl> With<P, S, Cmpl> {
   }
 }
 
+#[cfg(feature = "many")]
 impl With<Minimum, Maximum> {
   #[inline(always)]
   pub(crate) fn check<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>(
@@ -120,6 +124,7 @@ impl With<Minimum, Maximum> {
   }
 }
 
+#[cfg(feature = "many")]
 impl Minimum {
   #[inline(always)]
   pub(crate) fn check<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>(
@@ -144,6 +149,7 @@ impl Minimum {
   }
 }
 
+#[cfg(feature = "many")]
 impl Maximum {
   #[inline(always)]
   pub(crate) fn check<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>(

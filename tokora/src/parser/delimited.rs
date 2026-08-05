@@ -41,14 +41,21 @@ use crate::{
   emitter::UnclosedEmitter,
   error::{Unclosed, UnexpectedEot, token::UnexpectedTokenOf},
   input::{CloseStatus, Cursor, InputRef, SurfaceIncomplete},
+  span::{Span as _, Spanned},
+  utils::{CowStr, Delimited},
+};
+
+// The four concrete shapes — `parens`/`braces`/`brackets`/`angles` and their `try_` twins — run
+// `OpenParen::parse` and friends, which the `punct` family supplies. The generic `delimited` /
+// `try_delimited` above them take any `TypedDelimiter` and need none of it.
+#[cfg(feature = "punct")]
+use crate::{
   punct::{
     Angle, Brace, Bracket, CloseAngle, CloseBrace, CloseBracket, CloseParen, OpenAngle, OpenBrace,
     OpenBracket, OpenParen, Paren,
   },
-  span::{Span as _, Spanned},
   token::{PunctuatorToken, PunctuatorTokenExt, SpannedPunctuatorToken},
   try_parse_input::ParseAttempt,
-  utils::{CowStr, Delimited},
 };
 
 /// The result the parser [`delimited`] builds yields: `inner`'s output wrapped in a
@@ -233,9 +240,14 @@ struct PairIdentity {
 }
 
 impl PairIdentity {
+  // Named only by the four concrete shapes, which the `punct` family supplies the openers for.
+  #[cfg(feature = "punct")]
   const PAREN: Self = Self::new(DelimiterKind::Paren, CowStr::from_static("()"));
+  #[cfg(feature = "punct")]
   const BRACE: Self = Self::new(DelimiterKind::Brace, CowStr::from_static("{}"));
+  #[cfg(feature = "punct")]
   const BRACKET: Self = Self::new(DelimiterKind::Bracket, CowStr::from_static("[]"));
+  #[cfg(feature = "punct")]
   const ANGLE: Self = Self::new(DelimiterKind::Angle, CowStr::from_static("<>"));
 
   const fn new(kind: DelimiterKind, name: CowStr) -> Self {
@@ -526,6 +538,8 @@ where
 
 /// The result [`parens`] returns: `inner`'s output wrapped in a paren-delimited
 /// [`Delimited`] spanning the whole `( … )`, or the propagated error.
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 pub type ParensOf<'inp, L, Ctx, Lang, T> = Result<
   Delimited<
     OpenParen<<L as Lexer<'inp>>::Span, (), Lang>,
@@ -627,6 +641,8 @@ pub type ParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// assert_eq!(Parser::with_parser(wrapped).parse_str("(1)").unwrap(), 1);
 /// assert!(Parser::with_parser(wrapped).parse_str("(1").is_err());
 /// ```
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 #[inline]
 pub fn parens<'inp, L, Ctx, Lang, P, T, Cmpl>(
   mut inner: P,
@@ -649,6 +665,7 @@ where
 /// The shared post-open body of [`parens`] and [`try_parens`]: from here the parse is
 /// committed — runs `inner`, commits the `)` closer, and builds the [`Delimited`] whose
 /// span runs from `cursor` (captured before the opener) to the closer.
+#[cfg(feature = "punct")]
 #[inline]
 fn finish_parens<'inp, 'c, L, Ctx, Lang, P, T, Cmpl>(
   inp: &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
@@ -679,6 +696,8 @@ where
 
 /// The result the parser [`try_parens`] builds yields: `Some` of the paren-delimited
 /// construct on accept, `None` on decline, or the propagated error.
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 pub type TryParensOf<'inp, L, Ctx, Lang, T> = Result<
   Option<
     Delimited<
@@ -793,6 +812,8 @@ pub type TryParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// // Opener consumed: committed — an unterminated group errors, it does not decline.
 /// assert!(Parser::with_parser(attempt).parse_str("(1").is_err());
 /// ```
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 #[inline]
 pub fn try_parens<'inp, L, Ctx, Lang, P, T, Cmpl>(
   mut inner: P,
@@ -816,6 +837,8 @@ where
 
 /// The result [`braces`] returns: `inner`'s output wrapped in a brace-delimited
 /// [`Delimited`] spanning the whole `{ … }`, or the propagated error.
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 pub type BracesOf<'inp, L, Ctx, Lang, T> = Result<
   Delimited<
     OpenBrace<<L as Lexer<'inp>>::Span, (), Lang>,
@@ -917,6 +940,8 @@ pub type BracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// assert_eq!(Parser::with_parser(wrapped).parse_str("{1}").unwrap(), 1);
 /// assert!(Parser::with_parser(wrapped).parse_str("{1").is_err());
 /// ```
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 #[inline]
 pub fn braces<'inp, L, Ctx, Lang, P, T, Cmpl>(
   mut inner: P,
@@ -939,6 +964,7 @@ where
 /// The shared post-open body of [`braces`] and [`try_braces`]: from here the parse is
 /// committed — runs `inner`, commits the `}` closer, and builds the [`Delimited`] whose
 /// span runs from `cursor` (captured before the opener) to the closer.
+#[cfg(feature = "punct")]
 #[inline]
 fn finish_braces<'inp, 'c, L, Ctx, Lang, P, T, Cmpl>(
   inp: &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
@@ -969,6 +995,8 @@ where
 
 /// The result the parser [`try_braces`] builds yields: `Some` of the brace-delimited
 /// construct on accept, `None` on decline, or the propagated error.
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 pub type TryBracesOf<'inp, L, Ctx, Lang, T> = Result<
   Option<
     Delimited<
@@ -1083,6 +1111,8 @@ pub type TryBracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// // Opener consumed: committed — an unterminated group errors, it does not decline.
 /// assert!(Parser::with_parser(attempt).parse_str("{1").is_err());
 /// ```
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 #[inline]
 pub fn try_braces<'inp, L, Ctx, Lang, P, T, Cmpl>(
   mut inner: P,
@@ -1107,6 +1137,8 @@ where
 /// The result [`brackets`] returns: `inner`'s output wrapped in a
 /// bracket-delimited [`Delimited`] spanning the whole `[ … ]`, or the propagated
 /// error.
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 pub type BracketsOf<'inp, L, Ctx, Lang, T> = Result<
   Delimited<
     OpenBracket<<L as Lexer<'inp>>::Span, (), Lang>,
@@ -1208,6 +1240,8 @@ pub type BracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// assert_eq!(Parser::with_parser(wrapped).parse_str("[1]").unwrap(), 1);
 /// assert!(Parser::with_parser(wrapped).parse_str("[1").is_err());
 /// ```
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 #[inline]
 pub fn brackets<'inp, L, Ctx, Lang, P, T, Cmpl>(
   mut inner: P,
@@ -1230,6 +1264,7 @@ where
 /// The shared post-open body of [`brackets`] and [`try_brackets`]: from here the parse is
 /// committed — runs `inner`, commits the `]` closer, and builds the [`Delimited`] whose
 /// span runs from `cursor` (captured before the opener) to the closer.
+#[cfg(feature = "punct")]
 #[inline]
 fn finish_brackets<'inp, 'c, L, Ctx, Lang, P, T, Cmpl>(
   inp: &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
@@ -1260,6 +1295,8 @@ where
 
 /// The result the parser [`try_brackets`] builds yields: `Some` of the bracket-delimited
 /// construct on accept, `None` on decline, or the propagated error.
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 pub type TryBracketsOf<'inp, L, Ctx, Lang, T> = Result<
   Option<
     Delimited<
@@ -1374,6 +1411,8 @@ pub type TryBracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// // Opener consumed: committed — an unterminated group errors, it does not decline.
 /// assert!(Parser::with_parser(attempt).parse_str("[1").is_err());
 /// ```
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 #[inline]
 pub fn try_brackets<'inp, L, Ctx, Lang, P, T, Cmpl>(
   mut inner: P,
@@ -1399,6 +1438,8 @@ where
 
 /// The result [`angles`] returns: `inner`'s output wrapped in an angle-delimited
 /// [`Delimited`] spanning the whole `< … >`, or the propagated error.
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 pub type AnglesOf<'inp, L, Ctx, Lang, T> = Result<
   Delimited<
     OpenAngle<<L as Lexer<'inp>>::Span, (), Lang>,
@@ -1500,6 +1541,8 @@ pub type AnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// assert_eq!(Parser::with_parser(wrapped).parse_str("<1>").unwrap(), 1);
 /// assert!(Parser::with_parser(wrapped).parse_str("<1").is_err());
 /// ```
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 #[inline]
 pub fn angles<'inp, L, Ctx, Lang, P, T, Cmpl>(
   mut inner: P,
@@ -1522,6 +1565,7 @@ where
 /// The shared post-open body of [`angles`] and [`try_angles`]: from here the parse is
 /// committed — runs `inner`, commits the `>` closer, and builds the [`Delimited`] whose
 /// span runs from `cursor` (captured before the opener) to the closer.
+#[cfg(feature = "punct")]
 #[inline]
 fn finish_angles<'inp, 'c, L, Ctx, Lang, P, T, Cmpl>(
   inp: &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
@@ -1552,6 +1596,8 @@ where
 
 /// The result the parser [`try_angles`] builds yields: `Some` of the angle-delimited
 /// construct on accept, `None` on decline, or the propagated error.
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 pub type TryAnglesOf<'inp, L, Ctx, Lang, T> = Result<
   Option<
     Delimited<
@@ -1666,6 +1712,8 @@ pub type TryAnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// // Opener consumed: committed — an unterminated group errors, it does not decline.
 /// assert!(Parser::with_parser(attempt).parse_str("<1").is_err());
 /// ```
+#[cfg(feature = "punct")]
+#[cfg_attr(docsrs, doc(cfg(feature = "punct")))]
 #[inline]
 pub fn try_angles<'inp, L, Ctx, Lang, P, T, Cmpl>(
   mut inner: P,

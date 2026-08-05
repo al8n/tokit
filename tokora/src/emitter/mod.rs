@@ -14,6 +14,8 @@ use super::Token;
 pub use cst::*;
 pub use delimited::*;
 pub use impl_::*;
+#[cfg(feature = "pratt")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pratt")))]
 pub use pratt::*;
 pub use repeated::*;
 pub use separated::*;
@@ -23,6 +25,7 @@ pub use view::EmitterView;
 mod cst;
 mod delimited;
 mod impl_;
+#[cfg(feature = "pratt")]
 mod pratt;
 mod repeated;
 mod separated;

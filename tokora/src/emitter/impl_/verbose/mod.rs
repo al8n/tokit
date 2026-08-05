@@ -22,6 +22,7 @@ mod diagnostic;
 mod full_container;
 mod missing_leading_separator;
 mod missing_trailing_separator;
+#[cfg(feature = "pratt")]
 mod pratt;
 mod separator;
 mod store;

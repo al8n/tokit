@@ -144,11 +144,14 @@
 //! if the decline/stall/closer exits above stop being gated and the section's non-vacuity controls
 //! stop noticing.
 
+// `UnexpectedEot` reaches this family's descendants through their `use super::*`; the drivers
+// under `repeated*/`, `sep*/` and `delim/` all name it in a `From` bound and none of them import
+// it directly.
 use crate::{
   Decision, Emitter, ParseContext, ParseInput, Window,
   container::Container as ContainerT,
   emitter::FullContainerEmitter,
-  error::syntax::FullContainer,
+  error::{UnexpectedEot, syntax::FullContainer},
   input::{CloseStatus, Cursor, InputRef},
   lexer::Lexer,
   span::{Span as _, Spanned},

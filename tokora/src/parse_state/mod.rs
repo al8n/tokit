@@ -42,6 +42,17 @@ where
   start: Cursor<'inp, 'closure, L>,
 }
 
+/// The constructor, in its own block: only the `*_with` callback combinators build a
+/// `ParseState`, and every one of them is a gated family, so in a build with none of them on
+/// there is nothing left here to compile.
+#[cfg(any(
+  feature = "fail",
+  feature = "filter",
+  feature = "fold",
+  feature = "map",
+  feature = "then",
+  feature = "validate"
+))]
 impl<'a, 'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>
   ParseState<'a, 'inp, 'closure, L, Ctx, Lang, Cmpl>
 where
@@ -57,7 +68,14 @@ where
   ) -> Self {
     Self { inp, start }
   }
+}
 
+impl<'inp, L, Ctx, Lang: ?Sized, Cmpl> ParseState<'_, 'inp, '_, L, Ctx, Lang, Cmpl>
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Cmpl: Completeness,
+{
   /// Returns the span covering the output being parsed.
   #[inline(always)]
   pub fn span(&self) -> L::Span {

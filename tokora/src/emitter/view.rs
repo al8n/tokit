@@ -73,12 +73,16 @@ use crate::{
   cst::event::EventMark,
   emitter::{
     CstEmitter, Emitter, FullContainerEmitter, MissingLeadingSeparatorEmitter,
-    MissingTrailingSeparatorEmitter, PrattEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter,
+    MissingTrailingSeparatorEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter,
     UnclosedEmitter, UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
   },
   error::token::UnexpectedTokenOf,
   span::Spanned,
 };
+
+// The two pratt forwarders below are the only members that name it.
+#[cfg(feature = "pratt")]
+use crate::emitter::PrattEmitter;
 
 /// The emitter's **operations**, lent to a callback — never the emitter.
 ///
@@ -454,6 +458,8 @@ where
   }
 
   /// [`PrattEmitter::emit_unexpected_end_of_lhs`], forwarded.
+  #[cfg(feature = "pratt")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "pratt")))]
   #[inline(always)]
   pub fn emit_unexpected_end_of_lhs(
     &mut self,
@@ -466,6 +472,8 @@ where
   }
 
   /// [`PrattEmitter::emit_unexpected_end_of_rhs`], forwarded.
+  #[cfg(feature = "pratt")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "pratt")))]
   #[inline(always)]
   pub fn emit_unexpected_end_of_rhs(
     &mut self,

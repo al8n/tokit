@@ -1,5 +1,7 @@
 use core::marker::PhantomData;
 
+use crate::parse_state::ParseState;
+
 use super::*;
 
 /// A parser that transforms and validates output, combining mapping with fallible conversion.

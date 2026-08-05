@@ -1,11 +1,13 @@
+use crate::{input::InputRef, span::Spanned, try_parse_input::ParseAttempt};
+
+// The four dispatch constructors below hand their arms to a `peek` combinator; the choice
+// traits themselves — and the `Branch` id they dispatch on — are substrate.
+#[cfg(feature = "peek")]
 use crate::{
   Token, Window,
   cache::Peeked,
   emitter::EmitterView,
-  input::InputRef,
   parser::{DispatchOnKind, FusedDispatchOnKind, PeekThenChoice},
-  span::Spanned,
-  try_parse_input::ParseAttempt,
 };
 
 use super::*;
@@ -52,6 +54,8 @@ pub trait ParseChoice<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// The handler owns its failure diagnostic — including any `expected one of …` set. To derive
   /// that set automatically from a static table of viable first-token kinds instead, see
   /// [`dispatch_on_kind`](Self::dispatch_on_kind).
+  #[cfg(feature = "peek")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "peek")))]
   #[inline(always)]
   fn peek_then_choice<H, W: Window>(self, condition: H) -> PeekThenChoice<Self, H, L, Ctx, W, Lang>
   where
@@ -70,6 +74,8 @@ pub trait ParseChoice<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   ///
   /// If the condition handler `H` returns `Ok(id)`, the inner choice parser is applied with the given id, otherwise,
   /// parsing is stopped and return the error from the handler.
+  #[cfg(feature = "peek")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "peek")))]
   #[inline(always)]
   fn peek_then_try_choice<H, W: Window>(
     self,
@@ -103,6 +109,8 @@ pub trait ParseChoice<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// diagnostic by hand, `dispatch_on_kind` derives the expected set from the table automatically.
   /// For many-to-one dispatch (several kinds routing to one branch) use
   /// [`peek_then_choice`](Self::peek_then_choice) instead.
+  #[cfg(feature = "peek")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "peek")))]
   #[inline(always)]
   fn dispatch_on_kind(
     self,
@@ -164,6 +172,8 @@ pub trait ParseTokenChoice<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> 
   /// [`ParseAttempt::Decline`] without consuming valid input; an error from a selected arm
   /// remains an `Err`. See
   /// [`FusedDispatchOnKind`] for the full shape comparison and the equivalence contract.
+  #[cfg(feature = "peek")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "peek")))]
   #[inline(always)]
   fn fused_dispatch_on_kind(
     self,
@@ -413,6 +423,7 @@ impl<const N: usize> Branch<N> {
   /// Crate-internal: the caller must guarantee `index <= N` (the in-bounds contract every
   /// `ParseChoice` dispatch relies on). Used by [`DispatchOnKind`](crate::parser::DispatchOnKind)
   /// after a table lookup, where the matched table position is a valid branch index.
+  #[cfg(feature = "peek")]
   #[inline(always)]
   pub(crate) const fn from_index(index: usize) -> Self {
     debug_assert!(index <= N, "Branch index out of range");

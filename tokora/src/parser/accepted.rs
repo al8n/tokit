@@ -2,6 +2,10 @@ use core::marker::PhantomData;
 
 use crate::{TryParseInput, try_parse_input::ParseAttempt};
 
+// Only `map_with` below names it, and that method is `map`'s.
+#[cfg(feature = "map")]
+use crate::parse_state::ParseState;
+
 use super::*;
 
 /// A combinator that wraps a `TryParseInput` parser, producing a parser that will apply combinators to the accepted output.
@@ -29,6 +33,8 @@ impl<P, O, L, Ctx, Lang: ?Sized, Cmpl> Accepted<P, L, O, Ctx, Lang, Cmpl> {
   }
 
   /// Transforms the output of this parser using the given function.
+  #[cfg(feature = "map")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "map")))]
   #[inline(always)]
   pub fn map<'inp, U, F>(
     self,
@@ -42,6 +48,8 @@ impl<P, O, L, Ctx, Lang: ?Sized, Cmpl> Accepted<P, L, O, Ctx, Lang, Cmpl> {
   }
 
   /// Transforms the output of this parser using the given function.
+  #[cfg(feature = "map")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "map")))]
   #[inline(always)]
   pub fn map_with<'inp, U, F>(
     self,

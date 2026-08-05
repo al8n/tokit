@@ -1,3 +1,5 @@
+use crate::parse_state::ParseState;
+
 use super::*;
 
 /// A parser that validates output after parsing, rejecting invalid values with errors.

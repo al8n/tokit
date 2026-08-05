@@ -1,5 +1,8 @@
 use super::*;
 
+// Re-exported to this family's submodules through their `use super::*`.
+use crate::cache::Peeked;
+
 pub use dispatch_on_kind::*;
 pub use peek_kind::*;
 pub use peek_then::*;
