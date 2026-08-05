@@ -1,0 +1,227 @@
+name: Miri
+
+# ── THE SLOW LANE ───────────────────────────────────────────────────────────────────────────
+#
+# Miri lives in its own workflow so that `CI` can reach a CONCLUSION. Measured 2026-08-05 on
+# `main` (#213): five consecutive main commits merged with no CI verdict at all — one run sat
+# `queued` for 3h02m — while `loc` and `Deploy mdBook` completed on the same refs in the same
+# window, so it was never an outage.
+#
+# The jobs were not the problem; the RUN was. In run 31014181684 (main `680d15f9`) 34 of the 59
+# jobs completed within 49m49s of the run being created and 25 did not: the 24 Miri cells and
+# `coverage`. A conclusion is a property of the whole run, so all 34 of those verdicts were
+# unreadable — and two of them were REAL failures (`feature combinations` on that commit,
+# `name-collision-probe` as well on the next one) sitting inside runs whose conclusion stayed
+# `null`. A verdict that never arrives is not a slow gate, it is no gate.
+#
+# WHY MIRI AND NOTHING ELSE. #213 proposed moving the sanitizers and the cross matrix here too.
+# The workflow said otherwise: `sanitizer` and `cross` are `ubuntu-latest`, and every one of
+# their cells completed in the measured run. The only macOS-bound cells in this repository are
+# the 16 apple-darwin cells of the two matrices below, 8 per matrix — which is the 269–347
+# minute macOS queue #157 measured, and the whole of it. So the line is drawn exactly where the
+# hosts are: everything ubuntu stays in `CI`, where it can be read in minutes.
+#
+# This is a SCHEDULING change, not a coverage change. Every job, matrix cell and step below runs
+# what `.github/workflows/ci.yml` ran before, unchanged; the two files together enumerate the
+# same 59 cells that file enumerated alone.
+#
+# What this does NOT do is make Miri faster. It cannot: the macOS queue is a runner-concurrency
+# constraint (#157), and 16 macOS cells per run is the demand that meets it. What the split buys
+# is that `CI`'s answer no longer waits behind that demand. Whether these cells need a macOS
+# HOST at all is a separate question — see the note on `miri-tb` below for what was measured.
+
+# Triggers, `paths-ignore` and the concurrency rule are deliberately identical to
+# `.github/workflows/ci.yml`; read the comments there for why the ignore list carries no blanket
+# `**.md` (the guide chapters under `tokora/src/guide/` and `README.md` are `include_str!`'d, so
+# they are code here).
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "README"
+      - "COPYRIGHT"
+      - "LICENSE-*"
+      - "*.txt"
+  pull_request:
+    paths-ignore:
+      - "README"
+      - "COPYRIGHT"
+      - "LICENSE-*"
+      - "*.txt"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 1 1 * *"
+
+concurrency:
+  # Same expression as `CI`'s, and `${{ github.workflow }}` leading it is what keeps the two
+  # lanes independent: `CI-refs/heads/main-<sha>` and `Miri-refs/heads/main-<sha>` are different
+  # groups, so neither lane can ever cancel the other's run. The rest is #141 unchanged — one
+  # in-flight run per ref, except on `main`, where the group is keyed on the commit SHA so that
+  # every main commit gets its own group and its own verdict. Do NOT collapse that back to one
+  # group per ref: `cancel-in-progress: false` does not protect a main run on its own, because a
+  # run queued into a group that already has one in progress cancels whichever run was PENDING
+  # there regardless of that setting — and this workflow is precisely the one whose runs stay
+  # pending long enough for the next push to do it.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# `RUSTFLAGS` is carried over from `CI` verbatim even though `ci/miri_tb.sh` and `ci/miri_sb.sh`
+# both `export RUSTFLAGS="--cfg test_$CONFIG_FLAGS"` before any `cargo miri test`: the export
+# happens AFTER `cargo miri setup`, so this value is what the sysroot build sees, and dropping it
+# here would have changed that. `CI`'s unused `nightly` / `stable` entries are not carried — no
+# step in this workflow, or in that one, references them.
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Gate: Miri — the shard plan the two Miri matrices are built from ────────
+  # Miri sets this workflow's wall clock on its own, and set the whole of `CI`'s before the
+  # split; Miri and only Miri is sharded.
+  #
+  # The shard COUNT lives in `ci/miri_shard.py` and the LIST is generated from it here, so the
+  # matrices below never spell out `[0, 1, 2, 3]`: a count and a list written down separately can
+  # disagree silently, dropping a quarter of the suite from Miri while every job stays green.
+  #
+  # `ci/miri_shard.py` re-proves the whole partition inside every Miri job anyway; running it
+  # here first makes a broken plan red in seconds, once and readably, rather than after
+  # `cargo miri setup` in every cell. `selftest` runs before `plan` for the reason the changelog
+  # self-test runs before its gate in `CI`: a self-test CI never exercises rots, and a green
+  # `plan` proves nothing about a guard nobody has watched fail on cue.
+  #
+  # No `rustup` step on purpose — it needs `cargo metadata --no-deps` and nothing else, and must
+  # not add minutes to the head of the critical path it exists to shorten.
+  miri-shard-plan:
+    name: miri shard plan
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: ci/miri_shard.py selftest
+        run: python3 ci/miri_shard.py selftest
+      - name: Enumerate the integration suite and verify the partition
+        id: plan
+        run: python3 ci/miri_shard.py plan
+
+  # ── Gate: Miri (Tree Borrows) ───────────────────────────────────────────────
+  # `fail-fast: false` on both Miri matrices, because sharding changes what a fast failure costs:
+  # the first shard to go red would otherwise cancel every other shard on every target, leaving
+  # a report that says nothing about the rest of the suite and a next push that re-runs all of it.
+  #
+  # ── WHY THE APPLE CELLS STILL RUN ON A macOS HOST ───────────────────────────
+  # #213 asked whether they have to, since Miri interprets a TARGET and the host ought to be
+  # irrelevant — and if it were, all 16 macOS cells would become ubuntu ones and the queue that
+  # forced this split would go away with them. Measured on a Linux host (Debian 13, aarch64,
+  # nightly 1.99.0 2026-08-04) rather than assumed, and the answer comes in two halves:
+  #
+  #   * Miri is NOT the obstacle. `cargo miri setup --target x86_64-apple-darwin` and
+  #     `--target aarch64-apple-darwin` each build a full darwin sysroot — core, alloc, std,
+  #     test, panic_unwind, proc_macro — on Linux in under ten seconds. With `criterion` removed
+  #     from the manifest, `cargo miri test --features logos` over `downcast`, `dialect_anchor`
+  #     and `span` then reported 90 passed / 0 failed for BOTH apple targets, the same 90 the
+  #     host's own linux target reports (4.5s linux, 4.9s x86_64-apple-darwin, 15.1s
+  #     aarch64-apple-darwin, on a contended laptop VM — indicative, not a timing measurement).
+  #   * `cargo build` is. With the manifest as it stands, both apple legs die before Miri runs,
+  #     in `alloca v0.4.0` — reached only through `criterion`, an unconditional dev-dependency,
+  #     which cargo therefore builds for every `--test` target. Its cc-rs build script invokes
+  #     the host `cc` with `-arch x86_64 -mmacosx-version-min=10.7` (and `-arch arm64
+  #     -mmacosx-version-min=11.0`); a Linux `cc` rejects both, and compiling them needs Apple
+  #     clang and the macOS SDK.
+  #
+  # So `macos-latest` here is load-bearing for a reason that has nothing to do with Miri, and it
+  # is not a leftover: it is the only host that can build the dev-dependency graph `cargo miri
+  # test` needs for an apple target. Moving these cells means getting criterion out of that graph
+  # first — cargo does not allow an optional dev-dependency, so that means the benches moving to
+  # their own workspace member — or putting an osxcross toolchain on the runner, which trades a
+  # runner queue for an unmanaged SDK. Neither is a CI edit.
+  #
+  # The `os` axis is what pins each target to its host. The three `exclude` entries per matrix
+  # keep each target on the host that can build it; two further entries naming
+  # `i686-unknown-linux-gnu` and `powerpc64-unknown-linux-gnu` were dropped in the move, because
+  # neither is in the `target` list, so each excluded nothing while reading as though it did —
+  # `actionlint` had been reporting all four for exactly that reason.
+  miri-tb:
+    name: miri-tb-${{ matrix.target }}-shard${{ matrix.shard }}
+    needs: miri-shard-plan
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+        cfg:
+          - all_tests
+        # Generated from `SHARD_TOTAL` in `ci/miri_shard.py`; never written out here.
+        shard: ${{ fromJSON(needs.miri-shard-plan.outputs.shards) }}
+        exclude:
+          - os: ubuntu-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-miri-
+      - name: Miri
+        run: |
+          bash ci/miri_tb.sh ${{ matrix.target }} ${{ matrix.cfg }} ${{ matrix.shard }}
+
+  # ── Gate: Miri (Stacked Borrows) ────────────────────────────────────────────
+  miri-sb:
+    name: miri-sb-${{ matrix.target }}-shard${{ matrix.shard }}
+    needs: miri-shard-plan
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+        cfg:
+          - all_tests
+        # Generated from `SHARD_TOTAL` in `ci/miri_shard.py`; never written out here.
+        shard: ${{ fromJSON(needs.miri-shard-plan.outputs.shards) }}
+        exclude:
+          - os: ubuntu-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-miri-
+      - name: Miri
+        run: |
+          bash ci/miri_sb.sh ${{ matrix.target }} ${{ matrix.cfg }} ${{ matrix.shard }}
