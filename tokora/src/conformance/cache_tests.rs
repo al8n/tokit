@@ -287,6 +287,19 @@ const WRONG_TRY_POP_FRONT_IF: u8 = 28;
 /// overflow iterator (#180 part A, item 6). Nothing before this issue's fix ever called
 /// `push_many`, so an override that discards tokens outright passed unnoticed.
 const SILENT_PUSH_MANY: u8 = 29;
+/// `clear()` empties the cache in every observable the kit reads at a point — `len`, `is_empty`,
+/// `remaining`, `front`/`back`, the three span accessors and `peek` all answer for an empty
+/// cache — but it **stashes the back entry**, and the first `pop_front()` after it hands that
+/// entry back. A `clear` that unlinks the run without dropping it, and a `pop` that reads the
+/// old link, is the natural shape of it.
+///
+/// This is the mutant [`POISONING_CLEAR`]'s sibling fix shipped without. `assert_empty` used to
+/// run its pop probe against a throwaway `C::new()` rather than against the cache under test, so
+/// "after clear() a pop must not answer" was asked of a cache that had never been cleared —
+/// which is no question at all. The probe now runs on the cleared cache itself, and this cell is
+/// what makes that change bite: a fresh `C::new()` has nothing stashed, so before the fix this
+/// defect was certified in full (#180 part A, item 2).
+const RESURRECTING_CLEAR: u8 = 30;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -315,6 +328,10 @@ where
   /// Set by `clear()` under [`POISONING_CLEAR`] and never unset — every `push_back` after that
   /// checks it and refuses, regardless of capacity.
   poisoned: bool,
+  /// The entry `clear()` stashed under [`RESURRECTING_CLEAR`] — read (and taken) by the first
+  /// `pop_front` after that clear, and by nothing else. `items` is genuinely emptied, so every
+  /// observable but the pop answers for an empty cache.
+  stashed: Option<CachedTokenOf<'a, L>>,
 }
 
 // `L::Token: Clone` is what the two stale-residency cells cost: `STALE_RESIDENCY_PEEK`'s
@@ -345,6 +362,7 @@ where
       front_pushes: Cell::new(0),
       last_pushed_back_span: None,
       poisoned: false,
+      stashed: None,
     }
   }
 
@@ -499,6 +517,12 @@ where
   }
 
   fn clear(&mut self) {
+    if D == RESURRECTING_CLEAR {
+      // Unlink the run without dropping it: `items` really is emptied, so `len`, `is_empty`,
+      // `remaining`, `front`/`back`, the spans and `peek` all answer for an empty cache — but the
+      // newest entry survives in `stashed`, and the first `pop_front` after this hands it back.
+      self.stashed = self.items.pop_back();
+    }
     self.items.clear();
     self.graveyard.clear();
     if D == POISONING_CLEAR {
@@ -722,6 +746,14 @@ where
     if D == LIFO_POP_FRONT {
       return self.items.pop_back();
     }
+    // The entry `clear()` unlinked but did not drop, handed back by the first pop after it. Only
+    // reachable while `items` is empty, so the resurrection never perturbs a live residency —
+    // the whole point of the cell is that every other observable stays correct.
+    if D == RESURRECTING_CLEAR && self.items.is_empty() {
+      if let Some(tok) = self.stashed.take() {
+        return Some(tok);
+      }
+    }
     let popped = self.items.pop_front();
     if D == STALE_RESIDENCY_PEEK {
       // The entry leaves the live run and stays in the store — a ring's head moving past a slot
@@ -790,6 +822,20 @@ fn cache_kit_catches_a_stale_span_after_pop_back() {
 #[should_panic(expected = "clear]")]
 fn cache_kit_catches_a_poisoning_clear() {
   run_queue::<POISONING_CLEAR>();
+}
+
+/// #180 part A, item 2, second half — the one that shipped with no mutant behind it.
+/// `assert_empty`'s pop probe used to run against a throwaway `C::new()`; it now runs against
+/// the cache under test, which is the only way "after clear() a pop must not answer" is a
+/// question about the cache that was cleared. `RESURRECTING_CLEAR` is the defect that change
+/// catches and the unfixed probe cannot: `clear()` unlinks the run without dropping it, every
+/// point observable answers for an empty cache, and the first `pop_front` after it hands the
+/// stashed entry back. A fresh `C::new()` has nothing stashed, so it answers `None` and the old
+/// probe was satisfied.
+#[test]
+#[should_panic(expected = "a pop answered on an empty cache")]
+fn cache_kit_catches_a_resurrecting_clear() {
+  run_queue::<RESURRECTING_CLEAR>();
 }
 
 /// #180 part A, item 5: `pop_front_if`/`try_pop_front_if` were never called by the kit, so an
