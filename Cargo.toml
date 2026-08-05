@@ -5,11 +5,14 @@ members = [
 resolver = "3"
 
 [workspace.package]
-# MSRV policy: `rust-version` tracks the current genuine requirement — the floor is
-# edition 2024 (rustc >= 1.85) plus what the dependency tree resolves under; the declared
-# value is verified by `cargo +1.87 check -p tokora --all-features` (CI `msrv` job). Bumps
-# are permitted whenever the crate needs them and are NOT treated as breaking changes.
-rust-version = "1.87"
+# MSRV policy: `rust-version` is a floor maintainers set, not necessarily the crate's bare
+# minimum — edition 2024 already requires rustc >= 1.85, and a bump above that may be forced
+# by the dependency tree or taken deliberately ahead of necessity (e.g. to unlock a language
+# feature for later use). The declared value is what CI actually builds and tests against: the
+# `msrv` job reads it out of this file rather than hardcoding a toolchain, so the two cannot
+# drift. Bumps are permitted whenever maintainers choose and are NOT treated as breaking
+# changes.
+rust-version = "1.95"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/al8n/tokora"

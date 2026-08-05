@@ -474,13 +474,13 @@ impl<St, Off> PartialSession<St, Off, RedriveFromBase> {
     // comparison is skipped entirely, so saturation can never refuse a legal session.
     let lexable: u64 = attempt_len.try_into().unwrap_or(u64::MAX);
     let projected = self.spent.saturating_add(lexable);
-    if let Budget::Bytes(cap) = self.budget {
-      if projected > cap {
-        return Err(refuse(SessionRefusal::BudgetExhausted {
-          spent: projected,
-          budget: cap,
-        }));
-      }
+    if let Budget::Bytes(cap) = self.budget
+      && projected > cap
+    {
+      return Err(refuse(SessionRefusal::BudgetExhausted {
+        spent: projected,
+        budget: cap,
+      }));
     }
 
     // Step 2 — the terminal latch, also before any work. A latched session never unlatches:
@@ -515,10 +515,10 @@ impl<St, Off> PartialSession<St, Off, RedriveFromBase> {
     // deliberately **not** harvested: nothing in this mode ever seeds from it, and writing
     // it would destroy the base state the next attempt needs.
     self.committed = input.span.end();
-    if let Err(e) = &outcome {
-      if e.is_terminal() {
-        self.terminal = true;
-      }
+    if let Err(e) = &outcome
+      && e.is_terminal()
+    {
+      self.terminal = true;
     }
     outcome
   }

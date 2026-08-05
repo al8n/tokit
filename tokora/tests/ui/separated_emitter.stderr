@@ -4,7 +4,11 @@ error[E0277]: `MyEmitter` cannot report separator diagnostics for lexer `L`
 12 |   inner::<L, MyEmitter>();
    |              ^^^^^^^^^ missing `SeparatedEmitter` — required by the separated drivers and by the `ComposableEmitter` bundle
    |
-   = help: the trait `SeparatedEmitter<'_, L>` is not implemented for `MyEmitter`
+help: the trait `SeparatedEmitter<'_, L>` is not implemented for `MyEmitter`
+  --> tests/ui/separated_emitter.rs:8:1
+   |
+ 8 | struct MyEmitter;
+   | ^^^^^^^^^^^^^^^^
    = note: implement `SeparatedEmitter` (usually alongside the other members of the `ComposableEmitter` bundle)
    = help: the following other types implement trait `SeparatedEmitter<'inp, L, Lang>`:
              &mut U

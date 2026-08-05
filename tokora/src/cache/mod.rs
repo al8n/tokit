@@ -305,10 +305,10 @@ pub trait Cache<'a, L, Lang: ?Sized = ()>: 'a {
     F: FnOnce(CachedTokenRefOf<'_, 'a, L>) -> bool,
     L: Lexer<'a>,
   {
-    if let Some(peeked) = self.front() {
-      if predicate(peeked) {
-        return self.pop_front();
-      }
+    if let Some(peeked) = self.front()
+      && predicate(peeked)
+    {
+      return self.pop_front();
     }
     None
   }

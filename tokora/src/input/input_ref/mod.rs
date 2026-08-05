@@ -2547,10 +2547,10 @@ where
     // Stream order is `parked?` then the cache, so a parked token — when there is one — is where
     // the next consume starts. Reading the cache front first would report a token that is NEWER
     // than the parked one.
-    if Self::can_park() {
-      if let Some(parked) = self.pending.as_ref() {
-        return Cursor::from_ref(parked.token.span.start_ref());
-      }
+    if Self::can_park()
+      && let Some(parked) = self.pending.as_ref()
+    {
+      return Cursor::from_ref(parked.token.span.start_ref());
     }
     Cursor::from_ref(
       self
@@ -2571,10 +2571,10 @@ where
     match self.cache().back_span() {
       Some(span) => span.end_ref(),
       None => {
-        if Self::can_park() {
-          if let Some(parked) = self.pending.as_ref() {
-            return parked.token.span.end_ref();
-          }
+        if Self::can_park()
+          && let Some(parked) = self.pending.as_ref()
+        {
+          return parked.token.span.end_ref();
         }
         self.span.end_ref()
       }

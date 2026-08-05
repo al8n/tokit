@@ -4,7 +4,11 @@ error[E0277]: `MyError` cannot yet be a tokora parse error for lexer `L`
 11 |   inner::<L, MyError>();
    |              ^^^^^^^ this error type is missing one or more token-level conversions
    |
-   = help: the trait `From<UnexpectedEnd<TokenHint, <L as tokora::Lexer<'_>>::Offset>>` is not implemented for `MyError`
+help: the trait `From<UnexpectedEnd<TokenHint, <L as tokora::Lexer<'_>>::Offset>>` is not implemented for `MyError`
+  --> tests/ui/from_token_errors.rs:7:1
+   |
+ 7 | struct MyError;
+   | ^^^^^^^^^^^^^^
    = note: an error type must absorb all five token-level failures: `From<UnexpectedEot<L::Offset, Lang>>`, `From<UnexpectedEot<L::Offset, Lang, <L::Token as Token>::Kind>>`, `From<UnexpectedTokenOf<'_, L, Lang>>`, `From<<L::Token as Token>::Error>`, and `FromUnclosed<'_, L, Lang>`
    = note: the two end-of-input members are one `Set`-generic impl: `impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for MyError { fn from(e: UnexpectedEot<O, Lang, Set>) -> Self { /* … */ } }`
    = note: the delimiter half is one generic impl: `impl<'i, L: Lexer<'i>, Lang: ?Sized> FromUnclosed<'i, L, Lang> for MyError { fn from_unclosed<D>(e: Unclosed<D, L::Span, Lang>) -> Self { /* … */ } }`
@@ -22,7 +26,11 @@ error[E0277]: `MyError` cannot yet be a tokora parse error for lexer `L`
 11 |   inner::<L, MyError>();
    |              ^^^^^^^ this error type is missing one or more token-level conversions
    |
-   = help: the trait `From<UnexpectedEnd<TokenHint, <L as tokora::Lexer<'_>>::Offset, (), <<L as tokora::Lexer<'_>>::Token as tokora::Token<'_>>::Kind>>` is not implemented for `MyError`
+help: the trait `From<UnexpectedEnd<TokenHint, <L as tokora::Lexer<'_>>::Offset, (), <<L as tokora::Lexer<'_>>::Token as tokora::Token<'_>>::Kind>>` is not implemented for `MyError`
+  --> tests/ui/from_token_errors.rs:7:1
+   |
+ 7 | struct MyError;
+   | ^^^^^^^^^^^^^^
    = note: an error type must absorb all five token-level failures: `From<UnexpectedEot<L::Offset, Lang>>`, `From<UnexpectedEot<L::Offset, Lang, <L::Token as Token>::Kind>>`, `From<UnexpectedTokenOf<'_, L, Lang>>`, `From<<L::Token as Token>::Error>`, and `FromUnclosed<'_, L, Lang>`
    = note: the two end-of-input members are one `Set`-generic impl: `impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for MyError { fn from(e: UnexpectedEot<O, Lang, Set>) -> Self { /* … */ } }`
    = note: the delimiter half is one generic impl: `impl<'i, L: Lexer<'i>, Lang: ?Sized> FromUnclosed<'i, L, Lang> for MyError { fn from_unclosed<D>(e: Unclosed<D, L::Span, Lang>) -> Self { /* … */ } }`
@@ -40,7 +48,11 @@ error[E0277]: `MyError` cannot yet be a tokora parse error for lexer `L`
 11 |   inner::<L, MyError>();
    |              ^^^^^^^ this error type is missing one or more token-level conversions
    |
-   = help: the trait `From<UnexpectedToken<'_, <L as tokora::Lexer<'_>>::Token, <<L as tokora::Lexer<'_>>::Token as tokora::Token<'_>>::Kind, <L as tokora::Lexer<'_>>::Span>>` is not implemented for `MyError`
+help: the trait `From<UnexpectedToken<'_, <L as tokora::Lexer<'_>>::Token, <<L as tokora::Lexer<'_>>::Token as tokora::Token<'_>>::Kind, <L as tokora::Lexer<'_>>::Span>>` is not implemented for `MyError`
+  --> tests/ui/from_token_errors.rs:7:1
+   |
+ 7 | struct MyError;
+   | ^^^^^^^^^^^^^^
    = note: an error type must absorb all five token-level failures: `From<UnexpectedEot<L::Offset, Lang>>`, `From<UnexpectedEot<L::Offset, Lang, <L::Token as Token>::Kind>>`, `From<UnexpectedTokenOf<'_, L, Lang>>`, `From<<L::Token as Token>::Error>`, and `FromUnclosed<'_, L, Lang>`
    = note: the two end-of-input members are one `Set`-generic impl: `impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for MyError { fn from(e: UnexpectedEot<O, Lang, Set>) -> Self { /* … */ } }`
    = note: the delimiter half is one generic impl: `impl<'i, L: Lexer<'i>, Lang: ?Sized> FromUnclosed<'i, L, Lang> for MyError { fn from_unclosed<D>(e: Unclosed<D, L::Span, Lang>) -> Self { /* … */ } }`
@@ -58,7 +70,11 @@ error[E0277]: `MyError` cannot yet be a tokora parse error for lexer `L`
 11 |   inner::<L, MyError>();
    |              ^^^^^^^ this error type is missing one or more token-level conversions
    |
-   = help: the trait `From<<<L as tokora::Lexer<'_>>::Token as tokora::Token<'_>>::Error>` is not implemented for `MyError`
+help: the trait `From<<<L as tokora::Lexer<'_>>::Token as tokora::Token<'_>>::Error>` is not implemented for `MyError`
+  --> tests/ui/from_token_errors.rs:7:1
+   |
+ 7 | struct MyError;
+   | ^^^^^^^^^^^^^^
    = note: an error type must absorb all five token-level failures: `From<UnexpectedEot<L::Offset, Lang>>`, `From<UnexpectedEot<L::Offset, Lang, <L::Token as Token>::Kind>>`, `From<UnexpectedTokenOf<'_, L, Lang>>`, `From<<L::Token as Token>::Error>`, and `FromUnclosed<'_, L, Lang>`
    = note: the two end-of-input members are one `Set`-generic impl: `impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for MyError { fn from(e: UnexpectedEot<O, Lang, Set>) -> Self { /* … */ } }`
    = note: the delimiter half is one generic impl: `impl<'i, L: Lexer<'i>, Lang: ?Sized> FromUnclosed<'i, L, Lang> for MyError { fn from_unclosed<D>(e: Unclosed<D, L::Span, Lang>) -> Self { /* … */ } }`
@@ -71,7 +87,7 @@ note: required by a bound in `inner`
    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `inner`
 help: consider introducing a `where` clause, but there might be an alternative better way to express this requirement
    |
-9  | fn needs_bundle<'inp, L: Lexer<'inp>>() where MyError: From<<<L as tokora::Lexer<'_>>::Token as tokora::Token<'_>>::Error> {
+ 9 | fn needs_bundle<'inp, L: Lexer<'inp>>() where MyError: From<<<L as tokora::Lexer<'_>>::Token as tokora::Token<'_>>::Error> {
    |                                         ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 error[E0277]: `MyError` cannot yet be a tokora parse error for lexer `L`
@@ -80,12 +96,22 @@ error[E0277]: `MyError` cannot yet be a tokora parse error for lexer `L`
 11 |   inner::<L, MyError>();
    |              ^^^^^^^ this error type is missing one or more token-level conversions
    |
-   = help: the trait `FromUnclosed<'_, L>` is not implemented for `MyError`
+help: the trait `FromUnclosed<'_, L>` is not implemented for `MyError`
+  --> tests/ui/from_token_errors.rs:7:1
+   |
+ 7 | struct MyError;
+   | ^^^^^^^^^^^^^^
    = note: an error type must absorb all five token-level failures: `From<UnexpectedEot<L::Offset, Lang>>`, `From<UnexpectedEot<L::Offset, Lang, <L::Token as Token>::Kind>>`, `From<UnexpectedTokenOf<'_, L, Lang>>`, `From<<L::Token as Token>::Error>`, and `FromUnclosed<'_, L, Lang>`
    = note: the two end-of-input members are one `Set`-generic impl: `impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for MyError { fn from(e: UnexpectedEot<O, Lang, Set>) -> Self { /* … */ } }`
    = note: the delimiter half is one generic impl: `impl<'i, L: Lexer<'i>, Lang: ?Sized> FromUnclosed<'i, L, Lang> for MyError { fn from_unclosed<D>(e: Unclosed<D, L::Span, Lang>) -> Self { /* … */ } }`
    = note: pin the span if your error stores it — an opaque `L::Span` has no route to a concrete span type: `L: Lexer<'i, Span = SimpleSpan>`
-   = help: the trait `FromUnclosed<'inp, L, Lang>` is implemented for `()`
+help: the trait `FromUnclosed<'inp, L, Lang>` is implemented for `()`
+  --> src/error/unclosed.rs
+   |
+   | / impl<'inp, L, Lang: ?Sized> FromUnclosed<'inp, L, Lang> for ()
+   | | where
+   | |   L: Lexer<'inp>,
+   | |_________________^
    = note: required for `MyError` to implement `FromTokenErrors<'_, L>`
 note: required by a bound in `inner`
   --> tests/ui/from_token_errors.rs:10:37

@@ -17,33 +17,37 @@
 //! `.stderr` beside it is the message, byte for byte.
 //!
 //! **The `.stderr` files are generated, never hand-edited.** Regenerate with
-//! `TRYBUILD=overwrite cargo +1.87 test -p tokora --all-features --test diagnostics` and
-//! review the diff.
+//! `TRYBUILD=overwrite cargo +<MSRV> test -p tokora --all-features --test diagnostics` (the
+//! MSRV declared in the workspace `Cargo.toml`) and review the diff.
 //!
 //! # The toolchain pin, and its honest cost
 //!
 //! rustc's diagnostic rendering churns between releases — note ordering, `help:` wording,
 //! and the underline art all move — so a `.stderr` committed against stable would go red
 //! on a schedule nobody controls. The files here are therefore generated on the crate's
-//! **MSRV toolchain, 1.87**, and the test **skips itself on any other rustc**.
+//! **MSRV toolchain** (currently 1.95; see [`PINNED_RUSTC`]), and the test **skips itself on
+//! any other rustc**.
 //!
 //! The cost of that is exact and worth stating rather than glossing: **this rail proves
-//! the message only on 1.87.** A change that keeps the 1.87 rendering intact while
+//! the message only on the pinned MSRV.** A change that keeps that rendering intact while
 //! breaking a later one passes here. What it does catch is the thing it was built for —
 //! somebody deleting or rewriting an `on_unimplemented` attribute and the curated message
 //! silently reverting to rustc's default, which is a source change, not a rustc change.
 //!
-//! Because the default gates run on a newer toolchain, this rail is only live where 1.87
-//! is: CI's `msrv` job runs it explicitly.
+//! Because the default gates run on a newer toolchain, this rail is only live where the MSRV
+//! is: CI's `msrv` job runs it explicitly, on whatever toolchain `Cargo.toml`'s `rust-version`
+//! currently declares. A bump to that declaration must regenerate the `.stderr` files and move
+//! [`PINNED_RUSTC`] in the same change, or this rail goes back to skipping itself everywhere.
 
 /// The toolchain the committed `.stderr` files were generated on. A rustc that does not
 /// report this version skips the cases rather than diffing against another release's
-/// rendering.
-const PINNED_RUSTC: &str = "1.87.0";
+/// rendering. Kept in step with the workspace `Cargo.toml`'s `rust-version` — see the module
+/// docs above.
+const PINNED_RUSTC: &str = "1.95.0";
 
 /// The rustc trybuild's inner `cargo` will use: the `RUSTC` override if the environment
 /// sets one, otherwise whatever `rustc` resolves to on `PATH` — which is the rustup shim,
-/// and so honours `+1.87` / `RUSTUP_TOOLCHAIN` exactly as the inner build will.
+/// and so honours `+<MSRV>` / `RUSTUP_TOOLCHAIN` exactly as the inner build will.
 fn rustc_version() -> Option<String> {
   let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
   let out = std::process::Command::new(rustc)
@@ -53,7 +57,7 @@ fn rustc_version() -> Option<String> {
   if !out.status.success() {
     return None;
   }
-  // `rustc 1.87.0 (17067e9ac 2025-05-09)` -> `1.87.0`
+  // `rustc 1.95.0 (59807616e 2026-04-14)` -> `1.95.0`
   String::from_utf8(out.stdout)
     .ok()?
     .split_whitespace()
@@ -79,7 +83,8 @@ fn on_unimplemented_messages_match_their_committed_stderr() {
       println!("{LIVENESS_MARKER}=0");
       eprintln!(
         "R8 skipped: the committed .stderr is pinned to rustc {PINNED_RUSTC}, this is {}. \
-         Run `cargo +1.87 test -p tokora --all-features --test diagnostics`.",
+         Run under the toolchain the workspace Cargo.toml declares as `rust-version` (e.g. \
+         `cargo +1.95 test -p tokora --all-features --test diagnostics`).",
         other.as_deref().unwrap_or("unknown")
       );
       return;

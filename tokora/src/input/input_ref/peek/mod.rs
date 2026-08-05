@@ -268,10 +268,10 @@ where
       // The parked token is the front of the stream, so it heads the window and the cache fills in
       // behind it. Safe unguarded because every caller of this fill passes a buffer with room for at
       // least one entry.
-      if Self::can_park() {
-        if let Some(parked) = self.pending.as_ref() {
-          buf.push_back(Maybe::Ref(parked.as_ref()));
-        }
+      if Self::can_park()
+        && let Some(parked) = self.pending.as_ref()
+      {
+        buf.push_back(Maybe::Ref(parked.as_ref()));
       }
       self.cache.peek::<W>(buf);
       return Ok(self.session.emitter);
@@ -286,10 +286,10 @@ where
       // The parked token is the front of the stream, so it heads the window and the cache fills in
       // behind it. Safe unguarded because every caller of this fill passes a buffer with room for at
       // least one entry.
-      if Self::can_park() {
-        if let Some(parked) = self.pending.as_ref() {
-          buf.push_back(Maybe::Ref(parked.as_ref()));
-        }
+      if Self::can_park()
+        && let Some(parked) = self.pending.as_ref()
+      {
+        buf.push_back(Maybe::Ref(parked.as_ref()));
       }
       self.cache.peek::<W>(buf);
       return Ok(self.session.emitter);
@@ -492,10 +492,10 @@ where
     // The parked token is the front of the stream, so it heads the window and the cache fills in
     // behind it. Safe unguarded because every caller of this fill passes a buffer with room for at
     // least one entry.
-    if Self::can_park() {
-      if let Some(parked) = self.pending.as_ref() {
-        buf.push_back(Maybe::Ref(parked.as_ref()));
-      }
+    if Self::can_park()
+      && let Some(parked) = self.pending.as_ref()
+    {
+      buf.push_back(Maybe::Ref(parked.as_ref()));
     }
     debug_assert!(
       buf.len() == buf_len + staged + parked,

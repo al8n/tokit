@@ -4,7 +4,11 @@ error[E0277]: `MyEmitter` is not a composable emitter for lexer `L`
 12 |   inner::<L, MyEmitter>();
    |              ^^^^^^^^^ one or more of the seven `ComposableEmitter` members is missing for this type
    |
-   = help: the trait `FullContainerEmitter<'_, L>` is not implemented for `MyEmitter`
+help: the trait `FullContainerEmitter<'_, L>` is not implemented for `MyEmitter`
+  --> tests/ui/composable_emitter.rs:8:1
+   |
+ 8 | struct MyEmitter;
+   | ^^^^^^^^^^^^^^^^
    = note: the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below
    = help: the following other types implement trait `FullContainerEmitter<'a, L, Lang>`:
              `&mut U` implements `FullContainerEmitter<'a, L, Lang>`
@@ -26,7 +30,11 @@ error[E0277]: `MyEmitter` is not a composable emitter for lexer `L`
 12 |   inner::<L, MyEmitter>();
    |              ^^^^^^^^^ one or more of the seven `ComposableEmitter` members is missing for this type
    |
-   = help: the trait `UnexpectedLeadingSeparatorEmitter<'_, L>` is not implemented for `MyEmitter`
+help: the trait `UnexpectedLeadingSeparatorEmitter<'_, L>` is not implemented for `MyEmitter`
+  --> tests/ui/composable_emitter.rs:8:1
+   |
+ 8 | struct MyEmitter;
+   | ^^^^^^^^^^^^^^^^
    = note: the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below
    = help: the following other types implement trait `UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>`:
              &mut U
@@ -48,7 +56,11 @@ error[E0277]: `MyEmitter` is not a composable emitter for lexer `L`
 12 |   inner::<L, MyEmitter>();
    |              ^^^^^^^^^ one or more of the seven `ComposableEmitter` members is missing for this type
    |
-   = help: the trait `UnexpectedTrailingSeparatorEmitter<'_, L>` is not implemented for `MyEmitter`
+help: the trait `UnexpectedTrailingSeparatorEmitter<'_, L>` is not implemented for `MyEmitter`
+  --> tests/ui/composable_emitter.rs:8:1
+   |
+ 8 | struct MyEmitter;
+   | ^^^^^^^^^^^^^^^^
    = note: the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below
    = help: the following other types implement trait `UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>`:
              `&mut U` implements `UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>`
@@ -70,7 +82,11 @@ error[E0277]: `MyEmitter` is not a composable emitter for lexer `L`
 12 |   inner::<L, MyEmitter>();
    |              ^^^^^^^^^ one or more of the seven `ComposableEmitter` members is missing for this type
    |
-   = help: the trait `TooFewEmitter<'_, L>` is not implemented for `MyEmitter`
+help: the trait `TooFewEmitter<'_, L>` is not implemented for `MyEmitter`
+  --> tests/ui/composable_emitter.rs:8:1
+   |
+ 8 | struct MyEmitter;
+   | ^^^^^^^^^^^^^^^^
    = note: the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below
    = help: the following other types implement trait `TooFewEmitter<'a, L, Lang>`:
              `&mut U` implements `TooFewEmitter<'a, L, Lang>`
@@ -92,7 +108,11 @@ error[E0277]: `MyEmitter` is not a composable emitter for lexer `L`
 12 |   inner::<L, MyEmitter>();
    |              ^^^^^^^^^ one or more of the seven `ComposableEmitter` members is missing for this type
    |
-   = help: the trait `UnclosedEmitter<'_, L>` is not implemented for `MyEmitter`
+help: the trait `UnclosedEmitter<'_, L>` is not implemented for `MyEmitter`
+  --> tests/ui/composable_emitter.rs:8:1
+   |
+ 8 | struct MyEmitter;
+   | ^^^^^^^^^^^^^^^^
    = note: the members: `Emitter`, `FullContainerEmitter`, `SeparatedEmitter`, `UnexpectedLeadingSeparatorEmitter`, `UnexpectedTrailingSeparatorEmitter`, `TooFewEmitter`, `UnclosedEmitter` — the compiler names the missing one below
    = help: the following other types implement trait `UnclosedEmitter<'a, L, Lang>`:
              `&mut U` implements `UnclosedEmitter<'a, L, Lang>`
