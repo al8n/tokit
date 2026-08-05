@@ -26,6 +26,200 @@ When `## Unreleased` becomes `## 0.9.0 (date)`, its anchors and the links to the
 with it. `ci/changelog_structure.sh` enforces every clause above and will red until they do.
 -->
 
+## Unreleased
+
+### Fixed
+
+1. **`is_empty()` was never asserted false by the cache conformance kit — a fixture returning
+   `true` unconditionally passed `CacheHarness::run()` at every capacity the kit drives.**
+   `is_empty` is a *default* `Cache` method (`len() == 0`) an implementation is free to override,
+   and the kit called it from exactly one place, `assert_empty`, always against a cache `len()`
+   had already established was empty. `assert_resident` — already run at every residency every
+   other check sweeps, full and partially drained from both ends — now also checks
+   `is_empty() == want.is_empty()`, so a constant answer is caught the first time the kit drives
+   a non-empty cache instead of never.
+   — *(#180)*
+
+2. **`clear()` and `span()` had the same one-shot blind spot in the cache conformance kit, in
+   two different shapes.** `check_clear` filled a cache, cleared it, asserted the check-1
+   invariants, and never touched it again — so a `clear` that empties the cache and also
+   **permanently disables it** (refuses every push afterward, with capacity to spare) passed
+   exactly like one that only empties it. It now refills the cleared cache with `cap` fresh
+   pushes and checks the refill against check 3's oracle. Separately, `assert_empty`'s own pop
+   probe called `pop_front`/`pop_back` on a throwaway `C::new()` rather than on the cache
+   `check_clear` had just emptied, so neither call site actually asked the CACHE UNDER TEST
+   whether its own pops still answered; `assert_empty` now takes that cache by `&mut` and probes
+   it directly.
+
+   `check_span` called `span()` exactly once, immediately after a fresh fill — a residency at
+   which `span()` cannot yet be stale, so a `span` that is correct there and never updated after
+   a `pop_back` passed unnoticed. It now sweeps every residency `peek`'s check already sweeps:
+   full, and partially drained from both the front and the back.
+   — *(#180)*
+
+3. **`pop_front_if`/`try_pop_front_if`/`push_many` were never called by the cache conformance
+   kit, so a broken override of any of the three passed `CacheHarness::run()` unnoticed.** All
+   three are *default* `Cache` methods composed from `front`/`pop_front`/`push_back` — already
+   checked exhaustively — so an implementation that does not override them was already correct.
+   What was untested was an override: one that removes on a false predicate (or removes and
+   reports `None` regardless of what the predicate said), or one that silently discards tokens
+   that do not fit instead of handing them back through `push_many`'s overflow iterator. The kit
+   now drives both `pop_front_if` and `try_pop_front_if` against a false predicate, an
+   `Err`-returning one, and a true/`Ok(())` one, on both an empty and a filled cache, and drives
+   `push_many` with two more tokens than capacity, checking the accepted prefix and the refused
+   overflow separately.
+   — *(#180)*
+
+4. **`peek_one` was never called twice against one unchanged cache by the cache conformance
+   kit, so an answer that is correct once and wrong on every repeat passed
+   `CacheHarness::run()`.** `peek` has been held to that law since the kit existed; `peek_one`,
+   which is composed from it, had not — the kit called it exactly once per residency its sweep
+   visits, against a cache instance built fresh for that residency, so a second answer had
+   nothing to disagree with. It is now called twice at every one of those residencies.
+   Separately, the assertion that `peek_one` names the front entry had **no mutant behind it at
+   all**: `peek_one` is a default method, no fixture had ever overridden it, and a fixture that
+   does not override it is correct wherever `peek` is. Both halves now have one.
+   — *(#180)*
+
+5. **`front()` and `back()` were checked for presence and never for identity outside the empty
+   state, so a cache whose specialized span accessors were right and whose entry accessors were
+   wrong passed the cache conformance kit.** `assert_resident` — the oracle every residency check
+   in the kit runs through — read `front_span()`/`back_span()` and nothing else, and nothing
+   required the two pairs to name the same entry. `front_span`/`back_span` are *default* methods
+   derived from `front`/`back`, so a cache that gets only `front` wrong was already caught; what
+   was not is a cache that specializes the span accessors off a head and tail index, which is
+   what a ring does to avoid building a `CachedTokenRef`, and then disagrees. The entry is the
+   half that carries the token and the `L::State` a restore resumes from. `assert_resident` now
+   reads `front()`/`back()` themselves against the same expectation.
+   — *(#180)*
+
+6. **`Cache::with_options` was never called by the cache conformance kit, so a conformant `new()`
+   covered for an arbitrarily broken second constructor.** `Cache` has two constructors and the
+   kit built every cache it tested with the first, so a `with_options` that came back non-empty,
+   or that reported a capacity it would not honour, passed `CacheHarness::run()` undetected. The
+   kit could not reach it on its own: `Options` is an associated type it has no way to fabricate
+   a value of. `CacheHarness::also_built_by(|| C::with_options(..))` is the new, additive way to
+   supply the second constructor; `run()` then drives the **whole** contract a second time
+   against caches built by it, re-reading the capacity per pass so the two may differ, and every
+   failure message names which constructor built the cache it is about. tokora's own four caches
+   are now driven through both. What no kit generic over `C` can check — that the capacity
+   matches what the *caller asked for*, since `Options` is opaque — is stated in the module docs'
+   "what it deliberately does not check" section rather than left implied.
+   — *(#180)*
+
+7. **The cache conformance kit's `push_front` check returned at its first line for capacity 1,
+   so the one capacity at which every front push is refused was never driven at all.** The
+   prepend *order* genuinely is not observable there — the seeding `push_back` fills the cache,
+   so nothing can be prepended — but the refusal is, and nothing else in the kit reaches a
+   refused push on that arm: check 3 drives the round-trip for `push_back`, and the two checks
+   that drive accepted front pushes never see one refused. A cache that corrupts a refused
+   `push_front` — hands back a resident entry and swallows the token it was offered — was
+   therefore invisible at capacity 1, which is precisely the capacity where every front push is
+   refused. Check 5 now returns only at capacity 0, and asserts at capacity 1 that the refusal
+   half was actually reached.
+   — *(#180)*
+
+8. **No cache instance was ever peeked, mutated, and peeked again by the cache conformance kit,
+   so a `peek` that memoises its first answer passed `CacheHarness::run()`.** The residency sweep
+   reaches every state a cache can be in, but it reaches each of them on a cache built **fresh**
+   for it — fill to capacity, pop to the depth wanted, and only then peek — so every `peek` the
+   kit ever made was the first question that instance had been asked, and the latch was always
+   armed by the very state it was about to be checked against. Such a cache also satisfies the
+   purity law, which was the only repeatability the kit asked for: two peeks with nothing changed
+   in between *do* agree; a latch is only wrong once something has changed. Check 6 now runs its
+   whole body once more against a single instance, peeked at capacity and then popped and
+   re-peeked at every residency down to empty, alternating which end the pop comes off.
+   — *(#180)*
+
+9. **The cache conformance kit built every mixed residency the same way and read it from the
+   same end, so two whole dimensions of the prepend law went undriven.** A residency a
+   `push_front` contributed to was drained with `pop_front` and never from the other end, and
+   every `pop_back` the kit *did* drive — check 4's newest-first drain, check 6's and check 8's
+   back sweeps — ran against a cache `push_back` filled from empty. A `pop_back` that is correct
+   on a back-built residency and wrong on one a prepend built, which is a ring whose prepend
+   establishes the new head and leaves the tail index naming a slot it invalidated, therefore had
+   nothing to answer to — and that is the shape the input layer's **restore** path reads through
+   after a put-back has prepended. Separately, every mixed residency was "one `push_back`, then
+   N `push_front`s", so in the whole kit an append **never once followed** a prepend: a
+   `push_back` that computes its slot from a head index a `push_front` has since moved was
+   correct in every sequence the kit could build. Check 5 now drains each front-built prefix from
+   both ends, and drives a second residency built by **alternating** the two arms from empty,
+   swept from two entries up to the capacity.
+   — *(#180)*
+
+10. **The cache conformance kit peeked through one window type, `U4`, in every driver it had — so
+   a `Cache::peek` that reads `W::CAPACITY` off its own type parameter and branches on it was
+   invisible.** `peek` is generic over the window, and the two natural branches on it are both
+   dead code at a single fixed one: the single-slot fast path the trait itself invites, since
+   `peek_one`'s default body is literally `peek::<U1>` into a one-slot buffer, and the truncating
+   path a cache takes when the residency does **not** fit in the window, which never runs while
+   the window is at least as wide as every residency the kit builds. Sweeping the prefill depth
+   was not a substitute: that varies the buffer's remaining capacity, not the type. Check 6 now
+   reads the bound, the order and the purity law through `U1` and `U3` as well as `U4`, at every
+   residency it already sweeps.
+   — *(#180)*
+
+11. **No residency the cache conformance kit built could make a ring wrap, so the classic missing
+   `% capacity` was truncating by zero everywhere the kit asked.** The kit fills by pushing back
+   into an empty cache, which puts a ring's head at slot zero, and every state it reached from
+   there was reached by popping: popping the front advances the head and shortens the run by the
+   same step, so `head + len` never exceeds the capacity, and popping the back only shortens it.
+   A live run wraps past the end of the backing array only when something is **pushed after
+   something was popped**, and no driver in the kit did that. Both operations that *walk* from the
+   head — `peek`, and the combined `span` — were therefore never asked to cross the seam. Checks 6
+   and 8 now re-run against a rotated residency: drained off the front and topped back up to
+   capacity, swept across head positions up to the peek window's width. (`front`, `back` and the
+   pops name a single slot rather than walking to one, and an index naming the wrong slot is
+   already caught by the residency oracle, so those are not re-driven.)
+   — *(#180)*
+
+12. **Every prefilled `peek` the cache conformance kit drove put entries in the buffer whose spans
+   came *after* the residency — the inverse of what the input layer actually hands over.**
+   `InputRef`'s peek fill pushes the parked token before it calls in, because the parked token is
+   the front of the stream: it heads the window and the cache fills in behind it. So at the real
+   call site the buffer holds what comes **first**, and the kit had never once built that shape.
+   That is the one arrangement in which a cache can talk itself into treating the buffer as a
+   prefix of its own run and skipping an entry it decides the caller already holds — a "do not
+   serve the parked token twice" dedup, keyed on a span comparison that is simply false in the
+   arrangement the kit did build. Check 6 now sweeps the prefill depth in **both** relations,
+   building the residency one peek window into the corpus so the tokens before it are available
+   to prefill from; this costs no extra source, since the kit already asks for the capacity plus a
+   window.
+
+   Recorded because the issue this closes predicted the opposite: it named a `peek` that *sorts or
+   merges by span* as the invisible case. That one is caught, and was already — measured, not
+   argued. Because the old prefill's spans are the greater ones, a correct append leaves the
+   buffer **unsorted**, so any sort visibly reorders it and the untouched-prefix assertion fires
+   at depth 1. In the newly added relation the correct append is already ascending, so a sort is
+   the identity and invisible there. The two arrangements catch different defect classes, which is
+   why both are kept.
+   — *(#180)*
+
+13. **The cache conformance kit's check 9 said "the predicate sees the front entry" for both
+   `pop_front_if` and `try_pop_front_if`, and had no way to tell for either: the two
+   `try_pop_front_if` closures threw the entry away, and the `pop_front_if` one that kept it had
+   never been run against a cache that disagrees.** The Err closure was `|_| Err("no")` and the
+   Ok closure `|_| Ok(())`, so everything the check asserted about `try_pop_front_if` was its
+   return value and its residency. An override that ran the caller's validation predicate against
+   `back()` and then handed back the error, or removed and returned exactly the front — the
+   conforming outcomes — satisfied every one of those assertions and was certified. That is a
+   cache whose caller-supplied predicate decides whether to keep or drop the front token on the
+   strength of unrelated lookahead, and a parser built on it removes or retains the wrong token.
+   Both predicates now record the span they are handed and assert it is the front entry's, ahead
+   of the return and residency assertions that were already there.
+
+   The sweep that followed found the same shape one arm over. `pop_front_if`'s recording assertion
+   has existed since the check was written, but every fixture predicated on `front()` — including
+   the one whose entire defect is in `pop_front_if`, which gets the *return value* wrong and the
+   question right — so that assertion had never fired in its life. An assertion with no mutant
+   behind it is the defect class this issue exists to close, not an exception to it, so it now has
+   one. Two new cells, one per method, each handing its predicate the back entry while keeping the
+   return value and the residency conforming. The `try_pop_front_if` one is invisible to the kit
+   as it stood — the whole suite runs green against it; the `pop_front_if` one is the witness its
+   assertion never had. Removing the assertion that catches either reds exactly that one test and
+   nothing else.
+   — *(#180)*
+
 ## 0.8.0 (2026-08-04)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.
@@ -3610,196 +3804,6 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    only** — never the token or the `L::State` beside it in the same `CachedToken` — so a cache
    that returns the right spans while corrupting either one still passes in full.
    — *(#172)*
-
-69. **`is_empty()` was never asserted false by the cache conformance kit — a fixture returning
-   `true` unconditionally passed `CacheHarness::run()` at every capacity the kit drives.**
-   `is_empty` is a *default* `Cache` method (`len() == 0`) an implementation is free to override,
-   and the kit called it from exactly one place, `assert_empty`, always against a cache `len()`
-   had already established was empty. `assert_resident` — already run at every residency every
-   other check sweeps, full and partially drained from both ends — now also checks
-   `is_empty() == want.is_empty()`, so a constant answer is caught the first time the kit drives
-   a non-empty cache instead of never.
-   — *(#180)*
-
-70. **`clear()` and `span()` had the same one-shot blind spot in the cache conformance kit, in
-   two different shapes.** `check_clear` filled a cache, cleared it, asserted the check-1
-   invariants, and never touched it again — so a `clear` that empties the cache and also
-   **permanently disables it** (refuses every push afterward, with capacity to spare) passed
-   exactly like one that only empties it. It now refills the cleared cache with `cap` fresh
-   pushes and checks the refill against check 3's oracle. Separately, `assert_empty`'s own pop
-   probe called `pop_front`/`pop_back` on a throwaway `C::new()` rather than on the cache
-   `check_clear` had just emptied, so neither call site actually asked the CACHE UNDER TEST
-   whether its own pops still answered; `assert_empty` now takes that cache by `&mut` and probes
-   it directly.
-
-   `check_span` called `span()` exactly once, immediately after a fresh fill — a residency at
-   which `span()` cannot yet be stale, so a `span` that is correct there and never updated after
-   a `pop_back` passed unnoticed. It now sweeps every residency `peek`'s check already sweeps:
-   full, and partially drained from both the front and the back.
-   — *(#180)*
-
-71. **`pop_front_if`/`try_pop_front_if`/`push_many` were never called by the cache conformance
-   kit, so a broken override of any of the three passed `CacheHarness::run()` unnoticed.** All
-   three are *default* `Cache` methods composed from `front`/`pop_front`/`push_back` — already
-   checked exhaustively — so an implementation that does not override them was already correct.
-   What was untested was an override: one that removes on a false predicate (or removes and
-   reports `None` regardless of what the predicate said), or one that silently discards tokens
-   that do not fit instead of handing them back through `push_many`'s overflow iterator. The kit
-   now drives both `pop_front_if` and `try_pop_front_if` against a false predicate, an
-   `Err`-returning one, and a true/`Ok(())` one, on both an empty and a filled cache, and drives
-   `push_many` with two more tokens than capacity, checking the accepted prefix and the refused
-   overflow separately.
-   — *(#180)*
-
-72. **`peek_one` was never called twice against one unchanged cache by the cache conformance
-   kit, so an answer that is correct once and wrong on every repeat passed
-   `CacheHarness::run()`.** `peek` has been held to that law since the kit existed; `peek_one`,
-   which is composed from it, had not — the kit called it exactly once per residency its sweep
-   visits, against a cache instance built fresh for that residency, so a second answer had
-   nothing to disagree with. It is now called twice at every one of those residencies.
-   Separately, the assertion that `peek_one` names the front entry had **no mutant behind it at
-   all**: `peek_one` is a default method, no fixture had ever overridden it, and a fixture that
-   does not override it is correct wherever `peek` is. Both halves now have one.
-   — *(#180)*
-
-73. **`front()` and `back()` were checked for presence and never for identity outside the empty
-   state, so a cache whose specialized span accessors were right and whose entry accessors were
-   wrong passed the cache conformance kit.** `assert_resident` — the oracle every residency check
-   in the kit runs through — read `front_span()`/`back_span()` and nothing else, and nothing
-   required the two pairs to name the same entry. `front_span`/`back_span` are *default* methods
-   derived from `front`/`back`, so a cache that gets only `front` wrong was already caught; what
-   was not is a cache that specializes the span accessors off a head and tail index, which is
-   what a ring does to avoid building a `CachedTokenRef`, and then disagrees. The entry is the
-   half that carries the token and the `L::State` a restore resumes from. `assert_resident` now
-   reads `front()`/`back()` themselves against the same expectation.
-   — *(#180)*
-
-74. **`Cache::with_options` was never called by the cache conformance kit, so a conformant `new()`
-   covered for an arbitrarily broken second constructor.** `Cache` has two constructors and the
-   kit built every cache it tested with the first, so a `with_options` that came back non-empty,
-   or that reported a capacity it would not honour, passed `CacheHarness::run()` undetected. The
-   kit could not reach it on its own: `Options` is an associated type it has no way to fabricate
-   a value of. `CacheHarness::also_built_by(|| C::with_options(..))` is the new, additive way to
-   supply the second constructor; `run()` then drives the **whole** contract a second time
-   against caches built by it, re-reading the capacity per pass so the two may differ, and every
-   failure message names which constructor built the cache it is about. tokora's own four caches
-   are now driven through both. What no kit generic over `C` can check — that the capacity
-   matches what the *caller asked for*, since `Options` is opaque — is stated in the module docs'
-   "what it deliberately does not check" section rather than left implied.
-   — *(#180)*
-
-75. **The cache conformance kit's `push_front` check returned at its first line for capacity 1,
-   so the one capacity at which every front push is refused was never driven at all.** The
-   prepend *order* genuinely is not observable there — the seeding `push_back` fills the cache,
-   so nothing can be prepended — but the refusal is, and nothing else in the kit reaches a
-   refused push on that arm: check 3 drives the round-trip for `push_back`, and the two checks
-   that drive accepted front pushes never see one refused. A cache that corrupts a refused
-   `push_front` — hands back a resident entry and swallows the token it was offered — was
-   therefore invisible at capacity 1, which is precisely the capacity where every front push is
-   refused. Check 5 now returns only at capacity 0, and asserts at capacity 1 that the refusal
-   half was actually reached.
-   — *(#180)*
-
-76. **No cache instance was ever peeked, mutated, and peeked again by the cache conformance kit,
-   so a `peek` that memoises its first answer passed `CacheHarness::run()`.** The residency sweep
-   reaches every state a cache can be in, but it reaches each of them on a cache built **fresh**
-   for it — fill to capacity, pop to the depth wanted, and only then peek — so every `peek` the
-   kit ever made was the first question that instance had been asked, and the latch was always
-   armed by the very state it was about to be checked against. Such a cache also satisfies the
-   purity law, which was the only repeatability the kit asked for: two peeks with nothing changed
-   in between *do* agree; a latch is only wrong once something has changed. Check 6 now runs its
-   whole body once more against a single instance, peeked at capacity and then popped and
-   re-peeked at every residency down to empty, alternating which end the pop comes off.
-   — *(#180)*
-
-77. **The cache conformance kit built every mixed residency the same way and read it from the
-   same end, so two whole dimensions of the prepend law went undriven.** A residency a
-   `push_front` contributed to was drained with `pop_front` and never from the other end, and
-   every `pop_back` the kit *did* drive — check 4's newest-first drain, check 6's and check 8's
-   back sweeps — ran against a cache `push_back` filled from empty. A `pop_back` that is correct
-   on a back-built residency and wrong on one a prepend built, which is a ring whose prepend
-   establishes the new head and leaves the tail index naming a slot it invalidated, therefore had
-   nothing to answer to — and that is the shape the input layer's **restore** path reads through
-   after a put-back has prepended. Separately, every mixed residency was "one `push_back`, then
-   N `push_front`s", so in the whole kit an append **never once followed** a prepend: a
-   `push_back` that computes its slot from a head index a `push_front` has since moved was
-   correct in every sequence the kit could build. Check 5 now drains each front-built prefix from
-   both ends, and drives a second residency built by **alternating** the two arms from empty,
-   swept from two entries up to the capacity.
-   — *(#180)*
-
-78. **The cache conformance kit peeked through one window type, `U4`, in every driver it had — so
-   a `Cache::peek` that reads `W::CAPACITY` off its own type parameter and branches on it was
-   invisible.** `peek` is generic over the window, and the two natural branches on it are both
-   dead code at a single fixed one: the single-slot fast path the trait itself invites, since
-   `peek_one`'s default body is literally `peek::<U1>` into a one-slot buffer, and the truncating
-   path a cache takes when the residency does **not** fit in the window, which never runs while
-   the window is at least as wide as every residency the kit builds. Sweeping the prefill depth
-   was not a substitute: that varies the buffer's remaining capacity, not the type. Check 6 now
-   reads the bound, the order and the purity law through `U1` and `U3` as well as `U4`, at every
-   residency it already sweeps.
-   — *(#180)*
-
-79. **No residency the cache conformance kit built could make a ring wrap, so the classic missing
-   `% capacity` was truncating by zero everywhere the kit asked.** The kit fills by pushing back
-   into an empty cache, which puts a ring's head at slot zero, and every state it reached from
-   there was reached by popping: popping the front advances the head and shortens the run by the
-   same step, so `head + len` never exceeds the capacity, and popping the back only shortens it.
-   A live run wraps past the end of the backing array only when something is **pushed after
-   something was popped**, and no driver in the kit did that. Both operations that *walk* from the
-   head — `peek`, and the combined `span` — were therefore never asked to cross the seam. Checks 6
-   and 8 now re-run against a rotated residency: drained off the front and topped back up to
-   capacity, swept across head positions up to the peek window's width. (`front`, `back` and the
-   pops name a single slot rather than walking to one, and an index naming the wrong slot is
-   already caught by the residency oracle, so those are not re-driven.)
-   — *(#180)*
-
-80. **Every prefilled `peek` the cache conformance kit drove put entries in the buffer whose spans
-   came *after* the residency — the inverse of what the input layer actually hands over.**
-   `InputRef`'s peek fill pushes the parked token before it calls in, because the parked token is
-   the front of the stream: it heads the window and the cache fills in behind it. So at the real
-   call site the buffer holds what comes **first**, and the kit had never once built that shape.
-   That is the one arrangement in which a cache can talk itself into treating the buffer as a
-   prefix of its own run and skipping an entry it decides the caller already holds — a "do not
-   serve the parked token twice" dedup, keyed on a span comparison that is simply false in the
-   arrangement the kit did build. Check 6 now sweeps the prefill depth in **both** relations,
-   building the residency one peek window into the corpus so the tokens before it are available
-   to prefill from; this costs no extra source, since the kit already asks for the capacity plus a
-   window.
-
-   Recorded because the issue this closes predicted the opposite: it named a `peek` that *sorts or
-   merges by span* as the invisible case. That one is caught, and was already — measured, not
-   argued. Because the old prefill's spans are the greater ones, a correct append leaves the
-   buffer **unsorted**, so any sort visibly reorders it and the untouched-prefix assertion fires
-   at depth 1. In the newly added relation the correct append is already ascending, so a sort is
-   the identity and invisible there. The two arrangements catch different defect classes, which is
-   why both are kept.
-   — *(#180)*
-
-81. **The cache conformance kit's check 9 said "the predicate sees the front entry" for both
-   `pop_front_if` and `try_pop_front_if`, and had no way to tell for either: the two
-   `try_pop_front_if` closures threw the entry away, and the `pop_front_if` one that kept it had
-   never been run against a cache that disagrees.** The Err closure was `|_| Err("no")` and the
-   Ok closure `|_| Ok(())`, so everything the check asserted about `try_pop_front_if` was its
-   return value and its residency. An override that ran the caller's validation predicate against
-   `back()` and then handed back the error, or removed and returned exactly the front — the
-   conforming outcomes — satisfied every one of those assertions and was certified. That is a
-   cache whose caller-supplied predicate decides whether to keep or drop the front token on the
-   strength of unrelated lookahead, and a parser built on it removes or retains the wrong token.
-   Both predicates now record the span they are handed and assert it is the front entry's, ahead
-   of the return and residency assertions that were already there.
-
-   The sweep that followed found the same shape one arm over. `pop_front_if`'s recording assertion
-   has existed since the check was written, but every fixture predicated on `front()` — including
-   the one whose entire defect is in `pop_front_if`, which gets the *return value* wrong and the
-   question right — so that assertion had never fired in its life. An assertion with no mutant
-   behind it is the defect class this issue exists to close, not an exception to it, so it now has
-   one. Two new cells, one per method, each handing its predicate the back entry while keeping the
-   return value and the residency conforming. The `try_pop_front_if` one is invisible to the kit
-   as it stood — the whole suite runs green against it; the `pop_front_if` one is the witness its
-   assertion never had. Removing the assertion that catches either reds exactly that one test and
-   nothing else.
-   — *(#180)*
 
 ### Performance
 
