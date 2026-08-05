@@ -457,6 +457,32 @@ const TRUNCATING_PEEK_WALKS_BACKWARD: u8 = 41;
 ///
 /// Correct at `len <= 1`, where front and back are the same entry.
 const SINGLE_SLOT_PEEK_TAKES_THE_BACK: u8 = 42;
+/// `peek` walks the backing store from the head **without the modulo**, so once the live run
+/// wraps past the end of the array it stops at the array end and serves only the part before it
+/// (#180 part B, item 5).
+///
+/// The classic missing-`% capacity`, and the kit could not reach it: `filled` pushes back into an
+/// empty cache, so the head index starts at 0 and every residency the kit builds keeps
+/// `head + len <= capacity`. Popping the front advances the head and shortens the run by the same
+/// step, so the sum is invariant; popping the back only shortens it. **Nothing wraps unless
+/// something is pushed after something was popped**, and no driver did that until this issue.
+///
+/// Modelled with a synthetic [`head`](Queue::head) that moves exactly as a ring's does —
+/// `pop_front` forward, `push_front` back, both modulo the capacity, `clear` to zero — read by
+/// this cell and by [`WRAPPED_RUN_SPAN`] and by nothing else, so every other observable keeps
+/// answering for the live run.
+const WRAPPED_RUN_PEEK: u8 = 43;
+/// [`WRAPPED_RUN_PEEK`]'s sibling on the combined span: `span()` ends at the last slot **before
+/// the array end** once the live run wraps, rather than at the true back entry (#180 part B,
+/// item 5).
+///
+/// The same missing modulo, in the other place a ring computes an end from `head + len`.
+/// `front()`, `back()`, `back_span()` and `len()` all stay correct — they name a slot rather than
+/// walking to one — so only the combined span diverges, and only at a residency that wraps.
+/// [`STALE_SPAN_AFTER_POP_BACK`] is check 8's other span cell and is orthogonal: it is wrong
+/// after a `pop_back` and right at every wrapped residency, since the rotation ends with a
+/// `push_back` that refreshes what it reads.
+const WRAPPED_RUN_SPAN: u8 = 44;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -501,6 +527,13 @@ where
   /// cache's life. `RefCell` rather than `Cell` because it is read in place, and populated inside
   /// `peek`, which takes `&self`.
   memo: RefCell<Option<VecDeque<CachedTokenOf<'a, L>>>>,
+  /// A ring's head index, kept purely so that [`WRAPPED_RUN_PEEK`] and [`WRAPPED_RUN_SPAN`] can
+  /// ask whether the live run has wrapped past the end of the backing array — `head + len > cap`.
+  ///
+  /// Moved exactly as a ring moves it: forward on `pop_front`, back on `push_front`, both modulo
+  /// the capacity, and reset by `clear`. `push_back` and `pop_back` leave it alone. Nothing else
+  /// reads it, so every observable of every other cell is untouched.
+  head: usize,
 }
 
 // `L::Token: Clone` is what the two stale-residency cells cost: `STALE_RESIDENCY_PEEK`'s
@@ -584,6 +617,10 @@ where
       return Err(self.refuse(tok));
     }
     self.front_pushes.set(self.front_pushes.get() + 1);
+    // A ring's head steps back over the slot this prepend claims.
+    if self.cap > 0 {
+      self.head = (self.head + self.cap - 1) % self.cap;
+    }
     if D == APPENDING_PUSH_FRONT {
       self.items.push_back(tok);
       return Ok(self.items.back().expect("just pushed").as_ref());
@@ -705,6 +742,9 @@ where
     }
     self.items.clear();
     self.graveyard.clear();
+    // A ring's `clear` puts the head back at slot zero, so a cleared cache does not start out
+    // wrapped.
+    self.head = 0;
     if D == POISONING_CLEAR {
       // The cache is genuinely empty right after this — every check-1 observable answers
       // correctly — but `push_back` refuses everything from here on regardless of capacity.
@@ -752,6 +792,12 @@ where
         buf.push_back(Maybe::Ref(tok.as_ref()));
       }
       return;
+    }
+    if D == WRAPPED_RUN_PEEK && self.wrapped() {
+      // The walk from the head runs to the end of the array and stops there, because the index
+      // that should have wrapped did not. Everything the kit built before this issue kept
+      // `head + len <= cap`, so the truncation was always by zero.
+      fill = fill.min(self.cap - self.head);
     }
     if D == IMPURE_PEEK && seen > 0 {
       fill = fill.saturating_sub(1);
@@ -972,6 +1018,20 @@ where
         .end();
       return Some(L::Span::new(front.token().span_ref().start(), end));
     }
+    if D == WRAPPED_RUN_SPAN && self.wrapped() {
+      // The end computed by walking from the head without the modulo: it lands on the last slot
+      // before the array end instead of on the true back. `back()` and `back_span()` name a slot
+      // rather than walk to one, so they stay correct and only this diverges.
+      let front = self.items.front()?;
+      let last_before_the_end = self
+        .items
+        .get(self.cap - self.head - 1)
+        .expect("a wrapped run is longer than the distance from the head to the array end");
+      return Some(L::Span::new(
+        front.token().span_ref().start(),
+        last_before_the_end.token().span_ref().end(),
+      ));
+    }
     match (self.items.front(), self.items.back()) {
       (Some(first), Some(last)) => Some(L::Span::new(
         first.token().span_ref().start(),
@@ -1007,7 +1067,14 @@ where
       stashed: None,
       peek_one_at_len: Cell::new(None),
       memo: RefCell::new(None),
+      head: 0,
     }
+  }
+
+  /// Whether the live run has wrapped past the end of the backing array — the state a ring reaches
+  /// only by pushing after popping, and the one the two wrap cells are keyed on.
+  fn wrapped(&self) -> bool {
+    self.head + self.items.len() > self.cap
   }
 
   /// The refusal round-trip — or, under `SWAPPING_REFUSAL`, its violation: the caller is handed a
@@ -1073,6 +1140,10 @@ where
       }
     }
     let popped = self.items.pop_front();
+    // A ring's head steps forward over the slot this pop vacates.
+    if popped.is_some() && self.cap > 0 {
+      self.head = (self.head + 1) % self.cap;
+    }
     if D == STALE_RESIDENCY_PEEK {
       // The entry leaves the live run and stays in the store — a ring's head moving past a slot
       // it does not clear. Nothing but `peek` reads it, so `len`, `front`, `back` and `remaining`
@@ -1437,6 +1508,33 @@ fn cache_kit_catches_a_peek_bounded_by_the_backing_store() {
 #[should_panic(expected = "after 1 pop_back(s) off a full one")]
 fn cache_kit_catches_a_peek_bounded_by_the_backing_store_after_a_tail_drain() {
   run_queue::<STALE_TAIL_RESIDENCY_PEEK>();
+}
+
+/// #180 part B, item 5: the ring never wrapped. `filled` pushes back into an empty cache, so the
+/// head starts at slot zero, and a residency reached by popping keeps `head + len <= capacity` —
+/// popping the front advances the head and shortens the run by the same step. A run wraps only
+/// when something is **pushed after something was popped**, and no driver did that.
+///
+/// The expected message names the shallowest wrapped residency there is: one pop off the front
+/// and one push back on. So this test failing means the rotation is gone and a missing
+/// `% capacity` in `peek`'s walk from the head is back to truncating by zero everywhere.
+#[test]
+#[should_panic(expected = "a ring's live run starts at slot 1 and runs past the end of its array")]
+fn cache_kit_catches_a_peek_that_stops_at_the_end_of_a_wrapped_ring() {
+  run_queue::<WRAPPED_RUN_PEEK>();
+}
+
+/// The same missing modulo in the other place a ring computes an end from `head + len`: the
+/// combined span.
+///
+/// `back()`, `back_span()` and `len()` name a slot rather than walk to one, so they stay correct
+/// and only `span()` diverges — which means `check_peek_at`'s oracle cannot see this and the
+/// wrapped residency has to be handed to check 8's as well. This test failing means it no longer
+/// is.
+#[test]
+#[should_panic(expected = "combined-span] against a WRAPPED residency")]
+fn cache_kit_catches_a_span_that_stops_at_the_end_of_a_wrapped_ring() {
+  run_queue::<WRAPPED_RUN_SPAN>();
 }
 
 /// #180 part B, item 4: `W` was `U4` in every driver the kit had, so a `peek` that reads

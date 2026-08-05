@@ -3740,6 +3740,20 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    residency it already sweeps.
    — *(#180)*
 
+79. **No residency the cache conformance kit built could make a ring wrap, so the classic missing
+   `% capacity` was truncating by zero everywhere the kit asked.** The kit fills by pushing back
+   into an empty cache, which puts a ring's head at slot zero, and every state it reached from
+   there was reached by popping: popping the front advances the head and shortens the run by the
+   same step, so `head + len` never exceeds the capacity, and popping the back only shortens it.
+   A live run wraps past the end of the backing array only when something is **pushed after
+   something was popped**, and no driver in the kit did that. Both operations that *walk* from the
+   head — `peek`, and the combined `span` — were therefore never asked to cross the seam. Checks 6
+   and 8 now re-run against a rotated residency: drained off the front and topped back up to
+   capacity, swept across head positions up to the peek window's width. (`front`, `back` and the
+   pops name a single slot rather than walking to one, and an index naming the wrong slot is
+   already caught by the residency oracle, so those are not re-driven.)
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,

@@ -105,6 +105,14 @@
 //!    checked once against a freshly filled cache: a `span` that is correct immediately after a
 //!    fill and stale after any pop is indistinguishable from a conforming one at the one
 //!    residency a single check reaches.
+//!
+//!    Checks 6 and 8 are then both re-run against a **rotated** residency — drained off the front
+//!    and topped back up to capacity — because those two are the operations that WALK from the
+//!    head, and a ring's live run only ever wraps past the end of its backing array when
+//!    something is pushed *after* something was popped. Every other residency the kit builds
+//!    starts from an empty cache and only shrinks, so the classic missing `% capacity` truncates
+//!    by zero at all of them. `front`, `back` and the pops name a single slot rather than walking
+//!    to one, and an index that names the wrong slot is already caught by the residency oracle.
 //! 9. **`pop_front_if` / `try_pop_front_if`** — the predicate sees the front entry and nothing
 //!    else; a `false` (or `Err`) answer removes nothing and leaves every observable untouched; a
 //!    `true` (or `Ok(())`) answer removes exactly the front entry, matching what a bare
@@ -462,6 +470,7 @@ where
     self.check_peek_across_mutations(cap);
     self.check_clear(cap);
     self.check_span(cap);
+    self.check_wrapped_ring(cap);
     self.check_pop_front_if(cap);
     self.check_push_many(cap);
   }
@@ -1710,6 +1719,82 @@ where
         want.len()
       ),
     }
+  }
+
+  // ── checks 6 and 8 where a ring has WRAPPED ─────────────────────────────────────
+
+  /// Checks 6 and 8 against a residency whose live run runs **past the end of a ring's backing
+  /// array and around to its start** — the one shape no driver in this kit could reach.
+  ///
+  /// [`filled`](Self::filled) pushes back into an empty cache, so a ring's head index starts at
+  /// slot zero and every residency built from it satisfies `head + len <= capacity`. Popping the
+  /// front advances the head and shortens the run by the same step, so that sum is invariant;
+  /// popping the back only shortens it. **A run wraps only when something is pushed after
+  /// something was popped**, and until this check existed nothing in the kit did that (#180 part
+  /// B, item 5). So the classic missing `% capacity` — in the walk `peek` makes from the head,
+  /// and in the end `span` computes from `head + len` — was truncating by zero everywhere it was
+  /// asked.
+  ///
+  /// The rotation is swept, since `capacity - head` is where a truncated walk stops and a single
+  /// head position fixes it. Two bounds cap the sweep. It stops one short of the capacity,
+  /// because at `rotation == capacity` a ring's head is back at slot zero and the run does not
+  /// wrap at all — that pass would certify nothing while looking like the deepest case. And it
+  /// stops at the **peek window**, because the tokens pushed back come from past the residency
+  /// and the corpus this kit asks its caller for is the capacity plus one window: a deeper
+  /// rotation would be a longer source requirement charged to every user of the kit, for head
+  /// positions that differ from these in no way a walk can tell.
+  ///
+  /// Only `peek` and `span` are re-driven here. They are the two operations that WALK from the
+  /// head; `front`, `back`, `pop_front` and `pop_back` name a single slot, and an index that
+  /// names the wrong slot is already caught wherever the kit checks residency —
+  /// [`check_peek_at`](Self::check_peek_at)'s own [`assert_resident`](Self::assert_resident) does
+  /// it here too.
+  fn check_wrapped_ring(&self, cap: usize) {
+    if cap < 2 {
+      // At capacity 1 a ring's head is always slot zero, so there is no wrap to reach; at 0
+      // there is no residency at all.
+      return;
+    }
+    let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
+    for rotation in 1..=(cap - 1).min(window) {
+      let (cache, want) = self.rotated(cap, rotation);
+      let state = format!(
+        "a WRAPPED residency: {cap} of {cap} resident after {rotation} pop_front(s) and {rotation} push_back(s), so a ring's live run starts at slot {rotation} and runs past the end of its array"
+      );
+      self.check_peek_at(&cache, cap, &want, &state);
+      self.assert_span_at(&cache, &want, &state);
+    }
+  }
+
+  /// A fresh cache filled to capacity, drained `rotation` entries off the **front**, and topped
+  /// back up to capacity with `rotation` fresh tokens — so a ring holding it has its head at slot
+  /// `rotation` and a live run that wraps.
+  ///
+  /// The tokens pushed back are the ones past the original residency, not the ones just popped:
+  /// re-pushing those would leave a resident sequence whose spans run backwards at the seam, and
+  /// a combined span from a later start to an earlier end is not a value a `Span` implementation
+  /// is obliged to be able to construct. A cache's residency is always in source order, and so is
+  /// this one.
+  fn rotated(&self, cap: usize, rotation: usize) -> (C, Vec<L::Span>) {
+    let name = self.label();
+    let (mut cache, filled) = self.filled_to_capacity(cap);
+    for i in 0..rotation {
+      assert!(
+        cache.pop_front().is_some(),
+        "tokora cache conformance [{name} wrapped-run]: pop_front() answered None after {i} of {rotation} pops off a cache filled to its capacity {cap}"
+      );
+    }
+    let mut want: Vec<L::Span> = filled[rotation..].to_vec();
+    for (i, tok) in self.beyond_residency(cap, rotation).into_iter().enumerate() {
+      let span = span_of::<L>(&tok);
+      assert!(
+        cache.push_back(tok).is_ok(),
+        "tokora cache conformance [{name} wrapped-run]: push_back #{i} was REFUSED while topping a cache back up to its capacity {cap} with {} of {cap} slots used; a push is refused only when the cache is FULL",
+        want.len()
+      );
+      want.push(span);
+    }
+    (cache, want)
   }
 
   // ── 9. pop_front_if / try_pop_front_if ──────────────────────────────────────────
