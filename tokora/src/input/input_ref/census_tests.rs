@@ -2234,8 +2234,12 @@ const SYNC_POSTURE_SOURCES: &[(&str, &str)] = &[
 ///
 /// - `HOLDS_ENTRY` — whether the mode holds a pre-call snapshot. `false` makes
 ///   `ScanScope::keeps_on_unwind` fold to `true`, so **every** unwind keeps and there is no
-///   abandon arm; `true` gives the split, whose abandoning half is the mode's own no-match
-///   end-of-input rewind;
+///   abandon arm; `true` gives the split — some exits keep, others abandon and rewind to the
+///   pre-call state, derived from `ScanScope::keeps_on_unwind`. For the two current holders the
+///   abandoning half happens to be a no-match end-of-input rewind, but the required phrase below
+///   states only the general posture — that an abandon-and-rewind arm exists at all — not that
+///   specific trigger, so a future `HOLDS_ENTRY = true` member whose abandon condition differs
+///   does not have to lie about it to pass (#187);
 /// - `COMMITS_FRONTIER_ON_STOP` — whether a stop settles *before* the token (leaving the frontier
 ///   as what a stop commits) or consumes it (committing at its own span instead);
 /// - `REPORT_SKIPPED` — whether the prefix whose fate an unwind decides was diagnosed per token
@@ -2243,7 +2247,13 @@ const SYNC_POSTURE_SOURCES: &[(&str, &str)] = &[
 const POSTURE_PHRASES: &[(&str, &str, &str)] = &[
   (
     "HOLDS_ENTRY",
-    "rewinds the full pre-call state at a no-match end of input",
+    // POSTURE, not mechanism (#187): this must not also pin WHICH exit triggers the abandon
+    // arm. "at a no-match end of input" was here until #187 — true of the two current holders,
+    // but not implied by `HOLDS_ENTRY = true` itself, so it would force a future holder with a
+    // different abandon trigger to either lie about its own mechanism or fail a census that is
+    // supposed to be checking posture. See
+    // `posture_census_holds_entry_true_phrase_does_not_bind_a_future_members_mechanism` below.
+    "rewinds the full pre-call state",
     "every unwind keeps",
   ),
   (
@@ -2731,6 +2741,52 @@ fn posture_census_each_sync_states_the_posture_its_scan_mode_has() {
       );
     }
   }
+}
+
+/// POSTURE_CENSUS — regression test for #187: the `HOLDS_ENTRY` true-phrase must state the
+/// POSTURE (an abandon-and-rewind arm exists) without also binding the specific MECHANISM the
+/// two current holders happen to share (that the trigger is named "a no-match end of input").
+/// The old phrase, `"rewinds the full pre-call state at a no-match end of input"`, was true of
+/// `sync_through` and `sync_balanced` only by coincidence: `ScanScope::keeps_on_unwind`'s real
+/// formula (pinned in the test above) does not mention "end of input" at all, so nothing
+/// guarantees a future `HOLDS_ENTRY = true` member's abandon condition is the same one.
+///
+/// This synthesizes an honestly-worded `# Panic unwind` sentence for a hypothetical future
+/// member whose abandon arm triggers on something else entirely (a resource-limit trip, not a
+/// no-match end of input) and shows the CURRENT `HOLDS_ENTRY` true-phrase accepts it — proving
+/// the phrase asserts only the posture. `OLD_TRUE_PHRASE` is the exact pre-#187 wording; the
+/// second assertion pins that it would have rejected the same honest sentence, which is the
+/// defect this fixes (grep POSTURE_CENSUS).
+#[test]
+fn posture_census_holds_entry_true_phrase_does_not_bind_a_future_members_mechanism() {
+  // A future ScanMode, HOLDS_ENTRY = true, whose abandon condition is NOT "a no-match end of
+  // input" — this is what an honest author would write about it.
+  const FUTURE_MEMBER_PROSE: &str = "this scan rewinds the full pre-call state once a resource \
+    limit trips mid-scan, which is this mode's own abandon condition.";
+
+  let (_, current_true_phrase, _) = POSTURE_PHRASES
+    .iter()
+    .find(|&&(name, _, _)| name == "HOLDS_ENTRY")
+    .expect("HOLDS_ENTRY must stay in POSTURE_PHRASES");
+  assert!(
+    states(FUTURE_MEMBER_PROSE, current_true_phrase),
+    "POSTURE_CENSUS: the current HOLDS_ENTRY true-phrase {current_true_phrase:?} rejects an \
+     honestly worded section from a hypothetical member whose abandon condition is not \"a \
+     no-match end of input\" — the phrase is binding a MECHANISM specific to the current two \
+     holders again, not just the POSTURE (#187, grep POSTURE_CENSUS)."
+  );
+
+  // The pre-#187 wording this replaced. Restoring it in POSTURE_PHRASES and rerunning the
+  // suite is exactly the regression this test exists to catch; this assertion pins that the old
+  // wording really did fail on this honest sentence, so the characterization above is not just
+  // asserted but demonstrated.
+  const OLD_TRUE_PHRASE: &str = "rewinds the full pre-call state at a no-match end of input";
+  assert!(
+    !states(FUTURE_MEMBER_PROSE, OLD_TRUE_PHRASE),
+    "the pre-#187 phrase was expected to reject this honest-but-differently-triggered section; \
+     if it now accepts it, this test no longer demonstrates what #187 fixed and should be \
+     revisited (grep POSTURE_CENSUS)."
+  );
 }
 
 /// POSTURE_CENSUS — the callback/source vocabulary, not just the posture phrases.
