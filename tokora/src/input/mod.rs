@@ -944,24 +944,23 @@ where
     // `bound_source()` is `None` for every emitter that binds no source — 30 of the 31 core
     // `Emitter` impls in this tree — so this folds to nothing for them. Once per `Input`, at the
     // moment the pair forms: never per borrow, never per token.
-    // Spelled without a let-chain on purpose: let-chains are unstable at the MSRV (1.87),
-    // and this crate has now shipped that mistake twice.
-    if <L::Source as crate::Source<L::Offset>>::REFERENT_IS_BYTES {
-      if let Some(bound) = crate::Emitter::<'inp, L, Lang>::bound_source(&emitter) {
-        let current = crate::source::SourceIdentity::of(input);
-        // Two questions, two answers. Origin is an equality; extent is an ordering, and only
-        // in one direction. Collapsing them into a single `==` would refuse the streaming
-        // shape; collapsing them into origin alone is what let a prefix through.
-        assert!(
-          bound.addr() == current.addr(),
-          "the emitter is bound to a different source value than this parse reads \
+    if <L::Source as crate::Source<L::Offset>>::REFERENT_IS_BYTES
+      && let Some(bound) = crate::Emitter::<'inp, L, Lang>::bound_source(&emitter)
+    {
+      let current = crate::source::SourceIdentity::of(input);
+      // Two questions, two answers. Origin is an equality; extent is an ordering, and only
+      // in one direction. Collapsing them into a single `==` would refuse the streaming
+      // shape; collapsing them into origin alone is what let a prefix through.
+      assert!(
+        bound.addr() == current.addr(),
+        "the emitter is bound to a different source value than this parse reads \
            (emitter: {bound}, parse: {current}) — bind the sink to the same `&source` you \
            hand the parser. A same-length foreign source produces a tree whose text is the \
            sink's and whose structure is the parse's, and no later check can see it."
-        );
-        assert!(
-          bound.extent() >= current.extent(),
-          "the emitter is bound to a shorter extent of this source than the parse reads \
+      );
+      assert!(
+        bound.extent() >= current.extent(),
+        "the emitter is bound to a shorter extent of this source than the parse reads \
            (emitter: {bound}, parse: {current}) — bind the sink to a slice at least as long \
            as the one you hand the parser. The parse can peek past the sink's end, commit \
            nothing there, and still let those bytes choose the tree's shape; the result \
@@ -969,8 +968,7 @@ where
            sees it. The opposite pairing — a sink bound to a LONGER extent — is the \
            fixed-arena streaming shape and is accepted here; its unparsed tail is `finish`'s \
            business, reported as `UncoveredGap` or tiled by `finish_partial`."
-        );
-      }
+      );
     }
 
     Self {

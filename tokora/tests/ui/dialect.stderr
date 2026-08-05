@@ -4,11 +4,15 @@ error[E0277]: `NotADialect` is not a tokora dialect
 12 |   needs_dialect::<NotADialect>();
    |                   ^^^^^^^^^^^ this type has no `Dialect` impl, so its lexer and language brand are unknown
    |
-   = help: the trait `Dialect<'_>` is not implemented for `NotADialect`
+help: the trait `Dialect<'_>` is not implemented for `NotADialect`
+  --> tests/ui/dialect.rs:7:1
+   |
+ 7 | struct NotADialect;
+   | ^^^^^^^^^^^^^^^^^^
    = note: a dialect is one impl naming the two things a production cannot derive: `impl<'inp, Src> Dialect<'inp> for MyDialect<Src> { type Lang = MyLang; type Lexer = MyLexer<'inp, Src>; }`
    = note: everything else — source, slice, token, span, offset, token capabilities — is reachable by projection from `Lexer`, so pin those in a one-line subtrait (`trait MyDialectBound<'inp>: Dialect<'inp, Lang = MyLang, Lexer: Lexer<'inp, …>> {}`) rather than as further associated items
 note: required by a bound in `needs_dialect`
   --> tests/ui/dialect.rs:9:27
    |
-9  | fn needs_dialect<'inp, D: Dialect<'inp>>() {}
+ 9 | fn needs_dialect<'inp, D: Dialect<'inp>>() {}
    |                           ^^^^^^^^^^^^^ required by this bound in `needs_dialect`

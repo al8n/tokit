@@ -157,6 +157,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Read declared MSRV from Cargo.toml
+        id: msrv
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/^rust-version *= *"([^"]+)".*/\1/')
+          if [ -z "$version" ]; then
+            echo "::error::could not read rust-version from Cargo.toml"
+            exit 1
+          fi
+          echo "Declared MSRV: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Cache cargo build and registry
         uses: actions/cache@v6
         with:
@@ -167,20 +177,21 @@ jobs:
           key: ${{ runner.os }}-msrv-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-msrv-
-      - name: Install Rust
-        run: rustup toolchain install 1.87 --no-self-update --profile minimal
-      - name: cargo +1.87 check -p tokora --all-features
-        run: cargo +1.87 check -p tokora --all-features
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        run: rustup toolchain install ${{ steps.msrv.outputs.version }} --no-self-update --profile minimal
+      - name: cargo +${{ steps.msrv.outputs.version }} check -p tokora --all-features
+        run: cargo +${{ steps.msrv.outputs.version }} check -p tokora --all-features
       # The trybuild half of `tests/diagnostics.rs` runs here and nowhere else: its committed
-      # `.stderr` files are pinned to 1.87 and the harness returns early on any other rustc.
+      # `.stderr` files are pinned to the declared MSRV and the harness returns early on any
+      # other rustc.
       #
       # So exit 0 is NOT the pass condition — a skip is indistinguishable from a pass, and every
       # compile-time rail routed through that file would retire silently the first time this
       # job's toolchain drifts. The step asserts on the executed-case count the harness prints.
-      - name: cargo +1.87 test --test diagnostics (asserting a nonzero executed-case count)
+      - name: cargo +${{ steps.msrv.outputs.version }} test --test diagnostics (asserting a nonzero executed-case count)
         run: |
           set -euo pipefail
-          cargo +1.87 test -p tokora --all-features --test diagnostics -- --nocapture \
+          cargo +${{ steps.msrv.outputs.version }} test -p tokora --all-features --test diagnostics -- --nocapture \
             | tee /tmp/diagnostics.out
           count=$(sed -n 's/^TOKORA_TRYBUILD_EXECUTED_CASES=\([0-9][0-9]*\)$/\1/p' \
             /tmp/diagnostics.out | head -1)
@@ -191,7 +202,7 @@ jobs:
           fi
           if [ "${count}" -eq 0 ]; then
             echo "::error::the diagnostics harness skipped itself (0 cases executed): this" \
-                 "job's rustc is not the pinned 1.87, so every trybuild rail is inert here"
+                 "job's rustc is not the pinned MSRV, so every trybuild rail is inert here"
             exit 1
           fi
           echo "diagnostics: ${count} trybuild case(s) executed on the pinned toolchain"

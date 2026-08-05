@@ -1286,10 +1286,10 @@ where
         .rposition(|row| row.mark == checkpoint)
         .map(|pos| rows.remove(pos))
     };
-    if let Some(row) = row {
-      if row.mark >= self.floor.mark {
-        self.floor = row;
-      }
+    if let Some(row) = row
+      && row.mark >= self.floor.mark
+    {
+      self.floor = row;
     }
   }
 
@@ -1418,15 +1418,15 @@ where
     // rest) and the integrity canary finish validates in both directions. The journal is
     // what keeps it honest across rewinds — restoring the overwritten value is the
     // pure-copy discipline, and it restores the chain head together with it.
-    if let Some(relative) = relative {
-      if let Some(Event::StartNode { forward_parent, .. }) = self.events.get_mut(target as usize) {
-        self.journal.push(JournalEntry {
-          at_len: new_index + 1,
-          index: target,
-          old_forward_parent: *forward_parent,
-        });
-        *forward_parent = Some(relative);
-      }
+    if let Some(relative) = relative
+      && let Some(Event::StartNode { forward_parent, .. }) = self.events.get_mut(target as usize)
+    {
+      self.journal.push(JournalEntry {
+        at_len: new_index + 1,
+        index: target,
+        old_forward_parent: *forward_parent,
+      });
+      *forward_parent = Some(relative);
     }
   }
 }

@@ -643,11 +643,12 @@ where
       // A warranted refusal on the front arm that corrupts its own round-trip, at capacity 1 and
       // nowhere else. Not routed through `refuse`, which `push_back` shares: the whole point of
       // the cell is that the defect lives on THIS arm, at the one capacity check 5 never drove.
-      if D == FRONT_REFUSAL_SWAP_AT_CAP_ONE && self.cap == 1 {
-        if let Some(other) = self.items.pop_back() {
-          self.items.push_back(tok);
-          return Err(other);
-        }
+      if D == FRONT_REFUSAL_SWAP_AT_CAP_ONE
+        && self.cap == 1
+        && let Some(other) = self.items.pop_back()
+      {
+        self.items.push_back(tok);
+        return Err(other);
       }
       return Err(self.refuse(tok));
     }
@@ -741,17 +742,17 @@ where
       // conforming ones, taken from the front. Same shape as
       // `TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK`, on the arm whose recording assertion already
       // existed and had never been run against a cache that disagrees with it.
-      if let Some(peeked) = self.items.back().map(CachedToken::as_ref) {
-        if predicate(peeked) {
-          return self.pop_front_impl();
-        }
+      if let Some(peeked) = self.items.back().map(CachedToken::as_ref)
+        && predicate(peeked)
+      {
+        return self.pop_front_impl();
       }
       return None;
     }
-    if let Some(peeked) = self.items.front().map(CachedToken::as_ref) {
-      if predicate(peeked) {
-        return self.pop_front_impl();
-      }
+    if let Some(peeked) = self.items.front().map(CachedToken::as_ref)
+      && predicate(peeked)
+    {
+      return self.pop_front_impl();
     }
     None
   }
@@ -850,10 +851,10 @@ where
     if D == SINGLE_SLOT_PEEK_TAKES_THE_BACK && w == 1 {
       // A one-slot fast path — the shape `peek_one`'s default composition asks for — reaching
       // for the wrong end. Dead code at every window but `U1`.
-      if let Some(tok) = self.items.back() {
-        if fill > 0 {
-          buf.push_back(Maybe::Ref(tok.as_ref()));
-        }
+      if let Some(tok) = self.items.back()
+        && fill > 0
+      {
+        buf.push_back(Maybe::Ref(tok.as_ref()));
       }
       return;
     }
@@ -1175,12 +1176,11 @@ where
   /// The refusal round-trip — or, under `SWAPPING_REFUSAL`, its violation: the caller is handed a
   /// resident entry instead of the token it offered, which silently swallows that token.
   fn refuse(&mut self, tok: CachedTokenOf<'a, L>) -> CachedTokenOf<'a, L> {
-    // Nested rather than a let-chain: the MSRV (1.87) does not have them.
-    if D == SWAPPING_REFUSAL {
-      if let Some(other) = self.items.pop_back() {
-        self.items.push_back(tok);
-        return other;
-      }
+    if D == SWAPPING_REFUSAL
+      && let Some(other) = self.items.pop_back()
+    {
+      self.items.push_back(tok);
+      return other;
     }
     tok
   }
@@ -1229,10 +1229,11 @@ where
     // The entry `clear()` unlinked but did not drop, handed back by the first pop after it. Only
     // reachable while `items` is empty, so the resurrection never perturbs a live residency —
     // the whole point of the cell is that every other observable stays correct.
-    if D == RESURRECTING_CLEAR && self.items.is_empty() {
-      if let Some(tok) = self.stashed.take() {
-        return Some(tok);
-      }
+    if D == RESURRECTING_CLEAR
+      && self.items.is_empty()
+      && let Some(tok) = self.stashed.take()
+    {
+      return Some(tok);
     }
     let popped = self.items.pop_front();
     // A ring's head steps forward over the slot this pop vacates.

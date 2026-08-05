@@ -556,12 +556,12 @@ where
       );
     }
     // 3. Monotone (non-decreasing) span starts.
-    if let Some(ps) = &prev_start {
-      if start < *ps {
-        panic!(
-          "tokora conformance [input #{idx} monotone-progress] position {pos}: span start moved backward: previous start {ps:?}, this span {span:?}"
-        );
-      }
+    if let Some(ps) = &prev_start
+      && start < *ps
+    {
+      panic!(
+        "tokora conformance [input #{idx} monotone-progress] position {pos}: span start moved backward: previous start {ps:?}, this span {span:?}"
+      );
     }
     prev_start = Some(start.clone());
 
@@ -684,13 +684,12 @@ where
       "tokora conformance [input #{idx} span-survives-exhaustion] after exhaustion span() is malformed: {span:?} has start > end. It must stay well-formed — the partial-input frontier reports this offset to a refill driver."
     );
   }
-  // Spelled as a nested `if` rather than a let-chain: the MSRV (1.87) does not have them.
-  if let Some(item_end) = &last_end {
-    if end < *item_end {
-      panic!(
-        "tokora conformance [input #{idx} span-survives-exhaustion] after exhaustion span() ends at {end:?}, before the last item's end {item_end:?}. The final position can only be at or past the last item the lexer yielded; a retracting span hands a refill driver an offset it has already consumed."
-      );
-    }
+  if let Some(item_end) = &last_end
+    && end < *item_end
+  {
+    panic!(
+      "tokora conformance [input #{idx} span-survives-exhaustion] after exhaustion span() ends at {end:?}, before the last item's end {item_end:?}. The final position can only be at or past the last item the lexer yielded; a retracting span hands a refill driver an offset it has already consumed."
+    );
   }
   if end > src_len {
     panic!(

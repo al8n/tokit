@@ -65,6 +65,32 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   write is for the sites where the gate and the item are apart — the re-exports of a gated
   module's contents above all, where the label has to name the gate on the `pub use`.
 
+### Changed
+
+- **MSRV raised to 1.95.** The previous floor, 1.87, was not a forced minimum — the crate
+  still built on it — so this is a deliberate raise, not a reaction to a dependency or
+  language requirement, and the policy note above `rust-version` in the workspace
+  `Cargo.toml` is reworded to say so: the declared value is a floor maintainers set, not
+  necessarily the crate's bare minimum. CI's `msrv` job now reads that declared value at run
+  time instead of hardcoding a toolchain number, including for the toolchain-pinned
+  `tests/diagnostics.rs` trybuild rail — its committed `.stderr` snapshots and `PINNED_RUSTC`
+  move to 1.95 in this same change — so a future bump cannot leave either the job or the rail
+  checking a stale version the way a hardcoded `+1.87` would have.
+
+  1.95 stabilizes let-chains, and this is not a purely additive unlock: `clippy`'s
+  `collapsible_if` is MSRV-aware, and the moment the declared floor reaches 1.88 it requires
+  the let-chain form wherever a nested `if`/`if let` is collapsible. Nineteen pre-existing
+  sites across eight files were written as nested `if`s specifically because the 1.87 floor
+  did not have let-chains, several with a comment saying so — `cache/mod.rs`,
+  `conformance/mod.rs`, `conformance/cache_tests.rs`, `cst/sink.rs`, `input/mod.rs`,
+  `input/session.rs`, `input/input_ref/mod.rs`, and `input/input_ref/peek/mod.rs`. All
+  nineteen are converted to let-chains in this same change (`cargo clippy --fix`, then
+  `cargo fmt`, then a manual review of every hunk) — required by the new floor's own lint
+  gate, not a stylistic pass. The three comments explaining the old avoidance are removed;
+  they described a constraint that no longer exists once the code reads as a let-chain.
+  Behaviour is unchanged: `cargo test --all-features` reports the same pass count before and
+  after.
+
 ### Fixed
 
 1. **`is_empty()` was never asserted false by the cache conformance kit — a fixture returning
