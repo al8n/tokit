@@ -227,7 +227,7 @@ const _: () = {
 
   #[cfg(any(feature = "alloc", feature = "std"))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "alloc", feature = "std"))))]
-  {
+  const _: () = {
     impl<'inp, L, T, A> SeparatorHandler<'inp, L> for tinyvec_1::TinyVec<A>
     where
       A: Array<Item = T>,
@@ -241,7 +241,7 @@ const _: () = {
       {
       }
     }
-  }
+  };
 };
 
 /// A handler for delimiter events during parsing.
@@ -438,7 +438,7 @@ const _: () = {
   }
   #[cfg(any(feature = "alloc", feature = "std"))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "alloc", feature = "std"))))]
-  {
+  const _: () = {
     impl<'inp, L, T, A> DelimiterHandler<'inp, L> for tinyvec_1::TinyVec<A>
     where
       A: Array<Item = T>,
@@ -457,7 +457,7 @@ const _: () = {
       {
       }
     }
-  }
+  };
 };
 
 #[cfg(feature = "heapless_0_9")]
