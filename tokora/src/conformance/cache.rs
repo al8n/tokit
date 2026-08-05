@@ -40,16 +40,31 @@
 //!    correct one at every OTHER residency this kit drives.
 //! 4. **Order** — `pop_front` removes the oldest and `pop_back` the newest, and `front`/`back`
 //!    view those same two entries without removing them. The input layer's restore path is built
-//!    on the `pop_back` half.
+//!    on the `pop_back` half. `front`/`back` are read **themselves**, at every residency the kit
+//!    builds, and not only through `front_span`/`back_span`: those two are *default* methods
+//!    derived from these, but a cache is free to specialize them off a head and tail index, and
+//!    then the entry a caller reads — the one carrying the token and the `L::State` a restore
+//!    resumes from — can name a different slot than the span accessor does.
 //! 5. **`push_front` prepends** — before every resident entry, with the same refusal
 //!    round-trip, and the same requirement that a refusal be **warranted**: a push is refused
 //!    only by a full cache, on this arm exactly as on `push_back`'s. The prepend order is
 //!    checked in **full**, not at its two ends: the resident sequence is drained after each
-//!    accepted prefix, since a `push_front` that lands its token at the front and permutes what
-//!    is behind it has the right front, the right back and the right length. And the refusal law
+//!    accepted prefix — from the front, and then from the back, since every other `pop_back` the
+//!    kit drives runs against a cache `push_back` filled from empty, and a tail index a prepend
+//!    invalidated is wrong only on a residency a prepend built — because a `push_front` that
+//!    lands its token at the front and permutes what
+//!    is behind it has the right front, the right back and the right length. The two arms are
+//!    also **interleaved**, not run one after the other: a mixed residency built as one
+//!    `push_back` and then every `push_front` never once puts an append after a prepend, so a
+//!    cache whose append computes its slot from a head index a prepend has since moved is
+//!    correct in every sequence the rest of the kit builds. And the refusal law
 //!    is driven at the **empty** cache too, at every nonzero capacity — the one state the
 //!    prepend driver cannot reach, because it has to seed the cache with a `push_back` before
-//!    there is anything to prepend before.
+//!    there is anything to prepend before. And it is driven at **capacity 1**, where the seeding
+//!    push fills the cache and so every front push after it is refused: the prepend order is not
+//!    observable at that capacity, but the refusal is the only thing observable there, and no
+//!    other check reaches a refused push on this arm — check 3 drives the round-trip for
+//!    `push_back`, and the two accepted-front-push checks never see one refused.
 //! 6. **Bounded, pure `peek`** — appends exactly `min(len, the buffer's REMAINING capacity at
 //!    call time)` entries, oldest first, each resident token once, leaving whatever the buffer
 //!    already held untouched; changes no observable; and answers identically when called twice
@@ -66,8 +81,29 @@
 //!    run are the same number — and each residency is reached from **both ends**, by
 //!    `pop_front` and by `pop_back`, since removed entries a cache fails to clear sit ahead of
 //!    the live run on the first path and behind it on the second, and only the sweep that drains
-//!    that end reads them. `pop_back` is the input layer's restore path. `peek_one` agrees with
-//!    `front`, and answers nothing where there is no front.
+//!    that end reads them. `pop_back` is the input layer's restore path. The whole of it is then
+//!    driven once more against **one instance**, peeked in full and then popped and re-peeked at
+//!    every residency down to empty — because a sweep that builds a fresh cache per residency
+//!    only ever asks a cache its FIRST question, and a `peek` that memoises its first answer and
+//!    serves it after later pops is pure, is correct at the residency it latched, and is
+//!    otherwise invisible. And the bound and order are read through **three window types**, not
+//!    one: `peek` is generic over `W` and may read `W::CAPACITY` off it, so a single fixed window
+//!    leaves a branch on that parameter unreachable — the single-slot fast path the trait invites
+//!    (`peek_one`'s default body is `peek::<U1>`), and the truncating path a cache takes when the
+//!    residency does not fit in the window, which never runs while the window is as wide as every
+//!    residency driven. Sweeping the prefill depth does not stand in for this: that varies the
+//!    room LEFT in the buffer, not the type. The prefilled half is also driven with the buffer's
+//!    entries **before** the residency in source order, not only after it: that relation was one
+//!    fixed value in every prefilled call the kit made, and the value it was fixed at is the
+//!    inverse of the real one — the peek fill pushes the parked token first, because the parked
+//!    token is the front of the stream. Both are now driven, and they catch different things: a
+//!    `peek` that sorts or merges the buffer by span is caught by the *later* arrangement, where
+//!    a correct append leaves the buffer unsorted, and a `peek` that reads the buffer as a prefix
+//!    of its own run and skips an entry it decides the caller already holds can only act in the
+//!    *earlier* one. `peek_one` agrees with
+//!    `front`, answers nothing where there is no front, and — like `peek` — answers **the same
+//!    on a second call** against an unchanged cache: it takes `&self`, so the two calls are the
+//!    same question.
 //! 7. **`clear`** — returns the cache to the check-1 state, AND the cache stays usable
 //!    afterward: it is refilled with `cap` fresh pushes and checked against check 3's oracle,
 //!    so a `clear` that empties the cache but also permanently disables it (poisons it, zeroes
@@ -78,11 +114,50 @@
 //!    fill and stale after any pop is indistinguishable from a conforming one at the one
 //!    residency a single check reaches.
 //!
+//!    Checks 6 and 8 are then both re-run against a **rotated** residency — drained off the front
+//!    and topped back up to capacity — because those two are the operations that WALK from the
+//!    head, and a ring's live run only ever wraps past the end of its backing array when
+//!    something is pushed *after* something was popped. Every other residency the kit builds
+//!    starts from an empty cache and only shrinks, so the classic missing `% capacity` truncates
+//!    by zero at all of them. `front`, `back` and the pops name a single slot rather than walking
+//!    to one, and an index that names the wrong slot is already caught by the residency oracle.
+//! 9. **`pop_front_if` / `try_pop_front_if`** — the predicate sees the front entry and nothing
+//!    else; a `false` (or `Err`) answer removes nothing and leaves every observable untouched; a
+//!    `true` (or `Ok(())`) answer removes exactly the front entry, matching what a bare
+//!    `pop_front` would return from an identically filled cache. Against an empty cache, both
+//!    answer `None` and the predicate never runs at all — there is no front to hand it. The
+//!    predicate's **argument** is recorded and compared on **both** methods, not only on
+//!    `pop_front_if`: the two `try_pop_front_if` closures used to throw it away, so everything the
+//!    check asserted about that method was its return value and its residency — and an override
+//!    that ran the caller's validation predicate against `back()` and then produced the conforming
+//!    return and the conforming residency satisfied all of it. That is a cache whose
+//!    caller-supplied predicate decides whether to remove or retain the front on the strength of
+//!    unrelated lookahead, certified by a check whose own prose named the property it was not
+//!    testing.
+//! 10. **`push_many`** — accepts tokens in order until the cache is full, then hands the
+//!     remainder back through the returned iterator, unchanged and in the order they arrived.
+//!
 //! The kit adapts to capacity: it runs every check a cache of that capacity can express, so the
 //! capacity-0 `()` cache, the capacity-1 `Option` cache and an arbitrarily wide ring are all
 //! driven by the same call.
 //!
+//! **Both constructors.** `Cache` has two — [`new`](Cache::new) and
+//! [`with_options`](Cache::with_options) — and the kit builds with the first. Hand it
+//! [`also_built_by`](CacheHarness::also_built_by) and it runs the whole contract a second time
+//! against caches the second one builds, re-reading the capacity from each pass so the two may
+//! differ, and tagging every message with which constructor it is talking about. It cannot reach
+//! `with_options` on its own: [`Options`](Cache::Options) is an associated type the kit has no
+//! way to fabricate a value of.
+//!
 //! # What it deliberately does not check
+//!
+//! **Whether `with_options` honours the options it was given.** The pass above certifies that a
+//! `with_options`-built cache obeys the whole contract, which is what catches the shapes that
+//! matter — one that comes back non-empty, or that reports a capacity it will not honour. What
+//! no oracle generic over `L` and `C` can check is the *relation* between the options and the
+//! cache: `Options` is opaque, so a `with_options(16)` that hands back a capacity-3 cache is
+//! internally consistent, and internally consistent is all the kit can see. That relation is the
+//! implementor's to test, in a test that knows what the options mean.
 //!
 //! **The zero-re-scan law** (a probed closer is committed exactly once, cache-independently, in
 //! any capacity) is an *input-layer* law, not a queue law: its oracle drives `probe_close` and
@@ -147,9 +222,12 @@
 
 use std::{format, vec::Vec};
 
-use core::marker::PhantomData;
+use core::{cell::Cell, marker::PhantomData};
 
-use generic_arraydeque::{GenericArrayDeque, typenum::U4, typenum::Unsigned};
+use generic_arraydeque::{
+  GenericArrayDeque,
+  typenum::{U1, U3, U4, Unsigned},
+};
 use mayber::Maybe;
 
 use crate::{
@@ -165,6 +243,58 @@ use crate::{
 /// also what every source the kit is pointed at has to carry past the cache's capacity, so it
 /// buys those shapes at four tokens rather than at a longer corpus.
 type PeekWindow = U4;
+
+/// The single-slot window, driven beside [`PeekWindow`] so that `W` is not one fixed type in
+/// every driver the kit has (#180 part B, item 4).
+///
+/// This one is not an arbitrary second value: [`Cache::peek_one`]'s default body is
+/// `peek::<U1>` into a one-slot buffer, so a one-slot fast path is a specialization the trait
+/// itself invites — and an implementation that overrides `peek_one` (the hot path) while getting
+/// `peek::<U1>` wrong has two answers to the same question, only one of which the kit was asking.
+type PeekWindowOne = U1;
+
+/// A window strictly between [`PeekWindowOne`] and [`PeekWindow`], so that at the residencies
+/// this kit builds there is a call where the window is **narrower than the residency** and the
+/// bound genuinely truncates.
+///
+/// At `PeekWindow` that never happens for a cache of capacity 4 or less, and at `PeekWindowOne`
+/// the truncated run is a single entry, which has no order to get wrong. So a cache with a
+/// separate code path for "the residency does not fit" — the branch where a copy has to stop
+/// short of `back`, and the one place `peek` can walk in the wrong direction — is reached here
+/// and nowhere else.
+type PeekWindowMid = U3;
+
+/// Where the entries a prefilled `peek` finds already in the buffer sit **relative to the
+/// residency**, in source order.
+///
+/// Until #180 part B, item 6 this was one fixed value: every prefill the kit built came from past
+/// the residency, so the buffer's spans were always greater than every resident one, and a `peek`
+/// that reasons about the two — sorting, merging, or deciding the caller already holds its own
+/// front — was answering the same question in every call the kit made. Both relations are now
+/// driven, and the one the real call site has is [`Earlier`](Prefill::Earlier).
+#[derive(Clone, Copy)]
+enum Prefill {
+  /// Corpus tokens **past** the residency. The kit's original prefill, and the one that keeps
+  /// "`peek` left the buffer alone" honest at the residencies the sweeps build: a `peek` that
+  /// clears the buffer and re-appends its own run cannot land the prefill's spans by coincidence,
+  /// because the cache's front is a token the prefill does not contain.
+  Later,
+  /// Corpus tokens **before** the residency, which is the relation `InputRef`'s peek fill
+  /// actually produces: the parked token is the front of the stream, so it heads the window and
+  /// the cache fills in behind it. A cache that reads the buffer as a prefix of its own run —
+  /// and skips an entry it decides the caller already has — can only do so in this arrangement.
+  Earlier,
+}
+
+impl Prefill {
+  /// The message tag, so a failure says which of the two arrangements it is talking about.
+  const fn tag(self) -> &'static str {
+    match self {
+      Self::Later => "prefilled",
+      Self::Earlier => "prefilled-with-earlier-tokens",
+    }
+  }
+}
 
 /// The span of a cached token, owned. `token()` hands back a `Spanned<&T, &Span>`, so the span
 /// arrives double-borrowed and has to be dereferenced once before it can be cloned.
@@ -214,8 +344,38 @@ where
 {
   source: &'inp L::Source,
   name: &'static str,
+  /// How the cache under test is built on THIS pass. `None` is `C::new()`;
+  /// [`also_built_by`](CacheHarness::also_built_by) stores a second constructor here and
+  /// [`run`](CacheHarness::run) makes a second pass with it.
+  ///
+  /// A plain `fn` pointer rather than a boxed closure, so this needs no allocation and — the
+  /// reason it is a constructor for `C` and not a factory for `C::Options` — no `C::Options`
+  /// bound on the struct, which would be a breaking change to a released public type. A closure
+  /// that captures nothing coerces to one, so `|| C::with_options(..)` is what a caller writes.
+  built_by: Option<fn() -> C>,
+  /// The suffix every failure message on this pass carries after the cache's name, so a failure
+  /// says which constructor built the cache it is talking about. Empty on the `C::new()` pass.
+  via: &'static str,
   _cache: PhantomData<fn() -> C>,
   _lang: PhantomData<fn(&Lang)>,
+}
+
+/// The cache's name, plus which constructor built it on this pass, as one `Display` value.
+///
+/// `Copy`, so the closures inside the kit's `unwrap_or_else` panics can capture it exactly the
+/// way they captured the bare `&'static str` before, and every `{name}` in every message
+/// interpolates unchanged.
+#[derive(Clone, Copy)]
+struct Label {
+  name: &'static str,
+  via: &'static str,
+}
+
+impl core::fmt::Display for Label {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(self.name)?;
+    f.write_str(self.via)
+  }
 }
 
 impl<'inp, L, C, Lang> CacheHarness<'inp, L, C, Lang>
@@ -236,6 +396,8 @@ where
     Self {
       source,
       name: "cache",
+      built_by: None,
+      via: "",
       _cache: PhantomData,
       _lang: PhantomData,
     }
@@ -249,15 +411,86 @@ where
     self
   }
 
+  /// Runs every check a **second** time against caches built by `make` instead of by
+  /// [`Cache::new`], and is how [`Cache::with_options`] gets driven at all.
+  ///
+  /// Without this the kit builds every cache it tests with `C::new()`, so a conformant `new` and
+  /// a broken `with_options` — one that hands back a cache with the wrong capacity, or one that
+  /// is not actually empty — were indistinguishable: nothing ever called the second constructor
+  /// (#180 part A, item 7). The kit cannot reach it on its own, because [`Cache::Options`] is an
+  /// associated type it has no way to fabricate a value of.
+  ///
+  /// Pass the constructor, not the options:
+  ///
+  /// ```ignore
+  /// CacheHarness::<MyLexer<'_>, MyCache<'_>>::new(SRC)
+  ///   .also_built_by(|| MyCache::with_options(MyOptions { capacity: 16 }))
+  ///   .run();
+  /// ```
+  ///
+  /// Both passes run the whole contract, independently: the capacity is re-read from the cache
+  /// each pass builds, so the two may differ, and the corpus must be long enough for the larger
+  /// of them. Every failure message names which constructor built the cache it is about.
+  #[must_use]
+  pub fn also_built_by(mut self, make: fn() -> C) -> Self {
+    self.built_by = Some(make);
+    self
+  }
+
   /// Runs every check the cache's capacity can express, panicking on the first violation.
+  ///
+  /// Runs the whole contract once against a cache built by [`Cache::new`], and — if
+  /// [`also_built_by`](Self::also_built_by) supplied a second constructor — once more against a
+  /// cache built by that one.
   ///
   /// # Panics
   ///
-  /// Panics — naming the check, the capacity, and the expected-vs-got values — the moment a
-  /// contract law fails. Returns normally on full conformance.
+  /// Panics — naming the check, the capacity, the constructor, and the expected-vs-got values —
+  /// the moment a contract law fails. Returns normally on full conformance.
   pub fn run(&self) {
-    let name = self.name;
-    let cap = C::new().remaining();
+    Self {
+      source: self.source,
+      name: self.name,
+      built_by: None,
+      via: "",
+      _cache: PhantomData,
+      _lang: PhantomData,
+    }
+    .run_pass();
+
+    if self.built_by.is_some() {
+      Self {
+        source: self.source,
+        name: self.name,
+        built_by: self.built_by,
+        via: " built by with_options",
+        _cache: PhantomData,
+        _lang: PhantomData,
+      }
+      .run_pass();
+    }
+  }
+
+  /// The cache under test, built the way this pass builds it.
+  fn make(&self) -> C {
+    match self.built_by {
+      Some(f) => f(),
+      None => C::new(),
+    }
+  }
+
+  /// The cache's name plus this pass's constructor, for every failure message.
+  fn label(&self) -> Label {
+    Label {
+      name: self.name,
+      via: self.via,
+    }
+  }
+
+  /// One whole pass of the contract, against caches built by [`make`](Self::make).
+  fn run_pass(&self) {
+    let name = self.label();
+    let cap = self.make().remaining();
     // Past the residency the kit needs a full peek window of tokens the cache is NOT holding:
     // check 6 prefills the peek buffer with them, at every depth from one entry to a buffer with
     // no room left. A capacity-0 cache runs no peek check and needs only the two an ordering law
@@ -282,8 +515,13 @@ where
     self.check_pop_order(cap);
     self.check_push_front(cap);
     self.check_peek(cap);
+    self.check_peek_across_mutations(cap);
     self.check_clear(cap);
     self.check_span(cap);
+    self.check_wrapped_ring(cap);
+    self.check_peek_behind_earlier_entries(cap);
+    self.check_pop_front_if(cap);
+    self.check_push_many(cap);
   }
 
   // ── the corpus ──────────────────────────────────────────────────────────────────
@@ -309,7 +547,7 @@ where
   /// Returns the cache and the spans it should be holding, so every later assertion compares
   /// against a list the kit built rather than against the cache's own answer.
   fn filled(&self, n: usize) -> (C, Vec<L::Span>) {
-    let mut cache = C::new();
+    let mut cache = self.make();
     let mut want = Vec::new();
     for tok in self.corpus(n) {
       let span = span_of::<L>(&tok);
@@ -323,14 +561,14 @@ where
   // ── 1. empty invariants ─────────────────────────────────────────────────────────
 
   fn check_empty(&self, cap: usize, when: &str) {
-    let mut cache = C::new();
+    let mut cache = self.make();
     self.assert_empty(&mut cache, cap, when);
   }
 
   /// Takes `cache` by `&mut` specifically so its own pop methods can be probed below — see
   /// there for why a fresh `C::new()` used to stand in for it and what that missed.
   fn assert_empty(&self, cache: &mut C, cap: usize, when: &str) {
-    let name = self.name;
+    let name = self.label();
     assert!(
       cache.len() == 0,
       "tokora cache conformance [{name} empty-invariants/{when}]: len() is {}, expected 0",
@@ -382,7 +620,7 @@ where
     if !C::RETAINS_FRONT {
       return;
     }
-    let name = self.name;
+    let name = self.label();
     assert!(
       cap >= 1,
       "tokora cache conformance [{name} retains-front]: RETAINS_FRONT is declared true but the empty-cache capacity is 0"
@@ -395,7 +633,7 @@ where
     // lazily on the first `push_back`, a "warm-up" flag, a front link only a back push
     // establishes. The input layer's first put-back can land on exactly that cache, and it has
     // already compiled the parked-slot fallback out.
-    let mut fresh = C::new();
+    let mut fresh = self.make();
     let first = self
       .corpus(1)
       .pop()
@@ -414,7 +652,7 @@ where
 
     // And again on an empty cache that has been used: a cache that retains the front until it is
     // drained once, and then stops, is the same violation reached from the other side.
-    let mut cache = C::new();
+    let mut cache = self.make();
     let tok = self.corpus(1).pop().expect("the corpus is non-empty");
     assert!(
       cache.push_back(tok).is_ok(),
@@ -454,11 +692,11 @@ where
       // are the same state.
       return;
     }
-    let name = self.name;
+    let name = self.label();
     let declares = C::RETAINS_FRONT;
 
     // Fresh: the front push is the first operation this cache has ever seen.
-    let mut fresh = C::new();
+    let mut fresh = self.make();
     let tok = self
       .corpus(1)
       .pop()
@@ -477,7 +715,7 @@ where
 
     // Used and emptied: the same state reached the other way, for a cache whose front is
     // established lazily and then torn down again with the entry that established it.
-    let mut used = C::new();
+    let mut used = self.make();
     let tok = self.corpus(1).pop().expect("the corpus is non-empty");
     assert!(
       used.push_back(tok).is_ok(),
@@ -502,8 +740,8 @@ where
   // ── 3. FIFO append, exact length, and the refusal round-trip ────────────────────
 
   fn check_fifo_and_length(&self, cap: usize) {
-    let name = self.name;
-    let mut cache = C::new();
+    let name = self.label();
+    let mut cache = self.make();
     let corpus = self.corpus(cap.saturating_add(1).max(2));
     let mut resident: Vec<L::Span> = Vec::new();
 
@@ -545,7 +783,7 @@ where
 
   /// The four length/edge observables against the list the kit is tracking.
   fn assert_resident(&self, cache: &C, cap: usize, want: &[L::Span], when: &str) {
-    let name = self.name;
+    let name = self.label();
     assert!(
       cache.len() == want.len(),
       "tokora cache conformance [{name} exact-length] {when}: len() is {}, expected {}",
@@ -594,6 +832,38 @@ where
         "tokora cache conformance [{name} fifo-append] {when}: back presence disagrees — expected {a:?}, got {b:?}"
       ),
     }
+    // `front()` and `back()` name the same two entries `front_span()` and `back_span()` do.
+    //
+    // Outside the empty state the kit read those two accessors and nothing else, so `front`/`back`
+    // were checked for PRESENCE (in `assert_empty`) and never for identity (#180 part A, item 8).
+    // `front_span`/`back_span` are DEFAULT methods derived from `front`/`back`, so a cache that
+    // overrides only `front` is already caught by the span check above — but `front_span` is
+    // exactly the accessor a ring specializes off its head index rather than paying for a
+    // `CachedTokenRef`, and a cache that overrides BOTH, with the cheap span half right and the
+    // reference half wrong, had nothing to answer to. The entry a caller reads through `front()`
+    // carries the token and the `L::State` a restore resumes from; the span half alone does not.
+    let front_ref: Option<L::Span> = cache.front().map(|t| (**t.token().span_ref()).clone());
+    match (want.first(), &front_ref) {
+      (Some(expected), Some(got)) => assert!(
+        got == expected,
+        "tokora cache conformance [{name} edge-identity] {when}: front() names {got:?}, expected the OLDEST resident entry {expected:?} — the same entry front_span() must name"
+      ),
+      (None, None) => {}
+      (a, b) => panic!(
+        "tokora cache conformance [{name} edge-identity] {when}: front() presence disagrees — expected {a:?}, got {b:?}"
+      ),
+    }
+    let back_ref: Option<L::Span> = cache.back().map(|t| (**t.token().span_ref()).clone());
+    match (want.last(), &back_ref) {
+      (Some(expected), Some(got)) => assert!(
+        got == expected,
+        "tokora cache conformance [{name} edge-identity] {when}: back() names {got:?}, expected the NEWEST resident entry {expected:?} — the same entry back_span() must name"
+      ),
+      (None, None) => {}
+      (a, b) => panic!(
+        "tokora cache conformance [{name} edge-identity] {when}: back() presence disagrees — expected {a:?}, got {b:?}"
+      ),
+    }
   }
 
   // ── 4. pop order ────────────────────────────────────────────────────────────────
@@ -602,7 +872,7 @@ where
     if cap == 0 {
       return;
     }
-    let name = self.name;
+    let name = self.label();
 
     // pop_front drains oldest-first, and `front` names the entry the next pop will return.
     let (mut cache, want) = self.filled(cap);
@@ -666,13 +936,16 @@ where
   // ── 5. push_front prepends ──────────────────────────────────────────────────────
 
   fn check_push_front(&self, cap: usize) {
-    if cap < 2 {
+    if cap == 0 {
+      // Always full, so a front push is refused with a warrant and there is no residency for a
+      // prepend to be observed against. Check 5's refusal law at capacity 0 is check 3's.
       return;
     }
-    let name = self.name;
+    let name = self.label();
     let corpus = self.corpus(cap.saturating_add(1));
-    let mut cache = C::new();
+    let mut cache = self.make();
     let mut resident: Vec<L::Span> = Vec::new();
+    let mut refusals = 0usize;
 
     // One at the back, then everything else at the front: each must land BEFORE the rest.
     let mut it = corpus.into_iter();
@@ -723,15 +996,32 @@ where
             "tokora cache conformance [{name} refusal-round-trip]: a refused push_front returned a DIFFERENT token: pushed {span:?}, got back {back_span:?}"
           );
           self.assert_resident(&cache, cap, &resident, "after a refused push_front");
+          refusals += 1;
           continue;
         }
       }
       self.assert_resident(&cache, cap, &resident, "after push_front");
     }
-    assert!(
-      resident.len() > 1,
-      "tokora cache conformance [{name} push-front]: no push_front was ever accepted at capacity {cap}, so the prepend law was never observed"
-    );
+    // Capacity 1 is the one capacity where the loop above is expected to accept nothing: the
+    // seeding `push_back` fills the cache, so every front push after it meets a full one. This
+    // check used to return at its first line for `cap < 2` and skip that capacity entirely
+    // (#180 part A, item 10) — but "no prepend ORDER to observe" is not "nothing to observe".
+    // What is left is the refusal half, and nothing else in the kit reaches it on this arm:
+    // check 3 drives the round-trip for `push_back`, check 2 and `check_empty_push_front` only
+    // ever drive front pushes that are ACCEPTED. So a cache that corrupts a refused front push —
+    // hands back a resident entry and swallows the offered token — was invisible at capacity 1,
+    // which is exactly the capacity where every front push is refused.
+    if cap == 1 {
+      assert!(
+        refusals > 0,
+        "tokora cache conformance kit bug [{name} push-front]: at capacity 1 the driver never reached a refused push_front, so the one half of check 5 this capacity can express was not observed"
+      );
+    } else {
+      assert!(
+        resident.len() > 1,
+        "tokora cache conformance [{name} push-front]: no push_front was ever accepted at capacity {cap}, so the prepend law was never observed"
+      );
+    }
 
     // ── the whole sequence, not its two ends ──────────────────────────────────────
     //
@@ -767,7 +1057,124 @@ where
         "tokora cache conformance [{name} push-front/full-order at depth {depth}]: pop_front() still answers after all {} entries were drained",
         order.len()
       );
+
+      // ── and the same sequence read from the OTHER end ───────────────────────────
+      //
+      // The drain above reads a front-built residency with `pop_front` and nothing else, and
+      // every OTHER `pop_back` in the kit — check 4's drain, check 6's and check 8's back
+      // sweeps, the alternating drain check 6 runs across mutations — is driven against a cache
+      // `filled` built with `push_back` from empty. So the two were never combined: a `pop_back`
+      // that is correct on a back-built residency and wrong on one a `push_front` contributed to
+      // had nothing to answer to (#180 part B, item 2). That is a ring whose prepend establishes
+      // the new head and leaves the tail index naming a slot the prepend invalidated — and it is
+      // the input layer's **restore** path that reads through it, after a put-back has prepended.
+      //
+      // A second cache at the same depth, since the drain above consumed the first.
+      let (mut mixed, order) = self.front_built(cap, depth);
+      for (i, expected) in order.iter().rev().enumerate() {
+        let popped = mixed.pop_back().unwrap_or_else(|| {
+          panic!(
+            "tokora cache conformance [{name} push-front/full-order-from-the-back at depth {depth}]: pop_back() is empty at position {i} of the {} entries one push_back and {depth} push_front(s) put in",
+            order.len()
+          )
+        });
+        let got = span_of::<L>(&popped);
+        assert!(
+          got == *expected,
+          "tokora cache conformance [{name} push-front/full-order-from-the-back at depth {depth}]: pop_back #{i} returned {got:?}, expected {expected:?}. After one push_back and {depth} push_front(s) the resident order is {order:?}, so a newest-first drain must hand those back in reverse. Every other pop_back the kit drives runs against a cache built by push_back alone; this one runs against a residency a push_front built."
+        );
+      }
+      assert!(
+        mixed.pop_back().is_none(),
+        "tokora cache conformance [{name} push-front/full-order-from-the-back at depth {depth}]: pop_back() still answers after all {} entries were drained",
+        order.len()
+      );
     }
+
+    // ── a build that INTERLEAVES the two arms ──────────────────────────────────────
+    //
+    // Every mixed residency above is the same shape: one `push_back`, and then every
+    // `push_front`. So in the whole kit a `push_back` **never once followed** a `push_front` — the
+    // seeding append is always the first operation, `filled` and `check_fifo_and_length` append
+    // from empty and never prepend at all, and `check_clear`'s refill and `push_many` are appends
+    // too (#180 part B, item 3). A cache whose append is right while the head has never moved and
+    // wrong once a prepend has moved it — a slot computed from a stale head index — was
+    // therefore driven by nothing.
+    //
+    // So alternate the arms, starting at the front, and read the whole sequence back. The order
+    // is not the reverse of anything: `push_front`, `push_back`, `push_front`, `push_back` leaves
+    // the prepends newest-first ahead of the appends oldest-first, which is a shape neither drain
+    // above builds. And the length is swept rather than fixed, for the reason the depth above is:
+    // a permutation of the interior needs a fourth resident entry before index 2 stops being the
+    // tail, so a driver pinned at one short length puts the defect back where the contract and it
+    // agree.
+    for n in 2..=cap {
+      let (mut mixed, order) = self.interleaved(cap, n);
+      for (i, expected) in order.iter().enumerate() {
+        let popped = mixed.pop_front().unwrap_or_else(|| {
+          panic!(
+            "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: pop_front() is empty at position {i} of the {} entries the alternating build put in",
+            order.len()
+          )
+        });
+        let got = span_of::<L>(&popped);
+        assert!(
+          got == *expected,
+          "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: position {i} of the drained sequence is {got:?}, expected {expected:?}. Alternating push_front and push_back from empty, starting at the front, leaves the resident order {order:?} — each prepend before every entry then resident, each append after every entry then resident. Neither arm may move an entry the other one placed."
+        );
+      }
+      assert!(
+        mixed.pop_front().is_none(),
+        "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: pop_front() still answers after all {} entries were drained",
+        order.len()
+      );
+    }
+  }
+
+  /// A fresh cache built by **alternating** the two push arms — `push_front`, `push_back`,
+  /// `push_front`, … from empty — until `n` tokens are resident, together with the resident order
+  /// it must be holding.
+  ///
+  /// The interleaving is the point: [`front_built`](Self::front_built) puts its single
+  /// `push_back` first and every `push_front` after it, so nothing there — or anywhere else in
+  /// the kit — ever appends to a queue a prepend has already touched.
+  ///
+  /// `n` is bounded by the capacity, so every push here has room and a refusal is a violation
+  /// rather than a case to handle. Both arms' laws are already established before this runs:
+  /// check 3 for the append, and — for the very first push, which goes to the front of an empty
+  /// cache — [`check_empty_push_front`](Self::check_empty_push_front).
+  fn interleaved(&self, cap: usize, n: usize) -> (C, Vec<L::Span>) {
+    let name = self.label();
+    let corpus = self.corpus(n);
+    assert!(
+      corpus.len() == n,
+      "tokora cache conformance [{name}]: the source lexed {} token(s), but the kit needs {n} to build an alternating push_front/push_back residency at capacity {cap}. This is a kit-usage problem, not a cache defect: lengthen the source.",
+      corpus.len()
+    );
+
+    let mut cache = self.make();
+    let mut order: Vec<L::Span> = Vec::new();
+    for (i, tok) in corpus.into_iter().enumerate() {
+      let span = span_of::<L>(&tok);
+      let to_front = i % 2 == 0;
+      let accepted = if to_front {
+        cache.push_front(tok).is_ok()
+      } else {
+        cache.push_back(tok).is_ok()
+      };
+      let arm = if to_front { "push_front" } else { "push_back" };
+      assert!(
+        accepted,
+        "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: {arm} #{i} was REFUSED with {} of {cap} slots used; a push is refused only when the cache is FULL",
+        order.len()
+      );
+      if to_front {
+        order.insert(0, span);
+      } else {
+        order.push(span);
+      }
+    }
+    (cache, order)
   }
 
   /// A fresh cache in the shape [`check_push_front`](Self::check_push_front) builds — one
@@ -778,7 +1185,7 @@ where
   /// rather than a case to handle — the warranted-refusal law itself is checked by the caller,
   /// which drives one push past the capacity.
   fn front_built(&self, cap: usize, depth: usize) -> (C, Vec<L::Span>) {
-    let name = self.name;
+    let name = self.label();
     let want = depth.saturating_add(1);
     let corpus = self.corpus(want);
     assert!(
@@ -787,7 +1194,7 @@ where
       corpus.len()
     );
 
-    let mut cache = C::new();
+    let mut cache = self.make();
     let mut order: Vec<L::Span> = Vec::new();
     let mut it = corpus.into_iter();
     let back = it.next().expect("the corpus was just checked non-empty");
@@ -841,7 +1248,7 @@ where
     if cap == 0 {
       return;
     }
-    let name = self.name;
+    let name = self.label();
 
     // Drained from the FRONT: the consuming path, leaving the resident suffix.
     for popped in 0..=cap {
@@ -886,6 +1293,70 @@ where
     }
   }
 
+  /// Check 6 against **one cache instance**, peeked → mutated → peeked again, all the way down.
+  ///
+  /// [`check_peek`](Self::check_peek) reaches every residency, but it reaches each of them on a
+  /// cache built **fresh** for it: `filled_to_capacity`, then the pops, and only then the first
+  /// peek. So every `peek` the kit ever made was the first one that instance had answered at that
+  /// residency, and a `peek` that memoises its first answer — and keeps serving it after later
+  /// pops — was byte-for-byte a conforming one everywhere the kit looked (#180 part B, item 1).
+  /// It even satisfies the purity law, which is the only repeatability the kit asked for: two
+  /// peeks with nothing changed in between DO agree; the latch is only wrong once something has
+  /// changed.
+  ///
+  /// So this drives the missing shape and nothing else: one instance, filled to capacity, peeked
+  /// in full, then popped and peeked again at every residency down to empty. The pops alternate
+  /// ends — a latch is equally stale after either, and a cache that invalidates on one path and
+  /// not the other is a real shape (the input layer's rollback pops the back, its consume path
+  /// the front). Everything each state is then checked for is [`check_peek_at`](Self::check_peek_at)'s
+  /// whole body, unchanged, so this adds a driver rather than an oracle.
+  fn check_peek_across_mutations(&self, cap: usize) {
+    if cap == 0 {
+      return;
+    }
+    let name = self.label();
+    let (mut cache, filled) = self.filled_to_capacity(cap);
+    let mut want: Vec<L::Span> = filled;
+    self.check_peek_at(
+      &cache,
+      cap,
+      &want,
+      &format!("ONE cache instance, full at {cap}, before anything has mutated it"),
+    );
+
+    let mut pops = 0usize;
+    let mut from_front = true;
+    while !want.is_empty() {
+      let end = if from_front { "pop_front" } else { "pop_back" };
+      let popped = if from_front {
+        cache.pop_front()
+      } else {
+        cache.pop_back()
+      };
+      assert!(
+        popped.is_some(),
+        "tokora cache conformance [{name} bounded-peek]: {end}() answered None with {} of {cap} entries still resident",
+        want.len()
+      );
+      if from_front {
+        want.remove(0);
+      } else {
+        want.pop();
+      }
+      pops += 1;
+      from_front = !from_front;
+      self.check_peek_at(
+        &cache,
+        cap,
+        &want,
+        &format!(
+          "the SAME cache instance this kit has ALREADY peeked, after {pops} pop(s) — the last a {end}() — leaving {} of {cap} resident",
+          want.len()
+        ),
+      );
+    }
+  }
+
   /// [`filled`](Self::filled) at exactly the capacity, which is what both residency sweeps in
   /// [`check_peek`](Self::check_peek) read their expectation off: each slices that list, so it has
   /// to be the full residency before the first pop.
@@ -893,7 +1364,7 @@ where
   /// Check 3 drives the same fill one token further and would have failed already; this says so
   /// in the kit's own words rather than as a slice index panic.
   fn filled_to_capacity(&self, cap: usize) -> (C, Vec<L::Span>) {
-    let name = self.name;
+    let name = self.label();
     let (cache, filled) = self.filled(cap);
     assert!(
       filled.len() == cap,
@@ -906,7 +1377,7 @@ where
   /// Check 6 in full — bound, order, purity, `peek_one`, and the prefilled-buffer sweep —
   /// against a cache holding exactly `want`. `state` names the residency in every message.
   fn check_peek_at(&self, cache: &C, cap: usize, want: &[L::Span], state: &str) {
-    let name = self.name;
+    let name = self.label();
     let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
     let bound = window.min(want.len());
 
@@ -916,6 +1387,15 @@ where
       "tokora cache conformance [{name} bounded-peek] against {state}: peek() appended {} entries into an empty {window}-slot buffer, expected exactly min(len, the buffer's remaining capacity) = {bound}. The bound is the cache's CURRENT length, not the room its backing store has: an entry that has been popped is not lookahead any more.",
       first.len()
     );
+    // This one assertion carries three of check 6's clauses at once: the ORDER (oldest first),
+    // the CONTENT (these entries and no others), and "**each resident token once**". The third
+    // has no assertion of its own and does not get one: `corpus` lexes successive tokens, so the
+    // spans in `want` are pairwise distinct at every capacity and from every source, and an
+    // appended run that equals `want[..bound]` is therefore distinct by construction. A separate
+    // distinctness check could not be made to fail while this one passes, and an assertion that
+    // cannot fail is not a check (#180 part A, item 9). What the clause was missing is a fixture
+    // that violates it and nothing else, which `DUPLICATING_PEEK` in `cache_tests.rs` now is: the
+    // right count, the right first entry, the front served `bound` times over.
     assert!(
       first == want[..bound],
       "tokora cache conformance [{name} bounded-peek] against {state}: peek() appended {first:?}, expected the resident prefix OLDEST FIRST {:?}",
@@ -932,26 +1412,33 @@ where
 
     // `peek_one` is the single-slot case: it names the front, and it names nothing where a
     // drained cache has no front left to name.
-    match cache.peek_one() {
-      Some(one) => {
-        let Some(expected) = want.first() else {
-          panic!(
-            "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() answered {:?} with NOTHING resident",
-            one.span()
-          )
-        };
-        assert!(
-          one.span() == expected,
-          "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() named {:?}, expected the front entry {expected:?}",
-          one.span()
-        );
-      }
-      None => assert!(
-        want.is_empty(),
+    //
+    // Taken as an owned span rather than matched in place, so the borrow ends and the SECOND
+    // call below can be made against the same cache. Until it was, `peek_one` was called exactly
+    // once per residency this sweep visits — against a cache instance built fresh for that
+    // residency — so a `peek_one` that is correct once and wrong on every repeat had nothing to
+    // disagree with. `peek` has been held to that since the kit existed, three lines above; this
+    // is the same law on the method composed from it (#180 part A, item 4).
+    let one_first: Option<L::Span> = cache.peek_one().map(|one| one.span().clone());
+    match (&one_first, want.first()) {
+      (Some(got), Some(expected)) => assert!(
+        got == expected,
+        "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() named {got:?}, expected the front entry {expected:?}"
+      ),
+      (Some(got), None) => panic!(
+        "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() answered {got:?} with NOTHING resident"
+      ),
+      (None, Some(_)) => panic!(
         "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() is empty with {} entries resident",
         want.len()
       ),
+      (None, None) => {}
     }
+    let one_second: Option<L::Span> = cache.peek_one().map(|one| one.span().clone());
+    assert!(
+      one_second == one_first,
+      "tokora cache conformance [{name} pure-peek-one] against {state}: two peek_one() calls on an unchanged cache disagreed: {one_first:?} then {one_second:?}. `peek_one` takes &self and must be logically pure, exactly as `peek` must."
+    );
 
     // ── the same law against a buffer that is NOT empty ───────────────────────────
     //
@@ -991,8 +1478,54 @@ where
     // that leaves NO room at all, which is the only shape where the bound is asked to come out
     // zero.
     for depth in 1..=window {
-      self.check_prefilled_peek(cache, cap, want, depth, state);
+      self.check_prefilled_peek(cache, cap, want, depth, Prefill::Later, state);
     }
+
+    // ── and the same law through a window that is NOT the kit's own ───────────────
+    //
+    // Everything above peeks through [`PeekWindow`], and until this ran, so did every other
+    // driver in the kit: `W` was `U4` in all of them (#180 part B, item 4). Sweeping the prefill
+    // depth does not stand in for varying it — that moves the buffer's REMAINING capacity, and
+    // `peek` is generic over `W`, can read `W::CAPACITY` off the type, and is free to branch on
+    // it. Two shapes of that branch are worth naming, and both are dead code at a single window:
+    // the single-slot fast path, which the trait itself invites (`peek_one`'s default body is
+    // `peek::<U1>` into a one-slot buffer), and the truncating path a cache takes when the
+    // residency does NOT fit in the window — which never runs while the window is as wide as
+    // every residency the kit builds.
+    self.check_peek_window::<PeekWindowOne>(cache, want, state);
+    self.check_peek_window::<PeekWindowMid>(cache, want, state);
+  }
+
+  /// Check 6's bound, order and purity through **one** window type, against a cache holding
+  /// exactly `want`.
+  ///
+  /// Only the empty-buffer shape: the prefilled sweep above already varies the room left, at
+  /// [`PeekWindow`], and what this adds is the other axis — the value of `W` itself. `peek_one`
+  /// is not re-driven either; it takes no window.
+  fn check_peek_window<W>(&self, cache: &C, want: &[L::Span], state: &str)
+  where
+    W: Window,
+  {
+    let name = self.label();
+    let window = <<W as Window>::CAPACITY as Unsigned>::USIZE;
+    let bound = window.min(want.len());
+
+    let first = self.peeked_spans_through::<W>(cache);
+    assert!(
+      first.len() == bound,
+      "tokora cache conformance [{name} bounded-peek/window {window}] against {state}: peek() appended {} entries into an empty {window}-slot buffer, expected exactly min(len, the buffer's remaining capacity) = {bound}. `peek` is generic over W and this is a window the kit's own PeekWindow is not: the bound is the same law at every one of them.",
+      first.len()
+    );
+    assert!(
+      first == want[..bound],
+      "tokora cache conformance [{name} bounded-peek/window {window}] against {state}: peek() appended {first:?}, expected the resident prefix OLDEST FIRST {:?}. A cache may not read W::CAPACITY and answer differently for it.",
+      &want[..bound]
+    );
+    let second = self.peeked_spans_through::<W>(cache);
+    assert!(
+      second == first,
+      "tokora cache conformance [{name} pure-peek/window {window}] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure at every window, not only at the kit's own."
+    );
   }
 
   /// Check 6's prefilled half at one prefill depth: `peek` into a buffer that already holds
@@ -1011,27 +1544,29 @@ where
     cap: usize,
     want: &[L::Span],
     depth: usize,
+    from: Prefill,
     state: &str,
   ) {
-    let name = self.name;
+    let name = self.label();
     let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
-    let prefill = self.beyond_residency(cap, depth);
+    let tag = from.tag();
+    let prefill = self.prefill(cap, depth, from);
     let prefill_spans: Vec<L::Span> = prefill.iter().map(|tok| span_of::<L>(tok)).collect();
     let remaining_at_prefill = window - depth;
     let prefilled_bound = remaining_at_prefill.min(want.len());
     let (prefix_after, appended) = self.peeked_spans_after_prefill(cache, prefill);
     assert!(
       prefix_after == prefill_spans,
-      "tokora cache conformance [{name} bounded-peek/prefilled at depth {depth}] against {state}: peek() changed the {depth} entr(ies) already in the buffer ahead of it — got {prefix_after:?}, expected them untouched, {prefill_spans:?}. `peek` appends BEHIND what the buffer already holds; it neither overwrites nor reorders it."
+      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() changed the {depth} entr(ies) already in the buffer ahead of it — got {prefix_after:?}, expected them untouched, {prefill_spans:?}. `peek` appends BEHIND what the buffer already holds; it neither overwrites nor reorders it."
     );
     assert!(
       appended.len() == prefilled_bound,
-      "tokora cache conformance [{name} bounded-peek/prefilled at depth {depth}] against {state}: peek() appended {} entries into a buffer already holding {depth} of {window} slots, expected exactly min(len, buffer's REMAINING capacity) = {prefilled_bound}.",
+      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() appended {} entries into a buffer already holding {depth} of {window} slots, expected exactly min(len, buffer's REMAINING capacity) = {prefilled_bound}.",
       appended.len()
     );
     assert!(
       appended == want[..prefilled_bound],
-      "tokora cache conformance [{name} bounded-peek/prefilled at depth {depth}] against {state}: peek() appended {appended:?}, expected the resident prefix OLDEST FIRST {:?}",
+      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() appended {appended:?}, expected the resident prefix OLDEST FIRST {:?}. Every resident entry is served, whatever the buffer already holds: `peek` is not entitled to decide the caller has one of them already.",
       &want[..prefilled_bound]
     );
 
@@ -1048,10 +1583,10 @@ where
       &format!("after prefilled peek() at depth {depth} against {state}"),
     );
     let (prefix_again, appended_again) =
-      self.peeked_spans_after_prefill(cache, self.beyond_residency(cap, depth));
+      self.peeked_spans_after_prefill(cache, self.prefill(cap, depth, from));
     assert!(
       prefix_again == prefix_after && appended_again == appended,
-      "tokora cache conformance [{name} pure-peek/prefilled at depth {depth}] against {state}: two prefilled peeks on an unchanged cache disagreed: prefix {prefix_after:?} then {prefix_again:?}, appended {appended:?} then {appended_again:?}. `peek` takes &self and must be logically pure against every shape of buffer, not only against an empty one."
+      "tokora cache conformance [{name} pure-peek/{tag} at depth {depth}] against {state}: two prefilled peeks on an unchanged cache disagreed: prefix {prefix_after:?} then {prefix_again:?}, appended {appended:?} then {appended_again:?}. `peek` takes &self and must be logically pure against every shape of buffer, not only against an empty one."
     );
     self.assert_resident(
       cache,
@@ -1059,6 +1594,31 @@ where
       want,
       &format!("after a second prefilled peek() at depth {depth} against {state}"),
     );
+  }
+
+  /// The `depth` prefill entries for one of the two arrangements — see [`Prefill`].
+  fn prefill(&self, cap: usize, depth: usize, from: Prefill) -> Vec<CachedTokenOf<'inp, L>> {
+    match from {
+      Prefill::Later => self.beyond_residency(cap, depth),
+      Prefill::Earlier => self.before_residency(depth),
+    }
+  }
+
+  /// The **first** `depth` corpus tokens — spans that precede every entry of the residency
+  /// [`check_peek_behind_earlier_entries`](Self::check_peek_behind_earlier_entries) builds, which
+  /// starts a full peek window into the corpus for exactly that reason.
+  ///
+  /// This is the arrangement the real call site produces, and the one no driver in this kit ever
+  /// built (#180 part B, item 6).
+  fn before_residency(&self, depth: usize) -> Vec<CachedTokenOf<'inp, L>> {
+    let name = self.label();
+    let corpus = self.corpus(depth);
+    assert!(
+      corpus.len() == depth,
+      "tokora cache conformance [{name}]: the source lexed {} token(s), but the kit needs {depth} of them BEFORE the residency for a peek-buffer prefill whose spans precede it. This is a kit-usage problem, not a cache defect: lengthen the source.",
+      corpus.len()
+    );
+    corpus
   }
 
   /// `depth` consecutive corpus tokens the cache under test is **not** holding: corpus indices
@@ -1073,7 +1633,7 @@ where
   /// of `filled`'s — a suffix where it drained the front, a prefix where it drained the back — so
   /// these stay non-resident at all of them.
   fn beyond_residency(&self, cap: usize, depth: usize) -> Vec<CachedTokenOf<'inp, L>> {
-    let name = self.name;
+    let name = self.label();
     let want = cap.saturating_add(depth);
     let mut corpus = self.corpus(want);
     assert!(
@@ -1084,13 +1644,21 @@ where
     corpus.split_off(cap)
   }
 
-  /// The spans `peek` appends, in order, into a fresh, empty buffer.
+  /// The spans `peek` appends, in order, into a fresh, empty buffer of the kit's own window.
   fn peeked_spans(&self, cache: &C) -> Vec<L::Span> {
-    let mut buf: GenericArrayDeque<
-      MaybeRefCachedTokenOf<'_, 'inp, L>,
-      <PeekWindow as Window>::CAPACITY,
-    > = GenericArrayDeque::new();
-    cache.peek::<PeekWindow>(&mut buf);
+    self.peeked_spans_through::<PeekWindow>(cache)
+  }
+
+  /// [`peeked_spans`](Self::peeked_spans) through an arbitrary window, which is what
+  /// [`check_peek_window`](Self::check_peek_window) needs and what the kit had no way to express
+  /// while every buffer it built was a [`PeekWindow`] one.
+  fn peeked_spans_through<W>(&self, cache: &C) -> Vec<L::Span>
+  where
+    W: Window,
+  {
+    let mut buf: GenericArrayDeque<MaybeRefCachedTokenOf<'_, 'inp, L>, W::CAPACITY> =
+      GenericArrayDeque::new();
+    cache.peek::<W>(&mut buf);
     buf.iter().map(|entry| entry.span().clone()).collect()
   }
 
@@ -1136,7 +1704,7 @@ where
     // permanently unable to accept a push — poisoned, its capacity zeroed, disabled outright —
     // passes everything above, since nothing above tries to use it again (#180 part A, item 2).
     // Reuse it: push back `cap` tokens and confirm they land exactly the way a first fill would.
-    let name = self.name;
+    let name = self.label();
     let mut want = Vec::with_capacity(cap);
     for tok in self.corpus(cap) {
       let span = span_of::<L>(&tok);
@@ -1166,7 +1734,7 @@ where
     if cap == 0 {
       return;
     }
-    let name = self.name;
+    let name = self.label();
 
     // Drained from the FRONT: the consuming path, leaving the resident suffix.
     for popped in 0..=cap {
@@ -1213,7 +1781,7 @@ where
   /// [`check_span`](Self::check_span) visits — including the fully drained one — is covered by
   /// the same oracle instead of splitting the empty case out).
   fn assert_span_at(&self, cache: &C, want: &[L::Span], state: &str) {
-    let name = self.name;
+    let name = self.label();
     match (want.first(), want.last(), cache.span()) {
       (Some(first), Some(last), Some(combined)) => assert!(
         combined.start_ref() == first.start_ref() && combined.end_ref() == last.end_ref(),
@@ -1227,5 +1795,346 @@ where
         want.len()
       ),
     }
+  }
+
+  // ── check 6 where the buffer's entries come BEFORE the residency ────────────────
+
+  /// Check 6's prefilled half with the span relation between the buffer and the residency
+  /// **reversed** — every entry already in the buffer precedes every resident one.
+  ///
+  /// Until this ran, that relation was one fixed value in the whole kit: the prefill came from
+  /// [`beyond_residency`](Self::beyond_residency), corpus tokens past the residency, so the
+  /// buffer's spans were always the *greater* ones (#180 part B, item 6). A `peek` that reasons
+  /// about the two — that sorts or merges by span, or that reads the buffer as a prefix of its
+  /// own run and skips an entry it decides the caller already holds — was asked the same question
+  /// every time, and answered it the same way a conforming cache would.
+  ///
+  /// The fixed value was also the **inverse of the real one**. `InputRef`'s peek fill pushes the
+  /// parked token before it calls in, because the parked token is the front of the stream: it
+  /// heads the window and the cache fills in behind it. So at the call site the buffer holds what
+  /// comes *first*, which is the one arrangement in which a cache can talk itself into
+  /// deduplicating against it.
+  ///
+  /// Reaching it costs no extra corpus. The residency is built one full peek window into the
+  /// corpus instead of at its start, which leaves that window free to prefill from and needs
+  /// exactly the `capacity + window` tokens [`run_pass`](Self::run_pass) already demands. One
+  /// residency — the full cache — and the same depth sweep, since what is under test here is the
+  /// span relation and not the depth.
+  fn check_peek_behind_earlier_entries(&self, cap: usize) {
+    if cap == 0 {
+      return;
+    }
+    let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
+    let (cache, want) = self.filled_from(window, cap);
+    let state = format!(
+      "a full cache of {cap} built from the corpus tokens PAST the prefill, so every entry already in the buffer PRECEDES every resident one — the span relation the input layer's own peek fill produces, and the inverse of the one every other prefilled driver here builds"
+    );
+    for depth in 1..=window {
+      self.check_prefilled_peek(&cache, cap, &want, depth, Prefill::Earlier, &state);
+    }
+  }
+
+  /// [`filled`](Self::filled), but from corpus index `offset` rather than from the start — so
+  /// that the tokens before it are available to prefill a peek buffer with spans that precede the
+  /// whole residency.
+  fn filled_from(&self, offset: usize, n: usize) -> (C, Vec<L::Span>) {
+    let name = self.label();
+    let want_len = offset.saturating_add(n);
+    let mut corpus = self.corpus(want_len);
+    assert!(
+      corpus.len() == want_len,
+      "tokora cache conformance [{name}]: the source lexed {} token(s), but the kit needs {want_len} to fill a cache of {n} starting {offset} token(s) into the corpus. This is a kit-usage problem, not a cache defect: lengthen the source.",
+      corpus.len()
+    );
+    let mut cache = self.make();
+    let mut want = Vec::with_capacity(n);
+    for (i, tok) in corpus.split_off(offset).into_iter().enumerate() {
+      let span = span_of::<L>(&tok);
+      assert!(
+        cache.push_back(tok).is_ok(),
+        "tokora cache conformance [{name} bounded-peek]: push_back #{i} was REFUSED while filling a fresh cache to {n} of its capacity {n}; a push is refused only when the cache is FULL"
+      );
+      want.push(span);
+    }
+    (cache, want)
+  }
+
+  // ── checks 6 and 8 where a ring has WRAPPED ─────────────────────────────────────
+
+  /// Checks 6 and 8 against a residency whose live run runs **past the end of a ring's backing
+  /// array and around to its start** — the one shape no driver in this kit could reach.
+  ///
+  /// [`filled`](Self::filled) pushes back into an empty cache, so a ring's head index starts at
+  /// slot zero and every residency built from it satisfies `head + len <= capacity`. Popping the
+  /// front advances the head and shortens the run by the same step, so that sum is invariant;
+  /// popping the back only shortens it. **A run wraps only when something is pushed after
+  /// something was popped**, and until this check existed nothing in the kit did that (#180 part
+  /// B, item 5). So the classic missing `% capacity` — in the walk `peek` makes from the head,
+  /// and in the end `span` computes from `head + len` — was truncating by zero everywhere it was
+  /// asked.
+  ///
+  /// The rotation is swept, since `capacity - head` is where a truncated walk stops and a single
+  /// head position fixes it. Two bounds cap the sweep. It stops one short of the capacity,
+  /// because at `rotation == capacity` a ring's head is back at slot zero and the run does not
+  /// wrap at all — that pass would certify nothing while looking like the deepest case. And it
+  /// stops at the **peek window**, because the tokens pushed back come from past the residency
+  /// and the corpus this kit asks its caller for is the capacity plus one window: a deeper
+  /// rotation would be a longer source requirement charged to every user of the kit, for head
+  /// positions that differ from these in no way a walk can tell.
+  ///
+  /// Only `peek` and `span` are re-driven here. They are the two operations that WALK from the
+  /// head; `front`, `back`, `pop_front` and `pop_back` name a single slot, and an index that
+  /// names the wrong slot is already caught wherever the kit checks residency —
+  /// [`check_peek_at`](Self::check_peek_at)'s own [`assert_resident`](Self::assert_resident) does
+  /// it here too.
+  fn check_wrapped_ring(&self, cap: usize) {
+    if cap < 2 {
+      // At capacity 1 a ring's head is always slot zero, so there is no wrap to reach; at 0
+      // there is no residency at all.
+      return;
+    }
+    let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
+    for rotation in 1..=(cap - 1).min(window) {
+      let (cache, want) = self.rotated(cap, rotation);
+      let state = format!(
+        "a WRAPPED residency: {cap} of {cap} resident after {rotation} pop_front(s) and {rotation} push_back(s), so a ring's live run starts at slot {rotation} and runs past the end of its array"
+      );
+      self.check_peek_at(&cache, cap, &want, &state);
+      self.assert_span_at(&cache, &want, &state);
+    }
+  }
+
+  /// A fresh cache filled to capacity, drained `rotation` entries off the **front**, and topped
+  /// back up to capacity with `rotation` fresh tokens — so a ring holding it has its head at slot
+  /// `rotation` and a live run that wraps.
+  ///
+  /// The tokens pushed back are the ones past the original residency, not the ones just popped:
+  /// re-pushing those would leave a resident sequence whose spans run backwards at the seam, and
+  /// a combined span from a later start to an earlier end is not a value a `Span` implementation
+  /// is obliged to be able to construct. A cache's residency is always in source order, and so is
+  /// this one.
+  fn rotated(&self, cap: usize, rotation: usize) -> (C, Vec<L::Span>) {
+    let name = self.label();
+    let (mut cache, filled) = self.filled_to_capacity(cap);
+    for i in 0..rotation {
+      assert!(
+        cache.pop_front().is_some(),
+        "tokora cache conformance [{name} wrapped-run]: pop_front() answered None after {i} of {rotation} pops off a cache filled to its capacity {cap}"
+      );
+    }
+    let mut want: Vec<L::Span> = filled[rotation..].to_vec();
+    for (i, tok) in self.beyond_residency(cap, rotation).into_iter().enumerate() {
+      let span = span_of::<L>(&tok);
+      assert!(
+        cache.push_back(tok).is_ok(),
+        "tokora cache conformance [{name} wrapped-run]: push_back #{i} was REFUSED while topping a cache back up to its capacity {cap} with {} of {cap} slots used; a push is refused only when the cache is FULL",
+        want.len()
+      );
+      want.push(span);
+    }
+    (cache, want)
+  }
+
+  // ── 9. pop_front_if / try_pop_front_if ──────────────────────────────────────────
+
+  /// Both methods are DEFAULT `Cache` methods, composed of `front` + `pop_front` (already
+  /// checked exhaustively elsewhere) — so an implementation that does not override them is
+  /// correct for free. What this check exists for is an implementation that DOES override
+  /// them, for whatever reason (a fused peek-and-pop, say): before it existed, neither method
+  /// was ever called by the kit at all, so an override that removed on a false predicate, or
+  /// removed and answered `None`, passed exactly like a conforming one (#180 part A, item 5).
+  fn check_pop_front_if(&self, cap: usize) {
+    let name = self.label();
+
+    // Empty cache: the predicate must not run at all — there is no front to hand it — and both
+    // methods answer `None` regardless of what the predicate would have said.
+    let mut empty = self.make();
+    let ran = Cell::new(false);
+    assert!(
+      empty
+        .pop_front_if(|_| {
+          ran.set(true);
+          true
+        })
+        .is_none(),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if() answered Some on an empty cache"
+    );
+    assert!(
+      !ran.get(),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if()'s predicate ran against an empty cache, which has no front to hand it"
+    );
+
+    let mut empty2 = self.make();
+    let ran2 = Cell::new(false);
+    assert!(
+      empty2
+        .try_pop_front_if::<(), _>(|_| {
+          ran2.set(true);
+          Ok(())
+        })
+        .is_none(),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if() answered Some on an empty cache"
+    );
+    assert!(
+      !ran2.get(),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if()'s predicate ran against an empty cache, which has no front to hand it"
+    );
+
+    if cap == 0 {
+      return;
+    }
+
+    // A false predicate removes nothing and leaves every observable untouched.
+    //
+    // This closure discards its argument, and is the only live-front predicate in this check that
+    // does. `pop_front_if`'s recording assertion is the true-predicate arm below; recording here
+    // as well would be the same test run twice, because a cache cannot answer these two calls
+    // differently. `F: FnOnce` is called exactly once, so the entry handed to the predicate is
+    // settled before the `true`/`false` that separates the arms exists, and both caches are built
+    // by the same `filled(cap)` and are in the same state when the call arrives.
+    let (mut cache_f, want_f) = self.filled(cap);
+    assert!(
+      cache_f.pop_front_if(|_| false).is_none(),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if() removed an entry despite a false predicate"
+    );
+    self.assert_resident(
+      &cache_f,
+      cap,
+      &want_f,
+      "after pop_front_if() with a false predicate",
+    );
+
+    // An Err-returning predicate is refused the same way, and the error comes straight back — and
+    // it too is handed the FRONT entry, which is recorded here rather than discarded.
+    //
+    // Both `try_pop_front_if` closures in this check used to be `|_| ...`, so everything the check
+    // asserted about this method was its return value and its residency. An override that ran the
+    // caller's validation predicate against `back()` and then produced the conforming return and
+    // the conforming residency satisfied every one of them — a cache that decides whether to
+    // remove or retain the front on the strength of unrelated lookahead, certified.
+    let (mut cache_e, want_e) = self.filled(cap);
+    let seen_e = Cell::new(None);
+    let result = cache_e.try_pop_front_if::<&str, _>(|tok| {
+      // The extra `*` is the same double-borrow `pop_front_if`'s recording predicate pays; see
+      // the comment there.
+      seen_e.set(Some((**tok.token().span_ref()).clone()));
+      Err("no")
+    });
+    let saw_e = seen_e.take();
+    assert!(
+      saw_e == Some(want_e[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if()'s Err-path predicate was handed {saw_e:?}, expected the front entry {:?}",
+      want_e[0]
+    );
+    assert!(
+      matches!(result, Some(Err("no"))),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if() with an Err-returning predicate did not hand the error straight back"
+    );
+    self.assert_resident(
+      &cache_e,
+      cap,
+      &want_e,
+      "after try_pop_front_if() with an Err predicate",
+    );
+
+    // A true predicate sees the FRONT entry's span, and removes exactly it.
+    let (mut cache_t, want_t) = self.filled(cap);
+    let seen = Cell::new(None);
+    let popped_span = cache_t
+      .pop_front_if(|tok| {
+        // `tok`'s own generic params are already references (`CachedTokenRefOf`), so `.token()`
+        // and `.span_ref()` each add one more — double what `span_of` derefs for an OWNED
+        // `CachedTokenOf`, hence the extra `*` here.
+        seen.set(Some((**tok.token().span_ref()).clone()));
+        true
+      })
+      .map(|tok| span_of::<L>(&tok));
+    let saw = seen.take();
+    assert!(
+      saw == Some(want_t[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if()'s predicate was handed {saw:?}, expected the front entry {:?}",
+      want_t[0]
+    );
+    assert!(
+      popped_span == Some(want_t[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if() with a true predicate returned {popped_span:?}, expected the front entry {:?}",
+      want_t[0]
+    );
+    self.assert_resident(
+      &cache_t,
+      cap,
+      &want_t[1..],
+      "after pop_front_if() with a true predicate",
+    );
+
+    // try_pop_front_if with Ok(()) does the same, predicate argument included.
+    //
+    // Stated here as well as on the Err path above rather than left to whichever call runs first.
+    // Against `TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK` it is the Err path — the earlier call —
+    // that reports, and by the `FnOnce` argument above no cache can fail one of these and pass
+    // the other; this assertion is what keeps the law stated where the Ok path is driven, so a
+    // later driver that reorders the two, or drives one at a residency the other does not reach,
+    // does not silently lose it.
+    let (mut cache_ok, want_ok) = self.filled(cap);
+    let seen_ok = Cell::new(None);
+    let popped_ok = cache_ok
+      .try_pop_front_if::<&str, _>(|tok| {
+        seen_ok.set(Some((**tok.token().span_ref()).clone()));
+        Ok(())
+      })
+      .and_then(Result::ok)
+      .map(|tok| span_of::<L>(&tok));
+    let saw_ok = seen_ok.take();
+    assert!(
+      saw_ok == Some(want_ok[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if()'s Ok-path predicate was handed {saw_ok:?}, expected the front entry {:?}",
+      want_ok[0]
+    );
+    assert!(
+      popped_ok == Some(want_ok[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if() with an Ok(()) predicate returned {popped_ok:?}, expected the front entry {:?}",
+      want_ok[0]
+    );
+    self.assert_resident(
+      &cache_ok,
+      cap,
+      &want_ok[1..],
+      "after try_pop_front_if() with an Ok(()) predicate",
+    );
+  }
+
+  // ── 10. push_many ────────────────────────────────────────────────────────────────
+
+  /// `push_many` is also a DEFAULT method, composed of `push_back` (already checked
+  /// exhaustively) — this exists for the same reason [`check_pop_front_if`](Self::check_pop_front_if)
+  /// does: an override that silently discards what does not fit, rather than handing it back
+  /// through the overflow iterator, passed unnoticed before this check existed at all (#180 part
+  /// A, item 6).
+  fn check_push_many(&self, cap: usize) {
+    let name = self.label();
+    let want_len = cap.saturating_add(2);
+    let corpus = self.corpus(want_len);
+    assert!(
+      corpus.len() == want_len,
+      "tokora cache conformance [{name}]: the source lexed {} token(s), but push_many's check needs {want_len} — 2 more than the capacity {cap}, to exercise the overflow return. This is a kit-usage problem, not a cache defect: lengthen the source.",
+      corpus.len()
+    );
+    let all_spans: Vec<L::Span> = corpus.iter().map(span_of::<L>).collect();
+
+    let mut cache = self.make();
+    let overflow: Vec<_> = cache.push_many(corpus.into_iter()).collect();
+    let overflow_spans: Vec<L::Span> = overflow.iter().map(span_of::<L>).collect();
+    assert!(
+      overflow_spans == all_spans[cap..],
+      "tokora cache conformance [{name} push-many]: push_many()'s overflow iterator yielded {overflow_spans:?}, expected exactly the {} refused entr(ies) {:?}, unchanged and in order",
+      all_spans.len() - cap,
+      &all_spans[cap..]
+    );
+    self.assert_resident(
+      &cache,
+      cap,
+      &all_spans[..cap],
+      "after push_many() with 2 more tokens than capacity",
+    );
   }
 }
