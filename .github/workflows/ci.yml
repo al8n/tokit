@@ -56,6 +56,20 @@ name: CI
 # ask which line goes red if it breaks — and when the answer is "none", the missing thing is
 # the line, not the test.
 
+# ── THIS IS THE FAST LANE ───────────────────────────────────────────────────────────────────
+#
+# Every job here runs on `ubuntu-latest`. The Miri matrices — the only macOS-bound cells in the
+# repository — live in `.github/workflows/miri.yml`, and that file's header carries the
+# measurement that separated them (#213): on 2026-08-05 five consecutive main commits merged
+# with no CI verdict at all, because a run's conclusion is a property of the WHOLE run and the
+# 24 Miri cells never got runners. In the measured run, 34 of 59 jobs finished inside 50
+# minutes — two of them RED — and none of those 34 verdicts could be read.
+#
+# So the contract is: this workflow's conclusion is the one a merge waits for, and it is
+# answerable in tens of minutes because nothing in it queues for a macOS runner. `Miri` reports
+# on its own clock. Adding a `runs-on:` here that is not `ubuntu-latest` gives that up — the
+# whole lane is then only as fast as its slowest host, which is the state this split undid.
+
 # `paths-ignore` deliberately does NOT carry a blanket `**.md`: the guide chapters under
 # `tokora/src/guide/` are Markdown compiled as doctests through `include_str!` and `README.md`
 # is `include_str!`'d into the crate root, so those are *code* changes here. `CHANGELOG.md` is
@@ -85,8 +99,14 @@ concurrency:
   # main commit gets its own group and its own verdict. Do NOT collapse that back to one group per
   # ref: `cancel-in-progress: false` does not protect a main run on its own, because a run queued
   # into a group that already has one in progress cancels whichever run was PENDING there
-  # regardless of that setting, and the Miri matrices keep main's runs pending long enough for the
-  # next push to do exactly that.
+  # regardless of that setting, and a main run only has to be pending for as long as it takes the
+  # next push to arrive. That was the Miri matrices' doing when they were in this file (#141);
+  # they are in `miri.yml` now and keyed the same way, and this lane still queues behind runner
+  # availability whenever several branches are in flight — so the SHA keying is load-bearing in
+  # both files and is not a Miri workaround that the split retired.
+  #
+  # `${{ github.workflow }}` leading the group is also what keeps the two lanes apart: `CI-...`
+  # and `Miri-...` are different groups, so neither can cancel the other's run.
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -560,8 +580,10 @@ jobs:
   # `graphql`, which supplied the consumers whose absence was the bug (#200).
   #
   # `--feature-powerset --depth 2` would close it and is the wrong trade at 40 features: ~780
-  # configurations, on a workflow that already spends hours on the Miri queue, buys a gate
-  # nobody keeps. So the legs are derived from the cfgs that ACTUALLY EXIST, and
+  # configurations buys a gate nobody keeps. That was written when the Miri queue was also in
+  # this workflow and the argument was partly a wall-clock one; Miri is in `miri.yml` now and the
+  # argument is unchanged, because ~780 `cargo check` legs would themselves make this lane the
+  # slow one. So the legs are derived from the cfgs that ACTUALLY EXIST, and
   # `ci/feature_cfg_coverage.py` is what stops that derivation going stale — three legs are a
   # snapshot, and the next `all(...)` predicate someone writes would be uncovered again with
   # green CI.
@@ -782,129 +804,6 @@ jobs:
         run: |
           rustup target add ${{ matrix.target }}
           cargo build --target ${{ matrix.target }}
-
-  # ── Gate: Miri — the shard plan the two Miri matrices are built from ────────
-  # Miri sets this workflow's wall clock on its own, so Miri and only Miri is sharded.
-  #
-  # The shard COUNT lives in `ci/miri_shard.py` and the LIST is generated from it here, so the
-  # matrices below never spell out `[0, 1, 2, 3]`: a count and a list written down separately can
-  # disagree silently, dropping a quarter of the suite from Miri while every job stays green.
-  #
-  # `ci/miri_shard.py` re-proves the whole partition inside every Miri job anyway; running it
-  # here first makes a broken plan red in seconds, once and readably, rather than after
-  # `cargo miri setup` in every cell. `selftest` runs before `plan` for the reason the changelog
-  # self-test runs before its gate: a self-test CI never exercises rots, and a green `plan`
-  # proves nothing about a guard nobody has watched fail on cue.
-  #
-  # No `rustup` step on purpose — it needs `cargo metadata --no-deps` and nothing else, and must
-  # not add minutes to the head of the critical path it exists to shorten.
-  miri-shard-plan:
-    name: miri shard plan
-    runs-on: ubuntu-latest
-    outputs:
-      shards: ${{ steps.plan.outputs.shards }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: ci/miri_shard.py selftest
-        run: python3 ci/miri_shard.py selftest
-      - name: Enumerate the integration suite and verify the partition
-        id: plan
-        run: python3 ci/miri_shard.py plan
-
-  # ── Gate: Miri (Tree Borrows) ───────────────────────────────────────────────
-  # `fail-fast: false` on both Miri matrices, because sharding changes what a fast failure costs:
-  # the first shard to go red would otherwise cancel every other shard on every target, leaving
-  # a report that says nothing about the rest of the suite and a next push that re-runs all of it.
-  miri-tb:
-    name: miri-tb-${{ matrix.target }}-shard${{ matrix.shard }}
-    needs: miri-shard-plan
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-        cfg:
-          - all_tests
-        # Generated from `SHARD_TOTAL` in `ci/miri_shard.py`; never written out here.
-        shard: ${{ fromJSON(needs.miri-shard-plan.outputs.shards) }}
-        exclude:
-          - os: ubuntu-latest
-            target: x86_64-apple-darwin
-          - os: ubuntu-latest
-            target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: i686-unknown-linux-gnu
-          - os: macos-latest
-            target: powerpc64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Cache cargo build and registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-miri-
-      - name: Miri
-        run: |
-          bash ci/miri_tb.sh ${{ matrix.target }} ${{ matrix.cfg }} ${{ matrix.shard }}
-
-  # ── Gate: Miri (Stacked Borrows) ────────────────────────────────────────────
-  miri-sb:
-    name: miri-sb-${{ matrix.target }}-shard${{ matrix.shard }}
-    needs: miri-shard-plan
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-        cfg:
-          - all_tests
-        # Generated from `SHARD_TOTAL` in `ci/miri_shard.py`; never written out here.
-        shard: ${{ fromJSON(needs.miri-shard-plan.outputs.shards) }}
-        exclude:
-          - os: ubuntu-latest
-            target: x86_64-apple-darwin
-          - os: ubuntu-latest
-            target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: i686-unknown-linux-gnu
-          - os: macos-latest
-            target: powerpc64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Cache cargo build and registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-miri-
-      - name: Miri
-        run: |
-          bash ci/miri_sb.sh ${{ matrix.target }} ${{ matrix.cfg }} ${{ matrix.shard }}
 
   # ── Gate: coverage (gated on the fast gates passing) ────────────────────────
   coverage:

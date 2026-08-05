@@ -91,6 +91,41 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   Behaviour is unchanged: `cargo test --all-features` reports the same pass count before and
   after.
 
+- **CI is two workflows now — `CI`, which is ubuntu-only, and `Miri`, which carries the two
+  Miri matrices and the shard plan they depend on (#213).** Nothing is added, removed or
+  reconfigured: the same jobs run, cell for cell, under the same check names, on the same
+  hosts, with byte-identical steps. Only which workflow owns them changes.
+
+  A run's conclusion is a property of the whole run, and that is what had stopped working. On
+  2026-08-05 five consecutive `main` commits merged with no CI verdict at all — one run sat
+  `queued` for 3h02m — while `loc` and `Deploy mdBook` completed on the same refs in the same
+  window, so it was never an outage. The jobs themselves were mostly fine: in the run for
+  `680d15f9`, 34 of the 59 completed within 49m49s of the run being created and 25 did not —
+  the 24 Miri cells and `coverage` — so the 34 answers that did exist were unreadable. Two of
+  them were red, on `main`, and stayed invisible. Splitting the macOS-bound half out means `CI`
+  concludes on its own jobs, in tens of minutes, and `Miri` reports whenever its runners
+  arrive.
+
+  The line is drawn where the HOSTS are, which is not where #213 proposed drawing it: that
+  issue expected the sanitizers and the cross matrix to be macOS-bound too, and they are not —
+  both are `ubuntu-latest`, every one of their cells completed in the measured run, and they
+  stay in the fast lane. The only macOS-bound cells in the repository are the 16 apple-darwin
+  Miri cells, 8 per matrix, and that is the whole of the 269–347 minute macOS queue #157
+  measured.
+
+  Whether those cells need a macOS host at all was measured on a Linux host rather than
+  assumed. Miri is not the obstacle: `cargo miri setup` builds a full darwin sysroot there in
+  seconds, and with `criterion` dropped from the manifest the suite interprets and passes under
+  both apple targets exactly as it does under the host's own linux target. What blocks them is
+  `cargo build` — `criterion` is an unconditional dev-dependency, so cargo builds it for every
+  `--test` target, and its transitive `alloca` runs a cc-rs build script that invokes the host
+  `cc` with `-arch x86_64 -mmacosx-version-min=10.7`. That needs Apple clang and the macOS SDK.
+  The measurement and what it would take to move the cells are recorded on the `miri-tb` job.
+
+  Two `exclude` entries per Miri matrix went in the move. Each named a target absent from that
+  matrix' own `target` list, so each excluded nothing while reading as though it did; the cell
+  set is unchanged with them gone, and `actionlint` reports the workflows clean.
+
 ### Fixed
 
 1. **`is_empty()` was never asserted false by the cache conformance kit — a fixture returning
