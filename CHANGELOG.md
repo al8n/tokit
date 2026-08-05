@@ -57,8 +57,13 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   `accepted`, `unwrapped`. The families are written against those and the crate's own error,
   recovery and CST machinery names them, so a seam there would have nothing to stand on.
 
-  Every gated public item carries `#[cfg_attr(docsrs, doc(cfg(...)))]`, so docs.rs labels which
-  feature each one needs.
+  docs.rs labels which feature every gated public item needs. Rustdoc derives that label from
+  the item's own `#[cfg]` — the crate enables `#![cfg_attr(docsrs, feature(doc_cfg))]` and
+  docs.rs builds with `--cfg docsrs` — so the punctuator markers' `parse` / `try_parse`, the
+  `Ident` and `Keyword` parsers and the `InputRef` pratt drivers are labelled without carrying
+  an attribute of their own. The explicit `#[cfg_attr(docsrs, doc(cfg(...)))]` the source does
+  write is for the sites where the gate and the item are apart — the re-exports of a gated
+  module's contents above all, where the label has to name the gate on the `pub use`.
 
 ### Fixed
 
