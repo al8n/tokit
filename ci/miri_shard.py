@@ -9,9 +9,22 @@ was close, so nothing else was worth splitting.
 The split is by integration test target, and the target list is ENUMERATED AT RUN TIME from
 `cargo metadata`. A hardcoded list would mean a newly added `tokora/tests/*.rs` is silently
 never interpreted under Miri, and nothing would ever say so — the shards would stay green while
-covering less every month. Index-modulo over the live list makes coverage exhaustive by
-construction: target `i` goes to shard `i % SHARD_TOTAL`, so a new file joins some shard the
-moment it exists, without anyone remembering to add it.
+covering less every month. Live enumeration keeps coverage exhaustive regardless of which
+algorithm then assigns shards: every enumerated target ends up in exactly one shard, so a new
+file joins some shard the moment it exists, without anyone remembering to add it.
+
+WHICH shard is decided by greedy LPT (Longest Processing Time first) over `TARGET_WEIGHTS`, not
+by `i % SHARD_TOTAL`. Splitting by target COUNT assumed every target costs the same to
+interpret; measured (#178), the 102 targets range from 0.0s to 261.2s per run — an outlier
+~87x the median — and that range does not track file size (the largest test file by line count
+is one of the cheaper targets to interpret; a mid-sized one is the single most expensive). A
+count-balanced split can hand one shard several of the expensive tail and another shard none of
+it, which is exactly what happened: Linux `miri-tb`'s four shards measured 77.5 / 64.1 / 23.3 /
+12.8 minutes, shard 0 doing roughly 6x shard 3's work. LPT sorts targets by descending weight
+and assigns each to the shard currently carrying the least total weight — the standard greedy
+algorithm for this exact problem, with a known worst-case bound (at most 4/3 of optimal,
+converging to it as `SHARD_TOTAL` grows) rather than an ad hoc heuristic. See `TARGET_WEIGHTS`
+below for where the weight per target comes from and how a target with no entry is handled.
 
 Three units cannot be split by test target and are each PINNED to exactly one shard so they are
 paid once instead of `SHARD_TOTAL` times:
@@ -154,6 +167,135 @@ NAME_RE = re.compile(r"\A[A-Za-z0-9_-]+\Z")
 # that a human, not this script, checked the target still covers what its name promises. Keys
 # are target names; values are the approved source path, relative to the repository root.
 PATH_EXCEPTIONS: dict[str, str] = {}
+
+# Per-target LPT weight: seconds to interpret that target under Miri, averaged over the two
+# feature passes (`logos` and `logos,unstable-raw`) `miri_tb.sh`/`miri_sb.sh` run per shard.
+# Measured from GitHub Actions run 30904621015 (main @ b78e854, 2026-08-04), job
+# `miri-tb-x86_64-unknown-linux-gnu-shard{0,1,2,3}`, by pairing each `Running tests/<name>.rs`
+# line in the raw job log with the `finished in <N>s` line that follows it. Real interpreted
+# cost, not a size proxy: file size was checked and rejected as a stand-in — the largest test
+# file by line count (`parser_delim`) is one of the cheaper targets below, and a mid-sized file
+# (`pratt_txn_retention`) is the single most expensive.
+#
+# A single-run snapshot, not a byte-identity requirement on this file: Miri timing drifts with
+# the suite and with shared-runner noise, and nothing here asserts this table still matches a
+# live run. It exists so `partition()` is weight-AWARE instead of uniform, which it was not at
+# all before #178. Refresh by re-parsing a recent green Miri job log the same way when the skew
+# below drifts far enough to matter again. A live target with no entry here — added since this
+# was captured — falls back to `DEFAULT_WEIGHT` rather than being dropped or refused; see the
+# `note()` in `partition()` for how that fallback is surfaced rather than silently absorbed.
+TARGET_WEIGHTS: dict[str, float] = {
+  "absence_terminal_stop": 7.0,
+  "boost": 7.6,
+  "bstr_gate": 0.0,
+  "bundle_elaboration": 1.0,
+  "bytes_gate": 0.0,
+  "cmpl_pins": 1.0,
+  "collection_resource_trip": 20.2,
+  "collection_terminal_stop": 3.1,
+  "combinators": 3.1,
+  "container": 1.9,
+  "delim_branded_lang": 0.8,
+  "delim_unclosed": 4.9,
+  "delim_wrong_opener_eoi": 4.4,
+  "delimited": 2.6,
+  "delimited_edges": 6.0,
+  "delimited_errors": 10.8,
+  "delimited_front_witness": 58.8,
+  "delimited_route_parity": 2.0,
+  "diagnostics": 0.0,
+  "dialect_anchor": 0.5,
+  "dispatch": 4.6,
+  "dispatch_terminal_stop": 0.9,
+  "downcast": 0.3,
+  "emitter": 9.8,
+  "end_state_parity": 9.9,
+  "error": 19.5,
+  "error_extra": 7.6,
+  "escaped": 3.4,
+  "expect": 3.1,
+  "expect_with_cache": 4.3,
+  "handler": 18.9,
+  "handler_coverage": 22.1,
+  "handler_extra": 12.6,
+  "hipstr_gate": 0.0,
+  "input_ref": 5.0,
+  "keyword": 6.0,
+  "lexer_error_paths": 2.3,
+  "lit_token": 5.5,
+  "misc": 5.4,
+  "missing_separator": 1.2,
+  "nonparser": 28.7,
+  "parse_input": 2.3,
+  "parser_atoms": 9.6,
+  "parser_basic": 3.4,
+  "parser_delim": 25.1,
+  "parser_extra": 2.3,
+  "parser_fold": 4.2,
+  "parser_misc": 6.5,
+  "parser_node": 0.0,
+  "parser_padded": 5.7,
+  "parser_pratt": 2.9,
+  "parser_recover": 1.9,
+  "parser_repeated": 5.0,
+  "parser_repeated_delim": 4.1,
+  "parser_repeated_while": 8.7,
+  "parser_small": 48.0,
+  "pratt_end": 1.0,
+  "pratt_floor": 25.7,
+  "pratt_limit": 162.1,
+  "pratt_limit_unit_sink": 122.8,
+  "pratt_prefix_progress": 60.0,
+  "pratt_progress_guard": 166.8,
+  "pratt_txn_retention": 261.2,
+  "probe_close_no_rescan": 1.3,
+  "punct": 2.6,
+  "punct_branded_lang": 0.4,
+  "recovery_terminal_stop": 1.9,
+  "render_freeze": 1.0,
+  "repeated_while_max_hook_order": 1.3,
+  "sep_delim": 19.7,
+  "sep_delim_extra": 6.5,
+  "sep_delim_mutref": 6.3,
+  "sep_parse": 14.1,
+  "sep_parse_extra": 4.5,
+  "sep_parse_mutref": 5.9,
+  "sep_require": 18.0,
+  "sep_while": 10.1,
+  "sep_while_delim": 6.9,
+  "sep_while_delim_extra": 6.1,
+  "sep_while_delim_mutref": 6.5,
+  "sep_while_delim_terminal_stop": 0.6,
+  "sep_while_parse": 14.1,
+  "sep_while_parse_extra": 6.0,
+  "sep_while_parse_mutref": 6.2,
+  "sep_while_terminal_stop": 0.6,
+  "separated": 10.9,
+  "separator_delivery": 2.0,
+  "separator_position": 1.3,
+  "session_points": 0.9,
+  "shape_unclosed": 4.4,
+  "span": 63.7,
+  "state_machine": 10.9,
+  "sync": 3.6,
+  "token_error": 2.2,
+  "tracker": 5.0,
+  "tryshape_terminal_stop": 3.1,
+  "typed_unclosed": 0.8,
+  "types": 12.4,
+  "unclosed_kind_dispatch": 1.0,
+  "utils": 7.4,
+  "verbose_conformance": 17.6,
+  "wapi_b": 5.7,
+}
+
+# The median of TARGET_WEIGHTS' values at capture time, used for any live target the table does
+# not name. Median rather than mean: the distribution is dominated by a handful of outliers
+# (five targets over 60s against this 5.0s median; the mean is ~15s), so the mean would overstate
+# a typical new target while still understating what the tail actually costs. An unweighted
+# target is not a failure — `partition()` still produces a valid, exhaustive, disjoint split,
+# see guards (6)-(7) — only one LPT cannot yet balance correctly against real cost.
+DEFAULT_WEIGHT = 5.0
 
 
 def die(msg: str) -> None:
@@ -362,7 +504,15 @@ def verify_targets(meta: dict, root: Path) -> list[str]:
 
 
 def partition(names: list[str]) -> list[list[str]]:
-    """Guard (6)-(7). Returns the shards, having re-proved the whole partition."""
+    """Guard (6)-(7), and the cost-aware assignment itself.
+
+    Greedy LPT (Longest Processing Time first): `names` sorted by DESCENDING
+    `TARGET_WEIGHTS` (ties broken by name, so the order — and therefore the whole partition —
+    is deterministic regardless of the input list's order), each assigned in turn to whichever
+    shard currently carries the LEAST total weight (ties broken by the lower shard index). This
+    is the standard approximation algorithm for balanced multiprocessor scheduling; see the
+    module header for the measured imbalance it replaces `i % SHARD_TOTAL` to fix.
+    """
     # (6) No shard can be empty by arithmetic.
     if SHARD_TOTAL < 1:
         die(f"SHARD_TOTAL must be >= 1, got {SHARD_TOTAL}")
@@ -372,9 +522,21 @@ def partition(names: list[str]) -> list[list[str]]:
             "exist; some shard would interpret nothing and pass."
         )
 
-    shards = [
-        [n for i, n in enumerate(names) if i % SHARD_TOTAL == s] for s in range(SHARD_TOTAL)
-    ]
+    unweighted = sorted(n for n in names if n not in TARGET_WEIGHTS)
+    if unweighted:
+        note(
+            f"{len(unweighted)} of {len(names)} target(s) have no TARGET_WEIGHTS entry and use "
+            f"DEFAULT_WEIGHT ({DEFAULT_WEIGHT}s); consider refreshing the table: {unweighted}"
+        )
+
+    order = sorted(names, key=lambda n: (-TARGET_WEIGHTS.get(n, DEFAULT_WEIGHT), n))
+    shards: list[list[str]] = [[] for _ in range(SHARD_TOTAL)]
+    shard_cost = [0.0] * SHARD_TOTAL
+    for n in order:
+        s = min(range(SHARD_TOTAL), key=lambda i: (shard_cost[i], i))
+        shards[s].append(n)
+        shard_cost[s] += TARGET_WEIGHTS.get(n, DEFAULT_WEIGHT)
+    shards = [sorted(shard) for shard in shards]
 
     # (7) Every shard re-proves the whole partition, not just its own slice.
     for s, shard in enumerate(shards):
