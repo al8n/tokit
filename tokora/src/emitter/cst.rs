@@ -62,7 +62,11 @@ use super::*;
 /// Two shapes are worth naming:
 ///
 /// - a **decline or error-unwind** between a start and its finish is safe *when the pair is
-///   emitted by a both-exits bracket* (the `labelled` precedent); raw callers own that duty;
+///   emitted by a both-exits bracket* (the `labelled` precedent); raw callers own that duty.
+///   A start has **two** closing exits, and the bracket owes exactly one of them:
+///   [`cst_finish`](Self::cst_finish) on success, [`cst_demote`](Self::cst_demote) on
+///   failure — the latter spending the mark `cst_start` handed back, which is why it hands
+///   one back at all;
 /// - a **session point rolled back across a finished node** truncates the finish but not the
 ///   start — legal, and reported by materialization as a leftover open, per the
 ///   `begin_point` settle-your-points clause.
@@ -85,16 +89,41 @@ use super::*;
 /// minted at each node open and consumed at its finish — which costs a mark-like allocation
 /// per node open on the hot emit path. The kind is the cheap 90%; the brand is not paid for.
 pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
-  /// Opens a node of `kind`; the matching [`cst_finish`](Self::cst_finish) closes it.
+  /// Opens a node of `kind`, returning the [`EventMark`] naming the slot it appended; the
+  /// matching [`cst_finish`](Self::cst_finish) closes it, and
+  /// [`cst_demote`](Self::cst_demote) un-opens it on a failing exit.
   ///
   /// `kind` is a dialect u16 from the unified kind space; the [`TOMBSTONE`](crate::cst::event::TOMBSTONE)
   /// value is reserved and rejected by recording sinks.
+  ///
+  /// # The handback, and who needs it
+  ///
+  /// The returned mark exists for the **both-exits bracket**: `node(kind, p)` names the kind
+  /// up front and, when `p` returns `Err`, spends the mark on `cst_demote` so the opened slot
+  /// reverts to an inert tombstone. A caller that never fails — or that closes with
+  /// `cst_finish` on every path — may discard it; an unspent start mark costs nothing beyond
+  /// the open node it names, which the stream must still balance.
+  ///
+  /// It is deliberately the **same** [`EventMark`] type [`cst_mark`](Self::cst_mark) hands
+  /// out, not a second position handle: one positional-mark surface, one staleness rule, one
+  /// validation wall. The two provenances are still distinguishable at a recording sink, and
+  /// the spend verbs do not cross — [`cst_start_at`](Self::cst_start_at) refuses a start mark
+  /// at its tombstone wall, and `cst_demote` refuses a `cst_mark` tombstone at its kind check
+  /// *and* refuses the reserved tombstone kind as an argument, so neither verb can be talked
+  /// into the other's slot.
+  ///
+  /// The default returns an **inert** mark (no event channel to name): the same value
+  /// [`cst_mark`](Self::cst_mark) defaults to, and just as unspendable on a recording sink.
+  /// An emitter with no event channel of its own should not override this method at all; a
+  /// **wrapper** emitter must forward the inner's return value unchanged, because that value
+  /// is the inner's own slot name and nothing else can stand in for it.
   #[inline(always)]
-  fn cst_start(&mut self, kind: u16)
+  fn cst_start(&mut self, kind: u16) -> EventMark
   where
     L: Lexer<'a>,
   {
     let _ = kind;
+    EventMark::inert()
   }
 
   // There is deliberately **no** `cst_token` here. Tokens reach the event stream through
@@ -119,6 +148,55 @@ pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
     L: Lexer<'a>,
   {
     let _ = kind;
+  }
+
+  /// Un-opens the node [`cst_start`](Self::cst_start) appended at `mark`: the **failing
+  /// exit** of an up-front bracket, which reverts the slot to an inert tombstone so the
+  /// stream carries no dangling open node.
+  ///
+  /// `kind` is the kind the matching `cst_start` was given — the same identity-by-kind
+  /// argument [`cst_finish`](Self::cst_finish) takes, checked here at the emit site rather
+  /// than at materialization because the mark names the exact slot to check.
+  ///
+  /// A demoted slot is indistinguishable from a never-spent [`cst_mark`](Self::cst_mark)
+  /// tombstone — the error path of the up-front bracket produces the byte-identical event
+  /// buffer the retro bracket's error path produces — so it materializes into nothing and
+  /// pairs with no finish. Indistinguishable is meant literally, and it cuts both ways: the
+  /// mark is *not* inert afterwards. It still names a live tombstone, so
+  /// [`cst_start_at`](Self::cst_start_at) will accept it, and that is coherent rather than a
+  /// gap — retro-wrapping the abandoned region under an error kind is exactly what recovery
+  /// tooling wants a failed bracket to leave behind. What the mark can no longer do is demote
+  /// again: the slot no longer holds a start of its kind.
+  ///
+  /// # Panics
+  ///
+  /// A recording sink validates the mark in **every** build — issued by this sink, in
+  /// bounds, era not invalidated by a later truncation, `kind` not the reserved
+  /// [`TOMBSTONE`](crate::cst::event::TOMBSTONE), and the slot still holding a `StartNode` of
+  /// exactly `kind` — and panics otherwise. This is the savepoint posture
+  /// [`cst_start_at`](Self::cst_start_at) already takes: a stale, foreign, wrong-kind or
+  /// already-**demoted** spend is a parser bug, and rewriting whatever else sits at that index
+  /// is the wrong-tree class nothing downstream can detect. The kind check is what makes a
+  /// `cst_mark` tombstone unspendable here, the mirror of `cst_start_at`'s tombstone wall
+  /// refusing a start mark; the reserved-kind check keeps that true even when the demote
+  /// *names* the tombstone kind, which no `cst_start` could ever have opened.
+  ///
+  /// One misuse is deliberately **not** an every-build panic: demoting a start whose node was
+  /// already **finished**. The slot cannot witness its own close — the finish is appended above
+  /// it — so proving it at the wall would put a scan on the failure path of every grammar. It
+  /// is caught at the two tiers this crate calibrates such checks to instead. A **debug** build
+  /// panics here, at the misuse site, on an exact recount of the events above the mark. A
+  /// **release** build refuses at materialization, typed: the demote removes one frame push and
+  /// no pop, so the replay walk underflows and answers `cst::FinishError::OrphanFinish` — or
+  /// `MismatchedFinish`, when kinds misalign first — through `Cst::finish` **and**
+  /// `Cst::finish_partial` alike, because they are one walk and the partial door relaxes
+  /// end-of-stream opens rather than balance. A silently wrong tree is not among the outcomes.
+  #[inline(always)]
+  fn cst_demote(&mut self, mark: EventMark, kind: u16)
+  where
+    L: Lexer<'a>,
+  {
+    let _ = (mark, kind);
   }
 
   /// Appends an inert tombstone and returns the [`EventMark`] naming it — the anchor for a
@@ -164,7 +242,7 @@ where
   U: CstEmitter<'a, L, Lang>,
 {
   #[inline(always)]
-  fn cst_start(&mut self, kind: u16)
+  fn cst_start(&mut self, kind: u16) -> EventMark
   where
     L: Lexer<'a>,
   {
@@ -177,6 +255,14 @@ where
     L: Lexer<'a>,
   {
     (**self).cst_finish(kind)
+  }
+
+  #[inline(always)]
+  fn cst_demote(&mut self, mark: EventMark, kind: u16)
+  where
+    L: Lexer<'a>,
+  {
+    (**self).cst_demote(mark, kind)
   }
 
   #[inline(always)]

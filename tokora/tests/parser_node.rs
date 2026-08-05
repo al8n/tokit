@@ -437,6 +437,82 @@ fn backtrack_equivalence_seed_declined_wrap_vs_straight() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// The two brackets — up-front (`ParseInput`) and retro (everything else)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// `Node` carries an up-front bracket as a `ParseInput` (`cst_start` at entry, `cst_finish` or
+// `cst_demote` at exit) and the retro one as a `TryParseInput` (`cst_mark` at entry, spent as a
+// retro-wrap on acceptance only), because a declining parser's kind is not knowable at entry —
+// a decline must leave *nothing*, on a path that also consumes nothing. The two encodings are
+// observationally equivalent, and these two cells are what keeps them so.
+
+/// **The equivalence.** Same source, same kind, same committed region: the two brackets build
+/// the byte-identical green tree. This is the crate-local half of the four-corpora
+/// byte-identity gate, and unlike that gate it is not blind to the retro path.
+#[test]
+fn the_up_front_and_retro_brackets_build_the_identical_tree() {
+  /// Accepts and consumes two tokens, declining only on an empty input.
+  fn try_two(inp: &mut Ir<'_, '_>) -> Result<ParseAttempt<()>, TestErr> {
+    match inp.try_expect(|t| t.data().0 == b'a')? {
+      Some(_) => {
+        take_one(inp)?;
+        Ok(ParseAttempt::Accept(()))
+      }
+      None => Ok(ParseAttempt::Decline),
+    }
+  }
+
+  let (res, up_front) = run("ab", |inp| node(K_NODE, take_two).parse_input(inp));
+  assert_eq!(res, Ok(()));
+
+  let (res, retro) = run("ab", |inp| {
+    let attempt = node(K_NODE, try_two).try_parse_input(inp)?;
+    assert!(matches!(attempt, ParseAttempt::Accept(())));
+    Ok(())
+  });
+  assert_eq!(res, Ok(()));
+
+  assert_eq!(
+    up_front.expect("the up-front bracket balances"),
+    retro.expect("the retro bracket balances"),
+    "the two bracket encodings must materialize the same tree — a divergence here is a wrong \
+     tree that the GraphQL corpora, which drive only the up-front path, cannot see"
+  );
+}
+
+/// **The decline path stays retro, and stays balanced.** The regression this pins is the
+/// tempting generalisation: converting `TryParseInput for Node` to the up-front bracket too.
+/// A decline would then leave an open `StartNode` that no exit closes — `cst_demote` is the
+/// *failure* exit and a decline is not a failure — and the strict `finish` door would refuse
+/// the whole parse with `UnclosedNodes` even though the grammar behaved perfectly. The cell is
+/// green today and reds on that change, which is exactly its job.
+#[test]
+fn a_decline_leaves_the_buffer_balanced_and_the_strict_finish_door_open() {
+  let (res, green) = run("ab", |inp| {
+    // Declines twice — once bare, once through `node_opt`'s adapter — with a successful
+    // up-front node between them, so a dangling start from either decline is visible.
+    let first = node(K_NODE, try_x).try_parse_input(inp)?;
+    assert!(matches!(first, ParseAttempt::Decline));
+    node(K_INNER, take_one).parse_input(inp)?;
+    assert_eq!(node_opt(K_NODE, try_x).parse_input(inp)?, None);
+    take_one(inp)
+  });
+  assert_eq!(res, Ok(()));
+
+  let root = tree(green.expect(
+    "the strict door: two declines leave nothing open, so `finish` succeeds rather than \
+     reporting UnclosedNodes",
+  ));
+  assert_eq!(root.text().to_string(), "ab");
+  assert_eq!(
+    root.children().count(),
+    1,
+    "only the accepted node exists — a decline records no node, not even an empty one"
+  );
+  assert_eq!(root.first_child().expect("Root[Inner]").kind(), K_INNER);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // node_at() / node_opt()
 // ═══════════════════════════════════════════════════════════════════════════════
 

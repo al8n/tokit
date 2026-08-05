@@ -142,6 +142,70 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   `CachedToken` gains no `PartialEq` impl (the kit compares componentwise for the message quality
   that buys).
 
+- **`CstEmitter::cst_start` now returns an `EventMark`, and a new `CstEmitter::cst_demote`
+  spends it — the up-front node bracket.** `node(kind, p)` driven as a `ParseInput` used to
+  name its node's kind *after* the sub-parse: entry minted an inert tombstone (`cst_mark`) and
+  a successful exit retro-wrapped it (`cst_start_at` + `cst_finish`), three events per node.
+  It now names the kind at entry (`cst_start`) and closes on both exits — `cst_finish` on
+  success, `cst_demote` on failure — two events per node. Measured on the GraphQL `alias`
+  corpus: **−57.7 µs** median over six paired reps, 9,013 events removed from a 64,085-event
+  log, which is ~3.8% of the lossless parse and ~19% of the gap to `apollo-parser`;
+  **−7.4 µs** on `supergraph`, **−0.3 µs** on `example_query`, no corpus slower and 14/14
+  paired reps same-signed.
+
+  What breaks — two shapes, both in the emitter layer, none in a grammar. An emitter that
+  **overrides** `cst_start` must now return the `EventMark` naming the slot it opened: a
+  wrapper forwards the inner's value unchanged, and an emitter with no event channel should
+  not override the method at all and inherits the defaulted inert mark. And an emitter that
+  overrides any structuring method should also forward `cst_demote`, for the same reason it
+  forwards the rest — a wrapper that forwards `cst_start` and inherits the `cst_demote` no-op
+  leaves its inner carrying a dangling open node for every `Err` a `node()` sees. `cst_demote`
+  is defaulted, so that is a silent gap rather than a compile error, the same class
+  `commit_token` already had; the sink's composition census now covers it. Grammars are
+  untouched: `node`, `node_at` and `node_opt` are unchanged at their call sites, and the three
+  surfaces that forward the event channel (`EmitterView`, `InputRef`, `ParseState`) carry
+  `cst_demote` alongside the rest.
+
+  What deliberately did *not* change: only `ParseInput for Node` took the up-front bracket.
+  `TryParseInput for Node`, both `NodeAt` impls, `NodeOpt`, `cst_mark` / `cst_start_at` /
+  `Marker` and the whole pratt driver stay retro, and they stay retro for a reason rather than
+  by omission — a declining parser's kind is not knowable at entry (a decline must leave
+  *nothing*, on a path that also consumes nothing), `node_at` exists precisely to name a kind
+  decided after its first child, and a pratt wrap's kind is a function of an operator not yet
+  read.
+
+  The law it amends: `cst/event.rs` argues at length that no operation rewrites the kind of an
+  interior slot. `cst_demote` does, and it is lawful in that one direction with no journal
+  entry — the write's author is the frame that appended the slot, so any truncation erasing the
+  branch that made the write erases the slot itself, while any truncation keeping the slot
+  keeps a demotion that is permanently true: the bracket exited with an error, and no rewind
+  re-runs an exited frame. The banned direction stays banned. Completing a tombstone in place
+  lets a rolled-back branch's decision survive its own truncation, because the completer is not
+  the frame that appended the slot.
+
+  The misuse wall around `cst_demote` is scoped to what it can actually prove. Three spends are
+  refused in **every** build — a stale mark, a foreign sink's mark, and a mark whose slot is not
+  a live `StartNode` of the demoted kind — and so, now, is a demote naming the reserved
+  `TOMBSTONE` kind, which no `cst_start` can ever have opened. What the wall cannot see is a
+  start whose node was already **finished**: the finish is appended *above* the slot, so the slot
+  cannot witness it. A debug build catches that at the misuse site with an exact suffix scan; a
+  release build refuses it at materialization as a typed `FinishError` — the demote removes one
+  frame push and no pop, so the walk underflows and both `finish` and `finish_partial` return
+  `OrphanFinish`. It is never a silently wrong tree.
+
+  `cargo semver-checks` reports this, and that is expected and acknowledged here rather than
+  suppressed there: `cst_start`'s return type changed on a public trait, and `cst_demote` is a
+  new defaulted trait method. Both are intentional, both are described above, and 0.9.0 is the
+  vehicle.
+
+  The change costs a diagnostics-only parse **nothing, verified rather than asserted**: over
+  `Fatal` / `Verbose` / `Silent` the event methods are defaulted `#[inline(always)]` no-ops and
+  the handback is a dead `Copy` constant, and a fixture exercising the whole `node` family
+  compiles to a **byte-identical binary** before and after — positive control, perturbing
+  `cst_demote`'s default to a `black_box` changes it. The four-corpora tree-identity gate is
+  byte-identical on all four, error corpora included.
+  — *(#169)*
+
 ### Changed
 
 - **MSRV raised to 1.95.** The previous floor, 1.87, was not a forced minimum — the crate

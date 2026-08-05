@@ -9,7 +9,7 @@
 //!
 //! | # | Cell | Class | Rewind/restore semantics |
 //! |---|------|-------|--------------------------|
-//! | E1 | [`Sink::events`] | **ground truth** (a second emission log) | append + suffix-truncate to the mark — the same two verbs as `Verbose`'s log (plus the one censused prefix-preserving splice of the hole wrap, entirely above every live mark) |
+//! | E1 | [`Sink::events`] | **ground truth** (a second emission log) | append + suffix-truncate to the mark — the same two verbs as `Verbose`'s log (plus the one censused prefix-preserving splice of the hole wrap, entirely above every live mark, and the two censused interior writes: `cst_start_at`'s journaled `forward_parent` link and `cst_demote`'s structurally-unjournaled kind demotion — see the law in [`event`](super::event)) |
 //! | E2 | [`Sink::journal`] | **undo journal** (the Verbose-parallel-maps discipline lifted to events) | rewind pops entries written above the mark, reverse order, restoring each overwritten `forward_parent`; never grows on rewind |
 //! | E3 | [`Sink::ledger`] | **monotone era source + truncation witness** | rewind APPENDS to it (a rewind *is* a truncation) and never removes; rewinding it would false-accept a stale mark |
 //! | E4 | [`Sink::rows`] | **release stack + per-checkpoint depth ledger + inner reading** | push at `checkpoint()` (freezing the depth and the inner emitter's own checkpoint reading), pop at `release()` (kept) and `rewind()` (spent, the popped row's inner reading is the inner's rewind target); depth entries are frozen facts about prefixes, never live counters |
@@ -153,7 +153,14 @@ struct DegradedRewind {
 /// One undo-journal entry: an in-place `forward_parent` write performed by
 /// [`cst_start_at`](CstEmitter::cst_start_at) on its target tombstone, recorded so a rewind
 /// can reverse it. In-place event mutation is otherwise banned by law; this one acceleration
-/// field is the single exception, and it is legal *only because* every write is journaled.
+/// field is the single **journaled** exception, and it is legal *only because* every write is
+/// journaled.
+///
+/// The law's other exception, [`cst_demote`](CstEmitter::cst_demote)'s kind rewrite, is
+/// deliberately **not** here: its writer is the frame that appended the slot, so every
+/// truncation that could want the write undone erases the slot it was made on, and a journal
+/// entry would have nothing to restore onto. See the law amendment in
+/// [`event`](super::event).
 #[derive(Debug, Clone, Copy)]
 struct JournalEntry {
   /// The event-log length immediately after the append that carried this write (the
@@ -663,15 +670,132 @@ where
     let is_current = !self.ledger.is_stale(mark.era(), index);
     assert!(
       in_bounds && is_tombstone && is_current,
-      "stale EventMark: the tombstone this mark named no longer exists on the live \
-       timeline (a rewind truncated it{}). The wrap intent died with the branch that \
-       conceived it; spending the mark anyway would wrap an unrelated region.",
-      if in_bounds {
-        " and the buffer regrew over its index"
+      "stale EventMark: this mark no longer names a live tombstone — {}. Spending it anyway \
+       would wrap an unrelated region: the wrong-tree class nothing downstream can detect.",
+      // Only evaluated on the failure path, so the extra discrimination costs the spend
+      // nothing. The last arm is the wrong-provenance misuse, which is not staleness at all
+      // and would otherwise be reported as a rewind that never happened.
+      if !in_bounds {
+        "a rewind truncated it away, so the wrap intent died with the branch that conceived it"
+      } else if !is_current {
+        "a rewind truncated it away and the buffer regrew over its index, so the wrap intent \
+         died with the branch that conceived it"
+      } else if matches!(self.events[index as usize], Event::StartNode { .. }) {
+        "the slot holds a real-kind StartNode, so the mark came from `cst_start` and not from \
+         `cst_mark`. An up-front start is closed by `cst_finish` or reverted by `cst_demote`; \
+         it is never a retro-wrap target, because wrapping an already-open node would nest it \
+         inside a wrap of itself"
       } else {
-        ""
+        "the slot holds no node start at all"
       },
     );
+  }
+
+  /// Validates a **start** mark before a demote — the panic-in-every-build wall for the
+  /// up-front bracket's failing exit, and the mirror of [`validate_mark`](Self::validate_mark).
+  ///
+  /// The two walls take the same three positional checks (issued by this sink, index in
+  /// bounds, no truncation younger than the mark's era reached the index) and then diverge on
+  /// the **slot content**, which is what keeps the two mark provenances from crossing: a
+  /// retro-wrap spend demands a live `TOMBSTONE`, a demote demands a live `StartNode` of
+  /// exactly the kind its `cst_start` was given. So a `cst_mark` tombstone cannot be demoted
+  /// (its kind is `TOMBSTONE`, which no `cst_start` is allowed to name), a `cst_start` mark
+  /// cannot be retro-wrapped (the tombstone wall refuses it), and a mark cannot be demoted
+  /// twice (the first demote leaves `TOMBSTONE` behind).
+  ///
+  /// That last sentence is only true because the **reserved kind is refused before the slot is
+  /// read at all**. A content-only comparison would let `cst_demote(mark, TOMBSTONE)` satisfy
+  /// itself against any live tombstone — a `cst_mark` slot, or one already carrying a live
+  /// `forward_parent` from a retro wrap — and write `TOMBSTONE` over `TOMBSTONE`: in release a
+  /// silent no-op on a slot the caller does not own, in debug a fire of `cst_demote`'s own
+  /// `forward_parent` assert far from the mistake. One compare against an immediate closes it
+  /// in every build, because no `cst_start` can ever have opened a `TOMBSTONE`-kind node.
+  ///
+  /// # What this wall cannot see, and what refuses it instead
+  ///
+  /// A start whose node was **already finished** passes here in a release build, and no check
+  /// that reads the slot can do better: the finish is appended *above* the slot, so the slot
+  /// cannot witness its own close. What that misuse costs is bounded and typed rather than
+  /// silent. The demote removes exactly one frame push from the stream (the start becomes a
+  /// tombstone, whose [`depth_delta`](Event::depth_delta) is 0) and removes no pop, so pops
+  /// exceed pushes and the replay walk underflows; `materialize` refuses at the first surplus
+  /// finish ([`FinishError::OrphanFinish`](crate::cst::FinishError::OrphanFinish), or
+  /// `MismatchedFinish` sooner when the kinds misalign first). Both public doors are the *same*
+  /// walk, and `close_open_nodes` relaxes only end-of-stream opens and gap tiling — never a
+  /// balance underflow — so [`finish`](Self::finish) and
+  /// [`finish_partial`](Self::finish_partial) refuse it alike. A debug build does not wait for
+  /// materialization: the exact suffix scan below catches it at the misuse site.
+  ///
+  /// Every check but that scan runs in every build, identity first, for the reason
+  /// [`validate_mark`](Self::validate_mark) gives: the positional and era halves are only
+  /// meaningful against the issuing sink's own history.
+  fn validate_start_mark(&self, mark: &EventMark, kind: u16) {
+    assert!(
+      mark.sink() == self.witness,
+      "EventMark was minted by a different sink (or by a no-event emitter's defaulted \
+       cst_start): marks are only spendable on the sink that issued them"
+    );
+    // Before the slot is read: the reserved kind names no node a `cst_start` could have
+    // opened, so no start mark can legally be demoted with it. See the doc comment for the
+    // two shapes this refuses that a content-only check admits.
+    assert!(
+      kind != TOMBSTONE,
+      "cst_demote with the reserved TOMBSTONE kind: no cst_start can open a TOMBSTONE-kind \
+       node (no validator admits it), so no start mark can legally be demoted with it — a \
+       cst_mark tombstone is spent by cst_start_at, never by cst_demote"
+    );
+    let index = mark.index();
+    let slot = if self.ledger.is_stale(mark.era(), index) {
+      None
+    } else {
+      self.events.get(index as usize)
+    };
+    let matches_kind = matches!(slot, Some(Event::StartNode { kind: k, .. }) if *k == kind);
+    assert!(
+      matches_kind,
+      "cst_demote on a mark that does not name a live open node of kind {kind}: the slot the \
+       mark named holds no such start any more. Either a rewind truncated it (the frame that \
+       opened the node was rolled back, and the demote belongs to a branch that no longer \
+       exists), or the mark was already demoted (a demoted start reverts to the tombstone \
+       kind), or it came from cst_mark, whose tombstones are spent by cst_start_at and never \
+       demoted. Rewriting whatever else sits at that index would be the wrong-tree class \
+       nothing downstream can detect."
+    );
+
+    // Detect-at-cause for the one misuse the slot itself cannot witness — a start whose node
+    // was already closed. Debug-only, and that is the calibration this surface already takes:
+    // `cst_finish`'s global-underflow check is a `debug_assert!` for the same reason, because
+    // the release backstop here is a TYPED refusal through both finish doors (see the doc
+    // comment) and not a wrong tree. Paying an O(suffix) recount in release would tax the
+    // failure path of every backtracking grammar to make a loud detection merely earlier.
+    //
+    // The predicate is EXACT, not heuristic, and — the #98 lesson — it consults no frozen
+    // baseline and no memo. It recounts the LIVE suffix strictly above the mark's own
+    // already-validated slot, so every truncation has already removed whatever it removed.
+    // While the marked node is still open the running sum cannot dip below zero: stack
+    // discipline pairs every surviving finish above the slot with a start above the slot (a
+    // completed child nets 0 and never dips on the way; an unspent tombstone and a token are
+    // 0 outright; a `StartAt` sits above the slot in EMISSION order whatever it hoists to, its
+    // +1 before its −1). A dip is therefore reachable only through a finish that closed the
+    // marked node itself, which is exactly demote-illegality. The sum is kind-blind, so the
+    // hoist-order inversion that forbids an emit-site kind check in `cst_finish` cannot reach
+    // it. The suffix total is deliberately NOT required to be 0: an open child above the mark
+    // is a different bug, already walled at materialization as `UnclosedNodes`.
+    #[cfg(debug_assertions)]
+    {
+      let mut depth: i64 = 0;
+      for ev in &self.events[index as usize + 1..] {
+        depth += ev.depth_delta();
+        assert!(
+          depth >= 0,
+          "cst_demote of a start whose node was already closed: a surviving cst_finish above \
+           the mark closed the node this mark names. The bracket owes exactly one closing \
+           exit, and this node took the success exit already. (In release builds this misuse \
+           surfaces at materialization as a typed FinishError — OrphanFinish or \
+           MismatchedFinish — through both finish and finish_partial.)"
+        );
+      }
+    }
   }
 
   /// Records one committed token. The token channel has exactly **one** door — the
@@ -745,11 +869,16 @@ where
     // reported span backward over already-committed tokens gets the wrap narrowed to its own
     // transaction, and the report itself forwarded untouched.
     //
-    // `EventMark`s need no term of their own here — but ONLY because `cst_mark`
-    // *materializes* a tombstone `StartNode` and this scan breaks on any structural event, so
-    // `at` is always above every tombstone and every `StartAt` target. **If a future design
-    // ever de-materialises marks — hands out an index with no event standing behind it — that
-    // immunity is gone and the floor must be extended to cover them.**
+    // `EventMark`s need no term of their own here — but ONLY because a mark *materializes* an
+    // event and this scan breaks on any structural event, so `at` is always above every mark's
+    // slot and every `StartAt` target. That holds for **both** mark provenances and in every
+    // state a marked slot can be in: `cst_mark` appends a tombstone `StartNode`, `cst_start`
+    // appends a real-kind `StartNode`, and `cst_demote` rewrites the second into the first
+    // **in place** — the slot never stops being a `StartNode`, so it never stops breaking the
+    // scan, and its index never moves. The up-front bracket therefore needs no floor term of
+    // its own. **If a future design ever de-materialises marks — hands out an index with no
+    // event standing behind it — that immunity is gone and the floor must be extended to
+    // cover them.**
     let floor = self
       .rows
       .borrow()
@@ -1312,7 +1441,7 @@ where
   E: Emitter<'inp, L, Lang> + ValueKeyedEmitter,
   Lang: ?Sized,
 {
-  fn cst_start(&mut self, kind: u16)
+  fn cst_start(&mut self, kind: u16) -> EventMark
   where
     L: Lexer<'inp>,
   {
@@ -1321,10 +1450,12 @@ where
       "node kind outside the dialect's own kind space (the tombstone kind, u16::MAX, is \
        reserved and no validator admits it)"
     );
+    let index = self.events.len() as u64;
     self.events.push(Event::StartNode {
       kind,
       forward_parent: None,
     });
+    EventMark::new(index, self.ledger.era(), self.witness)
   }
 
   fn cst_finish(&mut self, kind: u16)
@@ -1373,6 +1504,44 @@ where
        to close instead"
     );
     self.events.push(Event::FinishNode { kind });
+  }
+
+  fn cst_demote(&mut self, mark: EventMark, kind: u16)
+  where
+    L: Lexer<'inp>,
+  {
+    self.validate_start_mark(&mark, kind);
+
+    // THE ONE UNJOURNALED INTERIOR WRITE, and it is unjournaled *structurally* — see the law
+    // amendment in `cst/event.rs`. The write's author is the frame that appended this very
+    // slot, so a truncation reaching the write also reaches the slot: any rewind that would
+    // want the demote undone has already erased the thing it would undo it on. What survives
+    // a truncation ABOVE the slot is a demotion that is permanently true — the bracket exited
+    // with an error, and no rewind re-runs an exited frame. Un-demoting would resurrect a
+    // dangling open node whose finish never fires.
+    //
+    // The wall above is an unconditional `assert!`, so the slot IS a `StartNode` of `kind` in
+    // every build — the `else` arm is dead rather than a fallback, and spelling it that way is
+    // what keeps a future refactor of the wall from turning this into a silent no-op.
+    let Event::StartNode {
+      kind: k,
+      forward_parent,
+    } = &mut self.events[mark.index() as usize]
+    else {
+      unreachable!("validate_start_mark proved the slot is a StartNode of this kind")
+    };
+    // No `StartAt` can name a real-kind start: `cst_start_at` validates its target through the
+    // tombstone wall first, so this field is untouched since the append and the demoted slot
+    // is byte-identical to a never-spent `cst_mark` tombstone. The one shape that used to
+    // reach this assert with a live pointer — a retro-wrapped tombstone demoted with the
+    // reserved kind, which a content-only wall admits — is now refused above in every build,
+    // so this stays a debug canary over an argument the wall has already proved.
+    debug_assert!(
+      forward_parent.is_none(),
+      "a real-kind StartNode carries a forward_parent: only cst_start_at writes that field \
+       and its target must be a tombstone"
+    );
+    *k = TOMBSTONE;
   }
 
   fn cst_mark(&mut self) -> EventMark

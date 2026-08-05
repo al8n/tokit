@@ -302,13 +302,14 @@ where
   /// Opens a CST node of `kind` — [`CstEmitter::cst_start`], forwarded.
   ///
   /// Raw transport: pair it with [`cst_finish`](Self::cst_finish) through a both-exits bracket, or
-  /// use the `node`-shaped combinators.
+  /// use the `node`-shaped combinators. The returned mark is the failing exit's handle — spend
+  /// it on [`cst_demote`](Self::cst_demote).
   #[inline(always)]
-  pub fn cst_start(&mut self, kind: u16)
+  pub fn cst_start(&mut self, kind: u16) -> EventMark
   where
     E: CstEmitter<'inp, L, Lang>,
   {
-    self.emitter.cst_start(kind);
+    self.emitter.cst_start(kind)
   }
 
   /// Closes the innermost open CST node — [`CstEmitter::cst_finish`], forwarded.
@@ -318,6 +319,15 @@ where
     E: CstEmitter<'inp, L, Lang>,
   {
     self.emitter.cst_finish(kind);
+  }
+
+  /// Un-opens the node started at `mark` — [`CstEmitter::cst_demote`], forwarded.
+  #[inline(always)]
+  pub fn cst_demote(&mut self, mark: EventMark, kind: u16)
+  where
+    E: CstEmitter<'inp, L, Lang>,
+  {
+    self.emitter.cst_demote(mark, kind);
   }
 
   /// Appends a retro-wrap anchor — [`CstEmitter::cst_mark`], forwarded.

@@ -399,6 +399,395 @@ fn mark_survives_rewinds_strictly_above_it() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// The up-front bracket — `cst_start`'s handback and `cst_demote`'s wall
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// `node(kind, p)` as a `ParseInput` names the node's kind at entry and closes on both exits:
+// `cst_finish` on success, `cst_demote` on failure. The demote is the crate's ONE unjournaled
+// interior write, lawful because its author is the frame that appended the slot (the law
+// amendment lives in `cst/event.rs`). These cells hold the three properties that make it so:
+// the demoted slot is inert and indistinguishable from an unspent `cst_mark` tombstone, the
+// write survives exactly the truncations that keep its slot, and every misuse of the handback
+// panics in every build rather than rewriting an unrelated index.
+
+/// The demote is an **in-place** kind rewrite: no extra event, no journal entry, and the slot
+/// materializes into nothing — the abandoned node leaves no trace at all.
+#[test]
+fn demote_materialises_as_inert() {
+  let mut sink = verbose_sink("a");
+  let mark = sink.cst_start(K_NODE);
+  assert_eq!(mark.index(), 0, "the handback names the slot just appended");
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_demote(mark, K_NODE);
+
+  assert_eq!(
+    sink.events(),
+    &[
+      Event::StartNode {
+        kind: TOMBSTONE,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+    ],
+    "the slot reverts in place — the buffer neither grows nor shifts"
+  );
+  assert_eq!(
+    sink.journal_len(),
+    0,
+    "the demote is structurally unjournaled: a truncation that would want it undone erases \
+     the slot it was made on"
+  );
+
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("a demoted start leaves a balanced buffer");
+  assert_eq!(text(green.clone()), "a");
+  let root = tree(green);
+  assert_eq!(
+    root.children().count(),
+    0,
+    "the abandoned node materializes into nothing"
+  );
+  assert_eq!(root.children_with_tokens().count(), 1, "the token is loose");
+}
+
+/// **Why the four-corpora byte-identity gate can hold at all.** The two brackets' failing
+/// exits converge on the *same buffer*: the retro bracket leaves a `cst_mark` tombstone
+/// unspent, the up-front bracket demotes its own start back to one, and nothing — not the
+/// events, not the journal — separates the two. So converting `ParseInput for Node` changes
+/// the successful path's encoding only, and leaves the error path bit-for-bit alone.
+#[test]
+fn a_demoted_start_and_an_unspent_mark_leave_the_identical_buffer() {
+  let mut up_front = verbose_sink("a");
+  let mark = up_front.cst_start(K_NODE);
+  up_front.record_token(&MiniTok(b'a'), &span(0, 1));
+  up_front.cst_demote(mark, K_NODE);
+
+  let mut retro = verbose_sink("a");
+  let _unspent = retro.cst_mark();
+  retro.record_token(&MiniTok(b'a'), &span(0, 1));
+
+  assert_eq!(
+    up_front.events(),
+    retro.events(),
+    "the up-front bracket's Err exit is the retro bracket's Err exit, byte for byte"
+  );
+  assert_eq!(
+    up_front.journal_len(),
+    retro.journal_len(),
+    "both journal 0"
+  );
+}
+
+/// A truncation **strictly above** the demoted slot leaves the demotion standing. That is the
+/// direction the law argues for: the bracket already exited with an error, no rewind re-runs an
+/// exited frame, so un-demoting would resurrect a dangling open node whose finish never fires.
+#[test]
+fn demote_survives_a_truncation_strictly_above_it() {
+  let mut sink = verbose_sink("ab");
+  let mark = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_demote(mark, K_NODE);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+  rewind(&mut sink, ckp);
+
+  assert_eq!(
+    sink.events(),
+    &[
+      Event::StartNode {
+        kind: TOMBSTONE,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+    ],
+    "the rewind dropped the events above the mark and left the demotion in place"
+  );
+  // Balance is checked before the gap latch is consumed, so the only complaint being the
+  // rewound `b`'s uncovered byte IS the still-balanced proof: an un-demote on rewind would
+  // have reopened a node with no finish and answered `UnclosedNodes` first.
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("the rewound token leaves byte 1 uncovered"),
+    FinishError::UncoveredGap { start: 1, end: 2 }
+  );
+}
+
+/// A truncation **at or below** the slot erases the slot itself — which is precisely why the
+/// write needs no journal entry: there is nothing left for a reverse-replay to restore onto.
+#[test]
+fn demote_dies_with_a_truncation_at_or_below_it() {
+  let mut sink = verbose_sink("a");
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let mark = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_demote(mark, K_NODE);
+  rewind(&mut sink, ckp);
+
+  assert!(
+    sink.events().is_empty(),
+    "the truncation erased the very slot the write was made on"
+  );
+  assert_eq!(sink.journal_len(), 0);
+}
+
+/// The sharpest staleness alias, the demote twin of
+/// `stale_mark_panics_even_over_a_regrown_tombstone`: the regrown event at the mark's index is
+/// another `StartNode` of the *same kind*, so the positional and kind checks alone would both
+/// validate — only the era separates the histories.
+#[test]
+#[should_panic(expected = "cst_demote on a mark")]
+fn stale_demote_panics_even_over_a_regrown_start_of_the_same_kind() {
+  let mut sink = verbose_sink("");
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let dead = sink.cst_start(K_NODE);
+  rewind(&mut sink, ckp);
+  let live = sink.cst_start(K_NODE);
+  assert_eq!(live.index(), dead.index());
+  sink.cst_demote(dead, K_NODE);
+}
+
+/// A mark minted by one sink must not demote on another, even at the exact `(index: 0, era: 0)`
+/// collision two fresh sinks mint — the identity half of the wall, unconditional in every build.
+#[test]
+#[should_panic(expected = "different sink")]
+fn foreign_sink_demote_panics() {
+  let mut a = verbose_sink("");
+  let mut b = verbose_sink("");
+  let mark_a = a.cst_start(K_NODE);
+  let mark_b = b.cst_start(K_NODE);
+  assert_eq!(mark_a.index(), mark_b.index());
+  assert_eq!(mark_a.era(), mark_b.era());
+  b.cst_demote(mark_a, K_NODE);
+}
+
+/// An inert mark (a diagnostics-only emitter's defaulted `cst_start`) can never demote on a
+/// recording sink: its reserved witness names no sink.
+#[test]
+#[should_panic(expected = "different sink")]
+fn inert_mark_demote_panics() {
+  let mut fatal = Fatal::<TestErr>::new();
+  let inert = CstEmitter::<MiniLexer<'_>>::cst_start(&mut fatal, K_NODE);
+  let mut sink = verbose_sink("");
+  sink.cst_demote(inert, K_NODE);
+}
+
+/// The kind is checked, not merely carried: demoting with the wrong kind is the leaked-finish
+/// shape moved to the emit site, and the mark names the exact slot to check, so it is caught
+/// here rather than deferred to materialization.
+#[test]
+#[should_panic(expected = "cst_demote on a mark")]
+fn wrong_kind_demote_panics() {
+  let mut sink = verbose_sink("");
+  let mark = sink.cst_start(K_NODE);
+  sink.cst_demote(mark, K_LIST);
+}
+
+/// The two mark provenances do not cross in this direction either: a `cst_mark` tombstone is
+/// spent by `cst_start_at` and is never demotable. This is the half the slot-content check
+/// answers on its own — a real-kind argument against a `TOMBSTONE` slot. The other half, a
+/// `TOMBSTONE` **argument**, is not a content question at all and is refused separately; see
+/// `demote_with_the_tombstone_kind_panics`.
+#[test]
+#[should_panic(expected = "cst_demote on a mark")]
+fn demote_of_a_cst_mark_tombstone_panics() {
+  let mut sink = verbose_sink("");
+  let mark = sink.cst_mark();
+  sink.cst_demote(mark, K_NODE);
+}
+
+/// The reserved kind is refused as an **argument**, before the slot is read at all — the check
+/// that makes "the spend verbs do not cross" true rather than almost-true.
+///
+/// A content-only wall compares the slot's kind against the caller's, so `TOMBSTONE` against a
+/// live tombstone *matches*, and the demote then writes `TOMBSTONE` over `TOMBSTONE`. In a
+/// release build that is a silent no-op on a slot the caller never opened. The sharper shape it
+/// also retires is a **retro-wrapped** tombstone, whose `forward_parent` is live: the same
+/// content-only wall waves that through too, and only `cst_demote`'s debug `forward_parent`
+/// canary would have caught it, far from the mistake. One compare against an immediate closes
+/// both, in every build.
+#[test]
+#[should_panic(expected = "reserved TOMBSTONE kind")]
+fn demote_with_the_tombstone_kind_panics() {
+  let mut sink = verbose_sink("");
+  let mark = sink.cst_mark();
+  sink.cst_demote(mark, TOMBSTONE);
+}
+
+/// Single-use falls out of the same check: the first demote leaves a tombstone behind, so a
+/// second one finds no start of the expected kind.
+#[test]
+#[should_panic(expected = "cst_demote on a mark")]
+fn a_second_demote_of_one_mark_panics() {
+  let mut sink = verbose_sink("");
+  let mark = sink.cst_start(K_NODE);
+  sink.cst_demote(mark, K_NODE);
+  sink.cst_demote(mark, K_NODE);
+}
+
+/// **The one misuse the slot cannot witness**, caught at cause — in a debug build. `cst_finish`
+/// is appended *above* the mark's slot, so after it the slot still holds a live `StartNode` of
+/// exactly the demoted kind: identity, bounds, era and content all pass. Only a recount of the
+/// events above the mark sees the close, and that recount is `cfg(debug_assertions)`-only
+/// because the release backstop is a typed refusal rather than a wrong tree — pinned by
+/// `the_finished_then_demoted_residue_is_refused_typed_through_both_doors` below.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "already closed")]
+fn demote_of_a_finished_start_panics_in_debug() {
+  let mut sink = verbose_sink("a");
+  let mark = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_NODE);
+  sink.cst_demote(mark, K_NODE);
+}
+
+/// **What a release build does with the residue instead** — and it is what the `cst_demote` docs
+/// now stake, so it is pinned here rather than argued.
+///
+/// The buffer is built *directly*, not by committing the misuse, and that is what lets the cell
+/// run in **every** build: in a debug build the misuse is refused at cause by the cell above and
+/// never reaches materialization at all. Byte for byte, this is what
+/// `cst_start(K_NODE); token; cst_finish(K_NODE); cst_demote(mark, K_NODE)` leaves behind.
+///
+/// The counting argument the docs make: demoting a finished start removes one frame **push**
+/// (the start's `depth_delta` drops from 1 to 0) and removes no **pop**, so pops exceed pushes
+/// and the replay walk must underflow. `finish` and `finish_partial` are one walk over that
+/// buffer — `close_open_nodes` relaxes end-of-stream opens and gap tiling, never balance — so
+/// **both** doors refuse, typed. There is no door through which this residue becomes a tree.
+#[test]
+fn the_finished_then_demoted_residue_is_refused_typed_through_both_doors() {
+  fn residue(src: &str) -> VerboseSink<'_> {
+    let mut sink = verbose_sink(src);
+    // The demoted slot: byte-identical to a `cst_start` whose kind was rewritten back.
+    let _demoted = sink.cst_mark();
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
+    // The finish the demote left behind. Raw, because `cst_finish`'s own debug wall refuses to
+    // append a close with nothing open — which is the very imbalance this cell is about.
+    sink.push_raw_event_for_tests(Event::FinishNode { kind: K_NODE });
+    sink
+  }
+
+  assert_eq!(
+    residue("a").events(),
+    &[
+      Event::StartNode {
+        kind: TOMBSTONE,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+      Event::FinishNode { kind: K_NODE },
+    ],
+    "the residue is the post-misuse buffer exactly: demoted slot, token, surviving finish"
+  );
+
+  let (green, _emitter) = residue("a").finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("the strict door refuses the surplus finish"),
+    FinishError::OrphanFinish { index: 2 }
+  );
+
+  let (green, _emitter) = residue("a").finish_partial(K_ROOT);
+  assert_eq!(
+    green.expect_err("and so does the tooling door — one walk, one balance check"),
+    FinishError::OrphanFinish { index: 2 },
+    "close_open_nodes relaxes end-of-stream opens, not a pop with nothing to pop"
+  );
+}
+
+/// **The #98-class guard on the debug scan.** A predicate that fires on a legal history is worse
+/// than no predicate at all, and this repo has shipped that mistake once: the old `cst_finish`
+/// assert compared depth against a *frozen* baseline and panicked on a legal cross-checkpoint
+/// close. The new scan carries no baseline — it recounts the live suffix — and this cell is the
+/// busiest legal frame that recount has to admit.
+///
+/// Every shape here puts a `FinishNode` above the mark's slot without closing the marked node: a
+/// completed child (+1 then −1, never dipping), an unspent `cst_mark` tombstone (0 outright),
+/// and a completed retro wrap whose `StartAt` sits above the mark in **emission** order whatever
+/// it hoists to, so its +1 still precedes its −1 there. The demote must be silent, and the
+/// buffer must still materialize.
+#[test]
+fn demote_scan_admits_a_busy_legal_frame() {
+  let mut sink = verbose_sink("abc");
+  let outer = sink.cst_start(K_NODE);
+
+  // A completed child node.
+  sink.cst_start(K_LIST);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_LIST);
+
+  // An unspent tombstone, left to materialize into nothing.
+  let _unspent = sink.cst_mark();
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+
+  // A completed retro wrap, hoisted below its own `StartAt` at materialization.
+  let anchor = sink.cst_mark();
+  sink.record_token(&MiniTok(b'c'), &span(2, 3));
+  sink.cst_start_at(anchor, K_WRAP);
+  sink.cst_finish(K_WRAP);
+
+  // The demote under test: legal, and the scan must not fire on any of the above.
+  sink.cst_demote(outer, K_NODE);
+
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("a legal demote over a busy frame still materializes");
+  assert_eq!(text(green.clone()), "abc", "losslessness holds");
+  assert_eq!(
+    shape(&green),
+    "Root[List[Tok\"a\"] Tok\"b\" Wrap[Tok\"c\"]]",
+    "the demoted outer node vanishes; every completed structure above it survives"
+  );
+}
+
+/// …and the mirror wall, which is what keeps the shared `EventMark` type honest: an up-front
+/// start mark is refused by `cst_start_at`. `validate_mark` demands a live **tombstone**, and a
+/// real-kind `StartNode` is not one — retro-wrapping an already-open node would nest it inside
+/// a wrap of itself.
+#[test]
+#[should_panic(expected = "came from `cst_start`")]
+fn start_at_on_an_up_front_start_mark_panics() {
+  let mut sink = verbose_sink("a");
+  let mark = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_start_at(mark, K_WRAP);
+}
+
+/// **The panic residue, pinned.** A panic that escapes *every* guard is the one exit the
+/// up-front bracket does not close — no `catch_unwind` is involved, so there is no mechanism to
+/// test, only the residue it leaves: an open node. This cell says what that residue costs, and
+/// it costs nothing new — it is the pre-existing fatal-abort shape, already walled two ways.
+/// (A guard-mediated unwind never reaches here: the guard's rewind truncates the start away,
+/// which `demote_dies_with_a_truncation_at_or_below_it` above holds.)
+#[test]
+fn a_start_left_open_by_an_escaping_panic_is_refused_by_finish_and_closed_by_finish_partial() {
+  let mut sink = verbose_sink("a");
+  let _never_closed = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("the success door refuses a leftover open node, typed"),
+    FinishError::UnclosedNodes { open: 1 }
+  );
+
+  let mut sink = verbose_sink("a");
+  let _never_closed = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  let (green, _emitter) = sink.finish_partial(K_ROOT);
+  let green = green.expect("the tooling door closes it per its existing contract");
+  assert_eq!(text(green.clone()), "a", "losslessness holds either way");
+  let root = tree(green);
+  assert_eq!(root.first_child().expect("Root[Node]").kind(), K_NODE);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // F-A2 / F-A3 — the forward_parent write dies to journal + era
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1256,7 +1645,7 @@ fn cst_forward_census_one_helper_carries_every_channel() {
 fn cst_composition_census_every_family_method_is_overridden() {
   let src = include_str!("../sink.rs");
 
-  // (a) The 29-method inventory: 13 core Emitter + 4 CstEmitter + 12 capability emit_*.
+  // (a) The 30-method inventory: 13 core Emitter + 5 CstEmitter + 12 capability emit_*.
   // Each must appear as an `fn <name>` impl in the sink; a missing one is a severed channel.
   let overridden = [
     // 13 core Emitter
@@ -1278,9 +1667,13 @@ fn cst_composition_census_every_family_method_is_overridden() {
     // The sink is the one emitter in the crate that binds a source, so it is the one that
     // must answer this rather than inherit the `None` default.
     "bound_source",
-    // 4 CstEmitter
+    // 5 CstEmitter
     "cst_start",
     "cst_finish",
+    // The up-front bracket's failing exit. It is the one CstEmitter method whose default is
+    // not merely "record nothing" but "un-record something", so a defaulted inherit here would
+    // leave a wrapped inner carrying a dangling open node for every `Err` a `node()` sees.
+    "cst_demote",
     "cst_mark",
     "cst_start_at",
     // 12 capability emit_*
@@ -1304,8 +1697,8 @@ fn cst_composition_census_every_family_method_is_overridden() {
   ];
   assert_eq!(
     overridden.len(),
-    29,
-    "the family inventory is 13 core + 4 CstEmitter + 12 capability = 29"
+    30,
+    "the family inventory is 13 core + 5 CstEmitter + 12 capability = 30"
   );
 
   // DERIVED, and at the TYPE level rather than by string matching — the half a hand-written
@@ -1356,7 +1749,7 @@ fn cst_composition_census_every_family_method_is_overridden() {
   let cst_body = &cst[cst.find("pub trait CstEmitter<").unwrap()..cst.find("for &mut U").unwrap()];
   assert_eq!(
     count(cst_body, "  fn "),
-    4,
+    5,
     "CstEmitter method count drifted"
   );
   // The capability surface, DERIVED on both sides — no constant, because a hard-coded total is
@@ -2329,7 +2722,9 @@ fn placement_drive(
   let mut sink = verbose_sink(src);
   for op in ops {
     match *op {
-      PlacementOp::Start(kind) => sink.cst_start(kind),
+      PlacementOp::Start(kind) => {
+        let _up_front = sink.cst_start(kind);
+      }
       PlacementOp::Finish(kind) => sink.cst_finish(kind),
       PlacementOp::Tok(byte, lo, hi) => sink.record_token(&MiniTok(byte), &span(lo, hi)),
       PlacementOp::Diag(lo, hi) => {
@@ -5727,12 +6122,16 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'i
 /// combinators), so the realistic adversary is a wrapper that forwards everything a tree needs
 /// and still hides the binding. Pin 5 is the shape that needs it.
 impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'inp> {
-  fn cst_start(&mut self, kind: u16) {
-    self.0.cst_start(kind);
+  fn cst_start(&mut self, kind: u16) -> EventMark {
+    self.0.cst_start(kind)
   }
 
   fn cst_finish(&mut self, kind: u16) {
     self.0.cst_finish(kind);
+  }
+
+  fn cst_demote(&mut self, mark: EventMark, kind: u16) {
+    self.0.cst_demote(mark, kind);
   }
 
   fn cst_mark(&mut self) -> EventMark {
@@ -6593,12 +6992,16 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForward<'_, 'inp> {
 }
 
 impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for HalfForward<'_, 'inp> {
-  fn cst_start(&mut self, kind: u16) {
-    self.0.cst_start(kind);
+  fn cst_start(&mut self, kind: u16) -> EventMark {
+    self.0.cst_start(kind)
   }
 
   fn cst_finish(&mut self, kind: u16) {
     self.0.cst_finish(kind);
+  }
+
+  fn cst_demote(&mut self, mark: EventMark, kind: u16) {
+    self.0.cst_demote(mark, kind);
   }
 
   fn cst_mark(&mut self) -> EventMark {
@@ -6684,12 +7087,16 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForwardPartial<'_, 'inp
 }
 
 impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for HalfForwardPartial<'_, 'inp> {
-  fn cst_start(&mut self, kind: u16) {
-    self.inner.cst_start(kind);
+  fn cst_start(&mut self, kind: u16) -> EventMark {
+    self.inner.cst_start(kind)
   }
 
   fn cst_finish(&mut self, kind: u16) {
     self.inner.cst_finish(kind);
+  }
+
+  fn cst_demote(&mut self, mark: EventMark, kind: u16) {
+    self.inner.cst_demote(mark, kind);
   }
 
   fn cst_mark(&mut self) -> EventMark {
