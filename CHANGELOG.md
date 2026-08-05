@@ -369,6 +369,26 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
     so an emitter that answers `Some` for anything but the parse's own source cannot be driven
     through a parse. — *(#179)*
 
+18. **The `logos parity (0.14, 0.15)` CI job never compiled or ran the cache conformance kit
+    (`tokora::conformance::cache_tests`) under either version it exists to check.** The kit's
+    fixture lexer is a real `logos::Logos` derive — the most version-sensitive file in the
+    crate — but the job's command line named `std,combinators,${{ matrix.logos }}` and never
+    `conformance`, so the one job whose entire purpose is cross-version parity was the one job
+    that skipped the module most likely to diverge across versions. Every other leg that
+    reaches the kit uses `--all-features`, which always resolves the crate's `logos` alias to
+    `logos_0_16`, so in practice the kit had only ever been exercised against one of the three
+    advertised majors. `conformance` is now named alongside `combinators` in both matrix legs.
+
+    The same audit found two source-level instances of the same mistake, neither reachable by
+    any CI feature combination until fixed at the source: `parser::select_tests` and
+    `tests/wapi_b.rs` were gated on the `logos` feature alias — which always means
+    `logos_0_16` — instead of `any(logos_0_16, logos_0_15, logos_0_14)`, the form every
+    sibling module that builds a `Logos` derive uses. Both trace to the same pull request; a
+    later audit in the same series fixed one sibling, `select_tests`'s neighbour
+    `terminal_stop_tests`, and missed these two. Both now use the `any(...)` form and run
+    under all three versions like the rest of the suite.
+    — *(#208)*
+
 ## 0.8.0 (2026-08-04)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.

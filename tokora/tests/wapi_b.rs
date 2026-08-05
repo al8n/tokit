@@ -1,4 +1,8 @@
-#![cfg(all(feature = "std", feature = "logos", feature = "combinators"))]
+#![cfg(all(
+  feature = "std",
+  feature = "combinators",
+  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+))]
 
 //! The additive parser surfaces, driven through the public API.
 //!
