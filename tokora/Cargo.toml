@@ -12,7 +12,7 @@ categories = ["parsing", "text-processing", "no-std", "no-std::no-alloc"]
 keywords = ["parser", "combinator", "token", "logos", "error-recovery"]
 
 [features]
-default = ["std"]
+default = ["std", "combinators"]
 alloc = ["generic-arraydeque/alloc", "mayber/alloc", "tinyvec_1?/alloc"]
 std = [
   "generic-arraydeque/default",
@@ -34,6 +34,77 @@ logos = ["logos_0_16"]
 logos_0_14 = ["dep:logos_0_14"]
 logos_0_15 = ["dep:logos_0_15"]
 logos_0_16 = ["dep:logos_0_16"]
+
+# --- Combinator families -------------------------------------------------------------------
+#
+# Every combinator *family* under `src/parser/` is independently gateable, so an embedded or
+# no-alloc consumer compiles only the ones it calls. What is NOT gated is the parser substrate:
+# `Parser`/`Parse`/`parse*`, the `ParseInput`/`TryParseInput` traits themselves, and the
+# top-level `src/parser/*.rs` combinators (`expect`, `delimited`, `recover`, `recovery_gate`,
+# `select`, `opt`, `padded`, `node`, `skip_then_retry`, `ignore`, `labelled`, `empty`, `todo`,
+# `with`, `by_ref`, `collect`, `accepted`, `unwrapped`). Those are shared infrastructure — the
+# families are written against them and the crate's own error/recovery/CST machinery names them
+# — so splitting them out would buy a seam that nothing can actually stand on. The two
+# exceptions are named on their features below: `list`/`separated1` and `ident_list` are
+# `many`'s drivers under another name, so they follow it.
+#
+# `combinators` is the umbrella and is ON by default, so a plain `tokora = "0.9"` sees exactly
+# the 0.8 surface. `default-features = false` consumers opt into the families they use.
+combinators = [
+  "any",
+  "fail",
+  "filter",
+  "fold",
+  "ident",
+  "keyword",
+  "many",
+  "map",
+  "peek",
+  "pratt",
+  "punct",
+  "then",
+  "validate",
+]
+
+# `Any` — accept one token of any kind, plus its `spanned`/`sliced`/`located` shapes.
+any = []
+# `fail` / `fail_with` — a parser that always errors.
+fail = []
+# `filter`/`filter_with` and `filter_map`/`filter_map_with`. One feature: the two modules are
+# the same conceptual family, are the same size, and their `ParseInput` methods sit together.
+filter = []
+# The `fold` drivers (`fold_while`, `try_fold_while`, `rfold_while`, ...). They reuse `many`'s
+# absence-gate error construction (`many::absence_after_element`), so they pull `many` in.
+fold = ["many"]
+# `Ident::parse` / `try_parse` (+ `_except`) — identifier-token parsers on `types::Ident`.
+# `try_ident_list` needs this AND `many`; it is one item and is gated on both.
+ident = []
+# `Keyword::parse` / `try_parse` (+ `_exact`, `_sliced`) on `types::Keyword`.
+keyword = []
+# The repetition family: `repeated`, `repeated_while`, `separated*`, `delim*`, the eight
+# leading/trailing delimiter handlers, the four cardinality bounds, and the `Vec`-sinking
+# `list`/`separated1` shapes built on them (those also keep their `alloc`/`std` gate).
+many = []
+# `map` / `map_with`.
+map = []
+# The lookahead family: `peek_then`, `peek_then_choice`, `peek_kind`, `dispatch_on_kind` and
+# its fused twin.
+peek = []
+# Pratt expression parsing: the typed `pratt(...)` driver and the token-level
+# `InputRef::pratt*` driver, their `PrattToken` classification vocabulary, the `PrattEmitter`
+# capability and the CST kind wiring. `token::PrattToken` and the `InputRef` driver live
+# outside `src/parser/`, but they are the same family and are gated with it.
+pratt = []
+# The punctuator parsers — `Comma::parse`/`try_parse` and the other seventy-five markers — and
+# `delimited`'s `parens`/`braces`/`brackets`/`angles` shapes, which run them. NOT the
+# `Punctuator` trait impls for those markers: `delimited`, `TypedDelimiter` and every
+# `separated_by_*` read them, so they are vocabulary and stay unconditional.
+punct = []
+# The sequencing family: `then`, `then_ignore`, `ignore_then`, `then_value`, `and_then`,
+# `and_then_with`.
+then = []
+# `validate` / `validate_with`.
+validate = []
 
 # Parser tracing. Turns on `traced(name, parser)` — a wrapper that prints an indented
 # enter / exit-ok / exit-err / rollback event tree to stderr with an input preview — and
@@ -156,13 +227,13 @@ bench = false
 name = "input_scan"
 path = "benches/input_scan.rs"
 harness = false
-required-features = ["logos", "std"]
+required-features = ["logos", "std", "combinators"]
 
 [[bench]]
 name = "parser_combinators"
 path = "benches/parser_combinators.rs"
 harness = false
-required-features = ["logos", "std"]
+required-features = ["logos", "std", "combinators"]
 
 [[bench]]
 name = "pratt_typed"
@@ -174,13 +245,13 @@ harness = false
 # lexer with a non-trivial `L::State` (a different `logos` `extras`, so a different token enum),
 # it deliberately leaves criterion's measurement knobs live where that file pins them in code,
 # and a new file leaves the existing group's ids and baselines untouched.
-required-features = ["logos", "std"]
+required-features = ["logos", "std", "combinators"]
 
 [[bench]]
 name = "cst"
 path = "benches/cst.rs"
 harness = false
-required-features = ["logos", "std", "rowan"]
+required-features = ["logos", "std", "rowan", "combinators"]
 
 [[bench]]
 name = "backtrack"
@@ -188,49 +259,49 @@ path = "benches/backtrack.rs"
 harness = false
 # Exercises the raw checkpoint triple (`save`/`restore`/`commit`), which is public only under
 # `unstable-raw`; require it so the bench is skipped rather than failing to compile when off.
-required-features = ["logos", "std", "unstable-raw"]
+required-features = ["logos", "std", "unstable-raw", "combinators"]
 
 [[example]]
 name = "json"
 path = "examples/json.rs"
-required-features = ["std", "logos"]
+required-features = ["std", "logos", "combinators"]
 
 [[example]]
 name = "calculator"
 path = "examples/calculator.rs"
-required-features = ["std", "logos"]
+required-features = ["std", "logos", "combinators"]
 
 [[example]]
 name = "s_expression"
 path = "examples/s_expression.rs"
-required-features = ["std", "logos"]
+required-features = ["std", "logos", "combinators"]
 
 [[example]]
 name = "c_expression"
 path = "examples/c_expression.rs"
-required-features = ["std", "logos"]
+required-features = ["std", "logos", "combinators"]
 
 # Lossless-CST twins of the four examples above: each parses the same grammar as its twin but
 # builds a rowan concrete syntax tree through a `cst::Sink`, so it needs `rowan` as well.
 [[example]]
 name = "calculator_cst"
 path = "examples/calculator_cst.rs"
-required-features = ["std", "logos", "rowan"]
+required-features = ["std", "logos", "rowan", "combinators"]
 
 [[example]]
 name = "s_expression_cst"
 path = "examples/s_expression_cst.rs"
-required-features = ["std", "logos", "rowan"]
+required-features = ["std", "logos", "rowan", "combinators"]
 
 [[example]]
 name = "json_cst"
 path = "examples/json_cst.rs"
-required-features = ["std", "logos", "rowan"]
+required-features = ["std", "logos", "rowan", "combinators"]
 
 [[example]]
 name = "c_expression_cst"
 path = "examples/c_expression_cst.rs"
-required-features = ["std", "logos", "rowan"]
+required-features = ["std", "logos", "rowan", "combinators"]
 
 [package.metadata.docs.rs]
 all-features = true

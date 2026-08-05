@@ -19,12 +19,20 @@ use derive_more::{IsVariant, TryUnwrap, Unwrap};
 
 use crate::{
   input::InputRef,
-  parser::{Accepted, ByRef, Fold, Repeated, Separated, TryFold, TryFoldWith},
+  parser::{Accepted, ByRef},
+};
+
+#[cfg(feature = "many")]
+use crate::{
+  parser::{Repeated, Separated},
   punct::*,
   token::PunctuatorToken,
 };
 
-#[cfg(any(feature = "alloc", feature = "std"))]
+#[cfg(feature = "fold")]
+use crate::parser::{Fold, TryFold, TryFoldWith};
+
+#[cfg(all(feature = "fold", any(feature = "alloc", feature = "std")))]
 use crate::parser::RFold;
 
 use super::*;
@@ -160,6 +168,8 @@ macro_rules! define_separated_by {
         #[doc = "Creates a `Separated` combinator which separates elements by the `" $name:snake "` separator and applies this parser repeatedly."]
         ///
         /// See [`separated`](crate::TryParseInput::separated) for details.
+        #[cfg(feature = "many")]
+        #[cfg_attr(docsrs, doc(cfg(feature = "many")))]
         #[inline(always)]
         fn [< separated_by_ $name:snake>](
           self,
@@ -264,6 +274,8 @@ pub trait TryParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// ## See Also
   ///
   /// - [`repeated_while`](crate::ParseInput::repeated_while) - When you want to provide explicit stopping condition
+  #[cfg(feature = "many")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "many")))]
   #[inline(always)]
   fn repeated(self) -> Repeated<Self, O, L, Ctx, Lang, Cmpl>
   where
@@ -277,6 +289,8 @@ pub trait TryParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// Creates a `Fold` combinator that accumulates results using the provided initializer and accumulator.
   ///
   /// See also [`try_fold`](TryParseInput::try_fold), [`fold_while`](crate::ParseInput::fold_while), [try_fold_while](crate::ParseInput::try_fold_while).
+  #[cfg(feature = "fold")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "fold")))]
   #[inline(always)]
   fn fold<Init, Acc>(self, init: Init, acc: Acc) -> Fold<Self, Init, Acc, L, O, Ctx, Lang, Cmpl>
   where
@@ -292,6 +306,8 @@ pub trait TryParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// Creates a `TryFold` combinator that accumulates results using the provided initializer and fallible accumulator.
   ///
   /// See also [`try_fold_with`](Self::try_fold_with), [`fold_while`](crate::ParseInput::fold_while), [try_fold_while](crate::ParseInput::try_fold_while).
+  #[cfg(feature = "fold")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "fold")))]
   #[inline(always)]
   fn try_fold<Init, Acc>(
     self,
@@ -312,6 +328,8 @@ pub trait TryParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// fallible accumulator, and parsing state.
   ///
   /// See also [`try_fold`](Self::try_fold), [`fold_while`](crate::ParseInput::fold_while), [try_fold_while](crate::ParseInput::try_fold_while).
+  #[cfg(feature = "fold")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "fold")))]
   #[inline(always)]
   fn try_fold_with<Init, Acc>(
     self,
@@ -339,8 +357,11 @@ pub trait TryParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// Parsing stops when this parser returns `Ok(ParseAttempt::Decline)`.
   ///
   /// See also [`fold`](Self::fold).
-  #[cfg(any(feature = "alloc", feature = "std"))]
-  #[cfg_attr(docsrs, doc(cfg(any(feature = "alloc", feature = "std"))))]
+  #[cfg(all(feature = "fold", any(feature = "alloc", feature = "std")))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(all(feature = "fold", any(feature = "alloc", feature = "std"))))
+  )]
   #[inline(always)]
   fn rfold<Init, Acc>(self, init: Init, acc: Acc) -> RFold<Self, Init, Acc, L, O, Ctx, Lang, Cmpl>
   where
@@ -377,6 +398,8 @@ pub trait TryParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// ## See Also
   ///
   /// - [`separated_while`](crate::ParseInput::separated_while) - When you want to provide the lookahead/stopping logic externally
+  #[cfg(feature = "many")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "many")))]
   #[inline(always)]
   fn separated<Sep>(self) -> Separated<Self, Sep, O, L, Ctx, Lang, Cmpl>
   where

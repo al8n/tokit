@@ -10358,6 +10358,7 @@ fn d50_capture_survives_a_panicking_foreign_emitter_checkpoint() {
 // that would restore it, so a below-flag rollback is unreachable from outside the crate. The
 // mechanism is reachable here, and only here.
 
+#[cfg(feature = "many")]
 fn front_watermark_input(src: &str) -> Input<'_, BombLexer<'_>, BombCtx<'_>, ()> {
   let context = crate::input::InputContext::new(
     BombEmitter::default(),
@@ -10370,6 +10371,8 @@ fn front_watermark_input(src: &str) -> Input<'_, BombLexer<'_>, BombCtx<'_>, ()>
   )
 }
 
+// `emit_unexpected_front` / `front_report_live` exist only for the `many` drivers.
+#[cfg(feature = "many")]
 #[test]
 fn a_restore_below_the_flag_disarms_the_front_report_watermark() {
   let mut input = front_watermark_input("ab cd");
@@ -10423,6 +10426,8 @@ fn wapi_b_peek_kind_leaves_a_genuine_eof_unmarked() {
   );
 }
 
+// `emit_unexpected_front` / `front_report_live` exist only for the `many` drivers.
+#[cfg(feature = "many")]
 #[test]
 fn a_restore_above_the_flag_keeps_the_front_report_watermark() {
   let mut input = front_watermark_input("ab cd");

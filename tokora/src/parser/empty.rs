@@ -58,7 +58,11 @@ use super::*;
 /// # See Also
 ///
 /// - [`Todo`] - Placeholder that panics (for unimplemented parsers)
-/// - [`map`](crate::parser::ParseInput::map) - Transform `()` to other types
+#[cfg_attr(
+  feature = "map",
+  doc = " - [`map`](crate::parser::ParseInput::map) - Transform `()` to other types"
+)]
+#[cfg_attr(not(feature = "map"), doc = " - `map` - Transform `()` to other types")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Empty(());
 

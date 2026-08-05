@@ -33,6 +33,7 @@ mod drop_policy;
 mod emit;
 mod fold;
 mod peek;
+#[cfg(feature = "pratt")]
 mod pratt;
 mod scan;
 pub(crate) mod session;
@@ -59,7 +60,8 @@ pub(crate) use try_expect::CloseStatus;
 #[cfg(all(
   test,
   any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
+  feature = "std",
+  feature = "combinators"
 ))]
 pub(crate) use try_expect::ClosePayload;
 
@@ -84,7 +86,8 @@ mod tests;
 #[cfg(all(
   test,
   any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
+  feature = "std",
+  feature = "combinators"
 ))]
 mod partial_tests;
 
@@ -755,6 +758,9 @@ where
   /// what makes "watermark implies a live report" inductive: there is no ordering in which the
   /// watermark is armed for a report that was never appended, because a failed append returns
   /// before the publish.
+  // `many`'s delimited/separated drivers are the only callers of the one-junk-token-one-report
+  // pair and of the positional scanner witness.
+  #[cfg(feature = "many")]
   #[inline]
   pub(crate) fn emit_unexpected_front(
     &mut self,
@@ -771,6 +777,9 @@ where
   ///
   /// The read side of *one junk token, one report*. Frame-independent by construction, which is
   /// why every close-miss arm in the delimited drivers can ask it with one identical line.
+  // `many`'s delimited/separated drivers are the only callers of the one-junk-token-one-report
+  // pair and of the positional scanner witness.
+  #[cfg(feature = "many")]
   #[inline(always)]
   pub(crate) fn front_report_live(&self, end: &L::Offset) -> bool {
     self.front_reported_end.as_ref() == Some(end)
@@ -885,6 +894,9 @@ where
   /// attempt-relative by different means — this one positionally, that one against a snapshot —
   /// but to the same end: neither may charge an ordinary element failure with a stop it did not
   /// cause.
+  // `many`'s delimited/separated drivers are the only callers of the one-junk-token-one-report
+  // pair and of the positional scanner witness.
+  #[cfg(feature = "many")]
   #[inline(always)]
   pub(crate) fn at_committed_boundary(&self) -> bool {
     self.reached_boundary(self.cursor().as_inner())

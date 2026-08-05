@@ -1,3 +1,5 @@
+use crate::parse_state::ParseState;
+
 use super::*;
 
 /// A parser that validates output after parsing, rejecting invalid values with errors.
@@ -299,5 +301,6 @@ where
   }
 }
 
-#[cfg(test)]
+// The cells build their subject on top of `Any`, so they need that family as well.
+#[cfg(all(test, feature = "any"))]
 mod tests;

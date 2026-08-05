@@ -885,7 +885,14 @@ where
   /// The head's kind, on the same terminal-aware read as
   /// [`peek_head_map`](Self::peek_head_map).
   ///
-  /// The method form of the free [`peek_kind`](crate::parser::peek_kind). Note the
+  #[cfg_attr(
+    feature = "peek",
+    doc = " The method form of the free [`peek_kind`](crate::parser::peek_kind). Note the"
+  )]
+  #[cfg_attr(
+    not(feature = "peek"),
+    doc = " The method form of the free `peek_kind`. Note the"
+  )]
   /// contract difference from a hand-rolled `peek::<U1>()` fork: that discards the
   /// terminal flag, so a latched boundary reads as `Ok(None)`; this raises.
   #[inline]

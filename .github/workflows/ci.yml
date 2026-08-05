@@ -280,8 +280,11 @@ jobs:
             ${{ runner.os }}-logos-${{ matrix.logos }}-
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
-      - name: cargo test --no-default-features --features std,${{ matrix.logos }}
-        run: cargo test -p tokora --no-default-features --features std,${{ matrix.logos }}
+      # `combinators` is spelled out because it is a DEFAULT feature: without it this leg
+      # would still compile, but every combinator suite is `#![cfg]`'d on it, so the run
+      # would silently shrink to the handful of files that need no combinator at all.
+      - name: cargo test --no-default-features --features std,combinators,${{ matrix.logos }}
+        run: cargo test -p tokora --no-default-features --features std,combinators,${{ matrix.logos }}
 
   # ── Gate: mechanical public-API diff against the last published version ─────
   # `continue-on-error` is deliberate and the reason is written down because "advisory" usually
@@ -335,7 +338,16 @@ jobs:
           set -euo pipefail
           base="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
           echo "base=$base" >> "$GITHUB_ENV"
-          feat="std,logos,trace,rowan"
+          # The feature point this gate WANTS. It is resolved against EACH SIDE's manifest
+          # below and never handed to both sides as written, because the two sides do not
+          # have to declare the same features: a PR that ADDS one has a head that knows the
+          # name and a base that does not, and `cargo doc --features <unknown>` is a hard
+          # error (exit 101), not a warning. One shared list therefore reddens this job on
+          # exactly the PRs that introduce a feature — and again on the push run after the
+          # merge, where base becomes `HEAD~1`. Resolving per side is the general form; a
+          # transitional special case naming one feature would have to be written again for
+          # the next one.
+          want="std,logos,trace,rowan,combinators"
           mkdir -p /tmp/nc && git worktree add /tmp/nc/base "$base"
           # `Cargo.lock` is gitignored, and each side must resolve its OWN lock: one lock
           # generated from head and copied into base goes unsatisfiable the moment the PR
@@ -396,15 +408,50 @@ jobs:
 
           print("lock parity OK: graphs agree except tokora's own version")
           PY
+          # The per-side resolver for `want`. It reads `cargo metadata` rather than grepping
+          # the `[features]` table because that is cargo's own parser: it reports the implicit
+          # feature an optional dependency creates alongside the written ones, so a feature
+          # that exists is never mistaken for one that does not. Dropping a name is REPORTED,
+          # not silent — a shrunken feature point means a smaller documented surface, and this
+          # gate's whole subject is which names that surface gained.
+          cat > /tmp/nc/resolve_features.py <<'PY'
+          import json, sys
+
+          want, side = sys.argv[1], sys.argv[2]
+          meta = json.load(sys.stdin)
+          pkg = next((p for p in meta["packages"] if p["name"] == "tokora"), None)
+          if pkg is None:
+              sys.exit("::error::%s: cargo metadata reports no tokora package" % side)
+          have = set(pkg["features"])
+          asked = [f.strip() for f in want.split(",") if f.strip()]
+          keep = [f for f in asked if f in have]
+          drop = [f for f in asked if f not in have]
+          if drop:
+              print("name-collision: %s does not declare %s — dropped from its feature point"
+                    % (side, ", ".join(drop)), file=sys.stderr)
+          if not keep:
+              sys.exit("::error::%s declares none of [%s]; the wanted feature point is stale"
+                       % (side, want))
+          print(",".join(keep))
+          PY
+          head_feat=""
           for side in base head; do
             dir="/tmp/nc/base"; [ "$side" = head ] && dir="$PWD"
+            feat="$(cargo metadata --no-deps --format-version 1 \
+                      --manifest-path "$dir/tokora/Cargo.toml" \
+                    | python3 /tmp/nc/resolve_features.py "$want" "$side")"
+            echo "name-collision: $side feature point = $feat"
+            if [ "$side" = head ]; then head_feat="$feat"; fi
             ( cd "$dir" && RUSTC_BOOTSTRAP=1 \
                 RUSTDOCFLAGS="-Z unstable-options --output-format json" \
                 cargo doc -p tokora --no-deps --features "$feat" --locked )
             cp "$dir/target/doc/tokora.json" "/tmp/nc/$side.json"
           done
+          # The HEAD side's feature point is the one recorded in the inventory: the inventory
+          # is a statement about the surface this branch publishes, and `run.sh` builds the
+          # probe crate at whatever it records.
           python3 ci/name_collision/surface_diff.py \
-            /tmp/nc/base.json /tmp/nc/head.json --features "$feat"
+            /tmp/nc/base.json /tmp/nc/head.json --features "$head_feat"
           cp /tmp/nc/surface_names.json /tmp/nc/inventory.json
       - name: Probe every added name against its real owner
         run: bash ci/name_collision/run.sh "$base" /tmp/nc/inventory.json
@@ -546,10 +593,16 @@ jobs:
   #
   # Compiles all five declared bench targets and runs each once in test mode (`-- --test`),
   # which runs every benchmark body once instead of criterion's real sampling loop (#181).
-  # `--no-default-features --features std,logos,rowan,unstable-raw` is the exact union of every
-  # bench target's `required-features` in `tokora/Cargo.toml` — not `--all-features`, which
-  # would also enable `trace`: `cst.rs`'s own header says running under `trace` is roughly an
-  # order of magnitude slower and a configuration nobody ships.
+  # `--no-default-features --features std,logos,rowan,unstable-raw,combinators` is the exact
+  # union of every bench target's `required-features` in `tokora/Cargo.toml` — not
+  # `--all-features`, which would also enable `trace`: `cst.rs`'s own header says running under
+  # `trace` is roughly an order of magnitude slower and a configuration nobody ships.
+  #
+  # `combinators` is in that union and has to be SPELLED OUT, because `--no-default-features`
+  # turns it off and it is what every bench's `required-features` now carries. A bench whose
+  # required features are not enabled is SKIPPED, not failed, so leaving it out does not red
+  # this job — it compiles zero of the five and reports `Finished` in about 30ms, which is
+  # exactly the shape of the #181 gap this job was created to close.
   #
   # NOT a timed regression gate: GitHub runners are far too noisy for the ±2% discipline these
   # benches are held to locally, so regression numbers are gathered off-CI.
@@ -570,8 +623,8 @@ jobs:
             ${{ runner.os }}-bench-
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
-      - name: cargo bench --no-default-features --features std,logos,rowan,unstable-raw -- --test
-        run: cargo bench --no-default-features --features std,logos,rowan,unstable-raw -- --test
+      - name: cargo bench --no-default-features --features std,logos,rowan,unstable-raw,combinators -- --test
+        run: cargo bench --no-default-features --features std,logos,rowan,unstable-raw,combinators -- --test
 
   # ── Gate: cross-compile smoke across extra platforms ────────────────────────
   cross:

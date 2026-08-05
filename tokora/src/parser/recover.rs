@@ -322,7 +322,14 @@ where
 /// # See Also
 ///
 /// - [`InplaceRecover`] - Error recovery without backtracking
-/// - [`PeekThenChoice`] - Deterministic choice (no error recovery)
+#[cfg_attr(
+  feature = "peek",
+  doc = " - [`PeekThenChoice`] - Deterministic choice (no error recovery)"
+)]
+#[cfg_attr(
+  not(feature = "peek"),
+  doc = " - `PeekThenChoice` - Deterministic choice (no error recovery)"
+)]
 ///
 /// # Caveats
 ///

@@ -271,7 +271,8 @@ where
   }
 }
 
-#[cfg(test)]
+// Both cells run `Any::spanned().map(..)`, so they need the `map` family too.
+#[cfg(all(test, feature = "map"))]
 mod tests;
 
 #[cfg(all(

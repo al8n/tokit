@@ -1,5 +1,7 @@
 use core::marker::PhantomData;
 
+use crate::parse_state::ParseState;
+
 use super::*;
 
 /// A parser that transforms and validates output, combining mapping with fallible conversion.
@@ -327,5 +329,6 @@ where
   }
 }
 
-#[cfg(test)]
+// The cells build their subject on top of `Any`, so they need that family as well.
+#[cfg(all(test, feature = "any"))]
 mod tests;

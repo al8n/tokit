@@ -1,7 +1,14 @@
 use core::marker::PhantomData;
 
 /// A non-associative operator appeared a second time at its own binding power in one chain:
-/// `a == b == c` where `==` is [`PrattInfix::Neither`](crate::parser::PrattInfix::Neither).
+#[cfg_attr(
+  feature = "pratt",
+  doc = " `a == b == c` where `==` is [`PrattInfix::Neither`](crate::parser::PrattInfix::Neither)."
+)]
+#[cfg_attr(
+  not(feature = "pratt"),
+  doc = " `a == b == c` where `==` is `PrattInfix::Neither`."
+)]
 ///
 /// Both Pratt engines raise this, on the same trigger, with the same restored posture: the
 /// deciding read is handed back — the offending operator is left on the input, unconsumed — and
@@ -26,7 +33,14 @@ use core::marker::PhantomData;
 /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) may spend it. A grammar that *wants*
 /// the fold-once-then-stop behaviour asks for it explicitly, by wrapping the pratt parser in a
 /// recovery combinator or by reclassifying the operator
-/// [`Left`](crate::parser::PrattInfix::Left); tolerance is a caller policy stated in grammar
+#[cfg_attr(
+  feature = "pratt",
+  doc = " [`Left`](crate::parser::PrattInfix::Left); tolerance is a caller policy stated in grammar"
+)]
+#[cfg_attr(
+  not(feature = "pratt"),
+  doc = " `PrattInfix::Left`; tolerance is a caller policy stated in grammar"
+)]
 /// code, not a silent engine default.
 ///
 /// # The offset is the handback position, and that is one specific number
@@ -61,7 +75,14 @@ use core::marker::PhantomData;
 /// re-emitted.
 ///
 /// The operator's head is also not a quantity the typed engine could report even if it wanted to.
-/// [`ParsePrattRHS`](crate::parser::ParsePrattRHS) is caller code holding a whole
+#[cfg_attr(
+  feature = "pratt",
+  doc = " [`ParsePrattRHS`](crate::parser::ParsePrattRHS) is caller code holding a whole"
+)]
+#[cfg_attr(
+  not(feature = "pratt"),
+  doc = " `ParsePrattRHS` is caller code holding a whole"
+)]
 /// [`InputRef`](crate::InputRef) and decides for itself where its operator begins; learning how
 /// much it would skip means *running* it, and running it before the repeat has been decided is
 /// what the driver's transaction rules forbid.

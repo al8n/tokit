@@ -11,9 +11,12 @@ use crate::{
   punct::*,
   slice::Sliced,
   span::Spanned,
-  token::PunctuatorToken,
   utils::marker::{PhantomLocated, PhantomSliced, PhantomSpan},
 };
+
+// Named only by the `separated_by_*_while` family the macro below mints.
+#[cfg(feature = "many")]
+use crate::token::PunctuatorToken;
 
 use super::*;
 
@@ -341,6 +344,8 @@ macro_rules! define_separated_by {
         #[doc = "Creates a `SeparatedWhile` combinator which separates elements by the `" $name:snake "` separator and applies this parser repeatedly."]
         ///
         /// See [`separated_while`](crate::ParseInput::separated_while) for details.
+        #[cfg(feature = "many")]
+        #[cfg_attr(docsrs, doc(cfg(feature = "many")))]
         #[inline(always)]
         fn [< separated_by_ $name:snake _while>]<Condition, W>(
           self,
@@ -557,6 +562,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Creates a `FoldWhile` combinator that accumulates results while a condition is met.
+  #[cfg(feature = "fold")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "fold")))]
   #[inline(always)]
   fn fold_while<Condition, Init, Acc, W>(
     self,
@@ -579,6 +586,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// Creates a `TryFoldWhile` combinator that accumulates results while a condition is met.
   ///
   /// See also [`try_fold_while_with`](Self::try_fold_while_with).
+  #[cfg(feature = "fold")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "fold")))]
   #[inline(always)]
   fn try_fold_while<Condition, Init, Acc, W>(
     self,
@@ -602,6 +611,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
 
   /// Creates a `TryFoldWhileWith` combinator that accumulates results while a condition is met,
   /// with access to parsing state.
+  #[cfg(feature = "fold")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "fold")))]
   #[inline(always)]
   fn try_fold_while_with<Condition, Init, Acc, W>(
     self,
@@ -633,8 +644,11 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// This buffers all parsed outputs before folding them from right to left.
   ///
   /// See also [`fold_while`](Self::fold_while).
-  #[cfg(any(feature = "alloc", feature = "std"))]
-  #[cfg_attr(docsrs, doc(cfg(any(feature = "alloc", feature = "std"))))]
+  #[cfg(all(feature = "fold", any(feature = "alloc", feature = "std")))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(all(feature = "fold", any(feature = "alloc", feature = "std"))))
+  )]
   #[inline(always)]
   fn rfold_while<Condition, Init, Acc, W>(
     self,
@@ -678,6 +692,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   ///
   /// - [`repeated`](TryParseInput::repeated) - Parser has lookahead, no separator
   /// - [`Action`] - The decision type (`Continue` or `Stop`)
+  #[cfg(feature = "many")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "many")))]
   #[inline(always)]
   fn repeated_while<Condition, W>(
     self,
@@ -717,6 +733,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   ///
   /// - [`separated`](TryParseInput::separated) - Parser has lookahead, with separator
   /// - [`Action`] - The decision type (`Continue` or `Stop`)
+  #[cfg(feature = "many")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "many")))]
   #[inline(always)]
   fn separated_while<Sep, Condition, W>(
     self,
@@ -801,8 +819,11 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// here and is therefore generic over completeness.)
   ///
   /// The `alloc`/`std` gate is the free function's too — `list` returns a `Vec`.
-  #[cfg(any(feature = "alloc", feature = "std"))]
-  #[cfg_attr(docsrs, doc(cfg(any(feature = "alloc", feature = "std"))))]
+  #[cfg(all(feature = "many", any(feature = "alloc", feature = "std")))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(all(feature = "many", any(feature = "alloc", feature = "std"))))
+  )]
   #[inline(always)]
   fn list_until<Until>(
     self,
@@ -828,8 +849,11 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   /// [`ComposableParseContext`]. The pin is inherited from the free
   /// [`separated1`](crate::parser::separated1), and so is the `alloc`/`std` gate — the
   /// free function returns a `Vec`.
-  #[cfg(any(feature = "alloc", feature = "std"))]
-  #[cfg_attr(docsrs, doc(cfg(any(feature = "alloc", feature = "std"))))]
+  #[cfg(all(feature = "many", any(feature = "alloc", feature = "std")))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(all(feature = "many", any(feature = "alloc", feature = "std"))))
+  )]
   #[inline(always)]
   fn separated1_by<Sep, Peek>(
     self,
@@ -851,6 +875,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   ///
   /// If the condition handler `C` returns `Ok(())`, the inner parser is applied, otherwise,
   /// parsing is stopped and return the error from the handler.
+  #[cfg(feature = "peek")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "peek")))]
   fn peek_then<C, W>(self, condition: C) -> PeekThen<Self, C, L::Token, W, Cmpl>
   where
     Self: Sized,
@@ -870,6 +896,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   ///
   /// If the condition handler `C` returns `Ok(Action::Continue)`, the inner parser is applied,
   /// otherwise returns `None`.
+  #[cfg(feature = "peek")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "peek")))]
   #[doc(alias = "or_not")]
   fn peek_then_try<C, W>(self, condition: C) -> PeekThen<Self, C, L::Token, W, Cmpl>
   where
@@ -888,6 +916,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   ///
   /// No [`Peeked`], no typenum, and no emitter parameter — so a hook written as a named
   /// function does not have to name `Ctx` in its signature just to be callable here.
+  #[cfg(feature = "peek")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "peek")))]
   #[inline(always)]
   fn peek_then_head<C>(
     self,
@@ -924,6 +954,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Map the output of this parser using the given function.
+  #[cfg(feature = "map")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "map")))]
   #[inline(always)]
   fn map<U, F>(self, f: F) -> Map<Self, F, L, Ctx, O, U, Lang, Cmpl>
   where
@@ -936,6 +968,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Map the output of this parser using the given function.
+  #[cfg(feature = "map")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "map")))]
   #[inline(always)]
   fn map_with<U, F>(self, f: F) -> MapWith<Self, F, L, Ctx, O, U, Lang, Cmpl>
   where
@@ -948,6 +982,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Filter the output of this parser using a validation function.
+  #[cfg(feature = "filter")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "filter")))]
   #[inline(always)]
   fn filter<F>(self, validator: F) -> Filter<Self, F, O, L, Ctx, Lang, Cmpl>
   where
@@ -961,6 +997,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Filter the output of this parser using a validation function.
+  #[cfg(feature = "filter")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "filter")))]
   #[inline(always)]
   fn filter_with<F>(self, validator: F) -> FilterWith<Self, F, O, L, Ctx, Lang, Cmpl>
   where
@@ -980,6 +1018,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   ///
   /// The parser must produce a `Spanned<O>` value. The mapper receives
   /// the data and span, and returns `Ok(new_value)` or an error.
+  #[cfg(feature = "filter")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "filter")))]
   #[inline(always)]
   fn filter_map<U, F>(self, mapper: F) -> FilterMap<Self, F, O, U, L, Ctx, Lang, Cmpl>
   where
@@ -996,6 +1036,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   ///
   /// The parser must produce a `Spanned<O>` value. The mapper receives
   /// the data and span, and returns `Ok(new_value)` or an error.
+  #[cfg(feature = "filter")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "filter")))]
   #[inline(always)]
   fn filter_map_with<U, F>(self, mapper: F) -> FilterMapWith<Self, F, O, U, L, Ctx, Lang, Cmpl>
   where
@@ -1012,6 +1054,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Validate the output of this parser with full location context.
+  #[cfg(feature = "validate")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "validate")))]
   #[inline(always)]
   fn validate<F>(self, validator: F) -> Validate<Self, F, O, L, Ctx, Lang, Cmpl>
   where
@@ -1024,6 +1068,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Validate the output of this parser with full location context.
+  #[cfg(feature = "validate")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "validate")))]
   #[inline(always)]
   fn validate_with<F>(self, validator: F) -> ValidateWith<Self, F, O, L, Ctx, Lang, Cmpl>
   where
@@ -1039,6 +1085,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Sequence this parser with another, ignoring the output of the second.
+  #[cfg(feature = "then")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "then")))]
   #[inline(always)]
   fn then_ignore<G, U>(self, second: G) -> ThenIgnore<Self, G, O, U, L, Ctx, Lang, Cmpl>
   where
@@ -1052,6 +1100,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Sequence this parser with a fixed value, ignoring the output of the first.
+  #[cfg(feature = "then")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "then")))]
   #[inline(always)]
   fn then_value<F, U>(self, value: F) -> ThenValue<Self, F, O, U, L, Ctx, Lang, Cmpl>
   where
@@ -1064,6 +1114,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Sequence this parser with another, using the first result to determine the second parser.
+  #[cfg(feature = "then")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "then")))]
   #[inline(always)]
   fn and_then<T, U>(self, then: T) -> AndThen<Self, T, O, U, L, Ctx, Lang, Cmpl>
   where
@@ -1077,6 +1129,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Sequence this parser with another, using the first result to determine the second parser.
+  #[cfg(feature = "then")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "then")))]
   #[inline(always)]
   fn and_then_with<T, U>(self, then: T) -> AndThenWith<Self, T, O, U, L, Ctx, Lang, Cmpl>
   where
@@ -1093,6 +1147,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Sequence this parser with another, keeping both outputs.
+  #[cfg(feature = "then")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "then")))]
   #[inline(always)]
   fn then<T, U>(self, then: T) -> Then<Self, T, O, U, L, Ctx, Lang, Cmpl>
   where
@@ -1106,6 +1162,8 @@ pub trait ParseInput<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   }
 
   /// Sequence this parser with another, ignoring the output of the first.
+  #[cfg(feature = "then")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "then")))]
   #[inline(always)]
   fn ignore_then<G, U>(self, second: G) -> IgnoreThen<Self, G, O, U, L, Ctx, Lang, Cmpl>
   where

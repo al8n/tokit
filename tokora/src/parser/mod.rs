@@ -139,6 +139,29 @@
 //! - `inplace_recover` - Try parser, use recovery on error without backtracking
 //! - `padded` - Skip trivia (whitespace/comments) before and after
 //!
+//! # Feature gating
+//!
+//! Each combinator **family** is its own feature, so a no-std or no-alloc build compiles only
+//! the ones its grammar calls: `any`, `fail`, `filter` (which covers `filter_map`), `fold`
+//! (implies `many`), `ident`, `keyword`, `many`, `map`, `peek`, `pratt`, `punct`, `then`,
+//! `validate`. The `combinators` umbrella turns all of them on and is a **default** feature,
+//! so only a `default-features = false` dependency has to name any of this. Every gated item
+//! carries its feature in the rustdoc label.
+//!
+//! The substrate is unconditional: [`Parser`], [`Parse`], the [`parse`] family, the
+//! [`ParseInput`] / [`TryParseInput`] / [`ParseChoice`] traits, and the combinators the
+//! families are written against — `expect`, `delimited`, `recover`, `select`, `opt`,
+//! `padded`, `node`, `skip_then_retry`, `ignore`, `labelled`, `empty`, `todo`, `with`,
+//! `by_ref`, `collect`, `accepted`, `unwrapped`.
+//!
+//! Three edges are not guessable from the names. `fold` routes its "no more elements" exits
+//! through `many`'s absence gate, so it pulls `many` in. `list` / `separated1` and
+//! `try_ident_list` are named shapes of `many`'s drivers, so they need `many` on top of their
+//! own gate. And `punct` gates the punctuator *parsers* — including `delimited`'s
+//! `parens`/`braces`/`brackets`/`angles` shapes, which run them — but **not** the
+//! [`Punctuator`](crate::punct::Punctuator) impls for the built-in markers, which are
+//! vocabulary the whole crate reads and stay unconditional.
+//!
 //! # Performance Characteristics
 //!
 //! - **Memory**: O(1) - only small lookahead window on stack, no token buffering
@@ -158,14 +181,11 @@ use core::marker::PhantomData;
 
 use crate::{
   Emitter, Lexer, Source, Token,
-  cache::Peeked,
   emitter::{Fatal, FromTokenErrors},
-  error::{UnexpectedEot, token::UnexpectedToken},
   input::{Complete, Completeness, Input, InputRef, SurfaceIncomplete},
   located::Located,
   parse_context::{ErrorOf, FatalContext, ParseContext, ParserContext},
   parse_input::*,
-  parse_state::ParseState,
   slice::Sliced,
   span::Spanned,
   utils::{
@@ -177,73 +197,123 @@ use crate::{
 use derive_more::{IsVariant, TryUnwrap, Unwrap};
 
 pub use accepted::*;
-pub use any::*;
 pub use by_ref::*;
 pub use collect::Collect;
 pub use delimited::*;
 pub use empty::*;
 pub use expect::*;
-pub use fail::*;
-pub use filter::*;
-pub use filter_map::*;
-pub use fold::*;
-pub use ident_list::*;
 pub use ignore::*;
 pub use labelled::*;
-#[cfg(any(feature = "alloc", feature = "std"))]
-#[cfg_attr(docsrs, doc(cfg(any(feature = "alloc", feature = "std"))))]
+// `separated1` and `list` are two named shapes of `many`'s while-drivers with a `Vec` sink;
+// they need the allocator for the sink and the family for the driver.
+#[cfg(all(feature = "many", any(feature = "alloc", feature = "std")))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(all(feature = "many", any(feature = "alloc", feature = "std"))))
+)]
 pub use list::*;
-pub use many::*;
-pub use map::*;
 pub use node::*;
 pub use opt::*;
 pub use padded::*;
-pub use peek::*;
-pub use pratt::*;
 pub use recover::*;
 pub use select::*;
 pub use skip_then_retry::*;
-pub use then::*;
 pub use todo::*;
 pub use unwrapped::*;
-pub use validate::*;
 pub use with::*;
 
+#[cfg(feature = "any")]
+#[cfg_attr(docsrs, doc(cfg(feature = "any")))]
+pub use any::*;
+#[cfg(feature = "fail")]
+#[cfg_attr(docsrs, doc(cfg(feature = "fail")))]
+pub use fail::*;
+#[cfg(feature = "filter")]
+#[cfg_attr(docsrs, doc(cfg(feature = "filter")))]
+pub use filter::*;
+#[cfg(feature = "filter")]
+#[cfg_attr(docsrs, doc(cfg(feature = "filter")))]
+pub use filter_map::*;
+#[cfg(feature = "fold")]
+#[cfg_attr(docsrs, doc(cfg(feature = "fold")))]
+pub use fold::*;
+#[cfg(all(feature = "ident", feature = "many"))]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "ident", feature = "many"))))]
+pub use ident_list::*;
+#[cfg(feature = "many")]
+#[cfg_attr(docsrs, doc(cfg(feature = "many")))]
+pub use many::*;
+#[cfg(feature = "map")]
+#[cfg_attr(docsrs, doc(cfg(feature = "map")))]
+pub use map::*;
+#[cfg(feature = "peek")]
+#[cfg_attr(docsrs, doc(cfg(feature = "peek")))]
+pub use peek::*;
+#[cfg(feature = "pratt")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pratt")))]
+pub use pratt::*;
+#[cfg(feature = "then")]
+#[cfg_attr(docsrs, doc(cfg(feature = "then")))]
+pub use then::*;
+#[cfg(feature = "validate")]
+#[cfg_attr(docsrs, doc(cfg(feature = "validate")))]
+pub use validate::*;
+
 mod accepted;
-mod any;
 mod by_ref;
 mod collect;
 mod delimited;
 mod empty;
 mod expect;
-mod fail;
-mod filter;
-mod filter_map;
-mod fold;
-mod ident;
-mod ident_list;
 mod ignore;
-mod keyword;
 mod labelled;
-#[cfg(any(feature = "alloc", feature = "std"))]
+#[cfg(all(feature = "many", any(feature = "alloc", feature = "std")))]
 mod list;
-mod many;
-mod map;
 mod node;
 mod opt;
 mod padded;
-mod peek;
-mod pratt;
-mod punct;
 mod recover;
 mod recovery_gate;
 mod select;
 mod skip_then_retry;
-mod then;
 mod todo;
 mod unwrapped;
-mod validate;
 mod with;
+
+#[cfg(feature = "any")]
+mod any;
+#[cfg(feature = "fail")]
+mod fail;
+#[cfg(feature = "filter")]
+mod filter;
+#[cfg(feature = "filter")]
+mod filter_map;
+#[cfg(feature = "fold")]
+mod fold;
+#[cfg(feature = "ident")]
+mod ident;
+// `try_ident_list` is `Ident::try_parse` driven through `many`'s `separated` — one item, both
+// families, so it is gated on both rather than duplicating either.
+#[cfg(all(feature = "ident", feature = "many"))]
+mod ident_list;
+#[cfg(feature = "keyword")]
+mod keyword;
+#[cfg(feature = "many")]
+mod many;
+#[cfg(feature = "map")]
+mod map;
+#[cfg(feature = "peek")]
+mod peek;
+#[cfg(feature = "pratt")]
+mod pratt;
+// Always compiled: it also carries the `Punctuator` impls for the built-in markers, which are
+// crate-wide vocabulary. The `punct` feature gates the inherent `parse`/`try_parse` parsers
+// inside it.
+mod punct;
+#[cfg(feature = "then")]
+mod then;
+#[cfg(feature = "validate")]
+mod validate;
 
 /// Wrapper for cache configuration in parsers.
 ///
@@ -602,7 +672,8 @@ where
 ///
 /// A source-generic lexer, a context-generic production, and **no turbofish anywhere**:
 ///
-/// ```rust
+#[cfg_attr(feature = "any", doc = "```rust")]
+#[cfg_attr(not(feature = "any"), doc = "```rust,ignore")]
 /// # use core::{convert::Infallible, fmt};
 /// # use tokora::{
 /// #   ComposableParseContext, ErrorOf, InputRef, Lexer, SimpleSpan, Source, Token,
@@ -675,7 +746,8 @@ where
 /// from. This is the defect the free functions exist to remove; the block above is the same
 /// call with the source supplied as a value.
 ///
-/// ```compile_fail,E0283
+#[cfg_attr(feature = "any", doc = "```compile_fail,E0283")]
+#[cfg_attr(not(feature = "any"), doc = "```compile_fail,ignore")]
 /// # use core::{convert::Infallible, fmt};
 /// # use tokora::{
 /// #   ComposableParseContext, ErrorOf, InputRef, Lexer, Parser, SimpleSpan, Source, Token,
@@ -827,9 +899,10 @@ mod tests;
 #[cfg(all(
   test,
   any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
+  feature = "std",
+  feature = "combinators"
 ))]
 mod terminal_stop_tests;
 
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(test, feature = "logos", feature = "std", feature = "combinators"))]
 mod select_tests;

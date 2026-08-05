@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use crate::{TryParseInput, try_parse_input::ParseAttempt};
+use crate::{TryParseInput, parse_state::ParseState, try_parse_input::ParseAttempt};
 
 use super::*;
 
@@ -333,5 +333,6 @@ where
   }
 }
 
-#[cfg(test)]
+// The cells build their subject on top of `Any`, so they need that family as well.
+#[cfg(all(test, feature = "any"))]
 mod tests;

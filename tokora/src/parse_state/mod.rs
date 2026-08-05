@@ -1,10 +1,24 @@
 use super::{input::Cursor, span::Spanned, *};
 
-/// The view of a parse a state-carrying combinator callback is handed:
-/// [`map_with`](crate::ParseInput::map_with),
-/// [`and_then_with`](crate::ParseInput::and_then_with),
-/// [`validate_with`](crate::ParseInput::validate_with), and [`fold`](crate::TryParseInput::fold)
-/// each build one over the region their sub-parser just consumed and lend it for the call.
+/// The view of a parse a state-carrying combinator callback is handed: the `*_with` family —
+#[cfg_attr(feature = "map", doc = " [`map_with`](crate::ParseInput::map_with),")]
+#[cfg_attr(not(feature = "map"), doc = " `map_with`,")]
+#[cfg_attr(
+  feature = "then",
+  doc = " [`and_then_with`](crate::ParseInput::and_then_with),"
+)]
+#[cfg_attr(not(feature = "then"), doc = " `and_then_with`,")]
+#[cfg_attr(
+  feature = "validate",
+  doc = " [`validate_with`](crate::ParseInput::validate_with),"
+)]
+#[cfg_attr(not(feature = "validate"), doc = " `validate_with`,")]
+#[cfg_attr(
+  feature = "fold",
+  doc = " and [`try_fold_with`](crate::TryParseInput::try_fold_with)"
+)]
+#[cfg_attr(not(feature = "fold"), doc = " and `try_fold_with`")]
+/// — each build one over the region their sub-parser just consumed and lend it for the call.
 ///
 /// It answers the four questions a callback has about that region — its [`span`](Self::span), its
 /// source [`slice`](Self::slice), the lexer [`state`](Self::state) it was read under, and the
@@ -42,6 +56,17 @@ where
   start: Cursor<'inp, 'closure, L>,
 }
 
+/// The constructor, in its own block: only the `*_with` callback combinators build a
+/// `ParseState`, and every one of them is a gated family, so in a build with none of them on
+/// there is nothing left here to compile.
+#[cfg(any(
+  feature = "fail",
+  feature = "filter",
+  feature = "fold",
+  feature = "map",
+  feature = "then",
+  feature = "validate"
+))]
 impl<'a, 'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>
   ParseState<'a, 'inp, 'closure, L, Ctx, Lang, Cmpl>
 where
@@ -57,7 +82,14 @@ where
   ) -> Self {
     Self { inp, start }
   }
+}
 
+impl<'inp, L, Ctx, Lang: ?Sized, Cmpl> ParseState<'_, 'inp, '_, L, Ctx, Lang, Cmpl>
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Cmpl: Completeness,
+{
   /// Returns the span covering the output being parsed.
   #[inline(always)]
   pub fn span(&self) -> L::Span {

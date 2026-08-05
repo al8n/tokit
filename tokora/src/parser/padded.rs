@@ -107,7 +107,14 @@ use super::*;
 /// - [`PaddedLeft`] - Skip leading trivia only
 /// - [`PaddedRight`] - Skip trailing trivia only
 /// - [`Token::is_trivia()`](crate::Token::is_trivia) - Determines what counts as trivia
-/// - [`then_ignore`](crate::parser::ParseInput::then_ignore) - Ignore specific tokens (not trivia)
+#[cfg_attr(
+  feature = "then",
+  doc = " - [`then_ignore`](crate::parser::ParseInput::then_ignore) - Ignore specific tokens (not trivia)"
+)]
+#[cfg_attr(
+  not(feature = "then"),
+  doc = " - `then_ignore` - Ignore specific tokens (not trivia)"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Padded<P, O, L, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   parser: P,

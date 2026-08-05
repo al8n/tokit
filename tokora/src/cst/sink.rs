@@ -32,12 +32,11 @@ use crate::{
   Lexer,
   emitter::{
     CstEmitter, Emitter, FullContainerEmitter, MissingLeadingSeparatorEmitter,
-    MissingTrailingSeparatorEmitter, PrattEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter,
+    MissingTrailingSeparatorEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter,
     UnclosedEmitter, UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
     ValueKeyedEmitter,
   },
   error::{
-    UnexpectedEoLhs, UnexpectedEoRhs,
     syntax::{FullContainer, MissingSyntaxOf, TooFew, TooMany},
     token::{MissingTokenOf, UnexpectedTokenOf},
   },
@@ -45,6 +44,13 @@ use crate::{
   span::{Span, Spanned},
   token::Token,
   utils::CowStr,
+};
+
+// The sink forwards the pratt channel too, but only when that family exists.
+#[cfg(feature = "pratt")]
+use crate::{
+  emitter::PrattEmitter,
+  error::{UnexpectedEoLhs, UnexpectedEoRhs},
 };
 
 use super::{
@@ -1563,6 +1569,7 @@ where
   }
 }
 
+#[cfg(feature = "pratt")]
 impl<'inp, L, E, Lang> PrattEmitter<'inp, L, Lang> for Sink<'inp, L, E>
 where
   L: Lexer<'inp>,

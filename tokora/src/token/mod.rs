@@ -1,10 +1,15 @@
 pub use lit::*;
-pub use pratt::PrattToken;
 pub use punct::*;
 
+#[cfg(feature = "pratt")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pratt")))]
+pub use pratt::PrattToken;
+
 mod lit;
-mod pratt;
 mod punct;
+
+#[cfg(feature = "pratt")]
+mod pratt;
 
 /// The core trait for token types used with Tokora.
 ///

@@ -1413,6 +1413,9 @@ fn cst_composition_census_every_family_method_is_overridden() {
 /// bound is not part of the collecting surface, and the CST channel is orthogonal to all of
 /// it). They are the residue a bundle bound cannot derive, so they are enumerated with a
 /// reason rather than counted.
+// `PrattEmitter` is one of the two residue bounds this cell enumerates, and it is the `pratt`
+// family's.
+#[cfg(feature = "pratt")]
 #[test]
 fn sink_satisfies_the_public_emitter_bundles() {
   use crate::emitter::{ComposableEmitter, PolicyComposableEmitter, PrattEmitter};
