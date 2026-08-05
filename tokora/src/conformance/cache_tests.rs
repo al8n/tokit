@@ -92,25 +92,34 @@ const SRC: &str = "a b c d e f g h i j k l";
 
 // ── The built-ins ───────────────────────────────────────────────────────────────────
 
+// Every built-in takes `Options = ()`, so `also_built_by` drives their second constructor with
+// the only value that type has. Without it `Cache::with_options` was never called by the kit at
+// all — not for a third-party cache and not for tokora's own (#180 part A, item 7).
+
 #[test]
 fn cache_kit_accepts_the_default_ring() {
   CacheHarness::<CLex<'_>, DefaultCache<'_, CLex<'_>>>::new(SRC)
     .named("DefaultCache (U3)")
+    .also_built_by(|| <DefaultCache<'_, CLex<'_>> as Cache<'_, CLex<'_>, ()>>::with_options(()))
     .run();
 }
 
 #[test]
 fn cache_kit_accepts_a_wider_ring() {
   use generic_arraydeque::{GenericArrayDeque, typenum::U8};
-  CacheHarness::<CLex<'_>, GenericArrayDeque<CachedTokenOf<'_, CLex<'_>>, U8>>::new(SRC)
+  type Wide<'a> = GenericArrayDeque<CachedTokenOf<'a, CLex<'a>>, U8>;
+  CacheHarness::<CLex<'_>, Wide<'_>>::new(SRC)
     .named("GenericArrayDeque<_, U8>")
+    .also_built_by(|| <Wide<'_> as Cache<'_, CLex<'_>, ()>>::with_options(()))
     .run();
 }
 
 #[test]
 fn cache_kit_accepts_the_capacity_one_cache() {
-  CacheHarness::<CLex<'_>, Option<CachedTokenOf<'_, CLex<'_>>>>::new(SRC)
+  type One<'a> = Option<CachedTokenOf<'a, CLex<'a>>>;
+  CacheHarness::<CLex<'_>, One<'_>>::new(SRC)
     .named("Option (capacity 1)")
+    .also_built_by(|| <One<'_> as Cache<'_, CLex<'_>, ()>>::with_options(()))
     .run();
 }
 
@@ -118,6 +127,7 @@ fn cache_kit_accepts_the_capacity_one_cache() {
 fn cache_kit_accepts_the_blackhole() {
   CacheHarness::<CLex<'_>, ()>::new(SRC)
     .named("() (capacity 0)")
+    .also_built_by(|| <() as Cache<'_, CLex<'_>, ()>>::with_options(()))
     .run();
 }
 
@@ -350,6 +360,21 @@ const WRONG_BACK_IDENTITY: u8 = 34;
 /// Correct at every bound of 0 or 1, where "serve the front repeatedly" and "walk the residency
 /// once" are the same instruction.
 const DUPLICATING_PEEK: u8 = 35;
+/// `Cache::new()` is conformant and `Cache::with_options(n)` builds a cache that **reports** a
+/// capacity of `n` and can actually hold `n - 1` (#180 part A, item 7).
+///
+/// The kit built every cache it tested with `C::new()`, so the second constructor was never
+/// called at all and a cache could get it arbitrarily wrong. This cell is the shape the issue
+/// names — a `with_options` that hands back the wrong capacity — and it is a defect the kit can
+/// see only because the cache's own `remaining()` disagrees with how many `push_back`s it then
+/// accepts. The kit cannot check that the capacity matches what the CALLER asked for: `Options`
+/// is an opaque associated type, so `with_options(6)` returning a capacity-3 cache is
+/// internally consistent and conforming as far as any generic oracle can tell.
+///
+/// Reached through [`CacheHarness::also_built_by`](super::cache::CacheHarness::also_built_by),
+/// so the failure it produces carries the `built by with_options` tag and cannot be confused
+/// with a failure on the `C::new()` pass.
+const WRONG_WITH_OPTIONS: u8 = 36;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -363,7 +388,11 @@ where
   /// cases ordered as a walk from the head would meet them — behind the live run — so that
   /// `items` chained with it reads as the backing store a ring walks past its own length.
   graveyard: VecDeque<CachedTokenOf<'a, L>>,
+  /// How many entries this cache will actually hold — what `push_back` refuses past.
   cap: usize,
+  /// What `remaining()` reports against, which is the same as [`cap`](Self::cap) for every cell
+  /// but [`WRONG_WITH_OPTIONS`], where `with_options` inflates it by one.
+  claimed_cap: usize,
   peeks: Cell<usize>,
   /// Set by the first `peek` that is handed a buffer which already holds entries.
   prefilled: Cell<bool>,
@@ -402,23 +431,18 @@ where
   const RETAINS_FRONT: bool = D != APPENDING_PUSH_FRONT && D != EMPTY_REFUSING_PUSH_FRONT;
 
   fn new() -> Self {
-    <Self as Cache<'a, L, Lang>>::with_options(4)
+    // Deliberately NOT `with_options(4)`: `WRONG_WITH_OPTIONS` is a defect in the second
+    // constructor only, and it can only be one if the two do not share a body.
+    Self::build(4, 4)
   }
 
   fn with_options(cap: usize) -> Self {
-    Self {
-      items: VecDeque::with_capacity(cap),
-      graveyard: VecDeque::new(),
-      cap,
-      peeks: Cell::new(0),
-      prefilled: Cell::new(false),
-      warmed: Cell::new(false),
-      front_pushes: Cell::new(0),
-      last_pushed_back_span: None,
-      poisoned: false,
-      stashed: None,
-      peek_one_at_len: Cell::new(None),
+    if D == WRONG_WITH_OPTIONS {
+      // Reports `cap` and holds one fewer. `new()` above is untouched, so this is invisible to
+      // any driver that only ever calls `new()` — which is every driver there was.
+      return Self::build(cap.saturating_sub(1), cap);
     }
+    Self::build(cap, cap)
   }
 
   fn len(&self) -> usize {
@@ -432,7 +456,7 @@ where
   }
 
   fn remaining(&self) -> usize {
-    self.cap - self.items.len()
+    self.claimed_cap - self.items.len()
   }
 
   fn is_empty(&self) -> bool {
@@ -824,6 +848,28 @@ where
   L: Lexer<'a>,
   L::Token: Clone,
 {
+  /// A fresh queue that holds `cap` entries and reports `claimed_cap` free slots while empty.
+  ///
+  /// The two are the same number for every cell but [`WRONG_WITH_OPTIONS`]. Inherent rather than
+  /// shared through `new`/`with_options` so that those two can differ, which is what it takes for
+  /// a defect to live in the second constructor alone.
+  fn build(cap: usize, claimed_cap: usize) -> Self {
+    Self {
+      items: VecDeque::with_capacity(cap),
+      graveyard: VecDeque::new(),
+      cap,
+      claimed_cap,
+      peeks: Cell::new(0),
+      prefilled: Cell::new(false),
+      warmed: Cell::new(false),
+      front_pushes: Cell::new(0),
+      last_pushed_back_span: None,
+      poisoned: false,
+      stashed: None,
+      peek_one_at_len: Cell::new(None),
+    }
+  }
+
   /// The refusal round-trip — or, under `SWAPPING_REFUSAL`, its violation: the caller is handed a
   /// resident entry instead of the token it offered, which silently swallows that token.
   fn refuse(&mut self, tok: CachedTokenOf<'a, L>) -> CachedTokenOf<'a, L> {
@@ -893,9 +939,17 @@ where
 }
 
 /// Runs the kit over `Queue<D>`, so each cell below is one line.
+///
+/// Two passes: `Queue::new()` at capacity 4, then `Queue::with_options(1)` at capacity 1. The
+/// second is what drives `Cache::with_options` at all (#180 part A, item 7) — the kit cannot
+/// reach it on its own, since `Options` is an associated type it has no way to fabricate a value
+/// of — and capacity 1 is chosen for it because that is the most degenerate capacity a cache can
+/// have and still hold anything: several checks take a different path there, and one of them,
+/// the prepend law, could not be driven at all before #180 part A, item 10.
 fn run_queue<const D: u8>() {
   CacheHarness::<CLex<'_>, Queue<'_, CLex<'_>, D>>::new(SRC)
     .named("third-party queue")
+    .also_built_by(|| <Queue<'_, CLex<'_>, D> as Cache<'_, CLex<'_>, ()>>::with_options(1))
     .run();
 }
 
@@ -1006,6 +1060,18 @@ fn cache_kit_catches_a_back_that_names_the_wrong_entry() {
 #[should_panic(expected = "OLDEST FIRST")]
 fn cache_kit_catches_a_peek_that_serves_one_token_repeatedly() {
   run_queue::<DUPLICATING_PEEK>();
+}
+
+/// #180 part A, item 7: the kit built every cache it tested with `C::new()`, so `with_options`
+/// was never called and a conformant `new` covered for an arbitrarily broken second constructor.
+///
+/// The `expected` string is the point: it is the `built by with_options` tag the second pass puts
+/// in every message, so this test fails if the defect is ever caught on the `C::new()` pass
+/// instead — which would mean the fixture, not the kit, had changed.
+#[test]
+#[should_panic(expected = "built by with_options")]
+fn cache_kit_catches_a_wrong_with_options() {
+  run_queue::<WRONG_WITH_OPTIONS>();
 }
 
 /// #180 part A, item 5: `pop_front_if`/`try_pop_front_if` were never called by the kit, so an

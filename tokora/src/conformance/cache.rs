@@ -95,7 +95,23 @@
 //! capacity-0 `()` cache, the capacity-1 `Option` cache and an arbitrarily wide ring are all
 //! driven by the same call.
 //!
+//! **Both constructors.** `Cache` has two — [`new`](Cache::new) and
+//! [`with_options`](Cache::with_options) — and the kit builds with the first. Hand it
+//! [`also_built_by`](CacheHarness::also_built_by) and it runs the whole contract a second time
+//! against caches the second one builds, re-reading the capacity from each pass so the two may
+//! differ, and tagging every message with which constructor it is talking about. It cannot reach
+//! `with_options` on its own: [`Options`](Cache::Options) is an associated type the kit has no
+//! way to fabricate a value of.
+//!
 //! # What it deliberately does not check
+//!
+//! **Whether `with_options` honours the options it was given.** The pass above certifies that a
+//! `with_options`-built cache obeys the whole contract, which is what catches the shapes that
+//! matter — one that comes back non-empty, or that reports a capacity it will not honour. What
+//! no oracle generic over `L` and `C` can check is the *relation* between the options and the
+//! cache: `Options` is opaque, so a `with_options(16)` that hands back a capacity-3 cache is
+//! internally consistent, and internally consistent is all the kit can see. That relation is the
+//! implementor's to test, in a test that knows what the options mean.
 //!
 //! **The zero-re-scan law** (a probed closer is committed exactly once, cache-independently, in
 //! any capacity) is an *input-layer* law, not a queue law: its oracle drives `probe_close` and
@@ -227,8 +243,38 @@ where
 {
   source: &'inp L::Source,
   name: &'static str,
+  /// How the cache under test is built on THIS pass. `None` is `C::new()`;
+  /// [`also_built_by`](CacheHarness::also_built_by) stores a second constructor here and
+  /// [`run`](CacheHarness::run) makes a second pass with it.
+  ///
+  /// A plain `fn` pointer rather than a boxed closure, so this needs no allocation and — the
+  /// reason it is a constructor for `C` and not a factory for `C::Options` — no `C::Options`
+  /// bound on the struct, which would be a breaking change to a released public type. A closure
+  /// that captures nothing coerces to one, so `|| C::with_options(..)` is what a caller writes.
+  built_by: Option<fn() -> C>,
+  /// The suffix every failure message on this pass carries after the cache's name, so a failure
+  /// says which constructor built the cache it is talking about. Empty on the `C::new()` pass.
+  via: &'static str,
   _cache: PhantomData<fn() -> C>,
   _lang: PhantomData<fn(&Lang)>,
+}
+
+/// The cache's name, plus which constructor built it on this pass, as one `Display` value.
+///
+/// `Copy`, so the closures inside the kit's `unwrap_or_else` panics can capture it exactly the
+/// way they captured the bare `&'static str` before, and every `{name}` in every message
+/// interpolates unchanged.
+#[derive(Clone, Copy)]
+struct Label {
+  name: &'static str,
+  via: &'static str,
+}
+
+impl core::fmt::Display for Label {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(self.name)?;
+    f.write_str(self.via)
+  }
 }
 
 impl<'inp, L, C, Lang> CacheHarness<'inp, L, C, Lang>
@@ -249,6 +295,8 @@ where
     Self {
       source,
       name: "cache",
+      built_by: None,
+      via: "",
       _cache: PhantomData,
       _lang: PhantomData,
     }
@@ -262,15 +310,86 @@ where
     self
   }
 
+  /// Runs every check a **second** time against caches built by `make` instead of by
+  /// [`Cache::new`], and is how [`Cache::with_options`] gets driven at all.
+  ///
+  /// Without this the kit builds every cache it tests with `C::new()`, so a conformant `new` and
+  /// a broken `with_options` — one that hands back a cache with the wrong capacity, or one that
+  /// is not actually empty — were indistinguishable: nothing ever called the second constructor
+  /// (#180 part A, item 7). The kit cannot reach it on its own, because [`Cache::Options`] is an
+  /// associated type it has no way to fabricate a value of.
+  ///
+  /// Pass the constructor, not the options:
+  ///
+  /// ```ignore
+  /// CacheHarness::<MyLexer<'_>, MyCache<'_>>::new(SRC)
+  ///   .also_built_by(|| MyCache::with_options(MyOptions { capacity: 16 }))
+  ///   .run();
+  /// ```
+  ///
+  /// Both passes run the whole contract, independently: the capacity is re-read from the cache
+  /// each pass builds, so the two may differ, and the corpus must be long enough for the larger
+  /// of them. Every failure message names which constructor built the cache it is about.
+  #[must_use]
+  pub fn also_built_by(mut self, make: fn() -> C) -> Self {
+    self.built_by = Some(make);
+    self
+  }
+
   /// Runs every check the cache's capacity can express, panicking on the first violation.
+  ///
+  /// Runs the whole contract once against a cache built by [`Cache::new`], and — if
+  /// [`also_built_by`](Self::also_built_by) supplied a second constructor — once more against a
+  /// cache built by that one.
   ///
   /// # Panics
   ///
-  /// Panics — naming the check, the capacity, and the expected-vs-got values — the moment a
-  /// contract law fails. Returns normally on full conformance.
+  /// Panics — naming the check, the capacity, the constructor, and the expected-vs-got values —
+  /// the moment a contract law fails. Returns normally on full conformance.
   pub fn run(&self) {
-    let name = self.name;
-    let cap = C::new().remaining();
+    Self {
+      source: self.source,
+      name: self.name,
+      built_by: None,
+      via: "",
+      _cache: PhantomData,
+      _lang: PhantomData,
+    }
+    .run_pass();
+
+    if self.built_by.is_some() {
+      Self {
+        source: self.source,
+        name: self.name,
+        built_by: self.built_by,
+        via: " built by with_options",
+        _cache: PhantomData,
+        _lang: PhantomData,
+      }
+      .run_pass();
+    }
+  }
+
+  /// The cache under test, built the way this pass builds it.
+  fn make(&self) -> C {
+    match self.built_by {
+      Some(f) => f(),
+      None => C::new(),
+    }
+  }
+
+  /// The cache's name plus this pass's constructor, for every failure message.
+  fn label(&self) -> Label {
+    Label {
+      name: self.name,
+      via: self.via,
+    }
+  }
+
+  /// One whole pass of the contract, against caches built by [`make`](Self::make).
+  fn run_pass(&self) {
+    let name = self.label();
+    let cap = self.make().remaining();
     // Past the residency the kit needs a full peek window of tokens the cache is NOT holding:
     // check 6 prefills the peek buffer with them, at every depth from one entry to a buffer with
     // no room left. A capacity-0 cache runs no peek check and needs only the two an ordering law
@@ -324,7 +443,7 @@ where
   /// Returns the cache and the spans it should be holding, so every later assertion compares
   /// against a list the kit built rather than against the cache's own answer.
   fn filled(&self, n: usize) -> (C, Vec<L::Span>) {
-    let mut cache = C::new();
+    let mut cache = self.make();
     let mut want = Vec::new();
     for tok in self.corpus(n) {
       let span = span_of::<L>(&tok);
@@ -338,14 +457,14 @@ where
   // ── 1. empty invariants ─────────────────────────────────────────────────────────
 
   fn check_empty(&self, cap: usize, when: &str) {
-    let mut cache = C::new();
+    let mut cache = self.make();
     self.assert_empty(&mut cache, cap, when);
   }
 
   /// Takes `cache` by `&mut` specifically so its own pop methods can be probed below — see
   /// there for why a fresh `C::new()` used to stand in for it and what that missed.
   fn assert_empty(&self, cache: &mut C, cap: usize, when: &str) {
-    let name = self.name;
+    let name = self.label();
     assert!(
       cache.len() == 0,
       "tokora cache conformance [{name} empty-invariants/{when}]: len() is {}, expected 0",
@@ -397,7 +516,7 @@ where
     if !C::RETAINS_FRONT {
       return;
     }
-    let name = self.name;
+    let name = self.label();
     assert!(
       cap >= 1,
       "tokora cache conformance [{name} retains-front]: RETAINS_FRONT is declared true but the empty-cache capacity is 0"
@@ -410,7 +529,7 @@ where
     // lazily on the first `push_back`, a "warm-up" flag, a front link only a back push
     // establishes. The input layer's first put-back can land on exactly that cache, and it has
     // already compiled the parked-slot fallback out.
-    let mut fresh = C::new();
+    let mut fresh = self.make();
     let first = self
       .corpus(1)
       .pop()
@@ -429,7 +548,7 @@ where
 
     // And again on an empty cache that has been used: a cache that retains the front until it is
     // drained once, and then stops, is the same violation reached from the other side.
-    let mut cache = C::new();
+    let mut cache = self.make();
     let tok = self.corpus(1).pop().expect("the corpus is non-empty");
     assert!(
       cache.push_back(tok).is_ok(),
@@ -469,11 +588,11 @@ where
       // are the same state.
       return;
     }
-    let name = self.name;
+    let name = self.label();
     let declares = C::RETAINS_FRONT;
 
     // Fresh: the front push is the first operation this cache has ever seen.
-    let mut fresh = C::new();
+    let mut fresh = self.make();
     let tok = self
       .corpus(1)
       .pop()
@@ -492,7 +611,7 @@ where
 
     // Used and emptied: the same state reached the other way, for a cache whose front is
     // established lazily and then torn down again with the entry that established it.
-    let mut used = C::new();
+    let mut used = self.make();
     let tok = self.corpus(1).pop().expect("the corpus is non-empty");
     assert!(
       used.push_back(tok).is_ok(),
@@ -517,8 +636,8 @@ where
   // ── 3. FIFO append, exact length, and the refusal round-trip ────────────────────
 
   fn check_fifo_and_length(&self, cap: usize) {
-    let name = self.name;
-    let mut cache = C::new();
+    let name = self.label();
+    let mut cache = self.make();
     let corpus = self.corpus(cap.saturating_add(1).max(2));
     let mut resident: Vec<L::Span> = Vec::new();
 
@@ -560,7 +679,7 @@ where
 
   /// The four length/edge observables against the list the kit is tracking.
   fn assert_resident(&self, cache: &C, cap: usize, want: &[L::Span], when: &str) {
-    let name = self.name;
+    let name = self.label();
     assert!(
       cache.len() == want.len(),
       "tokora cache conformance [{name} exact-length] {when}: len() is {}, expected {}",
@@ -649,7 +768,7 @@ where
     if cap == 0 {
       return;
     }
-    let name = self.name;
+    let name = self.label();
 
     // pop_front drains oldest-first, and `front` names the entry the next pop will return.
     let (mut cache, want) = self.filled(cap);
@@ -716,9 +835,9 @@ where
     if cap < 2 {
       return;
     }
-    let name = self.name;
+    let name = self.label();
     let corpus = self.corpus(cap.saturating_add(1));
-    let mut cache = C::new();
+    let mut cache = self.make();
     let mut resident: Vec<L::Span> = Vec::new();
 
     // One at the back, then everything else at the front: each must land BEFORE the rest.
@@ -825,7 +944,7 @@ where
   /// rather than a case to handle — the warranted-refusal law itself is checked by the caller,
   /// which drives one push past the capacity.
   fn front_built(&self, cap: usize, depth: usize) -> (C, Vec<L::Span>) {
-    let name = self.name;
+    let name = self.label();
     let want = depth.saturating_add(1);
     let corpus = self.corpus(want);
     assert!(
@@ -834,7 +953,7 @@ where
       corpus.len()
     );
 
-    let mut cache = C::new();
+    let mut cache = self.make();
     let mut order: Vec<L::Span> = Vec::new();
     let mut it = corpus.into_iter();
     let back = it.next().expect("the corpus was just checked non-empty");
@@ -888,7 +1007,7 @@ where
     if cap == 0 {
       return;
     }
-    let name = self.name;
+    let name = self.label();
 
     // Drained from the FRONT: the consuming path, leaving the resident suffix.
     for popped in 0..=cap {
@@ -940,7 +1059,7 @@ where
   /// Check 3 drives the same fill one token further and would have failed already; this says so
   /// in the kit's own words rather than as a slice index panic.
   fn filled_to_capacity(&self, cap: usize) -> (C, Vec<L::Span>) {
-    let name = self.name;
+    let name = self.label();
     let (cache, filled) = self.filled(cap);
     assert!(
       filled.len() == cap,
@@ -953,7 +1072,7 @@ where
   /// Check 6 in full — bound, order, purity, `peek_one`, and the prefilled-buffer sweep —
   /// against a cache holding exactly `want`. `state` names the residency in every message.
   fn check_peek_at(&self, cache: &C, cap: usize, want: &[L::Span], state: &str) {
-    let name = self.name;
+    let name = self.label();
     let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
     let bound = window.min(want.len());
 
@@ -1076,7 +1195,7 @@ where
     depth: usize,
     state: &str,
   ) {
-    let name = self.name;
+    let name = self.label();
     let window = <<PeekWindow as Window>::CAPACITY as Unsigned>::USIZE;
     let prefill = self.beyond_residency(cap, depth);
     let prefill_spans: Vec<L::Span> = prefill.iter().map(|tok| span_of::<L>(tok)).collect();
@@ -1136,7 +1255,7 @@ where
   /// of `filled`'s — a suffix where it drained the front, a prefix where it drained the back — so
   /// these stay non-resident at all of them.
   fn beyond_residency(&self, cap: usize, depth: usize) -> Vec<CachedTokenOf<'inp, L>> {
-    let name = self.name;
+    let name = self.label();
     let want = cap.saturating_add(depth);
     let mut corpus = self.corpus(want);
     assert!(
@@ -1199,7 +1318,7 @@ where
     // permanently unable to accept a push — poisoned, its capacity zeroed, disabled outright —
     // passes everything above, since nothing above tries to use it again (#180 part A, item 2).
     // Reuse it: push back `cap` tokens and confirm they land exactly the way a first fill would.
-    let name = self.name;
+    let name = self.label();
     let mut want = Vec::with_capacity(cap);
     for tok in self.corpus(cap) {
       let span = span_of::<L>(&tok);
@@ -1229,7 +1348,7 @@ where
     if cap == 0 {
       return;
     }
-    let name = self.name;
+    let name = self.label();
 
     // Drained from the FRONT: the consuming path, leaving the resident suffix.
     for popped in 0..=cap {
@@ -1276,7 +1395,7 @@ where
   /// [`check_span`](Self::check_span) visits — including the fully drained one — is covered by
   /// the same oracle instead of splitting the empty case out).
   fn assert_span_at(&self, cache: &C, want: &[L::Span], state: &str) {
-    let name = self.name;
+    let name = self.label();
     match (want.first(), want.last(), cache.span()) {
       (Some(first), Some(last), Some(combined)) => assert!(
         combined.start_ref() == first.start_ref() && combined.end_ref() == last.end_ref(),
@@ -1301,11 +1420,11 @@ where
   /// was ever called by the kit at all, so an override that removed on a false predicate, or
   /// removed and answered `None`, passed exactly like a conforming one (#180 part A, item 5).
   fn check_pop_front_if(&self, cap: usize) {
-    let name = self.name;
+    let name = self.label();
 
     // Empty cache: the predicate must not run at all — there is no front to hand it — and both
     // methods answer `None` regardless of what the predicate would have said.
-    let mut empty = C::new();
+    let mut empty = self.make();
     let ran = Cell::new(false);
     assert!(
       empty
@@ -1321,7 +1440,7 @@ where
       "tokora cache conformance [{name} pop-front-if]: pop_front_if()'s predicate ran against an empty cache, which has no front to hand it"
     );
 
-    let mut empty2 = C::new();
+    let mut empty2 = self.make();
     let ran2 = Cell::new(false);
     assert!(
       empty2
@@ -1424,7 +1543,7 @@ where
   /// through the overflow iterator, passed unnoticed before this check existed at all (#180 part
   /// A, item 6).
   fn check_push_many(&self, cap: usize) {
-    let name = self.name;
+    let name = self.label();
     let want_len = cap.saturating_add(2);
     let corpus = self.corpus(want_len);
     assert!(
@@ -1434,7 +1553,7 @@ where
     );
     let all_spans: Vec<L::Span> = corpus.iter().map(span_of::<L>).collect();
 
-    let mut cache = C::new();
+    let mut cache = self.make();
     let overflow: Vec<_> = cache.push_many(corpus.into_iter()).collect();
     let overflow_spans: Vec<L::Span> = overflow.iter().map(span_of::<L>).collect();
     assert!(

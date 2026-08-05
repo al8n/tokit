@@ -3674,6 +3674,20 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    reads `front()`/`back()` themselves against the same expectation.
    — *(#180)*
 
+74. **`Cache::with_options` was never called by the cache conformance kit, so a conformant `new()`
+   covered for an arbitrarily broken second constructor.** `Cache` has two constructors and the
+   kit built every cache it tested with the first, so a `with_options` that came back non-empty,
+   or that reported a capacity it would not honour, passed `CacheHarness::run()` undetected. The
+   kit could not reach it on its own: `Options` is an associated type it has no way to fabricate
+   a value of. `CacheHarness::also_built_by(|| C::with_options(..))` is the new, additive way to
+   supply the second constructor; `run()` then drives the **whole** contract a second time
+   against caches built by it, re-reading the capacity per pass so the two may differ, and every
+   failure message names which constructor built the cache it is about. tokora's own four caches
+   are now driven through both. What no kit generic over `C` can check — that the capacity
+   matches what the *caller asked for*, since `Options` is opaque — is stated in the module docs'
+   "what it deliberately does not check" section rather than left implied.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,
