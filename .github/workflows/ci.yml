@@ -593,10 +593,16 @@ jobs:
   #
   # Compiles all five declared bench targets and runs each once in test mode (`-- --test`),
   # which runs every benchmark body once instead of criterion's real sampling loop (#181).
-  # `--no-default-features --features std,logos,rowan,unstable-raw` is the exact union of every
-  # bench target's `required-features` in `tokora/Cargo.toml` — not `--all-features`, which
-  # would also enable `trace`: `cst.rs`'s own header says running under `trace` is roughly an
-  # order of magnitude slower and a configuration nobody ships.
+  # `--no-default-features --features std,logos,rowan,unstable-raw,combinators` is the exact
+  # union of every bench target's `required-features` in `tokora/Cargo.toml` — not
+  # `--all-features`, which would also enable `trace`: `cst.rs`'s own header says running under
+  # `trace` is roughly an order of magnitude slower and a configuration nobody ships.
+  #
+  # `combinators` is in that union and has to be SPELLED OUT, because `--no-default-features`
+  # turns it off and it is what every bench's `required-features` now carries. A bench whose
+  # required features are not enabled is SKIPPED, not failed, so leaving it out does not red
+  # this job — it compiles zero of the five and reports `Finished` in about 30ms, which is
+  # exactly the shape of the #181 gap this job was created to close.
   #
   # NOT a timed regression gate: GitHub runners are far too noisy for the ±2% discipline these
   # benches are held to locally, so regression numbers are gathered off-CI.
@@ -617,8 +623,8 @@ jobs:
             ${{ runner.os }}-bench-
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
-      - name: cargo bench --no-default-features --features std,logos,rowan,unstable-raw -- --test
-        run: cargo bench --no-default-features --features std,logos,rowan,unstable-raw -- --test
+      - name: cargo bench --no-default-features --features std,logos,rowan,unstable-raw,combinators -- --test
+        run: cargo bench --no-default-features --features std,logos,rowan,unstable-raw,combinators -- --test
 
   # ── Gate: cross-compile smoke across extra platforms ────────────────────────
   cross:
