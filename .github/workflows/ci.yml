@@ -11,21 +11,22 @@ name: CI
 #     cargo test --release --all-features
 #     cargo +nightly check -p tokora --tests --all-features
 #     cargo check -p tokora --no-default-features
-#     cargo bench --no-run
+#     cargo bench --all-features --no-run
 #     RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 #     RUSTDOCFLAGS="-D warnings" cargo doc -p tokora --no-deps --no-default-features
 #     bash ci/changelog_structure.sh CHANGELOG.md
 #     bash ci/name_collision/run.sh <merge-base> <inventory.json>   # see that job for the
 #                                                                  # inventory it requires
 #
-# Three of those lines look redundant beside a broader command and are not — each catches a
-# class no other line in the set can:
+# `cargo bench --no-run` used to be the only line compiling `parser_combinators`, `pratt_typed`,
+# `cst` and `backtrack` — `bench (smoke)` below built only `input_scan` (#181). It now builds
+# and test-runs all five, so this line is redundant with CI; kept as a fast local compile-only
+# check, now `--all-features` so it actually builds all five — none of the five default to
+# enabling `logos`, so the bare form silently compiled zero of them.
 #
-#   * `cargo bench --no-run` is the only line that compiles the benches — `cargo test` does
-#     not — and it has no full mirror below: `bench (smoke)` builds ONE of the five declared
-#     bench targets, so `parser_combinators`, `pratt_typed`, `cst` and `backtrack` are
-#     compiled by this by-hand leg and by nothing in CI (#163). A known gap, recorded rather
-#     than implied.
+# Two of the remaining lines look redundant beside a broader command and are not — each catches
+# a class no other line in the set can:
+#
 #   * the bare-config rustdoc build is the only leg that sees bare-config intra-doc breakage:
 #     `--all-features` documents every item, so a link whose TARGET is feature-gated always
 #     resolves there.
@@ -543,9 +544,12 @@ jobs:
 
   # ── Gate: bench SMOKE only ──────────────────────────────────────────────────
   #
-  # Compiles ONE of the five declared bench targets — `input_scan` — and runs it once in test
-  # mode (`-- --test`). `parser_combinators`, `pratt_typed`, `cst` and `backtrack` are compiled
-  # by nothing in CI; only the by-hand `cargo bench --no-run` covers them (#163).
+  # Compiles all five declared bench targets and runs each once in test mode (`-- --test`),
+  # which runs every benchmark body once instead of criterion's real sampling loop (#181).
+  # `--no-default-features --features std,logos,rowan,unstable-raw` is the exact union of every
+  # bench target's `required-features` in `tokora/Cargo.toml` — not `--all-features`, which
+  # would also enable `trace`: `cst.rs`'s own header says running under `trace` is roughly an
+  # order of magnitude slower and a configuration nobody ships.
   #
   # NOT a timed regression gate: GitHub runners are far too noisy for the ±2% discipline these
   # benches are held to locally, so regression numbers are gathered off-CI.
@@ -566,8 +570,8 @@ jobs:
             ${{ runner.os }}-bench-
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
-      - name: cargo bench --bench input_scan --features logos -- --test
-        run: cargo bench --bench input_scan --features logos -- --test
+      - name: cargo bench --no-default-features --features std,logos,rowan,unstable-raw -- --test
+        run: cargo bench --no-default-features --features std,logos,rowan,unstable-raw -- --test
 
   # ── Gate: cross-compile smoke across extra platforms ────────────────────────
   cross:
