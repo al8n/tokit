@@ -60,7 +60,8 @@ pub(crate) use try_expect::CloseStatus;
 #[cfg(all(
   test,
   any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
+  feature = "std",
+  feature = "combinators"
 ))]
 pub(crate) use try_expect::ClosePayload;
 
@@ -85,7 +86,8 @@ mod tests;
 #[cfg(all(
   test,
   any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
+  feature = "std",
+  feature = "combinators"
 ))]
 mod partial_tests;
 

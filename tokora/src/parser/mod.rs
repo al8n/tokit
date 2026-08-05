@@ -283,7 +283,9 @@ mod map;
 mod peek;
 #[cfg(feature = "pratt")]
 mod pratt;
-#[cfg(feature = "punct")]
+// Always compiled: it also carries the `Punctuator` impls for the built-in markers, which are
+// crate-wide vocabulary. The `punct` feature gates the inherent `parse`/`try_parse` parsers
+// inside it.
 mod punct;
 #[cfg(feature = "then")]
 mod then;
@@ -647,7 +649,8 @@ where
 ///
 /// A source-generic lexer, a context-generic production, and **no turbofish anywhere**:
 ///
-/// ```rust
+#[cfg_attr(feature = "any", doc = "```rust")]
+#[cfg_attr(not(feature = "any"), doc = "```rust,ignore")]
 /// # use core::{convert::Infallible, fmt};
 /// # use tokora::{
 /// #   ComposableParseContext, ErrorOf, InputRef, Lexer, SimpleSpan, Source, Token,
@@ -720,7 +723,8 @@ where
 /// from. This is the defect the free functions exist to remove; the block above is the same
 /// call with the source supplied as a value.
 ///
-/// ```compile_fail,E0283
+#[cfg_attr(feature = "any", doc = "```compile_fail,E0283")]
+#[cfg_attr(not(feature = "any"), doc = "```compile_fail,ignore")]
 /// # use core::{convert::Infallible, fmt};
 /// # use tokora::{
 /// #   ComposableParseContext, ErrorOf, InputRef, Lexer, Parser, SimpleSpan, Source, Token,
@@ -872,9 +876,10 @@ mod tests;
 #[cfg(all(
   test,
   any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
+  feature = "std",
+  feature = "combinators"
 ))]
 mod terminal_stop_tests;
 
-#[cfg(all(test, feature = "logos", feature = "std"))]
+#[cfg(all(test, feature = "logos", feature = "std", feature = "combinators"))]
 mod select_tests;

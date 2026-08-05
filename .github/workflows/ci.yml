@@ -280,8 +280,11 @@ jobs:
             ${{ runner.os }}-logos-${{ matrix.logos }}-
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
-      - name: cargo test --no-default-features --features std,${{ matrix.logos }}
-        run: cargo test -p tokora --no-default-features --features std,${{ matrix.logos }}
+      # `combinators` is spelled out because it is a DEFAULT feature: without it this leg
+      # would still compile, but every combinator suite is `#![cfg]`'d on it, so the run
+      # would silently shrink to the handful of files that need no combinator at all.
+      - name: cargo test --no-default-features --features std,combinators,${{ matrix.logos }}
+        run: cargo test -p tokora --no-default-features --features std,combinators,${{ matrix.logos }}
 
   # ── Gate: mechanical public-API diff against the last published version ─────
   # `continue-on-error` is deliberate and the reason is written down because "advisory" usually
@@ -335,7 +338,7 @@ jobs:
           set -euo pipefail
           base="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
           echo "base=$base" >> "$GITHUB_ENV"
-          feat="std,logos,trace,rowan"
+          feat="std,logos,trace,rowan,combinators"
           mkdir -p /tmp/nc && git worktree add /tmp/nc/base "$base"
           # `Cargo.lock` is gitignored, and each side must resolve its OWN lock: one lock
           # generated from head and copied into base goes unsatisfiable the moment the PR

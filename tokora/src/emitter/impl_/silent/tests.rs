@@ -78,6 +78,7 @@ fn silent_with_lang_type() {
 ///
 /// Falsifying output: a compile error here means a body secretly used a conversion. It does
 /// not — but this cell is what says so.
+#[cfg(feature = "pratt")]
 #[test]
 fn silent_pratt_accepts_a_representation_independent_error() {
   /// An error type that implements *no* conversions at all.

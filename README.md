@@ -100,15 +100,29 @@ links back to them instead of copying whole files into prose.
 
 The book source lives under
 [`tokora/src/guide`](https://github.com/al8n/tokora/tree/main/tokora/src/guide), and the examples
-also compile together with `cargo test -p tokora --no-default-features --features std,logos --examples`.
+also compile together with `cargo test -p tokora --no-default-features --features std,logos,combinators --examples`.
 
 ## Features
 
 | Feature | Effect |
 | --- | --- |
-| `default` | Enables `std`. |
+| `default` | Enables `std` and `combinators`. |
 | `std` | Enables standard-library support and default features of applicable dependencies. |
 | `alloc` | Enables allocation-backed facilities in `no_std` builds. |
+| `combinators` | Umbrella for every combinator family below. On by default. |
+| `any` | `Any` — accept one token of any kind. |
+| `fail` | `fail` / `fail_with`. |
+| `filter` | `filter`, `filter_with`, `filter_map`, `filter_map_with`. |
+| `fold` | The fold drivers (`fold_while`, `try_fold*`, `rfold*`); implies `many`. |
+| `ident` | `Ident::parse` / `try_parse` and their `_except` twins. |
+| `keyword` | `Keyword::parse` / `try_parse` and their `_exact` / `_sliced` twins. |
+| `many` | The repetition family: `repeated*`, `separated*`, `delim*`, the delimiter handlers, the cardinality bounds, `list` and `separated1`. |
+| `map` | `map` / `map_with`. |
+| `peek` | `peek_then*`, `peek_then_choice`, `peek_kind`, `dispatch_on_kind` and its fused twin. |
+| `pratt` | Pratt expressions: the typed `pratt` driver, the token-level `InputRef::pratt*`, `PrattToken`, and the `PrattEmitter` channel. |
+| `punct` | The punctuator parsers (`Comma::parse`, …) and the `parens`/`braces`/`brackets`/`angles` delimited shapes built on them. |
+| `then` | `then`, `then_ignore`, `ignore_then`, `then_value`, `and_then`, `and_then_with`. |
+| `validate` | `validate` / `validate_with`. |
 | `logos` | Alias for `logos_0_16`, the current Logos integration. |
 | `logos_0_14` | Enables the optional `logos@0.14` adapter. |
 | `logos_0_15` | Enables the optional `logos@0.15` adapter. |
@@ -133,6 +147,13 @@ also compile together with `cargo test -p tokora --no-default-features --feature
 | `tinyvec` | Alias for `tinyvec_1`. |
 | `tinyvec_1` | Enables `tinyvec@1` containers. |
 
+Every combinator family is independently gateable so an embedded or no-alloc build compiles only
+the combinators it calls. What the families sit on stays unconditional: `Parser`/`Parse`/`parse*`,
+the `ParseInput` / `TryParseInput` / `ParseChoice` traits, and the substrate combinators
+(`expect`, `delimited`, `recover`, `select`, `opt`, `padded`, `node`, `labelled`, …). `combinators`
+is a default feature, so a plain dependency line sees the whole surface; a `default-features = false`
+build names the families it uses.
+
 Feature aliases select their versioned counterpart; versioned features make the corresponding
 optional dependency available. One Logos version is normally sufficient, though multiple versioned
 integrations may coexist. When several are enabled, the unversioned
@@ -151,15 +172,18 @@ Allocator-free `no_std`:
 
 ```toml
 [dependencies]
-tokora = { version = "0.8", default-features = false }
+tokora = { version = "0.8", default-features = false, features = ["combinators"] }
 ```
 
 `no_std` with `alloc`:
 
 ```toml
 [dependencies]
-tokora = { version = "0.8", default-features = false, features = ["alloc"] }
+tokora = { version = "0.8", default-features = false, features = ["alloc", "combinators"] }
 ```
+
+Either line can name individual families (`features = ["alloc", "many", "map"]`) in place of the
+`combinators` umbrella when the grammar only uses some of them.
 
 ## Design philosophy and inspirations
 
@@ -188,7 +212,7 @@ Useful repository checks:
 ```sh
 cargo fmt --all --check
 cargo test -p tokora --all-features
-cargo test -p tokora --no-default-features --features std,logos --examples
+cargo test -p tokora --no-default-features --features std,logos,combinators --examples
 RUSTDOCFLAGS="-D warnings" cargo test -p tokora --all-features --doc
 (cd tokora && mdbook build)
 ```

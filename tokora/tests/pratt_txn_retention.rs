@@ -1,4 +1,4 @@
-#![cfg(feature = "std")]
+#![cfg(all(feature = "std", feature = "combinators"))]
 
 //! What the typed pratt driver **retains** while it descends, and what it still gives back.
 //!

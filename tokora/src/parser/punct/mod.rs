@@ -1,17 +1,22 @@
 use super::*;
 
+use crate::{punct::*, utils::CowStr};
+
+// The two inherent parsers below are the `punct` family; the `Punctuator` impls beside them are
+// vocabulary the whole crate reads (`delimited`, `TypedDelimiter`, every `separated_by_*`), so
+// they stay.
+#[cfg(feature = "punct")]
 use crate::{
   error::{UnexpectedEot, token::UnexpectedToken},
-  punct::*,
   token::{PunctuatorToken, PunctuatorTokenExt},
   try_parse_input::ParseAttempt,
-  utils::CowStr,
 };
 
 macro_rules! define_parsers {
   ($($name:ident::$kind:ident::$punct_char:literal),+$(,)?) => {
     paste::paste! {
       $(
+        #[cfg(feature = "punct")]
         impl $name {
           #[doc = "A parser that parses a token and returns a `" $name "` instance if it matches."]
           ///
@@ -176,6 +181,7 @@ define_parsers!(
 
 #[cfg(all(
   test,
+  feature = "punct",
   feature = "std",
   any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
 ))]

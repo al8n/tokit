@@ -19,7 +19,8 @@ pub type OptOf<'inp, L, Ctx, Lang, O> = Result<Option<O>, ErrorOf<'inp, L, Ctx, 
 ///
 /// # Examples
 ///
-/// ```rust
+#[cfg_attr(feature = "punct", doc = "```rust")]
+#[cfg_attr(not(feature = "punct"), doc = "```rust,ignore")]
 /// # use core::fmt;
 /// # use tokora::{FatalContext, InputRef, Lexer, SimpleSpan, Token, error::{UnexpectedEot, syntax::{FullContainer, MissingSyntax, TooFew}, token::{MissingToken, SeparatedError, UnexpectedToken}}, punct::Comma, span::Span as _, token::PunctuatorToken};
 /// # #[derive(Debug)]

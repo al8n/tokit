@@ -296,8 +296,11 @@ pub mod fuzz;
 ///
 /// Documentation-only: the module defines no items. It requires the `std` and `logos`
 /// features (the same set the repository's `examples/` build with).
-#[cfg(all(feature = "std", feature = "logos_0_16"))]
-#[cfg_attr(docsrs, doc(cfg(all(feature = "std", feature = "logos_0_16"))))]
+#[cfg(all(feature = "std", feature = "logos_0_16", feature = "combinators"))]
+#[cfg_attr(
+  docsrs,
+  doc(cfg(all(feature = "std", feature = "logos_0_16", feature = "combinators")))
+)]
 pub mod guide;
 
 /// Convenience re-exports for common usage.

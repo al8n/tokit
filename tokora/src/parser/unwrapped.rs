@@ -14,7 +14,14 @@ use super::*;
 /// - In situations where `None` represents a programming error, not a parsing error
 ///
 /// **Warning**: This is similar to `.unwrap()` in Rust - it will panic if the value is `None`.
-/// For error handling, prefer using [`filter_map`](FilterMap) or working with `Option` directly.
+#[cfg_attr(
+  feature = "filter",
+  doc = " For error handling, prefer using [`filter_map`](FilterMap) or working with `Option` directly."
+)]
+#[cfg_attr(
+  not(feature = "filter"),
+  doc = " For error handling, prefer using `filter_map` or working with `Option` directly."
+)]
 ///
 /// # Type Parameters
 ///
@@ -46,8 +53,22 @@ use super::*;
 ///
 /// # See Also
 ///
-/// - [`filter_map`](FilterMap) - Transform and filter with error handling
-/// - [`map`](Map) - Transform output without unwrapping
+#[cfg_attr(
+  feature = "filter",
+  doc = " - [`filter_map`](FilterMap) - Transform and filter with error handling"
+)]
+#[cfg_attr(
+  not(feature = "filter"),
+  doc = " - `filter_map` - Transform and filter with error handling"
+)]
+#[cfg_attr(
+  feature = "map",
+  doc = " - [`map`](Map) - Transform output without unwrapping"
+)]
+#[cfg_attr(
+  not(feature = "map"),
+  doc = " - `map` - Transform output without unwrapping"
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Unwrapped<P, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   pub(crate) parser: P,

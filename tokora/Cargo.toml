@@ -219,13 +219,13 @@ bench = false
 name = "input_scan"
 path = "benches/input_scan.rs"
 harness = false
-required-features = ["logos", "std"]
+required-features = ["logos", "std", "combinators"]
 
 [[bench]]
 name = "parser_combinators"
 path = "benches/parser_combinators.rs"
 harness = false
-required-features = ["logos", "std"]
+required-features = ["logos", "std", "combinators"]
 
 [[bench]]
 name = "pratt_typed"
@@ -237,13 +237,13 @@ harness = false
 # lexer with a non-trivial `L::State` (a different `logos` `extras`, so a different token enum),
 # it deliberately leaves criterion's measurement knobs live where that file pins them in code,
 # and a new file leaves the existing group's ids and baselines untouched.
-required-features = ["logos", "std"]
+required-features = ["logos", "std", "combinators"]
 
 [[bench]]
 name = "cst"
 path = "benches/cst.rs"
 harness = false
-required-features = ["logos", "std", "rowan"]
+required-features = ["logos", "std", "rowan", "combinators"]
 
 [[bench]]
 name = "backtrack"
@@ -251,49 +251,49 @@ path = "benches/backtrack.rs"
 harness = false
 # Exercises the raw checkpoint triple (`save`/`restore`/`commit`), which is public only under
 # `unstable-raw`; require it so the bench is skipped rather than failing to compile when off.
-required-features = ["logos", "std", "unstable-raw"]
+required-features = ["logos", "std", "unstable-raw", "combinators"]
 
 [[example]]
 name = "json"
 path = "examples/json.rs"
-required-features = ["std", "logos"]
+required-features = ["std", "logos", "combinators"]
 
 [[example]]
 name = "calculator"
 path = "examples/calculator.rs"
-required-features = ["std", "logos"]
+required-features = ["std", "logos", "combinators"]
 
 [[example]]
 name = "s_expression"
 path = "examples/s_expression.rs"
-required-features = ["std", "logos"]
+required-features = ["std", "logos", "combinators"]
 
 [[example]]
 name = "c_expression"
 path = "examples/c_expression.rs"
-required-features = ["std", "logos"]
+required-features = ["std", "logos", "combinators"]
 
 # Lossless-CST twins of the four examples above: each parses the same grammar as its twin but
 # builds a rowan concrete syntax tree through a `cst::Sink`, so it needs `rowan` as well.
 [[example]]
 name = "calculator_cst"
 path = "examples/calculator_cst.rs"
-required-features = ["std", "logos", "rowan"]
+required-features = ["std", "logos", "rowan", "combinators"]
 
 [[example]]
 name = "s_expression_cst"
 path = "examples/s_expression_cst.rs"
-required-features = ["std", "logos", "rowan"]
+required-features = ["std", "logos", "rowan", "combinators"]
 
 [[example]]
 name = "json_cst"
 path = "examples/json_cst.rs"
-required-features = ["std", "logos", "rowan"]
+required-features = ["std", "logos", "rowan", "combinators"]
 
 [[example]]
 name = "c_expression_cst"
 path = "examples/c_expression_cst.rs"
-required-features = ["std", "logos", "rowan"]
+required-features = ["std", "logos", "rowan", "combinators"]
 
 [package.metadata.docs.rs]
 all-features = true

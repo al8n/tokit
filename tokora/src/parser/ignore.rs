@@ -100,9 +100,30 @@ use super::*;
 ///
 /// # See Also
 ///
-/// - [`then_ignore`](crate::parser::ParseInput::then_ignore) - Parse then discard second
-/// - [`ignore_then`](crate::parser::ParseInput::ignore_then) - Parse then discard first
-/// - [`Map`] - Transform output instead of discarding
+#[cfg_attr(
+  feature = "then",
+  doc = " - [`then_ignore`](crate::parser::ParseInput::then_ignore) - Parse then discard second"
+)]
+#[cfg_attr(
+  not(feature = "then"),
+  doc = " - `then_ignore` - Parse then discard second"
+)]
+#[cfg_attr(
+  feature = "then",
+  doc = " - [`ignore_then`](crate::parser::ParseInput::ignore_then) - Parse then discard first"
+)]
+#[cfg_attr(
+  not(feature = "then"),
+  doc = " - `ignore_then` - Parse then discard first"
+)]
+#[cfg_attr(
+  feature = "map",
+  doc = " - [`Map`] - Transform output instead of discarding"
+)]
+#[cfg_attr(
+  not(feature = "map"),
+  doc = " - `Map` - Transform output instead of discarding"
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Ignore<P, O, L, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   parser: P,

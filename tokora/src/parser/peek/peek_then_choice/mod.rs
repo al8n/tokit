@@ -174,5 +174,6 @@ where
   }
 }
 
-#[cfg(test)]
+// The cells build their subject on top of `Any`, so they need that family as well.
+#[cfg(all(test, feature = "any"))]
 mod tests;

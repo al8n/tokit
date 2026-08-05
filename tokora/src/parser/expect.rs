@@ -12,7 +12,14 @@ use super::*;
 /// If the token matches, parsing succeeds; otherwise, an `UnexpectedToken` error is
 /// emitted with information about what was expected and what was found.
 ///
-/// Unlike [`Any`] which accepts any token, `Expect` provides **better error messages**
+#[cfg_attr(
+  feature = "any",
+  doc = " Unlike [`Any`] which accepts any token, `Expect` provides **better error messages**"
+)]
+#[cfg_attr(
+  not(feature = "any"),
+  doc = " Unlike `Any` which accepts any token, `Expect` provides **better error messages**"
+)]
 /// by specifying what token was expected when a mismatch occurs.
 ///
 /// # Type Parameters
@@ -43,7 +50,14 @@ use super::*;
 ///
 /// | Parser | Accepts | Error Message Quality |
 /// |--------|---------|----------------------|
-/// | [`Any`] | Any token | Generic (just "unexpected token") |
+#[cfg_attr(
+  feature = "any",
+  doc = " | [`Any`] | Any token | Generic (just \"unexpected token\") |"
+)]
+#[cfg_attr(
+  not(feature = "any"),
+  doc = " | `Any` | Any token | Generic (just \"unexpected token\") |"
+)]
 /// | **`Expect`** | Specific tokens | Detailed (expected vs found) |
 ///
 /// **When to use**:
@@ -58,8 +72,16 @@ use super::*;
 ///
 /// # See Also
 ///
-/// - [`Any`] - Accept any token
-/// - [`Filter`] - Validate after parsing (less specific errors)
+#[cfg_attr(feature = "any", doc = " - [`Any`] - Accept any token")]
+#[cfg_attr(not(feature = "any"), doc = " - `Any` - Accept any token")]
+#[cfg_attr(
+  feature = "filter",
+  doc = " - [`Filter`] - Validate after parsing (less specific errors)"
+)]
+#[cfg_attr(
+  not(feature = "filter"),
+  doc = " - `Filter` - Validate after parsing (less specific errors)"
+)]
 /// - [`Check`] - The trait for token classifiers
 /// - [`Expected`] - Type for describing expected tokens
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

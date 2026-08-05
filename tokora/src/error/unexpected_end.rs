@@ -220,7 +220,14 @@ pub struct PrattLhsHint;
 ///
 /// The final type parameter `Set` is the element type of an **optional** end-of-input expected
 /// set — the "…, expected one of X, Y, Z" table a committed dispatch failure at end of input can
-/// attach (see [`DispatchOnKind`](crate::parser::DispatchOnKind)). It is purely additive: `Set`
+#[cfg_attr(
+  feature = "peek",
+  doc = " attach (see [`DispatchOnKind`](crate::parser::DispatchOnKind)). It is purely additive: `Set`"
+)]
+#[cfg_attr(
+  not(feature = "peek"),
+  doc = " attach (see `DispatchOnKind`). It is purely additive: `Set`"
+)]
 /// defaults to `&'static str` and every existing constructor leaves the set `None`, so the common
 /// end-of-input errors (`eof`/`eot`/`eos`) and the [type aliases](UnexpectedEof) are unchanged.
 /// The set is populated only through the dedicated `*_expected_*` constructors and read back
@@ -942,7 +949,14 @@ where
   ///
   /// `None` for every end-of-input error built through the legacy constructors
   /// (`eof`/`eot`/`eos`/…); `Some` only for the `*_expected_*` forms — e.g. a committed
-  /// [`DispatchOnKind`](crate::parser::DispatchOnKind) failure at end of input reports its whole
+  #[cfg_attr(
+    feature = "peek",
+    doc = " [`DispatchOnKind`](crate::parser::DispatchOnKind) failure at end of input reports its whole"
+  )]
+  #[cfg_attr(
+    not(feature = "peek"),
+    doc = " `DispatchOnKind` failure at end of input reports its whole"
+  )]
   /// dispatch table here.
   #[inline(always)]
   pub const fn expected(&self) -> Option<&Expected<'static, Set>> {

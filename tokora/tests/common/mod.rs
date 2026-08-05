@@ -447,12 +447,15 @@ pub fn ctx() -> ParserContext<'static, TestLexer<'static>, TestEm> {
 // public so each suite's local `PREC_*` constants can construct it; not every
 // binary that imports common uses it, hence `allow(dead_code)`.
 
+#[cfg(feature = "pratt")]
 use tokora::parser::PrattPower;
 
+#[cfg(feature = "pratt")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(dead_code)]
 pub struct Power(pub i32);
 
+#[cfg(feature = "pratt")]
 impl PrattPower for Power {}
 
 // ── The wall-clock wall ───────────────────────────────────────────────────────

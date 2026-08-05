@@ -128,7 +128,14 @@ pub trait ParseChoice<'inp, L, O, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
 /// A choice of parsers whose selected branch receives the **already-lexed** head token.
 ///
 /// `ParseTokenChoice` is the arm surface of the *fused* dispatch shape
-/// ([`FusedDispatchOnKind`]). Its peek-shaped sibling [`ParseChoice`] leaves the head
+#[cfg_attr(
+  feature = "peek",
+  doc = " ([`FusedDispatchOnKind`]). Its peek-shaped sibling [`ParseChoice`] leaves the head"
+)]
+#[cfg_attr(
+  not(feature = "peek"),
+  doc = " (`FusedDispatchOnKind`). Its peek-shaped sibling [`ParseChoice`] leaves the head"
+)]
 /// token on the input — the dispatcher peeks (staging the token in the cache) and the
 /// winning branch consumes it back out. The fused shape instead lexes **once**: the
 /// dispatcher consumes the head token as part of classifying it and hands it to the

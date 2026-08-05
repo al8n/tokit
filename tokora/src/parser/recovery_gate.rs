@@ -311,7 +311,7 @@ fn settle<O, E>(out: Result<O, (E, bool)>) -> Attempted<O, E> {
 // suites are feature-gated and their attribute is not that literal; the census `expect()`s the
 // marker, so deleting it fails loudly instead of silently widening the scan over test code.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "many"))]
 mod gate_census {
   //! RECOVERY_GATE_CENSUS — the recovery combinators' never-recoverable gate, locked to one
   //! chokepoint.

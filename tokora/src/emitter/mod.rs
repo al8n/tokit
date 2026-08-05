@@ -967,11 +967,25 @@ where
 /// bundle is [`PolicyComposableEmitter`], and it has this one as a supertrait. The pratt
 /// engines are outside both: neither is a collecting combinator, and each names what it needs
 /// at its own entry point. The **token** engine
-/// ([`InputRef::pratt`](crate::InputRef::pratt)) names [`PrattEmitter`] there, beside
+#[cfg_attr(
+  feature = "pratt",
+  doc = " ([`InputRef::pratt`](crate::InputRef::pratt)) names [`PrattEmitter`] there, beside"
+)]
+#[cfg_attr(
+  not(feature = "pratt"),
+  doc = " (`InputRef::pratt`) names `PrattEmitter` there, beside"
+)]
 /// `From<UnexpectedEot>` and the two conversions for the failures it *returns*
 /// ([`RecursionLimitReached`](crate::error::RecursionLimitReached) and
 /// [`NonAssociativeChain`](crate::error::NonAssociativeChain)). The **typed** engine
-/// ([`Pratt`](crate::parser::Pratt)) names no emitter sub-trait at all: it builds its
+#[cfg_attr(
+  feature = "pratt",
+  doc = " ([`Pratt`](crate::parser::Pratt)) names no emitter sub-trait at all: it builds its"
+)]
+#[cfg_attr(
+  not(feature = "pratt"),
+  doc = " (`Pratt`) names no emitter sub-trait at all: it builds its"
+)]
 /// end-of-expression reports itself rather than emitting them, so its bounds are four plain
 /// `From`s — `UnexpectedEoLhs`, `UnexpectedEoRhs`, and the same two returned failures.
 ///
