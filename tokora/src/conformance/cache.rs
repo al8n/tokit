@@ -77,6 +77,13 @@
 //!    checked once against a freshly filled cache: a `span` that is correct immediately after a
 //!    fill and stale after any pop is indistinguishable from a conforming one at the one
 //!    residency a single check reaches.
+//! 9. **`pop_front_if` / `try_pop_front_if`** — the predicate sees the front entry and nothing
+//!    else; a `false` (or `Err`) answer removes nothing and leaves every observable untouched; a
+//!    `true` (or `Ok(())`) answer removes exactly the front entry, matching what a bare
+//!    `pop_front` would return from an identically filled cache. Against an empty cache, both
+//!    answer `None` and the predicate never runs at all — there is no front to hand it.
+//! 10. **`push_many`** — accepts tokens in order until the cache is full, then hands the
+//!     remainder back through the returned iterator, unchanged and in the order they arrived.
 //!
 //! The kit adapts to capacity: it runs every check a cache of that capacity can express, so the
 //! capacity-0 `()` cache, the capacity-1 `Option` cache and an arbitrarily wide ring are all
@@ -147,7 +154,7 @@
 
 use std::{format, vec::Vec};
 
-use core::marker::PhantomData;
+use core::{cell::Cell, marker::PhantomData};
 
 use generic_arraydeque::{GenericArrayDeque, typenum::U4, typenum::Unsigned};
 use mayber::Maybe;
@@ -284,6 +291,8 @@ where
     self.check_peek(cap);
     self.check_clear(cap);
     self.check_span(cap);
+    self.check_pop_front_if(cap);
+    self.check_push_many(cap);
   }
 
   // ── the corpus ──────────────────────────────────────────────────────────────────
@@ -1227,5 +1236,164 @@ where
         want.len()
       ),
     }
+  }
+
+  // ── 9. pop_front_if / try_pop_front_if ──────────────────────────────────────────
+
+  /// Both methods are DEFAULT `Cache` methods, composed of `front` + `pop_front` (already
+  /// checked exhaustively elsewhere) — so an implementation that does not override them is
+  /// correct for free. What this check exists for is an implementation that DOES override
+  /// them, for whatever reason (a fused peek-and-pop, say): before it existed, neither method
+  /// was ever called by the kit at all, so an override that removed on a false predicate, or
+  /// removed and answered `None`, passed exactly like a conforming one (#180 part A, item 5).
+  fn check_pop_front_if(&self, cap: usize) {
+    let name = self.name;
+
+    // Empty cache: the predicate must not run at all — there is no front to hand it — and both
+    // methods answer `None` regardless of what the predicate would have said.
+    let mut empty = C::new();
+    let ran = Cell::new(false);
+    assert!(
+      empty
+        .pop_front_if(|_| {
+          ran.set(true);
+          true
+        })
+        .is_none(),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if() answered Some on an empty cache"
+    );
+    assert!(
+      !ran.get(),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if()'s predicate ran against an empty cache, which has no front to hand it"
+    );
+
+    let mut empty2 = C::new();
+    let ran2 = Cell::new(false);
+    assert!(
+      empty2
+        .try_pop_front_if::<(), _>(|_| {
+          ran2.set(true);
+          Ok(())
+        })
+        .is_none(),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if() answered Some on an empty cache"
+    );
+    assert!(
+      !ran2.get(),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if()'s predicate ran against an empty cache, which has no front to hand it"
+    );
+
+    if cap == 0 {
+      return;
+    }
+
+    // A false predicate removes nothing and leaves every observable untouched.
+    let (mut cache_f, want_f) = self.filled(cap);
+    assert!(
+      cache_f.pop_front_if(|_| false).is_none(),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if() removed an entry despite a false predicate"
+    );
+    self.assert_resident(
+      &cache_f,
+      cap,
+      &want_f,
+      "after pop_front_if() with a false predicate",
+    );
+
+    // An Err-returning predicate is refused the same way, and the error comes straight back.
+    let (mut cache_e, want_e) = self.filled(cap);
+    let result = cache_e.try_pop_front_if::<&str, _>(|_| Err("no"));
+    assert!(
+      matches!(result, Some(Err("no"))),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if() with an Err-returning predicate did not hand the error straight back"
+    );
+    self.assert_resident(
+      &cache_e,
+      cap,
+      &want_e,
+      "after try_pop_front_if() with an Err predicate",
+    );
+
+    // A true predicate sees the FRONT entry's span, and removes exactly it.
+    let (mut cache_t, want_t) = self.filled(cap);
+    let seen = Cell::new(None);
+    let popped_span = cache_t
+      .pop_front_if(|tok| {
+        // `tok`'s own generic params are already references (`CachedTokenRefOf`), so `.token()`
+        // and `.span_ref()` each add one more — double what `span_of` derefs for an OWNED
+        // `CachedTokenOf`, hence the extra `*` here.
+        seen.set(Some((**tok.token().span_ref()).clone()));
+        true
+      })
+      .map(|tok| span_of::<L>(&tok));
+    assert!(
+      seen.take() == Some(want_t[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if()'s predicate did not see the front entry {:?}",
+      want_t[0]
+    );
+    assert!(
+      popped_span == Some(want_t[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if() with a true predicate returned {popped_span:?}, expected the front entry {:?}",
+      want_t[0]
+    );
+    self.assert_resident(
+      &cache_t,
+      cap,
+      &want_t[1..],
+      "after pop_front_if() with a true predicate",
+    );
+
+    // try_pop_front_if with Ok(()) does the same.
+    let (mut cache_ok, want_ok) = self.filled(cap);
+    let popped_ok = cache_ok
+      .try_pop_front_if::<&str, _>(|_| Ok(()))
+      .and_then(Result::ok)
+      .map(|tok| span_of::<L>(&tok));
+    assert!(
+      popped_ok == Some(want_ok[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if() with an Ok(()) predicate returned {popped_ok:?}, expected the front entry {:?}",
+      want_ok[0]
+    );
+    self.assert_resident(
+      &cache_ok,
+      cap,
+      &want_ok[1..],
+      "after try_pop_front_if() with an Ok(()) predicate",
+    );
+  }
+
+  // ── 10. push_many ────────────────────────────────────────────────────────────────
+
+  /// `push_many` is also a DEFAULT method, composed of `push_back` (already checked
+  /// exhaustively) — this exists for the same reason [`check_pop_front_if`](Self::check_pop_front_if)
+  /// does: an override that silently discards what does not fit, rather than handing it back
+  /// through the overflow iterator, passed unnoticed before this check existed at all (#180 part
+  /// A, item 6).
+  fn check_push_many(&self, cap: usize) {
+    let name = self.name;
+    let want_len = cap.saturating_add(2);
+    let corpus = self.corpus(want_len);
+    assert!(
+      corpus.len() == want_len,
+      "tokora cache conformance [{name}]: the source lexed {} token(s), but push_many's check needs {want_len} — 2 more than the capacity {cap}, to exercise the overflow return. This is a kit-usage problem, not a cache defect: lengthen the source.",
+      corpus.len()
+    );
+    let all_spans: Vec<L::Span> = corpus.iter().map(span_of::<L>).collect();
+
+    let mut cache = C::new();
+    let overflow: Vec<_> = cache.push_many(corpus.into_iter()).collect();
+    let overflow_spans: Vec<L::Span> = overflow.iter().map(span_of::<L>).collect();
+    assert!(
+      overflow_spans == all_spans[cap..],
+      "tokora cache conformance [{name} push-many]: push_many()'s overflow iterator yielded {overflow_spans:?}, expected exactly the {} refused entr(ies) {:?}, unchanged and in order",
+      all_spans.len() - cap,
+      &all_spans[cap..]
+    );
+    self.assert_resident(
+      &cache,
+      cap,
+      &all_spans[..cap],
+      "after push_many() with 2 more tokens than capacity",
+    );
   }
 }

@@ -275,6 +275,18 @@ const STALE_SPAN_AFTER_POP_BACK: u8 = 25;
 /// ever tried to use the cache again, so a `clear` that empties the cache and permanently
 /// disables it passed exactly like one that only empties it.
 const POISONING_CLEAR: u8 = 26;
+/// `pop_front_if` removes the front regardless of what the predicate answers, and always
+/// reports `None` — silently dropping a token whose predicate said to leave alone (#180 part A,
+/// item 5). Nothing before this issue's fix ever called `pop_front_if`, so an override could
+/// diverge from the default's `front` + `pop_front` composition in any way at all unnoticed.
+const WRONG_POP_FRONT_IF: u8 = 27;
+/// [`WRONG_POP_FRONT_IF`]'s sibling for `try_pop_front_if`: removes the front regardless of
+/// what the predicate answers (even `Err`), and always reports `None` (#180 part A, item 5).
+const WRONG_TRY_POP_FRONT_IF: u8 = 28;
+/// `push_many` silently drops whatever does not fit instead of handing it back through the
+/// overflow iterator (#180 part A, item 6). Nothing before this issue's fix ever called
+/// `push_many`, so an override that discards tokens outright passed unnoticed.
+const SILENT_PUSH_MANY: u8 = 29;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -399,34 +411,11 @@ where
     &mut self,
     tok: CachedTokenOf<'a, L>,
   ) -> Result<CachedTokenRefOf<'_, 'a, L>, CachedTokenOf<'a, L>> {
-    if D == POISONING_CLEAR && self.poisoned {
-      return Err(self.refuse(tok));
-    }
-    if self.items.len() == self.cap {
-      return Err(self.refuse(tok));
-    }
-    self.warmed.set(true);
-    // Read before the move below, for `STALE_SPAN_AFTER_POP_BACK`'s `span()` override — see
-    // that constant's doc for why this is never cleared or refreshed by a pop.
-    self.last_pushed_back_span = Some((*tok.token().span_ref()).clone());
-    self.items.push_back(tok);
-    Ok(self.items.back().expect("just pushed").as_ref())
+    self.push_back_impl(tok)
   }
 
   fn pop_front(&mut self) -> Option<CachedTokenOf<'a, L>> {
-    if D == LIFO_POP_FRONT {
-      return self.items.pop_back();
-    }
-    let popped = self.items.pop_front();
-    if D == STALE_RESIDENCY_PEEK {
-      // The entry leaves the live run and stays in the store — a ring's head moving past a slot
-      // it does not clear. Nothing but `peek` reads it, so `len`, `front`, `back` and `remaining`
-      // all keep answering for the live run alone.
-      if let Some(tok) = popped.as_ref() {
-        self.graveyard.push_back(tok.clone());
-      }
-    }
-    popped
+    self.pop_front_impl()
   }
 
   fn pop_back(&mut self) -> Option<CachedTokenOf<'a, L>> {
@@ -445,6 +434,68 @@ where
       }
     }
     popped
+  }
+
+  fn pop_front_if<F>(&mut self, predicate: F) -> Option<CachedTokenOf<'a, L>>
+  where
+    F: FnOnce(CachedTokenRefOf<'_, 'a, L>) -> bool,
+  {
+    if D == WRONG_POP_FRONT_IF {
+      // Removes the front regardless of what the predicate answers — even a false one — and
+      // always reports None, silently dropping a token the caller's predicate said to leave
+      // alone. The predicate still runs, so this looks conforming to anything that does not
+      // read the return value.
+      if let Some(peeked) = self.items.front().map(CachedToken::as_ref) {
+        let _ = predicate(peeked);
+        self.pop_front_impl();
+      }
+      return None;
+    }
+    if let Some(peeked) = self.items.front().map(CachedToken::as_ref) {
+      if predicate(peeked) {
+        return self.pop_front_impl();
+      }
+    }
+    None
+  }
+
+  fn try_pop_front_if<E, F>(&mut self, predicate: F) -> Option<Result<CachedTokenOf<'a, L>, E>>
+  where
+    F: FnOnce(CachedTokenRefOf<'_, 'a, L>) -> Result<(), E>,
+  {
+    if D == WRONG_TRY_POP_FRONT_IF {
+      // [`WRONG_POP_FRONT_IF`]'s sibling: removes the front regardless of what the predicate
+      // answers, including `Err`, and always reports `None`.
+      if let Some(peeked) = self.items.front().map(CachedToken::as_ref) {
+        let _ = predicate(peeked);
+        self.pop_front_impl();
+      }
+      return None;
+    }
+    if let Some(peeked) = self.items.front().map(CachedToken::as_ref) {
+      return match predicate(peeked) {
+        Ok(()) => self.pop_front_impl().map(Ok),
+        Err(e) => Some(Err(e)),
+      };
+    }
+    None
+  }
+
+  fn push_many<'p>(
+    &'p mut self,
+    toks: impl Iterator<Item = CachedTokenOf<'a, L>> + 'p,
+  ) -> impl Iterator<Item = CachedTokenOf<'a, L>> + 'p {
+    toks.filter_map(move |tok| {
+      let refused = self.push_back_impl(tok).err();
+      if D == SILENT_PUSH_MANY {
+        // The refused token is dropped instead of handed back through the overflow iterator —
+        // `push_back` above still ran, so residency up to capacity is unaffected; only the
+        // overflow report is silently swallowed.
+        None
+      } else {
+        refused
+      }
+    })
   }
 
   fn clear(&mut self) {
@@ -622,6 +673,7 @@ where
 impl<'a, L, const D: u8> Queue<'a, L, D>
 where
   L: Lexer<'a>,
+  L::Token: Clone,
 {
   /// The refusal round-trip — or, under `SWAPPING_REFUSAL`, its violation: the caller is handed a
   /// resident entry instead of the token it offered, which silently swallows that token.
@@ -634,6 +686,52 @@ where
       }
     }
     tok
+  }
+
+  /// `Cache::push_back`'s real body, as an inherent method: `push_many`'s default composition
+  /// (`toks.filter_map(move |tok| self.push_back(tok).err())`) calls it directly rather than
+  /// through the trait, because `self.push_back(tok)` from inside another method of the SAME
+  /// `impl<Lang> Cache<'a, L, Lang> for Queue` block cannot infer which `Lang` to dispatch
+  /// through — nothing in any method's signature ties it down, since `Queue` implements
+  /// `Cache<'a, L, Lang>` for every `Lang` at once. `front`/`back` sidestep the same issue by
+  /// reading `self.items` directly, which works because their trait bodies do nothing else; this
+  /// one cannot, since accepting or refusing a push is the behavior under test.
+  fn push_back_impl(
+    &mut self,
+    tok: CachedTokenOf<'a, L>,
+  ) -> Result<CachedTokenRefOf<'_, 'a, L>, CachedTokenOf<'a, L>> {
+    if D == POISONING_CLEAR && self.poisoned {
+      return Err(self.refuse(tok));
+    }
+    if self.items.len() == self.cap {
+      return Err(self.refuse(tok));
+    }
+    self.warmed.set(true);
+    // Read before the move below, for `STALE_SPAN_AFTER_POP_BACK`'s `span()` override — see
+    // that constant's doc for why this is never cleared or refreshed by a pop.
+    self.last_pushed_back_span = Some((*tok.token().span_ref()).clone());
+    self.items.push_back(tok);
+    Ok(self.items.back().expect("just pushed").as_ref())
+  }
+
+  /// `Cache::pop_front`'s real body, as an inherent method — for the same reason
+  /// [`push_back_impl`](Self::push_back_impl) exists: `pop_front_if`'s trait-method override
+  /// calls this rather than `self.pop_front()`, which cannot infer which `Lang` to dispatch
+  /// through from inside another method of the same generic-over-`Lang` impl block.
+  fn pop_front_impl(&mut self) -> Option<CachedTokenOf<'a, L>> {
+    if D == LIFO_POP_FRONT {
+      return self.items.pop_back();
+    }
+    let popped = self.items.pop_front();
+    if D == STALE_RESIDENCY_PEEK {
+      // The entry leaves the live run and stays in the store — a ring's head moving past a slot
+      // it does not clear. Nothing but `peek` reads it, so `len`, `front`, `back` and `remaining`
+      // all keep answering for the live run alone.
+      if let Some(tok) = popped.as_ref() {
+        self.graveyard.push_back(tok.clone());
+      }
+    }
+    popped
   }
 }
 
@@ -692,6 +790,36 @@ fn cache_kit_catches_a_stale_span_after_pop_back() {
 #[should_panic(expected = "clear]")]
 fn cache_kit_catches_a_poisoning_clear() {
   run_queue::<POISONING_CLEAR>();
+}
+
+/// #180 part A, item 5: `pop_front_if`/`try_pop_front_if` were never called by the kit, so an
+/// override could remove on a false predicate and report `None` — silently dropping a token —
+/// and pass exactly like a conforming default implementation. Caught here by the very first
+/// sub-check (a false predicate must remove nothing), via `assert_resident`'s exact-length
+/// assertion rather than one of this check's own — `pop_front_if` is matched rather than the
+/// `pop-front-if` message tag so either path is accepted.
+#[test]
+#[should_panic(expected = "pop_front_if")]
+fn cache_kit_catches_a_wrong_pop_front_if() {
+  run_queue::<WRONG_POP_FRONT_IF>();
+}
+
+/// The `try_pop_front_if` sibling of [`cache_kit_catches_a_wrong_pop_front_if`], caught by this
+/// check's own dedicated Err-predicate assertion instead (`try_pop_front_if` is a substring of
+/// that message too, so the same `expected` pattern matches).
+#[test]
+#[should_panic(expected = "pop_front_if")]
+fn cache_kit_catches_a_wrong_try_pop_front_if() {
+  run_queue::<WRONG_TRY_POP_FRONT_IF>();
+}
+
+/// #180 part A, item 6: `push_many` was never called by the kit, so an override that silently
+/// discards whatever does not fit — instead of handing it back through the overflow iterator —
+/// passed exactly like a conforming default implementation.
+#[test]
+#[should_panic(expected = "push-many")]
+fn cache_kit_catches_a_silent_push_many() {
+  run_queue::<SILENT_PUSH_MANY>();
 }
 
 #[test]

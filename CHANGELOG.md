@@ -3638,6 +3638,19 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    full, and partially drained from both the front and the back.
    — *(#180)*
 
+71. **`pop_front_if`/`try_pop_front_if`/`push_many` were never called by the cache conformance
+   kit, so a broken override of any of the three passed `CacheHarness::run()` unnoticed.** All
+   three are *default* `Cache` methods composed from `front`/`pop_front`/`push_back` — already
+   checked exhaustively — so an implementation that does not override them was already correct.
+   What was untested was an override: one that removes on a false predicate (or removes and
+   reports `None` regardless of what the predicate said), or one that silently discards tokens
+   that do not fit instead of handing them back through `push_many`'s overflow iterator. The kit
+   now drives both `pop_front_if` and `try_pop_front_if` against a false predicate, an
+   `Err`-returning one, and a true/`Ok(())` one, on both an empty and a filled cache, and drives
+   `push_many` with two more tokens than capacity, checking the accepted prefix and the refused
+   overflow separately.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,
