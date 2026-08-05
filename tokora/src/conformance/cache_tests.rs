@@ -235,6 +235,22 @@ const EMPTY_REFUSING_PUSH_FRONT: u8 = 20;
 /// Modelled with a graveyard for the same reason the front one is: a `VecDeque` that really
 /// removes leaves no stale slot to read, so the defect could not exist in it at all.
 const STALE_TAIL_RESIDENCY_PEEK: u8 = 21;
+/// Not a defect: `peek` pushes `Maybe::Owned` clones instead of `Maybe::Ref` borrows — the
+/// OWNED arm of the trait's contract, which `Cache::peek`'s own doc allows ("or an owned token,
+/// if cache implementation requires") and which no built-in cache and no fixture before this one
+/// ever took (#186). Every other observable is `SOUND`'s, so this proves the kit's existing
+/// bound/order/purity/`peek_one`/prefill-sweep oracle certifies the owned arm exactly as it does
+/// the borrowed one — it reads `.span()`/`.token()` through [`PeekedTokenExt`](crate::cache::PeekedTokenExt),
+/// which is arm-blind by construction, so nothing about the oracle itself needed to change.
+const OWNED_PEEK: u8 = 22;
+/// [`OWNED_PEEK`] with a defect specific to that arm: every `Maybe::Owned` entry it pushes is a
+/// clone of the FRONT token rather than the token at its own position, so the first entry of a
+/// peek is right by coincidence — the front IS the first expected entry — and every entry behind
+/// it is wrong. `front`, `back`, `len` and a hypothetical `Maybe::Ref` peek over the same data
+/// would all still answer correctly; only the OWNED arm itself diverges, which is exactly the
+/// shape the module docs name as invisible before #186: "an implementation whose owned arm is
+/// wrong ... is certified by the kit regardless."
+const WRONG_OWNED_PEEK: u8 = 23;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -487,6 +503,35 @@ where
       }
       return;
     }
+    if D == OWNED_PEEK {
+      // The owned arm, otherwise correct: same bound, same order, same source — a clone of the
+      // entry at its own position, not a borrow of it.
+      for tok in self.items.iter().take(fill) {
+        buf.push_back(Maybe::Owned(tok.clone()));
+      }
+      return;
+    }
+    if D == WRONG_OWNED_PEEK {
+      // The owned arm, made wrong: every entry is a clone of the FRONT token regardless of its
+      // own position. `front()` stays correct — this cell's whole point is that the owned peek
+      // arm can diverge from every other observable, including a Ref-shaped peek over the same
+      // data, without anything but a check that actually reads the owned arm noticing.
+      //
+      // Guarded on `fill > 0`: an empty cache (check 1) or a full buffer (bound 0) must still
+      // push nothing, the same as a conforming `peek`, so `front()` is never asked to answer for
+      // a cache that is not resident at all.
+      if fill > 0 {
+        let wrong = self
+          .items
+          .front()
+          .expect("fill > 0 implies at least one resident entry")
+          .clone();
+        for _ in 0..fill {
+          buf.push_back(Maybe::Owned(wrong.clone()));
+        }
+      }
+      return;
+    }
     for tok in self.items.iter().take(fill) {
       buf.push_back(Maybe::Ref(tok.as_ref()));
     }
@@ -529,6 +574,25 @@ fn run_queue<const D: u8>() {
 #[test]
 fn cache_kit_accepts_a_correct_third_party_queue() {
   run_queue::<SOUND>();
+}
+
+/// #186: the kit never drove `Cache::peek`'s OWNED arm — every built-in cache and every fixture
+/// above pushes `Maybe::Ref`. `OWNED_PEEK` is `SOUND` in every other respect, so a pass here
+/// proves the kit's bound/order/purity/`peek_one`/prefill-sweep oracle certifies the owned arm
+/// on its own merits, not by accident of it being untested.
+#[test]
+fn cache_kit_accepts_a_queue_whose_peek_returns_owned_tokens() {
+  run_queue::<OWNED_PEEK>();
+}
+
+/// #186: the owned-arm counterpart to [`cache_kit_catches_a_reversed_peek`] and friends — a
+/// defect that exists ONLY on the arm [`cache_kit_accepts_a_queue_whose_peek_returns_owned_tokens`]
+/// just proved the kit can certify. Before #186 nothing drove this arm at all, so nothing could
+/// have caught this.
+#[test]
+#[should_panic(expected = "bounded-peek")]
+fn cache_kit_catches_a_wrong_owned_peek() {
+  run_queue::<WRONG_OWNED_PEEK>();
 }
 
 #[test]
