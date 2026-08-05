@@ -74,7 +74,12 @@
 //!    run are the same number — and each residency is reached from **both ends**, by
 //!    `pop_front` and by `pop_back`, since removed entries a cache fails to clear sit ahead of
 //!    the live run on the first path and behind it on the second, and only the sweep that drains
-//!    that end reads them. `pop_back` is the input layer's restore path. `peek_one` agrees with
+//!    that end reads them. `pop_back` is the input layer's restore path. The whole of it is then
+//!    driven once more against **one instance**, peeked in full and then popped and re-peeked at
+//!    every residency down to empty — because a sweep that builds a fresh cache per residency
+//!    only ever asks a cache its FIRST question, and a `peek` that memoises its first answer and
+//!    serves it after later pops is pure, is correct at the residency it latched, and is
+//!    otherwise invisible. `peek_one` agrees with
 //!    `front`, answers nothing where there is no front, and — like `peek` — answers **the same
 //!    on a second call** against an unchanged cache: it takes `&self`, so the two calls are the
 //!    same question.
@@ -418,6 +423,7 @@ where
     self.check_pop_order(cap);
     self.check_push_front(cap);
     self.check_peek(cap);
+    self.check_peek_across_mutations(cap);
     self.check_clear(cap);
     self.check_span(cap);
     self.check_pop_front_if(cap);
@@ -1073,6 +1079,70 @@ where
         want.len()
       );
       self.check_peek_at(&cache, cap, want, &state);
+    }
+  }
+
+  /// Check 6 against **one cache instance**, peeked → mutated → peeked again, all the way down.
+  ///
+  /// [`check_peek`](Self::check_peek) reaches every residency, but it reaches each of them on a
+  /// cache built **fresh** for it: `filled_to_capacity`, then the pops, and only then the first
+  /// peek. So every `peek` the kit ever made was the first one that instance had answered at that
+  /// residency, and a `peek` that memoises its first answer — and keeps serving it after later
+  /// pops — was byte-for-byte a conforming one everywhere the kit looked (#180 part B, item 1).
+  /// It even satisfies the purity law, which is the only repeatability the kit asked for: two
+  /// peeks with nothing changed in between DO agree; the latch is only wrong once something has
+  /// changed.
+  ///
+  /// So this drives the missing shape and nothing else: one instance, filled to capacity, peeked
+  /// in full, then popped and peeked again at every residency down to empty. The pops alternate
+  /// ends — a latch is equally stale after either, and a cache that invalidates on one path and
+  /// not the other is a real shape (the input layer's rollback pops the back, its consume path
+  /// the front). Everything each state is then checked for is [`check_peek_at`](Self::check_peek_at)'s
+  /// whole body, unchanged, so this adds a driver rather than an oracle.
+  fn check_peek_across_mutations(&self, cap: usize) {
+    if cap == 0 {
+      return;
+    }
+    let name = self.label();
+    let (mut cache, filled) = self.filled_to_capacity(cap);
+    let mut want: Vec<L::Span> = filled;
+    self.check_peek_at(
+      &cache,
+      cap,
+      &want,
+      &format!("ONE cache instance, full at {cap}, before anything has mutated it"),
+    );
+
+    let mut pops = 0usize;
+    let mut from_front = true;
+    while !want.is_empty() {
+      let end = if from_front { "pop_front" } else { "pop_back" };
+      let popped = if from_front {
+        cache.pop_front()
+      } else {
+        cache.pop_back()
+      };
+      assert!(
+        popped.is_some(),
+        "tokora cache conformance [{name} bounded-peek]: {end}() answered None with {} of {cap} entries still resident",
+        want.len()
+      );
+      if from_front {
+        want.remove(0);
+      } else {
+        want.pop();
+      }
+      pops += 1;
+      from_front = !from_front;
+      self.check_peek_at(
+        &cache,
+        cap,
+        &want,
+        &format!(
+          "the SAME cache instance this kit has ALREADY peeked, after {pops} pop(s) — the last a {end}() — leaving {} of {cap} resident",
+          want.len()
+        ),
+      );
     }
   }
 

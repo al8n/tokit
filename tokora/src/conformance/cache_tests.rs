@@ -13,7 +13,7 @@
 //! module docs' "what it deliberately does not check" section honest by failing if that ever
 //! stops being true.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 use mayber::Maybe;
@@ -389,6 +389,20 @@ const WRONG_WITH_OPTIONS: u8 = 36;
 /// Reached through the capacity-1 `with_options` pass, so its failure carries the `built by
 /// with_options` tag.
 const FRONT_REFUSAL_SWAP_AT_CAP_ONE: u8 = 37;
+/// `peek` memoises the residency it saw on its FIRST call and serves that latched run for the
+/// rest of the cache's life, however much has been popped since (#180 part B, item 1).
+///
+/// It is **pure** by construction — two peeks with nothing changed in between agree, which is the
+/// only repeatability law the kit had — and it is correct at the residency it latched, which is
+/// the only residency any single cache instance was ever peeked at. Every sweep in the kit built
+/// a **fresh** cache, popped it to the depth it wanted, and only then peeked, so the latch was
+/// always armed by the very state it was about to be checked against. Only a cache that is
+/// peeked, MUTATED, and peeked again separates it from a conforming one.
+///
+/// Takes the OWNED arm — a `VecDeque` behind `&self` cannot lend out entries it no longer holds,
+/// and `Cache::peek`'s contract allows either arm ([`OWNED_PEEK`] is the witness that the kit
+/// certifies it).
+const MEMOISING_PEEK: u8 = 38;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -429,6 +443,10 @@ where
   /// finds the same value here is a **repeat** against an unchanged cache, which is the only call
   /// that cell answers wrongly.
   peek_one_at_len: Cell<Option<usize>>,
+  /// The residency [`MEMOISING_PEEK`]'s first `peek` saw, latched and served for the rest of this
+  /// cache's life. `RefCell` rather than `Cell` because it is read in place, and populated inside
+  /// `peek`, which takes `&self`.
+  memo: RefCell<Option<VecDeque<CachedTokenOf<'a, L>>>>,
 }
 
 // `L::Token: Clone` is what the two stale-residency cells cost: `STALE_RESIDENCY_PEEK`'s
@@ -744,6 +762,19 @@ where
       }
       return;
     }
+    if D == MEMOISING_PEEK {
+      // The residency the FIRST peek saw, latched and served forever after. The bound is still
+      // read off the buffer's remaining capacity, so the only thing that ever goes wrong is that
+      // the run behind it stopped being the cache's own — which nothing can see until this
+      // instance is mutated between two peeks.
+      let mut memo = self.memo.borrow_mut();
+      let run = memo.get_or_insert_with(|| self.items.clone());
+      let latched = buf.remaining_capacity().min(run.len());
+      for tok in run.iter().take(latched) {
+        buf.push_back(Maybe::Owned(tok.clone()));
+      }
+      return;
+    }
     if D == OWNED_PEEK {
       // The owned arm, otherwise correct: same bound, same order, same source — a clone of the
       // entry at its own position, not a borrow of it.
@@ -890,6 +921,7 @@ where
       poisoned: false,
       stashed: None,
       peek_one_at_len: Cell::new(None),
+      memo: RefCell::new(None),
     }
   }
 
@@ -1313,6 +1345,19 @@ fn cache_kit_catches_a_peek_bounded_by_the_backing_store() {
 #[should_panic(expected = "after 1 pop_back(s) off a full one")]
 fn cache_kit_catches_a_peek_bounded_by_the_backing_store_after_a_tail_drain() {
   run_queue::<STALE_TAIL_RESIDENCY_PEEK>();
+}
+
+/// #180 part B, item 1: no cache instance was ever peeked, MUTATED, and peeked again — every
+/// sweep built a fresh cache, popped it to the residency it wanted, and only then peeked.
+///
+/// The expected message names the first state reached by mutating an instance the kit had already
+/// peeked. `MEMOISING_PEEK` is conforming at the residency it latched and pure at every one of
+/// them, so this test failing means the kit went back to a fresh instance per residency, where a
+/// latch is always armed by the very state it is about to be checked against.
+#[test]
+#[should_panic(expected = "ALREADY peeked, after 1 pop(s)")]
+fn cache_kit_catches_a_memoising_peek() {
+  run_queue::<MEMOISING_PEEK>();
 }
 
 /// The full-only refusal law is asserted at the empty cache for **every** nonzero capacity, not

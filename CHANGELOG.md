@@ -3700,6 +3700,18 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    half was actually reached.
    — *(#180)*
 
+76. **No cache instance was ever peeked, mutated, and peeked again by the cache conformance kit,
+   so a `peek` that memoises its first answer passed `CacheHarness::run()`.** The residency sweep
+   reaches every state a cache can be in, but it reaches each of them on a cache built **fresh**
+   for it — fill to capacity, pop to the depth wanted, and only then peek — so every `peek` the
+   kit ever made was the first question that instance had been asked, and the latch was always
+   armed by the very state it was about to be checked against. Such a cache also satisfies the
+   purity law, which was the only repeatability the kit asked for: two peeks with nothing changed
+   in between *do* agree; a latch is only wrong once something has changed. Check 6 now runs its
+   whole body once more against a single instance, peeked at capacity and then popped and
+   re-peeked at every residency down to empty, alternating which end the pop comes off.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,
