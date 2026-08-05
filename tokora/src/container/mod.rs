@@ -324,7 +324,7 @@ const _: () = {
 
   #[cfg(any(feature = "std", feature = "alloc"))]
   #[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
-  {
+  const _: () = {
     use tinyvec_1::TinyVec;
 
     impl<A, T> Container<T> for TinyVec<A>
@@ -357,7 +357,7 @@ const _: () = {
         TinyVec::len(self)
       }
     }
-  }
+  };
 };
 
 #[cfg(feature = "heapless_0_9")]

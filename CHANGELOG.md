@@ -257,6 +257,56 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    nothing else.
    — *(#180)*
 
+14. **The docs.rs build was broken, and no gate in the workspace could produce the failure.** Ten
+    `#[cfg_attr(docsrs, doc(cfg(...)))]` attributes sat on **block expressions** rather than on
+    items — the inner `{ ... }` of an anonymous const, in `container`, `parser::many::handler` and
+    the three `state` trackers. Under `--cfg docsrs` rustdoc rejects each one as an unused doc
+    comment, which the crate's own `#![deny(missing_docs, warnings)]` turns into an error, so
+    `RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --all-features --no-deps` exited
+    101 while every other gate was green. `doc(cfg)` is **inert without `--cfg docsrs`**, and both
+    doc legs in `ci.yml` ran without it, so the attributes never expanded and never warned —
+    while docs.rs, which builds *with* it, is where the fault actually lands.
+
+    The fix is the shape two of the three siblings in `state/tracker/mod.rs` were already written
+    in: `const _: () = { ... };`, an item, in place of the bare block. That is not cosmetic. The
+    attribute was being dropped, so the badges it exists to render were missing: the `Tracker`
+    impls for `logos_0_14` carried no "Available on crate feature" label while their `0_15` and
+    `0_16` neighbours did, and the `TinyVec` container and separator/delimiter handlers were
+    labelled `tinyvec_1` alone instead of `tinyvec_1 and (alloc or std)`. All of them render now.
+    No `#[cfg(...)]` changed and no configuration compiles differently.
+
+    A third doc leg builds documentation the way docs.rs does — `--cfg docsrs` on nightly, deny
+    warnings — so the next misapplied attribute is found before publish rather than after.
+    — *(#195)*
+
+15. **`cargo hack --each-feature` never builds a feature PAIR, so every `all(A, B)` cfg was
+    compiled in exactly one leg — `--all-features`, where a third feature can supply whatever the
+    pair itself was missing.** The matrix runs `--no-default-features`, each of the 40 features
+    alone, and `--all-features`: 42 legs, never a proper subset of size two or more. That is
+    coverage-shaped and is not coverage — downstream in smear the same hole let a `rowan +
+    graphqlx` pair fail from the commit that introduced it with green CI on every run in between.
+
+    Three legs now build combinations the matrix cannot reach, and they are derived from the cfgs
+    that exist rather than from the feature list: `fold,alloc` — the only leg compiling the
+    `many`/`fold` family at the alloc-without-`std` tier — plus `std,logos,combinators --tests`
+    and `std,logos,trace --tests`, which between them carry eight predicates over 34 sites that no
+    other leg satisfies. The third names `logos`, not `logos_0_16`, because `cfg(feature = "…")`
+    matches the literal feature name and only the umbrella satisfies both
+    `all(std, logos_0_16, combinators)` and `all(test, logos, std, combinators)`.
+
+    Hardcoded legs are a snapshot, so `ci/feature_cfg_coverage.py` enumerates every multi-feature
+    `cfg` in `tokora/src/` and fails, naming the predicate and a site, when no leg builds a
+    configuration satisfying it. `--all-features` is deliberately not counted as a covering leg:
+    it satisfies everything, which is the blind spot being closed. CI does not repeat the leg
+    list — it asks the script to print it and runs what it prints. The scan is attribute-based
+    and multi-line aware, which is load-bearing: the line-oriented grep the original derivation
+    used reported 25 predicates over 210 sites, the attribute scan finds 29 over 317, and one
+    predicate visible only to the latter — `all(test, trace, any(logos_0_16, logos_0_15,
+    logos_0_14), std)`, rustfmt-wrapped over five lines — was reachable from no leg at all.
+    `ci/feature_cfg_coverage_selftest.sh` plants an uncovered predicate, deletes each
+    load-bearing leg in turn and staleness-flips the leg declarations, requiring a red from each.
+    — *(#200)*
+
 ## 0.8.0 (2026-08-04)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.

@@ -14,7 +14,12 @@ name: CI
 #     cargo bench --all-features --no-run
 #     RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 #     RUSTDOCFLAGS="-D warnings" cargo doc -p tokora --no-deps --no-default-features
+#     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --all-features --no-deps
 #     bash ci/changelog_structure.sh CHANGELOG.md
+#     bash ci/feature_cfg_coverage_selftest.sh
+#     python3 ci/feature_cfg_coverage.py
+#     python3 ci/feature_cfg_coverage.py --print-legs \
+#       | while read -r leg; do cargo check -p tokora $leg || break; done
 #     bash ci/name_collision/run.sh <merge-base> <inventory.json>   # see that job for the
 #                                                                  # inventory it requires
 #
@@ -24,12 +29,23 @@ name: CI
 # check, now `--all-features` so it actually builds all five — none of the five default to
 # enabling `logos`, so the bare form silently compiled zero of them.
 #
-# Two of the remaining lines look redundant beside a broader command and are not — each catches
+# Four of the remaining lines look redundant beside a broader command and are not — each catches
 # a class no other line in the set can:
 #
 #   * the bare-config rustdoc build is the only leg that sees bare-config intra-doc breakage:
 #     `--all-features` documents every item, so a link whose TARGET is feature-gated always
 #     resolves there.
+#   * the `--cfg docsrs` rustdoc build is the only leg that expands `doc(cfg(...))` at all. The
+#     attribute is INERT without that cfg, so the two plain doc lines above cannot see a
+#     misapplied one — and docs.rs itself builds with it. Ten `#[cfg_attr(docsrs, doc(cfg(...)))]`
+#     sitting on block expressions instead of items made this line exit 101 while every other
+#     gate in the set was green, which is a docs.rs build failure nothing here could produce
+#     (#195).
+#   * the feature-combination legs and their coverage script are the only lines that build a
+#     PAIR of features. `cargo hack --each-feature` runs each feature alone and `--all-features`,
+#     never a proper subset of size two or more, so an `all(A, B)` predicate is compiled in
+#     exactly one leg — the one where a third feature can supply whatever the pair was missing
+#     (#200).
 #   * the name-collision probe needs a two-sided, GENERATED inventory rather than a fixed
 #     command line — which is why it went missing from this list, and why a branch that minted
 #     new item owners first heard about it from CI.
@@ -514,6 +530,66 @@ jobs:
       - name: cargo +stable hack clippy -p tokora --each-feature --no-deps --tests -D warnings
         run: cargo +stable hack clippy -p tokora --each-feature --no-deps --tests -- -D warnings
 
+  # ── Gate: the feature COMBINATIONS --each-feature cannot reach ──────────────
+  #
+  # The job above runs `--no-default-features`, each of the 40 features ALONE, and
+  # `--all-features` — 42 legs, and never a proper subset of size two or more. So an
+  # `all(A, B)` predicate is compiled in exactly ONE of them, `--all-features`, where a third
+  # feature may supply whatever the pair itself was missing. That is coverage-shaped and is not
+  # coverage: downstream in smear, a `rowan + graphqlx` pair failed from the commit that
+  # introduced it with green CI on every run in between, because `rowan` alone did not compile
+  # the macros, `graphqlx` alone did not compile the substrate, and `--all-features` also had
+  # `graphql`, which supplied the consumers whose absence was the bug (#200).
+  #
+  # `--feature-powerset --depth 2` would close it and is the wrong trade at 40 features: ~780
+  # configurations, on a workflow that already spends hours on the Miri queue, buys a gate
+  # nobody keeps. So the legs are derived from the cfgs that ACTUALLY EXIST, and
+  # `ci/feature_cfg_coverage.py` is what stops that derivation going stale — three legs are a
+  # snapshot, and the next `all(...)` predicate someone writes would be uncovered again with
+  # green CI.
+  #
+  # The leg list is deliberately NOT repeated here. This job asks the script to print it and
+  # runs what it prints, so the set CI builds and the set the script validates cannot drift.
+  #
+  # The self-test runs FIRST and is not optional, for the same reason the changelog one does.
+  # A coverage script's OK path is the path everything already takes, which makes "passes by
+  # not looking" its natural failure mode — the very first run of this gate reported zero
+  # predicates found, from a real bug in its own scanner, and only the positive control told
+  # that apart from a green.
+  feature-combinations:
+    name: feature combinations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-featcomb-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-featcomb-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: ci/feature_cfg_coverage_selftest.sh
+        run: bash ci/feature_cfg_coverage_selftest.sh
+      - name: python3 ci/feature_cfg_coverage.py
+        run: python3 ci/feature_cfg_coverage.py
+      - name: cargo check, one leg per declared feature combination
+        run: |
+          set -euo pipefail
+          mapfile -t legs < <(python3 ci/feature_cfg_coverage.py --print-legs)
+          [ "${#legs[@]}" -gt 0 ] || { echo "no legs declared" >&2; exit 1; }
+          for leg in "${legs[@]}"; do
+            echo "::group::cargo check -p tokora $leg"
+            # Word splitting is the point: $leg is a flag string from the declaration.
+            # shellcheck disable=SC2086
+            cargo check -p tokora $leg
+            echo "::endgroup::"
+          done
+
   # ── Gate: no-std / bare-metal builds ────────────────────────────────────────
   no-std:
     name: no-std (thumbv6m)
@@ -588,6 +664,28 @@ jobs:
       # early, so any count is a floor and a floor cannot detect a missing member.
       - name: cargo doc --no-default-features --no-deps (bare-config link resolution)
         run: cargo doc -p tokora --no-deps --no-default-features
+      # The ONLY leg that builds documentation the way docs.rs does, and the only one that
+      # expands `doc(cfg(...))` at all. The attribute is inert without `--cfg docsrs`, so both
+      # steps above compile every `#[cfg_attr(docsrs, doc(cfg(...)))]` in the crate away to
+      # nothing and cannot tell a correct one from a misapplied one. docs.rs builds WITH the
+      # cfg — that is the entire reason the pattern exists — so a fault only this leg can see is
+      # a real published-docs build failure, found after publish, which is the worst place to
+      # find it.
+      #
+      # It was not hypothetical when this step was added: ten of the attributes sat on block
+      # expressions rather than on items, and rustdoc's `unused_doc_comments` (an error here via
+      # the crate's own `#![deny(missing_docs, warnings)]`) took the build to exit 101 while
+      # every other gate in the workflow was green (#195). Two of the three siblings in
+      # `state/tracker/mod.rs` were already written the right way, so the fault was invisible
+      # even to a reader comparing neighbours.
+      #
+      # Nightly, because `doc(cfg)` is a nightly feature — the same toolchain docs.rs uses.
+      - name: Install Rust (nightly, for the docs.rs configuration)
+        run: rustup toolchain install nightly --no-self-update
+      - name: RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+        run: cargo +nightly doc --all-features --no-deps
 
   # ── Gate: bench SMOKE only ──────────────────────────────────────────────────
   #

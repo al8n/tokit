@@ -504,21 +504,21 @@ const _: () = {
 
   #[cfg(feature = "logos_0_14")]
   #[cfg_attr(docsrs, doc(cfg(feature = "logos_0_14")))]
-  {
+  const _: () = {
     bail!(logos_0_14);
-  }
+  };
 
   #[cfg(feature = "logos_0_15")]
   #[cfg_attr(docsrs, doc(cfg(feature = "logos_0_15")))]
-  {
+  const _: () = {
     bail!(logos_0_15);
-  }
+  };
 
   #[cfg(feature = "logos_0_16")]
   #[cfg_attr(docsrs, doc(cfg(feature = "logos_0_16")))]
-  {
+  const _: () = {
     bail!(logos_0_16);
-  }
+  };
 };
 
 #[cfg(test)]
