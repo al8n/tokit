@@ -299,8 +299,15 @@ jobs:
       # `combinators` is spelled out because it is a DEFAULT feature: without it this leg
       # would still compile, but every combinator suite is `#![cfg]`'d on it, so the run
       # would silently shrink to the handful of files that need no combinator at all.
-      - name: cargo test --no-default-features --features std,combinators,${{ matrix.logos }}
-        run: cargo test -p tokora --no-default-features --features std,combinators,${{ matrix.logos }}
+      #
+      # `conformance` is spelled out for the same reason and is not optional here: the cache
+      # conformance kit (`tokora::conformance::cache_tests`) builds its fixture lexer with a
+      # real `logos::Logos` derive, so it is the most version-sensitive file in the crate — and
+      # until this feature was named here, the one leg whose entire purpose is version parity
+      # was the one leg that never compiled it, so it ran against exactly one of the three
+      # advertised logos majors (whichever `--all-features` selects) instead of all three (#208).
+      - name: cargo test --no-default-features --features std,combinators,conformance,${{ matrix.logos }}
+        run: cargo test -p tokora --no-default-features --features std,combinators,conformance,${{ matrix.logos }}
 
   # ── Gate: mechanical public-API diff against the last published version ─────
   # `continue-on-error` is deliberate and the reason is written down because "advisory" usually
