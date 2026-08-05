@@ -3651,6 +3651,17 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    overflow separately.
    — *(#180)*
 
+72. **`peek_one` was never called twice against one unchanged cache by the cache conformance
+   kit, so an answer that is correct once and wrong on every repeat passed
+   `CacheHarness::run()`.** `peek` has been held to that law since the kit existed; `peek_one`,
+   which is composed from it, had not — the kit called it exactly once per residency its sweep
+   visits, against a cache instance built fresh for that residency, so a second answer had
+   nothing to disagree with. It is now called twice at every one of those residencies.
+   Separately, the assertion that `peek_one` names the front entry had **no mutant behind it at
+   all**: `peek_one` is a default method, no fixture had ever overridden it, and a fixture that
+   does not override it is correct wherever `peek` is. Both halves now have one.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,

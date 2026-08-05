@@ -67,7 +67,9 @@
 //!    `pop_front` and by `pop_back`, since removed entries a cache fails to clear sit ahead of
 //!    the live run on the first path and behind it on the second, and only the sweep that drains
 //!    that end reads them. `pop_back` is the input layer's restore path. `peek_one` agrees with
-//!    `front`, and answers nothing where there is no front.
+//!    `front`, answers nothing where there is no front, and — like `peek` — answers **the same
+//!    on a second call** against an unchanged cache: it takes `&self`, so the two calls are the
+//!    same question.
 //! 7. **`clear`** — returns the cache to the check-1 state, AND the cache stays usable
 //!    afterward: it is refilled with `cap` fresh pushes and checked against check 3's oracle,
 //!    so a `clear` that empties the cache but also permanently disables it (poisons it, zeroes
@@ -941,26 +943,33 @@ where
 
     // `peek_one` is the single-slot case: it names the front, and it names nothing where a
     // drained cache has no front left to name.
-    match cache.peek_one() {
-      Some(one) => {
-        let Some(expected) = want.first() else {
-          panic!(
-            "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() answered {:?} with NOTHING resident",
-            one.span()
-          )
-        };
-        assert!(
-          one.span() == expected,
-          "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() named {:?}, expected the front entry {expected:?}",
-          one.span()
-        );
-      }
-      None => assert!(
-        want.is_empty(),
+    //
+    // Taken as an owned span rather than matched in place, so the borrow ends and the SECOND
+    // call below can be made against the same cache. Until it was, `peek_one` was called exactly
+    // once per residency this sweep visits — against a cache instance built fresh for that
+    // residency — so a `peek_one` that is correct once and wrong on every repeat had nothing to
+    // disagree with. `peek` has been held to that since the kit existed, three lines above; this
+    // is the same law on the method composed from it (#180 part A, item 4).
+    let one_first: Option<L::Span> = cache.peek_one().map(|one| one.span().clone());
+    match (&one_first, want.first()) {
+      (Some(got), Some(expected)) => assert!(
+        got == expected,
+        "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() named {got:?}, expected the front entry {expected:?}"
+      ),
+      (Some(got), None) => panic!(
+        "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() answered {got:?} with NOTHING resident"
+      ),
+      (None, Some(_)) => panic!(
         "tokora cache conformance [{name} bounded-peek] against {state}: peek_one() is empty with {} entries resident",
         want.len()
       ),
+      (None, None) => {}
     }
+    let one_second: Option<L::Span> = cache.peek_one().map(|one| one.span().clone());
+    assert!(
+      one_second == one_first,
+      "tokora cache conformance [{name} pure-peek-one] against {state}: two peek_one() calls on an unchanged cache disagreed: {one_first:?} then {one_second:?}. `peek_one` takes &self and must be logically pure, exactly as `peek` must."
+    );
 
     // ── the same law against a buffer that is NOT empty ───────────────────────────
     //

@@ -300,6 +300,26 @@ const SILENT_PUSH_MANY: u8 = 29;
 /// what makes that change bite: a fresh `C::new()` has nothing stashed, so before the fix this
 /// defect was certified in full (#180 part A, item 2).
 const RESURRECTING_CLEAR: u8 = 30;
+/// `peek_one` names the **back** entry instead of the front, with `peek`, `front`, `back`, `len`
+/// and every span accessor left correct (#180 part A, item 4).
+///
+/// `peek_one` is a DEFAULT method — `peek::<U1>` into a one-slot buffer, then `pop_front` — so a
+/// fixture that does not override it is correct wherever `peek` is, and every cell above this
+/// line was. Nothing had ever overridden it, so the kit's `peek_one` assertion had no mutant
+/// behind it at all: it was an untested assertion, which is the defect class this issue exists to
+/// close. This cell is the witness that it bites. It answers correctly at `len <= 1`, where front
+/// and back are the same entry, so only a residency the kit drives with two or more entries
+/// separates it from a conforming cache.
+const WRONG_PEEK_ONE: u8 = 31;
+/// `peek_one` answers correctly the first time it is asked about a residency and answers `None`
+/// every time it is asked again about the **same, unchanged** cache — the `peek_one`-specific
+/// analogue of [`IMPURE_PEEK`] (#180 part A, item 4).
+///
+/// Keyed on the residency rather than on a raw call count, so it stays a statement about
+/// repeatability alone: any mutation between two calls re-arms it, and only a second call with
+/// nothing changed in between is answered wrongly. Before this issue's fix `peek_one` was called
+/// exactly once per residency the kit visits, so a second answer had nothing to disagree with.
+const IMPURE_PEEK_ONE: u8 = 32;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -332,6 +352,10 @@ where
   /// `pop_front` after that clear, and by nothing else. `items` is genuinely emptied, so every
   /// observable but the pop answers for an empty cache.
   stashed: Option<CachedTokenOf<'a, L>>,
+  /// The residency the previous [`IMPURE_PEEK_ONE`] `peek_one` call was asked about. A call that
+  /// finds the same value here is a **repeat** against an unchanged cache, which is the only call
+  /// that cell answers wrongly.
+  peek_one_at_len: Cell<Option<usize>>,
 }
 
 // `L::Token: Clone` is what the two stale-residency cells cost: `STALE_RESIDENCY_PEEK`'s
@@ -363,6 +387,7 @@ where
       last_pushed_back_span: None,
       poisoned: false,
       stashed: None,
+      peek_one_at_len: Cell::new(None),
     }
   }
 
@@ -663,6 +688,29 @@ where
     }
   }
 
+  fn peek_one<'c>(&self) -> Option<MaybeRefCachedTokenOf<'_, 'a, L>>
+  where
+    'a: 'c,
+  {
+    if D == WRONG_PEEK_ONE {
+      // The BACK entry, not the front. Identical to a conforming answer at `len <= 1`, where the
+      // two are the same entry; wrong at every deeper residency. `peek` is untouched, so a
+      // `peek_one` derived from `peek` — the default — would still be right, which is what makes
+      // this cell a statement about the override alone.
+      return self.items.back().map(|tok| Maybe::Ref(tok.as_ref()));
+    }
+    if D == IMPURE_PEEK_ONE {
+      let len = self.items.len();
+      let repeat = self.peek_one_at_len.replace(Some(len)) == Some(len);
+      if repeat {
+        // A second call with nothing changed in between. `peek_one` takes `&self`, so the two
+        // calls are the same question and must get the same answer.
+        return None;
+      }
+    }
+    self.items.front().map(|tok| Maybe::Ref(tok.as_ref()))
+  }
+
   fn front(&self) -> Option<CachedTokenRefOf<'_, 'a, L>> {
     self.items.front().map(CachedToken::as_ref)
   }
@@ -836,6 +884,24 @@ fn cache_kit_catches_a_poisoning_clear() {
 #[should_panic(expected = "a pop answered on an empty cache")]
 fn cache_kit_catches_a_resurrecting_clear() {
   run_queue::<RESURRECTING_CLEAR>();
+}
+
+/// #180 part A, item 4, first half: `peek_one` had no mutant at all. The assertion that it names
+/// the front entry existed and had never been run against a cache that disagrees with it, because
+/// `peek_one` is a default method and no fixture had ever overridden it. This is that mutant.
+#[test]
+#[should_panic(expected = "peek_one() named")]
+fn cache_kit_catches_a_wrong_peek_one() {
+  run_queue::<WRONG_PEEK_ONE>();
+}
+
+/// #180 part A, item 4, second half: `peek_one` was never called twice against one unchanged
+/// cache, so an answer that is correct once and wrong on every repeat passed. `peek` has been
+/// checked for exactly this since the kit existed ([`IMPURE_PEEK`]); `peek_one` had not.
+#[test]
+#[should_panic(expected = "pure-peek-one")]
+fn cache_kit_catches_an_impure_peek_one() {
+  run_queue::<IMPURE_PEEK_ONE>();
 }
 
 /// #180 part A, item 5: `pop_front_if`/`try_pop_front_if` were never called by the kit, so an
