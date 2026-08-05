@@ -28,6 +28,38 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
 
 ## Unreleased
 
+### Changed (breaking)
+
+- **Every combinator family under `src/parser/` is now behind its own feature.** The umbrella
+  `combinators` is a **default** feature, so a plain `tokora = "0.9"` compiles exactly the 0.8
+  surface and nothing changes. A `default-features = false` consumer must now name the families
+  it uses — either `combinators` for all of them or the individual ones:
+  `any`, `fail`, `filter` (covers `filter_map`), `fold`, `ident`, `keyword`, `many`, `map`,
+  `peek`, `pratt`, `punct`, `then`, `validate`.
+
+  The point is footprint: an embedded or no-alloc build compiled all fourteen families whether
+  or not the grammar named one. `many` alone is roughly 18,000 lines.
+
+  Three edges are not guessable from the names and are encoded in the manifest:
+  `fold` implies `many` (the folds route their absence exits through
+  `many::absence_after_element`); `try_ident_list` needs `ident` **and** `many`; `list` and
+  `separated1` need `many` on top of the allocator gate they already had. `punct` gates the
+  punctuator *parsers* (`Comma::parse`, `parens`/`braces`/`brackets`/`angles`), not the
+  `Punctuator` trait impls for the built-in markers, which stay unconditional because
+  `delimited` and every `separated_by_*` read them. `pratt` reaches outside `src/parser/`: it
+  also gates `token::PrattToken`, the token-level `InputRef::pratt*` driver, and the
+  `PrattEmitter` channel with its emitter impls.
+
+  What is **not** gated is the substrate: `Parser` / `Parse` / `parse*`, the `ParseInput`,
+  `TryParseInput` and `ParseChoice` traits, and the top-level `src/parser/*.rs` combinators —
+  `expect`, `delimited`, `recover`, `recovery_gate`, `select`, `opt`, `padded`, `node`,
+  `skip_then_retry`, `ignore`, `labelled`, `empty`, `todo`, `with`, `by_ref`, `collect`,
+  `accepted`, `unwrapped`. The families are written against those and the crate's own error,
+  recovery and CST machinery names them, so a seam there would have nothing to stand on.
+
+  Every gated public item carries `#[cfg_attr(docsrs, doc(cfg(...)))]`, so docs.rs labels which
+  feature each one needs.
+
 ### Fixed
 
 1. **`is_empty()` was never asserted false by the cache conformance kit — a fixture returning
