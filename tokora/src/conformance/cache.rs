@@ -86,7 +86,13 @@
 //!    every residency down to empty — because a sweep that builds a fresh cache per residency
 //!    only ever asks a cache its FIRST question, and a `peek` that memoises its first answer and
 //!    serves it after later pops is pure, is correct at the residency it latched, and is
-//!    otherwise invisible. `peek_one` agrees with
+//!    otherwise invisible. And the bound and order are read through **three window types**, not
+//!    one: `peek` is generic over `W` and may read `W::CAPACITY` off it, so a single fixed window
+//!    leaves a branch on that parameter unreachable — the single-slot fast path the trait invites
+//!    (`peek_one`'s default body is `peek::<U1>`), and the truncating path a cache takes when the
+//!    residency does not fit in the window, which never runs while the window is as wide as every
+//!    residency driven. Sweeping the prefill depth does not stand in for this: that varies the
+//!    room LEFT in the buffer, not the type. `peek_one` agrees with
 //!    `front`, answers nothing where there is no front, and — like `peek` — answers **the same
 //!    on a second call** against an unchanged cache: it takes `&self`, so the two calls are the
 //!    same question.
@@ -194,7 +200,10 @@ use std::{format, vec::Vec};
 
 use core::{cell::Cell, marker::PhantomData};
 
-use generic_arraydeque::{GenericArrayDeque, typenum::U4, typenum::Unsigned};
+use generic_arraydeque::{
+  GenericArrayDeque,
+  typenum::{U1, U3, U4, Unsigned},
+};
 use mayber::Maybe;
 
 use crate::{
@@ -210,6 +219,26 @@ use crate::{
 /// also what every source the kit is pointed at has to carry past the cache's capacity, so it
 /// buys those shapes at four tokens rather than at a longer corpus.
 type PeekWindow = U4;
+
+/// The single-slot window, driven beside [`PeekWindow`] so that `W` is not one fixed type in
+/// every driver the kit has (#180 part B, item 4).
+///
+/// This one is not an arbitrary second value: [`Cache::peek_one`]'s default body is
+/// `peek::<U1>` into a one-slot buffer, so a one-slot fast path is a specialization the trait
+/// itself invites — and an implementation that overrides `peek_one` (the hot path) while getting
+/// `peek::<U1>` wrong has two answers to the same question, only one of which the kit was asking.
+type PeekWindowOne = U1;
+
+/// A window strictly between [`PeekWindowOne`] and [`PeekWindow`], so that at the residencies
+/// this kit builds there is a call where the window is **narrower than the residency** and the
+/// bound genuinely truncates.
+///
+/// At `PeekWindow` that never happens for a cache of capacity 4 or less, and at `PeekWindowOne`
+/// the truncated run is a single entry, which has no order to get wrong. So a cache with a
+/// separate code path for "the residency does not fit" — the branch where a copy has to stop
+/// short of `back`, and the one place `peek` can walk in the wrong direction — is reached here
+/// and nowhere else.
+type PeekWindowMid = U3;
 
 /// The span of a cached token, owned. `token()` hands back a `Spanned<&T, &Span>`, so the span
 /// arrives double-borrowed and has to be dereferenced once before it can be cloned.
@@ -1393,6 +1422,52 @@ where
     for depth in 1..=window {
       self.check_prefilled_peek(cache, cap, want, depth, state);
     }
+
+    // ── and the same law through a window that is NOT the kit's own ───────────────
+    //
+    // Everything above peeks through [`PeekWindow`], and until this ran, so did every other
+    // driver in the kit: `W` was `U4` in all of them (#180 part B, item 4). Sweeping the prefill
+    // depth does not stand in for varying it — that moves the buffer's REMAINING capacity, and
+    // `peek` is generic over `W`, can read `W::CAPACITY` off the type, and is free to branch on
+    // it. Two shapes of that branch are worth naming, and both are dead code at a single window:
+    // the single-slot fast path, which the trait itself invites (`peek_one`'s default body is
+    // `peek::<U1>` into a one-slot buffer), and the truncating path a cache takes when the
+    // residency does NOT fit in the window — which never runs while the window is as wide as
+    // every residency the kit builds.
+    self.check_peek_window::<PeekWindowOne>(cache, want, state);
+    self.check_peek_window::<PeekWindowMid>(cache, want, state);
+  }
+
+  /// Check 6's bound, order and purity through **one** window type, against a cache holding
+  /// exactly `want`.
+  ///
+  /// Only the empty-buffer shape: the prefilled sweep above already varies the room left, at
+  /// [`PeekWindow`], and what this adds is the other axis — the value of `W` itself. `peek_one`
+  /// is not re-driven either; it takes no window.
+  fn check_peek_window<W>(&self, cache: &C, want: &[L::Span], state: &str)
+  where
+    W: Window,
+  {
+    let name = self.label();
+    let window = <<W as Window>::CAPACITY as Unsigned>::USIZE;
+    let bound = window.min(want.len());
+
+    let first = self.peeked_spans_through::<W>(cache);
+    assert!(
+      first.len() == bound,
+      "tokora cache conformance [{name} bounded-peek/window {window}] against {state}: peek() appended {} entries into an empty {window}-slot buffer, expected exactly min(len, the buffer's remaining capacity) = {bound}. `peek` is generic over W and this is a window the kit's own PeekWindow is not: the bound is the same law at every one of them.",
+      first.len()
+    );
+    assert!(
+      first == want[..bound],
+      "tokora cache conformance [{name} bounded-peek/window {window}] against {state}: peek() appended {first:?}, expected the resident prefix OLDEST FIRST {:?}. A cache may not read W::CAPACITY and answer differently for it.",
+      &want[..bound]
+    );
+    let second = self.peeked_spans_through::<W>(cache);
+    assert!(
+      second == first,
+      "tokora cache conformance [{name} pure-peek/window {window}] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure at every window, not only at the kit's own."
+    );
   }
 
   /// Check 6's prefilled half at one prefill depth: `peek` into a buffer that already holds
@@ -1484,13 +1559,21 @@ where
     corpus.split_off(cap)
   }
 
-  /// The spans `peek` appends, in order, into a fresh, empty buffer.
+  /// The spans `peek` appends, in order, into a fresh, empty buffer of the kit's own window.
   fn peeked_spans(&self, cache: &C) -> Vec<L::Span> {
-    let mut buf: GenericArrayDeque<
-      MaybeRefCachedTokenOf<'_, 'inp, L>,
-      <PeekWindow as Window>::CAPACITY,
-    > = GenericArrayDeque::new();
-    cache.peek::<PeekWindow>(&mut buf);
+    self.peeked_spans_through::<PeekWindow>(cache)
+  }
+
+  /// [`peeked_spans`](Self::peeked_spans) through an arbitrary window, which is what
+  /// [`check_peek_window`](Self::check_peek_window) needs and what the kit had no way to express
+  /// while every buffer it built was a [`PeekWindow`] one.
+  fn peeked_spans_through<W>(&self, cache: &C) -> Vec<L::Span>
+  where
+    W: Window,
+  {
+    let mut buf: GenericArrayDeque<MaybeRefCachedTokenOf<'_, 'inp, L>, W::CAPACITY> =
+      GenericArrayDeque::new();
+    cache.peek::<W>(&mut buf);
     buf.iter().map(|entry| entry.span().clone()).collect()
   }
 

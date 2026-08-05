@@ -16,6 +16,7 @@
 use core::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+use generic_arraydeque::typenum::Unsigned;
 use mayber::Maybe;
 
 use super::cache::CacheHarness;
@@ -431,6 +432,31 @@ const TAIL_POP_AFTER_PUSH_FRONT: u8 = 39;
 /// [`REORDERING_PUSH_FRONT`] is, so that index 2 is interior rather than the tail and `front`,
 /// `back`, `len` and `remaining` all keep answering exactly as a conforming cache would.
 const INTERLEAVED_PUSH_BACK_REORDERS: u8 = 40;
+/// `peek` copies the whole residency when it fits in `W`, and walks **backward** from the cut
+/// point when it does not — a truncating branch that is dead code at every window the kit drove
+/// (#180 part B, item 4).
+///
+/// `peek` is generic over `W` and this cell reads `W::CAPACITY` off the type, which is the thing
+/// the kit could not see: the window was `U4` in **every** driver, and with a fixture capacity of
+/// 4 the guard `W::CAPACITY >= len` is true at every residency, so the branch behind it never
+/// ran. Sweeping the prefill depth does not reach it either — that varies the buffer's REMAINING
+/// capacity, and this is keyed on the type parameter, not on the room left.
+///
+/// Deliberately correct at `W = U1`: a one-entry run has no order, so reversing it is the
+/// identity. Only a window strictly between 1 and the residency separates it from a conforming
+/// cache, which is exactly the window nothing in the kit ever used.
+const TRUNCATING_PEEK_WALKS_BACKWARD: u8 = 41;
+/// `peek` has a single-slot fast path — `W::CAPACITY == 1` — and it grabs the **back** entry
+/// (#180 part B, item 4).
+///
+/// [`Cache::peek_one`](crate::cache::Cache::peek_one)'s default body is literally `peek::<U1>`
+/// into a one-slot buffer, so a one-slot special case is a shape the trait invites; this cell
+/// overrides `peek_one` correctly (like every cell that is not [`WRONG_PEEK_ONE`], by not
+/// overriding it at all) and gets `peek::<U1>` wrong, so the two cannot cover for each other. The
+/// kit peeked through `U4` and nothing else, so the branch was unreachable.
+///
+/// Correct at `len <= 1`, where front and back are the same entry.
+const SINGLE_SLOT_PEEK_TAKES_THE_BACK: u8 = 42;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -701,7 +727,32 @@ where
     if !buf.is_empty() {
       self.prefilled.set(true);
     }
+    // The window off the TYPE, not off the buffer. `buf.capacity()` is the same number, but the
+    // two cells below are statements about a cache that branches on its `W` parameter, and this
+    // is where that parameter is read.
+    let w = <<W as crate::Window>::CAPACITY as Unsigned>::USIZE;
     let mut fill = buf.remaining_capacity().min(self.items.len());
+    if D == SINGLE_SLOT_PEEK_TAKES_THE_BACK && w == 1 {
+      // A one-slot fast path — the shape `peek_one`'s default composition asks for — reaching
+      // for the wrong end. Dead code at every window but `U1`.
+      if let Some(tok) = self.items.back() {
+        if fill > 0 {
+          buf.push_back(Maybe::Ref(tok.as_ref()));
+        }
+      }
+      return;
+    }
+    if D == TRUNCATING_PEEK_WALKS_BACKWARD && w < self.items.len() {
+      // The branch taken only when the residency does NOT fit in the window: it walks backward
+      // from the cut point instead of forward from the front. At `w >= len` the fast path below
+      // runs and is correct, which is every call the kit made while its window was fixed at `U4`
+      // and its fixture capacity was 4 — and at `w == 1` reversing a one-entry run is the
+      // identity, so a single-slot window cannot see it either.
+      for tok in self.items.iter().take(fill).rev() {
+        buf.push_back(Maybe::Ref(tok.as_ref()));
+      }
+      return;
+    }
     if D == IMPURE_PEEK && seen > 0 {
       fill = fill.saturating_sub(1);
     }
@@ -1386,6 +1437,31 @@ fn cache_kit_catches_a_peek_bounded_by_the_backing_store() {
 #[should_panic(expected = "after 1 pop_back(s) off a full one")]
 fn cache_kit_catches_a_peek_bounded_by_the_backing_store_after_a_tail_drain() {
   run_queue::<STALE_TAIL_RESIDENCY_PEEK>();
+}
+
+/// #180 part B, item 4: `W` was `U4` in every driver the kit had, so a `peek` that reads
+/// `W::CAPACITY` off its own type parameter and branches on it was invisible.
+///
+/// The expected message names **window 3** — the only window the kit drives that is narrower than
+/// the residency and wider than one entry, which is the only shape in which the "does not fit"
+/// branch both runs and has an order to get wrong. So this test failing means the window sweep
+/// lost its middle value and `peek` is back to only ever being asked for a run that fits whole.
+#[test]
+#[should_panic(expected = "bounded-peek/window 3")]
+fn cache_kit_catches_a_peek_whose_truncating_branch_walks_backward() {
+  run_queue::<TRUNCATING_PEEK_WALKS_BACKWARD>();
+}
+
+/// The other end of the same sweep: the **single-slot** window.
+///
+/// The expected message names window 1. `peek_one`'s default body is `peek::<U1>`, so a one-slot
+/// fast path is a specialization the trait invites — and this fixture leaves `peek_one` itself
+/// correct, so only a driver that peeks through a one-slot window can see it. This test failing
+/// means that window is gone.
+#[test]
+#[should_panic(expected = "bounded-peek/window 1")]
+fn cache_kit_catches_a_single_slot_peek_that_takes_the_back() {
+  run_queue::<SINGLE_SLOT_PEEK_TAKES_THE_BACK>();
 }
 
 /// #180 part B, item 3: every mixed residency the kit built was "one `push_back`, then N

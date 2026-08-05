@@ -3728,6 +3728,18 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    swept from two entries up to the capacity.
    — *(#180)*
 
+78. **The cache conformance kit peeked through one window type, `U4`, in every driver it had — so
+   a `Cache::peek` that reads `W::CAPACITY` off its own type parameter and branches on it was
+   invisible.** `peek` is generic over the window, and the two natural branches on it are both
+   dead code at a single fixed one: the single-slot fast path the trait itself invites, since
+   `peek_one`'s default body is literally `peek::<U1>` into a one-slot buffer, and the truncating
+   path a cache takes when the residency does **not** fit in the window, which never runs while
+   the window is at least as wide as every residency the kit builds. Sweeping the prefill depth
+   was not a substitute: that varies the buffer's remaining capacity, not the type. Check 6 now
+   reads the bound, the order and the purity law through `U1` and `U3` as well as `U4`, at every
+   residency it already sweeps.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,
