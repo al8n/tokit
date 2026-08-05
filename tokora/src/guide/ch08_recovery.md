@@ -488,6 +488,23 @@ let holes: Vec<usize> = emitter.skipped_regions().values().flatten().copied().co
 assert_eq!(holes, [7]);
 ```
 
+## Recovery *inside* an expression
+
+Everything above recovers **between** constructs: a statement fails, the driver skips to the
+next sync point, and the statement loop carries on. An expression cannot be recovered that way.
+There is no sync point inside `1 + `, and skipping to one would discard the operand the user is
+about to type.
+
+The Pratt driver's answer is the rust-analyzer one: report the missing operand, hand the driver
+an *error node* as the operand, and let the fold and the loop continue over it. It works because
+the LHS channel's [`Operand`](crate::parser::PrattLHS::Operand) report — unlike
+[`Prefix`](crate::parser::PrattLHS::Prefix) — is not held to "consume what you report", so an
+operand of **zero width** is legal. The full argument, the recovery-set rule that keeps such a
+parse terminating, and how the two kinds of recovery meet at an
+[`inplace_recover`](crate::ParseInput::inplace_recover) boundary are in
+[chapter 5](super::ch05_pratt); the worked grammar is
+[`examples/expr_recovery.rs`](https://github.com/al8n/tokora/blob/main/tokora/examples/expr_recovery.rs).
+
 ## The law, once more
 
 Recovery skips input. An [`Incomplete`](crate::error::Incomplete) error says *there is more

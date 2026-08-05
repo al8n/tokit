@@ -344,6 +344,104 @@ let binding = Parser::new()
 assert_eq!(binding, ("x", 13));
 ```
 
+## Recovery: an error node is a legal operand
+
+Everything above stops at the first bad token. An editor cannot: it needs a tree for
+`1 + ` — a line the user is halfway through typing — not an error message. The posture that
+produces one is rust-analyzer's, and the typed driver already supports it with no signature
+change at all.
+
+The rule that makes it work is a rule about
+[`ParsePrattLHS`](crate::parser::ParsePrattLHS): **only
+[`Prefix`](crate::parser::PrattLHS::Prefix) is held to "consume what you report".** A prefix
+report makes the driver re-enter the expression at the same position, so a zero-width one would
+descend forever, and the driver refuses it. An [`Operand`](crate::parser::PrattLHS::Operand)
+report causes no recursion and no fold, so a zero-width one costs nothing — and *that* is the
+licence an error node needs. Report an operand you did not consume, and the driver folds it
+like any other.
+
+So the LHS channel, when no operand is there, reports the problem and hands back a hole:
+
+```rust,ignore
+// The recovery arm of the LHS channel. `other` is the head token kind, or `None` at end of
+// input. Compiled and pinned in full — see the links below.
+other => {
+  inp.emit_error(Spanned::new(here(inp), Diag::ExpectedExpression))?;
+  let mark = inp.cst_mark();
+  if !in_recovery_set(other) {
+    // Nothing can consume this token, so leaving it would hand the next cycle the same
+    // input. Swallow exactly one — r-a's `err_and_bump`.
+    inp.next()?;
+  }
+  inp.cst_start_at(mark, ERROR_EXPR);
+  inp.cst_finish(ERROR_EXPR);
+  Ok(PrattLHS::Operand(Expr::Error))
+}
+```
+
+Two branches, and the *recovery set* chooses between them. A token some enclosing construct can
+still use — `)`, an infix operator, end of input — is left in place, so the error node is
+zero-width and the enclosing frame is handed the token it was waiting for. Anything else is
+swallowed into a one-token error node, which is what guarantees the parse moves.
+
+Deciding that by peeking is safe because of the RHS channel's own contract:
+[`End`](crate::parser::PrattRHS::End) restores whatever the deciding read consumed, so a token
+this expression declines is handed back untouched.
+
+The same licence covers a case that has nothing to do with a *missing* operand. A token your
+lexer accepts can still be one your AST cannot hold — a digit run whose value overflows the
+integer type is the usual one, and no lexer regex rules it out, since the regex bounds a
+literal's shape and not its magnitude. That conversion is the one step in an operand parser that
+can fail on input nothing upstream is able to reject, and the answer is the same one: report,
+return an error-node `Operand`, and let the fold complete. Here the node is as wide as the
+offending text rather than zero or one token, because the text is real and the tree owes the
+source every byte. An operand arm that panics instead gives back a parser that fails on input a
+user can type, which is the property this whole posture exists to avoid.
+
+The rest follows from the driver:
+
+- **the fold completes over the hole.** `fold_infix` is called with `Expr::Error` on one side
+  and returns a node like any other, so `1 + ` becomes `Bin(Add, Num(1), Error)` rather than an
+  absence.
+- **the loop continues.** After that fold the RHS loop takes another cycle, so `1 + + 2` parses
+  to `((1 + <error>) + 2)` with **one** diagnostic — the second `+` is folded, not reported.
+  This is where r-a and rustc part company: rustc propagates a `PResult` upward and abandons
+  the enclosing production instead.
+- **several diagnostics survive one parse.** Under a recording emitter (`Verbose`),
+  `emit_error` returns `Ok` and the grammar keeps going; and when a production *does* have to
+  give up, the ordinary `Err` it returns crosses the driver on the keep-and-commit path, so
+  every diagnostic the expression had already made is still there for the caller.
+
+That last point is what lets the two halves of the posture coexist. Recover in the channel
+where the production knows what to do; return `Err` where it does not — an unclosed group, say,
+whose extent an operand parser cannot guess — and catch it at the nearest enclosing recovery
+point with [`inplace_recover`](crate::ParseInput::inplace_recover), which resumes at the offset
+the driver handed back rather than at the attempt origin the way
+[`recover`](crate::ParseInput::recover) does.
+
+### Where this posture stops
+
+One class of error stays outside it, and a grammar that recovers should know where the line is.
+A **grammar** error becomes a hole and the parse continues. A **resource** error ends the parse:
+[`RecursionLimitReached`](crate::error::RecursionLimitReached) is *terminal*, so the session
+latches and [`inplace_recover`](crate::ParseInput::inplace_recover) re-raises it instead of
+spending it — deliberately, because a depth budget a recovery point could swallow would not
+bound anything. There is no position to resume from and no error node to synthesize, and the
+default budget is shallower than it sounds: 64 frames, which 64 nested parentheses reach.
+
+What a recovering entry point owes there is therefore not recovery but **not panicking**: record
+the trip, hand back a hole, and let the caller tell "this is your program" from "this is how far
+we got". If you build a tree alongside, a terminated parse leaves its tail uncovered, so the
+tree has to come out through [`finish_partial`](crate::cst::Cst::finish_partial), which tiles
+that tail; [`finish`](crate::cst::Cst::finish) refuses it, correctly, since for a parse that ran
+to the end an uncovered gap is a bug in the grammar.
+
+The whole grammar — with a lossless tree whose holes are real, sometimes zero-width, error
+nodes — is
+[`examples/expr_recovery.rs`](https://github.com/al8n/tokora/blob/main/tokora/examples/expr_recovery.rs),
+pinned input by input in `tokora/tests/pratt_recovery.rs`. For recovery *between* constructs —
+skipping to a sync point, counting holes — see [chapter 8](super::ch08_recovery).
+
 ## A floor of your own
 
 [`pratt`](crate::InputRef::pratt) starts at `Power::default()`.

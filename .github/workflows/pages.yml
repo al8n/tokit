@@ -125,8 +125,15 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo +"$RUST_TOOLCHAIN" test -p tokora --no-default-features --features std,logos --doc
           RUSTDOCFLAGS="-D warnings" cargo +"$RUST_TOOLCHAIN" test -p tokora --no-default-features --features logos,rowan --doc
 
+      # `combinators` and `rowan` are load bearing here, not decoration: every `[[example]]`
+      # declares `required-features` that include `combinators`, and the `_cst` twins plus
+      # `expr_recovery` also need `rowan`. Under `--features std,logos` cargo filtered ALL of
+      # them out and reported `target filter 'examples' specified, but no targets matched;
+      # this is a no-op` — with exit code 0. This step compiled nothing for as long as it
+      # existed. `--examples` also *runs* each example's `test_example` cell, which is the
+      # only place in CI that executes an example's assertions.
       - name: Compile canonical examples
-        run: cargo +"$RUST_TOOLCHAIN" test -p tokora --no-default-features --features std,logos --examples
+        run: cargo +"$RUST_TOOLCHAIN" test -p tokora --no-default-features --features std,logos,rowan,combinators --examples
 
       - name: Generate rustdoc
         run: |

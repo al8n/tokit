@@ -283,6 +283,14 @@ required-features = ["std", "logos", "combinators"]
 
 # Lossless-CST twins of the four examples above: each parses the same grammar as its twin but
 # builds a rowan concrete syntax tree through a `cst::Sink`, so it needs `rowan` as well.
+# The error-recovery example: the only in-tree grammar that parses malformed input to
+# completion. Needs `rowan` because half of what it demonstrates is the shape of the CST the
+# recovery leaves behind (a real, sometimes zero-width, error node).
+[[example]]
+name = "expr_recovery"
+path = "examples/expr_recovery.rs"
+required-features = ["std", "logos", "rowan", "combinators"]
+
 [[example]]
 name = "calculator_cst"
 path = "examples/calculator_cst.rs"
