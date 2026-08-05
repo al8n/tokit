@@ -49,8 +49,15 @@
 //!    round-trip, and the same requirement that a refusal be **warranted**: a push is refused
 //!    only by a full cache, on this arm exactly as on `push_back`'s. The prepend order is
 //!    checked in **full**, not at its two ends: the resident sequence is drained after each
-//!    accepted prefix, since a `push_front` that lands its token at the front and permutes what
-//!    is behind it has the right front, the right back and the right length. And the refusal law
+//!    accepted prefix — from the front, and then from the back, since every other `pop_back` the
+//!    kit drives runs against a cache `push_back` filled from empty, and a tail index a prepend
+//!    invalidated is wrong only on a residency a prepend built — because a `push_front` that
+//!    lands its token at the front and permutes what
+//!    is behind it has the right front, the right back and the right length. The two arms are
+//!    also **interleaved**, not run one after the other: a mixed residency built as one
+//!    `push_back` and then every `push_front` never once puts an append after a prepend, so a
+//!    cache whose append computes its slot from a head index a prepend has since moved is
+//!    correct in every sequence the rest of the kit builds. And the refusal law
 //!    is driven at the **empty** cache too, at every nonzero capacity — the one state the
 //!    prepend driver cannot reach, because it has to seed the cache with a `push_back` before
 //!    there is anything to prepend before. And it is driven at **capacity 1**, where the seeding
@@ -963,7 +970,124 @@ where
         "tokora cache conformance [{name} push-front/full-order at depth {depth}]: pop_front() still answers after all {} entries were drained",
         order.len()
       );
+
+      // ── and the same sequence read from the OTHER end ───────────────────────────
+      //
+      // The drain above reads a front-built residency with `pop_front` and nothing else, and
+      // every OTHER `pop_back` in the kit — check 4's drain, check 6's and check 8's back
+      // sweeps, the alternating drain check 6 runs across mutations — is driven against a cache
+      // `filled` built with `push_back` from empty. So the two were never combined: a `pop_back`
+      // that is correct on a back-built residency and wrong on one a `push_front` contributed to
+      // had nothing to answer to (#180 part B, item 2). That is a ring whose prepend establishes
+      // the new head and leaves the tail index naming a slot the prepend invalidated — and it is
+      // the input layer's **restore** path that reads through it, after a put-back has prepended.
+      //
+      // A second cache at the same depth, since the drain above consumed the first.
+      let (mut mixed, order) = self.front_built(cap, depth);
+      for (i, expected) in order.iter().rev().enumerate() {
+        let popped = mixed.pop_back().unwrap_or_else(|| {
+          panic!(
+            "tokora cache conformance [{name} push-front/full-order-from-the-back at depth {depth}]: pop_back() is empty at position {i} of the {} entries one push_back and {depth} push_front(s) put in",
+            order.len()
+          )
+        });
+        let got = span_of::<L>(&popped);
+        assert!(
+          got == *expected,
+          "tokora cache conformance [{name} push-front/full-order-from-the-back at depth {depth}]: pop_back #{i} returned {got:?}, expected {expected:?}. After one push_back and {depth} push_front(s) the resident order is {order:?}, so a newest-first drain must hand those back in reverse. Every other pop_back the kit drives runs against a cache built by push_back alone; this one runs against a residency a push_front built."
+        );
+      }
+      assert!(
+        mixed.pop_back().is_none(),
+        "tokora cache conformance [{name} push-front/full-order-from-the-back at depth {depth}]: pop_back() still answers after all {} entries were drained",
+        order.len()
+      );
     }
+
+    // ── a build that INTERLEAVES the two arms ──────────────────────────────────────
+    //
+    // Every mixed residency above is the same shape: one `push_back`, and then every
+    // `push_front`. So in the whole kit a `push_back` **never once followed** a `push_front` — the
+    // seeding append is always the first operation, `filled` and `check_fifo_and_length` append
+    // from empty and never prepend at all, and `check_clear`'s refill and `push_many` are appends
+    // too (#180 part B, item 3). A cache whose append is right while the head has never moved and
+    // wrong once a prepend has moved it — a slot computed from a stale head index — was
+    // therefore driven by nothing.
+    //
+    // So alternate the arms, starting at the front, and read the whole sequence back. The order
+    // is not the reverse of anything: `push_front`, `push_back`, `push_front`, `push_back` leaves
+    // the prepends newest-first ahead of the appends oldest-first, which is a shape neither drain
+    // above builds. And the length is swept rather than fixed, for the reason the depth above is:
+    // a permutation of the interior needs a fourth resident entry before index 2 stops being the
+    // tail, so a driver pinned at one short length puts the defect back where the contract and it
+    // agree.
+    for n in 2..=cap {
+      let (mut mixed, order) = self.interleaved(cap, n);
+      for (i, expected) in order.iter().enumerate() {
+        let popped = mixed.pop_front().unwrap_or_else(|| {
+          panic!(
+            "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: pop_front() is empty at position {i} of the {} entries the alternating build put in",
+            order.len()
+          )
+        });
+        let got = span_of::<L>(&popped);
+        assert!(
+          got == *expected,
+          "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: position {i} of the drained sequence is {got:?}, expected {expected:?}. Alternating push_front and push_back from empty, starting at the front, leaves the resident order {order:?} — each prepend before every entry then resident, each append after every entry then resident. Neither arm may move an entry the other one placed."
+        );
+      }
+      assert!(
+        mixed.pop_front().is_none(),
+        "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: pop_front() still answers after all {} entries were drained",
+        order.len()
+      );
+    }
+  }
+
+  /// A fresh cache built by **alternating** the two push arms — `push_front`, `push_back`,
+  /// `push_front`, … from empty — until `n` tokens are resident, together with the resident order
+  /// it must be holding.
+  ///
+  /// The interleaving is the point: [`front_built`](Self::front_built) puts its single
+  /// `push_back` first and every `push_front` after it, so nothing there — or anywhere else in
+  /// the kit — ever appends to a queue a prepend has already touched.
+  ///
+  /// `n` is bounded by the capacity, so every push here has room and a refusal is a violation
+  /// rather than a case to handle. Both arms' laws are already established before this runs:
+  /// check 3 for the append, and — for the very first push, which goes to the front of an empty
+  /// cache — [`check_empty_push_front`](Self::check_empty_push_front).
+  fn interleaved(&self, cap: usize, n: usize) -> (C, Vec<L::Span>) {
+    let name = self.label();
+    let corpus = self.corpus(n);
+    assert!(
+      corpus.len() == n,
+      "tokora cache conformance [{name}]: the source lexed {} token(s), but the kit needs {n} to build an alternating push_front/push_back residency at capacity {cap}. This is a kit-usage problem, not a cache defect: lengthen the source.",
+      corpus.len()
+    );
+
+    let mut cache = self.make();
+    let mut order: Vec<L::Span> = Vec::new();
+    for (i, tok) in corpus.into_iter().enumerate() {
+      let span = span_of::<L>(&tok);
+      let to_front = i % 2 == 0;
+      let accepted = if to_front {
+        cache.push_front(tok).is_ok()
+      } else {
+        cache.push_back(tok).is_ok()
+      };
+      let arm = if to_front { "push_front" } else { "push_back" };
+      assert!(
+        accepted,
+        "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: {arm} #{i} was REFUSED with {} of {cap} slots used; a push is refused only when the cache is FULL",
+        order.len()
+      );
+      if to_front {
+        order.insert(0, span);
+      } else {
+        order.push(span);
+      }
+    }
+    (cache, order)
   }
 
   /// A fresh cache in the shape [`check_push_front`](Self::check_push_front) builds — one

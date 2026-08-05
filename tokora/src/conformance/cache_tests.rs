@@ -403,6 +403,34 @@ const FRONT_REFUSAL_SWAP_AT_CAP_ONE: u8 = 37;
 /// and `Cache::peek`'s contract allows either arm ([`OWNED_PEEK`] is the witness that the kit
 /// certifies it).
 const MEMOISING_PEEK: u8 = 38;
+/// `pop_back` hands back the **front** entry, but only once this cache has accepted a
+/// `push_front` (#180 part B, item 2).
+///
+/// The natural shape is a ring whose `push_front` establishes the new head and leaves the tail
+/// index naming a slot the prepend invalidated, so the tail pop reads the wrong end of the queue —
+/// and only on a residency a prepend contributed to.
+///
+/// [`FIFO_POP_BACK`] is the same violation without the gate, and check 4 catches it at once. The
+/// gate is what makes this cell a statement about the **front-built** residency alone: every
+/// `pop_back` the kit drove ran against a cache built by `push_back` from empty — check 4's
+/// drain, check 6's and check 8's back sweeps, and the alternating drain of #180 part B item 1
+/// all fill with [`CacheHarness::filled`](super::cache) — while the one residency a `push_front`
+/// builds was read by `pop_front` and never from the other end.
+const TAIL_POP_AFTER_PUSH_FRONT: u8 = 39;
+/// A `push_back` that lands while the cache already holds a front-pushed entry **permutes the
+/// interior**: the two entries just behind the head swap places (#180 part B, item 3).
+///
+/// The natural shape is a ring whose `push_back` computes its slot from a head index a
+/// `push_front` has since moved — right while the head has never moved, wrong once a prepend has
+/// moved it, and wrong in the middle of the queue rather than at either end.
+///
+/// Every mixed residency the kit built was "one `push_back`, then N `push_front`s", so a
+/// `push_back` **never once followed** a `push_front` anywhere in the kit: the seeding append is
+/// the first operation, and the prepends all come after it. This cell is therefore inert in every
+/// driver that existed — and it is gated on a fourth resident entry for the same reason
+/// [`REORDERING_PUSH_FRONT`] is, so that index 2 is interior rather than the tail and `front`,
+/// `back`, `len` and `remaining` all keep answering exactly as a conforming cache would.
+const INTERLEAVED_PUSH_BACK_REORDERS: u8 = 40;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -558,6 +586,12 @@ where
 
   fn pop_back(&mut self) -> Option<CachedTokenOf<'a, L>> {
     if D == FIFO_POP_BACK {
+      return self.items.pop_front();
+    }
+    // The same wrong end, reached only on a residency a `push_front` contributed to — a tail
+    // index a prepend invalidated and nothing repaired. Every other `pop_back` the kit drives
+    // runs against a cache filled by `push_back` from empty, where this is inert.
+    if D == TAIL_POP_AFTER_PUSH_FRONT && self.front_pushes.get() > 0 {
       return self.items.pop_front();
     }
     let popped = self.items.pop_back();
@@ -961,6 +995,13 @@ where
     // that constant's doc for why this is never cleared or refreshed by a pop.
     self.last_pushed_back_span = Some((*tok.token().span_ref()).clone());
     self.items.push_back(tok);
+    if D == INTERLEAVED_PUSH_BACK_REORDERS && self.front_pushes.get() > 0 && self.items.len() > 3 {
+      // A slot computed from a head index a `push_front` has since moved. Interior only — index 2
+      // is the tail while there are three resident, so the swap waits for a fourth, and neither
+      // the head nor the tail this push just established ever moves. Gated on a prepend having
+      // happened at all, which is what no driver in the kit ever put in front of a `push_back`.
+      self.items.swap(1, 2);
+    }
     Ok(self.items.back().expect("just pushed").as_ref())
   }
 
@@ -1345,6 +1386,33 @@ fn cache_kit_catches_a_peek_bounded_by_the_backing_store() {
 #[should_panic(expected = "after 1 pop_back(s) off a full one")]
 fn cache_kit_catches_a_peek_bounded_by_the_backing_store_after_a_tail_drain() {
   run_queue::<STALE_TAIL_RESIDENCY_PEEK>();
+}
+
+/// #180 part B, item 3: every mixed residency the kit built was "one `push_back`, then N
+/// `push_front`s", so a `push_back` never once followed a `push_front` anywhere in the kit.
+///
+/// The expected message names **length 4**: the fixture leaves the queue alone until there are
+/// four resident, since below that the pair it swaps includes the tail. So this test failing means
+/// the alternating build is gone, or its length is pinned short of the capacity — either way a
+/// `push_back` is back to only ever meeting a queue no prepend has touched.
+#[test]
+#[should_panic(expected = "interleaved-order at length 4")]
+fn cache_kit_catches_an_append_that_reorders_after_a_prepend() {
+  run_queue::<INTERLEAVED_PUSH_BACK_REORDERS>();
+}
+
+/// #180 part B, item 2: the front-built residency was drained with `pop_front` and never from the
+/// other end, and every `pop_back` the kit did drive ran against a cache `push_back` built from
+/// empty.
+///
+/// The expected message names the shallowest front-built residency there is — one `push_back` and
+/// one `push_front`. `TAIL_POP_AFTER_PUSH_FRONT` is conforming at every back-built residency the
+/// kit sweeps, so this test failing means the mirrored drain is gone and the two dimensions —
+/// which end built the queue, and which end reads it — are back to being tied together.
+#[test]
+#[should_panic(expected = "full-order-from-the-back at depth 1")]
+fn cache_kit_catches_a_tail_pop_broken_by_a_prepend() {
+  run_queue::<TAIL_POP_AFTER_PUSH_FRONT>();
 }
 
 /// #180 part B, item 1: no cache instance was ever peeked, MUTATED, and peeked again — every

@@ -3712,6 +3712,22 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    re-peeked at every residency down to empty, alternating which end the pop comes off.
    — *(#180)*
 
+77. **The cache conformance kit built every mixed residency the same way and read it from the
+   same end, so two whole dimensions of the prepend law went undriven.** A residency a
+   `push_front` contributed to was drained with `pop_front` and never from the other end, and
+   every `pop_back` the kit *did* drive — check 4's newest-first drain, check 6's and check 8's
+   back sweeps — ran against a cache `push_back` filled from empty. A `pop_back` that is correct
+   on a back-built residency and wrong on one a prepend built, which is a ring whose prepend
+   establishes the new head and leaves the tail index naming a slot it invalidated, therefore had
+   nothing to answer to — and that is the shape the input layer's **restore** path reads through
+   after a put-back has prepended. Separately, every mixed residency was "one `push_back`, then
+   N `push_front`s", so in the whole kit an append **never once followed** a prepend: a
+   `push_back` that computes its slot from a head index a `push_front` has since moved was
+   correct in every sequence the kit could build. Check 5 now drains each front-built prefix from
+   both ends, and drives a second residency built by **alternating** the two arms from empty,
+   swept from two entries up to the capacity.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,
