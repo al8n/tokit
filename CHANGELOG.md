@@ -306,6 +306,36 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
     `ci/feature_cfg_coverage_selftest.sh` plants an uncovered predicate, deletes each
     load-bearing leg in turn and staleness-flips the leg declarations, requiring a red from each.
     — *(#200)*
+16. **A recovery hole reported with a span reaching back over already-committed tokens spliced
+   its error node *below* a live checkpoint mark, silently corrupting the CST event log in
+   release builds.** The CST sink's checkpoint marks are event-buffer positions and the hole wrap
+   is an `insert`, so a wrap start below a live mark shifts every index at or above it and the
+   mark comes to name a different position. The wrap's `Start` then sits below the mark and its
+   `Finish` above it, so the rewind that follows truncates between them: the log keeps an
+   unbalanced error start where a committed token used to be. Only a `debug_assert!` stood
+   against it, so the profile users ship had no wall at all — a debug panic and a release
+   corruption from the same call.
+
+   Nothing in the crate's own recovery could reach it: `sync_balanced` spans exactly the tokens
+   its scan just settled, which postdate every capture. The reachable door is a caller running
+   its own recovery loop through `InputRef`, `EmitterView` or `ParseState::emit_skipped_region`,
+   where the span is the caller's own and no public surface stated any discipline relating it to
+   open checkpoints — the realistic trigger being a lossless grammar whose recoverer widens its
+   reported span backward over adjacent committed trivia.
+
+   The wrap start is now **bounded** rather than asserted: the backward scan is floored at the
+   youngest positional fact the sink holds — the innermost live mark-stack row, or the released
+   floor memo when a commit promoted it higher — so the splice cannot cross one by construction.
+   Fixing up the shifted rows instead is not available: every truncation point between a `Start`
+   below a mark and a `Finish` above it tears the pair, and no row arithmetic restores
+   rewind-exactness. The `debug_assert!` is gone rather than promoted, because the clamp is now
+   the contract and an assert that fires on behaviour release defines-and-accepts is the
+   profile divergence this crate has been removing.
+
+   A wider caller span still reaches the diagnostic channel verbatim; only the error node it
+   induces is narrowed, to the tokens that settled within the transaction reporting the hole.
+   That span semantics is now stated on all four public doors and on the sink's own impl.
+   — *(#177)*
 
 ## 0.8.0 (2026-08-04)
 

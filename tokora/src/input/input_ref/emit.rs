@@ -193,6 +193,15 @@ where
   ///
   /// [`sync_balanced`](InputRef::sync_balanced) raises exactly one of these per hole it skips;
   /// a caller running its own recovery loop is the reason this is reachable at all.
+  ///
+  /// **Span semantics.** Under a CST sink this call also has a structural effect: the hole's
+  /// buffered tokens are bracketed in an error node. That bracket covers only the hole tokens
+  /// that settled **within the transaction reporting the hole** — at or above the youngest
+  /// live checkpoint. A recovery loop that widens `span` backward over tokens it already
+  /// committed still gets the report forwarded verbatim, but the error node stops at the
+  /// transaction boundary: checkpoint marks are event-log positions, and a node spliced
+  /// beneath one would rename it. `sync_balanced`'s own spans postdate every live capture, so
+  /// this bound never narrows the crate's own recovery.
   #[inline(always)]
   pub fn emit_skipped_region(
     &mut self,

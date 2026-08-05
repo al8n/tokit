@@ -283,6 +283,20 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// `sync_balanced_hole_emission_unwinds_on_rollback` and
   /// `sync_balanced_trip_commits_prefix_without_hole_diagnostic` in
   /// `src/input/input_ref/tests.rs`.
+  ///
+  /// # Span semantics: the report is verbatim, the structure is transaction-bounded
+  ///
+  /// For a diagnostics-only emitter `span` is just the reported extent. The CST sink is the
+  /// one built-in implementation that also gives it *structural* effect — it brackets the
+  /// hole's buffered token events in an error node — and there the bracket covers only the
+  /// hole tokens that settled **within the transaction reporting the hole**, i.e. at or above
+  /// the youngest live [`checkpoint`](Self::checkpoint). A wider `span`, reaching back over
+  /// tokens committed before that checkpoint, still reaches the diagnostic channel unchanged;
+  /// it simply exerts no structural authority over them. Checkpoint marks are positions in
+  /// that emitter's event log, and a node spliced beneath one would silently rename it, so the
+  /// wrap start is *bounded* rather than trusted. The crate's own recovery never notices: a
+  /// [`sync_balanced`](crate::InputRef::sync_balanced) hole spans exactly the tokens its scan
+  /// just settled, which postdate every live capture.
   #[inline(always)]
   fn emit_skipped_region(&mut self, span: L::Span, skipped: usize) -> Result<(), Self::Error>
   where
