@@ -139,6 +139,29 @@
 //! - `inplace_recover` - Try parser, use recovery on error without backtracking
 //! - `padded` - Skip trivia (whitespace/comments) before and after
 //!
+//! # Feature gating
+//!
+//! Each combinator **family** is its own feature, so a no-std or no-alloc build compiles only
+//! the ones its grammar calls: `any`, `fail`, `filter` (which covers `filter_map`), `fold`
+//! (implies `many`), `ident`, `keyword`, `many`, `map`, `peek`, `pratt`, `punct`, `then`,
+//! `validate`. The `combinators` umbrella turns all of them on and is a **default** feature,
+//! so only a `default-features = false` dependency has to name any of this. Every gated item
+//! carries its feature in the rustdoc label.
+//!
+//! The substrate is unconditional: [`Parser`], [`Parse`], the [`parse`] family, the
+//! [`ParseInput`] / [`TryParseInput`] / [`ParseChoice`] traits, and the combinators the
+//! families are written against — `expect`, `delimited`, `recover`, `select`, `opt`,
+//! `padded`, `node`, `skip_then_retry`, `ignore`, `labelled`, `empty`, `todo`, `with`,
+//! `by_ref`, `collect`, `accepted`, `unwrapped`.
+//!
+//! Three edges are not guessable from the names. `fold` routes its "no more elements" exits
+//! through `many`'s absence gate, so it pulls `many` in. `list` / `separated1` and
+//! `try_ident_list` are named shapes of `many`'s drivers, so they need `many` on top of their
+//! own gate. And `punct` gates the punctuator *parsers* — including `delimited`'s
+//! `parens`/`braces`/`brackets`/`angles` shapes, which run them — but **not** the
+//! [`Punctuator`](crate::punct::Punctuator) impls for the built-in markers, which are
+//! vocabulary the whole crate reads and stay unconditional.
+//!
 //! # Performance Characteristics
 //!
 //! - **Memory**: O(1) - only small lookahead window on stack, no token buffering
