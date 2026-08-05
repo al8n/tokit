@@ -3776,6 +3776,31 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    why both are kept.
    — *(#180)*
 
+81. **The cache conformance kit's check 9 said "the predicate sees the front entry" for both
+   `pop_front_if` and `try_pop_front_if`, and had no way to tell for either: the two
+   `try_pop_front_if` closures threw the entry away, and the `pop_front_if` one that kept it had
+   never been run against a cache that disagrees.** The Err closure was `|_| Err("no")` and the
+   Ok closure `|_| Ok(())`, so everything the check asserted about `try_pop_front_if` was its
+   return value and its residency. An override that ran the caller's validation predicate against
+   `back()` and then handed back the error, or removed and returned exactly the front — the
+   conforming outcomes — satisfied every one of those assertions and was certified. That is a
+   cache whose caller-supplied predicate decides whether to keep or drop the front token on the
+   strength of unrelated lookahead, and a parser built on it removes or retains the wrong token.
+   Both predicates now record the span they are handed and assert it is the front entry's, ahead
+   of the return and residency assertions that were already there.
+
+   The sweep that followed found the same shape one arm over. `pop_front_if`'s recording assertion
+   has existed since the check was written, but every fixture predicated on `front()` — including
+   the one whose entire defect is in `pop_front_if`, which gets the *return value* wrong and the
+   question right — so that assertion had never fired in its life. An assertion with no mutant
+   behind it is the defect class this issue exists to close, not an exception to it, so it now has
+   one. Two new cells, one per method, each handing its predicate the back entry while keeping the
+   return value and the residency conforming. The `try_pop_front_if` one is invisible to the kit
+   as it stood — the whole suite runs green against it; the `pop_front_if` one is the witness its
+   assertion never had. Removing the assertion that catches either reds exactly that one test and
+   nothing else.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,

@@ -501,6 +501,38 @@ const WRAPPED_RUN_SPAN: u8 = 44;
 /// fills in behind it" — so at the call site the buffer's entries **precede** the residency, and
 /// that is the arrangement in which a cache can talk itself into deduplicating.
 const PARKED_PREFIX_SKIPPING_PEEK: u8 = 45;
+/// `try_pop_front_if` hands its predicate the **back** entry, and is otherwise conforming: the
+/// return value and the residency are both computed from the FRONT, exactly as a correct
+/// implementation would.
+///
+/// So an `Err` answer still removes nothing and hands the error straight back, an `Ok(())` answer
+/// still removes exactly the front and returns it, and `pop_front_if` — the sibling arm — is left
+/// alone entirely. The caller's validation predicate is simply run against a token the caller did
+/// not ask about, which is how a parser ends up removing or retaining the front on the strength of
+/// unrelated lookahead.
+///
+/// Check 9's Err and Ok closures used to be `|_| Err("no")` and `|_| Ok(())` — they discarded the
+/// entry they were handed — so every assertion the check made about `try_pop_front_if` was about
+/// its return value and its residency, both of which this cell gets right. The check *claimed*
+/// "the predicate sees the front entry" for both methods and witnessed it for one.
+///
+/// Correct at `len <= 1`, where front and back are the same entry, so only the capacity-4 pass
+/// separates it from a conforming cache.
+const TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK: u8 = 46;
+/// [`TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK`] on the other arm: `pop_front_if` hands its
+/// predicate the **back** entry, and is otherwise conforming — a `true` answer still removes and
+/// returns exactly the front, a `false` answer still removes nothing.
+///
+/// The assertion this cell is the witness for is not a new one: check 9 has recorded the span
+/// `pop_front_if` hands its predicate since the check was written. What it never had was a cache
+/// that disagrees with it — every fixture above predicates on `self.items.front()`, including
+/// [`WRONG_POP_FRONT_IF`], whose defect is in what it returns and not in what it asks about. So
+/// the `pop_front_if` half of "the predicate sees the front entry" was an assertion with nothing
+/// behind it, which is the same shape as the `try_pop_front_if` half having no assertion at all,
+/// and it turned up in the sweep that followed the review finding rather than in the finding.
+///
+/// Correct at `len <= 1`, where front and back are the same entry.
+const POP_FRONT_IF_PREDICATES_ON_THE_BACK: u8 = 47;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -704,6 +736,18 @@ where
       }
       return None;
     }
+    if D == POP_FRONT_IF_PREDICATES_ON_THE_BACK {
+      // The predicate is handed the BACK entry; the removal and the return value below are the
+      // conforming ones, taken from the front. Same shape as
+      // `TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK`, on the arm whose recording assertion already
+      // existed and had never been run against a cache that disagrees with it.
+      if let Some(peeked) = self.items.back().map(CachedToken::as_ref) {
+        if predicate(peeked) {
+          return self.pop_front_impl();
+        }
+      }
+      return None;
+    }
     if let Some(peeked) = self.items.front().map(CachedToken::as_ref) {
       if predicate(peeked) {
         return self.pop_front_impl();
@@ -722,6 +766,19 @@ where
       if let Some(peeked) = self.items.front().map(CachedToken::as_ref) {
         let _ = predicate(peeked);
         self.pop_front_impl();
+      }
+      return None;
+    }
+    if D == TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK {
+      // The predicate is handed the BACK entry; everything downstream of it is the conforming
+      // body, computed from the front. Note that the outcome cannot gate this: `F: FnOnce` is
+      // called exactly once, so which entry the predicate receives is settled before there is an
+      // `Ok`/`Err` to branch on — this cell is therefore wrong on both paths at once.
+      if let Some(peeked) = self.items.back().map(CachedToken::as_ref) {
+        return match predicate(peeked) {
+          Ok(()) => self.pop_front_impl().map(Ok),
+          Err(e) => Some(Err(e)),
+        };
       }
       return None;
     }
@@ -1359,6 +1416,38 @@ fn cache_kit_catches_a_wrong_pop_front_if() {
 #[should_panic(expected = "pop_front_if")]
 fn cache_kit_catches_a_wrong_try_pop_front_if() {
   run_queue::<WRONG_TRY_POP_FRONT_IF>();
+}
+
+/// The two `try_pop_front_if` closures used to be `|_| Err("no")` and `|_| Ok(())`: they threw
+/// away the entry they were handed, so the check asserted the return value and the residency and
+/// nothing about WHICH entry the caller's validation predicate was run against — while its own
+/// prose, and the module docs' check 9, claimed the predicate sees the front for both methods.
+/// The `pop_front_if` arm did record it; this arm did not, and an assertion that names a property
+/// it does not test reads as coverage.
+///
+/// The expected message names the **Err** path, which is the one that runs first. A cache cannot
+/// key the entry it hands over on an answer it has not received yet — `F: FnOnce`, called once —
+/// so a wrong-entry defect is wrong on both paths, and the first recording assertion to run is the
+/// one that reports it. Both are asserted regardless, so that neither path depends on the other
+/// running first.
+#[test]
+#[should_panic(expected = "try_pop_front_if()'s Err-path predicate was handed")]
+fn cache_kit_catches_a_try_pop_front_if_that_predicates_on_the_back() {
+  run_queue::<TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK>();
+}
+
+/// The same defect on the `pop_front_if` arm, and the witness for an assertion that was already
+/// there.
+///
+/// Check 9 has recorded the span `pop_front_if` hands its predicate since it was written, but
+/// every fixture predicated on the front, so nothing ever made that assertion fire — the
+/// `try_pop_front_if` finding is an assertion missing where the property is claimed, and this is
+/// the same property claimed by an assertion with no mutant behind it. Both halves of check 9's
+/// "the predicate sees the front entry" are witnessed as of this pair.
+#[test]
+#[should_panic(expected = "pop_front_if()'s predicate was handed")]
+fn cache_kit_catches_a_pop_front_if_that_predicates_on_the_back() {
+  run_queue::<POP_FRONT_IF_PREDICATES_ON_THE_BACK>();
 }
 
 /// #180 part A, item 6: `push_many` was never called by the kit, so an override that silently

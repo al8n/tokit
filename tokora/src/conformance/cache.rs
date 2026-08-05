@@ -125,7 +125,15 @@
 //!    else; a `false` (or `Err`) answer removes nothing and leaves every observable untouched; a
 //!    `true` (or `Ok(())`) answer removes exactly the front entry, matching what a bare
 //!    `pop_front` would return from an identically filled cache. Against an empty cache, both
-//!    answer `None` and the predicate never runs at all — there is no front to hand it.
+//!    answer `None` and the predicate never runs at all — there is no front to hand it. The
+//!    predicate's **argument** is recorded and compared on **both** methods, not only on
+//!    `pop_front_if`: the two `try_pop_front_if` closures used to throw it away, so everything the
+//!    check asserted about that method was its return value and its residency — and an override
+//!    that ran the caller's validation predicate against `back()` and then produced the conforming
+//!    return and the conforming residency satisfied all of it. That is a cache whose
+//!    caller-supplied predicate decides whether to remove or retain the front on the strength of
+//!    unrelated lookahead, certified by a check whose own prose named the property it was not
+//!    testing.
 //! 10. **`push_many`** — accepts tokens in order until the cache is full, then hands the
 //!     remainder back through the returned iterator, unchanged and in the order they arrived.
 //!
@@ -1977,6 +1985,13 @@ where
     }
 
     // A false predicate removes nothing and leaves every observable untouched.
+    //
+    // This closure discards its argument, and is the only live-front predicate in this check that
+    // does. `pop_front_if`'s recording assertion is the true-predicate arm below; recording here
+    // as well would be the same test run twice, because a cache cannot answer these two calls
+    // differently. `F: FnOnce` is called exactly once, so the entry handed to the predicate is
+    // settled before the `true`/`false` that separates the arms exists, and both caches are built
+    // by the same `filled(cap)` and are in the same state when the call arrives.
     let (mut cache_f, want_f) = self.filled(cap);
     assert!(
       cache_f.pop_front_if(|_| false).is_none(),
@@ -1989,9 +2004,28 @@ where
       "after pop_front_if() with a false predicate",
     );
 
-    // An Err-returning predicate is refused the same way, and the error comes straight back.
+    // An Err-returning predicate is refused the same way, and the error comes straight back — and
+    // it too is handed the FRONT entry, which is recorded here rather than discarded.
+    //
+    // Both `try_pop_front_if` closures in this check used to be `|_| ...`, so everything the check
+    // asserted about this method was its return value and its residency. An override that ran the
+    // caller's validation predicate against `back()` and then produced the conforming return and
+    // the conforming residency satisfied every one of them — a cache that decides whether to
+    // remove or retain the front on the strength of unrelated lookahead, certified.
     let (mut cache_e, want_e) = self.filled(cap);
-    let result = cache_e.try_pop_front_if::<&str, _>(|_| Err("no"));
+    let seen_e = Cell::new(None);
+    let result = cache_e.try_pop_front_if::<&str, _>(|tok| {
+      // The extra `*` is the same double-borrow `pop_front_if`'s recording predicate pays; see
+      // the comment there.
+      seen_e.set(Some((**tok.token().span_ref()).clone()));
+      Err("no")
+    });
+    let saw_e = seen_e.take();
+    assert!(
+      saw_e == Some(want_e[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if()'s Err-path predicate was handed {saw_e:?}, expected the front entry {:?}",
+      want_e[0]
+    );
     assert!(
       matches!(result, Some(Err("no"))),
       "tokora cache conformance [{name} pop-front-if]: try_pop_front_if() with an Err-returning predicate did not hand the error straight back"
@@ -2015,9 +2049,10 @@ where
         true
       })
       .map(|tok| span_of::<L>(&tok));
+    let saw = seen.take();
     assert!(
-      seen.take() == Some(want_t[0].clone()),
-      "tokora cache conformance [{name} pop-front-if]: pop_front_if()'s predicate did not see the front entry {:?}",
+      saw == Some(want_t[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: pop_front_if()'s predicate was handed {saw:?}, expected the front entry {:?}",
       want_t[0]
     );
     assert!(
@@ -2032,12 +2067,29 @@ where
       "after pop_front_if() with a true predicate",
     );
 
-    // try_pop_front_if with Ok(()) does the same.
+    // try_pop_front_if with Ok(()) does the same, predicate argument included.
+    //
+    // Stated here as well as on the Err path above rather than left to whichever call runs first.
+    // Against `TRY_POP_FRONT_IF_PREDICATES_ON_THE_BACK` it is the Err path — the earlier call —
+    // that reports, and by the `FnOnce` argument above no cache can fail one of these and pass
+    // the other; this assertion is what keeps the law stated where the Ok path is driven, so a
+    // later driver that reorders the two, or drives one at a residency the other does not reach,
+    // does not silently lose it.
     let (mut cache_ok, want_ok) = self.filled(cap);
+    let seen_ok = Cell::new(None);
     let popped_ok = cache_ok
-      .try_pop_front_if::<&str, _>(|_| Ok(()))
+      .try_pop_front_if::<&str, _>(|tok| {
+        seen_ok.set(Some((**tok.token().span_ref()).clone()));
+        Ok(())
+      })
       .and_then(Result::ok)
       .map(|tok| span_of::<L>(&tok));
+    let saw_ok = seen_ok.take();
+    assert!(
+      saw_ok == Some(want_ok[0].clone()),
+      "tokora cache conformance [{name} pop-front-if]: try_pop_front_if()'s Ok-path predicate was handed {saw_ok:?}, expected the front entry {:?}",
+      want_ok[0]
+    );
     assert!(
       popped_ok == Some(want_ok[0].clone()),
       "tokora cache conformance [{name} pop-front-if]: try_pop_front_if() with an Ok(()) predicate returned {popped_ok:?}, expected the front entry {:?}",
