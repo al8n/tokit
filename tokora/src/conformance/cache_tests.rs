@@ -251,6 +251,17 @@ const OWNED_PEEK: u8 = 22;
 /// shape the module docs name as invisible before #186: "an implementation whose owned arm is
 /// wrong ... is certified by the kit regardless."
 const WRONG_OWNED_PEEK: u8 = 23;
+/// `is_empty()` returns `true` unconditionally, independent of `len()` (#180 part A, item 1).
+///
+/// The `Cache` trait's own `is_empty` is a DEFAULT method computed as `len() == 0`, so a fixture
+/// that does not override it — every one above this line, [`OWNED_PEEK`] and
+/// [`WRONG_OWNED_PEEK`] included — gets a correct answer for free, derived from a `len()` the kit
+/// already checks exhaustively. This cell overrides it, which is the only way to give the kit
+/// anything to be right or wrong ABOUT: before this cell existed, `cache.is_empty()` was called
+/// from exactly one place in the kit (`assert_empty`), and only ever against a cache `len()` had
+/// already established was empty — so a constant-`true` override was indistinguishable from a
+/// correct one, at every capacity, in every existing test.
+const LYING_IS_EMPTY: u8 = 24;
 
 /// A `VecDeque`-backed third-party cache with a const-selected defect.
 struct Queue<'a, L, const D: u8>
@@ -315,6 +326,13 @@ where
 
   fn remaining(&self) -> usize {
     self.cap - self.items.len()
+  }
+
+  fn is_empty(&self) -> bool {
+    if D == LYING_IS_EMPTY {
+      return true;
+    }
+    self.items.is_empty()
   }
 
   fn push_front(
@@ -593,6 +611,15 @@ fn cache_kit_accepts_a_queue_whose_peek_returns_owned_tokens() {
 #[should_panic(expected = "bounded-peek")]
 fn cache_kit_catches_a_wrong_owned_peek() {
   run_queue::<WRONG_OWNED_PEEK>();
+}
+
+/// #180 part A, item 1: `is_empty()` is never asserted FALSE anywhere in the kit before this
+/// fixture — `LYING_IS_EMPTY` returns `true` unconditionally and, before the fix this fixture
+/// proves, that constant answer was certified by the kit at every capacity this suite drives.
+#[test]
+#[should_panic(expected = "empty-invariants")]
+fn cache_kit_catches_a_lying_is_empty() {
+  run_queue::<LYING_IS_EMPTY>();
 }
 
 #[test]

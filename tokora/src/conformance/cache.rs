@@ -33,7 +33,11 @@
 //! 3. **FIFO append and exact length** — `push_back` places each token after every resident one;
 //!    `len` is exactly the resident count and `remaining` exactly how many more `push_back`s will
 //!    be accepted, at every step; and a refused push **returns the token unchanged** and leaves
-//!    every observable untouched.
+//!    every observable untouched. `is_empty` is checked against the same residency here too, not
+//!    only at check 1's fresh cache: `is_empty` is a *default* method (`len() == 0`) a fixture
+//!    can override, and check 1 alone only ever calls it where `len` has already established the
+//!    answer is `true` — a constant-`true` override was otherwise indistinguishable from a
+//!    correct one at every OTHER residency this kit drives.
 //! 4. **Order** — `pop_front` removes the oldest and `pop_back` the newest, and `front`/`back`
 //!    view those same two entries without removing them. The input layer's restore path is built
 //!    on the `pop_back` half.
@@ -526,13 +530,28 @@ where
     );
   }
 
-  /// The three length/edge observables against the list the kit is tracking.
+  /// The four length/edge observables against the list the kit is tracking.
   fn assert_resident(&self, cache: &C, cap: usize, want: &[L::Span], when: &str) {
     let name = self.name;
     assert!(
       cache.len() == want.len(),
       "tokora cache conformance [{name} exact-length] {when}: len() is {}, expected {}",
       cache.len(),
+      want.len()
+    );
+    // `is_empty()` is a DEFAULT method (`len() == 0`) a fixture is free to override, and
+    // `check_empty` (below) only ever calls it on a cache `len()` has already established is
+    // empty — so a `true`-returning override, independent of `len`, was indistinguishable from a
+    // correct one everywhere else this kit ran. `assert_resident` runs at every residency every
+    // other check already sweeps — full, drained from the front, drained from the back — so
+    // checking it HERE, against the same `want` every other observable in this function answers
+    // for, asks the one question `check_empty` structurally cannot: whether `is_empty()` ever
+    // says `true` while `want` is not.
+    assert!(
+      cache.is_empty() == want.is_empty(),
+      "tokora cache conformance [{name} empty-invariants] {when}: is_empty() is {}, expected {} against {} resident entr(ies)",
+      cache.is_empty(),
+      want.is_empty(),
       want.len()
     );
     assert!(

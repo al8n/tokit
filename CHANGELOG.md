@@ -3611,6 +3611,16 @@ member, so a hand-written `FromPrattError` impl compiles unchanged.
    that returns the right spans while corrupting either one still passes in full.
    — *(#172)*
 
+69. **`is_empty()` was never asserted false by the cache conformance kit — a fixture returning
+   `true` unconditionally passed `CacheHarness::run()` at every capacity the kit drives.**
+   `is_empty` is a *default* `Cache` method (`len() == 0`) an implementation is free to override,
+   and the kit called it from exactly one place, `assert_empty`, always against a cache `len()`
+   had already established was empty. `assert_resident` — already run at every residency every
+   other check sweeps, full and partially drained from both ends — now also checks
+   `is_empty() == want.is_empty()`, so a constant answer is caught the first time the kit drives
+   a non-empty cache instead of never.
+   — *(#180)*
+
 ### Performance
 
 The materialization walk was one linear pass **plus a from-zero coverage rescan per gap**,
