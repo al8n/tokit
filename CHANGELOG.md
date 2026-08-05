@@ -337,6 +337,38 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
    That span semantics is now stated on all four public doors and on the sink's own impl.
    — *(#177)*
 
+17. **Nothing distinguished a correct forwarding method from a mis-wired one.** `EmitterView`,
+    `InputRef`'s emit surface and `ParseState` carry a thin delegation layer onto the emitter's
+    operations, written by copy-and-adjust. A body that reached a *sibling* — `emit_warning`
+    calling `emit_error`, `cst_finish` calling `cst_start` — compiled, propagated nothing, and
+    passed the whole suite; the defect surfaced only as the wrong diagnostic in a consumer's
+    output, arbitrarily far from the cause. Demonstrated rather than asserted: re-pointing
+    `InputRef::emit_missing_leading_separator` at `emit_missing_separator` produced **zero**
+    failures anywhere in the crate.
+
+    `tests/forwarding_discrimination.rs` covers every public method of all three receivers, one
+    test each, and each one asserts the specific call landed on the inner emitter with its
+    arguments unchanged — not that the method ran. The instrument is a recording emitter that
+    logs a tagged call per operation, including the five members the surface deliberately
+    withholds, so a forward that lands on `commit_token` is visible too. The three existing
+    recorders could not do this: `Verbose` funnels eleven capability channels into one error
+    channel and inherits the no-op `CstEmitter`, and the tracking and counting emitters hold
+    plain counters.
+
+    The suite is proven discriminating: six sibling re-pointings each red exactly the delegation
+    closure of the mutated body and nothing else — one test for a `ParseState` leaf, two when an
+    `InputRef` body has a `ParseState` twin above it, three for an `EmitterView` body with twins
+    at both layers. A `FORWARDING_CENSUS` test reads the three sources and fails when a method
+    gains or loses a row, so the coverage cannot drift.
+
+    Two findings came out of building it. Most sibling re-pointings **do not compile** — the
+    method-level capability bounds mean `emit_missing_leading_separator` cannot reach
+    `emit_missing_trailing_separator` at all — so the reachable mis-wire space is exactly the
+    identical-signature families the suite now pins. And `Emitter::bound_source` is not only a
+    query: the parse entry compares it against the buffer it was handed and refuses a mismatch,
+    so an emitter that answers `Some` for anything but the parse's own source cannot be driven
+    through a parse. — *(#179)*
+
 ## 0.8.0 (2026-08-04)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.
