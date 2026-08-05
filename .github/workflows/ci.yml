@@ -368,6 +368,31 @@ jobs:
           rustup update stable --no-self-update && rustup default stable
           rustup toolchain install nightly
       - name: Derive the added-name inventory from rustdoc JSON, both sides
+        env:
+          # MSRV-aware version selection is OFF for this step, on BOTH sides, and that is what
+          # makes the lock-parity check below meaningful rather than merely strict.
+          #
+          # Since cargo 1.84 the resolver reads each workspace's declared `rust-version` and
+          # holds a dependency back when its own `rust-version` is higher. That makes the
+          # RESOLVED GRAPH a function of the MSRV field — and the two sides of this job do not
+          # have to declare the same MSRV, for exactly the reason spelled out below for
+          # features. #211 raised the floor from 1.87 to 1.95 and `b8773b80`'s push run went
+          # red here with
+          #
+          #     only in base: trybuild 1.0.119
+          #     only in head: trybuild 1.0.120
+          #
+          # because trybuild 1.0.120 declares `rust-version = 1.88`: admissible to head, held
+          # back on base. Nothing about the dependency graph had changed — one manifest field
+          # had. The guard was right that the graphs differed and wrong to conclude anything
+          # from it, and every future MSRV bump would red the bump commit and its PR the same
+          # way.
+          #
+          # `allow` takes `rust-version` out of resolution on both sides, so the only inputs
+          # left are the dependency requirements themselves — which is precisely the thing the
+          # comparison is asking about. It is right HERE and would be wrong in the `msrv` job,
+          # whose whole subject is that the declared floor builds; that job resolves normally.
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: allow
         run: |
           set -euo pipefail
           base="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
@@ -394,6 +419,11 @@ jobs:
           # artifact of the two `cargo doc` runs linking different versions of some third
           # crate. Deleting it gives that guarantee up silently. `--locked` stays on both
           # `cargo doc` calls so a re-resolution during doc generation is refused.
+          #
+          # Both resolutions run under the step's
+          # `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=allow`, so a difference in the two
+          # sides' declared `rust-version` cannot manufacture a difference in the two locks —
+          # see the note on the step's `env`.
           cargo generate-lockfile
           ( cd /tmp/nc/base && cargo generate-lockfile )
           python3 - <<'PY'

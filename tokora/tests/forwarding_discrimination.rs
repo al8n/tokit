@@ -92,11 +92,15 @@ mod common;
 
 use std::{
   cell::{Cell, RefCell},
-  collections::BTreeSet,
   rc::Rc,
   string::{String, ToString},
   vec::Vec,
 };
+
+// Read only by the FORWARDING_CENSUS section, which is gated on `pratt`; carrying the same gate
+// keeps the `std,logos,trace` leg warning-free.
+#[cfg(feature = "pratt")]
+use std::collections::BTreeSet;
 
 use tokora::{
   Emitter, EmitterView, InputRef, Lexer, Parse, Parser, ParserContext, Token as TokenTrait,
@@ -1344,6 +1348,15 @@ handle_case!(
 // `map_with` callback is the door, and it hands the state by value. Every one of the seventeen
 // public methods is reachable that way; none of them turned out to be a public method no
 // consumer can call.
+//
+// That door is what makes EVERY item in this section `map`-gated, the `state_case!`
+// INVOCATIONS included. The macro's own body spells `.map_with(...)`, so it is gated too — and
+// a gated `macro_rules!` does not merely expand to nothing when its feature is off, it stops
+// existing, so an ungated invocation of it is a hard `cannot find macro` rather than an empty
+// expansion. The twelve rows below shipped without their attribute and reddened
+// `--no-default-features --features std,logos,trace --tests` (the third `feature combinations`
+// leg) for two commits on main; see #215. A new row here needs the attribute for the same
+// reason its neighbours carry one.
 
 /// One `ParseState` row: a real parse, a real `map_with` callback, one forwarded call inside a
 /// cleared window. `$st` is the state binding the callback receives by value.
@@ -1412,6 +1425,7 @@ fn state_emitter_ref() {
   landed("ParseState", "emitter_ref", &got, &[]);
 }
 
+#[cfg(feature = "map")]
 state_case!(
   state_emit_lexer_error,
   "emit_lexer_error",
@@ -1422,6 +1436,7 @@ state_case!(
   [Call::EmitLexerError(sp(42, 43))]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_emit_unexpected_token,
   "emit_unexpected_token",
@@ -1432,6 +1447,7 @@ state_case!(
   [Call::EmitUnexpectedToken(sp(44, 45))]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_emit_error,
   "emit_error",
@@ -1442,6 +1458,7 @@ state_case!(
   [Call::EmitError(sp(11, 12), Note::Alpha)]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_emit_warning,
   "emit_warning",
@@ -1452,6 +1469,7 @@ state_case!(
   [Call::EmitWarning(sp(13, 14), Note::Beta)]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_emit_skipped_region,
   "emit_skipped_region",
@@ -1462,6 +1480,7 @@ state_case!(
   [Call::EmitSkippedRegion(sp(46, 47), 8)]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_enter_label,
   "enter_label",
@@ -1471,6 +1490,7 @@ state_case!(
   [Call::EnterLabel(LABEL)]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_exit_label,
   "exit_label",
@@ -1480,6 +1500,7 @@ state_case!(
   [Call::ExitLabel]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_emitter_bound_source,
   "emitter_bound_source",
@@ -1493,6 +1514,7 @@ state_case!(
   [Call::BoundSource]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_cst_start,
   "cst_start",
@@ -1502,6 +1524,7 @@ state_case!(
   [Call::CstStart(KIND_START)]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_cst_finish,
   "cst_finish",
@@ -1511,6 +1534,7 @@ state_case!(
   [Call::CstFinish(KIND_FINISH)]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_cst_mark,
   "cst_mark",
@@ -1524,6 +1548,7 @@ state_case!(
   [Call::CstMark]
 );
 
+#[cfg(feature = "map")]
 state_case!(
   state_cst_start_at,
   "cst_start_at",
@@ -1731,13 +1756,21 @@ fn state_state_and_state_mut() {
 // FORWARDING_CENSUS` finds the anchor.
 //
 // Gated on `pratt` because the census reads source **text**, where the two pratt forwards are
-// always present, while their rows are compiled only when the feature is on.
+// always present, while their rows are compiled only when the feature is on. The gate is on
+// every item of the section, not only on the `#[test]`: the six constants and the two functions
+// serve that one test and nothing else, so gating the test alone leaves them dead — eight
+// `never used` warnings on any leg without `pratt`, which is exactly where a real warning would
+// have to be spotted.
 
+#[cfg(feature = "pratt")]
 const VIEW_SOURCE: &str = include_str!("../src/emitter/view.rs");
+#[cfg(feature = "pratt")]
 const HANDLE_SOURCE: &str = include_str!("../src/input/input_ref/emit.rs");
+#[cfg(feature = "pratt")]
 const STATE_SOURCE: &str = include_str!("../src/parse_state/mod.rs");
 
 /// The rows this suite carries for `EmitterView`.
+#[cfg(feature = "pratt")]
 const VIEW_COVERED: &[&str] = &[
   "new",
   "reborrow",
@@ -1769,6 +1802,7 @@ const VIEW_COVERED: &[&str] = &[
 ];
 
 /// The rows this suite carries for `InputRef`'s emit surface.
+#[cfg(feature = "pratt")]
 const HANDLE_COVERED: &[&str] = &[
   "emitter_ref",
   "emit_lexer_error",
@@ -1798,6 +1832,7 @@ const HANDLE_COVERED: &[&str] = &[
 ];
 
 /// The rows this suite carries for `ParseState`.
+#[cfg(feature = "pratt")]
 const STATE_COVERED: &[&str] = &[
   "span",
   "emitter_ref",
@@ -1821,6 +1856,7 @@ const STATE_COVERED: &[&str] = &[
 /// Every `pub fn` / `pub const fn` declared on a non-comment line of `src`, by name. Restricted
 /// visibilities (`pub(crate)`, `pub(super)`) are not part of the forwarding surface and are not
 /// collected.
+#[cfg(feature = "pratt")]
 fn declared_forwards(src: &str) -> BTreeSet<String> {
   let mut out = BTreeSet::new();
   for line in src.lines() {
@@ -1841,6 +1877,7 @@ fn declared_forwards(src: &str) -> BTreeSet<String> {
   out
 }
 
+#[cfg(feature = "pratt")]
 #[track_caller]
 fn census(receiver: &str, src: &str, covered: &[&str], expected: usize) {
   let declared = declared_forwards(src);

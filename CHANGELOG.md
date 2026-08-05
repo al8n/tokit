@@ -415,6 +415,68 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
     under all three versions like the rest of the suite.
     — *(#208)*
 
+19. **Three gates were red on `main` for two commits, and the run holding two of the three
+    verdicts never concluded, so nothing surfaced them.** `CI`'s Miri cells sit queued for
+    hours while the other 34 jobs finish in under an hour; a run's conclusion stays `null`
+    until the last cell reports, and `gh pr checks` and the run-level status show nothing in
+    the meantime. Both `feature combinations` and `name-collision-probe` had already answered.
+    Read job conclusions, not run status, until #214 lands.
+
+    **`feature combinations`, third leg.** `tests/forwarding_discrimination.rs` gated its
+    `state_case!` **definition** on `map` — correctly, since the macro's body spells
+    `.map_with(...)`, the only door to a `ParseState` — and left the twelve **invocations**
+    ungated. A `#[cfg]`'d-out `macro_rules!` does not expand to nothing, it ceases to exist,
+    so `--no-default-features --features std,logos,trace --tests` failed with twelve
+    `cannot find macro state_case` rather than twelve quietly absent rows. The twelve
+    invocations now carry `#[cfg(feature = "map")]`, which is what every other item in that
+    section already carried. Coverage is unchanged where it is measured: 69 tests before and
+    69 after under `--all-features`, and the FORWARDING_CENSUS row count over the three
+    receivers is still 27 + 25 + 17.
+
+    Making that leg compile also made its warnings reachable, and it arrived with eight
+    `never used`: the FORWARDING_CENSUS section gates its `#[test]` on `pratt` but not the six
+    constants and two functions that serve only that test, nor the `BTreeSet` import they need.
+    All ten now carry the same gate, so the leg is warning-free rather than merely green.
+
+    `required-features` on the test target was rejected: it **skips** a target instead of
+    failing it, which converts this red into a silently unrun suite — the defect class #181
+    was filed for, where `bench (smoke)` compiled one of five targets and stayed green.
+    Widening the macro's own gate was rejected too: the body needs `map` to type-check at all,
+    so the gate is not incidental.
+
+    **`name-collision-probe`.** The job's lock-parity guard — every `[[package]]` triple must
+    match across head and base, so a collision finding cannot be an artifact of two `cargo doc`
+    runs linking different versions of a third crate — fired on `b8773b80` with
+    `only in base: trybuild 1.0.119` / `only in head: trybuild 1.0.120`. That is a real
+    resolution difference and the guard was right to see it, but nothing about the dependency
+    graph had changed: since cargo 1.84 the resolver holds a dependency back when its
+    `rust-version` exceeds the workspace's, trybuild 1.0.120 declares 1.88, and the MSRV bump
+    in that very commit took the workspace from 1.87 to 1.95 — admissible to head, held back
+    on base. The resolved graph was a function of a manifest field the two sides are not
+    required to share, which is the same reason the job already resolves its FEATURE point per
+    side rather than handing one list to both. Left alone it would red every future MSRV bump
+    and its PR.
+
+    The inventory step now runs both `cargo generate-lockfile` calls under
+    `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=allow`, so `rust-version` is not an input to
+    either resolution and the only inputs left are the dependency requirements — which is what
+    the comparison is asking about. The guard itself is untouched: relaxing it to tolerate
+    version-only differences would have let a genuine dependency swap through on exactly the
+    pull requests that also move the MSRV.
+
+    **`Deploy mdBook to GitHub Pages`.** `pages.yml` carried `RUST_TOOLCHAIN: 1.88.0` in its
+    `env:`, and the MSRV raise to 1.95 updated the pin in `ci.yml` only, so every push and
+    every pull request failed *Run guide doctests* with
+    `rustc 1.88.0 is not supported: tokora@0.8.0 requires rustc 1.95`. Writing `1.95` there
+    would reproduce the defect one bump later, so the workflow now reads `rust-version` from
+    `Cargo.toml` at run time exactly as the `msrv` job does, loud guard included: an empty read
+    fails the job rather than falling through to `cargo +""` and testing the guide on whatever
+    rustc the runner happened to ship. Every workflow under `.github/workflows/` was swept for
+    the same shape — `ci.yml` reads the manifest or installs floating `stable`/`nightly`,
+    `loc.yml` installs floating `stable`, and the `ci/*.sh` helpers install floating `nightly`
+    — and `pages.yml` held the only hardcoded toolchain version left.
+    — *(#215)*
+
 ## 0.8.0 (2026-08-04)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.

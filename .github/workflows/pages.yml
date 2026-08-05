@@ -46,7 +46,6 @@ permissions:
 
 env:
   MDBOOK_VERSION: 0.5.4
-  RUST_TOOLCHAIN: 1.88.0
 
 jobs:
   build:
@@ -55,6 +54,27 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      # `RUST_TOOLCHAIN` is READ from the manifest, never written here. It used to be a literal
+      # `1.88.0` in this workflow's `env:`, and #211 raised the workspace floor to 1.95 while
+      # updating only `ci.yml` — so every push and every PR failed this job's doctests with
+      # "rustc 1.88.0 is not supported: tokora@0.8.0 requires rustc 1.95". Writing `1.95` here
+      # instead would reproduce that one bump later; the declared floor has exactly one home,
+      # and it is `Cargo.toml`.
+      #
+      # The empty check is not decoration. A rename or a reformat of the `rust-version` line
+      # makes the read yield "", `cargo +""` then resolves to the default toolchain, and the
+      # job would go green having tested the guide on whatever rustc the runner shipped —
+      # a pin that cannot fail. Same guard, same wording, as the `msrv` job in `ci.yml`.
+      - name: Read declared MSRV from Cargo.toml
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/^rust-version *= *"([^"]+)".*/\1/')
+          if [ -z "$version" ]; then
+            echo "::error::could not read rust-version from Cargo.toml"
+            exit 1
+          fi
+          echo "Declared MSRV: $version"
+          echo "RUST_TOOLCHAIN=$version" >> "$GITHUB_ENV"
 
       - name: Install Rust
         run: |
