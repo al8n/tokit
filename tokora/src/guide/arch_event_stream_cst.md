@@ -50,15 +50,19 @@ The event stream is therefore not an optimization detail; it is the data structu
 The vocabulary lives in [`cst::event`](crate::cst::event), and it is rowan-free — it compiles in
 every build, because the *recording* half of the CST design (the marks, the `node` combinators) is
 unconditional; only the *materializing* half is gated on `rowan`. The log itself is a `Vec` of one
-crate-internal `Event` enum, and the governing law is stated up front: **an event buffer changes in
-exactly two ways** — *append* (the `cst_*` emission methods) and *suffix-truncate* (a
-[`rewind`](crate::Emitter::rewind)). No operation ever rewrites the *kind* of an interior slot. That
-two-verb discipline is what makes rewind-by-truncation exact: the prefix below any live mark is
-immutable, so truncating to a mark restores the buffer to precisely the state it had when the mark
-was captured. (There is one journaled exception — an acceleration field — developed with the sink
-below; it is legal *only because* it is reversed on rewind, so the law holds observationally.)
+crate-internal `Event` enum, and the governing law is stated up front: **the parse-time event buffer
+changes in exactly two ways** — *append* (the `cst_*` emission methods) and *suffix-truncate* (a
+[`rewind`](crate::Emitter::rewind)). No emission ever rewrites the *kind* of an interior slot: both
+directions of that rewrite — completing a tombstone into a real node, and un-opening a real node
+back into a tombstone — are encoded as **appended events naming the earlier slot** (`StartAt` and
+`Demote` below), and the kind writes they stand for land at materialization, on a buffer the
+consumed sink owns and no mark can still name. That two-verb discipline is what makes
+rewind-by-truncation exact: the prefix below any live mark is immutable, so truncating to a mark
+restores the buffer to precisely the state it had when the mark was captured. (There is one
+journaled exception — an acceleration field — developed with the sink below; it is legal *only
+because* it is reversed on rewind, so the law holds observationally.)
 
-### The five events
+### The six events
 
 - **`StartNode { kind, forward_parent }`** opens a node of `kind`, closed by a matching `FinishNode`
   — *unless* `kind` is the reserved [`TOMBSTONE`](crate::cst::event::TOMBSTONE) value (`u16::MAX`), in
@@ -68,14 +72,37 @@ below; it is legal *only because* it is reversed on rewind, so the law holds obs
   appended exactly once per settled token. Peeks, declines, and unconsumed stoppers append nothing —
   only a *settle* records a token (the [`commit_token`](crate::Emitter::commit_token) hook the
   emitter chapter named).
-- **`FinishNode`** closes the innermost open node — plain stack discipline.
-- **`StartAt { kind, target }`** retro-opens a node of `kind` at the buffer position of the tombstone
-  named by `target`. This is the **append-only form of retro-parenting**: rather than rewrite a
-  tombstone into a real start in place, you *append* a `StartAt` that names it. Same-target `StartAt`s
-  open in **reverse buffer order** at materialization — the later wrap becomes the *outer* node,
-  because its finish is necessarily appended later. The in-place alternative (rewriting the
-  tombstone's kind) is banned by law: an interior write below a live emitter mark would survive the
-  truncation that was supposed to erase the branch that made it.
+- **`FinishNode { kind }`** closes the innermost open node — plain stack discipline. The `kind` is
+  the one the emitter *intended* to close, and it is the leaked-finish detector: materialization
+  compares it against the frame the finish actually lands on and refuses a mismatch
+  ([`MismatchedFinish`](crate::cst::FinishError::MismatchedFinish)), which is the one signal that
+  separates a legal cross-checkpoint close from a finish whose start was rolled back out from under
+  it — two histories that otherwise leave byte-identical buffers.
+- **`StartAt { kind, target, prev }`** retro-opens a node of `kind` at the buffer position of the
+  tombstone named by `target`. This is the **append-only form of retro-parenting**: rather than
+  rewrite a tombstone into a real start in place, you *append* a `StartAt` that names it.
+  Same-target `StartAt`s open in **reverse buffer order** at materialization — the later wrap becomes
+  the *outer* node, because its finish is necessarily appended later — and `prev` is the chain link
+  that makes recovering them cheap: it holds the `forward_parent` value this wrap displaced on its
+  target, so materialization walks the target's wrap list newest-first instead of rebuilding a keyed
+  index. The in-place alternative (rewriting the tombstone's kind) is banned by law: an interior
+  write below a live emitter mark would survive the truncation that was supposed to erase the branch
+  that made it.
+- **`Demote { target }`** un-opens the node the `StartNode` at `target` opened — the **failing exit**
+  of an up-front bracket, and the exact mirror of `StartAt`: an appended event naming an earlier
+  slot, never an in-place rewrite of it. It is what a [`node`](crate::parser::node()) bracket emits
+  when its sub-parser unwinds with an error (see [the combinator surface](#the-combinator-surface)),
+  so a stream carries one per failing bracket and a parse with no failing bracket carries none.
+  Appending rather than rewriting is what gives the bracket's two exits **one** rollback law: a
+  rollback into the window between the start and the demote truncates the demote and the node is
+  open again, exactly as it would truncate a `FinishNode`. A rewrite would not truncate — the
+  rollback would keep the slot *and* the rewrite — so the failing exit would silently drop a node the
+  restore contract had just promised was open again. Materialization **canonicalizes** the demotion:
+  one pass over the owned buffer writes `TOMBSTONE` onto every surviving demote's target before the
+  walk, after which the abandoned node is indistinguishable from the inert slot an unspent
+  `cst_mark` leaves, and the walk is blind to both. A `Demote` can never outlive its target —
+  `target` is strictly below the demote's own index, and truncation is a suffix operation — so the
+  pass has nothing to reconcile.
 - **`Diag { error_span }`** is a forwarded-diagnostic slot — a marker in the *event* log for one
   diagnostic that was forwarded to the wrapped emitter, on `Ok` and `Err` alike. It is skipped at
   materialization, with one exception that is the design's single deliberate channel coupling: a
@@ -86,21 +113,25 @@ below; it is legal *only because* it is reversed on rewind, so the law holds obs
   or at zero-width absences, covers no gap, and stores `None`.
 
 Balance is **derived** from the log, never cached beside it: a real `StartNode` or a `StartAt` is
-`+1`, a `FinishNode` is `−1`, and a tombstone, a `Token`, and a `Diag` are all `0`. A malformed
-buffer is *representable* — the raw `cst_*` surface is sharp on purpose — but it is *unrepresentable
-as a successful materialization*: `finish` walks the log and returns a typed error rather than
-building a wrong tree.
+`+1`, a `FinishNode` or a `Demote` is `−1`, and a tombstone, a `Token`, and a `Diag` are all `0` —
+so the pair `StartNode(+1) … Demote(−1)` nets exactly what a canonicalized `StartNode(TOMBSTONE)`
+does, which is why an up-front bracket's two exits cost balance the same thing whichever it takes. A
+malformed buffer is *representable* — the raw `cst_*` surface is sharp on purpose — but it is
+*unrepresentable as a successful materialization*: `finish` walks the log and returns a typed error
+rather than building a wrong tree.
 
 ### Marks carry an era and a witness
 
-A retro-wrap needs a handle to the tombstone it will anchor at. That handle is an
-[`EventMark`](crate::cst::event::EventMark), and the subtle part is that *index-in-bounds is not
+A retro-wrap needs a handle to the tombstone it will anchor at, and an up-front bracket needs one to
+the start it may have to demote. Both are the same handle — an
+[`EventMark`](crate::cst::event::EventMark), one positional surface with one staleness rule rather
+than two — and the subtle part is that *index-in-bounds is not
 validity*. Truncate-and-regrow is the normal backtracking rhythm, so "the buffer has an event at
-index 3" says nothing about whether that event is still the tombstone a mark was minted for — a
+index 3" says nothing about whether that event is still the slot a mark was minted for — a
 rewind can truncate it away and unrelated events can regrow over index 3. So a mark is a **positional
 witness plus identity**, three fields:
 
-- **`index`** — the tombstone's buffer slot;
+- **`index`** — the named slot's position in the buffer;
 - **`era`** — the truncation history the mark was issued under;
 - **`sink`** — the identity of the one recording sink that minted it.
 
@@ -294,11 +325,27 @@ of arising from it: a sink that had to degrade a rewind it could not perform ref
 ([`UnpairedSettle`](crate::cst::FinishError::UnpairedSettle)) rather than materialize a log that
 describes a rollback that never happened.
 
-Same-target wraps are resolved in a pre-pass that groups the `StartAt`s by target and validates every
-`forward_parent` canary; the main walk then opens each target's wraps *latest-first* at the
-tombstone's position (so the last-declared wrap is the outermost node), and a hoisted wrap that would
-close *before* its own declaration is an [`ImproperWrap`](crate::cst::FinishError) — a wrap crossing a
-node boundary instead of enclosing whole subtrees.
+Two pre-passes run ahead of that walk, and both are legal for one reason: `finish` has consumed the
+sink, so no [`EventMark`](crate::cst::event::EventMark) and no checkpoint row can still name a slot,
+and nothing can observe the buffer between them and the walk. This is the one moment an interior
+kind write is unconditionally safe.
+
+**Canonicalization** is the first, and it is what makes the failing exit's *appended* event
+equivalent to the eager rewrite it replaced: one linear pass applies every surviving `Demote` to its
+target (`events[target].kind = TOMBSTONE`), after which the walk simply skips the `Demote` and sees
+an abandoned node as the inert slot it is. The pass is latched off when the parse took no failing
+bracket exit — which is every parse of a predictive grammar — so a grammar that never demotes never
+pays for it. A demote whose target is not a live, un-demoted `StartNode` sitting *strictly below*
+the demote itself is a [`StaleDemote`](crate::cst::FinishError::StaleDemote): the release-build half
+of the double-demote calibration (the debug half panics at the emit site), and the backstop for the
+positional shape a raw injection could otherwise use to erase a node with a perfectly balanced
+buffer left behind.
+
+Same-target wraps are resolved in the second pre-pass, which groups the `StartAt`s by target and
+validates every `forward_parent` canary; the main walk then opens each target's wraps *latest-first*
+at the tombstone's position (so the last-declared wrap is the outermost node), and a hoisted wrap
+that would close *before* its own declaration is an [`ImproperWrap`](crate::cst::FinishError) — a
+wrap crossing a node boundary instead of enclosing whole subtrees.
 
 ### Gap-tiling and the coverage law
 
@@ -402,11 +449,28 @@ reason the enum exists at all.
 
 You rarely emit events by hand. The [`node`](crate::parser::node()) family is the blessed bracketing
 over the sink, and its encoding is worth one architectural note because it explains why backtracking
-stays clean: `node` and [`node_opt`](crate::parser::node_opt()) are **append-only and never leave a
-node open**. Entry mints an inert tombstone; only a *successful* exit spends it as a retro-wrap
-(`cst_start_at` + `cst_finish`). A decline or an error-path unwind leaves the tombstone unspent — no
-dangling `StartNode` for a later finish to mispair with, and nothing for a rollback to surgically
-undo. The `labelled` finish-on-both-exits discipline, made structural rather than dutiful.
+stays clean: every combinator in the family is a **both-exits bracket whose exits are all appends**.
+They differ only in *when* the node's kind is named, and that split is measured rather than
+stylistic.
+
+**Up front.** [`node`](crate::parser::node()) driven as a plain parser cannot decline, so its kind is
+known at entry: it appends a `StartNode` immediately (`cst_start`, which hands back the mark naming
+that slot) and closes on both exits — `cst_finish` on success, `cst_demote` on an error-path unwind.
+Two events per successful node instead of three, no tombstone whose only purpose is to be named
+later, and an open node that exists *only* inside the frame.
+
+**Retro.** Every other shape — `node` over a declining parser,
+[`node_opt`](crate::parser::node_opt()), and [`node_at`](crate::parser::node_at()) — mints an inert
+tombstone at entry and spends it as a retro-wrap (`cst_start_at` + `cst_finish`) only on a
+*successful* exit, so no node is ever open between entry and exit. That is not a leftover: a
+declining parser's kind is not knowable at entry, and `node_at`'s whole purpose is a kind decided
+after its first child was parsed.
+
+Neither shape leaves a dangling `StartNode` for a later finish to mispair with, and neither leaves
+anything for a rollback to surgically undo. On a non-success return the two **materialize
+identically** — the retro bracket by never spending its mark, the up-front bracket by appending a
+`Demote` that canonicalization applies to its own start — so the buffers differ and the trees do
+not. The `labelled` finish-on-both-exits discipline, made structural rather than dutiful.
 
 [`node_at`](crate::parser::node_at()) spends a *caller-held* mark — the retro-wrap shape: mark, parse a
 prefix, then decide it was the start of something bigger. For the common single-wrap decision,
@@ -521,9 +585,10 @@ impl Language for Lang {
 
 type Ln<'a> = CharLexer<'a>;
 
-// One `Expr` node wrapping every token the sub-parse commits. `node` mints a tombstone on
-// entry and — only on success — spends it as a retro-wrap; there is never an open node
-// between entry and exit, which is exactly why a rolled-back branch leaves nothing behind.
+// One `Expr` node wrapping every token the sub-parse commits. Driven through `parse_input`
+// this is the UP-FRONT bracket: `cst_start` opens the node, and the exit closes it either
+// way — `cst_finish` here, `cst_demote` had the sub-parse errored. Both exits are appends,
+// which is exactly why a rolled-back branch leaves nothing behind.
 fn expr<'inp, Ctx>(inp: &mut In<'inp, '_, Ln<'inp>, Ctx>) -> Result<(), Error>
 where
   Ctx: ParseContext<'inp, Ln<'inp>>,
@@ -538,7 +603,7 @@ where
 }
 
 // Build the WHOLE node speculatively, then decline: every event the branch buffered — the
-// tombstone, the token settles, the retro-wrap — truncates on the one rewind mark. Then
+// node's start, the token settles, its finish — truncates on the one rewind mark. Then
 // build it again, for keeps.
 fn decline_then_parse<'inp, Ctx>(inp: &mut In<'inp, '_, Ln<'inp>, Ctx>) -> Result<(), Error>
 where
