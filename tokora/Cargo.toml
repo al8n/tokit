@@ -141,6 +141,34 @@ conformance = ["alloc"]
 # `fuzz` module, which runs as ordinary `#[test]`s on stable Rust.
 fuzz = ["std"]
 
+# The lossless CST tower (`tokora::cst`): the event stream, the recording `Sink`, and the
+# materialization of both into a `rowan` green/red tree. Off by default; enabling it compiles 41
+# `#[cfg]`-gated code sites across 8 files under `src/` (66 mentions of `feature = "rowan"` in
+# all, the rest being `doc(cfg(...))` labels, doc-text alternations and one `not(...)` arm).
+#
+# ── THIS FEATURE IS NOT INTERPRETED BY MIRI, AND THAT IS DELIBERATE ─────────────────────────
+#
+# The Miri matrices run `--features logos` and `--features logos,unstable-raw`; `rowan` is in
+# neither, and not in `default`, so those 41 sites have never been COMPILED under Miri on any
+# target under either aliasing model. Zero coverage of the path 0.9.0 ships as its lossless
+# story — not reduced coverage.
+#
+# Enabling it there does not close the gap, it reddens the cells. `rowan 0.16.1`, the version
+# `Cargo.lock` resolves, executes undefined behaviour on its ordinary public path, and the two
+# models find it at two DIFFERENT sites, so neither is clean and no one-model half-measure
+# exists: Stacked Borrows at `arc.rs:260` (`<HeaderSlice<H, [T; 0]> as Deref>::deref` forging a
+# whole-slice reference from a header-only retag), reached through `cst::sink::finish::replay`
+# from building any tree; Tree Borrows at `cursor.rs:219` (`rowan::cursor::free`), reached from
+# dropping any red-tree `SyntaxNode`. Both reproduced on `543ce6d` on 2026-08-07, red on the
+# first of `--test parser_node`'s 24 tests under each model.
+#
+# The defect is rowan's: `src/cst` contains no `unsafe` at all. It is unfixed upstream since
+# 2021 (rust-analyzer/rowan#108, #163, #192, all open; the one fix attempt, PR #211, is a draft
+# whose own description says the immutable path still fails), and the `arc.rs` construct is
+# present unchanged in `0.17.0`, the newest release — so RAISING THE REQUIREMENT BELOW IS NOT A
+# FIX. The answer flips when a published rowan is clean at both sites under both models; at that
+# point add `rowan` to the feature sets in `ci/miri_sb.sh` and `ci/miri_tb.sh`, which carry the
+# full account. Recorded for 0.9.0 by al8n/tokit#235.
 rowan = ["dep:rowan", "std"]
 
 bytes = ["bytes_1"]
@@ -209,6 +237,9 @@ logos_0_15 = { package = "logos", version = "0.15", default-features = false, op
 logos_0_16 = { package = "logos", version = "0.16", default-features = false, optional = true, features = [
   "export_derive",
 ] }
+# Bumping this to `0.17` does NOT buy a Miri-clean lossless path, if that is what sent you here:
+# the `arc.rs` Stacked-Borrows construct is present unchanged in `0.17.0`. See the `rowan`
+# feature's note above for the two sites, the repro and what a real fix would look like.
 rowan = { version = "0.16", optional = true }
 
 # ── NO `criterion` HERE, AND NO `[[bench]]` — BOTH ARE LOAD-BEARING ABSENCES ────────────────
