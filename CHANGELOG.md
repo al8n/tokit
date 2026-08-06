@@ -976,6 +976,66 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
     brand-new line, so the header says to name the targets instead.
     — *(#220)*
 
+22. **The in-crate model of the wrapper hazard was unexercised on `cst_demote` — the one CST
+    method whose loss is silent.** `NonForwardingWrapper` in `src/cst/sink/tests.rs` is the
+    fixture that pins what a consumer-shaped emitter wrapper costs, and its `cst_demote`
+    forward was dead code under the suite: pin 5 drives `cst_start`/`cst_finish` only, and
+    every other demote exercise in the tree is direct-on-sink, through `ParseState`, or through
+    the view/handle forwarding surfaces — none interposes a wrapper. Demonstrated rather than
+    asserted, in the shape this repository requires: emptying that forward to a discard left
+    the lib suite at **1747 passed, 0 failed**.
+
+    That matters because of *which* method it is. `CstEmitter::cst_demote`'s *Required, not
+    defaulted* section grades the five CST methods by failure direction — the four defaulted
+    ones fail toward a loud, typed absence (`OrphanFinish`/`MismatchedFinish`/`UnclosedNodes`,
+    or the inert-mark identity wall), while a swallowed demote fails toward a silent
+    **presence**: the `StartNode` stays open and a sink cannot tell a swallowed demote from a
+    legal panic residue. Requiredness, new in this release, closed the *inherited* discard —
+    the empty impl no longer compiles — and left the population this gap covers untouched: a
+    discard written deliberately, visible in a diff, and wrong.
+
+    One cell closes it. `a_wrapper_forwards_the_node_brackets_failing_exit` opens the up-front
+    bracket through the wrapper, keeps the handback, commits a token, abandons the bracket
+    through the wrapper, and materializes through **strict** `finish` — asserting
+    `demote_materialises_as_inert`'s outcome reached through a forwarder: the abandoned node
+    materializes into nothing and the token survives loose beside it. Its falsifying edit was
+    run in both directions before it landed, which is the only thing that makes a cell like
+    this worth having: with the forward emptied it reds loudly and typed —
+    `Err(FinishError::UnclosedNodes { open: 1 })`, and **1747 passed, 1 failed**, so the new
+    cell is the sole detector — and with it restored the suite is **1748 passed, 0 failed**.
+    Test-only; no shipped surface changed.
+    — *(#226)*
+
+23. **The name-collision probe's `TRAITS` records are trusted, not verified, and the harness
+    said so everywhere except where records are authored.** A trait row names the receiver its
+    probe rides (`recvr`), and no run can check that the named value implements the trait: a
+    subject that does *not* constructs no collision and reports a clean run, byte-identical to
+    the clean run a correct subject produces whenever the consumer's item wins at an earlier
+    pick. Measured for the shape it bites hardest — a `&mut self` trait method on a non-deref
+    subject, where the consumer's blanket `impl<T>` claims every pick and tokora's item is
+    never a candidate — swapping the blessed receiver for one that implements nothing produced
+    the identical `7u8` from the consumer's item and the identical `CONSUMER-CALLS` witness on
+    both sides, a byte-identical `ok*`. Such a row cannot be falsified by running it, so its
+    `no_collision.txt` justification and the reviewer who agrees with it are the whole of its
+    protection.
+
+    This is a property of **method resolution**, not a gap in the templates, so no amount of
+    generator work converts it into machine detection — which is why it lands as prose in three
+    places rather than as a fix. `gen_probe.py`'s `TRAITS` table now carries the trust boundary
+    above the rows themselves, with the measurement and the rule for picking a subject;
+    `ci/name_collision/README.md`'s "What this harness does NOT test" gains the bound, stated
+    as what it costs a reviewer — approving a record is a review act, not a mechanical one;
+    and the generator's `no argument template` refusal now says the multi-argument support is
+    **declined, not missing**, names the reopen condition (a traced-trait method whose shape
+    the templates cannot express *and* whose pick analysis is not foreknown-vacuous), and
+    routes the author who lands there to the ruling instead of into an unbounded enumeration.
+
+    Comments and prose only, with zero verdict changes: driving both generators over 2,182
+    invocations spanning every category, spelling, `TRAITS` owner and templated name produced
+    **0** differences in exit status and **0** in generated probe source. Only the refusal
+    text on stderr differs, which `run.sh` echoes into its log line and never matches.
+    — *(#225)*
+
 ## 0.8.0 (2026-08-04)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.

@@ -6609,6 +6609,10 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'i
 /// way, so what the three cells below pin is unchanged. What is gone is the *silent* half of the
 /// same shape on the CST surface: a wrapper can still discard the failing exit, but only by
 /// writing the discard where its own reviewer reads it.
+///
+/// The `cst_demote` line below is pinned by `a_wrapper_forwards_the_node_brackets_failing_exit`,
+/// and needs to be: emptying it once left the whole lib suite green, because pin 5 drives
+/// `cst_start`/`cst_finish` only and every other demote exercise bypasses a wrapper entirely.
 impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'inp> {
   fn cst_start(&mut self, kind: u16) -> EventMark {
     self.0.cst_start(kind)
@@ -7299,6 +7303,71 @@ fn a_structured_all_diagnostic_parse_through_a_non_forwarding_wrapper_is_not_cau
      text is the sink's \"XY\" — the shape the unqualified wall refused, accepted now, and by \
      accident either way"
   );
+}
+
+/// **THE WRAPPER HAZARD, THE OTHER HALF: the forward that is load-bearing.**
+///
+/// The three cells above pin what a wrapper's *omission* costs. This one pins the opposite
+/// direction — that `NonForwardingWrapper`'s `cst_demote` line does something — and it exists
+/// because nothing in the tree drove the node bracket's **failing** exit through a wrapper at
+/// all. Pin 5 drives `cst_start`/`cst_finish` only, and every other demote exercise is
+/// direct-on-sink, through `ParseState`, or through the view/handle forwarding surfaces — none
+/// interposes a consumer-shaped wrapper. So flipping that fixture's `cst_demote` body to a
+/// discard left the whole lib suite green, and the in-crate model of the wrapper hazard was
+/// unexercised on the one method whose loss is *silent*.
+///
+/// **Why demote alone earns a cell.** [`CstEmitter::cst_demote`]'s *Required, not defaulted*
+/// grades the five by failure direction: the four defaulted methods fail toward a loud, typed
+/// absence, and demote fails toward a silent **presence** — a swallowed demote leaves the
+/// `StartNode` open, and a sink cannot tell a swallowed demote from a legal panic residue.
+/// Requiredness (0.9.0) closed the *inherited* discard; a discard written deliberately still
+/// compiles, and that is the population this cell is against.
+///
+/// **Its falsifying edit, which is the acceptance it landed under.** Empty the forward at
+/// `impl CstEmitter for NonForwardingWrapper` and this cell goes red loudly and typed — strict
+/// `finish` answers `Err(FinishError::UnclosedNodes { open: 1 })`, because the demote never
+/// reached the sink. Restore it and the cell greens. A check that has only ever been green over
+/// a correct wrapper proves nothing, so the flip was run in both directions before this landed.
+///
+/// The pairing is the matching-source control's, not the residue cells' — one buffer on both
+/// sides — so what is measured here is the forward and nothing else.
+#[test]
+fn a_wrapper_forwards_the_node_brackets_failing_exit() {
+  let buf = std::string::String::from("a");
+  let src: &str = &buf;
+  let mut sink: SesSink<'_> = Sink::new(src, Verbose::new(), profile());
+  {
+    let mut input =
+      crate::input::Input::<MiniLexer<'_>, NonFwdCtx<'_, '_>, ()>::with_state_and_context(
+        src,
+        (),
+        crate::input::InputContext::new(
+          NonForwardingWrapper(&mut sink),
+          DefaultCache::<'_, MiniLexer<'_>>::default(),
+        ),
+      );
+    let mut inp = input.as_ref();
+    // The up-front bracket, opened through the wrapper and abandoned through it. The handback
+    // is the *inner sink's* mark — a wrapper can mint none of its own — so only the forward
+    // returns it to the buffer that issued it.
+    let mark = inp.emitter().cst_start(K_NODE);
+    while let Ok(Some(_)) = inp.next() {}
+    inp.emitter().cst_demote(mark, K_NODE);
+  }
+
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect(
+    "the demote arrived, so the buffer is balanced and STRICT finish materializes — a wrapper \
+     that discarded it answers UnclosedNodes here instead, which is this cell's red",
+  );
+  assert_eq!(
+    shape(&green),
+    r#"Root[Tok"a"]"#,
+    "`demote_materialises_as_inert`'s outcome, reached through a wrapper: canonicalization \
+     tombstones the slot, so the abandoned node materializes into nothing and the committed \
+     token survives loose beside it"
+  );
+  assert_eq!(text(green), "a", "the demote costs the tree no text");
 }
 
 /// **A PIN OF A KNOWN-OPEN DEFECT.** Duplicated **zero-width** token events survive: the

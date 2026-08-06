@@ -334,6 +334,40 @@ pub fn emitter_value() -> Silent<PErr> {
 #            nothing — so a new trait is reached through a module glob, which is a legal
 #            consumer spelling on both sides.
 #   fixture  extra source the subject needs, or `None`.
+#
+# ── THE TRUST BOUNDARY: `recvr` IS NOT POLICED BY THE RUN ─────────────────────────────────
+#
+# Read this before adding or editing a row. Nothing below is checked by anything; the table is
+# an assertion its author makes, and for some row shapes it is the ONLY protection there is.
+#
+# The run cannot verify that `recvr` names a value the trait is actually implemented for. It
+# has no witness to key on: a subject that does NOT implement the trait constructs no collision
+# and reports a clean run, which is byte-identical to the clean run a correct subject produces
+# whenever the consumer's item wins at an earlier pick. Both score `ok*`, both sides agree, and
+# both leave the same `CONSUMER-CALLS` witness — there is no column in which they differ.
+#
+# That is not a hypothesis. It was MEASURED (issue #225) for the shape it bites hardest:
+#
+#   A `&mut self` trait method on a NON-DEREF subject. The consumer is `impl<T> ConsumerComb
+#   for T`, so it supplies a candidate at every pick, and `trait_method`'s three spellings
+#   declare `self` or `&self` — both EARLIER than `&mut`, and on a non-deref value there is no
+#   later step to fall through to. The consumer's item therefore claims the call at pick one or
+#   two and tokora's is never a candidate, no matter WHAT the receiver is. Swapping
+#   `emitter_value()` for a receiver that implements nothing produced the identical `7u8` from
+#   the consumer's item and the identical witness on both sides — a byte-identical `ok*`. The
+#   row cannot be falsified by running it.
+#
+# So for such rows the blessed record is TRUSTED, NOT VERIFIED, and the written justification in
+# `no_collision.txt` — read by a human who agrees with it — is the entire mechanism. The only
+# consumer that would genuinely compete declares `&mut self`, collides at the same pick, and is
+# E0034-loud; `trait_method` cannot generate it. This is a property of METHOD RESOLUTION, not a
+# gap in the templates, so no amount of generator work converts it into machine detection —
+# see issue #225's ruling, which declines exactly that work and records why.
+#
+# What follows for an author: pick `recvr` from a type tokora demonstrably implements the trait
+# for (the fixture's own types, not a convenient one), say in the row's `no_collision.txt` entry
+# WHY the subject satisfies the bound, and never read a green `ok*` on a `&mut`-self row as
+# evidence that the subject was right. `EMITTER_SUBJECT_FIXTURE` above is the worked example.
 TRAITS = {
     "ParseInput": {
         "recvr": "parse_num",
@@ -1101,7 +1135,21 @@ def trait_method(name, owner, spelling):
             "tokora::span::Spanned::new(tokora::SimpleSpan::new(0, 1), PErr)",
     }.get(name)
     if args is None:
-        sys.exit(f"gen_probe: no argument template for trait method {name!r} on {owner!r}")
+        # The pointer matters more than the refusal. An author who lands here reads "add a
+        # template" and starts extending — which is the search issue #225 declines by name.
+        sys.exit(
+            f"gen_probe: no argument template for trait method {name!r} on {owner!r}. "
+            "DECLINED, not missing: multi-argument support is deliberately unbuilt — see issue "
+            "#225's ruling BEFORE extending this. Its grounds: for the shapes that reach here "
+            "today every row the extension could produce is foreknown-vacuous (a `&mut self` "
+            "trait method on a non-deref subject loses every pick to the consumer's blanket "
+            "item, so the row would agree while measuring nothing), and generating cells whose "
+            "outcome is known in advance is 'extend the generator until the probe goes green' "
+            "wearing a work order. The reopen condition is a traced-trait method whose shape "
+            "these templates cannot express AND whose pick analysis is NOT foreknown-vacuous. "
+            "Until you hold one: justify the row in no_collision.txt, or state in the PR why "
+            "the name cannot collide. Do not delete the row."
+        )
     # The parameter type is built outside the f-string on purpose. An escaped quote inside
     # an f-string expression is a SyntaxError before Python 3.12 (PEP 701 relaxed it), and
     # this file must parse under the `python3` CI happens to have — which is 3.9 on stock
