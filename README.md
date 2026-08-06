@@ -39,6 +39,11 @@ tokora = { version = "0.8", features = ["logos"] }
 `logos` is the alias for the current `logos_0_16` integration. The default `std` feature remains
 enabled unless you set `default-features = false`.
 
+> **Which version this describes.** Every `[dependencies]` snippet in this README resolves against
+> the latest release, **0.8.0**. Where `main` has since grown a feature that 0.8.0 does not have,
+> the surrounding prose says so and names the version it arrived in, rather than putting a manifest
+> you cannot resolve in a copyable block.
+
 ## Capabilities
 
 - On-demand token flow through `InputRef`, with explicit cache-backed lookahead and transactions.
@@ -104,9 +109,14 @@ also compile together with `cargo test -p tokora --no-default-features --feature
 
 ## Features
 
+The combinator-family gates — `combinators` and the thirteen families it covers, `any` through
+`validate` — are **new in 0.9.0 and are not in the released 0.8.0**. On 0.8.0 there are no
+per-family gates, `default` is `std` alone, and every combinator is compiled unconditionally.
+The rest of the table applies to both.
+
 | Feature | Effect |
 | --- | --- |
-| `default` | Enables `std` and `combinators`. |
+| `default` | Enables `std` and `combinators` (0.8.0: `std` alone). |
 | `std` | Enables standard-library support and default features of applicable dependencies. |
 | `alloc` | Enables allocation-backed facilities in `no_std` builds. |
 | `combinators` | Umbrella for every combinator family below. On by default. |
@@ -163,7 +173,8 @@ is the versioned feature that adds `alloc`.
 
 ## Platform support
 
-Tokora's MSRV is Rust 1.87. Tokora's core supports both allocator-free `no_std`
+Tokora's MSRV is Rust 1.87 in the released 0.8.0; `main` raises it to 1.95 for 0.9.0.
+Tokora's core supports both allocator-free `no_std`
 (`no_std` without `alloc`) and allocation-enabled `no_std` (`no_std` with `alloc`).
 Disable default features for allocator-free core use. Enable `alloc` when a parser, cache,
 or selected optional facility requires allocation; other optional facilities may require `std`.
@@ -172,18 +183,20 @@ Allocator-free `no_std`:
 
 ```toml
 [dependencies]
-tokora = { version = "0.8", default-features = false, features = ["combinators"] }
+tokora = { version = "0.8", default-features = false }
 ```
 
 `no_std` with `alloc`:
 
 ```toml
 [dependencies]
-tokora = { version = "0.8", default-features = false, features = ["alloc", "combinators"] }
+tokora = { version = "0.8", default-features = false, features = ["alloc"] }
 ```
 
-Either line can name individual families (`features = ["alloc", "many", "map"]`) in place of the
-`combinators` umbrella when the grammar only uses some of them.
+Both lines compile the whole combinator surface, because 0.8.0 has no per-family gates. From
+0.9.0 the families are gated and an allocator-free build names what it uses: add
+`features = ["combinators"]` for the umbrella, or list the families the grammar actually calls,
+as in `features = ["alloc", "many", "map"]`.
 
 ## Design philosophy and inspirations
 
