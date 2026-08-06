@@ -147,11 +147,11 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   name its node's kind *after* the sub-parse: entry minted an inert tombstone (`cst_mark`) and
   a successful exit retro-wrapped it (`cst_start_at` + `cst_finish`), three events per node.
   It now names the kind at entry (`cst_start`) and closes on both exits — `cst_finish` on
-  success, `cst_demote` on failure — two events per **successful** node. Measured on the
-  GraphQL `alias` corpus: **−47.1 µs** median over sixteen paired reps, 9,013 events removed
-  from a 64,085-event log, which is ~3.8% of the lossless parse and ~19% of the gap to
-  `apollo-parser`; **−7.0 µs** on `supergraph`, **−0.3 µs** on `example_query`, no corpus
-  slower and 24/24 paired reps same-signed.
+  success, `cst_demote` on failure — two events per **successful** node. Paired and
+  interleaved with `apollo-parser` as the drift control, measured on the shipped append-only
+  encoding described below: **−44.5 µs** median on the GraphQL `alias` corpus and
+  **−315.2 µs** on a backtracking fixture, over 32 paired reps, 16/16 and 8/8 same-signed, no
+  corpus slower. `alias` alone removes 9,013 events from a 64,085-event log.
 
   What breaks — two shapes, both in the emitter layer, none in a grammar. An emitter that
   **overrides** `cst_start` must now return the `EventMark` naming the slot it opened: a
@@ -263,10 +263,14 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   slot strictly below the appended event — and no accepted stream's output changes: the guard
   only converts invalid raw streams from accept to typed refusal.
 
-  `cargo semver-checks` reports this, and that is expected and acknowledged here rather than
-  suppressed there: `cst_start`'s return type changed on a public trait, and `cst_demote` is a
-  new **required** trait method. Both are intentional, both are described above (the second in
-  the entry below), and 0.9.0 is the vehicle.
+  `cargo semver-checks` reports three lints here, all expected and acknowledged rather than
+  suppressed: `trait_method_return_value_added` (`cst_start`'s return type changed on a public
+  trait, above) and `trait_method_added` (`cst_demote` is a new **required** trait method,
+  described in the entry below) are both intentional, and so is
+  `enum_no_repr_variant_discriminant_changed` — inserting `FinishError::StaleDemote` above in
+  declaration order, rather than appending it, shifts the fieldless discriminant of the
+  fourteen variants after it. Nothing in the crate casts them and `FinishError` carries no
+  `#[repr]`, so those values were never a contract. 0.9.0 is the vehicle for all three.
 
   The change costs a diagnostics-only parse **nothing, verified rather than asserted**: over
   `Fatal` / `Verbose` / `Silent` the event methods are `#[inline(always)]` no-ops — four
