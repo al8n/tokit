@@ -1188,3 +1188,118 @@ fn raw_innermost_first_bracket_exits_are_admitted_and_abandon_both() {
     "the two tokens are loose in the root"
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// A rollback BELOW an in-progress bracket's start: the sink mechanism, and the wall
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The session-point block further up asks what happens when a point sits ABOVE a bracket's
+// slot. This block asks the mirror question — a point opened BEFORE the bracket, rolled back
+// BELOW its start — which is the one an external review raised against the blessed combinator.
+//
+// The answer has two halves, and they are pinned separately because they are different kinds
+// of fact:
+//
+// - **At the sink**, the mechanism is real: the rollback truncates the slot away, the mark
+//   stales, and the failing exit's `cst_demote` hits `validate_start_mark`'s every-build
+//   assert. `raw_demote_after_a_rollback_below_the_start_panics` drives exactly that, through
+//   the raw surface, where it is the documented contract.
+// - **Through `node()`, it is unreachable**, and not by a runtime check — `take_point`'s settle
+//   scan is newest-first, and a point opened before the bracket has no younger open above it,
+//   so the scan would accept it. It is unreachable because the *type system* refuses to carry a
+//   `SessionPointId` across the bracket boundary at all. That is the load-bearing fact, and it
+//   is pinned as two compile-fail cases: `tests/ui/session_point_cannot_cross_into_a_bracket.rs`
+//   and its `_impl` companion.
+//
+// The last cell in the block is the asymmetry control: opened inside, rolled back inside, green.
+
+/// **The mechanism, at the raw surface, where it is the published contract.** A session point
+/// opened *below* a raw bracket's `cst_start`, rolled back after the content is recorded: the
+/// truncation takes the slot with it, so the mark is stale and `cst_demote` refuses to spend it
+/// — in **every** build, because naming whatever else lands at that index would be the
+/// wrong-tree class nothing downstream can detect.
+///
+/// Unconditional rather than `#[cfg(debug_assertions)]`: this is the identity/liveness wall, not
+/// the debug suffix recount.
+///
+/// This is precisely what would fire *inside* `node()` if a pre-bracket point could be settled
+/// in its inner parser. It cannot — see the compile-fail cases named above — so this cell is the
+/// raw surface's contract and not a reachable defect of the combinator.
+#[test]
+#[should_panic(expected = "does not name a live open node")]
+fn raw_demote_after_a_rollback_below_the_start_panics() {
+  let _ = run("ab", |inp| {
+    // The emitter row lands BELOW the slot: the point opens before the bracket does.
+    let id = inp.begin_point();
+    let m_cell = core::cell::Cell::new(None);
+    Empty::new()
+      .map_with(|_o, mut st| m_cell.set(Some(st.cst_start(K_NODE))))
+      .parse_input(inp)?;
+    take_one(inp)?; // 'a'
+    // Truncates the slot away and records the truncation era.
+    inp.rollback_point(id);
+    // The failing exit, now spending a mark whose slot is gone.
+    Empty::new()
+      .map_with(|_o, mut st| st.cst_demote(m_cell.get().expect("stashed"), K_NODE))
+      .parse_input(inp)?;
+    take_one(inp)
+  });
+}
+
+/// **And the retro encoding is not a refuge from it.** The same drive, one encoding back: a
+/// `cst_mark` minted above the point, staled by the same rollback, then handed to `node_at` —
+/// which is a *public API argument*, not an internal handback. It panics too, on the
+/// pre-existing `validate_mark` wall, and on the **success** exit rather than the failing one.
+///
+/// The cell exists because the finding framed the panic as a regression the up-front bracket
+/// introduced. It is not: a rollback below a pending wrap's anchor has always been a
+/// spend-time panic, and the retro shape reaches it on the exit a grammar is *more* likely to
+/// take.
+#[test]
+#[should_panic(expected = "stale EventMark")]
+fn retro_node_at_over_a_mark_staled_by_the_same_rollback_panics_too() {
+  let _ = run("ab", |inp| {
+    let id = inp.begin_point();
+    let m_cell = core::cell::Cell::new(None);
+    Empty::new()
+      .map_with(|_o, mut st| m_cell.set(Some(st.cst_mark())))
+      .parse_input(inp)?;
+    take_one(inp)?; // 'a'
+    inp.rollback_point(id); // stales the mark
+    node_at(m_cell.get().expect("stashed"), K_NODE, take_one).parse_input(inp)
+  });
+}
+
+/// **The asymmetry control, and the settled twin of the abandon-shape cell above.** A session
+/// point opened *inside* the blessed bracket's inner parser and rolled back there sits ABOVE the
+/// slot, so the truncation stops short of it: the start survives, the mark stays live, and the
+/// failing exit's demote is valid. A bracket cannot be staled from inside itself.
+///
+/// `a_live_point_above_the_slot_at_demote_time_is_a_legal_and_harmless_history` is the same
+/// geometry with the point *abandoned*; this one **settles** it, which is the stronger claim —
+/// the rollback actually runs, and the demote that follows it still validates.
+#[test]
+fn a_point_opened_inside_the_bracket_and_rolled_back_inside_keeps_the_demote_valid() {
+  let (res, green) = run("ab", |inp| {
+    let r: Result<(), TestErr> = node(K_NODE, |ii: &mut Ir<'_, '_>| {
+      // The row lands ABOVE the slot: the point opens after the bracket's own cst_start.
+      let id = ii.begin_point();
+      take_one(ii)?; // 'a'
+      ii.rollback_point(id); // truncates back to just above the slot
+      Err(TestErr::Boom) // the failing exit, demoting a still-live mark
+    })
+    .parse_input(inp);
+    assert_eq!(r, Err(TestErr::Boom), "the bracket failed and demoted");
+    take_one(inp)?; // 'a' again — the rollback un-consumed it
+    take_one(inp) // 'b'
+  });
+  assert_eq!(res, Ok(()));
+  let green = green.expect("lawful parse: balanced buffer, full coverage");
+  let root = tree(green);
+  assert_eq!(root.text(), "ab", "losslessness holds");
+  assert_eq!(
+    root.children().count(),
+    0,
+    "the failed bracket correctly leaves no node"
+  );
+}

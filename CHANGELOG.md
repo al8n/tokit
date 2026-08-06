@@ -237,6 +237,34 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   reserved `TOMBSTONE` kind are all refused in **every** build. `FinishError::StaleDemote` is a
   new variant of a `#[non_exhaustive]` enum.
 
+  **The stale-mark panic is not reachable from `node()`, and the wall that keeps it unreachable
+  is now pinned.** A review round raised the shape it would take: a `SessionPointId` opened
+  *before* the bracket, settled inside its inner parser, rewinding the sink below the bracket's
+  own `cst_start` so the failing exit spends a staled mark and panics in a release build. At the
+  sink the mechanism is real, and it is now driven directly through the raw surface, where it is
+  the published contract. Through the combinator it does not compile: a settle needs an id whose
+  `'closure` brand is **invariant**, and `ParseInput::parse_input`'s handle lifetime is
+  universally quantified, so the id can enter neither direction of the unification. Two
+  compile-fail cases pin it — the closure form and a hand-written `ParseInput` — because there
+  is no runtime backstop underneath: `take_point`'s settle scan is newest-first and would
+  *accept* a pre-bracket point, so the type system is the whole defence, and an untested
+  type-system guarantee is one signature change away from silently ceasing to hold. The reading
+  that this was a regression from the retro encoding does not hold either: under the identical
+  drive the retro shape panics too, on its **success** exit, at the older `node_at` mark wall.
+  The theorem, its three legs, and the duty it places on any future session-verb surface are
+  written up in the `parser::node` module docs.
+
+  One real gap did come out of that round, and it is closed. Canonicalization checked that a
+  `Demote`'s target held a live, un-demoted `StartNode`, but not that the target sat **below**
+  the demote itself. A raw-injected `Demote { target: 1 }` ahead of the start it named
+  materialized a tree with that node silently erased — the only stale-demote shape whose residue
+  stays balanced, so nothing downstream could catch it. One compare, before the slot read and in
+  `u64` space (which also removes a latent 32-bit truncation alias, where a target past `2^32`
+  wrapped onto a nearby slot), now refuses it as `FinishError::StaleDemote` through both finish
+  doors. No legal stream is affected — the emission wall derives `target` from a validated live
+  slot strictly below the appended event — and no accepted stream's output changes: the guard
+  only converts invalid raw streams from accept to typed refusal.
+
   `cargo semver-checks` reports this, and that is expected and acknowledged here rather than
   suppressed there: `cst_start`'s return type changed on a public trait, and `cst_demote` is a
   new defaulted trait method. Both are intentional, both are described above, and 0.9.0 is the

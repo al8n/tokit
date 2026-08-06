@@ -187,7 +187,7 @@ pub(crate) enum Event<S> {
   Demote {
     /// The absolute buffer index of the `StartNode` this demote un-opens; always `<` this
     /// event's own index, validated at emission (identity, bounds, era and slot kind) and
-    /// again at canonicalization.
+    /// again at canonicalization (including the positional `target < index` half).
     target: u64,
   },
   /// Retro-opens a node of `kind` at the buffer position of the tombstone at `target` —

@@ -80,6 +80,57 @@
 //! `a_start_left_open_by_an_escaping_panic_is_refused_by_finish_and_closed_by_finish_partial`
 //! in the sink suite.
 //!
+//! # A rollback below the start cannot happen mid-frame
+//!
+//! The up-front bracket's failing exit spends the mark `cst_start` handed back, and a recording
+//! sink's [`cst_demote`](crate::emitter::CstEmitter::cst_demote) asserts **in every build** that
+//! the mark still names a live open node. A rewind whose target lands *below* the bracket's own
+//! start would truncate the slot away and stale that mark — so the assert would fire from inside
+//! a blessed combinator, in a release build, on code that broke no documented rule.
+//!
+//! It cannot, and the reason is worth stating as a theorem rather than left implicit, because it
+//! is a **type-system** fact with no runtime backstop under it. Three legs:
+//!
+//! 1. **The bracket's own rewinds are one-frame.** `cst_start` mints the mark and one of the two
+//!    exits spends it, both inside `parse_input`'s single call frame. Nothing else holds the
+//!    mark, so no rewind the bracket itself performs can outlive the window.
+//! 2. **Both exits append.** Neither rewrites the slot, so a rollback *into* the window
+//!    `(start, exit]` truncates the exit and leaves the node open again — the one rollback law
+//!    both exits share, pinned by `raw_bracket_{failing,success}_exit_below_a_point_is_exactly_restored_by_the_rollback`
+//!    in `tests/parser_node.rs`. That is the *inside* case, and it is legal.
+//! 3. **No external rollback can enter the window.** The only public verbs that rewind below a
+//!    point an enclosing frame opened are the session settles
+//!    ([`rollback_point`](crate::InputRef::rollback_point) and friends), and each takes a
+//!    [`SessionPointId`](crate::SessionPointId) branded with the *minting* handle's `'closure`
+//!    lifetime — **invariantly**, via an `fn(&'closure ()) -> &'closure ()` marker chosen
+//!    precisely so it cannot be coerced. A parser reaches its input through
+//!    [`ParseInput::parse_input`], whose handle lifetime is universally quantified (a fresh
+//!    region per call). An invariant token branded with one concrete region cannot be passed
+//!    into a frame that demands every region, in either direction. So an id minted outside the
+//!    bracket cannot be settled inside it, and an id minted inside sits **above** the slot, where
+//!    a rollback stops short of the start.
+//!
+//! Leg 3 is the load-bearing one and the only one a future change can quietly remove, so it is
+//! pinned as two compile-fail cases — `tests/ui/session_point_cannot_cross_into_a_bracket.rs`
+//! (the closure form a grammar would write) and its `_impl` companion (a hand-written
+//! `ParseInput`, which closes the "that is merely closure inference" reading). Registered in
+//! `BOUND_CASES` in `tests/diagnostics.rs`, so the census test refuses to let either go
+//! unregistered.
+//!
+//! **There is no second wall.** The runtime settle scan is not one: `take_point` checks
+//! newest-first, and a point opened *before* the bracket has no younger open above it, so the
+//! scan would accept it and the sink would panic. Whoever adds a new session-verb surface —
+//! on [`ParseState`](crate::ParseState), or any other handle a parser can reach — **must
+//! re-prove this theorem for it**, and add the corresponding compile-fail case. A verb that
+//! takes an unbranded id, or one branded covariantly, reopens a release panic inside `node()`.
+//!
+//! What the assert itself does on the raw surface, where the shape *is* reachable and *is* the
+//! published contract, is pinned by `raw_demote_after_a_rollback_below_the_start_panics`; the
+//! legal mirror is `a_point_opened_inside_the_bracket_and_rolled_back_inside_keeps_the_demote_valid`;
+//! and `retro_node_at_over_a_mark_staled_by_the_same_rollback_panics_too` records that the retro
+//! encoding is no refuge — under the same drive it panics on its *success* exit, on the older
+//! [`node_at`] wall.
+//!
 //! # The structural gate
 //!
 //! Every combinator here bounds `Ctx::Emitter:`[`CstEmitter`] — the one user-ruled gate of

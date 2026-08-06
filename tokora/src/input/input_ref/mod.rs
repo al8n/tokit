@@ -1951,6 +1951,13 @@ where
   /// happens either way is the third outcome: a point left on the stack describing a lineage the
   /// rewind destroyed.
   ///
+  /// One thing a point deliberately **cannot** reach is the interior of a
+  /// [`node`](crate::parser::node) bracket a caller is already inside: settling a point from an
+  /// enclosing frame there would rewind below that bracket's start and stale the mark its failing
+  /// exit must spend, so the invariant `'closure` brand on the id refuses it at compile time —
+  /// the wall is the brand, not a runtime check. See *A rollback below the start cannot happen
+  /// mid-frame* in the [`node` module docs](crate::parser::node).
+  ///
   /// # Contract: a point is scoped to *this handle*, and never outlives it
   ///
   /// A session point is non-lexical — it outlives the *call* that opened it — but it is **not**

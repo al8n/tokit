@@ -771,6 +771,17 @@ where
   /// Every check but that scan runs in every build, identity first, for the reason
   /// [`validate_mark`](Self::validate_mark) gives: the positional and era halves are only
   /// meaningful against the issuing sink's own history.
+  ///
+  /// # Who can reach the stale arm
+  ///
+  /// Raw callers, and only raw callers: staling a start mark requires a rewind below the
+  /// bracket's own `cst_start`, and the safe combinator surface cannot express one mid-frame —
+  /// a session settle needs a `SessionPointId` whose invariant `'closure` brand cannot enter a
+  /// universally quantified parser frame, so `node()`'s failing exit always spends a live mark.
+  /// That is a type-system guarantee with **no runtime backstop**: the settle scan is
+  /// newest-first, so a point opened before the bracket would pass it. See *A rollback below the
+  /// start cannot happen mid-frame* in the [`node` module docs](crate::parser::node) for the
+  /// theorem and the compile-fail cases that pin it.
   fn validate_start_mark(&self, mark: &EventMark, kind: u16) {
     assert!(
       mark.sink() == self.witness,

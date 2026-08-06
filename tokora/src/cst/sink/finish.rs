@@ -93,10 +93,16 @@ pub enum FinishError {
   },
 
   /// A `Demote`'s target is not a live, un-demoted `StartNode` — out of bounds, a slot
-  /// holding some other event, a `cst_mark` tombstone, or a slot a **prior** `Demote` already
-  /// claimed.
+  /// holding some other event, a `cst_mark` tombstone, a slot a **prior** `Demote` already
+  /// claimed, or a slot at or **above** the `Demote`'s own index.
   ///
-  /// The last of those is the one a caller can actually reach: `cst_demote` appends rather
+  /// That last shape is raw-injected only: a `Demote` must name a slot strictly below itself,
+  /// and the emission wall derives `target` from a validated live slot below the appended
+  /// event, so no legal stream can carry one. Left unrefused it would tombstone a start the
+  /// walk has not reached yet, erasing that node from a buffer that stays balanced — the
+  /// silent class, so it is refused positionally before the slot is even read.
+  ///
+  /// The double demote is the one a caller can actually reach: `cst_demote` appends rather
   /// than rewrites, so the slot cannot witness an earlier demote of itself and the emission
   /// wall cannot refuse a **double demote** in a release build. It is refused here instead,
   /// by the canonicalization pass — the release half of the two-tier calibration whose
@@ -508,15 +514,23 @@ where
 ///
 /// # What it refuses
 ///
-/// A `Demote` whose target is not a live, un-demoted `StartNode`. Through the validated
-/// emission surface exactly one shape reaches that: a **double demote**, whose second event
-/// finds the slot its predecessor already tombstoned. `cst_demote` cannot refuse it in a
-/// release build — appending leaves the slot unchanged, so the emission wall has nothing to
-/// read — so this is the release half of that misuse's two-tier calibration (the debug half is
-/// `cst_demote`'s own suffix scan, where the prior `Demote`'s −1 dips the running sum). Every
-/// other shape — an out-of-range target, a target holding a token, a `cst_mark` tombstone, a
-/// real-kind start carrying a `forward_parent` — is unreachable through the emission walls and
-/// refused here as the backstop for the raw in-crate injection hook.
+/// A `Demote` whose target is not a live, un-demoted `StartNode`, **or does not sit strictly
+/// below the `Demote` itself**. Through the validated emission surface exactly one shape
+/// reaches that: a **double demote**, whose second event finds the slot its predecessor
+/// already tombstoned. `cst_demote` cannot refuse it in a release build — appending leaves the
+/// slot unchanged, so the emission wall has nothing to read — so this is the release half of
+/// that misuse's two-tier calibration (the debug half is `cst_demote`'s own suffix scan, where
+/// the prior `Demote`'s −1 dips the running sum). Every other shape — an out-of-range target,
+/// a target holding a token, a `cst_mark` tombstone, a real-kind start carrying a
+/// `forward_parent`, **a target at or above the `Demote`'s own index** — is unreachable
+/// through the emission walls and refused here as the backstop for the raw in-crate injection
+/// hook.
+///
+/// The positional shape is worth naming separately, because it is the only one whose residue
+/// is *balanced*. A future target tombstones a start the walk has not opened yet, so the node
+/// simply vanishes and no downstream check has anything to fire on; the others all leave a
+/// stream that reads wrong somewhere. It is checked first, before the slot read, so the
+/// narrowing to `usize` can never alias a distant target onto a nearby slot.
 ///
 /// # Cost
 ///
@@ -531,6 +545,24 @@ fn canonicalize_demotes<S>(events: &mut [Event<S>]) -> Result<(), FinishError> {
     let Event::Demote { target } = events[index] else {
       continue;
     };
+    // The **positional** half of the documented invariant — `target` is strictly below the
+    // `Demote`'s own index — mirroring the `StartAt` replay arm's `*target < index` term. The
+    // content check below cannot stand in for it: a slot ahead of this event holds whatever the
+    // stream put there, so a future-target demote would tombstone a start the walk has not
+    // reached yet and erase its node silently, with a balanced buffer downstream and nothing
+    // left to notice. Only raw injection can build that shape — the emission wall derives
+    // `target` from a validated live slot strictly below the appended event — so no legal
+    // stream is affected.
+    //
+    // Compared in `u64` space, ahead of the `as usize` narrowing below: on a 32-bit target that
+    // cast truncates, so a `target` of, say, `2^32` would otherwise alias slot 0 and be
+    // *accepted*. This compare refuses every such target before the narrowing can happen.
+    if target >= index as u64 {
+      return Err(FinishError::StaleDemote {
+        index: index as u64,
+        target,
+      });
+    }
     // A `forward_parent` on the target is refused with the rest: only `cst_start_at` writes
     // that field and its wall demands a tombstone, so a real-kind start can never carry one —
     // and a tombstoned target that does is a slot this demote does not own.

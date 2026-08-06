@@ -191,6 +191,13 @@ pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// the reserved-kind check keeps that true even when the demote *names* the tombstone kind,
   /// which no `cst_start` could ever have opened.
   ///
+  /// **Scope: those panics are reachable from the raw surface only.** The blessed
+  /// [`node`](crate::parser::node) bracket cannot reach the stale arm, because staling its mark
+  /// needs a rewind below its own `cst_start`, and the only public verbs that rewind that far
+  /// take a `SessionPointId` whose invariant `'closure` brand cannot cross into a parser frame
+  /// — see *A rollback below the start cannot happen mid-frame* in the
+  /// [`node` module docs](crate::parser::node), which names the compile-fail cases that pin it.
+  ///
   /// Two misuses are deliberately **not** every-build panics, and for one reason: the slot is
   /// unchanged by a demote, so it cannot witness that it has already been closed. Demoting a
   /// start whose node was already **finished**, and demoting the same start **twice**, both

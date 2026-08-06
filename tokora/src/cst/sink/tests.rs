@@ -759,6 +759,90 @@ fn canonicalization_refuses_a_demote_that_names_no_live_start() {
   );
 }
 
+/// **The positional half of the wall, and the one demote shape whose residue is balanced.**
+///
+/// A `Demote` naming a slot *ahead* of itself is the only stale shape that leaves nothing
+/// downstream to notice: canonicalization tombstones a start the walk has not opened yet, so
+/// the node vanishes, the buffer stays balanced, pops still match pushes, and the tree
+/// materializes one node short of what the stream said. Every other stale target leaves a
+/// stream that reads wrong somewhere — the surplus finish, the unclosed node — and is caught
+/// by a later law.
+///
+/// The stream below is that shape at its smallest: a demote at slot 0 naming slot 1, the start
+/// it names, and a token inside it. Before the positional term existed this **materialized**,
+/// returning `<root><tok/></root>` with the `K_NODE` silently erased. It is raw-injectable
+/// only — `cst_demote` derives its target from a live slot strictly below the event it appends
+/// — which is exactly why the release backstop has to carry the term the emission wall
+/// guarantees.
+#[test]
+fn canonicalization_refuses_a_demote_naming_a_slot_above_itself() {
+  fn future_target(src: &str) -> VerboseSink<'_> {
+    let mut sink = verbose_sink(src);
+    // The demote lands FIRST, naming the start that follows it.
+    sink.push_raw_event_for_tests(Event::Demote { target: 1 });
+    sink.push_raw_event_for_tests(Event::StartNode {
+      kind: K_NODE,
+      forward_parent: None,
+    });
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
+    sink
+  }
+
+  let (green, _emitter) = future_target("a").finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("a demote may only name a slot strictly below itself"),
+    FinishError::StaleDemote {
+      index: 0,
+      target: 1
+    },
+    "without the positional term this materializes a tree with the future start erased, and \
+     nothing downstream can tell it apart from a stream that never opened the node"
+  );
+
+  let (green, _emitter) = future_target("a").finish_partial(K_ROOT);
+  assert_eq!(
+    green.expect_err("and the tooling door, which tolerates incompleteness, not corruption"),
+    FinishError::StaleDemote {
+      index: 0,
+      target: 1
+    }
+  );
+}
+
+/// The boundary of the same term: `>=`, not `>`. A demote naming **its own** index is refused
+/// through both doors.
+///
+/// Its outcome does not depend on the positional term — a slot holding a `Demote` is not a
+/// `StartNode`, so the content match refuses a self-target anyway — and that is the point of
+/// pinning it. The two arms must agree on the boundary, so that a future rewrite of either one
+/// cannot open a gap between them.
+#[test]
+fn canonicalization_refuses_a_demote_naming_its_own_slot() {
+  fn self_target(src: &str) -> VerboseSink<'_> {
+    let mut sink = verbose_sink(src);
+    sink.push_raw_event_for_tests(Event::Demote { target: 0 });
+    sink
+  }
+
+  let (green, _emitter) = self_target("").finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("a demote cannot un-open itself"),
+    FinishError::StaleDemote {
+      index: 0,
+      target: 0
+    }
+  );
+
+  let (green, _emitter) = self_target("").finish_partial(K_ROOT);
+  assert_eq!(
+    green.expect_err("through the tooling door too"),
+    FinishError::StaleDemote {
+      index: 0,
+      target: 0
+    }
+  );
+}
+
 /// **The interleaved-exit shape, and what release actually does with it.** Two brackets whose
 /// closings cross — the enclosing start demoted while the inner one is still open — is the third
 /// route that dips `cst_demote`'s debug suffix recount, and the only one of the three that is
