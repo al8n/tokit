@@ -756,8 +756,15 @@ fn main() {
     // Prefix / postfix increment
     ("++x", "(++x)"),
     ("x++", "(x++)"),
+    // Postfix `++` (14) and prefix `++` (13) both sit above the infix `+` (11),
+    // so each increment attaches to its own operand and the `+` joins the two
+    // folded results — the two `++` never meet.
+    ("x++ + ++y", "((x++) + (++y))"),
     // Ternary
     ("a ? b : c", "(a ? b : c)"),
+    // The ternary is right-associative: the else-branch takes the whole tail,
+    // so the second `?` nests inside the first rather than beside it.
+    ("a ? b : c ? d : e", "(a ? b : (c ? d : e))"),
     // Array index
     ("arr[0]", "(arr[0])"),
     // Function calls
