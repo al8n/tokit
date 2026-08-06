@@ -725,12 +725,11 @@ where
   // legitimate and sometimes not — so an enumeration organised by shape classified them once, as
   // "expected refusal", and never saw the other branch.
   //
-  // So the account above is an enumeration by hand, and it stays one here: nothing in this crate
-  // fails when a call to one of these methods appears at a site this comment does not know about.
-  // What keeps that residue small is the helpers below — every read of a `Cache` return value in
-  // the kit goes through one of them, so the sites are few and each one's disposition is visible
-  // at the call. A mechanical guard that scans this file and fails on an unregistered site is
-  // #221, and is deliberately not part of this change.
+  // So the account above is no longer the guarantee. `CACHE_CALL_CENSUS` in `cache_tests.rs` is:
+  // it parses this file and fails, naming the function and the line, the moment a call to any of
+  // these methods appears at a site its table does not know about. Adding a call somewhere new
+  // is a red test, not a missed review comment. The helpers below exist so that the registered
+  // sites are few and each one's disposition is obvious at the call.
 
   /// The `Ok` arm of an accepted push, compared against the entry that was offered.
   ///
@@ -799,6 +798,7 @@ where
     refusal: core::fmt::Arguments<'_>,
   ) -> Result<CachedTokenOf<'inp, L>, CachedTokenOf<'inp, L>> {
     let offered = tok.clone();
+    // CACHE_CALL_CENSUS: routed
     match self.checked_push(cache.push_back(tok), offered.clone(), site) {
       Ok(placed) => Ok(placed),
       Err(returned) => {
@@ -822,6 +822,7 @@ where
     refusal: core::fmt::Arguments<'_>,
   ) -> Result<CachedTokenOf<'inp, L>, CachedTokenOf<'inp, L>> {
     let offered = tok.clone();
+    // CACHE_CALL_CENSUS: routed
     match self.checked_push(cache.push_front(tok), offered.clone(), site) {
       Ok(placed) => Ok(placed),
       Err(returned) => {
@@ -943,6 +944,7 @@ where
     absent: core::fmt::Arguments<'_>,
     tail: &str,
   ) -> CachedTokenOf<'inp, L> {
+    // CACHE_CALL_CENSUS: routed
     let popped = cache.pop_front();
     self.drained(popped, want, site, absent, tail, NO_NOTE)
   }
@@ -961,6 +963,7 @@ where
     absent: core::fmt::Arguments<'_>,
     tail: &str,
   ) -> CachedTokenOf<'inp, L> {
+    // CACHE_CALL_CENSUS: routed
     let popped = cache.pop_back();
     self.drained(popped, want, site, absent, tail, RESTORE_NOTE)
   }
@@ -1002,6 +1005,7 @@ where
   /// [`Cache::front`].
   fn assert_front_entry(&self, cache: &C, want: Option<&CachedTokenOf<'inp, L>>, when: &str) {
     let name = self.label();
+    // CACHE_CALL_CENSUS: routed
     match (want, cache.front()) {
       (Some(expected), Some(got)) => {
         let expected_span = span_of::<L>(expected);
@@ -1029,6 +1033,7 @@ where
   /// its state message carries [`RESTORE_NOTE`]. The one place the kit calls [`Cache::back`].
   fn assert_back_entry(&self, cache: &C, want: Option<&CachedTokenOf<'inp, L>>, when: &str) {
     let name = self.label();
+    // CACHE_CALL_CENSUS: routed
     match (want, cache.back()) {
       (Some(expected), Some(got)) => {
         let expected_span = span_of::<L>(expected);
@@ -1054,6 +1059,7 @@ where
 
   /// `peek_one` as the triple the kit compares — the one place it is called for a value.
   fn peeked_one(&self, cache: &C) -> Option<PeekedTriple<'inp, L>> {
+    // CACHE_CALL_CENSUS: routed
     cache.peek_one().map(|one| Self::triple(&one))
   }
 
@@ -1071,6 +1077,7 @@ where
     lede: &str,
   ) -> Option<CachedTokenOf<'inp, L>> {
     let seen: Cell<Option<PeekedTriple<'inp, L>>> = Cell::new(None);
+    // CACHE_CALL_CENSUS: routed
     let popped = cache.pop_front_if(|tok| {
       seen.set(Some(Self::ref_triple(&tok)));
       answer
@@ -1089,6 +1096,7 @@ where
     lede: &str,
   ) -> Option<Result<CachedTokenOf<'inp, L>, &'static str>> {
     let seen: Cell<Option<PeekedTriple<'inp, L>>> = Cell::new(None);
+    // CACHE_CALL_CENSUS: routed
     let popped = cache.try_pop_front_if::<&'static str, _>(|tok| {
       seen.set(Some(Self::ref_triple(&tok)));
       outcome
@@ -1254,10 +1262,12 @@ where
     // to read. This is the documented exception to "every value a Cache method hands back is
     // read" — absence is the whole observable, not a weaker view of one.
     assert!(
+      // CACHE_CALL_CENSUS: absence
       cache.front().is_none(),
       "tokora cache conformance [{name} empty-invariants/{when}]: front()/back() answered on an empty cache — front() did"
     );
     assert!(
+      // CACHE_CALL_CENSUS: absence
       cache.back().is_none(),
       "tokora cache conformance [{name} empty-invariants/{when}]: front()/back() answered on an empty cache — back() did"
     );
@@ -1278,14 +1288,17 @@ where
     // wrongly answers on `pop_front` would leave `pop_back` unprobed and its own defect unnamed.
     // Split, each end is called and each failure says which one answered.
     assert!(
+      // CACHE_CALL_CENSUS: absence
       cache.pop_front().is_none(),
       "tokora cache conformance [{name} empty-invariants/{when}]: a pop answered on an empty cache — pop_front() did"
     );
     assert!(
+      // CACHE_CALL_CENSUS: absence
       cache.pop_back().is_none(),
       "tokora cache conformance [{name} empty-invariants/{when}]: a pop answered on an empty cache — pop_back() did"
     );
     assert!(
+      // CACHE_CALL_CENSUS: absence
       cache.peek_one().is_none(),
       "tokora cache conformance [{name} empty-invariants/{when}]: peek_one() answered on an empty cache"
     );
@@ -1636,6 +1649,7 @@ where
     // Presence-only, and the law: after a full drain there is no entry left for a pop to return,
     // so absence is the whole observable. (Documented exception — see `checked_push`.)
     assert!(
+      // CACHE_CALL_CENSUS: absence
       cache.pop_front().is_none(),
       "tokora cache conformance [{name} order]: pop_front() still answers after every resident entry was drained"
     );
@@ -1665,6 +1679,7 @@ where
     }
     // Presence-only, and the law — see the `pop_front` twin above.
     assert!(
+      // CACHE_CALL_CENSUS: absence
       cache.pop_back().is_none(),
       "tokora cache conformance [{name} order]: pop_back() still answers after every resident entry was drained"
     );
@@ -1809,6 +1824,7 @@ where
       }
       // Presence-only, and the law: nothing is left to return. (Documented exception.)
       assert!(
+        // CACHE_CALL_CENSUS: absence
         mixed.pop_front().is_none(),
         "tokora cache conformance [{name} push-front/full-order at depth {depth}]: pop_front() still answers after all {} entries were drained",
         order.len()
@@ -1844,6 +1860,7 @@ where
       }
       // Presence-only, and the law: nothing is left to return. (Documented exception.)
       assert!(
+        // CACHE_CALL_CENSUS: absence
         mixed.pop_back().is_none(),
         "tokora cache conformance [{name} push-front/full-order-from-the-back at depth {depth}]: pop_back() still answers after all {} entries were drained",
         order.len()
@@ -1886,6 +1903,7 @@ where
       }
       // Presence-only, and the law: nothing is left to return. (Documented exception.)
       assert!(
+        // CACHE_CALL_CENSUS: absence
         mixed.pop_front().is_none(),
         "tokora cache conformance [{name} push-front/interleaved-order at length {n}]: pop_front() still answers after all {} entries were drained",
         order.len()
@@ -2536,6 +2554,7 @@ where
   {
     let mut buf: GenericArrayDeque<MaybeRefCachedTokenOf<'_, 'inp, L>, W::CAPACITY> =
       GenericArrayDeque::new();
+    // CACHE_CALL_CENSUS: routed
     cache.peek::<W>(&mut buf);
     buf.iter().map(Self::triple).collect()
   }
@@ -2560,10 +2579,12 @@ where
     > = GenericArrayDeque::new();
     for tok in prefill {
       assert!(
+        // CACHE_CALL_CENSUS: not-a-cache-call
         buf.push_back(Maybe::Owned(tok)).is_none(),
         "tokora cache conformance kit bug: its own prefill overflowed the peek window before `peek` was even called"
       );
     }
+    // CACHE_CALL_CENSUS: routed
     cache.peek::<PeekWindow>(&mut buf);
     let mut entries = buf.iter().map(Self::triple);
     let prefix = entries.by_ref().take(prefill_len).collect();
@@ -2866,6 +2887,7 @@ where
     let ran = Cell::new(false);
     assert!(
       empty
+        // CACHE_CALL_CENSUS: absence
         .pop_front_if(|_| {
           ran.set(true);
           true
@@ -2882,6 +2904,7 @@ where
     let ran2 = Cell::new(false);
     assert!(
       empty2
+        // CACHE_CALL_CENSUS: absence
         .try_pop_front_if::<(), _>(|_| {
           ran2.set(true);
           Ok(())
@@ -3114,6 +3137,7 @@ where
     let all_spans = Self::spans_of(&all);
 
     let mut cache = self.make();
+    // CACHE_CALL_CENSUS: compared-in-place
     let overflow: Vec<_> = cache.push_many(corpus.into_iter()).collect();
     let overflow_spans: Vec<L::Span> = overflow.iter().map(span_of::<L>).collect();
     assert!(

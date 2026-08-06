@@ -101,9 +101,18 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   is the same hole four review rounds in a row, each closed by hand and each followed by another.
   All five sites are closed here, and every read of a `Cache` return value in the kit now goes
   through one of a handful of comparing helpers, so the sites are few and each one's disposition
-  is visible at the call. What is **not** here is a mechanical guard that fails when a call turns
-  up at a site the kit has not accounted for — the enumeration is still one made by hand, and the
-  scanner that would make it not be is #221.
+  is visible at the call. The enumeration is no longer one made by hand either: `CACHE_CALL_CENSUS`
+  parses `conformance/cache.rs` and fails, naming the function and the line, when a call to an
+  entry-returning `Cache` method appears at a site its table does not register. It earned that the
+  moment it went in, catching two things the hand enumeration and its substring predecessor had
+  both missed — locals named `back` and `front` read as function items, and two guarded calls in
+  `assert_empty` sharing one anchor comment. Because `syn` parses rather than expands, the census
+  also refuses any macro or attribute in that file that is not on a closed allowlist: a guarded
+  call must appear *literally* in the source, so an unregistered one cannot arrive through an
+  expansion the walk never sees. It is a test-only guard — no public surface changes with it, and
+  `syn`/`proc-macro2` join `[dev-dependencies]` to serve it. Both are pure Rust, so the
+  no-cc-rs-build-script rule that keeps the Miri matrix off macOS runners (#216) still holds.
+  — *(#221)*
 
   The last of those sites was a **classification** error rather than a missed call, and it is
   worth stating because it is the shape the rest of this entry keeps circling. Check 9's

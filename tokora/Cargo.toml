@@ -222,6 +222,27 @@ rowan = { version = "0.16", optional = true }
 # ask for a macOS runner (#216). Cargo has no optional dev-dependency, so the package boundary
 # is the mechanism; putting criterion back here would put those cells back on macOS.
 [dev-dependencies]
+# `CACHE_CALL_CENSUS` (`conformance/cache_tests.rs`) parses `conformance/cache.rs` and walks its
+# expression tree, so the census is exact for call SYNTAX rather than for a list of spellings.
+# Three review rounds of #183 each patched a substring matcher and each was followed by a new gap
+# in it — whitespace around `.`, a turbofish read as a function item — which is a property of text
+# scanning, not of any one pattern. `span-locations` is what gives each call a line, so an anchor
+# comment binds to the call it annotates rather than to the comment block above it.
+#
+# These two are subject to the same per-package reach the block above describes, so the reason
+# they are admissible where `criterion` is not has to be stated: both are pure Rust. `syn` 2 has
+# no build script at all, and `proc-macro2`'s only runs `rustc --version` — neither hands a C
+# compiler a target triple it cannot serve, which is the failure that put 16 Miri cells on macOS.
+# `default-features = false` keeps the `proc-macro` bridge out: the census runs in a `#[test]`,
+# not in a proc macro, so the fallback implementation is the one that is wanted anyway.
+proc-macro2 = { version = "1", default-features = false, features = [
+  "span-locations",
+] }
+syn = { version = "2", default-features = false, features = [
+  "full",
+  "parsing",
+  "visit",
+] }
 tempfile = "3"
 trybuild = "1.0.118"
 
