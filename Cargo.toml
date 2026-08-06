@@ -1,7 +1,26 @@
 [workspace]
 members = [
-  "tokora"
+  "tokora",
+  "tokora-benches",
 ]
+
+# ── WHY `default-members` IS NOT THE MEMBER LIST ────────────────────────────────────────────
+#
+# `tokora-benches` exists so that `criterion` — and through it `alloca`, whose cc-rs build
+# script cannot be built for an apple target from a Linux host — is not in tokora's own
+# dependency graph (#216; the reasoning is written out in `tokora-benches/Cargo.toml`). That
+# boundary only holds if the bench package is not SELECTED by the commands that must stay
+# criterion-free. In a virtual workspace the default selection is every member, so without this
+# line `cargo miri test --target x86_64-apple-darwin` at the root would pick `tokora-benches`
+# back up and rebuild exactly the graph the split removed.
+#
+# So the default selection is `tokora` alone, which is what it already was when `tokora` was the
+# only member: every root-level `cargo build` / `test` / `check` in CI keeps the package set it
+# had before this split. The bench package is reached by NAMING it — `-p tokora-benches`, or
+# `--workspace`, which `clippy` uses so the benches stay linted (`cargo fmt --all` and
+# `cargo metadata` read the member list above, not this one, so both already see it).
+default-members = ["tokora"]
+
 resolver = "3"
 
 [workspace.package]

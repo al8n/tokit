@@ -389,11 +389,74 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   `cargo build` — `criterion` is an unconditional dev-dependency, so cargo builds it for every
   `--test` target, and its transitive `alloca` runs a cc-rs build script that invokes the host
   `cc` with `-arch x86_64 -mmacosx-version-min=10.7`. That needs Apple clang and the macOS SDK.
-  The measurement and what it would take to move the cells are recorded on the `miri-tb` job.
+  **That was then done, in the entry below, which supersedes this paragraph**: criterion is out
+  of tokora's graph and none of these cells runs on macOS any more.
 
   Two `exclude` entries per Miri matrix went in the move. Each named a target absent from that
   matrix' own `target` list, so each excluded nothing while reading as though it did; the cell
   set is unchanged with them gone, and `actionlint` reports the workflows clean.
+
+- **The benches are their own workspace member, `tokora-benches`, and with them goes the last
+  macOS runner this repository asked for (#216).** The five `[[bench]]` targets and the
+  `criterion` dev-dependency move out of `tokora/Cargo.toml`; `tokora-benches` is unpublished,
+  depends on `tokora` by path, and the bench sources move verbatim — two doc-comment lines
+  carrying a `cargo bench` invocation are the only edits to the 4,700 lines of them. No library
+  code changes and no test changes.
+
+  **Why a package boundary.** `criterion` pulls `alloca`, whose build script compiles
+  `alloca.c` through cc-rs. Cargo resolves dev-dependencies per PACKAGE, not per target, so an
+  unconditional `criterion` in tokora's `[dev-dependencies]` was built for *every* `--test`
+  target — including under `cargo miri test --target x86_64-apple-darwin --test span`, where
+  cc-rs hands the host `cc` an `-arch x86_64 -mmacosx-version-min=10.7` that only Apple clang
+  and the macOS SDK can serve. Cargo has no optional dev-dependency, so there is no way to
+  express this inside one manifest.
+
+  **Measured in CI on a Linux runner before the fix was written** (runs `31081754960` and
+  `31082043450`, branch `ci/miri-linux-probe-216`, `ubuntu-latest`), in four steps: `cargo tree`
+  shows criterion is the only edge to `alloca`; `cargo miri setup` builds both darwin sysroots
+  there in about fourteen seconds each; `cargo miri test --target x86_64-apple-darwin` exits
+  **101** inside `alloca`'s build script on the `-arch` flag; and with that one manifest line
+  deleted and nothing else touched, the identical command passes on **both** apple targets. So
+  Miri was never what needed the host.
+
+  **What changes in CI.** `miri.yml`'s two matrices lose their `os` axis and their three
+  `exclude` entries each, and run every cell on `ubuntu-latest`. The cell set is otherwise
+  identical — same three targets, same four shards, same `MIRIFLAGS`, same scripts, same 24
+  cells plus the plan job — so this is a host change and not a coverage change. Repository-wide
+  the macOS-bound job count goes from **16 to 0**; `ci.yml`, `pages.yml` and `loc.yml` were
+  already ubuntu-only.
+
+  **What it costs, and what pays for it.** A package boundary moves targets out of every
+  command that names no package, and three of them mattered:
+
+  - `clippy` linted the benches through a bare `--all-targets`. The workspace declares
+    `default-members = ["tokora"]` — required, or `cargo miri test` at the root pulls criterion
+    straight back in — so that line would have silently linted zero of the five. It carries
+    `--workspace` now, verified off the `--message-format=json` stream: five `bench` artifacts
+    with it, none without.
+  - `bench (smoke)` no longer needs its hand-maintained
+    `--no-default-features --features std,logos,rowan,unstable-raw,combinators`, because
+    `tokora-benches` pins that feature point on its `tokora` dependency — which also means its
+    bench targets declare no `required-features`, so the #181 failure (a bench whose features
+    are unmet is *skipped*, not failed; the job once built one of five and reported `Finished`
+    in ~30ms) is removed by construction rather than guarded against. The bare
+    `cargo bench -p tokora-benches` that would replace it has its own silent shape — a deleted
+    `[[bench]]` section is just a smaller job — so the step derives the target list from
+    `cargo metadata`, passes each as an explicit `--bench NAME`, and refuses to run if it reads
+    back fewer than five.
+  - the `msrv` job compiled criterion on the pinned toolchain as a side effect of building
+    tokora's test targets, and would have stopped. It now runs
+    `cargo check -p tokora-benches --benches` there, which also compiles the five bench sources
+    at the declared floor — slightly more than was covered before, not less.
+
+  Two further edits are consequences rather than choices. `coverage` reads
+  `--workspace --exclude tokora-benches`, so the measured package set stays exactly what
+  `--workspace` meant when tokora was the only member. And `name-collision-probe`'s lock-parity
+  guard exempted the literal name `tokora`; it exempts **path/local** entries now — the ones a
+  lock records with no `source` — because a source-less entry's content is the working tree,
+  which is the thing the two sides are already comparing, and the new member would otherwise
+  have read as the two lock graphs disagreeing over this branch's own code. Every entry that
+  carries a `source` is still compared exactly.
 
 ### Added
 

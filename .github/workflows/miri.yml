@@ -16,19 +16,23 @@ name: Miri
 #
 # WHY MIRI AND NOTHING ELSE. #213 proposed moving the sanitizers and the cross matrix here too.
 # The workflow said otherwise: `sanitizer` and `cross` are `ubuntu-latest`, and every one of
-# their cells completed in the measured run. The only macOS-bound cells in this repository are
-# the 16 apple-darwin cells of the two matrices below, 8 per matrix — which is the 269–347
-# minute macOS queue #157 measured, and the whole of it. So the line is drawn exactly where the
-# hosts are: everything ubuntu stays in `CI`, where it can be read in minutes.
+# their cells completed in the measured run. When the split was made, the 16 apple-darwin cells
+# of the two matrices below were the only macOS-bound cells in the repository — the 269–347
+# minute macOS queue #157 measured, and the whole of it — so the line was drawn where the hosts
+# were.
 #
-# This is a SCHEDULING change, not a coverage change. Every job, matrix cell and step below runs
-# what `.github/workflows/ci.yml` ran before, unchanged; the two files together enumerate the
-# same 59 cells that file enumerated alone.
+# THE HOSTS ARE ALL THE SAME NOW, AND THIS FILE STAYS SPLIT ANYWAY. #216 removed the macOS
+# requirement: every cell below is `ubuntu-latest`, and the repository has no macOS-bound job
+# left in any workflow. That retires the argument the split was originally made on, and NOT the
+# split — what makes `CI` unreadable is a run that cannot conclude, and Miri is still the long
+# pole by an order of magnitude. Before sharding, one Tree-Borrows cell was 116.9 minutes; the
+# whole of `CI` answers in tens of minutes. Folding these 25 cells back in would put that answer
+# behind them again for a different reason than last time and with the same result, so the
+# contract is unchanged: `CI` is what a merge waits for, `Miri` reports on its own clock.
 #
-# What this does NOT do is make Miri faster. It cannot: the macOS queue is a runner-concurrency
-# constraint (#157), and 16 macOS cells per run is the demand that meets it. What the split buys
-# is that `CI`'s answer no longer waits behind that demand. Whether these cells need a macOS
-# HOST at all is a separate question — see the note on `miri-tb` below for what was measured.
+# The SCHEDULING-not-coverage promise the split was made under is also unchanged by #216. Every
+# job, matrix cell and step below runs what it ran before: same targets, same shards, same
+# `MIRIFLAGS`, same scripts, same 24 cells plus the plan job. Only `runs-on` changed.
 
 # Triggers, `paths-ignore` and the concurrency rule are deliberately identical to
 # `.github/workflows/ci.yml`; read the comments there for why the ignore list carries no blanket
@@ -111,47 +115,39 @@ jobs:
   # the first shard to go red would otherwise cancel every other shard on every target, leaving
   # a report that says nothing about the rest of the suite and a next push that re-runs all of it.
   #
-  # ── WHY THE APPLE CELLS STILL RUN ON A macOS HOST ───────────────────────────
-  # #213 asked whether they have to, since Miri interprets a TARGET and the host ought to be
-  # irrelevant — and if it were, all 16 macOS cells would become ubuntu ones and the queue that
-  # forced this split would go away with them. Measured on a Linux host (Debian 13, aarch64,
-  # nightly 1.99.0 2026-08-04) rather than assumed, and the answer comes in two halves:
+  # ── WHY THE APPLE CELLS NO LONGER NEED A macOS HOST ─────────────────────────
+  # They ran on `macos-latest` until #216, under an `os` matrix axis and three `exclude` entries
+  # per matrix that pinned each target to the only host that could build it. Miri was never the
+  # reason — it interprets a TARGET, and `cargo miri setup --target x86_64-apple-darwin` /
+  # `--target aarch64-apple-darwin` each build a full darwin sysroot (core, alloc, std, test,
+  # panic_unwind, proc_macro) on an ubuntu runner in about fourteen seconds. `cargo build` was:
+  # both apple legs died before Miri ran, in `alloca v0.4.0`'s cc-rs build script, which invokes
+  # the host `cc` with `-arch x86_64 -mmacosx-version-min=10.7` (and `-arch arm64
+  # -mmacosx-version-min=11.0`) — flags a Linux `cc` rejects and only Apple clang plus the macOS
+  # SDK can serve.
   #
-  #   * Miri is NOT the obstacle. `cargo miri setup --target x86_64-apple-darwin` and
-  #     `--target aarch64-apple-darwin` each build a full darwin sysroot — core, alloc, std,
-  #     test, panic_unwind, proc_macro — on Linux in under ten seconds. With `criterion` removed
-  #     from the manifest, `cargo miri test --features logos` over `downcast`, `dialect_anchor`
-  #     and `span` then reported 90 passed / 0 failed for BOTH apple targets, the same 90 the
-  #     host's own linux target reports (4.5s linux, 4.9s x86_64-apple-darwin, 15.1s
-  #     aarch64-apple-darwin, on a contended laptop VM — indicative, not a timing measurement).
-  #   * `cargo build` is. With the manifest as it stands, both apple legs die before Miri runs,
-  #     in `alloca v0.4.0` — reached only through `criterion`, an unconditional dev-dependency,
-  #     which cargo therefore builds for every `--test` target. Its cc-rs build script invokes
-  #     the host `cc` with `-arch x86_64 -mmacosx-version-min=10.7` (and `-arch arm64
-  #     -mmacosx-version-min=11.0`); a Linux `cc` rejects both, and compiling them needs Apple
-  #     clang and the macOS SDK.
+  # `alloca` was reached through exactly one edge: `criterion`, an unconditional entry in
+  # tokora's `[dev-dependencies]`. Cargo resolves dev-dependencies per PACKAGE, not per target,
+  # so `--test span` built criterion too. #216 moved the five benches into the `tokora-benches`
+  # workspace member and criterion with them — cargo has no optional dev-dependency, so a
+  # package boundary is the only available seam — and the apple legs then build and interpret on
+  # ubuntu exactly as the linux one does. Measured in CI, on a Linux runner, before the fix was
+  # written: run 31082043450, job 92552854128 (branch `ci/miri-linux-probe-216`, `ubuntu-latest`)
+  # built both darwin sysroots, got exit 101 from `cargo miri test --target x86_64-apple-darwin`
+  # inside `alloca`'s build script on the `-arch` flag, and then — with `criterion = "0.8"`
+  # deleted from `tokora/Cargo.toml` and nothing else touched — passed the identical command on
+  # BOTH apple targets, 95 tests each (3 `downcast` + 2 `dialect_anchor` + 90 `span`).
   #
-  # So `macos-latest` here is load-bearing for a reason that has nothing to do with Miri, and it
-  # is not a leftover: it is the only host that can build the dev-dependency graph `cargo miri
-  # test` needs for an apple target. Moving these cells means getting criterion out of that graph
-  # first — cargo does not allow an optional dev-dependency, so that means the benches moving to
-  # their own workspace member — or putting an osxcross toolchain on the runner, which trades a
-  # runner queue for an unmanaged SDK. Neither is a CI edit.
-  #
-  # The `os` axis is what pins each target to its host. The three `exclude` entries per matrix
-  # keep each target on the host that can build it; two further entries naming
-  # `i686-unknown-linux-gnu` and `powerpc64-unknown-linux-gnu` were dropped in the move, because
-  # neither is in the `target` list, so each excluded nothing while reading as though it did —
-  # `actionlint` had been reporting all four for exactly that reason.
+  # So there is no `os` axis here any more, and no `exclude` list: every cell is `ubuntu-latest`.
+  # Putting `criterion` back into `tokora/Cargo.toml` — or adding any dev-dependency with a
+  # cc-rs build script — puts these 16 cells back on a macOS runner and the 269–347 minute queue
+  # #157 measured back in front of them. `tokora/Cargo.toml` says so where the table is.
   miri-tb:
     name: miri-tb-${{ matrix.target }}-shard${{ matrix.shard }}
     needs: miri-shard-plan
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
         target:
           - x86_64-unknown-linux-gnu
           - x86_64-apple-darwin
@@ -160,14 +156,7 @@ jobs:
           - all_tests
         # Generated from `SHARD_TOTAL` in `ci/miri_shard.py`; never written out here.
         shard: ${{ fromJSON(needs.miri-shard-plan.outputs.shards) }}
-        exclude:
-          - os: ubuntu-latest
-            target: x86_64-apple-darwin
-          - os: ubuntu-latest
-            target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: Cache cargo build and registry
@@ -185,15 +174,14 @@ jobs:
           bash ci/miri_tb.sh ${{ matrix.target }} ${{ matrix.cfg }} ${{ matrix.shard }}
 
   # ── Gate: Miri (Stacked Borrows) ────────────────────────────────────────────
+  # Deliberately the same matrix as `miri-tb` above, `runs-on` included; the note there on why
+  # the apple cells no longer need a macOS host covers these eight too.
   miri-sb:
     name: miri-sb-${{ matrix.target }}-shard${{ matrix.shard }}
     needs: miri-shard-plan
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
         target:
           - x86_64-unknown-linux-gnu
           - x86_64-apple-darwin
@@ -202,14 +190,7 @@ jobs:
           - all_tests
         # Generated from `SHARD_TOTAL` in `ci/miri_shard.py`; never written out here.
         shard: ${{ fromJSON(needs.miri-shard-plan.outputs.shards) }}
-        exclude:
-          - os: ubuntu-latest
-            target: x86_64-apple-darwin
-          - os: ubuntu-latest
-            target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: Cache cargo build and registry

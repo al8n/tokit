@@ -54,9 +54,16 @@ GATE=ci/feature_cfg_coverage.py
 work=$(mktemp -d "${TMPDIR:-/tmp}/feature-cfg-selftest.XXXXXX") || exit 1
 trap 'rm -rf "$work"' EXIT INT TERM
 
-# One pristine copy, re-cloned per case. `cargo metadata --no-deps` needs the workspace and
-# crate manifests; the scan needs `tokora/src`. The declared bench/example targets are not
-# required to exist for `--no-default-features` metadata, so they are not copied.
+# One pristine copy, re-cloned per case. `cargo metadata --no-deps` needs EVERY workspace
+# member's manifest — a `members` entry it cannot load is a hard error, not a skipped package —
+# and it needs each explicitly-`path`'d target to exist, so `tokora-benches` comes over whole
+# (#216). tokora's own `examples/` do not, because its `[[example]]` sections are the only
+# declared targets left whose sources this copy omits and `cargo metadata` is content with a
+# missing autodiscovered directory; the scan itself needs `tokora/src` and nothing else.
+#
+# Copying the workspace root manifest and then NOT copying a member is the failure this comment
+# exists to prevent: it makes all six cases die inside `feature_map()` with a `cargo metadata`
+# exit 101, which reads like a broken gate rather than a broken fixture.
 base=$work/base
 mkdir -p "$base/ci" "$base/tokora" || exit 1
 cp "$root/Cargo.toml" "$base/" || exit 1
@@ -64,6 +71,7 @@ cp "$root/Cargo.toml" "$base/" || exit 1
 cp "$root/$GATE" "$base/ci/" || exit 1
 cp "$root/tokora/Cargo.toml" "$base/tokora/" || exit 1
 cp -R "$root/tokora/src" "$base/tokora/" || exit 1
+cp -R "$root/tokora-benches" "$base/" || exit 1
 
 fails=0
 total=0
