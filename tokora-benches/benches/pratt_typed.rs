@@ -223,7 +223,7 @@
 //! throughout. The toolchain was not recorded. Reproduce the sweep with:
 //!
 //! ```text
-//! cargo bench --bench pratt_typed --features logos -- --warm-up-time 1 --measurement-time 3
+//! cargo bench -p tokora-benches --bench pratt_typed -- --warm-up-time 1 --measurement-time 3
 //! ```
 //!
 //! ## The retention sweep, and the null it found

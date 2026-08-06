@@ -30,13 +30,15 @@
 //! the same event stream the old hand-built setup pushed, with the reservation, mapping and
 //! validation the real path pays.
 //!
-//! # Run it with a named feature set, never `--all-features`
+//! # Do not add `--all-features` to this
 //!
-//! `--all-features` turns on `trace`, which is roughly an order of magnitude slower and
-//! measures a configuration nobody ships:
+//! `--all-features` turns on `trace`, which is roughly an order of magnitude slower and measures
+//! a configuration nobody ships. Nothing needs to be named to avoid it: `tokora-benches` pins the
+//! feature point on its `tokora` dependency — `std`, `logos`, `rowan`, `unstable-raw`,
+//! `combinators`, and deliberately not `trace` — so the plain form is the correct one:
 //!
 //! ```text
-//! cargo bench --no-default-features --features std,logos,rowan --bench cst
+//! cargo bench -p tokora-benches --bench cst
 //! ```
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};

@@ -1,0 +1,103 @@
+[package]
+name = "tokora-benches"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "tokora's criterion benchmarks. Not published; exists so `criterion` is not in tokora's own dependency graph."
+
+# ── WHY THE BENCHES LIVE IN THEIR OWN CRATE ─────────────────────────────────────────────────
+#
+# `criterion` pulls `alloca`, whose build script compiles `alloca.c` through cc-rs. Cross-
+# compiling to an apple target hands the HOST `cc` an `-arch x86_64 -mmacosx-version-min=10.7`,
+# which a Linux `cc` rejects — so any package with `criterion` in `[dev-dependencies]` cannot
+# have its test targets built for an apple target from Linux. Cargo resolves dev-dependencies
+# per PACKAGE, not per target, so `cargo miri test --target x86_64-apple-darwin --test span`
+# built criterion too, and died in `alloca` before Miri ran (#216). Cargo has no optional
+# dev-dependency, so the only way out is a package boundary: criterion is a dev-dependency of
+# THIS package, tokora depends on nothing of the sort, and the 16 apple Miri cells that had to
+# run on a macOS runner for that one reason now run on ubuntu.
+#
+# ── AND WHY THE BENCH TARGETS HAVE NO `required-features` ───────────────────────────────────
+#
+# In `tokora/Cargo.toml` each `[[bench]]` carried `required-features = ["logos", "std", ...]`,
+# because tokora's own features can be off and a bench that names a gated API would then fail
+# to COMPILE. A bench whose required features are unmet is SKIPPED, not failed, and #181 is
+# what that costs: `bench (smoke)` compiled one of five targets and reported `Finished` in
+# ~30ms while claiming all five.
+#
+# Here there is nothing to skip on. This package pins the feature point on its `tokora`
+# dependency below, so the five benches compile under every configuration this package can be
+# built in, and `required-features` would be a tautology. The skip hazard is removed by
+# construction rather than guarded against — though `bench (smoke)` in `.github/workflows/ci.yml`
+# still names each target it builds, derived from `cargo metadata`, because a `[[bench]]`
+# section that goes missing is a different failure from a skipped one and `--benches` would
+# shrug at it.
+
+[dependencies]
+# The exact union of the `required-features` the five `[[bench]]` sections used to declare in
+# `tokora/Cargo.toml`: `logos` + `std` + `combinators` for all five, `rowan` additionally for
+# `cst`, `unstable-raw` additionally for `backtrack`. `default-features = false` so the set is
+# the one written here rather than that plus whatever `default` happens to carry.
+#
+# NOT `--all-features`: that would also turn on `trace`, and `benches/cst.rs`'s own header
+# records that running under `trace` is roughly an order of magnitude slower and a
+# configuration nobody ships.
+tokora = { path = "../tokora", default-features = false, features = [
+  "std",
+  "logos",
+  "rowan",
+  "unstable-raw",
+  "combinators",
+] }
+
+# `benches/input_scan.rs` names `generic_arraydeque::typenum::{U3, U8}` directly, to size the
+# peek window against `tokora::DefaultCache`'s capacity. It is a public dependency of tokora —
+# the window type appears in tokora's own signatures — and the requirement here is the same
+# `0.2` with the same features, so cargo resolves ONE copy and the typenum types match.
+generic-arraydeque = { version = "0.2", default-features = false, features = ["unstable"] }
+
+# `logos` itself is NOT a dependency: the benches reach it as `tokora::logos`, the re-export
+# tokora publishes for whichever logos major its features select, and their `#[logos(crate =
+# logos)]` attributes resolve against that import. Depending on logos here would let this
+# package's copy drift from the one tokora derives against.
+
+[dev-dependencies]
+criterion = "0.8"
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "input_scan"
+path = "benches/input_scan.rs"
+harness = false
+
+[[bench]]
+name = "parser_combinators"
+path = "benches/parser_combinators.rs"
+harness = false
+
+[[bench]]
+name = "pratt_typed"
+path = "benches/pratt_typed.rs"
+harness = false
+# The TYPED pratt driver (`Pratt::parse_input`), which `parser_combinators`'s `pratt_expr` does
+# not reach — that one drives the token-level `InputRef::pratt`. Kept out of
+# `parser_combinators.rs` for three reasons, all of them in the file's own header: it needs a
+# lexer with a non-trivial `L::State` (a different `logos` `extras`, so a different token enum),
+# it deliberately leaves criterion's measurement knobs live where that file pins them in code,
+# and a new file leaves the existing group's ids and baselines untouched.
+
+[[bench]]
+name = "cst"
+path = "benches/cst.rs"
+harness = false
+
+[[bench]]
+name = "backtrack"
+path = "benches/backtrack.rs"
+harness = false
+# Exercises the raw checkpoint triple (`save`/`restore`/`commit`), which tokora makes public
+# only under `unstable-raw` — enabled on the dependency above, for this file.

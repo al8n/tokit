@@ -5,13 +5,13 @@ name: CI
 # There is no CONTRIBUTING.md and no gate script, so the set lives here. Every line exits 0
 # before a push:
 #
-#     cargo fmt --check
-#     cargo +stable clippy --all-features --all-targets --no-deps -- -D warnings
+#     cargo fmt --all --check
+#     cargo +stable clippy --workspace --all-features --all-targets --no-deps -- -D warnings
 #     cargo test --all-features
 #     cargo test --release --all-features
 #     cargo +nightly check -p tokora --all-targets --all-features
 #     cargo check -p tokora --no-default-features
-#     cargo bench --all-features --no-run
+#     cargo bench -p tokora-benches --no-run
 #     RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 #     RUSTDOCFLAGS="-D warnings" cargo doc -p tokora --no-deps --no-default-features
 #     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --all-features --no-deps
@@ -23,11 +23,19 @@ name: CI
 #     bash ci/name_collision/run.sh <merge-base> <inventory.json>   # see that job for the
 #                                                                  # inventory it requires
 #
+# Two of those lines carry a package selection that is not decoration. The workspace declares
+# `default-members = ["tokora"]` — see the root `Cargo.toml` for why — so a bare `cargo clippy`
+# or `cargo bench` at the root does NOT see `tokora-benches`, the member the five benches moved
+# to in #216. `--workspace` on the clippy line and `-p tokora-benches` on the bench line are
+# what keep those five targets in the local set; without them both commands are green and build
+# nothing of them.
+#
 # `cargo bench --no-run` used to be the only line compiling `parser_combinators`, `pratt_typed`,
 # `cst` and `backtrack` — `bench (smoke)` below built only `input_scan` (#181). It now builds
 # and test-runs all five, so this line is redundant with CI; kept as a fast local compile-only
-# check, now `--all-features` so it actually builds all five — none of the five default to
-# enabling `logos`, so the bare form silently compiled zero of them.
+# check. It needs no `--features` any more: `tokora-benches` pins the feature point on its
+# `tokora` dependency, which is also why its bench targets no longer carry `required-features`
+# and so can no longer be silently skipped.
 #
 # Four of the remaining lines look redundant beside a broader command and are not — each catches
 # a class no other line in the set can:
@@ -65,6 +73,10 @@ name: CI
 # `cargo metadata --no-deps`'s, and every "linted by" below was counted off the
 # `--message-format=json` artifact stream, not inferred from a flag's name.
 #
+# There is a SECOND axis now, and it is the same shape: since #216 the workspace has two members
+# and `default-members = ["tokora"]`, so a job that names no package sees tokora's targets and
+# not `tokora-benches`'s. The counts below are tokora's unless the row says otherwise.
+#
 #   * **lib** (1) — built by nearly every job. Clippy-linted by `clippy` and `hack-clippy`; run
 #     as a unittest by `test`, `test-valve-off`, `test-release`, `logos-versions`, `no-std` and
 #     `coverage`.
@@ -75,8 +87,12 @@ name: CI
 #     the `clippy` line report it, rather than by reading the flag list.
 #   * **tests** (103 integration targets) — clippy-linted by `clippy` and by
 #     `hack-clippy --tests`; run by the five test jobs above.
-#   * **benches** (5) — clippy-linted by `clippy`; compiled and executed once each by
-#     `bench (smoke)`.
+#   * **benches** (5, and they belong to `tokora-benches`, not to tokora — #216) — clippy-linted
+#     by `clippy`, which is why that job carries `--workspace`; compiled and executed once each
+#     by `bench (smoke)`, which names each target it builds. tokora itself declares zero bench
+#     targets and `bench = false` on its lib, so `--benches` against tokora now matches nothing.
+#     Neither of those two jobs can drift into building fewer than all five without going red:
+#     see the note on `bench (smoke)`, which is the job #181 was filed against.
 #   * **examples** (8) — clippy-linted by `clippy` **only since #220**; before that `--tests`
 #     and `--benches` were the whole job and neither reaches an example, so all eight had never
 #     been linted and four were red for as long as they had existed. Compiled by
@@ -100,17 +116,26 @@ name: CI
 
 # ── THIS IS THE FAST LANE ───────────────────────────────────────────────────────────────────
 #
-# Every job here runs on `ubuntu-latest`. The Miri matrices — the only macOS-bound cells in the
-# repository — live in `.github/workflows/miri.yml`, and that file's header carries the
-# measurement that separated them (#213): on 2026-08-05 five consecutive main commits merged
+# Every job here runs on `ubuntu-latest`. Since #216 so does every job in every OTHER workflow —
+# `miri.yml`, `pages.yml` and `loc.yml` — and this repository now asks for no macOS runner at
+# all, from anywhere. That was 16 jobs per push, all of them Miri's apple cells, and it was never
+# Miri that needed the host: `criterion` in tokora's `[dev-dependencies]` pulled `alloca`, whose
+# cc-rs build script cannot be run for an apple target from Linux. `miri.yml`'s `miri-tb` header
+# carries the measurement and the in-CI run that proved it.
+#
+# The Miri matrices still live in `.github/workflows/miri.yml`, and that file's header carries
+# the measurement that separated them (#213): on 2026-08-05 five consecutive main commits merged
 # with no CI verdict at all, because a run's conclusion is a property of the WHOLE run and the
 # 24 Miri cells never got runners. In the measured run, 34 of 59 jobs finished inside 50
-# minutes — two of them RED — and none of those 34 verdicts could be read.
+# minutes — two of them RED — and none of those 34 verdicts could be read. Their host is no
+# longer the reason they are slow; their wall clock still is, at roughly two hours a cell before
+# sharding, so the split stands.
 #
 # So the contract is: this workflow's conclusion is the one a merge waits for, and it is
-# answerable in tens of minutes because nothing in it queues for a macOS runner. `Miri` reports
-# on its own clock. Adding a `runs-on:` here that is not `ubuntu-latest` gives that up — the
-# whole lane is then only as fast as its slowest host, which is the state this split undid.
+# answerable in tens of minutes. `Miri` reports on its own clock. Adding a `runs-on:` here that
+# is not `ubuntu-latest` gives that up — the whole lane is then only as fast as its slowest
+# host, which is the state this split undid, and the queue #157 measured at 269–347 minutes is
+# what a macOS runner request buys.
 
 # `paths-ignore` deliberately does NOT carry a blanket `**.md`: the guide chapters under
 # `tokora/src/guide/` are Markdown compiled as doctests through `include_str!` and `README.md`
@@ -211,6 +236,15 @@ jobs:
   # nothing can be filtered out. Narrowing the feature set here without narrowing the claim
   # reopens exactly that hole — name the targets instead, since `--example NAME` errors where
   # `--examples` shrugs.
+  #
+  # `--workspace` is the PACKAGE half of the same hazard, and #216 is when it became load-bearing.
+  # The workspace root declares `default-members = ["tokora"]` — so that `cargo miri test` at the
+  # root cannot pull the bench package's criterion back into the graph — which means the bare
+  # form of this line selects tokora alone. The five benches are `tokora-benches` now, so without
+  # `--workspace` they would have gone unlinted from the moment they moved, silently, with this
+  # job still green and still claiming every target kind. A package SET is acceptable here where
+  # a target filter would not be, because `--no-deps` bounds it to workspace members and both of
+  # them are meant to be linted; a third member would be too.
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -228,8 +262,8 @@ jobs:
             ${{ runner.os }}-clippy-
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable && rustup component add clippy
-      - name: clippy --all-features --all-targets --no-deps -D warnings
-        run: cargo +stable clippy --all-features --all-targets --no-deps -- -D warnings
+      - name: clippy --workspace --all-features --all-targets --no-deps -D warnings
+        run: cargo +stable clippy --workspace --all-features --all-targets --no-deps -- -D warnings
 
   # ── Gate: MSRV (the workspace `rust-version`; see the policy note in Cargo.toml) ─
   msrv:
@@ -261,6 +295,16 @@ jobs:
         run: rustup toolchain install ${{ steps.msrv.outputs.version }} --no-self-update --profile minimal
       - name: cargo +${{ steps.msrv.outputs.version }} check -p tokora --all-features
         run: cargo +${{ steps.msrv.outputs.version }} check -p tokora --all-features
+      # A compensating check for what #216 took away. `criterion` used to be tokora's own
+      # dev-dependency, so the trybuild step below compiled it on the pinned toolchain and the
+      # declared floor covered it. Moving it to `tokora-benches` took it out of every job that
+      # names `-p tokora`, and nothing else in this workflow runs the MSRV toolchain — so a
+      # criterion release, or a bench edit, that needed a newer rustc would have been invisible
+      # here and would only have surfaced as a broken local `cargo bench` on the declared floor.
+      # `--benches` also compiles the five bench SOURCES at MSRV, which is slightly more than
+      # was covered before rather than less.
+      - name: cargo +${{ steps.msrv.outputs.version }} check -p tokora-benches --benches
+        run: cargo +${{ steps.msrv.outputs.version }} check -p tokora-benches --benches
       # The trybuild half of `tests/diagnostics.rs` runs here and nowhere else: its committed
       # `.stderr` files are pinned to the declared MSRV and the harness returns early on any
       # other rustc.
@@ -494,11 +538,22 @@ jobs:
           # `--locked` then refuses base outright.
           #
           # The comparison below is what that copied lock used to prove, made explicit: every
-          # `[[package]]` triple (name, version, source) must match across both locks, with
-          # tokora's own version the one allowed difference, so that a finding cannot be an
-          # artifact of the two `cargo doc` runs linking different versions of some third
-          # crate. Deleting it gives that guarantee up silently. `--locked` stays on both
-          # `cargo doc` calls so a re-resolution during doc generation is refused.
+          # `[[package]]` triple (name, version, source) must match across both locks, so that a
+          # finding cannot be an artifact of the two `cargo doc` runs linking different versions
+          # of some third crate. Deleting it gives that guarantee up silently. `--locked` stays
+          # on both `cargo doc` calls so a re-resolution during doc generation is refused.
+          #
+          # The exemption is PATH/LOCAL entries — the ones a lock records with no `source`,
+          # meaning a workspace member or a path dependency. It used to be the single name
+          # `tokora`, which is the same set written as a literal, and #216 is what made the
+          # difference visible: adding the `tokora-benches` member put a source-less entry in
+          # head's lock and not in base's, and this guard reported the two graphs as disagreeing
+          # over a package that is this branch's own code. A source-less entry is not something
+          # the lock pins in the first place — its content is the working tree, and the two
+          # working trees ARE the two revisions under comparison — so it was never what this
+          # check protected. Third-party entries, which is every entry that carries a `source`,
+          # are still compared exactly. The exempted set is printed rather than dropped
+          # silently, because "the member list changed" is worth seeing in this job's log.
           #
           # Both resolutions run under the step's
           # `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=allow`, so a difference in the two
@@ -538,19 +593,24 @@ jobs:
           if not any(n == "tokora" for n, _, _ in base):
               sys.exit("::error::/tmp/nc/base/Cargo.lock: no tokora [[package]] entry")
 
-          head_set, base_set = set(head), set(base)
-          only_head = {t for t in head_set - base_set if t[0] != "tokora"}
-          only_base = {t for t in base_set - head_set if t[0] != "tokora"}
+          local = sorted({(n, v) for n, v, s in head + base if s is None})
+          print("lock parity: path/local entries exempted from the comparison: "
+                + ", ".join(f"{n} {v}" for n, v in local))
+
+          head_set = {t for t in head if t[2] is not None}
+          base_set = {t for t in base if t[2] is not None}
+          only_head = head_set - base_set
+          only_base = base_set - head_set
 
           if only_head or only_base:
-              print("::error::lock graphs disagree beyond tokora's own version")
+              print("::error::lock graphs disagree on a third-party package")
               for n, v, s in sorted(only_base):
                   print(f"  only in base: {n} {v} ({s or 'path/local'})")
               for n, v, s in sorted(only_head):
                   print(f"  only in head: {n} {v} ({s or 'path/local'})")
               sys.exit(1)
 
-          print("lock parity OK: graphs agree except tokora's own version")
+          print(f"lock parity OK: {len(head_set)} third-party entries agree on both sides")
           PY
           # The per-side resolver for `want`. It reads `cargo metadata` rather than grepping
           # the `[features]` table because that is cargo's own parser: it reports the implicit
@@ -819,18 +879,30 @@ jobs:
 
   # ── Gate: bench SMOKE only ──────────────────────────────────────────────────
   #
-  # Compiles all five declared bench targets and runs each once in test mode (`-- --test`),
-  # which runs every benchmark body once instead of criterion's real sampling loop (#181).
-  # `--no-default-features --features std,logos,rowan,unstable-raw,combinators` is the exact
-  # union of every bench target's `required-features` in `tokora/Cargo.toml` — not
-  # `--all-features`, which would also enable `trace`: `cst.rs`'s own header says running under
-  # `trace` is roughly an order of magnitude slower and a configuration nobody ships.
+  # Compiles every declared bench target and runs each once in test mode (`-- --test`), which
+  # runs every benchmark body once instead of criterion's real sampling loop (#181).
   #
-  # `combinators` is in that union and has to be SPELLED OUT, because `--no-default-features`
-  # turns it off and it is what every bench's `required-features` now carries. A bench whose
-  # required features are not enabled is SKIPPED, not failed, so leaving it out does not red
-  # this job — it compiles zero of the five and reports `Finished` in about 30ms, which is
-  # exactly the shape of the #181 gap this job was created to close.
+  # ── THE FEATURE INCANTATION IS GONE, AND SO IS THE SKIP IT GUARDED ──────────
+  # This line used to read `cargo bench --no-default-features --features
+  # std,logos,rowan,unstable-raw,combinators -- --test`, hand-maintained to equal the union of
+  # the five `[[bench]]` sections' `required-features` in `tokora/Cargo.toml`. #216 moved the
+  # benches into `tokora-benches`, which pins that feature point on its `tokora` dependency
+  # instead, so the bench targets declare no `required-features` at all — and a bench with no
+  # required features cannot be SKIPPED, which is the #181 failure this job exists to close (a
+  # bench whose features are unmet is skipped, not failed: the job once compiled one of five
+  # targets and reported `Finished` in ~30ms). The hazard is now removed by construction rather
+  # than by a list two files apart having to agree.
+  #
+  # ── WHAT REPLACES IT ────────────────────────────────────────────────────────
+  # A different silent shape takes its place: `cargo bench -p tokora-benches` is a package
+  # selection with no target filter, so a `[[bench]]` section that is deleted, renamed or
+  # mis-pathed just makes the job build fewer targets and still report success. So the step
+  # below does not use the bare form. It reads the bench target list out of `cargo metadata` and
+  # passes each as an explicit `--bench NAME` — which ERRORS on a name cargo cannot find, where
+  # `--benches` would shrug — and refuses to run at all if the list it got back is shorter than
+  # the five targets that exist today. Deriving the list rather than hardcoding it is what keeps
+  # a SIXTH bench from being silently unbuilt; the floor is what keeps one of the five from
+  # silently disappearing. Raise the floor when a bench is added.
   #
   # NOT a timed regression gate: GitHub runners are far too noisy for the ±2% discipline these
   # benches are held to locally, so regression numbers are gathered off-CI.
@@ -851,8 +923,46 @@ jobs:
             ${{ runner.os }}-bench-
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
-      - name: cargo bench --no-default-features --features std,logos,rowan,unstable-raw,combinators -- --test
-        run: cargo bench --no-default-features --features std,logos,rowan,unstable-raw,combinators -- --test
+      - name: cargo bench -p tokora-benches, every declared target named explicitly, -- --test
+        run: |
+          set -euo pipefail
+          cargo metadata --no-deps --format-version 1 > /tmp/meta.json
+          python3 - /tmp/meta.json > /tmp/bench_targets.txt <<'PY'
+          import json, sys
+
+          # The floor. It is the count that exists today, asserted rather than assumed: a
+          # `[[bench]]` section that goes missing is not a smaller job, it is an unbuilt bench.
+          EXPECTED_AT_LEAST = 5
+
+          meta = json.load(open(sys.argv[1], encoding="utf-8"))
+          pkgs = [p for p in meta["packages"] if p["name"] == "tokora-benches"]
+          if len(pkgs) != 1:
+              sys.exit(
+                  "::error::expected exactly one workspace package named `tokora-benches`, "
+                  "found %d — the bench package was renamed or dropped from the member list"
+                  % len(pkgs)
+              )
+          names = sorted(t["name"] for t in pkgs[0]["targets"] if t["kind"] == ["bench"])
+          if len(names) < EXPECTED_AT_LEAST:
+              sys.exit(
+                  "::error::tokora-benches declares %d bench targets, expected at least %d: %s"
+                  % (len(names), EXPECTED_AT_LEAST, names)
+              )
+          print("\n".join(names))
+          PY
+          mapfile -t names < /tmp/bench_targets.txt
+          # Re-checked in the shell as well as in python: `mapfile` from a file a dead python
+          # left empty would otherwise leave `args` empty, and a bare `cargo bench
+          # -p tokora-benches` runs everything and reports success — the exact silent shape this
+          # step is built to refuse.
+          if [ "${#names[@]}" -lt 5 ]; then
+            echo "::error::read ${#names[@]} bench target names, expected at least 5"
+            exit 1
+          fi
+          args=()
+          for n in "${names[@]}"; do args+=(--bench "$n"); done
+          echo "bench (smoke): ${#names[@]} named targets — ${names[*]}"
+          cargo bench -p tokora-benches "${args[@]}" -- --test
 
   # ── Gate: cross-compile smoke across extra platforms ────────────────────────
   cross:
@@ -920,8 +1030,14 @@ jobs:
           key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-coverage-
+      # `--exclude tokora-benches` keeps the measured package set exactly what `--workspace` meant
+      # before #216, when `tokora` was the only member. The bench package has no tests and no
+      # library — instrumenting it would add criterion to this job's build for zero covered
+      # lines. `--workspace --exclude <name>` rather than `-p tokora` on purpose: a third member
+      # added later is covered by default and has to be excluded deliberately, where a `-p` list
+      # would silently omit it.
       - name: Generate coverage with llvm-cov
-        run: cargo llvm-cov --all-features --workspace --doctests --lcov --output-path lcov.info
+        run: cargo llvm-cov --all-features --workspace --exclude tokora-benches --doctests --lcov --output-path lcov.info
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v7
         with:
