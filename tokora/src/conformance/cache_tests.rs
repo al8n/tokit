@@ -3451,6 +3451,30 @@ fn census_scan(src: &str) -> CensusScan {
 )]
 fn cache_call_census_every_guarded_call_is_registered() {
   let found = census_scan(include_str!("cache.rs"));
+  let drift = census_drift(&found);
+
+  assert!(
+    drift.is_empty(),
+    "CACHE_CALL_CENSUS drift:\n  {}\n\nEvery call to a Cache method that returns an entry must \
+     carry an anchor comment saying what happens to the value — routed through a comparing \
+     helper, compared in place, or checked only for absence because absence is the law — and \
+     must be registered in CALL_SITES with the same kind AND the same receiver. Six review \
+     rounds of #183 each found one site that had been reasoned about and missed (grep \
+     CACHE_CALL_CENSUS). Route the call, anchor it, and register it in the same commit. A macro \
+     or attribute that is not allowlisted is refused rather than guessed at: syn does not expand, \
+     so an unlisted expansion could carry a call that appears nowhere in the source.",
+    drift.join("\n  ")
+  );
+}
+
+/// Every way a scan can be drift, as the lines the failure prints.
+///
+/// Split out of the test above so it can be *called with a scan that is not clean*. It has to be:
+/// on a conforming `cache.rs` not one of these seven arms executes, so nothing would otherwise
+/// exercise the messages themselves — and a swapped placeholder in a failure message is invisible
+/// exactly when it matters, which is the shape of defect this whole census exists to refuse.
+/// [`cache_call_census_names_every_defect_it_reports`] drives all seven.
+fn census_drift(found: &CensusScan) -> std::vec::Vec<std::string::String> {
   let mut drift = std::vec::Vec::new();
 
   // 1. Identity: every call carries an anchor of its own, on the right receiver, and the anchor
@@ -3545,18 +3569,7 @@ fn cache_call_census_every_guarded_call_is_registered() {
     ));
   }
 
-  assert!(
-    drift.is_empty(),
-    "CACHE_CALL_CENSUS drift:\n  {}\n\nEvery call to a Cache method that returns an entry must \
-     carry an anchor comment saying what happens to the value — routed through a comparing \
-     helper, compared in place, or checked only for absence because absence is the law — and \
-     must be registered in CALL_SITES with the same kind AND the same receiver. Six review \
-     rounds of #183 each found one site that had been reasoned about and missed (grep \
-     CACHE_CALL_CENSUS). Route the call, anchor it, and register it in the same commit. A macro \
-     or attribute that is not allowlisted is refused rather than guessed at: syn does not expand, \
-     so an unlisted expansion could carry a call that appears nowhere in the source.",
-    drift.join("\n  ")
-  );
+  drift
 }
 
 /// CACHE_CALL_CENSUS — the positive control: a census that cannot fail is not a census.
@@ -3882,5 +3895,137 @@ impl Thing {
     "a body that does not parse, and a macro that is refused unread, both yield no calls — by \
      construction: {:?}",
     found.calls
+  );
+}
+
+/// CACHE_CALL_CENSUS — the seven drift arms, each driven at least once.
+///
+/// A census is two halves: a walk that finds things, and a report that names them. The other
+/// controls exercise the walk by asserting on what [`census_scan`] returns. Nothing exercised the
+/// **report** — on a conforming `cache.rs` not one `drift` arm runs, so every failure message
+/// here was unexecuted code, and a swapped placeholder in one would be invisible in exactly the
+/// situation the message exists for.
+///
+/// So this plants one source that trips all seven at once and asserts the exact lines. The
+/// planted file is also the permanent form of the two falsifications #183's eighth round left
+/// open: `r#pop_front` for the raw-identifier finding, `hidden!` for the macro-expansion one.
+/// Both were reproduced by hand against the recovered census — green, with the calls live — and a
+/// reproduction that is not a test is a story, so they are tests.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "parses a literal and formats strings: no UB surface, and miri interprets every byte"
+)]
+fn cache_call_census_names_every_defect_it_reports() {
+  // `drained_front` and `push_back_expecting` are real CALL_SITES rows, used here so the
+  // registered-count and anchor-kind arms have something to disagree with.
+  let planted = r#"
+impl Thing {
+  fn drained_front(&self, cache: &mut C) {
+    let _ = cache.pop_front();
+    // CACHE_CALL_CENSUS: absence
+    let _ = cache.r#pop_front();
+  }
+
+  fn push_back_expecting(&self, cache: &mut C) {
+    // CACHE_CALL_CENSUS: routed
+    let _ = other.push_back(tok);
+    let _ = Cache::peek_one;
+    let _ = hidden!(cache);
+    matches!(x, Some(_) if y.len() > 0)
+  }
+
+  #[rewrites_me]
+  fn attributed(&self) {
+    // CACHE_CALL_CENSUS: routed
+    let _ = 1;
+  }
+}
+"#;
+  let drift = census_drift(&census_scan(planted));
+  let want = std::vec![
+    // 1a. A call with no anchor of its own — the plain, ordinary miss, and the one the whole
+    //     census exists for.
+    std::string::String::from(
+      "conformance/cache.rs:4: `drained_front` calls `cache.pop_front` with no `// CACHE_CALL_CENSUS: <kind>` anchor of its own"
+    ),
+    // 1b. Anchored `absence` where CALL_SITES registers `routed`: a site reclassified by editing
+    //     one of the two places. Also the RAW-IDENTIFIER finding — `r#pop_front` is seen at all
+    //     only because the walk unraws, and before that it matched nothing anywhere.
+    std::string::String::from(
+      "conformance/cache.rs:6: `drained_front`'s `cache.pop_front` is anchored `absence` but registered `routed`"
+    ),
+    // 1c. Anchored and registered, but not for THIS receiver.
+    std::string::String::from(
+      "conformance/cache.rs:11: `push_back_expecting` calls `other.push_back` (anchored `routed`) and is NOT in CALL_SITES for that receiver"
+    ),
+    // 2. The inventory, in both directions.
+    std::string::String::from(
+      "CACHE_CALL_CENSUS: `drained_front` calls `cache.pop_front` 2 time(s), registered for 1"
+    ),
+    // 3. An anchor with no call bound to it.
+    std::string::String::from(
+      "conformance/cache.rs:19: a `CACHE_CALL_CENSUS:` anchor with no call bound to it"
+    ),
+    // 4. A guarded method named as a function item.
+    std::string::String::from(
+      "conformance/cache.rs:12: `push_back_expecting` names a guarded method as a function item rather than calling it; a call through that pointer would be invisible to this census"
+    ),
+    // 5. The MACRO-EXPANSION finding: an invocation naming nothing guarded, which the census now
+    //    refuses instead of walking.
+    std::string::String::from(
+      "conformance/cache.rs:13: `push_back_expecting` invokes `hidden!`, which is not in MACRO_ALLOWLIST; syn does not expand macros, so its expansion could contain a guarded call that appears nowhere in this source"
+    ),
+    // 6. An attribute macro, which never reaches `visit_macro` at all.
+    std::string::String::from(
+      "conformance/cache.rs:17: `attributed` carries `#[rewrites_me]`, which is not allowlisted; an attribute macro rewrites the item this census is reading"
+    ),
+    // 7. The residue: an allowlisted macro whose body the parse could not read.
+    std::string::String::from(
+      "conformance/cache.rs:14: `push_back_expecting`'s `matches!` body does not parse as an expression list, so the census did not walk it"
+    ),
+  ];
+  let missing: std::vec::Vec<&std::string::String> =
+    want.iter().filter(|w| !drift.contains(w)).collect();
+  assert!(
+    missing.is_empty(),
+    "CACHE_CALL_CENSUS drift messages changed or stopped firing.\nmissing:\n  {}\nactual:\n  {}",
+    missing
+      .iter()
+      .map(|s| s.as_str())
+      .collect::<std::vec::Vec<_>>()
+      .join("\n  "),
+    drift.join("\n  ")
+  );
+  // Arm 2 sweeps the whole of CALL_SITES, so scanning a snippet also reports every row this
+  // planted file does not contain — an artifact of the fixture, not of the census. So exactness
+  // is checked over the other six arms, the ones driven by what the file *contains*: an extra
+  // line among those means a shape is reported twice, or reported where it should not be.
+  let (inventory, located): (std::vec::Vec<_>, std::vec::Vec<_>) = drift
+    .iter()
+    .partition(|d| d.starts_with("CACHE_CALL_CENSUS: "));
+  let want_located = want.len() - 1;
+  assert!(
+    located.len() == want_located,
+    "CACHE_CALL_CENSUS reported {} located drift line(s), expected exactly {}.\nactual:\n  {}",
+    located.len(),
+    want_located,
+    drift.join("\n  ")
+  );
+  // And the inventory arm fires for the planted count mismatch specifically, not merely somewhere.
+  assert!(
+    inventory.iter().any(|d| d.as_str()
+      == "CACHE_CALL_CENSUS: `drained_front` calls `cache.pop_front` 2 time(s), registered for 1"),
+    "the inventory arm must name the site whose count moved:\n  {}",
+    drift.join("\n  ")
+  );
+  // And the arm that must stay silent: `names_guarded` is only appended when the unread tokens
+  // really do name one, so the harmless `matches!` above must NOT carry that tail.
+  assert!(
+    !drift
+      .iter()
+      .any(|d| d.contains("and its tokens name a guarded method")),
+    "the opaque-macro tail is for a body whose tokens name a guarded method; this one's do not:\n  {}",
+    drift.join("\n  ")
   );
 }
