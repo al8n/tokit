@@ -27,22 +27,29 @@ use super::*;
 /// gap-tiled tree. A wrapper must forward
 /// [`Emitter::commit_token`] alongside these methods.
 ///
-/// # Defaulted no-ops: diagnostics-only emitters opt in trivially
+/// # Four defaulted no-ops, one required method: what a diagnostics-only emitter writes
 ///
-/// Every method has an empty (or inert-value) default, so an emitter with no event channel
+/// Four of the five event methods have an empty (or inert-value) default, so an emitter with
+/// no event channel opts in with an `impl` whose entire body is the fifth
 #[cfg_attr(
   any(feature = "std", feature = "alloc"),
-  doc = " opts in with an empty `impl` — the crate does exactly that for [`Fatal`], [`Verbose`],"
+  doc = " — the crate does exactly that for [`Fatal`], [`Verbose`],"
 )]
 #[cfg_attr(
   not(any(feature = "std", feature = "alloc")),
-  doc = " opts in with an empty `impl` — the crate does exactly that for [`Fatal`], `Verbose`,"
+  doc = " — the crate does exactly that for [`Fatal`], `Verbose`,"
 )]
 /// [`Silent`], and [`Ignored`](crate::utils::marker::Ignored). That is what makes *one*
 /// parser assembly serve both configurations: over a plain diagnostics emitter the event
 /// calls compile to nothing (reference-taking signatures, empty inlined bodies — the
 /// zero-cost bar is byte-identical machine code, held by the `__text`-hash standard); over a
 /// recording sink the same calls buffer the tree.
+///
+/// The fifth, [`cst_demote`](Self::cst_demote), is **required**: an implementor writes the
+/// one-line discard itself rather than inheriting it. The asymmetry is a rule, not an
+/// oversight — see *Required, not defaulted* on that method for the failure-direction test
+/// it is the only member of this trait to fail, and for what that test asks of any CST
+/// method added later.
 ///
 /// The recording implementation is the `rowan`-gated `Sink`, which buffers events under
 /// the one emitter checkpoint/rewind mark so backtracking rewinds the tree exactly as it
@@ -158,6 +165,40 @@ pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// argument [`cst_finish`](Self::cst_finish) takes, checked here at the emit site because
   /// the mark names the exact slot to check.
   ///
+  /// # Required, not defaulted
+  ///
+  /// This is the one method on this trait with **no default body**, so every implementor
+  /// writes it: a diagnostics-only emitter with a one-line discard, a wrapper by forwarding to
+  /// its inner. The other four keep their defaults. The difference is not this method's
+  /// importance — it is the **direction its absence fails in**, and that direction is the rule
+  /// this trait applies to defaults.
+  ///
+  /// Inherit any of the other four alone, over an otherwise-forwarded channel, and the first
+  /// consequence is an **absence**, announced loudly, on a path every test walks: a finish or a
+  /// demote arriving unopened is `cst::FinishError::OrphanFinish` (or `MismatchedFinish`), a
+  /// node nothing ever closes is `UnclosedNodes` on the *first successful* parse, an inert mark
+  /// spent on a recording sink is the identity-wall panic in every build, a swallowed
+  /// retro-wrap lands its paired finish elsewhere as a `MismatchedFinish`. Inherit **this** one
+  /// and the first consequence is a **presence**, silent, on error paths only: nothing happens
+  /// at all until a [`node`](crate::parser::node) fails, and then the channel below keeps a
+  /// `StartNode` open. That stream is byte-identical to the one an escaped panic leaves, so
+  /// `Cst::finish` refuses a grammar that did everything right (`UnclosedNodes`, misattributed)
+  /// and `Cst::finish_partial` materializes the very node the grammar retracted. The same
+  /// byte-identity is why no sink-side check could recover the difference: a sink cannot tell a
+  /// swallowed demote from a legal panic residue, so there is no backstop to fall back on.
+  ///
+  /// [`Emitter::commit_token`] keeps *its* default under this rule rather than in spite of it —
+  /// its inheritance fails toward absence and it has typed finish-time backstops
+  /// (`cst::FinishError::StructureWithoutTokens`, `UncoveredGap`). So: **a method whose default
+  /// cannot be backstopped and whose absence fails toward a silently wrong tree does not get a
+  /// default.** That governs growth as well as today's surface — a CST method added after this
+  /// one either passes the failure-direction test or ships behind a new bound, never as a
+  /// default on this trait.
+  ///
+  /// The cost to an emitter with no event channel is one line, and the line is not noise: such
+  /// an emitter genuinely does discard the failing exit, and now says so where its own reviewer
+  /// can read it, instead of inheriting the decision from a trait it never opened.
+  ///
   /// # Append-only, like every other structural decision
   ///
   /// A recording sink **appends** an event naming the slot; it does not rewrite the slot. That
@@ -222,13 +263,9 @@ pub trait CstEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// cannot trip it — `node(kind, p)` mints and spends its mark inside one call frame, so
   /// nested brackets close last-in-first-out structurally — and a raw caller that hits it
   /// should emit the two closings innermost-first.
-  #[inline(always)]
   fn cst_demote(&mut self, mark: EventMark, kind: u16)
   where
-    L: Lexer<'a>,
-  {
-    let _ = (mark, kind);
-  }
+    L: Lexer<'a>;
 
   /// Appends an inert tombstone and returns the [`EventMark`] naming it — the anchor for a
   /// later retro-wrap ([`cst_start_at`](Self::cst_start_at)). An unspent mark costs
@@ -313,27 +350,74 @@ where
   }
 }
 
-// The shipped diagnostics-only emitters opt into the event channel with the defaulted
-// no-ops: one parser assembly can then bound `Ctx::Emitter: CstEmitter` and run tree-less
-// (today's behavior, zero cost) or tree-building (a `Sink`) by configuration alone. The
-// wrapper-emitter trap this trait exists to close is untouched: a *wrapper* type gets no
-// blanket opt-in and must implement (and forward) the trait deliberately.
+// The shipped diagnostics-only emitters opt into the event channel with the four defaulted
+// no-ops plus the one body below: one parser assembly can then bound
+// `Ctx::Emitter: CstEmitter` and run tree-less (today's behavior, zero cost) or tree-building
+// (a `Sink`) by configuration alone. The wrapper-emitter trap this trait exists to close is
+// untouched: a *wrapper* type gets no blanket opt-in and must implement (and forward) the
+// trait deliberately.
+//
+// THE DISCARD, WRITTEN OUT FOUR TIMES, AND WHY IT IS NOT DEFAULTED ONCE. These four have no
+// event channel, so the failing exit of a node bracket has nothing to un-open and the right
+// body is empty. A default would spell the same thing in one place — and would then be
+// *inheritable*, which is precisely the property that must not exist: a wrapper emitter over a
+// recording sink inherits it too, and on `node()`'s failing exit its inner keeps a `StartNode`
+// open with no diagnostic anywhere and no possible sink-side backstop (a swallowed demote and
+// a legal escaped-panic residue leave byte-identical streams). Requiring the method costs
+// these four one line each and buys `E0046` at the one place that can tell the two intents
+// apart: the implementor's own impl block. See `CstEmitter::cst_demote`'s *Required, not
+// defaulted* for the failure-direction rule this is an application of.
 
-impl<'a, L, E, Lang: ?Sized> CstEmitter<'a, L, Lang> for Fatal<E, Lang> where
-  Self: Emitter<'a, L, Lang>
+impl<'a, L, E, Lang: ?Sized> CstEmitter<'a, L, Lang> for Fatal<E, Lang>
+where
+  Self: Emitter<'a, L, Lang>,
 {
+  #[inline(always)]
+  fn cst_demote(&mut self, mark: EventMark, kind: u16)
+  where
+    L: Lexer<'a>,
+  {
+    let _ = (mark, kind);
+  }
 }
 
-impl<'a, L, E, Lang: ?Sized> CstEmitter<'a, L, Lang> for Silent<E, Lang> where
-  Self: Emitter<'a, L, Lang>
+impl<'a, L, E, Lang: ?Sized> CstEmitter<'a, L, Lang> for Silent<E, Lang>
+where
+  Self: Emitter<'a, L, Lang>,
 {
+  #[inline(always)]
+  fn cst_demote(&mut self, mark: EventMark, kind: u16)
+  where
+    L: Lexer<'a>,
+  {
+    let _ = (mark, kind);
+  }
 }
 
-impl<'a, L, Lang: ?Sized> CstEmitter<'a, L, Lang> for Ignored where Self: Emitter<'a, L, Lang> {}
+impl<'a, L, Lang: ?Sized> CstEmitter<'a, L, Lang> for Ignored
+where
+  Self: Emitter<'a, L, Lang>,
+{
+  #[inline(always)]
+  fn cst_demote(&mut self, mark: EventMark, kind: u16)
+  where
+    L: Lexer<'a>,
+  {
+    let _ = (mark, kind);
+  }
+}
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "std", feature = "alloc"))))]
-impl<'a, L, Error, S, Lang: ?Sized> CstEmitter<'a, L, Lang> for Verbose<Error, S, Lang> where
-  Self: Emitter<'a, L, Lang>
+impl<'a, L, Error, S, Lang: ?Sized> CstEmitter<'a, L, Lang> for Verbose<Error, S, Lang>
+where
+  Self: Emitter<'a, L, Lang>,
 {
+  #[inline(always)]
+  fn cst_demote(&mut self, mark: EventMark, kind: u16)
+  where
+    L: Lexer<'a>,
+  {
+    let _ = (mark, kind);
+  }
 }

@@ -236,6 +236,9 @@ DOCS_RS_MAP = {
   "crate::emitter": "emitter/index.html",
   "crate::emitter::ComposableEmitter": "emitter/trait.ComposableEmitter.html",
   "crate::emitter::CstEmitter": "emitter/trait.CstEmitter.html",
+  # `cst_demote` is the trait's one REQUIRED method, so rustdoc anchors it as `#tymethod.`, not
+  # `#method.` like its four defaulted siblings. Re-defaulting it would move the anchor.
+  "crate::emitter::CstEmitter::cst_demote": "emitter/trait.CstEmitter.html#tymethod.cst_demote",
   "crate::emitter::CstEmitter::cst_mark": "emitter/trait.CstEmitter.html#method.cst_mark",
   "crate::emitter::CstEmitter::cst_start_at": "emitter/trait.CstEmitter.html#method.cst_start_at",
   "crate::emitter::Diagnostic": "emitter/struct.Diagnostic.html",

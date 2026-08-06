@@ -37,9 +37,10 @@
 //! # Scope
 //!
 //! This census covers `impl_/verbose/**`. One `impl … for Verbose` lives outside it —
-//! `emitter/cst.rs`'s empty `CstEmitter` impl — which carries no diagnostic payload and could
-//! not record if it wanted to (`Verbose::record` is private to this subtree). It is asserted
-//! to contain no emit channel at all, so the scope statement is a test rather than a claim.
+//! `emitter/cst.rs`'s `CstEmitter` impl, whose whole body is the required `cst_demote`
+//! discard — which carries no diagnostic payload and could not record if it wanted to
+//! (`Verbose::record` is private to this subtree). It is asserted to contain no emit channel
+//! at all, so the scope statement is a test rather than a claim.
 //!
 //! Counting is line-based and skips `//`-prefixed lines, so doc references to these names do
 //! not count; only code does. Keep code mentions of the counted names off comment-trailing

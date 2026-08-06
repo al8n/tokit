@@ -6601,6 +6601,14 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'i
 /// could not carry a CST parse at all (`CstEmitter` is a bound, not a default, on the `node()`
 /// combinators), so the realistic adversary is a wrapper that forwards everything a tree needs
 /// and still hides the binding. Pin 5 is the shape that needs it.
+///
+/// One of the five is no longer forwarded voluntarily: as of 0.9.0 `cst_demote` is a **required**
+/// method, so rustc refuses this impl unless the line below is present. That is the whole reach of
+/// that change and it is worth stating here, next to the residue it does *not* touch — this type's
+/// omission is `Emitter::bound_source`, which is defaulted on the **core** trait and stays that
+/// way, so what the three cells below pin is unchanged. What is gone is the *silent* half of the
+/// same shape on the CST surface: a wrapper can still discard the failing exit, but only by
+/// writing the discard where its own reviewer reads it.
 impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'inp> {
   fn cst_start(&mut self, kind: u16) -> EventMark {
     self.0.cst_start(kind)
@@ -7059,6 +7067,17 @@ fn conformance_emitter_kit_refuses_a_non_forwarding_wrapper() {
 /// published bypasses is the `## Panics` fiction this release deleted nine of, in a different
 /// medium.
 ///
+/// **What 0.9.0 narrowed, and what it left alone.** The cell used to state the general form as
+/// "a wrapper writing `impl CstEmitter for W {}` satisfies every CST bound while inheriting every
+/// default". That sentence is now stale in the good direction and is reworded below: `cst_demote`
+/// — the node bracket's failing exit — is a **required** method, so the empty impl no longer
+/// compiles and the one default whose inheritance produced a *silently wrong tree* cannot be
+/// inherited at all. The residue this cell pins is untouched by that, and the reason is worth
+/// keeping next to it: `bound_source` lives on the **core** `Emitter` trait, where the defaults
+/// are the promise diagnostics-only emitters were made, and its inheritance fails toward an
+/// *absence* (the check does not run) rather than toward a wrong tree. Same grading, opposite
+/// answer — see `CstEmitter::cst_demote`'s *Required, not defaulted*.
+///
 /// **The handle no longer hands out the sink; a callback parameter still does.** Wrapping a
 /// sink needs a `Sink` value or a `&mut Sink`, and the *handle* routes are shut — `Sink::new`,
 /// `InputRef::emitter` and `Input::emitter`/`into_emitter` are crate-private,
@@ -7091,7 +7110,8 @@ fn a_non_forwarding_wrapper_is_not_caught() {
     "XY",
     "the residue: an emitter wrapper that does not forward `bound_source` gives up the \
      guarantee for whatever it wraps, and no bound can see the omission — a wrapper writing \
-     `impl CstEmitter for W {{}}` satisfies every CST bound while inheriting every default"
+     `impl CstEmitter for W {{ fn cst_demote(..) {{}} }}`, the smallest impl that still \
+     compiles, satisfies every CST bound while inheriting every default it is still allowed to"
   );
 }
 

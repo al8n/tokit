@@ -153,10 +153,15 @@ of them regardless.
 ### The one capability that binds rather than defaults
 
 [`CstEmitter`](crate::emitter::CstEmitter) is the exception worth naming, because it inverts the
-default's purpose. Its methods (`cst_start` / `cst_finish`, and the retro-wrap pair
-`cst_mark` / `cst_start_at`) all have no-op defaults, so `Fatal` / `Verbose` / `Silent` /
-[`Ignored`](crate::emitter::Ignored) are `CstEmitter` for free and a tree-less parse compiles the
-event calls to nothing. But a tree-*producing* parse path bounds `Ctx::Emitter: CstEmitter` anyway —
+default's purpose. Four of its five methods (`cst_start` / `cst_finish`, and the retro-wrap pair
+`cst_mark` / `cst_start_at`) have no-op defaults, so `Fatal` / `Verbose` / `Silent` /
+[`Ignored`](crate::emitter::Ignored) are `CstEmitter` for one written line and a tree-less parse
+compiles the event calls to nothing. That line is the fifth method,
+[`cst_demote`](crate::emitter::CstEmitter::cst_demote) — the node bracket's failing exit, and
+**required** for the same reason [`rewind`](crate::Emitter::rewind) is (the next section): an
+inherited no-op there is not an absence someone would notice on the first parse but a *presence*
+nothing can detect — a node the grammar retracted, left open in whatever channel sits below, on
+error paths only. But a tree-*producing* parse path bounds `Ctx::Emitter: CstEmitter` anyway —
 not to reach a method the default already provides, but to make the bound itself load-bearing: a
 wrapper emitter that forwarded the diagnostic surface and forgot the structure surface would produce
 a parse whose diagnostics flow perfectly and whose tree is *silently empty*. On every other
@@ -165,7 +170,7 @@ is the one place the design binds instead of trusting a default. The recording i
 `rowan`-gated `cst::Sink`, the subject of the event-stream CST chapter (its
 vocabulary lives in [`crate::cst`]).
 
-## The one method the design refuses to default
+## The core trait's one method the design refuses to default
 
 Everything past the three emit verbs is defaulted — with a single, deliberate exception:
 [`rewind`](crate::Emitter::rewind) has no default body. Every emitter must write it, and that is a
@@ -182,6 +187,12 @@ and [`Ignored`](crate::emitter::Ignored) each write one — but the compiler mak
 the question is never skipped by accident. `checkpoint` defaults to `0` and `release` defaults to a
 no-op precisely because a stateless emitter genuinely has nothing to mark or reclaim; `rewind` is
 the one place where silence would be a correctness bug, so silence is not allowed to be the default.
+
+[`CstEmitter::cst_demote`](crate::emitter::CstEmitter::cst_demote) is the same decision taken again
+on the capability trait, and the test is the same one stated generally: a default is allowed when
+inheriting it fails toward an *absence* something downstream reports, and refused when inheriting it
+fails toward a *presence* nothing can. `rewind` is a phantom diagnostic; `cst_demote` is a phantom
+node. Every other method on both traits keeps its default because its absence announces itself.
 
 ## checkpoint / rewind / release: the emitter's transactional surface
 

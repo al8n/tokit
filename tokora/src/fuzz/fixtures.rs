@@ -419,8 +419,19 @@ impl crate::emitter::ValueKeyedEmitter for CountEmitter {}
 /// scripts satisfy the `Ctx::Emitter: CstEmitter` bound. The recording twin — the same
 /// ops over a real `Sink` with the tree-equality oracle — is the `rowan`-gated
 /// `fuzz::cst` case kind.
-impl<'a, L, Lang: ?Sized> crate::emitter::CstEmitter<'a, L, Lang> for CountEmitter where L: Lexer<'a>
-{}
+///
+/// One member is not defaulted and so is written out: `cst_demote`, the node bracket's failing
+/// exit, is discarded here because there is no event channel to un-open — the deliberate
+/// counterpart of a wrapper, which must forward it (see `CstEmitter::cst_demote`).
+impl<'a, L, Lang: ?Sized> crate::emitter::CstEmitter<'a, L, Lang> for CountEmitter
+where
+  L: Lexer<'a>,
+{
+  #[inline(always)]
+  fn cst_demote(&mut self, mark: crate::cst::event::EventMark, kind: u16) {
+    let _ = (mark, kind);
+  }
+}
 
 // ── Context wiring ───────────────────────────────────────────────────────────────────────────────
 

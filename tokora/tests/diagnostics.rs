@@ -182,6 +182,17 @@ fn every_ui_case_file_is_registered() {
 /// signature change away from silently ceasing to hold. The closure case is the shape a grammar
 /// would actually write; the `_impl` case closes the "that is just closure inference" reading by
 /// attacking the trait boundary directly.
+///
+/// `cst_demote_cannot_be_inherited` pins a **missing default**, which is a subject with no runtime
+/// shadow at all: `CstEmitter::cst_demote` has no default body, so a wrapper that forwards the four
+/// 0.8 CST methods and stops fails with `E0046` instead of inheriting an empty failing exit. The
+/// case's teeth point forward rather than back — the day someone re-adds that default "for
+/// convenience", this file starts compiling and a `compile_fail` case that compiles is a failing
+/// test. That is the *only* signal there would be: an inherited demote is silent on every success
+/// path, byte-perfect in the buffer, and its error-path residue is byte-identical to an escaped
+/// panic's, so no sink-side check and no other gate can see it. Same reason the two session-point
+/// cases exist — the guarantee lives entirely in the type system, so it needs a test that compiles
+/// nothing.
 const BOUND_CASES: &[&str] = &[
   "tests/ui/session_sink.rs",
   "tests/ui/bundle1_policy.rs",
@@ -189,6 +200,7 @@ const BOUND_CASES: &[&str] = &[
   "tests/ui/descent_dropped_early.rs",
   "tests/ui/session_point_cannot_cross_into_a_bracket.rs",
   "tests/ui/session_point_cannot_cross_into_a_bracket_impl.rs",
+  "tests/ui/cst_demote_cannot_be_inherited.rs",
 ];
 
 /// Per case: the ui file, the curated headline its trait's attribute must produce, and

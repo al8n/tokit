@@ -1,0 +1,10 @@
+error[E0046]: not all trait items implemented, missing: `cst_demote`
+  --> tests/ui/cst_demote_cannot_be_inherited.rs:71:1
+   |
+71 | / impl<'inp, L, E> CstEmitter<'inp, L> for Wrapper<E>
+72 | | where
+73 | |   L: Lexer<'inp>,
+74 | |   E: CstEmitter<'inp, L>,
+   | |_________________________^ missing `cst_demote` in implementation
+   |
+   = help: implement the missing item: `fn cst_demote(&mut self, _: EventMark, _: u16) { todo!() }`

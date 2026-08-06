@@ -156,12 +156,10 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   What breaks — two shapes, both in the emitter layer, none in a grammar. An emitter that
   **overrides** `cst_start` must now return the `EventMark` naming the slot it opened: a
   wrapper forwards the inner's value unchanged, and an emitter with no event channel should
-  not override the method at all and inherits the defaulted inert mark. And an emitter that
-  overrides any structuring method should also forward `cst_demote`, for the same reason it
-  forwards the rest — a wrapper that forwards `cst_start` and inherits the `cst_demote` no-op
-  leaves its inner carrying a dangling open node for every `Err` a `node()` sees. `cst_demote`
-  is defaulted, so that is a silent gap rather than a compile error, the same class
-  `commit_token` already had; the sink's composition census now covers it. Grammars are
+  not override the method at all and inherits the defaulted inert mark. And **every**
+  implementor now writes `cst_demote`, because it is a required method rather than a defaulted
+  one — a wrapper forwards it, a diagnostics-only emitter discards it in one line. That is the
+  next entry, and it is the half of this migration the compiler can point at. Grammars are
   untouched: `node`, `node_at` and `node_opt` are unchanged at their call sites, and the three
   surfaces that forward the event channel (`EmitterView`, `InputRef`, `ParseState`) carry
   `cst_demote` alongside the rest.
@@ -267,15 +265,69 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
 
   `cargo semver-checks` reports this, and that is expected and acknowledged here rather than
   suppressed there: `cst_start`'s return type changed on a public trait, and `cst_demote` is a
-  new defaulted trait method. Both are intentional, both are described above, and 0.9.0 is the
-  vehicle.
+  new **required** trait method. Both are intentional, both are described above (the second in
+  the entry below), and 0.9.0 is the vehicle.
 
   The change costs a diagnostics-only parse **nothing, verified rather than asserted**: over
-  `Fatal` / `Verbose` / `Silent` the event methods are defaulted `#[inline(always)]` no-ops and
-  the handback is a dead `Copy` constant, and a fixture exercising the whole `node` family
-  compiles to a **byte-identical binary** before and after — positive control, perturbing
-  `cst_demote`'s default to a `black_box` changes it. The four-corpora tree-identity gate is
-  byte-identical on all four, error corpora included.
+  `Fatal` / `Verbose` / `Silent` the event methods are `#[inline(always)]` no-ops — four
+  inherited, `cst_demote` written out per emitter with the identical body — and the handback is
+  a dead `Copy` constant; a fixture exercising the whole `node` family compiles to a
+  **byte-identical binary** before and after — positive control, perturbing `cst_demote`'s body
+  to a `black_box` changes it. The four-corpora tree-identity gate is byte-identical on all
+  four, error corpora included.
+  — *(#169)*
+
+- **`CstEmitter::cst_demote` is a required method, not a defaulted one.** Every implementor
+  writes it: a wrapper by forwarding to its inner, an emitter with no event channel with a
+  one-line discard. The other four CST methods keep their no-op defaults, and that asymmetry is
+  a rule rather than an inconsistency — it is stated once in the trait docs and it governs what
+  may be added to this trait later.
+
+  **Why.** The method arrived defaulted in the entry above, and the review round after it built
+  the trap by construction: a 0.8-era wrapper that correctly forwarded all four CST methods
+  fails its rebase onto 0.9.0 with *exactly one* diagnostic, `E0053` on `cst_start`, whose
+  rustc fix-it writes the minimal migration itself and names `cst_demote` nowhere. Apply the
+  suggestion and the wrapper compiles with zero warnings, is byte-perfect on every success
+  path, and starves only the failing exit — the inner channel keeps a `StartNode` that no exit
+  closes, on error paths, silently. A wrapper that was correct becomes incorrect with no change
+  on its part, steered there by the compiler's own suggestion. Nothing downstream can recover
+  it either: the starved stream is byte-identical to the one an escaped panic leaves, so strict
+  `finish` refuses a grammar that did everything right (`UnclosedNodes`, misattributed) and
+  `finish_partial` materializes the node the grammar retracted. There is no sink-side wall to
+  build — the sink cannot tell a swallowed demote from a legal panic residue — which is why the
+  wall is the type system.
+
+  **Why only this one.** Grade each default by what happens when it is inherited alone over an
+  otherwise-forwarded channel. `cst_start`, `cst_finish`, `cst_mark` and `cst_start_at` each
+  fail toward an *absence* announced loudly on a path every test walks: `OrphanFinish` or
+  `MismatchedFinish`, `UnclosedNodes` on the first successful parse, or the identity-wall panic
+  in every build. `cst_demote` fails toward a *presence*, silently, through the door built for
+  error recovery, on the paths test suites cover worst. `Emitter::commit_token` keeps its own
+  default under this same test rather than in spite of it — its absence is loud and it has
+  typed finish-time backstops (`StructureWithoutTokens`, `UncoveredGap`). So the rule, and it
+  is the one that governs growth: **a method whose default cannot be backstopped and whose
+  absence fails toward a silently wrong tree does not get a default.** A CST method added after
+  this one either passes that test or ships behind a new bound.
+
+  **Migration**, both populations, one line each:
+
+  - *A wrapper or instrumentor* — forward it, exactly as it forwards `cst_start`:
+    `fn cst_demote(&mut self, mark: EventMark, kind: u16) { self.inner.cst_demote(mark, kind) }`.
+  - *An emitter with no event channel* — discard it:
+    `fn cst_demote(&mut self, _: EventMark, _: u16) {}`. The shipped `Fatal`, `Silent`,
+    `Verbose` and `Ignored` do exactly that, and the line is not noise: such an emitter really
+    does discard the failing exit, and now says so where its own reviewer reads it.
+
+  This lands the second half of the same migration in the same release. Both errors appear on
+  one rebase, adjacent and self-explanatory: `E0053` with a fix-it, `E0046` naming the method.
+  Deferring was not an option — after 1.0 a trait can only grow defaults, which is this trap
+  again. Cost measured before the decision: four one-line stubs in the crate's own diagnostics
+  emitters and one in the fuzz fixture; the recording `Sink`, the `&mut U` blanket and every
+  in-tree wrapper already implemented it; no impls in the guide, the book, any doctest or any
+  consumer in the org. `tests/ui/cst_demote_cannot_be_inherited.rs` pins the `E0046`, and its
+  real subject is the future — the day someone re-adds the default "for convenience" that case
+  starts compiling, and a `compile_fail` case that compiles is a failing test. It is the only
+  signal there would be.
   — *(#169)*
 
 ### Changed
@@ -698,8 +750,8 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
     logs a tagged call per operation, including the five members the surface deliberately
     withholds, so a forward that lands on `commit_token` is visible too. The three existing
     recorders could not do this: `Verbose` funnels eleven capability channels into one error
-    channel and inherits the no-op `CstEmitter`, and the tracking and counting emitters hold
-    plain counters.
+    channel and its `CstEmitter` impl records nothing, and the tracking and counting emitters
+    hold plain counters.
 
     The suite is proven discriminating: six sibling re-pointings each red exactly the delegation
     closure of the mutated body and nothing else — one test for a `ParseState` leaf, two when an

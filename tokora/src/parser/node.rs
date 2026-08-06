@@ -135,13 +135,22 @@
 //!
 //! Every combinator here bounds `Ctx::Emitter:`[`CstEmitter`] — the one user-ruled gate of
 //! the CST design. A diagnostics-only parse (over [`Fatal`](crate::emitter::Fatal),
-//! [`Verbose`](crate::emitter::Verbose), …) satisfies the bound through the defaulted no-op
-//! event methods, so one parser assembly serves both configurations: tree-less at zero cost
-//! (every mark is inert, the start/finish/wrap/demote calls inline to nothing and the
-//! handback is a dead `Copy` constant), or tree-building over a recording sink — by emitter
-//! choice alone. A wrapper emitter that does not implement (and forward)
-//! [`CstEmitter`] cannot drive a `node`-bearing parser at all: a **compile error**, never a
-//! silently empty tree.
+//! [`Verbose`](crate::emitter::Verbose), …) satisfies the bound through four defaulted no-op
+//! event methods plus a one-line discard for the fifth, so one parser assembly serves both
+//! configurations: tree-less at zero cost (every mark is inert, the start/finish/wrap/demote
+//! calls inline to nothing and the handback is a dead `Copy` constant), or tree-building over
+//! a recording sink — by emitter choice alone. A wrapper emitter that does not implement (and
+//! forward) [`CstEmitter`] cannot drive a `node`-bearing parser at all: a **compile error**,
+//! never a silently empty tree.
+//!
+//! The bound guarantees the structuring surface **exists**; that
+//! [`cst_demote`](crate::emitter::CstEmitter::cst_demote) is a **required** method is what
+//! guarantees a wrapper cannot **half-carry** it. Forward `cst_start` and inherit the failing
+//! exit — which is what a 0.8-era wrapper does after applying the one compiler diagnostic its
+//! rebase produces — and the `Err` arm below would dispatch into a vacuous body, leaving the
+//! channel underneath holding a `StartNode` no exit ever closes, on error paths only and
+//! indistinguishable downstream from an escaped panic. `E0046` now stands where that silence
+//! was, and `tests/ui/cst_demote_cannot_be_inherited.rs` pins both it and the re-defaulting.
 //!
 //! # Marks are LIFO by construction
 //!
