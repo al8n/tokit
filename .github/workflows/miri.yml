@@ -33,6 +33,33 @@ name: Miri
 # The SCHEDULING-not-coverage promise the split was made under is also unchanged by #216. Every
 # job, matrix cell and step below runs what it ran before: same targets, same shards, same
 # `MIRIFLAGS`, same scripts, same 24 cells plus the plan job. Only `runs-on` changed.
+#
+# ── WHAT THESE 24 CELLS DO NOT COVER, AND WHY IT IS NOT AN OVERSIGHT: `rowan` ───────────────
+#
+# Every cell below runs `ci/miri_sb.sh` or `ci/miri_tb.sh`, and those run two feature sets —
+# `logos` and `logos,unstable-raw`. `rowan` is in neither, and it is not in `default`, so no
+# cell in this workflow has ever COMPILED the lossless CST materialization path. Measured on
+# `543ce6d`: 66 mentions of `feature = "rowan"` across 8 files under `tokora/src`, of which 41
+# are `#[cfg]` gates whose code exists only when the feature is on. Across all three targets and
+# both models that is ZERO coverage of that path, not reduced coverage — and it is the path
+# 0.9.0 ships as its lossless story, which is why it is written down rather than left to be
+# rediscovered.
+#
+# Adding `rowan` to the matrices, or to the scripts' feature sets, does not close the gap: it
+# turns these cells red. `rowan 0.16.1` executes undefined behaviour on its ordinary public
+# path, and the two aliasing models find it at two DIFFERENT sites — Stacked Borrows in
+# `arc.rs:260`, Tree Borrows in `cursor.rs:219` — so neither model is clean and there is no
+# one-model half-measure. Both were reproduced on `543ce6d` on 2026-08-07, red on the first of
+# `--test parser_node`'s 24 tests under each model. The defect is rowan's, not tokora's;
+# `tokora/src/cst` contains no `unsafe` at all.
+#
+# What would flip the answer: a published rowan clean at both sites under both models. Upstream
+# has had the reports open since 2021 (rust-analyzer/rowan#108, #163, #192) and the only fix
+# attempt, PR #211, is a draft whose own description says the immutable path still fails, so
+# this is not a wait measured in weeks. The two scripts carry the full account with backtraces
+# and the exact repro command — read `ci/miri_sb.sh` before adding a feature here. Recorded for
+# 0.9.0 by al8n/tokit#235; the sibling notes are in both scripts, in `tokora/Cargo.toml`'s
+# `rowan` feature, and in the changelog's known-limitation entry.
 
 # Triggers, `paths-ignore` and the concurrency rule are deliberately identical to
 # `.github/workflows/ci.yml`; read the comments there for why the ignore list carries no blanket

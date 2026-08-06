@@ -1219,6 +1219,53 @@ row on `Cst` takes the pre-existing-owner shape rather than the seven original o
     observable to a consumer — session-absolute after the parse, attempt-relative during it —
     and a door whose docs contradicted six other passages would have been worse than either.
     — *(#224)*
+### Known limitation — Miri does not interpret the `rowan` lossless path at all, and cannot until rowan is fixed
+
+**Zero coverage, not reduced coverage.** The Miri matrices run two feature sets, `logos` and
+`logos,unstable-raw`. `rowan` is in neither and is not in `default`, so across all three targets
+and both aliasing models, no Miri job in this repository has ever *compiled* the lossless CST
+materialization path — the path this release ships as its lossless story. Measured on `543ce6d`:
+`tokora/src` carries 66 mentions of `feature = "rowan"` across 8 files, of which **41 are
+`#[cfg]` gates whose code exists only when the feature is on**. Those 41 are the uncovered set.
+The remaining 25 are not code Miri is missing: 14 are `doc(cfg(...))` docs.rs labels, 10 are
+doc-text alternations, and one is a `not(feature = "rowan")` arm the current runs do compile.
+
+**Enabling `rowan` there is not the fix — it reddens the cells.** `rowan 0.16.1`, the version
+`Cargo.lock` resolves, executes undefined behaviour on its ordinary public path, and the two
+models find it in two *different* places. Neither model is clean, so there is no
+Tree-Borrows-only half-measure:
+
+- **Stacked Borrows** — `rowan-0.16.1/src/arc.rs:260`, `<HeaderSlice<H, [T; 0]> as Deref>::deref`
+  forging a `&HeaderSlice<H, [T]>` over the whole slice out of a `&self` retagged for the header
+  only. Reached here through `cst::sink::finish::replay` → `materialize` → `Cst::finish`, which
+  is to say from building any tree at all.
+- **Tree Borrows** — `rowan-0.16.1/src/cursor.rs:219`, `rowan::cursor::free` dropping a
+  `Box<NodeData>` through a tag an ancestor's `Cell` still holds. Reached from dropping any
+  red-tree `SyntaxNode`.
+
+Both were reproduced on `543ce6d` on 2026-08-07 with
+`cargo miri test --target aarch64-apple-darwin --test parser_node --features logos,rowan`, the
+two runs differing only in `MIRIFLAGS`. Each was red on the **first** of that target's 24 tests.
+
+**The defect is rowan's, not this crate's.** `src/cst` contains no `unsafe` at all. Upstream has
+had it reported since 2021 — rust-analyzer/rowan#108, #163 and #192, all three still open — and
+the only fix attempt, PR #211, is a draft whose own description says the immutable path still
+fails. A version bump is not an answer either: the `arc.rs` construct is present unchanged in
+`0.17.0`, the newest release.
+
+**What this does and does not mean for a consumer.** The lossless path is not untested. It runs
+in `cargo test --all-features` and `cargo test --release --all-features`, and in both sanitizer
+cells, which are `--all-features` as well — so it is exercised, and exercised under ASan and
+TSan. What it has never had is an *aliasing-model* check, which is the one class those gates
+cannot see and Miri exists for. That bound is disclosed here rather than left to be discovered.
+
+**What would flip it.** A published rowan clean at both sites under `-Zmiri-strict-provenance`
+and under `-Zmiri-tree-borrows`. At that point `rowan` joins the feature sets in `ci/miri_sb.sh`
+and `ci/miri_tb.sh`. The reason is written at each place a re-enabler arrives from — both of
+those scripts, `.github/workflows/miri.yml`, and `tokora/Cargo.toml`'s `rowan` feature — so the
+decision does not have to be rederived from this file.
+
+— *(#235)*
 
 ## 0.8.0 (2026-08-04)
 

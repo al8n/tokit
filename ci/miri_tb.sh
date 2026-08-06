@@ -92,6 +92,52 @@ rustup toolchain install nightly --component miri
 rustup override set nightly
 cargo miri setup
 
+# ── WHAT THE TWO FEATURE SETS BELOW DO NOT COVER: `rowan` ───────────────────────────────────
+#
+# The passes below run `--features logos` and `--features logos,unstable-raw`. `rowan` is in
+# neither and is not in `default`, so no Miri job in this repository has ever COMPILED the
+# lossless CST materialization path — the one 0.9.0 ships as its lossless story. Measured on
+# `543ce6d`: 66 mentions of `feature = "rowan"` across 8 files under `tokora/src`, of which 41
+# are `#[cfg]` gates whose code exists only when the feature is on. Every target, both models:
+# that is ZERO coverage of that path, not reduced coverage.
+#
+# ADDING `rowan` HERE DOES NOT CLOSE THE GAP — IT TURNS THESE CELLS RED. `rowan 0.16.1`, the
+# version `Cargo.lock` resolves, executes undefined behaviour on its ordinary public path, and
+# the two aliasing models find it in two DIFFERENT places. Neither model is clean, so there is
+# no one-model half-measure — in particular, this being the newer and more permissive model does
+# NOT make it the survivable one:
+#
+#   * Tree Borrows — THIS model — `src/cursor.rs:219`, `rowan::cursor::free` dropping a
+#     `Box<NodeData>` through a tag an ancestor's `Cell` still holds. Reached from dropping any
+#     red-tree `SyntaxNode`.
+#   * Stacked Borrows — `src/arc.rs:260`, `<HeaderSlice<H, [T; 0]> as Deref>::deref` forging a
+#     `&HeaderSlice<H, [T]>` over the whole slice out of a `&self` retagged for the header only.
+#     Reached through `tokora::cst::sink::finish::replay` → `materialize` → `Cst::finish`, i.e.
+#     from building any tree at all.
+#
+# Reproduced 2026-08-07 on `543ce6d`. Both runs used the command below and differed only in
+# `MIRIFLAGS`, exactly as this script and `ci/miri_sb.sh` differ:
+#
+#     cargo miri test --target aarch64-apple-darwin --test parser_node --features logos,rowan
+#
+# Both models red on the FIRST of that target's 24 tests.
+#
+# The defect is rowan's, not tokora's: `tokora/src/cst` contains no `unsafe` at all. Upstream has
+# had it reported since 2021 — rust-analyzer/rowan#108, #163, #192, all three still open — and
+# the only fix attempt, PR #211, is a draft whose own description says the immutable path still
+# fails. Bumping is not a known answer either: the `arc.rs` construct above is present unchanged
+# in `0.17.0`, the newest release, and al8n/smear#77 reproduced both reds against it standalone.
+#
+# WHAT WOULD FLIP THIS ANSWER. A published rowan whose `arc.rs` `Deref` and whose `cursor.rs`
+# `free` are both clean under `-Zmiri-strict-provenance` and under `-Zmiri-tree-borrows`. Then
+# add `rowan` to the feature sets below and to `ci/miri_sb.sh`'s — and extend
+# `ci/miri_shard.py`'s enumeration if any `rowan`-gated test TARGET arrives with it — rather
+# than leaving this note to rot.
+#
+# Recorded for 0.9.0 by al8n/tokit#235. The same answer is written where the other re-enablers
+# arrive from: `ci/miri_sb.sh`, `.github/workflows/miri.yml`, `tokora/Cargo.toml`'s `rowan`
+# feature, and the changelog's known-limitation entry.
+
 export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbolic-alignment-check -Zmiri-tree-borrows"
 export RUSTFLAGS="--cfg test_$CONFIG_FLAGS"
 
