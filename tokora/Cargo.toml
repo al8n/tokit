@@ -155,14 +155,15 @@ fuzz = ["std"]
 # target under either aliasing model. Zero coverage of the path 0.9.0 ships as its lossless
 # story — not reduced coverage.
 #
-# Enabling it there does not close the gap, it reddens the cells. `rowan 0.16.1`, the version
+# Enabling it there does not close the gap, it reddens the cells. `rowan 0.17.0`, the version
 # `Cargo.lock` resolves, executes undefined behaviour on its ordinary public path, and the two
 # models find it at two DIFFERENT sites, so neither is clean and no one-model half-measure
-# exists: Stacked Borrows at `arc.rs:260` (`<HeaderSlice<H, [T; 0]> as Deref>::deref` forging a
+# exists: Stacked Borrows at `arc.rs:264` (`<HeaderSlice<H, [T; 0]> as Deref>::deref` forging a
 # whole-slice reference from a header-only retag), reached through `cst::sink::finish::replay`
-# from building any tree; Tree Borrows at `cursor.rs:219` (`rowan::cursor::free`), reached from
-# dropping any red-tree `SyntaxNode`. Both reproduced on `543ce6d` on 2026-08-07, red on the
-# first of `--test parser_node`'s 24 tests under each model.
+# from building any tree; Tree Borrows at `cursor.rs:136` (`rowan::cursor::free`), reached from
+# dropping any red-tree `SyntaxNode`. Both reproduced on `543ce6d` on 2026-08-07 against 0.16.1
+# (then `arc.rs:260` / `cursor.rs:219`), red on the first of `--test parser_node`'s 24 tests
+# under each model, and re-measured unchanged against 0.17.0 when this requirement was bumped.
 #
 # The defect is rowan's: `src/cst` contains no `unsafe` at all. It is unfixed upstream since
 # 2021 (rust-analyzer/rowan#108, #163, #192, all open; the one fix attempt, PR #211, is a draft
@@ -239,10 +240,14 @@ logos_0_15 = { package = "logos", version = "0.15", default-features = false, op
 logos_0_16 = { package = "logos", version = "0.16", default-features = false, optional = true, features = [
   "export_derive",
 ] }
-# Bumping this to `0.17` does NOT buy a Miri-clean lossless path, if that is what sent you here:
-# the `arc.rs` Stacked-Borrows construct is present unchanged in `0.17.0`. See the `rowan`
-# feature's note above for the two sites, the repro and what a real fix would look like.
-rowan = { version = "0.16", optional = true }
+# This IS `0.17` now, and it did NOT buy a Miri-clean lossless path — measured on 0.17.0, not
+# predicted. Both sites survived the bump and only moved line numbers: Stacked Borrows still reds
+# in `arc.rs` (260 -> 264) and Tree Borrows still reds in `cursor::free` (219 -> 136), even though
+# 0.17 deleted `sll.rs` and rewrote `cursor.rs` from 1592 lines to 1003. The bump was made because
+# `rowan` is in this crate's PUBLIC API and its major is therefore ours — not because it fixes
+# anything. See the `rowan` feature's note above for the two sites, the repro and what a real fix
+# would look like; raising this requirement again is still not that fix.
+rowan = { version = "0.17", optional = true }
 
 # ── NO `criterion` HERE, AND NO `[[bench]]` — BOTH ARE LOAD-BEARING ABSENCES ────────────────
 #

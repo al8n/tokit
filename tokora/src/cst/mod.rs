@@ -46,7 +46,9 @@
 //!
 //! - **Zero-cost abstractions**: Typed CST nodes are just pointers, no runtime overhead
 //! - **Lossless**: All source information is preserved in the tree
-//! - **Immutable**: Trees are immutable by default (use `clone_for_update()` for mutations)
+//! - **Immutable**: Trees are immutable. `rowan` 0.17 removed the mutable red-tree API
+//!   (`clone_for_update`, `detach`, `splice_children`), so an edit is a rebuild: read the
+//!   green tree, emit a new one through `SyntaxTreeBuilder`, and re-root it.
 //! - **Type-safe**: Compile-time guarantees about node types and relationships
 //!
 //! # See Also
@@ -562,17 +564,6 @@ pub trait Node<Lang: Language>: Element<Lang> + Syntax<Lang = Lang> {
     self.syntax().to_string()
   }
 
-  /// Clones this CST node for update operations.
-  ///
-  /// This creates a mutable copy of the node that can be modified using rowan's
-  /// mutation APIs. The original tree remains unchanged.
-  fn clone_for_update(&self) -> Self
-  where
-    Self: Sized,
-  {
-    Self::try_cast_node(self.syntax().clone_for_update()).unwrap()
-  }
-
   /// Clones the subtree rooted at this CST node.
   ///
   /// This creates a deep copy of this node and all its descendants, detached
@@ -707,11 +698,16 @@ impl<N, Lang: Language> NodeChildren<N, Lang> {
   ///
   /// This allows further filtering of children based on their syntax kind,
   /// returning the underlying [`SyntaxNode`] instead of typed nodes.
+  ///
+  /// `rowan` 0.17 removed `SyntaxNodeChildren::by_kind`, so the filter is applied here
+  /// rather than delegated. The predicate is the same one the removed method took, and
+  /// `SyntaxNode::kind` is what that method compared against, so the yielded sequence is
+  /// unchanged — only the crate that runs the comparison moved.
   pub fn by_kind<F>(self, f: F) -> impl Iterator<Item = SyntaxNode<Lang>>
   where
     F: Fn(Lang::Kind) -> bool,
   {
-    self.inner.by_kind(f)
+    self.inner.filter(move |node| f(node.kind()))
   }
 }
 

@@ -141,7 +141,7 @@ The rest of the table applies to both.
 | `unstable-raw` | Exposes the unstable raw checkpoint API. |
 | `conformance` | Enables the custom-lexer conformance test kit; implies `std`. |
 | `fuzz` | Enables the deterministic public input/backtracking fuzz harness; implies `std`. |
-| `rowan` | Enables the rewindable event-stream Rowan CST — emitter, recording sink, and `node` combinators; implies `std`. A lossless sink requires a trivia-surfacing lexer (`Lexer::SURFACES_TRIVIA`). Add `rowan = "0.16"` directly when implementing `rowan::Language`. |
+| `rowan` | Enables the rewindable event-stream Rowan CST — emitter, recording sink, and `node` combinators; implies `std`. A lossless sink requires a trivia-surfacing lexer (`Lexer::SURFACES_TRIVIA`). Add `rowan = "0.17"` directly when implementing `rowan::Language`. |
 | `bytes` | Alias for `bytes_1`. |
 | `bytes_1` | Enables `bytes@1` source support. |
 | `bstr` | Alias for `bstr_1`. |

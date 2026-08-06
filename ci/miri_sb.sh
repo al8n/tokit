@@ -101,16 +101,16 @@ cargo miri setup
 # are `#[cfg]` gates whose code exists only when the feature is on. Every target, both models:
 # that is ZERO coverage of that path, not reduced coverage.
 #
-# ADDING `rowan` HERE DOES NOT CLOSE THE GAP — IT TURNS THESE CELLS RED. `rowan 0.16.1`, the
+# ADDING `rowan` HERE DOES NOT CLOSE THE GAP — IT TURNS THESE CELLS RED. `rowan 0.17.0`, the
 # version `Cargo.lock` resolves, executes undefined behaviour on its ordinary public path, and
 # the two aliasing models find it in two DIFFERENT places. Neither model is clean, so there is
 # no one-model half-measure:
 #
-#   * Stacked Borrows — THIS model — `src/arc.rs:260`, `<HeaderSlice<H, [T; 0]> as Deref>::deref`
+#   * Stacked Borrows — THIS model — `src/arc.rs:264`, `<HeaderSlice<H, [T; 0]> as Deref>::deref`
 #     forging a `&HeaderSlice<H, [T]>` over the whole slice out of a `&self` retagged for the
 #     header only. Reached through `tokora::cst::sink::finish::replay` → `materialize` →
 #     `Cst::finish`, i.e. from building any tree at all.
-#   * Tree Borrows — `src/cursor.rs:219`, `rowan::cursor::free` dropping a `Box<NodeData>`
+#   * Tree Borrows — `src/cursor.rs:136`, `rowan::cursor::free` dropping a `Box<NodeData>`
 #     through a tag an ancestor's `Cell` still holds. Reached from dropping any red-tree
 #     `SyntaxNode`.
 #

@@ -46,9 +46,9 @@ name: Miri
 # rediscovered.
 #
 # Adding `rowan` to the matrices, or to the scripts' feature sets, does not close the gap: it
-# turns these cells red. `rowan 0.16.1` executes undefined behaviour on its ordinary public
+# turns these cells red. `rowan 0.17.0` executes undefined behaviour on its ordinary public
 # path, and the two aliasing models find it at two DIFFERENT sites — Stacked Borrows in
-# `arc.rs:260`, Tree Borrows in `cursor.rs:219` — so neither model is clean and there is no
+# `arc.rs:264`, Tree Borrows in `cursor.rs:136` — so neither model is clean and there is no
 # one-model half-measure. Both were reproduced on `543ce6d` on 2026-08-07, red on the first of
 # `--test parser_node`'s 24 tests under each model. The defect is rowan's, not tokora's;
 # `tokora/src/cst` contains no `unsafe` at all.

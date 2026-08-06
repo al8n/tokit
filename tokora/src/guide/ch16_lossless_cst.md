@@ -47,7 +47,7 @@ names both:
 ```toml
 [dependencies]
 tokora = { version = "0.8", features = ["logos", "rowan"] }
-rowan = "0.16"
+rowan = "0.17"
 ```
 
 The `rowan` feature implies `std` (rowan itself requires it); it does not imply `logos`.
