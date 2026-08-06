@@ -305,6 +305,21 @@ Two things follow, and neither is a bug to be fixed by another round of generato
    project has now lost five times. The harness stays at the shape it can express, and the
    gap is disclosed instead of papered over.
 
+**It does not test its own `TRAITS` records — they are trusted, not verified.** A trait row
+names the receiver its probe rides (`recvr` in `gen_probe.py`), and no run can check that the
+named value implements the trait: a subject that does *not* constructs no collision and reports
+a clean run, which is byte-identical to the clean run a correct subject produces whenever the
+consumer's item wins at an earlier pick. Measured, for the worst shape — a `&mut self` trait
+method on a non-deref subject, where the consumer's blanket item claims every pick and tokora's
+is never a candidate: swapping in a receiver that implements nothing produced the identical
+`7u8` from the consumer's item and the identical `CONSUMER-CALLS` witness on both sides — a
+byte-identical `ok*`, with no column in which the two differ. Such a row **cannot be falsified
+by running it**, so its `no_collision.txt` justification, and the reviewer who agrees with it, are
+the whole of its protection. That is a property of method resolution rather than a gap in the
+templates, which is why it appears here as a bound and not on a fix list. Approving a record is
+therefore a **review act, not a mechanical one**: read the pick analysis, not the verdict
+column, and never take a green `ok*` on such a row as evidence that its subject was right.
+
 ## Categories and spellings
 
 | category | spellings | why |
