@@ -102,3 +102,38 @@ cst_mark/discarded
 emitter_bound_source/discarded
 emitter_ref/discarded
 exit_label/discarded
+
+# ── `Cst::resource_trips` — the first row added to `Cst` AFTER `Cst` shipped ──────────────
+#
+# `Cst` is the handle both lossless drivers return, and `resource_trips` is the first inherent
+# item added to it since it shipped. So unlike the seven items it arrived with, this one has a
+# real before-state: a consumer holding a `Cst` already had somewhere to hang the name.
+#
+# Reproduced, two-sided, base 543ce6d against this branch, on rustc 1.99.0-nightly:
+#
+#     loud    resource_trips/used         base=witness=1  head=no-compile
+#     SILENT  resource_trips/discarded    base=witness=1  head=witness=0
+#
+# Both sides compile on the discarded row, neither emits a diagnostic, and the two run different
+# programs. `used` is `loud` by E0308 against the consumer's `-> u8`, so the discarded return is
+# the whole of the difference — the method returns a plain `usize`, which carries no `#[must_use]`
+# and which `unused_must_use` does not fire on. Same discriminator as every row above: the lint,
+# not an attribute.
+#
+# NOT a bounded receiver. `Cst<'inp, L, E>` is a concrete public struct; there is no blanket impl
+# to reject anybody, exactly as for `RecursionLimiter::unlimited` and `ParseState`'s four.
+#
+# `#[must_use]` was considered and rejected for the reason it was there: it does not reach a
+# consumer who *assigns* the result — the silent case that matters and that this harness cannot
+# generate — while firing on legitimate discards of tokora's own.
+#
+# ADDING THIS ROW ALSO CHANGED THE TEMPLATE, which is worth recording because the change is not
+# specific to this name. `gen_probe.py`'s `Cst` subject bound the handle immutably, and the
+# generated consumer item always takes `&mut self`, so on a base side where the consumer's item is
+# the ONLY candidate the probe was E0596 and never compiled. For an owner the same diff introduces
+# that is invisible — the base side is expected not to compile — so it survived until the first
+# row with a before-state. The binding is now `mut` (`drive()` already carries
+# `#[allow(unused_mut)]`, so the reason it was immutable had already stopped applying), and the
+# `used` binding for this row is the CONSUMER's `u8` rather than the item's real `usize`, which is
+# the shape the table's header prescribes for a pre-existing owner.
+resource_trips/discarded

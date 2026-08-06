@@ -423,11 +423,23 @@ the driver handed back rather than at the attempt origin the way
 
 One class of error stays outside it, and a grammar that recovers should know where the line is.
 A **grammar** error becomes a hole and the parse continues. A **resource** error ends the parse:
-[`RecursionLimitReached`](crate::error::RecursionLimitReached) is *terminal*, so the session
-latches and [`inplace_recover`](crate::ParseInput::inplace_recover) re-raises it instead of
-spending it — deliberately, because a depth budget a recovery point could swallow would not
-bound anything. There is no position to resume from and no error node to synthesize, and the
-default budget is shallower than it sounds: 64 frames, which 64 nested parentheses reach.
+[`RecursionLimitReached`](crate::error::RecursionLimitReached) is *terminal*, so
+[`inplace_recover`](crate::ParseInput::inplace_recover) re-raises it instead of spending it —
+deliberately, because a depth budget a recovery point could swallow would not bound anything.
+There is no position to resume from and no error node to synthesize, and the default budget is
+shallower than it sounds: 64 frames, which 64 nested parentheses reach.
+
+**Terminal is a property of the attempt, not a switch thrown on the parse.** The trip is counted
+on a monotone cell of the input session, so an error type that discards the payload — `()` does —
+still cannot lose the stop; but every recovery point reads that cell *relative to the attempt it
+is judging*, snapshotting it beforehand and asking whether it moved. So the budget charges the
+failure it actually stopped, and grammar code that catches a trip itself and parses on gets
+ordinary recovery back for everything after it. Reading the cell absolutely instead would let one
+deep expression early in a file suppress every diagnostic in the rest of it. (Do not confuse this
+with a [`PartialSession`](crate::input::PartialSession)'s *terminal latch*, which is a real latch
+and a different mechanism: it refuses later **attempts** over a growing buffer.) Once the parse is
+over, the absolute reading is the useful one and has its own door —
+[`Cst::resource_trips`](crate::cst::Cst::resource_trips) for a lossless parse.
 
 What a recovering entry point owes there is therefore not recovery but **not panicking**: record
 the trip, hand back a hole, and let the caller tell "this is your program" from "this is how far

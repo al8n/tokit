@@ -810,13 +810,38 @@ INHERENT_SUBJECTS = {
         "fixture": CST_HANDLE_FIXTURE,
         "ty": "Cst<'static, Mini<'static>, Silent<PErr>>",
         "setup": "",
-        # NOT `mut`: three of the seven items consume `self` and the other four take `&self`, so a
-        # `mut` binding would be an `unused_mut` warning on every row — a head-side diagnostic
-        # this template manufactured, in a harness whose verdicts are decided by which side gains
-        # one.
+        # `mut`, and the reason it was not used to be is handled elsewhere. Three of the eight
+        # items consume `self` and the other five take `&self`, so nothing here needs a `&mut`
+        # receiver and the binding used to be left immutable to avoid an `unused_mut` warning —
+        # a head-side diagnostic the template would have manufactured, in a harness whose
+        # verdicts are decided by which side gains one. `drive()` already carries
+        # `#[allow(unused_mut)]`, so that warning cannot fire and the immutability bought nothing.
+        #
+        # What it COST became visible the first time a row was added to `Cst` after `Cst` itself
+        # shipped: the consumer's extension item is generated with a `&mut self` receiver, so on
+        # the BASE side — where that item is the only candidate — an immutable binding is E0596
+        # and the base build fails. For an owner the diff introduces that is expected (the base
+        # side cannot compile anyway), which is why it went unnoticed; for a pre-existing owner
+        # it destroys the before-state and every row scores INCONCL.
         "build": (
-            "  let subject: Cst<'static, Mini<'static>, Silent<PErr>> = mini_cst();\n"
+            "  let mut subject: Cst<'static, Mini<'static>, Silent<PErr>> = mini_cst();\n"
         ),
+        # The second element is the type the `used` spelling BINDS, and for seven of these eight
+        # it is the item's real return type — the shape this table's header prescribes for an
+        # owner the same diff introduces, where the base side cannot compile at all and only the
+        # head side's binding has to be right.
+        #
+        # `resource_trips` is the first row added to `Cst` AFTER `Cst` shipped, so for its diff
+        # the owner is PRE-EXISTING and the header's rule inverts (the same inversion it already
+        # states for `InputRef` / `ParserContext` / `ParseState`). The base side must compile, and
+        # there the only `resource_trips` in scope is the consumer's `ConsumerExt::resource_trips
+        # -> u8`; binding the real `usize` would make the BASE build fail, which scores INCONCL —
+        # `new-owner` is unavailable because rustc resolves `Cst` on both sides. So the binding is
+        # the CONSUMER's `u8`, the base side compiles and runs the consumer's item, and the head
+        # side's E0308 against tokora's inherent `-> usize` is the honest `loud` verdict: adding
+        # the name is source-breaking for a consumer extension trait, and breaks it *loudly*.
+        #
+        # Any further row added to `Cst` from here on takes this same shape, not the seven above.
         "calls": {
             "with_trivia_policy": ("TriviaPolicy::AsEmitted", "Cst<'static, Mini<'static>, Silent<PErr>>"),
             "trivia_policy": ("", "TriviaPolicy"),
@@ -825,6 +850,7 @@ INHERENT_SUBJECTS = {
             "inner_ref": ("", "&Silent<PErr>"),
             "finish": ("MINI_ROOT", "(Result<GreenNode, FinishError>, Silent<PErr>)"),
             "finish_partial": ("MINI_ROOT", "(Result<GreenNode, FinishError>, Silent<PErr>)"),
+            "resource_trips": ("", "u8"),
         },
         # `Cst` declares no receiver-less associated function: `from_sink` is `pub(crate)` and the
         # drivers are the only minters. An empty table rather than an absent key, so the refusal

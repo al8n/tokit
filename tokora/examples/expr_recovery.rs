@@ -66,11 +66,23 @@
 //!
 //! There is exactly one of the second kind here: the **recursion budget**. Every nested group
 //! and every prefix `-` enters the driver's descent, tokora's parser-facing default is a depth
-//! of **64**, and a trip raises `RecursionLimitReached`. That error is *terminal*: the session
-//! latches, and every recovery combinator — [`inplace_recover`](tokora::ParseInput::inplace_recover)
-//! included — re-raises a terminal error rather than spending it. Deliberately. A budget whose
-//! whole purpose is to stop a parse before it exhausts the native stack would be worthless if a
+//! of **64**, and a trip raises `RecursionLimitReached`. That error is *terminal*, and every
+//! recovery combinator — [`inplace_recover`](tokora::ParseInput::inplace_recover) included —
+//! re-raises a terminal error rather than spending it. Deliberately. A budget whose whole
+//! purpose is to stop a parse before it exhausts the native stack would be worthless if a
 //! recovery point could swallow it and carry on descending.
+//!
+//! **Terminal for the attempt, not a switch thrown on the parse.** The trip is counted on a
+//! monotone cell of the input session — so a grammar error type that discards the payload
+//! cannot lose the stop — but every recovery point reads that cell *relative to the attempt it
+//! is judging*, by snapshotting it beforehand and asking whether it moved. So a budget charges
+//! the failure it actually stopped, and nothing else. Grammar code is free to catch a trip
+//! itself and parse on; the recoveries after it behave exactly as they would in a parse that
+//! never tripped (`tests/pratt_limit_unit_sink.rs`,
+//! `a_caught_trip_does_not_disable_a_later_recovery`). An absolute reading would instead let one
+//! deep expression early in a file suppress every diagnostic after it, which is the opposite of
+//! what an editor wants. This grammar never catches the trip, so here the stop simply travels
+//! out — but the mechanism is the per-attempt comparison, not a latch.
 //!
 //! So `recover_expr` never runs for it, no error node is synthesized, and there is nothing to
 //! resume from. What [`parse`] owes the caller is therefore *not* "recover", it is **"do not
@@ -736,8 +748,9 @@ pub(crate) struct Parsed {
   /// `Some` when the parse **ended** instead of recovering.
   ///
   /// The distinction this whole file is about, in one field. A *grammar* error becomes a hole
-  /// and the parse continues; a *resource* error — here, only the recursion budget — latches
-  /// the session, so no recovery point can spend it and there is nothing left to parse. The
+  /// and the parse continues; a *resource* error — here, only the recursion budget — is
+  /// terminal, so the recovery point judging the attempt that tripped re-raises it instead of
+  /// spending it, and this grammar catches it nowhere, so there is nothing left to parse. The
   /// caller that wants "is this AST a description of the input, or of how far we got" reads
   /// this rather than scanning the diagnostics.
   pub(crate) terminated: Option<Diag>,
@@ -795,11 +808,13 @@ pub(crate) fn parse(src: &str) -> Parsed {
     .collect();
 
   // THE LIMIT OF THE POSTURE. Everything above recovers because the *grammar* knew what to do
-  // with what it found. A **resource** trip is not like that: the recursion budget latches the
-  // session, and every recovery combinator — `inplace_recover` included — re-raises a terminal
+  // with what it found. A **resource** trip is not like that: `RecursionLimitReached` is
+  // terminal, and every recovery combinator — `inplace_recover` included — re-raises a terminal
   // error rather than spending it, deliberately, because the whole point of the budget is that
-  // the parse must stop. So there is no error node to synthesize here and no position to resume
-  // from; the parse *ended*.
+  // the parse must stop. What is scoped to the *attempt* is which failure gets charged: each
+  // recovery point compares the session's monotone trip counter against a baseline it took
+  // before its own attempt. Nothing here catches the trip, so it travels all the way out — so
+  // there is no error node to synthesize and no position to resume from; the parse *ended*.
   //
   // What must not happen is a panic. `parse` used to unwrap this, which made a deeply nested
   // but otherwise valid input — 64 nested groups is enough — take the process down, in a file
@@ -930,8 +945,8 @@ fn main() {
 
   // ── The boundary: the one thing that does not recover ──
   //
-  // 64 nested groups is the parser-facing recursion budget, and a trip is terminal — the
-  // session latches, `inplace_recover` re-raises rather than spending it, and there is no
+  // 64 nested groups is the parser-facing recursion budget, and a trip is terminal —
+  // `inplace_recover` re-raises the attempt it stopped rather than spending it, and there is no
   // position at which to synthesize an error node. So this is the one input class the file
   // cannot turn into a hole *in the tree*. What it can do, and does, is not panic.
   for depth in [63usize, 64] {

@@ -1153,7 +1153,12 @@ where
     ParseContext::provide(ctx),
   );
   let parsed = f.parse_input(&mut input.as_ref());
-  (Cst::from_sink(input.into_emitter()), parsed)
+  // Read the descent-trip count BEFORE `into_emitter`, which drops the input and every cell that
+  // is not the emitter. That line is where this fact used to die: the trip is deliberately not an
+  // emitter event, so a consumer that keeps the tree and the diagnostics and discards the `Result`
+  // — the ordinary lossless shape — had nothing left to ask.
+  let resource_trips = input.resource_trips();
+  (Cst::from_sink(input.into_emitter(), resource_trips), parsed)
 }
 
 /// The [`Partial`] sibling of [`parse_lossless`]: the same pinned sink, driven in Sans-I/O
@@ -1213,5 +1218,10 @@ where
     input.seal();
   }
   let parsed = f.parse_input(&mut input.as_ref());
-  (Cst::from_sink(input.into_emitter()), parsed)
+  // Taken before `into_emitter` for the reason the complete driver states, and owed here for a
+  // second one: a partial attempt builds a fresh input and therefore a fresh counter, so this
+  // handle's count is this attempt's — a refill loop that wants the whole stream's total sums the
+  // handles it kept, rather than expecting the last one to carry them.
+  let resource_trips = input.resource_trips();
+  (Cst::from_sink(input.into_emitter(), resource_trips), parsed)
 }

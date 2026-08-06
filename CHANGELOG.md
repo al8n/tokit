@@ -28,6 +28,54 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
 
 ## Unreleased
 
+### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+This release adds **one** public name to a type that already shipped, and the two-sided
+name-collision probe measures it **silent** in one of its two spellings. Disclosed here because a
+consumer cannot discover it from a compiler diagnostic.
+
+#### `Cst::resource_trips` — measured SILENT on a discarded return
+
+**You are exposed if you wrote a `resource_trips` method of your own on
+[`Cst`](https://docs.rs/tokora/latest/tokora/cst/struct.Cst.html)** — the handle both lossless
+drivers return. It shipped with seven inherent items and no way to ask this question, so an
+extension trait was the only way to carry the answer alongside the tree; that helper now competes
+with a tokora method of the same name on the same receiver, and an inherent item wins the pick.
+
+Reproduced two-sided by `ci/name_collision/`, base `543ce6d` against this branch, on
+rustc 1.99.0-nightly:
+
+```text
+loud    resource_trips/used         base=witness=1  head=no-compile
+SILENT  resource_trips/discarded    base=witness=1  head=witness=0
+```
+
+On the discarded row both sides compile, **neither emits any diagnostic**, and the two run
+different programs: yours before, tokora's after. The `used` row is `loud` on the same probe
+(`E0308` against the consumer's `-> u8`), so a **discarded return** is the whole of the
+difference — `usize` carries no `#[must_use]` and `unused_must_use` does not fire on it, the same
+discriminator every earlier silent row came down to. **The remedy is UFCS**:
+`MyTrait::resource_trips(&cst)` pins your method by name and is immune to this.
+
+`#[must_use]` was considered and rejected for the reason it was rejected for
+`RecursionLimiter::unlimited`: it does not reach a consumer who *assigns* the result — the silent
+case that matters, and the one the harness cannot generate — while firing on legitimate discards.
+Disclosure is the honest instrument.
+
+Recorded in `ci/name_collision/disclosed.txt`. It is disclosed on **this** branch because the
+probe's inventory is a two-sided delta: once this merges the name exists on both sides, the row
+leaves every future plan, and the harness can never re-litigate it.
+
+**One template defect was found by the same run and is fixed with it, and the fix is not specific
+to this name.** `gen_probe.py` bound its `Cst` subject immutably while generating every consumer
+extension item with a `&mut self` receiver — so on a base side where the consumer's item is the
+only candidate, the probe was `E0596` and never compiled. That is invisible for an owner the same
+diff introduces, because there the base side is *expected* not to compile; it survived until the
+first row on `Cst` with a real before-state, where it turned both spellings into `INCONCL`. The
+binding is now `mut` (`drive()` already carried `#[allow(unused_mut)]`, so the reason it was
+immutable had stopped applying), and the header of `INHERENT_SUBJECTS` now states that any further
+row on `Cst` takes the pre-existing-owner shape rather than the seven original ones.
+
 ### Changed (breaking)
 
 - **Every combinator family under `src/parser/` is now behind its own feature.** The umbrella
@@ -469,6 +517,51 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
 
 ### Added
 
+- **`Cst::resource_trips()` — a lossless consumer can finally ask whether the recursion budget
+  tripped.** Both lossless drivers now carry the parse's descent-trip count onto the handle they
+  return, and the new accessor reads it back. Purely additive: no signature changes, and both
+  `parse_lossless` and `parse_lossless_partial` are covered.
+
+  The gap it closes was measured, not inferred. A `parse_lossless` run whose parser trips the
+  budget produced **zero diagnostics**, a tree that round-tripped byte for byte, and nothing at
+  all saying why it was shaped that way. That is not an emitter oversight and is not fixed by
+  routing the trip through one: `RecursionLimitReached` deliberately has no `emit_*` counterpart,
+  because a recording emitter that could *absorb* a resource trip would be worse than one that is
+  hard to observe — so the engines return trips rather than emitting them. Having refused the
+  emitter channel, the crate offered nothing else. The one carrier was the driver's `Result`, and
+  the realistic lossless consumer discards it: its product is the tree plus the diagnostics, so a
+  descent trip was completely silent for exactly the consumer the lossless door exists for.
+
+  The count could not simply be fetched afterwards. It lives on the parse-driver's `Input`, which
+  `into_emitter` drops on the same line that mints the handle; `InputRef::recursion()` is public
+  but **live-only** — it reports depth and limitation, never "a trip happened" — and the trip path
+  releases the frame before building the error, so the budget reads clean the instant the error
+  exists. The fix takes the counter at the one moment it still exists and moves it onto the value
+  the consumer keeps.
+
+  **Session-absolute, and only sound because the parse is over.** The cell is monotone: it counts
+  up and nothing lowers it, because nothing can un-exceed a budget. Every site *inside* a parse —
+  `recover`, `inplace_recover`, `skip_then_retry`, and the four resilient collection loops — reads
+  it as a difference across the one attempt it is judging, since an absolute reading there would
+  let one deep construct early in a document re-raise every later failure and suppress every later
+  diagnostic. This accessor takes the absolute reading, and it is sound here for the reason it is
+  unsound there: the parse is finished, so there is no later attempt to poison. It is a **count**
+  rather than a `bool` for the same reason the cell is one — a grammar that catches a trip itself
+  and parses on is supported, so more than one trip is reachable.
+
+  What it does not report: *where* (a descent trip has a control stack rather than a position, and
+  latches no boundary) and *whether the tree is truncated* (a grammar that caught the trip may have
+  carried on). It answers the existence question, which a consumer holding a silent tree could not
+  previously ask at all. A partial attempt builds a fresh input and therefore a fresh counter, so a
+  `parse_lossless_partial` handle reports **that attempt's** trips, not a running total.
+
+  Pinned in `tests/cst_resource_trips.rs`: both drivers, both directions, the value read off the
+  handle before `finish` / `finish_partial` and unaffected by which door the tree comes out of, and
+  the boundary stated as a **relation** — frames admitted equals the limiter's `limitation`
+  exactly, so the deepest clean *nested-construct* count is `limitation - 1`, with `limitation`
+  read out of the parse through `InputRef::recursion()` rather than written down, so a moved
+  default re-points nothing.
+
 - **An error-recovery example, and the pins that hold it — `examples/expr_recovery.rs` plus
   `tests/pratt_recovery.rs`.** tokora has always documented a recovery posture for the typed
   Pratt driver and demonstrated it nowhere: every grammar in this repository, every example and
@@ -501,9 +594,13 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   It also documents **what does not recover**, which is the half an error-recovery example
   usually leaves out. A *grammar* error becomes a hole and the parse continues; a *resource*
   error ends it. There is one of the latter — the recursion budget, depth 64, which every nested
-  group and every prefix `-` descends into. A trip is terminal **by design**: the session latches
-  and every recovery combinator, `inplace_recover` included, re-raises rather than spending it,
-  because a budget a recovery point could swallow would not be a budget. So no error node can be
+  group and every prefix `-` descends into. A trip is terminal **by design**: every recovery
+  combinator, `inplace_recover` included, re-raises the attempt the trip stopped rather than
+  spending it, because a budget a recovery point could swallow would not be a budget. The scoping
+  is per **attempt** and not per session — the trip is counted on a monotone session cell, and
+  each recovery point compares it against a baseline it took before its own attempt, so a grammar
+  that catches a trip and parses on keeps ordinary recovery afterwards; this one catches it
+  nowhere. So no error node can be
   synthesized and there is nothing to resume from. What `parse` owes there is not recovery but
   *not panicking*: the trip is recorded as `DepthExceeded` — deliberately a different variant
   from the never-should-happen `DriverContract`, so the corpus tripwire on the latter stays
@@ -1090,6 +1187,38 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
     naming that variant, and each refusal arm is separately driven by a positive control over
     the real readers. Documentation and test only; no shipped surface changed.
     — *(#227)*
+
+25. **Six shipped passages said a descent trip makes "the session latch", which is the exact
+    reading the crate rejects on the record — and the mechanism they attribute the behaviour to
+    predicts the opposite of what the code does.** `examples/expr_recovery.rs` (four sites),
+    `guide/ch05_pratt.md`, `tests/pratt_recovery.rs` and this changelog's own entry for the
+    example all explained the terminal stop as a *latch on the session*, unqualified and as the
+    reason recovery re-raises.
+
+    Read absolutely, that is the semantics `tests/collection_resource_trip.rs` argues against in
+    as many words: *"the session has tripped forever after… One deeply-nested expression early in
+    a document would then suppress every diagnostic after it — which is precisely wrong for the
+    editor and language-server consumers this crate is built for."* Every consulting site is
+    instead **attempt-relative** — it snapshots the monotone counter before the attempt it is
+    judging and re-raises only when the count moved during it.
+
+    The behaviour the passages describe is real; the mechanism is not a latch but **terminality
+    plus a per-attempt comparison**, and the two predict different things for a consumer that
+    handles the trip: under a latch, a grammar that catches a trip and parses on would lose
+    recovery for the rest of the parse, and it does not.
+    `tests/pratt_limit_unit_sink.rs`'s `a_caught_trip_does_not_disable_a_later_recovery` has
+    pinned the opposite since 0.9.0's #148 work — the tripping run and its untripped control are
+    required to produce the identical result. So the passages were checked against that cell
+    before being rewritten, not against each other.
+
+    All six now state terminality and the per-attempt scoping, and the guide additionally
+    distinguishes this from a `PartialSession`'s terminal latch,
+    which *is* a latch, refuses later **attempts** over a growing buffer, and is the thing the
+    word was borrowed from. Prose only; no behaviour changed. It travels with
+    `Cst::resource_trips` above because that accessor is what finally makes the distinction
+    observable to a consumer — session-absolute after the parse, attempt-relative during it —
+    and a door whose docs contradicted six other passages would have been worse than either.
+    — *(#224)*
 
 ## 0.8.0 (2026-08-04)
 

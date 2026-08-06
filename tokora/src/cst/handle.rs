@@ -126,6 +126,9 @@ where
   L: Lexer<'inp>,
 {
   sink: Sink<'inp, L, E>,
+  /// The parse's descent-trip count, taken off the `Input` the driver was about to drop. See
+  /// [`resource_trips`](Cst::resource_trips) for why the handle is the only place it can live.
+  resource_trips: usize,
 }
 
 impl<'inp, L, E> core::fmt::Debug for Cst<'inp, L, E>
@@ -134,7 +137,10 @@ where
   E: core::fmt::Debug,
 {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_struct("Cst").field("sink", &self.sink).finish()
+    f.debug_struct("Cst")
+      .field("sink", &self.sink)
+      .field("resource_trips", &self.resource_trips)
+      .finish()
   }
 }
 
@@ -142,12 +148,76 @@ impl<'inp, L, E> Cst<'inp, L, E>
 where
   L: Lexer<'inp>,
 {
-  /// Wraps a spent sink. Crate-private on purpose: the drivers are the only minters, and a
-  /// public constructor here would re-open the very seam [`Sink::new`] closed — a caller could
-  /// pair a sink with any parse and then wrap the result.
+  /// Wraps a spent sink, together with the descent-trip count of the parse that spent it.
+  ///
+  /// Crate-private on purpose: the drivers are the only minters, and a public constructor here
+  /// would re-open the very seam [`Sink::new`] closed — a caller could pair a sink with any parse
+  /// and then wrap the result. The second argument is why that matters twice over: it is a fact
+  /// about the parse, not about the sink, and a caller who could state it separately could state
+  /// a clean count over a tree that tripped.
+  ///
+  /// `resource_trips` comes from `Input::resource_trips`, read **before** `into_emitter` consumes
+  /// the input.
   #[inline(always)]
-  pub(crate) const fn from_sink(sink: Sink<'inp, L, E>) -> Self {
-    Self { sink }
+  pub(crate) const fn from_sink(sink: Sink<'inp, L, E>, resource_trips: usize) -> Self {
+    Self {
+      sink,
+      resource_trips,
+    }
+  }
+
+  /// How many times this parse exceeded its **recursion budget** — zero for a parse that stayed
+  /// inside it.
+  ///
+  /// # The question this answers, and why nothing else could
+  ///
+  /// A descent trip reaches the caller on exactly one channel: the driver's `Result`. It is
+  /// deliberately **not** an emitter event —
+  /// [`RecursionLimitReached`](crate::error::RecursionLimitReached) has no `emit_*` counterpart,
+  /// because a recording emitter that could absorb a resource trip would be worse than one that
+  /// is hard to observe. The consequence is that a lossless consumer whose product is the tree
+  /// plus its diagnostics — the ordinary shape, and the reason
+  /// [`parse_lossless`](super::parse_lossless) returns the tree first — sees **nothing**: the
+  /// diagnostics are empty, the tree round-trips (`tree.text() == source`) exactly as an untripped
+  /// parse's does, and only the discarded `Result` said why it is shaped that way. This is the
+  /// other channel, and it survives on the handle rather than in the tuple.
+  ///
+  /// It cannot be recovered later from anything else. [`InputRef::recursion`](crate::InputRef)
+  /// reports the *live* depth, and the trip path releases the frame before building the error, so
+  /// the budget reads clean the instant the error exists; the input that held the counter is
+  /// dropped by the driver on the same line that mints this handle.
+  ///
+  /// # Session-absolute, and only sound because the parse is over
+  ///
+  /// The cell is a **monotone session fact** — it counts up and nothing lowers it, because
+  /// nothing can un-exceed a budget. Read absolutely, it answers *"did this parse ever trip"*.
+  ///
+  /// That is precisely the reading every site **inside** a parse must not take: `recover`,
+  /// `inplace_recover`, `skip_then_retry` and the resilient collection loops all snapshot the
+  /// counter and ask whether it moved during the one attempt they are judging, because an
+  /// absolute reading there would let a single deep construct early in a document re-raise every
+  /// later failure and suppress every later diagnostic. The reading is safe *here* for the reason
+  /// it is unsafe there: there is no later attempt to poison. The parse is finished.
+  ///
+  /// A **count** rather than a `bool`, for the same reason the cell is one: it composes. Two
+  /// trips are distinguishable from one, which a flag cannot do — and a grammar that catches a
+  /// trip itself and parses on is supported, so more than one is reachable.
+  ///
+  /// # What it does not tell you
+  ///
+  /// Not *where*: a descent trip has a control stack rather than a position, and latches no
+  /// boundary. Not *whether the tree is truncated*: a grammar that caught the trip may have
+  /// carried on and produced a complete construct. It is the existence question, which is the one
+  /// a consumer holding a silent tree could not previously ask at all.
+  ///
+  /// # The boundary
+  ///
+  /// Frames admitted equals the limiter's `limitation` exactly — the `limitation + 1`th descent
+  /// is the one refused. For a Pratt-driven grammar the root expression spends the first frame, so
+  /// the deepest *nested* construct that parses clean is `limitation - 1`.
+  #[inline(always)]
+  pub const fn resource_trips(&self) -> usize {
+    self.resource_trips
   }
 
   /// Sets the materialization-time trivia placement policy (builder form).
