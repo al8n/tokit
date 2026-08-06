@@ -6,10 +6,10 @@ name: CI
 # before a push:
 #
 #     cargo fmt --check
-#     cargo +stable clippy --all-features --tests --no-deps -- -D warnings
+#     cargo +stable clippy --all-features --all-targets --no-deps -- -D warnings
 #     cargo test --all-features
 #     cargo test --release --all-features
-#     cargo +nightly check -p tokora --tests --all-features
+#     cargo +nightly check -p tokora --all-targets --all-features
 #     cargo check -p tokora --no-default-features
 #     cargo bench --all-features --no-run
 #     RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
@@ -55,6 +55,48 @@ name: CI
 # nothing compiles. When a change adds a configuration, a target, a feature or a public owner,
 # ask which line goes red if it breaks — and when the answer is "none", the missing thing is
 # the line, not the test.
+
+# ── EVERY CARGO TARGET KIND, AND WHAT REACHES IT ────────────────────────────────────────────
+#
+# Six of the defects found in the week of 2026-08 were one shape — a gate whose stated scope was
+# wider than what it actually built, silently, because cargo answers "nothing matched" with a
+# warning and exit 0 (#181, #195, #200, #208, #217, #220). The set of cargo target KINDS is short
+# and finite, so it is written out here once rather than rediscovered a seventh time. Counts are
+# `cargo metadata --no-deps`'s, and every "linted by" below was counted off the
+# `--message-format=json` artifact stream, not inferred from a flag's name.
+#
+#   * **lib** (1) — built by nearly every job. Clippy-linted by `clippy` and `hack-clippy`; run
+#     as a unittest by `test`, `test-valve-off`, `test-release`, `logos-versions`, `no-std` and
+#     `coverage`.
+#   * **bins** (0) — none declared. `--all-targets` on the `clippy` line carries any that appear.
+#   * **custom-build** (1, `tokora/build.rs`) — built by every job that builds the crate, and it
+#     IS clippy-linted, which is worth knowing because no `--<kind>` flag names it: it rides
+#     along with the package. Confirmed by injecting a `clippy::len_zero` into it and watching
+#     the `clippy` line report it, rather than by reading the flag list.
+#   * **tests** (103 integration targets) — clippy-linted by `clippy` and by
+#     `hack-clippy --tests`; run by the five test jobs above.
+#   * **benches** (5) — clippy-linted by `clippy`; compiled and executed once each by
+#     `bench (smoke)`.
+#   * **examples** (8) — clippy-linted by `clippy` **only since #220**; before that `--tests`
+#     and `--benches` were the whole job and neither reaches an example, so all eight had never
+#     been linted and four were red for as long as they had existed. Compiled by
+#     `cargo test --all-features` in `test` — cargo builds examples to prove they still compile —
+#     and by `pages.yml`'s *Compile canonical examples*, which is the only step that RUNS their
+#     `#[cfg(test)]` cells.
+#   * **doctests** — run by `test`, by `pages.yml` under four feature points, and by
+#     `coverage --doctests`. **Clippy-linted by nothing, and not fixable from here**:
+#     `--all-targets` excludes doctests by definition and clippy has no doctest mode, because
+#     rustdoc rather than clippy-driver is what compiles them. A clippy finding that lives only
+#     in a doctest is therefore invisible to this workflow, and that is not hypothetical — the
+#     ten `parse_lossless(src, Default::default(), ...)` calls in `guide/ch16_lossless_cst.md`
+#     were the same `clippy::unit_arg` as the four in `examples/` that #220 fixed, and no gate
+#     could see either set. Both sets are fixed by hand; the next one will have to be too.
+#
+# Two things are not cargo targets at all, so they appear under no `--<kind>` flag: the
+# `tests/ui/*.rs` trybuild cases, which the `diagnostics` test target compiles and only on the
+# pinned MSRV (hence that job asserting on an executed-case count — a skip is otherwise
+# indistinguishable from a pass), and the guide chapters under `tokora/src/guide/`, which reach
+# rustc only as the doctests above.
 
 # ── THIS IS THE FAST LANE ───────────────────────────────────────────────────────────────────
 #
@@ -148,7 +190,27 @@ jobs:
       - name: cargo +stable fmt --all -- --check
         run: cargo +stable fmt --all -- --check
 
-  # ── Gate: clippy (tests + benches, no deps, deny warnings) ──────────────────
+  # ── Gate: clippy (EVERY target kind, no deps, deny warnings) ────────────────
+  #
+  # `--all-targets`, not the `--tests` + `--benches` pair this job ran until #220. Between them
+  # those two reach the lib, the build script, the 103 integration tests and the five benches —
+  # and no example. So the eight `examples/` targets had never been linted by anything, and four
+  # of them were red the whole time: `parse_lossless(src, Default::default(), ..)` passes a unit
+  # value, which is `clippy::unit_arg`, so `clippy --all-features --all-targets` exited 101 on
+  # `main` while this job was green.
+  #
+  # Counted off the `--message-format=json` artifact stream rather than inferred: `--tests`
+  # processes 105 tokora targets, `--benches` 7, and `--all-targets` 118 — their union plus
+  # exactly the eight examples. One invocation is also cheaper than two, because the lib is
+  # checked once instead of twice.
+  #
+  # `--all-targets` is a target FILTER, and a filter is the silent shape: one that satisfies
+  # nothing warns `no targets matched` and exits 0, which is how `pages.yml` compiled zero
+  # examples for its whole existence (#217). It is safe on THIS line only because `--all-features`
+  # sits on it: a target's `required-features` are by construction a subset of all features, so
+  # nothing can be filtered out. Narrowing the feature set here without narrowing the claim
+  # reopens exactly that hole — name the targets instead, since `--example NAME` errors where
+  # `--examples` shrugs.
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -166,10 +228,8 @@ jobs:
             ${{ runner.os }}-clippy-
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable && rustup component add clippy
-      - name: clippy --all-features --tests --no-deps -D warnings
-        run: cargo +stable clippy --all-features --tests --no-deps -- -D warnings
-      - name: clippy --all-features --benches --no-deps -D warnings
-        run: cargo +stable clippy --all-features --benches --no-deps -- -D warnings
+      - name: clippy --all-features --all-targets --no-deps -D warnings
+        run: cargo +stable clippy --all-features --all-targets --no-deps -- -D warnings
 
   # ── Gate: MSRV (the workspace `rust-version`; see the policy note in Cargo.toml) ─
   msrv:
