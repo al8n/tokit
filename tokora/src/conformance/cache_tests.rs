@@ -2951,10 +2951,14 @@ const ANCHOR: &str = "CACHE_CALL_CENSUS:";
 /// source" is a wall rather than a caveat.
 ///
 /// The admission criterion is one property, and it is the reason walking the *body* is sound for
-/// everything here: **every call in the expansion appears literally in the invocation's tokens**.
-/// That holds for the whole `format_args!` family and for the assertions built on it — they
-/// rearrange and stringify their arguments, and introduce no call of their own. It does not hold
-/// for a user macro, which is why none is admitted.
+/// everything here: **the expansion adds no call the author chose.** Stated that precisely on
+/// purpose — "adds no call at all" would be wider than what holds, and a census whose own
+/// justification overclaims is #183's defect one level in. These macros do add calls: `assert_eq!`
+/// inserts `PartialEq::eq`, the `format_args!` family inserts `Display::fmt`. But which calls they
+/// add is fixed by std, not by what is written at the invocation, and none is a `Cache` method. So
+/// every *guarded* call in the expansion is one that appears literally in the tokens, which is
+/// exactly what the walk reads. A user macro chooses its own expansion, which is why none is
+/// admitted.
 ///
 /// `macro_rules` is deliberately absent, and that absence is what makes *defining* a macro in the
 /// censused file drift: a definition is an `Item::Macro` whose path is `macro_rules`, so it fails
