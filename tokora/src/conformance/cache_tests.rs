@@ -2677,3 +2677,1355 @@ fn cache_kit_catches_an_early_push_front_refusal_that_corrupts_the_returned_entr
 fn cache_kit_catches_a_declining_predicate_shown_the_backs_state() {
   run_queue::<POP_FRONT_IF_PREDICATE_ARG_STATE_SKEW>();
 }
+
+// ── CACHE_CALL_CENSUS ────────────────────────────────────────────────────────────────
+//
+// Four review rounds of #183 found the same defect four times: a value a `Cache` method handed
+// the kit that the kit reduced to `is_ok()`/`is_some()` and never compared. R1 a popped entry,
+// R2 the same on the peek-then-consume path, R3 every accepted push's `Ok` reference, R4/R5 the
+// `Err` of a refusal at the two sites where a refusal may be either warranted or not.
+//
+// Each round the fix was correct and each round the *method* was the same: enumerate the sites
+// by hand and argue the residue is fine. Four hand enumerations, four misses. The enumeration by
+// **shape** was complete — `Some` / `None` / `Ok` / `Err`-expected / `Err`-unexpected, and there
+// is no sixth — but the enumeration by **site** was not, because a site can be two shapes at
+// once and a census organised by shape cannot see that.
+//
+// So this is the guard that replaces the argument: a mechanical scan of the kit's own source
+// that fails, naming the function and line, the moment a `Cache` call appears anywhere it is not
+// registered below. It cannot prove a value is compared — Rust has no call-site reflection, and
+// `RECORD_CENSUS` and `SETTLE_CENSUS` live with the same limit — but it makes the *existence* of
+// a site impossible to overlook, which is the step that kept failing.
+
+/// The `Cache` methods whose return value carries an entry, and every spelling the scanner
+/// recognises for a call to one.
+///
+/// Two spellings per method: the method-call form (`cache.pop_front(`) and the qualified form
+/// (`Cache::pop_front(`, `C::pop_front(`, `<C as Cache<..>>::pop_front(`, `Self::pop_front(` —
+/// all of which end in `::pop_front(`). The qualified form was invisible to this census until
+/// #183's sixth review round, which is exactly the kind of gap the bounds note below exists to
+/// keep honest rather than to pretend away.
+///
+/// `len`, `remaining`, `is_empty`, `span`, `front_span`, `back_span` and `clear` are deliberately
+/// absent: they return counts, spans or nothing, so there is no entry behind them for an oracle
+/// to fail to compare.
+const GUARDED_METHODS: &[&str] = &[
+  "push_back",
+  "push_front",
+  "pop_front",
+  "pop_back",
+  "pop_front_if",
+  "try_pop_front_if",
+  "peek",
+  "peek_one",
+  "push_many",
+  "front",
+  "back",
+];
+
+/// What a registered site does with the value, as the key its anchor comment must carry.
+const ROUTED: &str = "routed";
+const COMPARED_IN_PLACE: &str = "compared-in-place";
+const NOT_A_CACHE_CALL: &str = "not-a-cache-call";
+const ABSENCE: &str = "absence";
+
+/// Every guarded call the kit makes: `(function, method, occurrences, kind, reason)`.
+///
+/// The count catches an added or removed call. It cannot catch a **swap** — delete one guarded
+/// call and add a different, uncompared one in the same function and the count is unchanged —
+/// which is why every registered call also carries an anchor comment at the site, and why the
+/// scanner requires one. The count is the inventory; the anchor is the identity.
+///
+/// `kind` is checked against the anchor, so a site cannot be silently reclassified from
+/// `absence` to `routed` (or the reverse) by editing only one of the two places.
+const CALL_SITES: &[(&str, &str, &str, usize, &str, &str)] = &[
+  // ── routed: the comparison lives in the callee ──────────────────────────────────
+  (
+    "push_back_expecting",
+    "push_back",
+    "cache",
+    1,
+    ROUTED,
+    "Compares the Ok reference against the offered entry; on a refusal, hands it to the caller when the refusal is legitimate and to `unexpected_refusal` when it is not.",
+  ),
+  (
+    "push_front_expecting",
+    "push_front",
+    "cache",
+    1,
+    ROUTED,
+    "The prepend twin of `push_back_expecting`.",
+  ),
+  (
+    "drained_front",
+    "pop_front",
+    "cache",
+    1,
+    ROUTED,
+    "Compares the popped entry against the entry the kit knows is next off the front.",
+  ),
+  (
+    "drained_back",
+    "pop_back",
+    "cache",
+    1,
+    ROUTED,
+    "The same at the restore-path end, with RESTORE_NOTE implied by the end rather than passed in.",
+  ),
+  (
+    "assert_front_entry",
+    "front",
+    "cache",
+    1,
+    ROUTED,
+    "Compares the front reference in full.",
+  ),
+  (
+    "assert_back_entry",
+    "back",
+    "cache",
+    1,
+    ROUTED,
+    "Compares the back reference in full; this is the entry `InputRef::resume` rebuilds a lexer from.",
+  ),
+  (
+    "peeked_entries_through",
+    "peek",
+    "cache",
+    1,
+    ROUTED,
+    "Flattens every peeked entry to the triple the kit compares.",
+  ),
+  (
+    "peeked_entries_after_prefill",
+    "peek",
+    "cache",
+    1,
+    ROUTED,
+    "The prefilled-buffer shape, same flattening.",
+  ),
+  (
+    "peeked_one",
+    "peek_one",
+    "cache",
+    1,
+    ROUTED,
+    "Flattens to the triple, so the caller compares an entry and not a span.",
+  ),
+  (
+    "recording_pop_front_if",
+    "pop_front_if",
+    "cache",
+    1,
+    ROUTED,
+    "Owns the recording closure, so the predicate's argument is compared unconditionally and cannot be discarded by an edit at a call site.",
+  ),
+  (
+    "recording_try_pop_front_if",
+    "try_pop_front_if",
+    "cache",
+    1,
+    ROUTED,
+    "The fallible twin.",
+  ),
+  // ── compared in place ───────────────────────────────────────────────────────────
+  (
+    "check_push_many",
+    "push_many",
+    "cache",
+    1,
+    COMPARED_IN_PLACE,
+    "The overflow iterator is collected and every entry compared against `corpus[cap..]` on the lines below.",
+  ),
+  // ── not a Cache call ────────────────────────────────────────────────────────────
+  (
+    "peeked_entries_after_prefill",
+    "push_back",
+    "buf",
+    1,
+    NOT_A_CACHE_CALL,
+    "`GenericArrayDeque::push_back` on the kit's OWN peek buffer, loading the prefill before `peek` is invoked. Registered rather than special-cased in the scanner, because a scanner that guessed at receivers would be the kind of check that passes by not looking.",
+  ),
+  // ── absence is the law under test ───────────────────────────────────────────────
+  (
+    "assert_empty",
+    "front",
+    "cache",
+    1,
+    ABSENCE,
+    "An empty cache must not answer.",
+  ),
+  (
+    "assert_empty",
+    "back",
+    "cache",
+    1,
+    ABSENCE,
+    "An empty cache must not answer.",
+  ),
+  (
+    "assert_empty",
+    "pop_front",
+    "cache",
+    1,
+    ABSENCE,
+    "A pop must not answer on an empty cache; this probe is what catches RESURRECTING_CLEAR.",
+  ),
+  (
+    "assert_empty",
+    "pop_back",
+    "cache",
+    1,
+    ABSENCE,
+    "As above, at the other end.",
+  ),
+  (
+    "assert_empty",
+    "peek_one",
+    "cache",
+    1,
+    ABSENCE,
+    "peek_one must name nothing where there is no front.",
+  ),
+  (
+    "check_pop_order",
+    "pop_front",
+    "cache",
+    1,
+    ABSENCE,
+    "After the full drain, nothing is left to return.",
+  ),
+  (
+    "check_pop_order",
+    "pop_back",
+    "cache",
+    1,
+    ABSENCE,
+    "As above, at the other end.",
+  ),
+  (
+    "check_push_front",
+    "pop_front",
+    "mixed",
+    2,
+    ABSENCE,
+    "The full-order and interleaved-order drains each end by asserting nothing is left.",
+  ),
+  (
+    "check_push_front",
+    "pop_back",
+    "mixed",
+    1,
+    ABSENCE,
+    "The from-the-back drain ends the same way.",
+  ),
+  (
+    "check_pop_front_if",
+    "pop_front_if",
+    "empty",
+    1,
+    ABSENCE,
+    "The empty-cache probe: the predicate must not run at all, and the method must answer None.",
+  ),
+  (
+    "check_pop_front_if",
+    "try_pop_front_if",
+    "empty2",
+    1,
+    ABSENCE,
+    "The empty-cache probe.",
+  ),
+];
+
+/// The marker every registered call carries on the comment line(s) directly above it.
+const ANCHOR: &str = "CACHE_CALL_CENSUS:";
+
+/// The macros the censused file may invoke.
+///
+/// `syn` hands the walk a macro **invocation**, never its expansion, so a macro this list does not
+/// name could expand to anything — `cache_call!(cache)` names nothing guarded, parses as an
+/// expression list, and expands to `cache.pop_front()`. #183's eighth round found exactly that,
+/// and it recorded neither a call nor a warning. Rather than widen the census's bound to admit it,
+/// the bound is made **true**: the census governs one file, so requiring every macro in that file
+/// to come from a closed list is enforceable, and then "a guarded call appears literally in the
+/// source" is a wall rather than a caveat.
+///
+/// The admission criterion is one property, and it is the reason walking the *body* is sound for
+/// everything here: **the expansion adds no call the author chose.** Stated that precisely on
+/// purpose — "adds no call at all" would be wider than what holds, and a census whose own
+/// justification overclaims is #183's defect one level in. These macros do add calls: `assert_eq!`
+/// inserts `PartialEq::eq`, the `format_args!` family inserts `Display::fmt`. But which calls they
+/// add is fixed by std, not by what is written at the invocation, and none is a `Cache` method. So
+/// every *guarded* call in the expansion is one that appears literally in the tokens, which is
+/// exactly what the walk reads. A user macro chooses its own expansion, which is why none is
+/// admitted.
+///
+/// `macro_rules` is deliberately absent, and that absence is what makes *defining* a macro in the
+/// censused file drift: a definition is an `Item::Macro` whose path is `macro_rules`, so it fails
+/// this list on the way in. A macro defined elsewhere in the crate is covered too — its
+/// *invocation* is what has to appear here, and only the invocation is in this file.
+///
+/// Matched on the **whole** path, not the last segment: `evil::assert!` is not `assert!`. So a
+/// qualified spelling of an admitted macro (`std::format!`) is refused until it is written down
+/// here, which is a red rather than a hole, and the conscious act is the point.
+const MACRO_ALLOWLIST: &[&str] = &[
+  "assert",
+  "assert_eq",
+  "assert_ne",
+  "format",
+  "format_args",
+  "matches",
+  "panic",
+  "unreachable",
+];
+
+/// The attributes the censused file may carry.
+///
+/// The same hole one level up, and the reason it is a separate list: an attribute macro rewrites
+/// the item the walk is reading, and `syn::visit` never routes an attribute through
+/// `CensusVisitor::visit_macro` — `Attribute` holds a `Meta`, not a `Macro` — so an
+/// attribute-macro invocation is not merely unexpanded, it is entirely outside the visitor.
+///
+/// Everything admitted here is compiler-built-in and cannot introduce a call: `doc` is inert,
+/// `must_use`, `inline` and `cold` annotate, `allow`/`expect` govern lints, `cfg` can only
+/// *remove* an item. `derive` is admitted because it is built-in, but what it expands is not, so
+/// its arguments go through [`DERIVE_ALLOWLIST`] separately.
+///
+/// `cfg_attr` is deliberately absent: it applies an arbitrary attribute, so admitting it would
+/// admit whatever it names.
+const ATTR_ALLOWLIST: &[&str] = &[
+  "allow", "cfg", "cold", "derive", "doc", "expect", "inline", "must_use",
+];
+
+/// The derive macros the censused file may ask for — the built-ins, which expand to `impl` blocks
+/// over the deriving type's own fields and cannot reach a `Cache` method.
+///
+/// A third-party derive can expand to anything, which is the whole reason `derive`'s presence in
+/// [`ATTR_ALLOWLIST`] is not enough on its own.
+const DERIVE_ALLOWLIST: &[&str] = &[
+  "Clone",
+  "Copy",
+  "Debug",
+  "Default",
+  "Eq",
+  "Hash",
+  "Ord",
+  "PartialEq",
+  "PartialOrd",
+];
+
+/// One scanned call: enclosing function, method, receiver, 1-based line, and the anchor kind
+/// bound to it.
+#[derive(Debug, PartialEq, Eq)]
+struct CensusCall {
+  function: std::string::String,
+  method: &'static str,
+  receiver: std::string::String,
+  line: usize,
+  anchor: Option<std::string::String>,
+}
+
+/// A macro invocation whose body the walk could not read as an expression list, so nothing inside
+/// it was visited.
+#[derive(Debug, PartialEq, Eq)]
+struct OpaqueMacro {
+  function: std::string::String,
+  path: std::string::String,
+  line: usize,
+  /// Whether the unread tokens name a guarded method — the loud case. Reported either way: an
+  /// unwalked body is a region the census did not look at, and saying so is the difference
+  /// between a bound and an assumption.
+  names_guarded: bool,
+}
+
+/// What one scan of a source file found.
+#[derive(Debug, Default)]
+struct CensusScan {
+  calls: std::vec::Vec<CensusCall>,
+  /// Anchors with no call bound to them — dead markers.
+  orphan_anchors: std::vec::Vec<usize>,
+  /// A guarded method named as a **function item** rather than called: `Cache::pop_front` with
+  /// no argument list, which a later call through the resulting pointer would hide.
+  function_items: std::vec::Vec<(std::string::String, usize)>,
+  /// A macro whose body does not parse as an expression list, so the walk saw none of it.
+  opaque_macros: std::vec::Vec<OpaqueMacro>,
+  /// A macro invocation whose path is not in [`MACRO_ALLOWLIST`] — its expansion is unknown, and
+  /// an unknown expansion can contain a guarded call that appears nowhere in the source.
+  unknown_macros: std::vec::Vec<(std::string::String, std::string::String, usize)>,
+  /// An attribute whose path is not in [`ATTR_ALLOWLIST`], or a `derive` argument not in
+  /// [`DERIVE_ALLOWLIST`]: an attribute macro rewrites the item the walk is reading.
+  unknown_attrs: std::vec::Vec<(std::string::String, std::string::String, usize)>,
+}
+
+/// The receiver a call is made on, as a short readable name.
+///
+/// This is what distinguishes `buf.push_back(…)` — the kit's own peek buffer — from
+/// `cache.push_back(…)`, which is a real `Cache` return value. The substring census could not
+/// tell them apart at all, so its `not-a-cache-call` row was a promise rather than a check.
+fn census_receiver(expr: &syn::Expr) -> std::string::String {
+  match expr {
+    syn::Expr::Path(p) => p
+      .path
+      .segments
+      .last()
+      .map_or_else(|| "<path>".into(), |s| census_ident(&s.ident)),
+    syn::Expr::Field(f) => match &f.member {
+      syn::Member::Named(n) => std::format!("{}.{}", census_receiver(&f.base), census_ident(n)),
+      syn::Member::Unnamed(i) => std::format!("{}.{}", census_receiver(&f.base), i.index),
+    },
+    syn::Expr::Reference(r) => census_receiver(&r.expr),
+    syn::Expr::Paren(p) => census_receiver(&p.expr),
+    syn::Expr::Unary(u) => census_receiver(&u.expr),
+    syn::Expr::MethodCall(m) => std::format!(
+      "{}.{}()",
+      census_receiver(&m.receiver),
+      census_ident(&m.method)
+    ),
+    syn::Expr::Call(c) => std::format!("{}()", census_receiver(&c.func)),
+    _ => "<expr>".into(),
+  }
+}
+
+/// An identifier as the census compares it, with the `r#` of a raw identifier stripped.
+///
+/// `Ident::to_string` **keeps** the `r#`, and #183's eighth round found what that costs:
+/// `cache.r#pop_front()` and `Cache::r#pop_front(cache)` are ordinary calls to a guarded method
+/// that no comparison against [`GUARDED_METHODS`] can match. The source parses, so they were not
+/// reported as an opaque macro either — simply invisible, in every form. It cuts the other way
+/// too: `r#cache.pop_front()` would have missed the `cache` row in [`CALL_SITES`] and been
+/// reported as an unregistered receiver.
+///
+/// Deliberately a string strip rather than `syn::ext::IdentExt::unraw`, which rebuilds the
+/// identifier through `Ident::new` — and `Ident::new` panics on a keyword. `unraw` on a
+/// `r#type` field anywhere in the censused file would take the whole census down with it, and
+/// this function is called on every identifier the walk stringifies, not only on guarded ones.
+fn census_ident(ident: &proc_macro2::Ident) -> std::string::String {
+  let text = ident.to_string();
+  match text.strip_prefix("r#") {
+    Some(bare) => bare.to_string(),
+    None => text,
+  }
+}
+
+/// A path as `a::b::c`, each segment unrawed, generic arguments dropped.
+fn census_path(path: &syn::Path) -> std::string::String {
+  let mut out = std::string::String::new();
+  for (i, seg) in path.segments.iter().enumerate() {
+    if i > 0 || path.leading_colon.is_some() {
+      out.push_str("::");
+    }
+    out.push_str(&census_ident(&seg.ident));
+  }
+  out
+}
+
+/// Whether a token stream names a guarded method as an **identifier**.
+///
+/// Identifiers only: the kit's failure messages are full of `pop_front` in prose, and a string
+/// literal that mentions one is not a call. Unrawed for the reason [`census_ident`] gives — a
+/// `r#pop_front` buried in tokens the walk could not parse is the quietest form of all.
+fn census_tokens_name_a_guarded_method(tokens: &proc_macro2::TokenStream) -> bool {
+  tokens.clone().into_iter().any(|tt| match tt {
+    proc_macro2::TokenTree::Ident(id) => {
+      let name = census_ident(&id);
+      GUARDED_METHODS.contains(&name.as_str())
+    }
+    proc_macro2::TokenTree::Group(g) => census_tokens_name_a_guarded_method(&g.stream()),
+    _ => false,
+  })
+}
+
+/// The visitor. Walks the expression tree, so call **syntax** is exact: whitespace and line
+/// breaks around `.` and `::` are gone by the time it runs, a turbofish is part of the call
+/// expression rather than a spelling to match, and a path that is merely *named* is an
+/// `ExprPath` and not an `ExprCall`.
+struct CensusVisitor {
+  scope: std::vec::Vec<std::string::String>,
+  found: CensusScan,
+}
+
+impl CensusVisitor {
+  fn here(&self) -> std::string::String {
+    self
+      .scope
+      .last()
+      .cloned()
+      .unwrap_or_else(|| "<file scope>".into())
+  }
+
+  fn guarded(ident: &proc_macro2::Ident) -> Option<&'static str> {
+    let name = census_ident(ident);
+    GUARDED_METHODS.iter().copied().find(|m| *m == name)
+  }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for CensusVisitor {
+  fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+    self.scope.push(census_ident(&node.sig.ident));
+    syn::visit::visit_item_fn(self, node);
+    self.scope.pop();
+  }
+
+  fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+    self.scope.push(census_ident(&node.sig.ident));
+    syn::visit::visit_impl_item_fn(self, node);
+    self.scope.pop();
+  }
+
+  /// A default body in a trait definition. There is none in the censused file today, and this is
+  /// here so that adding one is not quietly wrong: without it a call in a default body would be
+  /// attributed to the enclosing scope, which is not merely a bad label — the identity check
+  /// matches on the function name, so it could match a `CALL_SITES` row belonging to someone else.
+  fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+    self.scope.push(census_ident(&node.sig.ident));
+    syn::visit::visit_trait_item_fn(self, node);
+    self.scope.pop();
+  }
+
+  fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+    if let Some(method) = Self::guarded(&node.method) {
+      self.found.calls.push(CensusCall {
+        function: self.here(),
+        method,
+        receiver: census_receiver(&node.receiver),
+        line: node.method.span().start().line,
+        anchor: None,
+      });
+    }
+    syn::visit::visit_expr_method_call(self, node);
+  }
+
+  fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+    // A qualified call — `Cache::push_back(cache, tok)`, `<C as Cache<..>>::push_back(..)`. Its
+    // receiver is the first argument, so it lands in the table beside the method-call spelling
+    // rather than in a category of its own.
+    let mut counted = false;
+    if let syn::Expr::Path(path) = node.func.as_ref()
+      && let Some(last) = path.path.segments.last()
+      && let Some(method) = Self::guarded(&last.ident)
+    {
+      self.found.calls.push(CensusCall {
+        function: self.here(),
+        method,
+        receiver: node
+          .args
+          .first()
+          .map_or_else(|| "<none>".into(), census_receiver),
+        line: last.ident.span().start().line,
+        anchor: None,
+      });
+      counted = true;
+    }
+    // Recurse into the arguments either way; skip the callee path when it was the call, so it is
+    // not also reported as a function item.
+    if !counted {
+      self.visit_expr(&node.func);
+    }
+    for arg in &node.args {
+      self.visit_expr(arg);
+    }
+    // This is the one visitor that recurses by hand rather than delegating, so it is the one
+    // place an `attrs` field can be dropped on the floor. `visit_attribute` is where the
+    // attribute-macro bound is enforced, so skipping it here would be a hole in that bound
+    // specifically — cheap to close, and invisible if it were not.
+    for attr in &node.attrs {
+      self.visit_attribute(attr);
+    }
+  }
+
+  fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+    // Two or more segments only: a method function item is always reached through a type or
+    // trait path (`Cache::pop_front`). A bare single-segment path is a local — the kit has
+    // variables called `back` and `front` — and calling those function items would be nonsense.
+    if node.path.segments.len() >= 2
+      && let Some(last) = node.path.segments.last()
+      && let Some(_method) = Self::guarded(&last.ident)
+    {
+      // Named but not called: a function item. Not a call — reporting it as one is how the
+      // substring census spent a registered count on `Cache::try_pop_front_if::<E, _>` while the
+      // real call through it stayed invisible — but not nothing either, so it is surfaced.
+      self
+        .found
+        .function_items
+        .push((self.here(), last.ident.span().start().line));
+    }
+    syn::visit::visit_expr_path(self, node);
+  }
+
+  fn visit_macro(&mut self, node: &'ast syn::Macro) {
+    // `syn` hands back a macro's tokens, not its expansion — so this method has two jobs, and
+    // #183's eighth round found that only the first was being done.
+    //
+    // The first is to walk what IS here: most of the kit's guarded calls sit inside `assert!`,
+    // whose body is an expression list, so parse that and visit it like any other expression.
+    //
+    // The second is the expansion, which no amount of walking the tokens reaches.
+    // `cache_call!(cache)` names nothing guarded, parses cleanly as one expression, and expands
+    // to `cache.pop_front()`. Walking its tokens records a call that is not there and misses the
+    // one that is. The answer is not to look harder at the tokens — it is to refuse a macro whose
+    // expansion the census cannot account for, which MACRO_ALLOWLIST makes possible because this
+    // census governs exactly one file.
+    let path = census_path(&node.path);
+    let line = node
+      .path
+      .segments
+      .last()
+      .map_or(0, |s| s.ident.span().start().line);
+    if !MACRO_ALLOWLIST.contains(&path.as_str()) {
+      // Unknown expansion. Reported and NOT walked: the tokens of a macro whose meaning is
+      // unknown are not evidence about anything, in either direction.
+      self.found.unknown_macros.push((self.here(), path, line));
+      return;
+    }
+
+    let parsed = node
+      .parse_body_with(syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated);
+    match parsed {
+      Ok(exprs) => {
+        for expr in &exprs {
+          self.visit_expr(expr);
+        }
+      }
+      Err(_) => {
+        // Allowlisted, so the expansion introduces no call of its own — but the body was not
+        // walked, so any call written inside it went unseen. That is a region the census did not
+        // look at, and it is reported as one whether or not the tokens name something guarded.
+        self.found.opaque_macros.push(OpaqueMacro {
+          function: self.here(),
+          path,
+          line,
+          names_guarded: census_tokens_name_a_guarded_method(&node.tokens),
+        });
+      }
+    }
+  }
+
+  fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+    // An attribute never reaches `visit_macro`: `Attribute` holds a `Meta`, not a `Macro`, so an
+    // attribute macro is not merely unexpanded — it is outside the visitor entirely, and it
+    // rewrites the very item the walk is reading. The bound is closed the same way, by requiring
+    // every attribute in the censused file to be one that cannot introduce a call.
+    let path = census_path(node.path());
+    let line = node
+      .path()
+      .segments
+      .last()
+      .map_or(0, |s| s.ident.span().start().line);
+    if !ATTR_ALLOWLIST.contains(&path.as_str()) {
+      self.found.unknown_attrs.push((self.here(), path, line));
+      return;
+    }
+    // `derive` is built-in; what it expands is not. A third-party derive expands to items of its
+    // own choosing, so the arguments are checked against their own list.
+    if path == "derive"
+      && let Ok(paths) = node
+        .parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+    {
+      for p in &paths {
+        let name = census_path(p);
+        if !DERIVE_ALLOWLIST.contains(&name.as_str()) {
+          self
+            .found
+            .unknown_attrs
+            .push((self.here(), std::format!("derive({name})"), line));
+        }
+      }
+    }
+    syn::visit::visit_attribute(self, node);
+  }
+}
+
+/// Parse `src`, collect every guarded call, and bind each to the anchor comment above it.
+///
+/// The parse gives every call a **line**, which is what lets an anchor bind to a call rather
+/// than to a comment block: each anchor is consumed by at most one call, so a second call added
+/// under an existing marker has no anchor of its own and is reported.
+fn census_scan(src: &str) -> CensusScan {
+  let file = syn::parse_file(src).expect("CACHE_CALL_CENSUS: the censused source must parse");
+  let mut visitor = CensusVisitor {
+    scope: std::vec::Vec::new(),
+    found: CensusScan::default(),
+  };
+  syn::visit::Visit::visit_file(&mut visitor, &file);
+  let mut found = visitor.found;
+  // Everything is reported by line, so everything is sorted by line: the drift list is read by a
+  // human next to the file it names.
+  found.calls.sort_by_key(|c| c.line);
+  found.function_items.sort_by_key(|&(_, line)| line);
+  found.opaque_macros.sort_by_key(|m| m.line);
+  found.unknown_macros.sort_by_key(|&(_, _, line)| line);
+  found.unknown_attrs.sort_by_key(|&(_, _, line)| line);
+
+  let lines: std::vec::Vec<&str> = src.lines().collect();
+  let anchor_at = |i: usize| -> Option<std::string::String> {
+    let t = lines.get(i)?.trim_start();
+    if !t.starts_with("//") {
+      return None;
+    }
+    let pos = t.find(ANCHOR)?;
+    Some(t[pos + ANCHOR.len()..].trim().to_string())
+  };
+  let mut consumed: std::vec::Vec<usize> = std::vec::Vec::new();
+  for call in &mut found.calls {
+    let mut probe = call.line.saturating_sub(1); // 0-based index of the line above
+    while probe > 0 {
+      probe -= 1;
+      let Some(text) = lines.get(probe) else { break };
+      if !text.trim_start().starts_with("//") {
+        break;
+      }
+      if let Some(kind) = anchor_at(probe)
+        && !consumed.contains(&probe)
+      {
+        consumed.push(probe);
+        call.anchor = Some(kind);
+        break;
+      }
+    }
+  }
+  for (i, line) in lines.iter().enumerate() {
+    if line.trim_start().starts_with("//") && line.contains(ANCHOR) && !consumed.contains(&i) {
+      found.orphan_anchors.push(i + 1);
+    }
+  }
+  found.orphan_anchors.sort_unstable();
+  found
+}
+
+/// CACHE_CALL_CENSUS — no `Cache` value reaches the kit from a site this table does not know
+/// about, and no registered site can be swapped for a different call without saying so.
+///
+/// # What this census deliberately does not check
+///
+/// Stated rather than implied, because **this whole change exists because the kit made a coverage
+/// claim wider than what it checked**. A census that quietly claimed totality would be the same
+/// defect at one remove; the standard here is calibrated, not total.
+///
+/// Three of the bounds this note carried while the census was a substring scanner are **gone**,
+/// because the parse made them false, and a bound that is no longer true is the same defect as a
+/// claim that never was. For the record, they were: that a call form outside a fixed list of
+/// spellings was invisible; that an anchor bound to a comment block rather than to a call, so a
+/// second call could shelter under an existing marker; and that nothing checked the receiver, so
+/// a real `cache.push_back` could sit under the `not-a-cache-call` row. The walk closes all three
+/// — layout and turbofish are gone before it runs, every call carries its own line so an anchor
+/// binds to one call, and `ExprMethodCall` carries the receiver.
+///
+/// A fourth is gone too, and it went the other way — not because the parse made it false, but
+/// because it *was* false. It read: a call can hide only in a macro body the parse cannot read.
+/// #183's eighth round falsified it with a body that parses perfectly: `cache_call!(cache)` names
+/// nothing guarded, is one clean expression, and expands to `cache.pop_front()`. The bound was not
+/// about *unparseable* bodies at all; it was about **expansion**, which `syn` never performs.
+/// Widening the wording to admit that would have been honest and useless. Instead the claim is
+/// made true: **every macro invocation and every attribute in this file must come from a closed
+/// list** ([`MACRO_ALLOWLIST`], [`ATTR_ALLOWLIST`], [`DERIVE_ALLOWLIST`]), each entry admitted only
+/// because its expansion cannot introduce a call of its own. A macro that could generate one
+/// cannot appear here at all — including a `macro_rules` definition, whose path is not on the
+/// list. So a guarded call must appear *literally* in this source, and that is now a wall rather
+/// than a caveat.
+///
+/// What is left:
+///
+/// * **A macro body the parse cannot read is not walked**, and the residue is now this and nothing
+///   more: the macro is one of the eight, so its expansion adds no call, but a call written
+///   *inside* its body went unvisited. It is not silent — the body is **reported**, whether or not
+///   its tokens name a guarded method, because a region the census did not look at is exactly what
+///   it must not pass over quietly. See [`cache_call_census_reports_a_macro_body_it_cannot_read`].
+/// * **It cannot prove a routed helper actually compares.** It checks where a call is, what it is
+///   made on, and what its anchor says — not what the callee does with the value. That is what
+///   the twenty mutant cells and the ablation are for; this census is defence in depth behind
+///   them, not the primary protection.
+/// * **An author who adds both a call and its anchor has registered it.** The census is a speed
+///   bump that forces a conscious act and a reviewable diff, in the same way `RECORD_CENSUS` and
+///   `SETTLE_CENSUS` are.
+/// * **Scope is this file.** `cache_tests.rs`'s own fixture calls `Cache` methods constantly — it
+///   *is* the cache under test — and is not scanned.
+///
+/// A guarded method named as a **function item** (`Cache::pop_front` with no argument list) is
+/// not a bound and not a call: it is reported as drift, because a later call through that pointer
+/// would be invisible. The substring census counted such a path *as a call*, which spent the
+/// registered count while the real call stayed hidden — a miss wearing the costume of coverage.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
+fn cache_call_census_every_guarded_call_is_registered() {
+  let found = census_scan(include_str!("cache.rs"));
+  let drift = census_drift(&found);
+
+  assert!(
+    drift.is_empty(),
+    "CACHE_CALL_CENSUS drift:\n  {}\n\nEvery call to a Cache method that returns an entry must \
+     carry an anchor comment saying what happens to the value — routed through a comparing \
+     helper, compared in place, or checked only for absence because absence is the law — and \
+     must be registered in CALL_SITES with the same kind AND the same receiver. Six review \
+     rounds of #183 each found one site that had been reasoned about and missed (grep \
+     CACHE_CALL_CENSUS). Route the call, anchor it, and register it in the same commit. A macro \
+     or attribute that is not allowlisted is refused rather than guessed at: syn does not expand, \
+     so an unlisted expansion could carry a call that appears nowhere in the source.",
+    drift.join("\n  ")
+  );
+}
+
+/// Every way a scan can be drift, as the lines the failure prints.
+///
+/// Split out of the test above so it can be *called with a scan that is not clean*. It has to be:
+/// on a conforming `cache.rs` not one of these seven arms executes, so nothing would otherwise
+/// exercise the messages themselves — and a swapped placeholder in a failure message is invisible
+/// exactly when it matters, which is the shape of defect this whole census exists to refuse.
+/// [`cache_call_census_names_every_defect_it_reports`] drives all seven.
+fn census_drift(found: &CensusScan) -> std::vec::Vec<std::string::String> {
+  let mut drift = std::vec::Vec::new();
+
+  // 1. Identity: every call carries an anchor of its own, on the right receiver, and the anchor
+  //    agrees with the table.
+  for call in &found.calls {
+    let CensusCall {
+      function: f,
+      method: m,
+      receiver: r,
+      line,
+      anchor,
+    } = call;
+    let registered = CALL_SITES
+      .iter()
+      .find(|(g, n, recv, _, _, _)| g == f && n == m && recv == r);
+    match (anchor.as_deref(), registered) {
+      (None, _) => drift.push(std::format!(
+        "conformance/cache.rs:{line}: `{f}` calls `{r}.{m}` with no `// {ANCHOR} <kind>` anchor of its own"
+      )),
+      (Some(k), None) => drift.push(std::format!(
+        "conformance/cache.rs:{line}: `{f}` calls `{r}.{m}` (anchored `{k}`) and is NOT in CALL_SITES for that receiver"
+      )),
+      (Some(k), Some((_, _, _, _, want_kind, _))) if k != *want_kind => drift.push(std::format!(
+        "conformance/cache.rs:{line}: `{f}`'s `{r}.{m}` is anchored `{k}` but registered `{want_kind}`"
+      )),
+      (Some(_), Some(_)) => {}
+    }
+  }
+
+  // 2. Inventory: the per-site counts match, in both directions.
+  for (f, m, recv, want, _, _) in CALL_SITES {
+    let got = found
+      .calls
+      .iter()
+      .filter(|c| c.function == *f && c.method == *m && c.receiver == *recv)
+      .count();
+    if got != *want {
+      drift.push(std::format!(
+        "CACHE_CALL_CENSUS: `{f}` calls `{recv}.{m}` {got} time(s), registered for {want}"
+      ));
+    }
+  }
+
+  // 3. No anchor without a call bound to it — a marker nobody maintains reads like coverage.
+  for line in &found.orphan_anchors {
+    drift.push(std::format!(
+      "conformance/cache.rs:{line}: a `{ANCHOR}` anchor with no call bound to it"
+    ));
+  }
+
+  // 4. A guarded method named as a function item is not a call, and is not reported as one —
+  //    but a later call through the pointer would be invisible, so naming one at all is drift.
+  for (f, line) in &found.function_items {
+    drift.push(std::format!(
+      "conformance/cache.rs:{line}: `{f}` names a guarded method as a function item rather than calling it; a call through that pointer would be invisible to this census"
+    ));
+  }
+
+  // 5. A macro whose expansion is not accounted for. `syn` never expands, so an unlisted macro
+  //    could produce any call at all while its invocation names none — the R8 falsification.
+  //    A `macro_rules` definition lands here too: its path is not on the list.
+  for (f, path, line) in &found.unknown_macros {
+    drift.push(std::format!(
+      "conformance/cache.rs:{line}: `{f}` invokes `{path}!`, which is not in MACRO_ALLOWLIST; syn does not expand macros, so its expansion could contain a guarded call that appears nowhere in this source"
+    ));
+  }
+
+  // 6. An attribute the walk cannot account for — and an attribute macro rewrites the very item
+  //    being read, from outside the visitor entirely.
+  for (f, path, line) in &found.unknown_attrs {
+    drift.push(std::format!(
+      "conformance/cache.rs:{line}: `{f}` carries `#[{path}]`, which is not allowlisted; an attribute macro rewrites the item this census is reading"
+    ));
+  }
+
+  // 7. And the residue: an allowlisted macro whose body the parse could not read, so nothing
+  //    inside it was walked.
+  for OpaqueMacro {
+    function: f,
+    path,
+    line,
+    names_guarded,
+  } in &found.opaque_macros
+  {
+    let tail = if *names_guarded {
+      " — and its tokens name a guarded method"
+    } else {
+      ""
+    };
+    drift.push(std::format!(
+      "conformance/cache.rs:{line}: `{f}`'s `{path}!` body does not parse as an expression list, so the census did not walk it{tail}"
+    ));
+  }
+
+  drift
+}
+
+/// CACHE_CALL_CENSUS — the positive control: a census that cannot fail is not a census.
+///
+/// Every shape the walk exists to separate is planted here: the ones it must report, and the ones
+/// it must **not**. The second half matters as much — a scanner that over-reports spends a
+/// registered count on something that is not a call, which is a miss wearing the costume of
+/// coverage, and is exactly how the substring census read `Cache::try_pop_front_if::<E, _>`.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "parses a literal and walks it: no UB surface, and miri interprets every byte"
+)]
+fn cache_call_census_detects_every_defect_it_guards_against() {
+  let planted = r#"
+impl Thing {
+  fn anchored_router(&self, cache: &mut C) {
+    // CACHE_CALL_CENSUS: routed
+    let _ = cache.pop_front();
+  }
+
+  fn spaced(&self, cache: &mut C) {
+    let _ = cache . pop_back();
+  }
+
+  fn line_broken(&self, cache: &mut C) {
+    let _ = cache
+      .peek_one();
+  }
+
+  fn qualified_spaced(&self, cache: &mut C) {
+    let _ = C :: push_front(cache, tok);
+  }
+
+  fn turbofish_call(&self, cache: &mut C) {
+    let _ = cache.try_pop_front_if::<E, _>(|_| Err("no"));
+  }
+
+  fn inferred_turbofish(&self, cache: &mut C) {
+    let _: Option<Result<T, &str>> = cache.try_pop_front_if(|_| Err("no"));
+  }
+
+  fn inside_a_macro(&self, cache: &mut C) {
+    assert!(cache.front().is_none() && cache.back().is_none(), "both");
+  }
+
+  fn wrong_receiver(&self, cache: &mut C, buf: &mut Buf) {
+    // CACHE_CALL_CENSUS: not-a-cache-call
+    cache.push_back(tok);
+  }
+
+  fn function_item(&self) {
+    let f = Cache::try_pop_front_if::<E, _>;
+  }
+
+  fn not_a_call(&self) {
+    let _ = self.push_back_expecting_something;
+  }
+
+  fn orphan(&self) {
+    // CACHE_CALL_CENSUS: routed
+    let _ = 1;
+  }
+
+  fn raw_method(&self, cache: &mut C) {
+    let _ = cache.r#pop_front();
+  }
+
+  fn raw_qualified(&self, cache: &mut C) {
+    let _ = C::r#pop_back(cache);
+  }
+
+  fn raw_receiver(&self, r#cache: &mut C) {
+    let _ = r#cache.peek::<W>(&mut buf);
+  }
+
+  fn raw_function_item(&self) {
+    let f = Cache::r#peek_one;
+  }
+
+  fn parseable_macro(&self, cache: &mut C) {
+    let _ = cache_call!(cache);
+  }
+
+  #[some_attribute_macro]
+  fn attributed(&self) {}
+
+  fn third_party_derive(&self) {
+    #[derive(Clone, ThirdPartyDerive)]
+    struct S;
+  }
+}
+"#;
+  let found = census_scan(planted);
+  let seen: std::vec::Vec<(&str, &str, &str, usize, Option<&str>)> = found
+    .calls
+    .iter()
+    .map(|c| {
+      (
+        c.function.as_str(),
+        c.method,
+        c.receiver.as_str(),
+        c.line,
+        c.anchor.as_deref(),
+      )
+    })
+    .collect();
+
+  // ── shapes the walk MUST report ──────────────────────────────────────────────────
+  //
+  // The first is the ordinary anchored call. The next three are the layouts the substring
+  // matcher could not see, because Rust allows whitespace and newlines around `.` and `::` and
+  // a text scan cannot. The turbofish pair is the #183-round-six mis-specification from both
+  // sides: with the turbofish and without it.
+  let must = [
+    ("anchored_router", "pop_front", "cache", 5, Some("routed")),
+    ("spaced", "pop_back", "cache", 9, None),
+    ("line_broken", "peek_one", "cache", 14, None),
+    ("qualified_spaced", "push_front", "cache", 18, None),
+    ("turbofish_call", "try_pop_front_if", "cache", 22, None),
+    ("inferred_turbofish", "try_pop_front_if", "cache", 26, None),
+    // Inside `assert!`: `syn` hands back a macro's tokens, so the body is parsed as an
+    // expression list and walked. Most of the kit's absence probes live here.
+    ("inside_a_macro", "front", "cache", 30, None),
+    ("inside_a_macro", "back", "cache", 30, None),
+    // The receiver case the substring census could not express at all: a genuine
+    // `cache.push_back` sitting under an anchor registered for the kit's own `buf.push_back`.
+    // It is reported with receiver `cache`, so the table lookup for `buf` misses it.
+    (
+      "wrong_receiver",
+      "push_back",
+      "cache",
+      35,
+      Some("not-a-cache-call"),
+    ),
+    // The three raw-identifier forms, #183's eighth round. `Ident::to_string` keeps the `r#`, so
+    // every one of these was a real call to a guarded method that matched nothing — and, because
+    // the source parses, was not reported as an opaque macro or as drift either. Invisible, not
+    // merely unclassified.
+    ("raw_method", "pop_front", "cache", 52, None),
+    ("raw_qualified", "pop_back", "cache", 56, None),
+    // The same normalisation on the RECEIVER, which fails the other way: unrawed, this is the
+    // `cache` the table knows; left raw, it would be reported as an unregistered `r#cache`.
+    ("raw_receiver", "peek", "cache", 60, None),
+  ];
+  for want in must {
+    assert!(
+      seen.contains(&want),
+      "CACHE_CALL_CENSUS misses {want:?} — it must report every legal spelling of a call.\nsaw: {seen:?}"
+    );
+  }
+
+  // ── shapes it must NOT report as calls ───────────────────────────────────────────
+  assert!(
+    seen.len() == must.len(),
+    "CACHE_CALL_CENSUS reported {} call(s), expected exactly {} — a function item, an identifier \
+     that merely starts with a guarded name, and a comment must none of them count as calls.\nsaw: {seen:?}",
+    seen.len(),
+    must.len()
+  );
+  // The function item is not a call — and is surfaced separately rather than ignored, because a
+  // later call through that pointer would be invisible. Raw or not: the second entry is the same
+  // shape spelled `Cache::r#peek_one`, which matched nothing before the unrawing went in.
+  assert!(
+    found.function_items
+      == std::vec![
+        (std::string::String::from("function_item"), 39),
+        (std::string::String::from("raw_function_item"), 64),
+      ],
+    "CACHE_CALL_CENSUS must report a guarded method NAMED as a function item, and must not count \
+     it as a call: {:?}",
+    found.function_items
+  );
+  // An anchor with nothing bound to it is dead documentation.
+  assert!(
+    found.orphan_anchors == std::vec![47],
+    "CACHE_CALL_CENSUS misses an ORPHAN anchor, so a marker nobody maintains would read like \
+     coverage: {:?}",
+    found.orphan_anchors
+  );
+  // A macro that is not on the list is refused rather than read. `cache_call!(cache)` is the R8
+  // falsification exactly: nothing guarded in its tokens, a body that parses as one clean
+  // expression, and an expansion that can be `cache.pop_front()`. Walking it harder finds
+  // nothing; the only sound answer is to refuse it.
+  assert!(
+    found.unknown_macros
+      == std::vec![(
+        std::string::String::from("parseable_macro"),
+        std::string::String::from("cache_call"),
+        68,
+      )],
+    "CACHE_CALL_CENSUS must refuse a macro whose expansion it cannot account for, however cleanly \
+     the invocation parses: {:?}",
+    found.unknown_macros
+  );
+  // An attribute macro rewrites the item being read, and never reaches `visit_macro` at all. A
+  // third-party derive is the same hole behind a built-in attribute, which is why `derive`'s
+  // arguments are checked on their own.
+  assert!(
+    found.unknown_attrs
+      == std::vec![
+        (
+          std::string::String::from("attributed"),
+          std::string::String::from("some_attribute_macro"),
+          71,
+        ),
+        (
+          std::string::String::from("third_party_derive"),
+          std::string::String::from("derive(ThirdPartyDerive)"),
+          75,
+        ),
+      ],
+    "CACHE_CALL_CENSUS must refuse an attribute it cannot account for, including one hiding in a \
+     `derive` list: {:?}",
+    found.unknown_attrs
+  );
+  // Nothing here is an allowlisted macro with a body the parse cannot read.
+  assert!(
+    found.opaque_macros.is_empty(),
+    "CACHE_CALL_CENSUS reported an opaque macro where there is none: {:?}",
+    found.opaque_macros
+  );
+}
+
+/// CACHE_CALL_CENSUS — the residual bound, made visible rather than assumed away.
+///
+/// After the allowlist there is exactly one syntax-adjacent hole left, and it is much smaller than
+/// the one the substring era claimed: an **allowlisted** macro whose body does not parse as an
+/// expression list. The expansion is accounted for — that is what admission to
+/// [`MACRO_ALLOWLIST`] means — but the body was not walked, so a call written inside it went
+/// unseen. Both halves are planted here, including the raw-identifier form, which is the quietest
+/// of all: unread tokens, and a spelling that matched nothing until #183's eighth round.
+///
+/// A macro that is **not** allowlisted is a different answer, not a smaller one: it is refused
+/// outright and its tokens are not read, because the tokens of a macro whose meaning is unknown
+/// are not evidence in either direction. `macro_rules` is not on the list, so defining a macro in
+/// the censused file is refused by the same rule — which is also why a macro defined *elsewhere*
+/// in the crate is covered: only its invocation is in this file, and the invocation is what the
+/// list governs.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "parses a literal and walks it: no UB surface, and miri interprets every byte"
+)]
+fn cache_call_census_reports_a_macro_body_it_cannot_read() {
+  // `matches!` is allowlisted and its expansion introduces no call — but a guard clause is not an
+  // expression, so `parse_terminated` stops and the body goes unwalked. A realistic shape, not a
+  // contrived one.
+  let planted = r#"
+impl Thing {
+  fn hides_a_call(&self) {
+    matches!(x, Some(_) if y.pop_front().is_some())
+  }
+
+  fn hides_a_raw_call(&self) {
+    matches!(x, Some(_) if y.r#pop_back().is_some())
+  }
+
+  fn hides_nothing(&self) {
+    matches!(x, Some(_) if y.len() > 0)
+  }
+
+  fn defines_a_macro(&self) {
+    macro_rules! sneaky { ($c:expr) => { $c.pop_front() }; }
+  }
+
+  fn calls_it(&self, cache: &mut C) {
+    let _ = sneaky!(cache);
+  }
+}
+"#;
+  let found = census_scan(planted);
+  assert!(
+    found.opaque_macros
+      == std::vec![
+        OpaqueMacro {
+          function: std::string::String::from("hides_a_call"),
+          path: std::string::String::from("matches"),
+          line: 4,
+          names_guarded: true,
+        },
+        OpaqueMacro {
+          function: std::string::String::from("hides_a_raw_call"),
+          path: std::string::String::from("matches"),
+          line: 8,
+          names_guarded: true,
+        },
+        OpaqueMacro {
+          function: std::string::String::from("hides_nothing"),
+          path: std::string::String::from("matches"),
+          line: 12,
+          names_guarded: false,
+        },
+      ],
+    "CACHE_CALL_CENSUS must report every allowlisted macro body it could not walk — the raw \
+     spelling included, and the harmless one too, because an unread region is what it must never \
+     pass over quietly: {:?}",
+    found.opaque_macros
+  );
+  // Defining a macro in the censused file, and invoking it: both refused by MACRO_ALLOWLIST, and
+  // this is the pair that made the R8 bound false. The definition may live anywhere in the crate;
+  // the invocation is what has to be here, and the invocation is what is checked.
+  assert!(
+    found.unknown_macros
+      == std::vec![
+        (
+          std::string::String::from("defines_a_macro"),
+          std::string::String::from("macro_rules"),
+          16,
+        ),
+        (
+          std::string::String::from("calls_it"),
+          std::string::String::from("sneaky"),
+          20,
+        ),
+      ],
+    "CACHE_CALL_CENSUS must refuse a macro definition in the censused file AND any invocation of \
+     an unlisted macro: {:?}",
+    found.unknown_macros
+  );
+  assert!(
+    found.calls.is_empty(),
+    "a body that does not parse, and a macro that is refused unread, both yield no calls — by \
+     construction: {:?}",
+    found.calls
+  );
+}
+
+/// CACHE_CALL_CENSUS — the seven drift arms, each driven at least once.
+///
+/// A census is two halves: a walk that finds things, and a report that names them. The other
+/// controls exercise the walk by asserting on what [`census_scan`] returns. Nothing exercised the
+/// **report** — on a conforming `cache.rs` not one `drift` arm runs, so every failure message
+/// here was unexecuted code, and a swapped placeholder in one would be invisible in exactly the
+/// situation the message exists for.
+///
+/// So this plants one source that trips all seven at once and asserts the exact lines. The
+/// planted file is also the permanent form of the two falsifications #183's eighth round left
+/// open: `r#pop_front` for the raw-identifier finding, `hidden!` for the macro-expansion one.
+/// Both were reproduced by hand against the recovered census — green, with the calls live — and a
+/// reproduction that is not a test is a story, so they are tests.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "parses a literal and formats strings: no UB surface, and miri interprets every byte"
+)]
+fn cache_call_census_names_every_defect_it_reports() {
+  // `drained_front` and `push_back_expecting` are real CALL_SITES rows, used here so the
+  // registered-count and anchor-kind arms have something to disagree with.
+  let planted = r#"
+impl Thing {
+  fn drained_front(&self, cache: &mut C) {
+    let _ = cache.pop_front();
+    // CACHE_CALL_CENSUS: absence
+    let _ = cache.r#pop_front();
+  }
+
+  fn push_back_expecting(&self, cache: &mut C) {
+    // CACHE_CALL_CENSUS: routed
+    let _ = other.push_back(tok);
+    let _ = Cache::peek_one;
+    let _ = hidden!(cache);
+    matches!(x, Some(_) if y.len() > 0)
+  }
+
+  #[rewrites_me]
+  fn attributed(&self) {
+    // CACHE_CALL_CENSUS: routed
+    let _ = 1;
+  }
+}
+"#;
+  let drift = census_drift(&census_scan(planted));
+  let want = std::vec![
+    // 1a. A call with no anchor of its own — the plain, ordinary miss, and the one the whole
+    //     census exists for.
+    std::string::String::from(
+      "conformance/cache.rs:4: `drained_front` calls `cache.pop_front` with no `// CACHE_CALL_CENSUS: <kind>` anchor of its own"
+    ),
+    // 1b. Anchored `absence` where CALL_SITES registers `routed`: a site reclassified by editing
+    //     one of the two places. Also the RAW-IDENTIFIER finding — `r#pop_front` is seen at all
+    //     only because the walk unraws, and before that it matched nothing anywhere.
+    std::string::String::from(
+      "conformance/cache.rs:6: `drained_front`'s `cache.pop_front` is anchored `absence` but registered `routed`"
+    ),
+    // 1c. Anchored and registered, but not for THIS receiver.
+    std::string::String::from(
+      "conformance/cache.rs:11: `push_back_expecting` calls `other.push_back` (anchored `routed`) and is NOT in CALL_SITES for that receiver"
+    ),
+    // 2. The inventory, in both directions.
+    std::string::String::from(
+      "CACHE_CALL_CENSUS: `drained_front` calls `cache.pop_front` 2 time(s), registered for 1"
+    ),
+    // 3. An anchor with no call bound to it.
+    std::string::String::from(
+      "conformance/cache.rs:19: a `CACHE_CALL_CENSUS:` anchor with no call bound to it"
+    ),
+    // 4. A guarded method named as a function item.
+    std::string::String::from(
+      "conformance/cache.rs:12: `push_back_expecting` names a guarded method as a function item rather than calling it; a call through that pointer would be invisible to this census"
+    ),
+    // 5. The MACRO-EXPANSION finding: an invocation naming nothing guarded, which the census now
+    //    refuses instead of walking.
+    std::string::String::from(
+      "conformance/cache.rs:13: `push_back_expecting` invokes `hidden!`, which is not in MACRO_ALLOWLIST; syn does not expand macros, so its expansion could contain a guarded call that appears nowhere in this source"
+    ),
+    // 6. An attribute macro, which never reaches `visit_macro` at all.
+    std::string::String::from(
+      "conformance/cache.rs:17: `attributed` carries `#[rewrites_me]`, which is not allowlisted; an attribute macro rewrites the item this census is reading"
+    ),
+    // 7. The residue: an allowlisted macro whose body the parse could not read.
+    std::string::String::from(
+      "conformance/cache.rs:14: `push_back_expecting`'s `matches!` body does not parse as an expression list, so the census did not walk it"
+    ),
+  ];
+  let missing: std::vec::Vec<&std::string::String> =
+    want.iter().filter(|w| !drift.contains(w)).collect();
+  assert!(
+    missing.is_empty(),
+    "CACHE_CALL_CENSUS drift messages changed or stopped firing.\nmissing:\n  {}\nactual:\n  {}",
+    missing
+      .iter()
+      .map(|s| s.as_str())
+      .collect::<std::vec::Vec<_>>()
+      .join("\n  "),
+    drift.join("\n  ")
+  );
+  // Arm 2 sweeps the whole of CALL_SITES, so scanning a snippet also reports every row this
+  // planted file does not contain — an artifact of the fixture, not of the census. So exactness
+  // is checked over the other six arms, the ones driven by what the file *contains*: an extra
+  // line among those means a shape is reported twice, or reported where it should not be.
+  let (inventory, located): (std::vec::Vec<_>, std::vec::Vec<_>) = drift
+    .iter()
+    .partition(|d| d.starts_with("CACHE_CALL_CENSUS: "));
+  let want_located = want.len() - 1;
+  assert!(
+    located.len() == want_located,
+    "CACHE_CALL_CENSUS reported {} located drift line(s), expected exactly {}.\nactual:\n  {}",
+    located.len(),
+    want_located,
+    drift.join("\n  ")
+  );
+  // And the inventory arm fires for the planted count mismatch specifically, not merely somewhere.
+  assert!(
+    inventory.iter().any(|d| d.as_str()
+      == "CACHE_CALL_CENSUS: `drained_front` calls `cache.pop_front` 2 time(s), registered for 1"),
+    "the inventory arm must name the site whose count moved:\n  {}",
+    drift.join("\n  ")
+  );
+  // And the arm that must stay silent: `names_guarded` is only appended when the unread tokens
+  // really do name one, so the harmless `matches!` above must NOT carry that tail.
+  assert!(
+    !drift
+      .iter()
+      .any(|d| d.contains("and its tokens name a guarded method")),
+    "the opaque-macro tail is for a body whose tokens name a guarded method; this one's do not:\n  {}",
+    drift.join("\n  ")
+  );
+}
