@@ -1045,6 +1045,36 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
     text on stderr differs, which `run.sh` echoes into its log line and never matches.
     — *(#225)*
 
+24. **The guide's event-stream chapter enumerated five of the six `Event` variants under a
+    heading that counted them, and never mentioned `Demote`.** The section is headed *"The N
+    events"*, so the count is a reader's only signal that the list is exhaustive — and the
+    gap is undetectable from inside the text: someone learning the event stream came away
+    with a model that has no demote in it, which is not an exotic corner but what the failing
+    exit of every up-front `node()` bracket emits. `Demote` now gets the treatment the other
+    five get — what it is, when the stream carries one, and what materialization does with it
+    — and the chapter's other statements of the same fact are brought with it: the two-verb
+    law now says *both* directions of the kind rewrite are encoded as appended events, the
+    derived-depth sentence counts a `Demote` as `−1`, the materialization section documents
+    the canonicalization pre-pass and `StaleDemote`, and *The combinator surface* describes
+    the two bracket shapes (up-front `cst_start` / `cst_finish` | `cst_demote` for `node` as a
+    plain parser, retro tombstone for the declining and `node_at` shapes) instead of claiming
+    every one of them mints a tombstone. The `FinishNode` and `StartAt` entries also grew the
+    fields they have carried since the leaked-finish detector and the wrap chain landed.
+
+    The durable half is the heading. **An enumeration that carries a count in its heading is
+    a trap that re-arms itself** — the next variant makes the count wrong again, silently.
+    Dropping the number was the other option and was rejected: it removes the visible error
+    and keeps the actual one, because a bulleted enumeration reads as exhaustive whether or
+    not it counts itself, so a seventh variant with no seventh entry would still teach a
+    model with a hole in it, just without the arithmetic that gave it away. The count stays
+    and is now machine-checked. `GUIDE_EVENT_CENSUS` (`src/cst/event.rs`) parses the enum's
+    own source with `syn`, reads the chapter's heading and entries, and reds when the count
+    or the *set of names* drifts in either direction — a count alone cannot see a swap.
+    Proven to discriminate rather than assumed to: a seventh variant added to `Event` reds it
+    naming that variant, and each refusal arm is separately driven by a positive control over
+    the real readers. Documentation and test only; no shipped surface changed.
+    — *(#227)*
+
 ## 0.8.0 (2026-08-04)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.

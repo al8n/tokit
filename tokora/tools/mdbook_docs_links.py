@@ -200,6 +200,8 @@ DOCS_RS_MAP = {
   "crate::cst::Cst::finish_partial": "cst/struct.Cst.html#method.finish_partial",
   "crate::cst::Element": "cst/trait.Element.html",
   "crate::cst::FinishError": "cst/enum.FinishError.html",
+  "crate::cst::FinishError::MismatchedFinish": "cst/enum.FinishError.html#variant.MismatchedFinish",
+  "crate::cst::FinishError::StaleDemote": "cst/enum.FinishError.html#variant.StaleDemote",
   "crate::cst::FinishError::UncoveredGap": "cst/enum.FinishError.html#variant.UncoveredGap",
   "crate::cst::FinishError::UnpairedSettle": "cst/enum.FinishError.html#variant.UnpairedSettle",
   "crate::cst::Node": "cst/trait.Node.html",
