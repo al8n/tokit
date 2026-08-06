@@ -548,10 +548,16 @@ const DEEPEST_CLEAN: usize = PARSE_DEPTH_BUDGET - 1;
 ///
 /// The other half of the file's claim, and the one an error-recovery example is most likely to
 /// leave unsaid. Every cell above shows a *grammar* error becoming a hole. This one shows the
-/// kind that cannot: the recursion budget is terminal by design — the session latches and
-/// `inplace_recover` re-raises rather than spending it, because a budget a recovery point could
+/// kind that cannot: the recursion budget is terminal by design — `inplace_recover` re-raises
+/// the attempt the trip stopped rather than spending it, because a budget a recovery point could
 /// swallow would not be a budget. So no error node is synthesized and there is nothing to
 /// resume from.
+///
+/// The scoping is per **attempt**, not per session: the trip is counted on a monotone session
+/// cell and every recovery point compares it against a baseline taken before its own attempt, so
+/// a grammar that catches a trip and parses on keeps ordinary recovery afterwards
+/// (`tests/pratt_limit_unit_sink.rs`, `a_caught_trip_does_not_disable_a_later_recovery`). This
+/// grammar catches it nowhere, which is why the stop reaches `parse` at all.
 ///
 /// What `parse` owes is therefore not recovery but **no panic**, and that is what is pinned:
 /// the trip is recorded, the root is a hole, and `Parsed::terminated` says which happened. It

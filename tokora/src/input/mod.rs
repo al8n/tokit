@@ -772,8 +772,8 @@ where
   resource_trips: usize,
   /// **Where SCANNER terminality is stored**: how many times the scanner has tripped a lexer
   /// resource limit in this input session. The exact twin of
-  /// [`resource_trips`](Self::resource_trips) one field up, for the other budget — monotone, never
-  /// cleared, and deliberately outside the rollback set.
+  /// [`resource_trips`](field@Self::resource_trips) one field up, for the other budget —
+  /// monotone, never cleared, and deliberately outside the rollback set.
   ///
   /// # Why the poison boundary could not be this witness
   ///
@@ -814,8 +814,9 @@ where
   /// absolutely, `!= 0` answers "did this parse ever trip the scanner", which is true forever
   /// after the first trip and is not the question any consulting site has. A **count** rather than
   /// a flag is what makes the comparison hold up a second time — see
-  /// [`resource_trips`](Self::resource_trips) for the full argument, which transfers verbatim,
-  /// including the granularity floor of one attempt and the sense in which it fails closed.
+  /// [`resource_trips`](field@Self::resource_trips) for the full argument, which transfers
+  /// verbatim, including the granularity floor of one attempt and the sense in which it fails
+  /// closed.
   ///
   /// Per **input session**, like the sibling: a
   /// [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and a fresh
@@ -1026,9 +1027,34 @@ where
     &self.emitter
   }
 
+  /// How many times a **descent** budget was exceeded in this input session — the
+  /// [`resource_trips`](field@Self::resource_trips) cell, read out whole.
+  ///
+  /// The extraction point for the *session-absolute* question, and the only one there is: read
+  /// **before** [`into_emitter`](Self::into_emitter), which drops the input and the counter with
+  /// it. A lossless driver carries the value onto the returned handle
+  /// ([`Cst::resource_trips`](crate::cst::Cst::resource_trips)) precisely because this is the last
+  /// moment it exists.
+  ///
+  /// **This is not the question a consulting site inside the parse has.** Those are
+  /// attempt-relative and go through [`trip_snapshot`](InputRef::trip_snapshot) and
+  /// [`tripped_during_attempt`](InputRef::tripped_during_attempt); reading the cell absolutely
+  /// *there* would let one deep construct suppress every later diagnostic in the document. Read
+  /// absolutely **after the parse is over** there is no later attempt to poison, and "did this
+  /// parse ever exceed the budget" is exactly the question a consumer holding the finished tree
+  /// has.
+  #[allow(dead_code)]
+  #[inline(always)]
+  pub(crate) const fn resource_trips(&self) -> usize {
+    self.resource_trips
+  }
+
   /// Consumes the input and returns the bound emitter — the extraction point for an **owned
   /// recording** emitter (a CST [`Sink`](crate::cst::Sink)), whose `finish` takes `self` and so
   /// must outlive the input that fed it.
+  ///
+  /// Everything not on the emitter dies here, the
+  /// [`resource_trips`](Self::resource_trips) counter included — take it first.
   #[allow(dead_code)]
   #[inline(always)]
   pub(crate) fn into_emitter(self) -> Ctx::Emitter {
