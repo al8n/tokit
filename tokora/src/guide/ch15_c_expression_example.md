@@ -905,7 +905,9 @@ assert_eq!(parse("!flag").unwrap(), "(!flag)");
 assert_eq!(parse("~bits").unwrap(), "(~bits)");
 assert_eq!(parse("++x").unwrap(), "(++x)");
 assert_eq!(parse("x++").unwrap(), "(x++)");
+assert_eq!(parse("x++ + ++y").unwrap(), "((x++) + (++y))");
 assert_eq!(parse("a ? b : c").unwrap(), "(a ? b : c)");
+assert_eq!(parse("a ? b : c ? d : e").unwrap(), "(a ? b : (c ? d : e))");
 assert_eq!(parse("arr[0]").unwrap(), "(arr[0])");
 assert_eq!(parse("f()").unwrap(), "f()");
 assert_eq!(parse("f(1, 2)").unwrap(), "f(1, 2)");
@@ -919,8 +921,9 @@ assert_eq!(parse("x << 2 | y >> 1").unwrap(), "((x << 2) | (y >> 1))");
 ## Reproduce the maintained assertion table
 
 The assertions above *are* the maintained binary's assertion table: precedence, grouping,
-left-associativity, unary operators, prefix and postfix increment, the ternary, indexing, calls,
-mixed precedence chains, and C's low-precedence bitwise and shift operators. They are the behavior
+left-associativity, unary operators, prefix and postfix increment and the way the two bind against
+one infix operator, the ternary and its right-associative nesting, indexing, calls, mixed
+precedence chains, and C's low-precedence bitwise and shift operators. They are the behavior
 contract for the parser. For the full runnable program — the same code driven from a `main` that
 prints each parsed expression — run:
 

@@ -539,6 +539,22 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   pointer from the other direction: it recovers *between* constructs, and an expression has no
   sync point inside it.
 
+- **Two grouping pins in the C-expression example — prefix against postfix, and the ternary's
+  right-associativity.** `examples/c_expression.rs` pinned `++x` and `x++` on separate rows and
+  never together, and pinned `a ? b : c` but no nested ternary, so two groupings the driver
+  decides were held by nothing: how the two increment forms bind around one infix operator, and
+  whether a second `?` nests inside the first else-branch or sits beside it. Both are now
+  asserted — `x++ + ++y` → `((x++) + (++y))` and `a ? b : c ? d : e` → `(a ? b : (c ? d : e))` —
+  in the example's table, in the copy of that table inlined as doctests in [chapter
+  15](https://github.com/al8n/tokora/blob/main/tokora/src/guide/ch15_c_expression_example.md),
+  and as two more round-trip inputs in `examples/c_expression_cst.rs`.
+
+  Both hold today; nothing in the driver changed. The second is worth a pin specifically because
+  the grammar never declares it. The ternary is a *postfix* at `PREC_TERNARY` whose fold calls
+  `parse_cexpr` for the else-branch — a fresh entry at `Power::default()`, not a floored
+  recursion — so right-associativity there is a property of how the fold re-enters, and a pin is
+  the only thing that says so.
+
 ### Fixed
 
 1. **`is_empty()` was never asserted false by the cache conformance kit — a fixture returning
