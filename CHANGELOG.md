@@ -203,6 +203,78 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   matrix' own `target` list, so each excluded nothing while reading as though it did; the cell
   set is unchanged with them gone, and `actionlint` reports the workflows clean.
 
+### Added
+
+- **An error-recovery example, and the pins that hold it — `examples/expr_recovery.rs` plus
+  `tests/pratt_recovery.rs`.** tokora has always documented a recovery posture for the typed
+  Pratt driver and demonstrated it nowhere: every grammar in this repository, every example and
+  every census'd fixture aborts on the first error. This is the first in-tree grammar that
+  parses malformed input to completion.
+
+  It reproduces rust-analyzer's posture rather than rustc's, because continuing is what serves
+  an editor. Missing left-hand side: report, and hand the driver a
+  `PrattLHS::Operand(Expr::Error)` — a **zero-width** operand when the offending token belongs
+  to a recovery set an enclosing construct can still use (`)`, an infix operator, end of input),
+  a **one-token** one otherwise, which is r-a's `err_and_bump` and what keeps such a parse
+  terminating. Missing right-hand side: the fold completes over the hole and **the loop
+  continues**, so `1 + + 2` parses to `((1 + <error>) + 2)` with one diagnostic rather than two,
+  and `+ 1 +` folds two operators and reports two problems. The grammar also shows the other
+  half of the posture — a production that *cannot* repair what it found (an unclosed group)
+  reports and returns `Err`, which crosses the driver on the keep-and-commit path and is caught
+  by an `inplace_recover` boundary that resumes at the handback offset.
+
+  It builds a rowan tree beside the AST, so the recovery is visible as structure: an `ErrorExpr`
+  node sitting where the operand was owed, and `tree.text() == source` for every input including
+  the malformed ones. The node has three widths, and which one appears is the observable
+  difference between the three recoveries: **zero** when the offending token was left for an
+  enclosing frame, **one token** when it belonged to nobody and was bumped, and **as wide as the
+  offending text** for the third case — a literal the lexer accepted and `i64` cannot hold.
+  `[0-9]+` bounds a digit run's shape and not its magnitude, so the value conversion is the one
+  step in the grammar that can fail on a token nothing upstream is able to reject; it reports
+  `NumberOutOfRange` and yields the same `Expr::Error` hole as the rest, because a parser that
+  claims to have no failing input cannot have an operand arm that panics.
+
+  It also documents **what does not recover**, which is the half an error-recovery example
+  usually leaves out. A *grammar* error becomes a hole and the parse continues; a *resource*
+  error ends it. There is one of the latter — the recursion budget, depth 64, which every nested
+  group and every prefix `-` descends into. A trip is terminal **by design**: the session latches
+  and every recovery combinator, `inplace_recover` included, re-raises rather than spending it,
+  because a budget a recovery point could swallow would not be a budget. So no error node can be
+  synthesized and there is nothing to resume from. What `parse` owes there is not recovery but
+  *not panicking*: the trip is recorded as `DepthExceeded` — deliberately a different variant
+  from the never-should-happen `DriverContract`, so the corpus tripwire on the latter stays
+  sharp — the root becomes a hole, and `Parsed::terminated` tells the caller which of the two
+  happened. The lossless tree still round-trips, but only because a terminated parse is taken
+  out through `Cst::finish_partial`, which tiles the un-parsed tail as one `Gap` run; the strict
+  `finish` door refuses it with `UncoveredGap`, correctly, since for a parse that ran to the end
+  an uncovered gap is a grammar bug.
+
+  The 64 is tokora's default, not the example's choice, and the example says so: `parse_lossless`
+  constructs its own `ParseContext`, so the one door to a caller-chosen budget —
+  `ParserContext::with_recursion_limiter` — is not reachable from a lossless parse, and the
+  plumbing cannot be hand-rolled either (`Cst::from_sink`, `Sink::finish` and
+  `Input::into_emitter` are all `pub(crate)`). A lossless consumer that needs a different depth
+  has no way to ask for one today.
+
+  Nothing in the driver, the channels or any public signature changed to make this work — it is
+  the existing surface used as documented, which was the point of writing it.
+
+  The pins live in `tests/pratt_recovery.rs` rather than in the example's own
+  `#[cfg(test)] mod tests`, because CI runs no example's test module (see the CI fix below).
+  Fourteen cells, each written so a *shape* has to change for it to fail — exact ASTs, exact
+  diagnostic lists with offsets, exact tree dumps and exact error-node byte ranges, never a bare
+  count — plus a 48-input corpus asserting that no malformed input reaches the driver's terminal
+  `UnexpectedEoLhs`/`UnexpectedEoRhs` arms and that every one of them round-trips.
+
+- **Guide: recovery inside an expression.** A new section in
+  [chapter 5](https://github.com/al8n/tokora/blob/main/tokora/src/guide/ch05_pratt.md) states
+  the rule the posture rests on — only `PrattLHS::Prefix` is held to "consume what you report",
+  so a zero-width `Operand` is legal — the recovery-set rule that keeps a recovering parse
+  terminating, and where the two kinds of recovery meet. [Chapter
+  8](https://github.com/al8n/tokora/blob/main/tokora/src/guide/ch08_recovery.md) gains the
+  pointer from the other direction: it recovers *between* constructs, and an expression has no
+  sync point inside it.
+
 ### Fixed
 
 1. **`is_empty()` was never asserted false by the cache conformance kit — a fixture returning
@@ -588,6 +660,31 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
     `loc.yml` installs floating `stable`, and the `ci/*.sh` helpers install floating `nightly`
     — and `pages.yml` held the only hardcoded toolchain version left.
     — *(#215)*
+
+20. **The pages workflow's "Compile canonical examples" step compiled no example, and exited
+    0 while doing it.** It ran `cargo test -p tokora --no-default-features --features
+    std,logos --examples`. Every `[[example]]` in the manifest declares `required-features`
+    that include `combinators` — and the `_cst` twins need `rowan` on top of it — so that
+    feature set filtered out all eight targets that then existed and cargo reported `target
+    filter 'examples' specified, but no targets matched; this is a no-op`, which is a
+    **warning**. The step was green for as long as it existed and checked nothing; an example
+    that stopped compiling would have been caught only by `cargo test --all-features` building
+    it, and an example's assertions were never executed anywhere, because `cargo test` does not
+    run an example's `#[cfg(test)] mod tests` unless `--examples` is passed. The feature set is
+    now `std,logos,rowan,combinators`, which matches all **nine** examples in the manifest —
+    the eight plus `expr_recovery`, added in this release, whose `required-features` are the
+    same four — and runs each one's `test_example` cell.
+
+    Note the failure mode is specific to `--examples`, which is a target *filter*: an
+    unsatisfiable one matches nothing and warns. `cargo run --example NAME` names a target, so
+    an unsatisfiable feature set there is a hard error, which is why the run commands in the
+    example headers could never have hidden this.
+
+    This is the class the repository has been bitten by before — a target *skipped* rather
+    than failed — and it is why the recovery example added in this release keeps its pins in
+    `tests/pratt_recovery.rs`, which `cargo test --all-features` runs unconditionally, rather
+    than relying on this step.
+    — *(#202)*
 
 21. **No CI job had ever linted an example, and four of them were red on `main`.** The `clippy`
     job ran `--tests` and then `--benches`, and neither flag reaches an example: `--tests`
