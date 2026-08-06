@@ -383,10 +383,13 @@ fn main() {
   );
 
   // `parse_lossless` mints the sink from `src` itself: the buffer the parse reads and the
-  // buffer the tree's text is sliced out of are the same argument of the same call.
+  // buffer the tree's text is sliced out of are the same argument of the same call. The second
+  // argument is the lexer's `State`: `LogosLexer` inherits logos' `Extras`, which this grammar
+  // leaves at `()`. Spell the unit literal rather than `Default::default()` — the latter is a
+  // `clippy::unit_arg` and reads as though a state were being configured.
   let (cst, parsed) = parse_lossless(
     src,
-    Default::default(),
+    (),
     Fatal::<JsonError>::new(),
     profile,
     DefaultCache::<JsonLexer<'_>>::default(),

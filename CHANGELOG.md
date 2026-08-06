@@ -512,6 +512,41 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
     — and `pages.yml` held the only hardcoded toolchain version left.
     — *(#215)*
 
+21. **No CI job had ever linted an example, and four of them were red on `main`.** The `clippy`
+    job ran `--tests` and then `--benches`, and neither flag reaches an example: `--tests`
+    selects the targets carrying `test = true`, which an example does not, and `--benches`
+    selects `bench = true`. Counted off the `--message-format=json` artifact stream rather than
+    inferred from the flag names, `--tests` processes 105 tokora targets and `--benches` 7 — the
+    lib, the build script, the 103 integration tests and the five benches — and zero of the
+    eight in `examples/`. So `cargo +stable clippy --all-features --all-targets --no-deps --
+    -D warnings` exited **101 on `main`** while the job reported green: `calculator_cst`,
+    `s_expression_cst`, `json_cst` and `c_expression_cst` each pass `Default::default()` as
+    `parse_lossless`'s `L::State`, which for a `LogosLexer` whose token enum declares no logos
+    `Extras` is a unit value, and passing a unit value to a function is `clippy::unit_arg`. The
+    four now spell `()`, which is what the driver's own rustdoc example has always used, and the
+    job runs a single `--all-targets` line in place of the two: 118 targets, the union of the old
+    pair plus exactly the eight examples, with the lib checked once instead of twice.
+
+    The same idiom sat in ten more places the new line cannot reach — the `parse_lossless` calls
+    in `guide/ch16_lossless_cst.md`. **Doctests are the one declared target kind clippy cannot
+    lint**: `--all-targets` excludes them by definition, and rustdoc rather than clippy-driver is
+    what compiles them, so no invocation of clippy will ever see one. Those ten are fixed by
+    hand and the next such finding will have to be too. `ci.yml`'s header now carries the whole
+    enumeration — every cargo target kind this workspace declares, with what compiles it, what
+    lints it and what runs it, and doctests named as the one kind nothing lints. That
+    enumeration, not the four warnings, is the point: this is the sixth defect in one week of a
+    single shape — a gate whose stated scope is wider than what it actually builds (#181, #195,
+    #200, #208, #217) — and a finite list written down once is what stops a seventh.
+
+    The mechanism is worth restating because it constrains the fix. A target **filter**
+    (`--examples`, `--benches`, `--all-targets`) that satisfies nothing warns `no targets
+    matched` and exits **0**; a **named** target (`--example NAME`) errors and exits **101**.
+    `--all-targets` is therefore safe on the clippy line only because `--all-features` shares
+    that line, which makes every target's `required-features` satisfiable by construction.
+    Narrowing the feature set there without narrowing the claim would reopen #217's hole on a
+    brand-new line, so the header says to name the targets instead.
+    — *(#220)*
+
 ## 0.8.0 (2026-08-04)
 
 The whole of a 52-defect audit campaign lands in one release. Entries are grouped by **kind**, not by the round that produced them: a reader upgrading wants every breaking change in one place. Round provenance rides as an inline tag — *(R7, #117)* — and the pull-request bodies carry the full trail.

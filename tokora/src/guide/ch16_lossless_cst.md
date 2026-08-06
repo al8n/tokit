@@ -473,10 +473,11 @@ let src = "{ user(id: 4) { name } }";
 // the tree's text is sliced out of are the same argument of the same call, so they cannot
 // disagree. It takes the ordinary emitter to forward to (fail-fast `Fatal` here) and the
 // dialect corner — the mapper and the two bookkeeping kinds — and hands back the spent
-// handle, because materialization happens after the parse.
+// handle, because materialization happens after the parse. The `()` is the lexer's `State`:
+// `LogosLexer` inherits logos' `Extras`, which this dialect leaves empty.
 let (cst, parsed) = parse_lossless(
   src,
-  Default::default(),
+  (),
   Fatal::<QueryError>::new(),
   query_profile(),
   DefaultCache::<QueryLexer<'_>>::default(),
@@ -797,7 +798,7 @@ where
 let src = "{ author: user(id: 4) { name } }";
 let (cst, parsed) = parse_lossless(
   src,
-  Default::default(),
+  (),
   Fatal::<QueryError>::new(),
   query_profile(),
   DefaultCache::<QueryLexer<'_>>::default(),
@@ -1083,7 +1084,7 @@ formatting data *without* a tree in the dependency closure; under a sink they ar
 let src = "{ # every byte survives\n  a, b }";
 let (cst, parsed) = parse_lossless(
   src,
-  Default::default(),
+  (),
   Fatal::<QueryError>::new(),
   query_profile(),
   DefaultCache::<QueryLexer<'_>>::default(),
@@ -1112,7 +1113,7 @@ assert!(tokens.iter().all(|(kind, _)| *kind != SyntaxKind::Gap));
 let src = "{ a % b }";
 let (cst, res) = parse_lossless(
   src,
-  Default::default(),
+  (),
   Fatal::<QueryError>::new(),
   query_profile(),
   DefaultCache::<QueryLexer<'_>>::default(),
@@ -1618,7 +1619,7 @@ let src = "{ user(id: 4) { name } }";
 
 let (straight, parsed) = parse_lossless(
   src,
-  Default::default(),
+  (),
   Fatal::<QueryError>::new(),
   query_profile(),
   DefaultCache::<QueryLexer<'_>>::default(),
@@ -1629,7 +1630,7 @@ let (green_straight, _) = straight.finish(K::Root.raw());
 
 let (backtracked, parsed) = parse_lossless(
   src,
-  Default::default(),
+  (),
   Fatal::<QueryError>::new(),
   query_profile(),
   DefaultCache::<QueryLexer<'_>>::default(),
@@ -1946,7 +1947,7 @@ where
 let src = "{ user(id: 4) 4 5 name }";
 let (cst, parsed) = parse_lossless(
   src,
-  Default::default(),
+  (),
   Verbose::<QueryError>::new(),
   query_profile(),
   DefaultCache::<QueryLexer<'_>>::default(),
@@ -2110,7 +2111,7 @@ where
 let src = "{ user }";
 let (cst, _res) = parse_lossless(
   src,
-  Default::default(),
+  (),
   Fatal::<QueryError>::new(),
   query_profile(),
   DefaultCache::<QueryLexer<'_>>::default(),
@@ -2125,7 +2126,7 @@ assert!(matches!(green, Err(FinishError::UnclosedNodes { open: 1 })));
 // and hand back an inspectable partial tree — the round-trip law holds on it too.
 let (cst, _res) = parse_lossless(
   src,
-  Default::default(),
+  (),
   Fatal::<QueryError>::new(),
   query_profile(),
   DefaultCache::<QueryLexer<'_>>::default(),
@@ -2486,7 +2487,7 @@ impl FieldNode {
 let src = "{ user(id: 4) { name } }";
 let (cst, parsed) = parse_lossless(
   src,
-  Default::default(),
+  (),
   Fatal::<QueryError>::new(),
   query_profile(),
   DefaultCache::<QueryLexer<'_>>::default(),
