@@ -115,8 +115,8 @@ cargo miri setup
 #     Reached through `tokora::cst::sink::finish::replay` → `materialize` → `Cst::finish`, i.e.
 #     from building any tree at all.
 #
-# Reproduced 2026-08-07 on `543ce6d`, each model differing from the line below only in
-# `MIRIFLAGS`:
+# Reproduced 2026-08-07 on `543ce6d`. Both runs used the command below and differed only in
+# `MIRIFLAGS`, exactly as this script and `ci/miri_sb.sh` differ:
 #
 #     cargo miri test --target aarch64-apple-darwin --test parser_node --features logos,rowan
 #

@@ -143,8 +143,10 @@ fuzz = ["std"]
 
 # The lossless CST tower (`tokora::cst`): the event stream, the recording `Sink`, and the
 # materialization of both into a `rowan` green/red tree. Off by default; enabling it compiles 41
-# `#[cfg]`-gated code sites across 8 files under `src/` (66 mentions of `feature = "rowan"` in
-# all, the rest being `doc(cfg(...))` labels, doc-text alternations and one `not(...)` arm).
+# `#[cfg]`-gated code sites, in 6 files under `src/`. Counted on `543ce6d`, and the two figures
+# are different questions: `src/` carries 66 mentions of `feature = "rowan"` across 8 files, of
+# which those 41 are the gates whose CODE exists only when the feature is on. The other 25 are 14
+# `doc(cfg(...))` docs.rs labels, 10 doc-text alternations and one `not(...)` arm.
 #
 # ── THIS FEATURE IS NOT INTERPRETED BY MIRI, AND THAT IS DELIBERATE ─────────────────────────
 #

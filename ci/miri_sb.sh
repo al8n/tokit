@@ -114,8 +114,8 @@ cargo miri setup
 #     through a tag an ancestor's `Cell` still holds. Reached from dropping any red-tree
 #     `SyntaxNode`.
 #
-# Reproduced 2026-08-07 on `543ce6d`, each model differing from the line below only in
-# `MIRIFLAGS`:
+# Reproduced 2026-08-07 on `543ce6d`. Both runs used the command below and differed only in
+# `MIRIFLAGS`, exactly as this script and `ci/miri_tb.sh` differ:
 #
 #     cargo miri test --target aarch64-apple-darwin --test parser_node --features logos,rowan
 #
