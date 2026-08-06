@@ -4,16 +4,49 @@
 //!
 //! # The two verbs
 //!
-//! An event buffer changes in exactly two ways: **append** (the `cst_*` emission methods) and
-//! **suffix-truncate** (an emitter [`rewind`](crate::emitter::Emitter::rewind)). No operation
-//! rewrites the *kind* of an interior slot — retro-parenting is expressed by **appending** a
-//! `StartAt` that names an earlier tombstone, never by completing the
-//! tombstone in place. This is what makes rewind-by-truncation exact: the prefix below any
-//! live mark is immutable, so truncating to the mark restores the buffer to precisely the
-//! state it had when the mark was captured. (The one journaled exception is the
-//! `forward_parent` *acceleration* field a `StartAt` writes back onto its
-//! target tombstone; the sink's undo journal reverse-replays those writes on rewind, so the
-//! law holds observationally — see `Sink` under the `rowan` feature.)
+//! **The parse-time event buffer mutates only by append and suffix-truncate; interior writes
+//! are either journaled undo-state riding an append, or occur where no live mark can exist.**
+//!
+//! Append is the `cst_*` emission methods, suffix-truncate is an emitter
+//! [`rewind`](crate::emitter::Emitter::rewind). Every structural decision is expressed by
+//! appending an event that *names* an earlier slot, never by rewriting that slot in place:
+//! retro-parenting appends a `StartAt` naming an earlier tombstone, and the failing exit of an
+//! up-front bracket appends a `Demote` naming its own
+//! start. This is what makes rewind-by-truncation exact: the prefix below any live mark is
+//! immutable, so truncating to the mark restores the buffer to precisely the state it had when
+//! the mark was captured — for **both** exits of a bracket alike. A rollback into the window
+//! between a bracket's start and its exit truncates that exit, whichever it was, and the open
+//! node returns.
+//!
+//! The interior-write clause covers exactly three sites, and the census is closed:
+//!
+//! - the `forward_parent` *acceleration* field a `StartAt` writes back onto its target
+//!   tombstone — **journaled** undo-state riding the `StartAt`'s own append; the sink's undo
+//!   journal reverse-replays those writes on rewind, so the law holds observationally (see
+//!   `Sink` under the `rowan` feature);
+//! - the recovery hole's prefix-preserving splice, **floored above every live mark** so no
+//!   mark's prefix can change under it (`wrap_hole`);
+//! - **materialization's canonicalization pass**, which runs on the owned buffer at the one
+//!   moment no live mark can exist (the sink is consumed) and applies every surviving
+//!   `Demote` to its target — see below.
+//!
+//! The banned direction stays banned: **completing a tombstone in place** — rewriting an
+//! earlier slot's kind during the parse — lets a rolled-back branch's decision survive its own
+//! truncation, because the truncation that erases the deciding branch does not erase the slot
+//! the decision was written on. That is why *both* directions of the kind rewrite are encoded
+//! as appended events, and neither is a parse-time interior write.
+//!
+//! # Canonicalization: where the demotion actually lands
+//!
+//! [`cst_demote`](crate::emitter::CstEmitter::cst_demote) appends a
+//! `Demote` event naming the slot its [`cst_start`](crate::emitter::CstEmitter::cst_start)
+//! appended; the slot itself keeps its real kind for the whole parse. Materialization then
+//! canonicalizes the buffer it owns in one pass — `events[target].kind = TOMBSTONE` for every
+//! surviving `Demote` — after which the abandoned node is byte-identical to the inert slot an
+//! unspent [`cst_mark`](crate::emitter::CstEmitter::cst_mark) leaves, and the replay walk is
+//! blind to both. A `Demote` can never outlive its target (`target` is strictly below the
+//! `Demote`'s own index and truncation is a suffix operation), so the pass has nothing to
+//! reconcile.
 //!
 //! # The depth model
 //!
@@ -24,6 +57,9 @@
 //! - `StartAt` opens a retro-wrap (hoisted to its target at
 //!   materialization): **+1** at its own index;
 //! - `FinishNode` closes the innermost open node: **−1**;
+//! - `Demote` un-opens the node its target opened: **−1** at its own index (the pair
+//!   `StartNode(+1) … Demote(−1)` nets zero, exactly as the canonicalized
+//!   `StartNode(TOMBSTONE)` does);
 //! - `Token` and `Diag` are neutral: **0**.
 //!
 //! Both verbs preserve "every prefix has depth ≥ 0 or is diagnosed at materialization": a
@@ -51,6 +87,13 @@ use crate::{Lexer, emitter::CstEmitter};
 /// The reserved *initial* kind of a `StartNode` appended by
 /// [`cst_mark`](crate::emitter::CstEmitter::cst_mark): an inert placeholder that materializes
 /// into nothing unless a later `StartAt` names it as a retro-wrap target.
+///
+/// It is also the kind **canonicalization writes** onto the target of a surviving
+/// `Demote` event: the failing exit of an up-front bracket appends a `Demote` naming its own
+/// start, and materialization applies it to the slot, so a node that was opened and then
+/// abandoned *materializes* exactly as the inert slot an unspent `cst_mark` leaves (see the
+/// canonicalization note in the [module docs](self)). During the parse the slot still carries
+/// its real kind — the demotion is an appended event, not an interior write.
 ///
 /// The value is `u16::MAX`, and the slot is **reserved across the whole shared kind space**:
 /// a dialect's unified kind enum (node kinds and token images alike) must never map anything
@@ -88,7 +131,11 @@ pub(crate) enum Event<S> {
   /// that would otherwise be structurally dropped, are the two silent corruptions the
   /// journal and the reachability check exist to kill).
   StartNode {
-    /// The node kind, or [`TOMBSTONE`] while the slot is an inert mark.
+    /// The node kind, or [`TOMBSTONE`] while the slot is an inert mark — either because
+    /// [`cst_mark`](crate::emitter::CstEmitter::cst_mark) appended it that way, or because
+    /// materialization's canonicalization pass applied a surviving [`Demote`](Event::Demote)
+    /// to it. The two are indistinguishable by design *at materialization*; during the parse
+    /// only the first exists, because the demotion rides an appended event.
     kind: u16,
     /// Relative forward offset to the newest [`StartAt`](Event::StartAt) targeting this
     /// tombstone, if any — the head of its wrap chain. Maintained under the sink's undo
@@ -118,12 +165,42 @@ pub(crate) enum Event<S> {
     /// The kind of the node this finish intends to close.
     kind: u16,
   },
+  /// Un-opens the node the [`StartNode`](Event::StartNode) at `target` opened — the
+  /// **failing exit** of an up-front bracket
+  /// ([`cst_demote`](crate::emitter::CstEmitter::cst_demote)), and the exact mirror of
+  /// [`StartAt`](Event::StartAt): an appended event naming an earlier slot, never an
+  /// in-place rewrite of it.
+  ///
+  /// Appending rather than rewriting is what gives the bracket's two exits **one** rollback
+  /// law. A rewrite would survive a rollback into the window between the start and the
+  /// demote — the truncation keeps the slot and keeps the rewrite — so the failing exit
+  /// would silently drop a node the restore contract promised was open again. Appended, the
+  /// `Demote` truncates with everything else above the mark and the open node returns,
+  /// which is precisely the truncate-and-reopen semantics the success exit's `FinishNode`
+  /// already has.
+  ///
+  /// Materialization's canonicalization pass applies every surviving `Demote` to its target
+  /// (`events[target].kind = TOMBSTONE`) before the replay walk, which then skips the
+  /// `Demote` itself; a `Demote` survives a truncation **iff** its target does, because
+  /// `target` is strictly below the `Demote`'s own index and truncation is a suffix
+  /// operation.
+  Demote {
+    /// The absolute buffer index of the `StartNode` this demote un-opens; always `<` this
+    /// event's own index, validated at emission (identity, bounds, era and slot kind) and
+    /// again at canonicalization (including the positional `target < index` half).
+    target: u64,
+  },
   /// Retro-opens a node of `kind` at the buffer position of the tombstone at `target` —
   /// the **append-only** form of retro-parenting. Same-target `StartAt`s open in reverse
   /// buffer order at materialization (the later wrap is the outer node, because its
-  /// finish is necessarily appended later). The in-place alternative (rewriting the
-  /// tombstone's kind) is banned by law: an interior write below a live emitter mark
-  /// survives the truncation that was supposed to erase the branch that made it.
+  /// finish is necessarily appended later). The in-place alternative (**completing** the
+  /// tombstone by rewriting its kind) is banned by law: the write would sit below a live
+  /// emitter mark and survive the truncation that was supposed to erase the branch that
+  /// made it.
+  ///
+  /// [`Demote`](Event::Demote) is the mirror image and is lawful for exactly the same
+  /// reason this one is: it, too, is an appended event naming an earlier slot. See the
+  /// [module docs](self).
   StartAt {
     /// The node kind of the retro-wrap.
     kind: u16,
@@ -176,8 +253,8 @@ pub(crate) enum Event<S> {
 impl<S> Event<S> {
   /// This event's contribution to the derived open-node depth (the module-level depth
   /// model): `+1` for a real [`StartNode`](Self::StartNode) or a [`StartAt`](Self::StartAt),
-  /// `-1` for a [`FinishNode`](Self::FinishNode), `0` for everything else (tombstones
-  /// included).
+  /// `-1` for a [`FinishNode`](Self::FinishNode) or a [`Demote`](Self::Demote), `0` for
+  /// everything else (tombstones included).
   #[inline(always)]
   pub(crate) const fn depth_delta(&self) -> i64 {
     match self {
@@ -189,7 +266,7 @@ impl<S> Event<S> {
         }
       }
       Self::StartAt { .. } => 1,
-      Self::FinishNode { .. } => -1,
+      Self::FinishNode { .. } | Self::Demote { .. } => -1,
       Self::Token { .. } | Self::Diag { .. } => 0,
     }
   }
@@ -208,17 +285,39 @@ impl<S> Event<S> {
   }
 }
 
-/// A validated handle to a tombstone appended by
-/// [`cst_mark`](crate::emitter::CstEmitter::cst_mark): the anchor a later
-/// [`cst_start_at`](crate::emitter::CstEmitter::cst_start_at) retro-wraps from.
+/// A validated handle to one slot of the event buffer, in either of the two provenances that
+/// mint one:
 ///
-/// A mark is a **positional witness plus identity**: `index` names the tombstone's buffer
-/// slot, `era` names the truncation history it was issued under, and `sink` names the one
-/// recording sink that minted it. Index-in-bounds is *not* validity — a rewind can truncate
-/// the tombstone away and unrelated events can regrow over the same index — and `(index,
-/// era)` is *not* identity — two fresh sinks both mint `(0, 0)` — so the recording sink
-/// checks all three at every spend and **panics in every build** on a stale *or foreign*
-/// mark (the savepoint posture; see the [module docs](self)).
+/// - [`cst_mark`](crate::emitter::CstEmitter::cst_mark) names the **tombstone** it appends —
+///   the anchor a later [`cst_start_at`](crate::emitter::CstEmitter::cst_start_at) retro-wraps
+///   from;
+/// - [`cst_start`](crate::emitter::CstEmitter::cst_start) names the **open node** it appends —
+///   the handle a later [`cst_demote`](crate::emitter::CstEmitter::cst_demote) un-opens it
+///   with, on the failing exit of an up-front bracket, by appending a `Demote` event that names
+///   the slot.
+///
+/// One type, because two parallel position handles over one event stream would be two
+/// staleness rules and two validation walls for the same hazard. The spend verbs do not
+/// cross, and neither verb needs to be told which provenance it was handed: `cst_start_at`
+/// demands a live tombstone at the slot, `cst_demote` demands a live `StartNode` of the kind
+/// its start was given — and refuses the reserved [`TOMBSTONE`] kind outright, before reading
+/// the slot at all, since no `cst_start` can have opened a node of it. No slot satisfies both
+/// verbs, and no argument can make one satisfy the other.
+///
+/// What the walls do **not** claim is lifecycle: the slot is *content*, and a demote is an
+/// appended event rather than a rewrite of it, so a mark whose node has already been closed —
+/// or already demoted — still names a live `StartNode` of its kind, and a release build's
+/// `cst_demote` accepts it. Both misuses are refused downstream instead, typed and through
+/// both materialization doors, with a debug-build detection at the misuse site; see
+/// [`cst_demote`](crate::emitter::CstEmitter::cst_demote).
+///
+/// A mark is a **positional witness plus identity**: `index` names the slot, `era` names the
+/// truncation history it was issued under, and `sink` names the one recording sink that
+/// minted it. Index-in-bounds is *not* validity — a rewind can truncate the slot away and
+/// unrelated events can regrow over the same index — and `(index, era)` is *not* identity —
+/// two fresh sinks both mint `(0, 0)` — so the recording sink checks all three at every spend
+/// and **panics in every build** on a stale *or foreign* mark (the savepoint posture; see the
+/// [module docs](self)).
 ///
 /// Marks are freely `Copy` and may legitimately outlive combinator frames (a pratt driver
 /// holds one across arbitrarily many operator iterations, spending it once per fold). A
@@ -260,11 +359,16 @@ impl EventMark {
   }
 
   /// The inert mark returned by the defaulted
-  /// [`cst_mark`](crate::emitter::CstEmitter::cst_mark) of an emitter with no event
+  /// [`cst_mark`](crate::emitter::CstEmitter::cst_mark) **and**
+  /// [`cst_start`](crate::emitter::CstEmitter::cst_start) of an emitter with no event
   /// channel. Its witness is the reserved [`INERT_SINK`](Self::INERT_SINK) id (which no
   /// recording sink ever carries) and its index is `u64::MAX` (which no buffer reaches),
   /// so a recording sink that is handed one panics at the identity wall rather than
-  /// wrapping anything.
+  /// wrapping or demoting anything.
+  ///
+  /// It is a compile-time constant of a `Copy` POD, which is what makes the up-front
+  /// bracket's handback free over a diagnostics-only emitter: the value is dead on arrival
+  /// and the whole bracket inlines away.
   #[inline(always)]
   pub(crate) const fn inert() -> Self {
     Self {
@@ -621,6 +725,7 @@ mod tests {
       prev: None,
     };
     let fin: Event<()> = Event::FinishNode { kind: 7 };
+    let demote: Event<()> = Event::Demote { target: 0 };
     let tok: Event<()> = Event::Token { kind: 7, span: () };
     let diag: Event<()> = Event::Diag { error_span: None };
 
@@ -628,11 +733,37 @@ mod tests {
     assert_eq!(tomb.depth_delta(), 0);
     assert_eq!(wrap.depth_delta(), 1);
     assert_eq!(fin.depth_delta(), -1);
+    assert_eq!(
+      demote.depth_delta(),
+      -1,
+      "the failing exit un-opens exactly what its start opened: Start(+1) … Demote(−1) nets \
+       zero, the same as the canonicalized tombstone"
+    );
     assert_eq!(tok.depth_delta(), 0);
     assert_eq!(diag.depth_delta(), 0);
 
     assert!(tomb.is_tombstone());
     assert!(!start.is_tombstone());
+    assert!(
+      !demote.is_tombstone(),
+      "a Demote names a tombstone-to-be; it is not one"
+    );
+  }
+
+  /// The `Demote` variant costs the log nothing: `StartAt` already carries a `u64` target
+  /// alongside a kind and a link, so the widest variant is unchanged and the buffer's
+  /// per-event footprint does not move.
+  #[test]
+  fn the_demote_variant_does_not_widen_the_event() {
+    use core::mem::size_of;
+
+    type Ev = Event<crate::span::SimpleSpan>;
+    assert_eq!(
+      size_of::<Ev>(),
+      32,
+      "the event log's element is 32 bytes for a two-usize span; adding Demote must not \
+       widen it (StartAt already carries u64 + u16 + Option<NonZeroU32>)"
+    );
   }
 
   /// An inert mark can never name a real slot: its index is `u64::MAX`, above any

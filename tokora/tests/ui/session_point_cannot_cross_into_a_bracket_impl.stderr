@@ -1,0 +1,45 @@
+error: lifetime may not live long enough
+  --> tests/ui/session_point_cannot_cross_into_a_bracket_impl.rs:44:5
+   |
+33 | impl<'inp, L, Ctx> ParseInput<'inp, L, (), Ctx, ()> for Rollback<'_>
+   |      ---- lifetime `'inp` defined here
+...
+40 |     &mut self,
+   |     --------- has type `&mut Rollback<'1>`
+...
+44 |     input.rollback_point(self.id);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'inp` must outlive `'1`
+   |
+   = note: requirement occurs because of the type `SessionPointId<'_>`, which makes the generic argument `'_` invariant
+   = note: the struct `SessionPointId<'closure>` is invariant over the parameter `'closure`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+  --> tests/ui/session_point_cannot_cross_into_a_bracket_impl.rs:44:5
+   |
+40 |     &mut self,
+   |     --------- has type `&mut Rollback<'1>`
+41 |     input: &mut InputRef<'inp, '_, L, Ctx, ()>,
+   |     ----- has type `&mut InputRef<'_, '2, L, Ctx>`
+...
+44 |     input.rollback_point(self.id);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'1` must outlive `'2`
+   |
+   = note: requirement occurs because of a mutable reference to `InputRef<'_, '_, L, Ctx>`
+   = note: mutable references are invariant over their type parameter
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+  --> tests/ui/session_point_cannot_cross_into_a_bracket_impl.rs:44:5
+   |
+40 |     &mut self,
+   |     --------- has type `&mut Rollback<'1>`
+41 |     input: &mut InputRef<'inp, '_, L, Ctx, ()>,
+   |     ----- has type `&mut InputRef<'_, '2, L, Ctx>`
+...
+44 |     input.rollback_point(self.id);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'2` must outlive `'1`
+   |
+   = note: requirement occurs because of the type `SessionPointId<'_>`, which makes the generic argument `'_` invariant
+   = note: the struct `SessionPointId<'closure>` is invariant over the parameter `'closure`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance

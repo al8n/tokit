@@ -8,7 +8,7 @@
 //! # The defect this suite exists to catch
 //!
 //! Three receivers carry a thin forwarding surface onto the emitter's operations:
-//! [`EmitterView`] (27 public methods), [`InputRef`]'s `emit.rs` (25) and [`ParseState`] (17).
+//! [`EmitterView`] (28 public methods), [`InputRef`]'s `emit.rs` (26) and [`ParseState`] (18).
 //! They were written by copy-and-adjust, which is the shape where a wrong delegation target is
 //! easiest to introduce and hardest to see. An `emit_warning` whose body calls `emit_error`
 //! compiles, propagates nothing, and every other test in the crate still passes — the defect
@@ -254,6 +254,7 @@ enum Call {
   // `CstEmitter`
   CstStart(u16),
   CstFinish(u16),
+  CstDemote(EventMark, u16),
   CstMark,
   CstStartAt(EventMark, u16),
   // The capability channels
@@ -443,12 +444,17 @@ impl<'inp> Emitter<'inp, TestLexer<'inp>> for Ledger {
 }
 
 impl<'inp> CstEmitter<'inp, TestLexer<'inp>> for Ledger {
-  fn cst_start(&mut self, kind: u16) {
+  fn cst_start(&mut self, kind: u16) -> EventMark {
     self.note(Call::CstStart(kind));
+    inert_mark()
   }
 
   fn cst_finish(&mut self, kind: u16) {
     self.note(Call::CstFinish(kind));
+  }
+
+  fn cst_demote(&mut self, mark: EventMark, kind: u16) {
+    self.note(Call::CstDemote(mark, kind));
   }
 
   fn cst_mark(&mut self) -> EventMark {
@@ -625,6 +631,7 @@ fn sp(start: usize, end: usize) -> SimpleSpan {
 const KIND_START: u16 = 0x0151;
 const KIND_FINISH: u16 = 0x0152;
 const KIND_START_AT: u16 = 0x0153;
+const KIND_DEMOTE: u16 = 0x0154;
 const LABEL: &str = "ledger-label";
 
 // ── The assertion ─────────────────────────────────────────────────────────────
@@ -644,7 +651,7 @@ fn landed(receiver: &str, method: &str, got: &[Call], want: &[Call]) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// `EmitterView` — 27 public methods
+// `EmitterView` — 28 public methods
 // ══════════════════════════════════════════════════════════════════════════════
 //
 // The lowest layer, and the only one reachable without a parse: `EmitterView::new` is public
@@ -822,7 +829,11 @@ view_case!(
   view_cst_start,
   "cst_start",
   |v| {
-    v.cst_start(KIND_START);
+    assert_eq!(
+      v.cst_start(KIND_START),
+      inert_mark(),
+      "`EmitterView::cst_start` did not hand back the mark the emitter minted"
+    );
   },
   [Call::CstStart(KIND_START)]
 );
@@ -834,6 +845,15 @@ view_case!(
     v.cst_finish(KIND_FINISH);
   },
   [Call::CstFinish(KIND_FINISH)]
+);
+
+view_case!(
+  view_cst_demote,
+  "cst_demote",
+  |v| {
+    v.cst_demote(inert_mark(), KIND_DEMOTE);
+  },
+  [Call::CstDemote(inert_mark(), KIND_DEMOTE)]
 );
 
 view_case!(
@@ -1001,7 +1021,7 @@ view_case!(
 );
 
 // ══════════════════════════════════════════════════════════════════════════════
-// `InputRef` — 25 public methods
+// `InputRef` — 26 public methods
 // ══════════════════════════════════════════════════════════════════════════════
 //
 // Reached through a real parse: the handle's emitter accessor is crate-private, so the subject
@@ -1162,7 +1182,11 @@ handle_case!(
   handle_cst_start,
   "cst_start",
   |h| {
-    h.cst_start(KIND_START);
+    assert_eq!(
+      h.cst_start(KIND_START),
+      inert_mark(),
+      "`InputRef::cst_start` did not hand back the mark the emitter minted"
+    );
   },
   [Call::CstStart(KIND_START)]
 );
@@ -1174,6 +1198,15 @@ handle_case!(
     h.cst_finish(KIND_FINISH);
   },
   [Call::CstFinish(KIND_FINISH)]
+);
+
+handle_case!(
+  handle_cst_demote,
+  "cst_demote",
+  |h| {
+    h.cst_demote(inert_mark(), KIND_DEMOTE);
+  },
+  [Call::CstDemote(inert_mark(), KIND_DEMOTE)]
 );
 
 handle_case!(
@@ -1341,7 +1374,7 @@ handle_case!(
 );
 
 // ══════════════════════════════════════════════════════════════════════════════
-// `ParseState` — 17 public methods
+// `ParseState` — 18 public methods
 // ══════════════════════════════════════════════════════════════════════════════
 //
 // `ParseState::new` is `pub(super)`, so the subject is **reached**, not constructed: a real
@@ -1519,7 +1552,11 @@ state_case!(
   state_cst_start,
   "cst_start",
   |st| {
-    st.cst_start(KIND_START);
+    assert_eq!(
+      st.cst_start(KIND_START),
+      inert_mark(),
+      "`ParseState::cst_start` did not hand back the mark the emitter minted"
+    );
   },
   [Call::CstStart(KIND_START)]
 );
@@ -1532,6 +1569,16 @@ state_case!(
     st.cst_finish(KIND_FINISH);
   },
   [Call::CstFinish(KIND_FINISH)]
+);
+
+#[cfg(feature = "map")]
+state_case!(
+  state_cst_demote,
+  "cst_demote",
+  |st| {
+    st.cst_demote(inert_mark(), KIND_DEMOTE);
+  },
+  [Call::CstDemote(inert_mark(), KIND_DEMOTE)]
 );
 
 #[cfg(feature = "map")]
@@ -1785,6 +1832,7 @@ const VIEW_COVERED: &[&str] = &[
   "bound_source",
   "cst_start",
   "cst_finish",
+  "cst_demote",
   "cst_mark",
   "cst_start_at",
   "emit_too_few",
@@ -1815,6 +1863,7 @@ const HANDLE_COVERED: &[&str] = &[
   "emitter_bound_source",
   "cst_start",
   "cst_finish",
+  "cst_demote",
   "cst_mark",
   "cst_start_at",
   "emit_too_few",
@@ -1846,6 +1895,7 @@ const STATE_COVERED: &[&str] = &[
   "emitter_bound_source",
   "cst_start",
   "cst_finish",
+  "cst_demote",
   "cst_mark",
   "cst_start_at",
   "state",
@@ -1911,7 +1961,7 @@ fn census(receiver: &str, src: &str, covered: &[&str], expected: usize) {
 #[cfg(feature = "pratt")]
 #[test]
 fn forwarding_census_every_public_forward_is_covered() {
-  census("EmitterView", VIEW_SOURCE, VIEW_COVERED, 27);
-  census("InputRef", HANDLE_SOURCE, HANDLE_COVERED, 25);
-  census("ParseState", STATE_SOURCE, STATE_COVERED, 17);
+  census("EmitterView", VIEW_SOURCE, VIEW_COVERED, 28);
+  census("InputRef", HANDLE_SOURCE, HANDLE_COVERED, 26);
+  census("ParseState", STATE_SOURCE, STATE_COVERED, 18);
 }

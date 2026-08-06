@@ -2917,21 +2917,30 @@ fn delimiter_handler_ignored_via_parser() {
 
 use tokora::{cst::event::EventMark, emitter::CstEmitter};
 
+/// No public `EventMark` constructor exists (only a recording sink mints live marks), so the
+/// tracking overrides hand back the defaulted inert mark of a diagnostics-only emitter; the
+/// forwarding proof is the counter, not the value.
+fn inert_mark<'inp>() -> EventMark {
+  <Fatal<E> as CstEmitter<'inp, TestLexer<'inp>>>::cst_mark(&mut Fatal::new())
+}
+
 impl<'inp> CstEmitter<'inp, TestLexer<'inp>> for TrackingEmitter {
-  fn cst_start(&mut self, _: u16) {
+  fn cst_start(&mut self, _: u16) -> EventMark {
     self.cst_events += 1;
+    inert_mark()
   }
 
   fn cst_finish(&mut self, _: u16) {
     self.cst_events += 1;
   }
 
+  fn cst_demote(&mut self, _: EventMark, _: u16) {
+    self.cst_events += 1;
+  }
+
   fn cst_mark(&mut self) -> EventMark {
     self.cst_events += 1;
-    // No public EventMark constructor exists (only a recording sink mints live marks), so
-    // the tracking override hands back the defaulted inert mark of a diagnostics-only
-    // emitter; the forwarding proof is the counter, not the value.
-    <Fatal<E> as CstEmitter<'inp, TestLexer<'inp>>>::cst_mark(&mut Fatal::new())
+    inert_mark()
   }
 
   fn cst_start_at(&mut self, _: EventMark, _: u16) {

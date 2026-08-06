@@ -142,6 +142,198 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
   `CachedToken` gains no `PartialEq` impl (the kit compares componentwise for the message quality
   that buys).
 
+- **`CstEmitter::cst_start` now returns an `EventMark`, and a new `CstEmitter::cst_demote`
+  spends it — the up-front node bracket.** `node(kind, p)` driven as a `ParseInput` used to
+  name its node's kind *after* the sub-parse: entry minted an inert tombstone (`cst_mark`) and
+  a successful exit retro-wrapped it (`cst_start_at` + `cst_finish`), three events per node.
+  It now names the kind at entry (`cst_start`) and closes on both exits — `cst_finish` on
+  success, `cst_demote` on failure — two events per **successful** node. Paired and
+  interleaved with `apollo-parser` as the drift control, measured on the shipped append-only
+  encoding described below: **−44.5 µs** median on the GraphQL `alias` corpus and
+  **−315.2 µs** on a backtracking fixture, over 32 paired reps, 16/16 and 8/8 same-signed, no
+  corpus slower. `alias` alone removes 9,013 events from a 64,085-event log.
+
+  What breaks — two shapes, both in the emitter layer, none in a grammar. An emitter that
+  **overrides** `cst_start` must now return the `EventMark` naming the slot it opened: a
+  wrapper forwards the inner's value unchanged, and an emitter with no event channel should
+  not override the method at all and inherits the defaulted inert mark. And **every**
+  implementor now writes `cst_demote`, because it is a required method rather than a defaulted
+  one — a wrapper forwards it, a diagnostics-only emitter discards it in one line. That is the
+  next entry, and it is the half of this migration the compiler can point at. Grammars are
+  untouched: `node`, `node_at` and `node_opt` are unchanged at their call sites, and the three
+  surfaces that forward the event channel (`EmitterView`, `InputRef`, `ParseState`) carry
+  `cst_demote` alongside the rest.
+
+  What deliberately did *not* change: only `ParseInput for Node` took the up-front bracket.
+  `TryParseInput for Node`, both `NodeAt` impls, `NodeOpt`, `cst_mark` / `cst_start_at` /
+  `Marker` and the whole pratt driver stay retro, and they stay retro for a reason rather than
+  by omission — a declining parser's kind is not knowable at entry (a decline must leave
+  *nothing*, on a path that also consumes nothing), `node_at` exists precisely to name a kind
+  decided after its first child, and a pratt wrap's kind is a function of an operator not yet
+  read.
+
+  The law it does **not** amend, and that is the point. `cst/event.rs` states that the
+  parse-time event buffer mutates only by append and suffix-truncate. `cst_demote` obeys it: the
+  failing exit **appends** an `Event::Demote` naming its own start, exactly as `cst_start_at`
+  appends a `StartAt` naming its target, and materialization's canonicalization pass applies
+  every surviving demote to its slot (`events[target].kind = TOMBSTONE`) at the one moment no
+  live mark can exist — the sink has been consumed. Both of the bracket's exits are therefore
+  appends, which gives them **one** rollback law: a session point rolled back into the window
+  between a `cst_start` and its exit truncates that exit and the node is open again, success and
+  failure alike.
+
+  An earlier draft of this entry claimed an in-place kind rewrite was lawful without a journal
+  entry. It is not, and the counter-example is why the encoding is what it is: a rollback whose
+  target lands *between* the slot and the demote keeps the slot and keeps the rewrite, so
+  `finish` returned a balanced buffer with one fewer node than the checkpoint promised —
+  undetectable by anything downstream, on a history the public API can write (`EventMark` is a
+  `Copy` POD and session points are non-lexical). The single-sentence law now covers all three
+  interior writes the sink has: `cst_start_at`'s journaled `forward_parent` link, the recovery
+  hole's splice floored above every live mark, and canonicalization.
+
+  Canonicalization is **guarded by a latch**, and that is measured rather than tidy. It is one
+  linear pass over the event log, and an unguarded pass costs a parse that never took a failing
+  bracket exit — which is *every* parse of a predictive grammar, GraphQL included — a real
+  `O(events)`: **+75 µs** median over eight paired reps on a 231 KB / ~220,000-event document
+  whose demote count is exactly zero, 8/8 same-signed. The sink therefore carries a latching
+  `demotes` hint, set when a `Demote` is appended and never cleared. It is in the `degraded`
+  cell class rather than the memo class, and the direction of its imprecision is what makes it
+  safe: nothing ever writes `false` after construction, so a rewind that truncates the last
+  surviving `Demote` merely leaves the hint set and buys one no-op pass — the opposite error,
+  which would let an abandoned node materialize, is unrepresentable, and a `debug_assert!` at
+  materialization holds that direction.
+
+  Four things this costs, stated rather than left to be discovered:
+
+  - **A demoted slot is no longer a retro-wrap anchor.** It holds its real kind for the whole
+    parse, so `cst_start_at` refuses the mark at its tombstone wall. The affordance was one PR
+    old, unreleased and had no consumers; recovery tooling that wants to wrap an abandoned
+    region takes its own `cst_mark`.
+  - **A double demote is no longer refused in every build.** The slot is unchanged by a demote,
+    so it cannot witness that it was already demoted — the same reason it cannot witness a
+    finish. It drops to the calibration this surface already uses for demote-after-finish:
+    caught at cause in a **debug** build by the exact suffix recount (a prior `Demote` is a −1
+    above the mark), refused typed at materialization in **release** as
+    `FinishError::StaleDemote`, through `finish` and `finish_partial` alike.
+  - **A debug build now refuses two raw brackets whose closings *interleave*.** Because the
+    demote is an event, demoting an *enclosing* start puts a −1 above an inner still-open slot,
+    and the inner bracket's own demote then dips the recount. Release admits that order and
+    materialises exactly the tree the innermost-first order builds — canonicalization is
+    positional and tombstones both slots either way — so this is a **strictness choice on the
+    raw surface, not detection of a release defect**: debug enforces innermost-first closings;
+    release admits the out-of-order shape. No grammar can meet it, because `node` and `node_opt`
+    mint and spend their mark inside one call frame and their exits nest structurally. Pinned
+    from both ends: the emit-site refusal through the public surface, and the two closing orders'
+    trees asserted byte-equal.
+  - **The two brackets' error paths no longer leave byte-identical buffers — they
+    *materialize* identically.** The up-front shape carries the demote event; canonicalization
+    turns its slot into exactly the inert tombstone the retro shape left, before the walk begins.
+    That is what the four-corpora byte-identity gate measures, and it still passes on all four.
+
+  The rest of the misuse wall is unchanged and unconditional: a stale mark, a foreign sink's
+  mark, a mark whose slot is not a live `StartNode` of the demoted kind, and a demote naming the
+  reserved `TOMBSTONE` kind are all refused in **every** build. `FinishError::StaleDemote` is a
+  new variant of a `#[non_exhaustive]` enum.
+
+  **The stale-mark panic is not reachable from `node()`, and the wall that keeps it unreachable
+  is now pinned.** A review round raised the shape it would take: a `SessionPointId` opened
+  *before* the bracket, settled inside its inner parser, rewinding the sink below the bracket's
+  own `cst_start` so the failing exit spends a staled mark and panics in a release build. At the
+  sink the mechanism is real, and it is now driven directly through the raw surface, where it is
+  the published contract. Through the combinator it does not compile: a settle needs an id whose
+  `'closure` brand is **invariant**, and `ParseInput::parse_input`'s handle lifetime is
+  universally quantified, so the id can enter neither direction of the unification. Two
+  compile-fail cases pin it — the closure form and a hand-written `ParseInput` — because there
+  is no runtime backstop underneath: `take_point`'s settle scan is newest-first and would
+  *accept* a pre-bracket point, so the type system is the whole defence, and an untested
+  type-system guarantee is one signature change away from silently ceasing to hold. The reading
+  that this was a regression from the retro encoding does not hold either: under the identical
+  drive the retro shape panics too, on its **success** exit, at the older `node_at` mark wall.
+  The theorem, its three legs, and the duty it places on any future session-verb surface are
+  written up in the `parser::node` module docs.
+
+  One real gap did come out of that round, and it is closed. Canonicalization checked that a
+  `Demote`'s target held a live, un-demoted `StartNode`, but not that the target sat **below**
+  the demote itself. A raw-injected `Demote { target: 1 }` ahead of the start it named
+  materialized a tree with that node silently erased — the only stale-demote shape whose residue
+  stays balanced, so nothing downstream could catch it. One compare, before the slot read and in
+  `u64` space (which also removes a latent 32-bit truncation alias, where a target past `2^32`
+  wrapped onto a nearby slot), now refuses it as `FinishError::StaleDemote` through both finish
+  doors. No legal stream is affected — the emission wall derives `target` from a validated live
+  slot strictly below the appended event — and no accepted stream's output changes: the guard
+  only converts invalid raw streams from accept to typed refusal.
+
+  `cargo semver-checks` reports three lints here, all expected and acknowledged rather than
+  suppressed: `trait_method_return_value_added` (`cst_start`'s return type changed on a public
+  trait, above) and `trait_method_added` (`cst_demote` is a new **required** trait method,
+  described in the entry below) are both intentional, and so is
+  `enum_no_repr_variant_discriminant_changed` — inserting `FinishError::StaleDemote` above in
+  declaration order, rather than appending it, shifts the fieldless discriminant of the
+  fourteen variants after it. Nothing in the crate casts them and `FinishError` carries no
+  `#[repr]`, so those values were never a contract. 0.9.0 is the vehicle for all three.
+
+  The change costs a diagnostics-only parse **nothing, verified rather than asserted**: over
+  `Fatal` / `Verbose` / `Silent` the event methods are `#[inline(always)]` no-ops — four
+  inherited, `cst_demote` written out per emitter with the identical body — and the handback is
+  a dead `Copy` constant; a fixture exercising the whole `node` family compiles to a
+  **byte-identical binary** before and after — positive control, perturbing `cst_demote`'s body
+  to a `black_box` changes it. The four-corpora tree-identity gate is byte-identical on all
+  four, error corpora included.
+  — *(#169)*
+
+- **`CstEmitter::cst_demote` is a required method, not a defaulted one.** Every implementor
+  writes it: a wrapper by forwarding to its inner, an emitter with no event channel with a
+  one-line discard. The other four CST methods keep their no-op defaults, and that asymmetry is
+  a rule rather than an inconsistency — it is stated once in the trait docs and it governs what
+  may be added to this trait later.
+
+  **Why.** The method arrived defaulted in the entry above, and the review round after it built
+  the trap by construction: a 0.8-era wrapper that correctly forwarded all four CST methods
+  fails its rebase onto 0.9.0 with *exactly one* diagnostic, `E0053` on `cst_start`, whose
+  rustc fix-it writes the minimal migration itself and names `cst_demote` nowhere. Apply the
+  suggestion and the wrapper compiles with zero warnings, is byte-perfect on every success
+  path, and starves only the failing exit — the inner channel keeps a `StartNode` that no exit
+  closes, on error paths, silently. A wrapper that was correct becomes incorrect with no change
+  on its part, steered there by the compiler's own suggestion. Nothing downstream can recover
+  it either: the starved stream is byte-identical to the one an escaped panic leaves, so strict
+  `finish` refuses a grammar that did everything right (`UnclosedNodes`, misattributed) and
+  `finish_partial` materializes the node the grammar retracted. There is no sink-side wall to
+  build — the sink cannot tell a swallowed demote from a legal panic residue — which is why the
+  wall is the type system.
+
+  **Why only this one.** Grade each default by what happens when it is inherited alone over an
+  otherwise-forwarded channel. `cst_start`, `cst_finish`, `cst_mark` and `cst_start_at` each
+  fail toward an *absence* announced loudly on a path every test walks: `OrphanFinish` or
+  `MismatchedFinish`, `UnclosedNodes` on the first successful parse, or the identity-wall panic
+  in every build. `cst_demote` fails toward a *presence*, silently, through the door built for
+  error recovery, on the paths test suites cover worst. `Emitter::commit_token` keeps its own
+  default under this same test rather than in spite of it — its absence is loud and it has
+  typed finish-time backstops (`StructureWithoutTokens`, `UncoveredGap`). So the rule, and it
+  is the one that governs growth: **a method whose default cannot be backstopped and whose
+  absence fails toward a silently wrong tree does not get a default.** A CST method added after
+  this one either passes that test or ships behind a new bound.
+
+  **Migration**, both populations, one line each:
+
+  - *A wrapper or instrumentor* — forward it, exactly as it forwards `cst_start`:
+    `fn cst_demote(&mut self, mark: EventMark, kind: u16) { self.inner.cst_demote(mark, kind) }`.
+  - *An emitter with no event channel* — discard it:
+    `fn cst_demote(&mut self, _: EventMark, _: u16) {}`. The shipped `Fatal`, `Silent`,
+    `Verbose` and `Ignored` do exactly that, and the line is not noise: such an emitter really
+    does discard the failing exit, and now says so where its own reviewer reads it.
+
+  This lands the second half of the same migration in the same release. Both errors appear on
+  one rebase, adjacent and self-explanatory: `E0053` with a fix-it, `E0046` naming the method.
+  Deferring was not an option — after 1.0 a trait can only grow defaults, which is this trap
+  again. Cost measured before the decision: four one-line stubs in the crate's own diagnostics
+  emitters and one in the fuzz fixture; the recording `Sink`, the `&mut U` blanket and every
+  in-tree wrapper already implemented it; no impls in the guide, the book, any doctest or any
+  consumer in the org. `tests/ui/cst_demote_cannot_be_inherited.rs` pins the `E0046`, and its
+  real subject is the future — the day someone re-adds the default "for convenience" that case
+  starts compiling, and a `compile_fail` case that compiles is a failing test. It is the only
+  signal there would be.
+  — *(#169)*
+
 ### Changed
 
 - **MSRV raised to 1.95.** The previous floor, 1.87, was not a forced minimum — the crate
@@ -562,8 +754,8 @@ with it. `ci/changelog_structure.sh` enforces every clause above and will red un
     logs a tagged call per operation, including the five members the surface deliberately
     withholds, so a forward that lands on `commit_token` is visible too. The three existing
     recorders could not do this: `Verbose` funnels eleven capability channels into one error
-    channel and inherits the no-op `CstEmitter`, and the tracking and counting emitters hold
-    plain counters.
+    channel and its `CstEmitter` impl records nothing, and the tracking and counting emitters
+    hold plain counters.
 
     The suite is proven discriminating: six sibling re-pointings each red exactly the delegation
     closure of the mutated body and nothing else — one test for a `ParseState` leaf, two when an

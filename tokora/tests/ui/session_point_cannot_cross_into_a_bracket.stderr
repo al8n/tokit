@@ -1,0 +1,27 @@
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/ui/session_point_cannot_cross_into_a_bracket.rs:58:5
+   |
+54 |   let id: SessionPointId<'closure> = input.begin_point();
+   |       -- `id` declared here, outside of the closure body
+55 |   node(K_NODE, move |inner: &mut InputRef<'inp, '_, L, Ctx, ()>| {
+   |                      ----- `inner` is a reference that is only valid in the closure body
+...
+58 |     inner.rollback_point(id);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^ `inner` escapes the closure body here
+   |
+   = note: requirement occurs because of the type `SessionPointId<'_>`, which makes the generic argument `'_` invariant
+   = note: the struct `SessionPointId<'closure>` is invariant over the parameter `'closure`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+  --> tests/ui/session_point_cannot_cross_into_a_bracket.rs:58:5
+   |
+44 | fn cross_into_the_bracket<'inp, 'closure, L, Ctx>(
+   |                           ----  -------- lifetime `'closure` defined here
+   |                           |
+   |                           lifetime `'inp` defined here
+...
+58 |     inner.rollback_point(id);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'closure` must outlive `'inp`
+   |
+   = help: consider adding the following bound: `'closure: 'inp`

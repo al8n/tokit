@@ -399,6 +399,875 @@ fn mark_survives_rewinds_strictly_above_it() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// The up-front bracket — `cst_start`'s handback and `cst_demote`'s wall
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// `node(kind, p)` as a `ParseInput` names the node's kind at entry and closes on both exits:
+// `cst_finish` on success, `cst_demote` on failure. BOTH exits are appends — the failing one
+// appends an `Event::Demote` naming its own start, and materialization's canonicalization pass
+// applies it — so the bracket obeys ONE rollback law whichever exit it took (the law lives in
+// `cst/event.rs`). These cells hold the properties that make it so: the abandoned node
+// materializes into nothing, the demote survives exactly the truncations that keep it and dies
+// with the ones that do not, a rollback into the bracket's own window reopens the node on
+// either exit, and every misuse of the handback is refused — in every build at the wall, or at
+// the two calibrated tiers for the two the slot cannot witness.
+
+/// The demote leaves the buffer **balanced and append-only**: one extra event, no journal
+/// entry, no interior write, and the abandoned node materializes into nothing.
+#[test]
+fn demote_materialises_as_inert() {
+  let mut sink = verbose_sink("a");
+  let mark = sink.cst_start(K_NODE);
+  assert_eq!(mark.index(), 0, "the handback names the slot just appended");
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_demote(mark, K_NODE);
+
+  assert_eq!(
+    sink.events(),
+    &[
+      Event::StartNode {
+        kind: K_NODE,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+      Event::Demote { target: 0 },
+    ],
+    "the demote APPENDS: the slot keeps its real kind for the whole parse, and the decision \
+     rides an event that a rollback can truncate"
+  );
+  assert_eq!(
+    sink.journal_len(),
+    0,
+    "an appended event needs no undo entry — the truncation IS the undo"
+  );
+
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("a demoted start leaves a balanced buffer");
+  assert_eq!(text(green.clone()), "a");
+  let root = tree(green);
+  assert_eq!(
+    root.children().count(),
+    0,
+    "canonicalization tombstones the slot; the abandoned node materializes into nothing"
+  );
+  assert_eq!(root.children_with_tokens().count(), 1, "the token is loose");
+}
+
+/// **Why the four-corpora byte-identity gate can hold at all.** The two brackets' failing exits
+/// converge — at *materialization*, not in the buffer. The retro bracket leaves a `cst_mark`
+/// tombstone unspent; the up-front bracket leaves a real-kind start plus the `Demote` that
+/// names it, which canonicalization turns into exactly that tombstone before the walk begins.
+/// So converting `ParseInput for Node` leaves every tree the error path produces bit-for-bit
+/// alone, which is what the corpus hashes measure.
+#[test]
+fn a_demoted_start_and_an_unspent_mark_materialize_identically() {
+  let mut up_front = verbose_sink("a");
+  let mark = up_front.cst_start(K_NODE);
+  up_front.record_token(&MiniTok(b'a'), &span(0, 1));
+  up_front.cst_demote(mark, K_NODE);
+
+  let mut retro = verbose_sink("a");
+  let _unspent = retro.cst_mark();
+  retro.record_token(&MiniTok(b'a'), &span(0, 1));
+
+  assert_ne!(
+    up_front.events(),
+    retro.events(),
+    "the buffers deliberately differ: the demote is an event, not a rewrite"
+  );
+  assert_eq!(
+    up_front.journal_len(),
+    retro.journal_len(),
+    "both journal 0"
+  );
+
+  let (up_front_green, _emitter) = up_front.finish(K_ROOT);
+  let (retro_green, _emitter) = retro.finish(K_ROOT);
+  assert_eq!(
+    up_front_green.expect("balanced"),
+    retro_green.expect("balanced"),
+    "the up-front bracket's Err exit materializes the retro bracket's Err exit, byte for byte"
+  );
+}
+
+/// A truncation **strictly above** the `Demote` event leaves the demotion standing — the
+/// ordinary direction: the bracket exited with an error and nothing rewound into its window,
+/// so the abandoned node stays abandoned.
+#[test]
+fn demote_survives_a_truncation_strictly_above_it() {
+  let mut sink = verbose_sink("ab");
+  let mark = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_demote(mark, K_NODE);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+  rewind(&mut sink, ckp);
+
+  assert_eq!(
+    sink.events(),
+    &[
+      Event::StartNode {
+        kind: K_NODE,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+      Event::Demote { target: 0 },
+    ],
+    "the rewind dropped the events above the mark and left the demote event standing"
+  );
+  // Balance is checked before the gap latch is consumed, so the only complaint being the
+  // rewound `b`'s uncovered byte IS the still-balanced proof: a surviving Start with no
+  // surviving Demote would have answered `UnclosedNodes` first.
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("the rewound token leaves byte 1 uncovered"),
+    FinishError::UncoveredGap { start: 1, end: 2 }
+  );
+}
+
+/// A truncation **at or below** the slot erases the slot itself — which is precisely why the
+/// write needs no journal entry: there is nothing left for a reverse-replay to restore onto.
+#[test]
+fn demote_dies_with_a_truncation_at_or_below_it() {
+  let mut sink = verbose_sink("a");
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let mark = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_demote(mark, K_NODE);
+  rewind(&mut sink, ckp);
+
+  assert!(
+    sink.events().is_empty(),
+    "the truncation erased the very slot the write was made on"
+  );
+  assert_eq!(sink.journal_len(), 0);
+}
+
+/// The sharpest staleness alias, the demote twin of
+/// `stale_mark_panics_even_over_a_regrown_tombstone`: the regrown event at the mark's index is
+/// another `StartNode` of the *same kind*, so the positional and kind checks alone would both
+/// validate — only the era separates the histories.
+#[test]
+#[should_panic(expected = "cst_demote on a mark")]
+fn stale_demote_panics_even_over_a_regrown_start_of_the_same_kind() {
+  let mut sink = verbose_sink("");
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let dead = sink.cst_start(K_NODE);
+  rewind(&mut sink, ckp);
+  let live = sink.cst_start(K_NODE);
+  assert_eq!(live.index(), dead.index());
+  sink.cst_demote(dead, K_NODE);
+}
+
+/// A mark minted by one sink must not demote on another, even at the exact `(index: 0, era: 0)`
+/// collision two fresh sinks mint — the identity half of the wall, unconditional in every build.
+#[test]
+#[should_panic(expected = "different sink")]
+fn foreign_sink_demote_panics() {
+  let mut a = verbose_sink("");
+  let mut b = verbose_sink("");
+  let mark_a = a.cst_start(K_NODE);
+  let mark_b = b.cst_start(K_NODE);
+  assert_eq!(mark_a.index(), mark_b.index());
+  assert_eq!(mark_a.era(), mark_b.era());
+  b.cst_demote(mark_a, K_NODE);
+}
+
+/// An inert mark (a diagnostics-only emitter's defaulted `cst_start`) can never demote on a
+/// recording sink: its reserved witness names no sink.
+#[test]
+#[should_panic(expected = "different sink")]
+fn inert_mark_demote_panics() {
+  let mut fatal = Fatal::<TestErr>::new();
+  let inert = CstEmitter::<MiniLexer<'_>>::cst_start(&mut fatal, K_NODE);
+  let mut sink = verbose_sink("");
+  sink.cst_demote(inert, K_NODE);
+}
+
+/// The kind is checked, not merely carried: demoting with the wrong kind is the leaked-finish
+/// shape moved to the emit site, and the mark names the exact slot to check, so it is caught
+/// here rather than deferred to materialization.
+#[test]
+#[should_panic(expected = "cst_demote on a mark")]
+fn wrong_kind_demote_panics() {
+  let mut sink = verbose_sink("");
+  let mark = sink.cst_start(K_NODE);
+  sink.cst_demote(mark, K_LIST);
+}
+
+/// The two mark provenances do not cross in this direction either: a `cst_mark` tombstone is
+/// spent by `cst_start_at` and is never demotable. This is the half the slot-content check
+/// answers on its own — a real-kind argument against a `TOMBSTONE` slot. The other half, a
+/// `TOMBSTONE` **argument**, is not a content question at all and is refused separately; see
+/// `demote_with_the_tombstone_kind_panics`.
+#[test]
+#[should_panic(expected = "cst_demote on a mark")]
+fn demote_of_a_cst_mark_tombstone_panics() {
+  let mut sink = verbose_sink("");
+  let mark = sink.cst_mark();
+  sink.cst_demote(mark, K_NODE);
+}
+
+/// The reserved kind is refused as an **argument**, before the slot is read at all — the check
+/// that makes "the spend verbs do not cross" true rather than almost-true.
+///
+/// A content-only wall compares the slot's kind against the caller's, so `TOMBSTONE` against a
+/// live tombstone *matches*, and the demote then writes `TOMBSTONE` over `TOMBSTONE`. In a
+/// release build that is a silent no-op on a slot the caller never opened. The sharper shape it
+/// also retires is a **retro-wrapped** tombstone, whose `forward_parent` is live: the same
+/// content-only wall waves that through too, and only `cst_demote`'s debug `forward_parent`
+/// canary would have caught it, far from the mistake. One compare against an immediate closes
+/// both, in every build.
+#[test]
+#[should_panic(expected = "reserved TOMBSTONE kind")]
+fn demote_with_the_tombstone_kind_panics() {
+  let mut sink = verbose_sink("");
+  let mark = sink.cst_mark();
+  sink.cst_demote(mark, TOMBSTONE);
+}
+
+/// **Single-use, at the two tiers the appended encoding leaves available.** A demote no longer
+/// rewrites the slot, so the slot cannot witness that it was already demoted and the
+/// every-build content wall has nothing to read — the same reason it cannot see a finish. The
+/// debug tier catches it at cause: the prior `Demote` is a −1 above the mark, so the exact
+/// suffix recount dips.
+///
+/// That is a *narrowing* of the every-build refusal this bracket shipped with, taken
+/// deliberately in exchange for one rollback law across both exits, and the release tier below
+/// is what keeps it out of the silent class.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "a DOUBLE demote")]
+fn a_second_demote_of_one_mark_panics_in_debug() {
+  let mut sink = verbose_sink("");
+  let mark = sink.cst_start(K_NODE);
+  sink.cst_demote(mark, K_NODE);
+  sink.cst_demote(mark, K_NODE);
+}
+
+/// **…and what a release build does with the double-demote residue instead**: canonicalization
+/// refuses it, typed, through both doors. The buffer is built *directly* so the cell runs in
+/// every build — in a debug build the misuse is refused at cause by the cell above and never
+/// reaches materialization at all — and byte for byte it is what
+/// `cst_start(K_NODE); cst_demote(mark, K_NODE); cst_demote(mark, K_NODE)` leaves behind.
+///
+/// The second pass over one target finds the slot its predecessor already tombstoned; there is
+/// no reading of that buffer under which two brackets closed, so it is corruption rather than
+/// incompleteness and `finish_partial` refuses it too.
+#[test]
+fn the_double_demote_residue_is_refused_typed_through_both_doors() {
+  fn residue(src: &str) -> VerboseSink<'_> {
+    let mut sink = verbose_sink(src);
+    sink.push_raw_event_for_tests(Event::StartNode {
+      kind: K_NODE,
+      forward_parent: None,
+    });
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
+    // Raw, because in a debug build `cst_demote`'s own suffix scan refuses the second one —
+    // which is the very misuse this cell is about.
+    sink.push_raw_event_for_tests(Event::Demote { target: 0 });
+    sink.push_raw_event_for_tests(Event::Demote { target: 0 });
+    sink
+  }
+
+  let (green, _emitter) = residue("a").finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("the strict door refuses the second demote"),
+    FinishError::StaleDemote {
+      index: 3,
+      target: 0
+    }
+  );
+
+  let (green, _emitter) = residue("a").finish_partial(K_ROOT);
+  assert_eq!(
+    green.expect_err("and so does the tooling door — one canonicalization, one verdict"),
+    FinishError::StaleDemote {
+      index: 3,
+      target: 0
+    },
+    "close_open_nodes relaxes end-of-stream opens, not a stream that closed one node twice"
+  );
+}
+
+/// The canonicalization wall is positional, so it also backstops every shape the emission walls
+/// already refuse in every build but the raw injection hook can still construct: a `Demote`
+/// naming a `cst_mark` tombstone, and one naming a slot that is not a node start at all.
+#[test]
+fn canonicalization_refuses_a_demote_that_names_no_live_start() {
+  let mut sink = verbose_sink("a");
+  let _tomb = sink.cst_mark();
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.push_raw_event_for_tests(Event::Demote { target: 0 });
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("a cst_mark tombstone is spent by cst_start_at, never demoted"),
+    FinishError::StaleDemote {
+      index: 2,
+      target: 0
+    }
+  );
+
+  let mut sink = verbose_sink("a");
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.push_raw_event_for_tests(Event::Demote { target: 0 });
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("the target holds a token, not a start"),
+    FinishError::StaleDemote {
+      index: 1,
+      target: 0
+    }
+  );
+
+  let mut sink = verbose_sink("a");
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.push_raw_event_for_tests(Event::Demote { target: 99 });
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("out of bounds"),
+    FinishError::StaleDemote {
+      index: 1,
+      target: 99
+    }
+  );
+
+  // …and the `forward_parent: None` half of the same predicate, which the emission walls make
+  // unreachable (only `cst_start_at` writes that field, and its wall demands a tombstone) and
+  // which is therefore raw-injectable only. It is a typed refusal rather than the debug
+  // `forward_parent` canary the eager encoding carried: the demote does not own that slot.
+  let mut sink = verbose_sink("a");
+  sink.push_raw_event_for_tests(Event::StartNode {
+    kind: K_NODE,
+    forward_parent: NonZeroU32::new(1),
+  });
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.push_raw_event_for_tests(Event::Demote { target: 0 });
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("a real-kind start carrying a forward_parent is not this demote's own"),
+    FinishError::StaleDemote {
+      index: 2,
+      target: 0
+    }
+  );
+}
+
+/// **The positional half of the wall, and the one demote shape whose residue is balanced.**
+///
+/// A `Demote` naming a slot *ahead* of itself is the only stale shape that leaves nothing
+/// downstream to notice: canonicalization tombstones a start the walk has not opened yet, so
+/// the node vanishes, the buffer stays balanced, pops still match pushes, and the tree
+/// materializes one node short of what the stream said. Every other stale target leaves a
+/// stream that reads wrong somewhere — the surplus finish, the unclosed node — and is caught
+/// by a later law.
+///
+/// The stream below is that shape at its smallest: a demote at slot 0 naming slot 1, the start
+/// it names, and a token inside it. Before the positional term existed this **materialized**,
+/// returning `<root><tok/></root>` with the `K_NODE` silently erased. It is raw-injectable
+/// only — `cst_demote` derives its target from a live slot strictly below the event it appends
+/// — which is exactly why the release backstop has to carry the term the emission wall
+/// guarantees.
+#[test]
+fn canonicalization_refuses_a_demote_naming_a_slot_above_itself() {
+  fn future_target(src: &str) -> VerboseSink<'_> {
+    let mut sink = verbose_sink(src);
+    // The demote lands FIRST, naming the start that follows it.
+    sink.push_raw_event_for_tests(Event::Demote { target: 1 });
+    sink.push_raw_event_for_tests(Event::StartNode {
+      kind: K_NODE,
+      forward_parent: None,
+    });
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
+    sink
+  }
+
+  let (green, _emitter) = future_target("a").finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("a demote may only name a slot strictly below itself"),
+    FinishError::StaleDemote {
+      index: 0,
+      target: 1
+    },
+    "without the positional term this materializes a tree with the future start erased, and \
+     nothing downstream can tell it apart from a stream that never opened the node"
+  );
+
+  let (green, _emitter) = future_target("a").finish_partial(K_ROOT);
+  assert_eq!(
+    green.expect_err("and the tooling door, which tolerates incompleteness, not corruption"),
+    FinishError::StaleDemote {
+      index: 0,
+      target: 1
+    }
+  );
+}
+
+/// The boundary of the same term: `>=`, not `>`. A demote naming **its own** index is refused
+/// through both doors.
+///
+/// Its outcome does not depend on the positional term — a slot holding a `Demote` is not a
+/// `StartNode`, so the content match refuses a self-target anyway — and that is the point of
+/// pinning it. The two arms must agree on the boundary, so that a future rewrite of either one
+/// cannot open a gap between them.
+#[test]
+fn canonicalization_refuses_a_demote_naming_its_own_slot() {
+  fn self_target(src: &str) -> VerboseSink<'_> {
+    let mut sink = verbose_sink(src);
+    sink.push_raw_event_for_tests(Event::Demote { target: 0 });
+    sink
+  }
+
+  let (green, _emitter) = self_target("").finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("a demote cannot un-open itself"),
+    FinishError::StaleDemote {
+      index: 0,
+      target: 0
+    }
+  );
+
+  let (green, _emitter) = self_target("").finish_partial(K_ROOT);
+  assert_eq!(
+    green.expect_err("through the tooling door too"),
+    FinishError::StaleDemote {
+      index: 0,
+      target: 0
+    }
+  );
+}
+
+/// **The interleaved-exit shape, and what release actually does with it.** Two brackets whose
+/// closings cross — the enclosing start demoted while the inner one is still open — is the third
+/// route that dips `cst_demote`'s debug suffix recount, and the only one of the three that is
+/// *not* a misuse. Canonicalization is positional and order-blind, so it tombstones both slots
+/// whichever order the two `Demote`s arrive in, and the two buffers materialize the **same
+/// tree**.
+///
+/// That is the fact the debug assert's message stakes, so it is pinned rather than asserted.
+/// Both buffers are built raw, because in a debug build the interleaved order is refused at the
+/// emit site (`raw_interleaved_bracket_exits_panic_in_debug`, in `tests/parser_node.rs`) and
+/// would never reach materialization at all.
+#[test]
+fn interleaved_and_innermost_first_demotes_materialize_the_same_tree() {
+  fn built(src: &str, first: u64, second: u64) -> VerboseSink<'_> {
+    let mut sink = verbose_sink(src);
+    sink.push_raw_event_for_tests(Event::StartNode {
+      kind: K_NODE,
+      forward_parent: None,
+    });
+    sink.push_raw_event_for_tests(Event::StartNode {
+      kind: K_LIST,
+      forward_parent: None,
+    });
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
+    sink.push_raw_event_for_tests(Event::Demote { target: first });
+    sink.push_raw_event_for_tests(Event::Demote { target: second });
+    sink.record_token(&MiniTok(b'b'), &span(1, 2));
+    sink
+  }
+
+  // Interleaved: the ENCLOSING start (slot 0) closes first, while slot 1 is still open.
+  let (interleaved, _emitter) = built("ab", 0, 1).finish(K_ROOT);
+  // Innermost-first: the order the blessed bracket produces structurally.
+  let (innermost_first, _emitter) = built("ab", 1, 0).finish(K_ROOT);
+
+  let interleaved = interleaved.expect("release admits the interleaved order");
+  let innermost_first = innermost_first.expect("and the innermost-first order, as always");
+  assert_eq!(
+    shape(&interleaved),
+    "Root[Tok\"a\" Tok\"b\"]",
+    "both brackets abandoned: no node at all, and losslessness holds"
+  );
+  assert_eq!(
+    interleaved, innermost_first,
+    "the two closing orders are byte-identical after canonicalization — the debug refusal of \
+     the interleaved order is a strictness choice on the raw surface, not early detection of a \
+     release defect"
+  );
+}
+
+/// The traded-away affordance, pinned rather than left to be discovered: a **demoted** start
+/// mark is not a retro-wrap anchor. The slot keeps its real kind for the whole parse now, so
+/// `cst_start_at`'s tombstone wall refuses it exactly as it refuses an un-demoted start mark
+/// (`start_at_on_an_up_front_start_mark_panics` below). Recovery tooling that wants to wrap an
+/// abandoned region mints its own `cst_mark`.
+#[test]
+#[should_panic(expected = "came from `cst_start`")]
+fn start_at_on_a_demoted_start_mark_panics() {
+  let mut sink = verbose_sink("a");
+  let mark = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_demote(mark, K_NODE);
+  sink.cst_start_at(mark, K_WRAP);
+}
+
+/// **The first misuse the slot cannot witness**, caught at cause — in a debug build. Nothing
+/// ever rewrites the slot: `cst_finish` is appended *above* it, so afterwards the slot still
+/// holds a live `StartNode` of exactly the demoted kind and identity, bounds, era and content
+/// all pass. Only a recount of the events above the mark sees the close, and that recount is
+/// `cfg(debug_assertions)`-only because the release backstop is a typed refusal rather than a
+/// wrong tree — pinned by
+/// `the_finished_then_demoted_residue_is_refused_typed_through_both_doors` below.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "already took its SUCCESS exit")]
+fn demote_of_a_finished_start_panics_in_debug() {
+  let mut sink = verbose_sink("a");
+  let mark = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_NODE);
+  sink.cst_demote(mark, K_NODE);
+}
+
+/// **What a release build does with the residue instead** — and it is what the `cst_demote` docs
+/// now stake, so it is pinned here rather than argued.
+///
+/// The buffer is built *directly*, not by committing the misuse, and that is what lets the cell
+/// run in **every** build: in a debug build the misuse is refused at cause by the cell above and
+/// never reaches materialization at all. Byte for byte, this is what
+/// `cst_start(K_NODE); token; cst_finish(K_NODE); cst_demote(mark, K_NODE)` leaves behind — the
+/// real start, its finish, and the appended demote naming it.
+///
+/// The counting argument the docs make: canonicalization applies the demote, so the start's
+/// `depth_delta` drops from 1 to 0 — one frame **push** removed and no **pop** — and pops
+/// therefore exceed pushes and the replay walk must underflow. `finish` and `finish_partial`
+/// are one walk over that canonicalized buffer — `close_open_nodes` relaxes end-of-stream opens
+/// and gap tiling, never balance — so **both** doors refuse, typed. There is no door through
+/// which this residue becomes a tree.
+#[test]
+fn the_finished_then_demoted_residue_is_refused_typed_through_both_doors() {
+  fn residue(src: &str) -> VerboseSink<'_> {
+    let mut sink = verbose_sink(src);
+    sink.push_raw_event_for_tests(Event::StartNode {
+      kind: K_NODE,
+      forward_parent: None,
+    });
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
+    // The finish the demote left behind. Raw throughout, because the misuse is refused at cause
+    // in a debug build — which is the very imbalance this cell is about.
+    sink.push_raw_event_for_tests(Event::FinishNode { kind: K_NODE });
+    sink.push_raw_event_for_tests(Event::Demote { target: 0 });
+    sink
+  }
+
+  assert_eq!(
+    residue("a").events(),
+    &[
+      Event::StartNode {
+        kind: K_NODE,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+      Event::FinishNode { kind: K_NODE },
+      Event::Demote { target: 0 },
+    ],
+    "the residue is the post-misuse buffer exactly: the start, its token, the finish that \
+     closed it, and the demote that came after"
+  );
+
+  let (green, _emitter) = residue("a").finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("the strict door refuses the surplus finish"),
+    FinishError::OrphanFinish { index: 2 }
+  );
+
+  let (green, _emitter) = residue("a").finish_partial(K_ROOT);
+  assert_eq!(
+    green.expect_err("and so does the tooling door — one walk, one balance check"),
+    FinishError::OrphanFinish { index: 2 },
+    "close_open_nodes relaxes end-of-stream opens, not a pop with nothing to pop"
+  );
+}
+
+/// **The #98-class guard on the debug scan.** A predicate that fires on a legal history is worse
+/// than no predicate at all, and this repo has shipped that mistake once: the old `cst_finish`
+/// assert compared depth against a *frozen* baseline and panicked on a legal cross-checkpoint
+/// close. The new scan carries no baseline — it recounts the live suffix — and this cell is the
+/// busiest legal frame that recount has to admit.
+///
+/// Every shape here puts a −1 above the mark's slot without closing the marked node: a
+/// completed child (+1 then −1, never dipping), an unspent `cst_mark` tombstone (0 outright),
+/// a completed retro wrap whose `StartAt` sits above the mark in **emission** order whatever it
+/// hoists to (so its +1 still precedes its −1 there), and — the shape the appended encoding
+/// adds — a **nested bracket that took its own failing exit**, which is a `Start(+1)` followed
+/// by its own `Demote(−1)` and nets zero exactly like the completed child. The outer demote
+/// must be silent, and the buffer must still materialize.
+#[test]
+fn demote_scan_admits_a_busy_legal_frame() {
+  let mut sink = verbose_sink("abcd");
+  let outer = sink.cst_start(K_NODE);
+
+  // A completed child node.
+  sink.cst_start(K_LIST);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_LIST);
+
+  // A nested bracket that FAILED: its own Start/Demote pair nets zero above the outer mark.
+  let inner = sink.cst_start(K_LIST);
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+  sink.cst_demote(inner, K_LIST);
+
+  // An unspent tombstone, left to materialize into nothing.
+  let _unspent = sink.cst_mark();
+  sink.record_token(&MiniTok(b'c'), &span(2, 3));
+
+  // A completed retro wrap, hoisted below its own `StartAt` at materialization.
+  let anchor = sink.cst_mark();
+  sink.record_token(&MiniTok(b'd'), &span(3, 4));
+  sink.cst_start_at(anchor, K_WRAP);
+  sink.cst_finish(K_WRAP);
+
+  // The demote under test: legal, and the scan must not fire on any of the above.
+  sink.cst_demote(outer, K_NODE);
+
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("a legal demote over a busy frame still materializes");
+  assert_eq!(text(green.clone()), "abcd", "losslessness holds");
+  assert_eq!(
+    shape(&green),
+    "Root[List[Tok\"a\"] Tok\"b\" Tok\"c\" Wrap[Tok\"d\"]]",
+    "both demoted nodes vanish; every completed structure above them survives"
+  );
+}
+
+/// …and the mirror wall, which is what keeps the shared `EventMark` type honest: an up-front
+/// start mark is refused by `cst_start_at`. `validate_mark` demands a live **tombstone**, and a
+/// real-kind `StartNode` is not one — retro-wrapping an already-open node would nest it inside
+/// a wrap of itself.
+#[test]
+#[should_panic(expected = "came from `cst_start`")]
+fn start_at_on_an_up_front_start_mark_panics() {
+  let mut sink = verbose_sink("a");
+  let mark = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_start_at(mark, K_WRAP);
+}
+
+/// **The panic residue, pinned.** A panic that escapes *every* guard is the one exit the
+/// up-front bracket does not close — no `catch_unwind` is involved, so there is no mechanism to
+/// test, only the residue it leaves: an open node. This cell says what that residue costs, and
+/// it costs nothing new — it is the pre-existing fatal-abort shape, already walled two ways.
+/// (A guard-mediated unwind never reaches here: the guard's rewind truncates the start away,
+/// which `demote_dies_with_a_truncation_at_or_below_it` above holds.)
+#[test]
+fn a_start_left_open_by_an_escaping_panic_is_refused_by_finish_and_closed_by_finish_partial() {
+  let mut sink = verbose_sink("a");
+  let _never_closed = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("the success door refuses a leftover open node, typed"),
+    FinishError::UnclosedNodes { open: 1 }
+  );
+
+  let mut sink = verbose_sink("a");
+  let _never_closed = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  let (green, _emitter) = sink.finish_partial(K_ROOT);
+  let green = green.expect("the tooling door closes it per its existing contract");
+  assert_eq!(text(green.clone()), "a", "losslessness holds either way");
+  let root = tree(green);
+  assert_eq!(root.first_child().expect("Root[Node]").kind(), K_NODE);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ONE BRACKET, TWO EXITS, ONE ROLLBACK LAW
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// These five cells are the adversarial-review evidence that decided the appended encoding,
+// kept as pins. The finding they were built to demonstrate — a rollback whose target lands
+// BETWEEN a `cst_start` and its failing exit — is what an in-place kind rewrite got wrong: the
+// truncation kept the slot and kept the rewrite, so `finish` succeeded with the node silently
+// gone where the restore contract promised it open again. The success exit never had that
+// problem, because its `FinishNode` is an append the truncation removes.
+//
+// With both exits appended the two are the same law, and the first two cells below are the
+// former defect stated as its correct outcome.
+
+/// **The finding, inverted.** A checkpoint captured between `cst_start` and `cst_demote`
+/// promised a buffer whose slot holds a live `StartNode(K_NODE)`. The rollback truncates the
+/// `Demote` and delivers exactly that: the node is open again, and a `finish` that follows is
+/// answered with the typed refusal the restore contract implies.
+///
+/// Under the eager in-place rewrite this cell read the other way — the tombstone survived the
+/// rollback, the retry re-balanced the buffer, and `finish` returned a tree with the node
+/// silently omitted. Nothing downstream could detect that; this is the whole reason the
+/// demotion moved onto an event.
+#[test]
+fn a_rollback_into_the_demote_window_reopens_the_node() {
+  let mut sink = verbose_sink("ab");
+  let m = sink.cst_start(K_NODE); // slot 0
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // len 1: [StartNode(K_NODE)]
+  sink.record_token(&MiniTok(b'a'), &span(0, 1)); // len 2
+  sink.cst_demote(m, K_NODE); // len 3 — an APPEND above the checkpoint
+  rewind(&mut sink, ckp); // truncate to len 1
+
+  assert_eq!(
+    sink.events(),
+    &[Event::StartNode {
+      kind: K_NODE,
+      forward_parent: None
+    }],
+    "exact: the rollback restored the buffer the capture promised, demote and all"
+  );
+
+  // The retry that does not re-close. Under the eager rewrite this buffer was BALANCED and
+  // `finish` handed back a tree; now the open node is still open and the refusal is typed.
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("the reopened node is correctly reported open"),
+    FinishError::UnclosedNodes { open: 1 }
+  );
+}
+
+/// **The boundary case that killed the journal remedy, dissolved by construction.** A
+/// write-time-length journal cannot fix an in-place demote, because the eager demote appended
+/// *nothing*: capture-at-L → demote-at-L → rewind-to-L is a lawful rewind-to-current, a total
+/// no-op that runs no truncation and no journal replay, so no length-keyed entry can tell a
+/// capture taken before the demote from one taken after it. That is also the MOST common
+/// failure shape (the inner parser fails before consuming, with a point opened at entry).
+///
+/// An appended demote ticks the length clock, so the two captures are no longer at the same
+/// length and no rewind can straddle the demote invisibly.
+#[test]
+fn a_demote_ticks_the_length_clock_so_no_rewind_can_straddle_it() {
+  let mut sink = verbose_sink("ab");
+  let m = sink.cst_start(K_NODE); // slot 0
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // len 1
+  sink.cst_demote(m, K_NODE); // len 2 — the clock ticked
+  assert_eq!(
+    sink.events().len(),
+    2,
+    "the failing exit is an event, so the capture at len 1 is strictly below it"
+  );
+  rewind(&mut sink, ckp); // a real truncation, not a rewind-to-current
+
+  assert_eq!(
+    sink.events(),
+    &[Event::StartNode {
+      kind: K_NODE,
+      forward_parent: None
+    }],
+    "the capture promised StartNode(K_NODE) and got it back"
+  );
+}
+
+/// The **success exit** under the same drive, unchanged — the precedent the failing exit now
+/// matches rather than contradicts. The finish is an append, the rollback into the window
+/// truncates it, the open node returns, and the resumed window may lawfully re-close (the
+/// `#98` cross-checkpoint-close clause).
+#[test]
+fn the_success_exit_rollback_into_the_window_is_exact_and_reclosable() {
+  let mut sink = verbose_sink("ab");
+  let _m = sink.cst_start(K_NODE);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_finish(K_NODE); // success exit: an append
+  rewind(&mut sink, ckp); // rollback into the window
+  assert_eq!(
+    sink.events(),
+    &[Event::StartNode {
+      kind: K_NODE,
+      forward_parent: None
+    }],
+    "exact: the open node is back"
+  );
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+  sink.cst_finish(K_NODE); // the reopened frame re-closes — legal per #98
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let root = tree(green.expect("balanced"));
+  assert_eq!(
+    root.first_child().expect("Root[Node]").kind(),
+    K_NODE,
+    "same drive, success exit: the node survives the window rollback"
+  );
+}
+
+/// …and the failing exit's twin of that re-close, which under the eager rewrite was a **misuse
+/// caught by a debug wall**: a continuation that trusted the restore law and re-closed the
+/// promised node was closing a node the buffer no longer had open. It is now simply correct —
+/// the node really is open again, the finish really does close it, and the tree is the one the
+/// restore contract described.
+#[test]
+fn a_reclose_after_a_rollback_into_the_demote_window_is_legal() {
+  let mut sink = verbose_sink("ab");
+  let m = sink.cst_start(K_NODE);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_demote(m, K_NODE);
+  rewind(&mut sink, ckp);
+
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+  sink.cst_finish(K_NODE); // trusts the promise — and the promise is now true
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("balanced");
+  assert_eq!(text(green.clone()), "ab", "losslessness holds");
+  assert_eq!(
+    shape(&green),
+    "Root[Node[Tok\"a\" Tok\"b\"]]",
+    "the resumed window re-closed the node the rollback reopened"
+  );
+}
+
+/// **E4, healed as a corollary.** A live row between the slot and the exit freezes a depth over
+/// the prefix below it, and the eager rewrite falsified that frozen fact in place: the row went
+/// on claiming depth 1 over a prefix whose start had become a tombstone, which masked
+/// `cst_finish`'s debug underflow wall and cost the at-cause tier.
+///
+/// With the demotion on an event, a frozen depth stays true because both the `+1` start and the
+/// `−1` demote are *events* — nothing below a live row can change under it. The row here
+/// survives the rollback, still reads 1, and the finish it governs is correctly admitted.
+#[test]
+fn a_frozen_row_depth_stays_true_across_a_demote_and_its_rollback() {
+  let mut sink = verbose_sink("ab");
+  let m = sink.cst_start(K_NODE); // slot 0
+  let _outer = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // row(mark 1, depth 1) — stays live
+  sink.record_token(&MiniTok(b'a'), &span(0, 1)); // len 2
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // row(mark 2, depth 1)
+  sink.record_token(&MiniTok(b'b'), &span(1, 2)); // len 3
+  sink.cst_demote(m, K_NODE); // len 4 — appended, ABOVE both rows
+  rewind(&mut sink, ckp); // spends row(mark 2), keeps row(mark 1)
+
+  assert_eq!(
+    sink.events(),
+    &[
+      Event::StartNode {
+        kind: K_NODE,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+    ],
+    "the demote went with the rollback; the surviving row's prefix is untouched"
+  );
+
+  // The surviving row froze depth 1 over `[StartNode(K_NODE)]`, and that is still the truth,
+  // so this finish is admitted rather than masked — the debug wall it consults is exact.
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+  sink.cst_finish(K_NODE);
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("balanced");
+  assert_eq!(text(green.clone()), "ab");
+  assert_eq!(shape(&green), "Root[Node[Tok\"a\" Tok\"b\"]]");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // F-A2 / F-A3 — the forward_parent write dies to journal + era
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1256,7 +2125,7 @@ fn cst_forward_census_one_helper_carries_every_channel() {
 fn cst_composition_census_every_family_method_is_overridden() {
   let src = include_str!("../sink.rs");
 
-  // (a) The 29-method inventory: 13 core Emitter + 4 CstEmitter + 12 capability emit_*.
+  // (a) The 30-method inventory: 13 core Emitter + 5 CstEmitter + 12 capability emit_*.
   // Each must appear as an `fn <name>` impl in the sink; a missing one is a severed channel.
   let overridden = [
     // 13 core Emitter
@@ -1278,9 +2147,13 @@ fn cst_composition_census_every_family_method_is_overridden() {
     // The sink is the one emitter in the crate that binds a source, so it is the one that
     // must answer this rather than inherit the `None` default.
     "bound_source",
-    // 4 CstEmitter
+    // 5 CstEmitter
     "cst_start",
     "cst_finish",
+    // The up-front bracket's failing exit. It is the one CstEmitter method whose default is
+    // not merely "record nothing" but "un-record something", so a defaulted inherit here would
+    // leave a wrapped inner carrying a dangling open node for every `Err` a `node()` sees.
+    "cst_demote",
     "cst_mark",
     "cst_start_at",
     // 12 capability emit_*
@@ -1304,8 +2177,8 @@ fn cst_composition_census_every_family_method_is_overridden() {
   ];
   assert_eq!(
     overridden.len(),
-    29,
-    "the family inventory is 13 core + 4 CstEmitter + 12 capability = 29"
+    30,
+    "the family inventory is 13 core + 5 CstEmitter + 12 capability = 30"
   );
 
   // DERIVED, and at the TYPE level rather than by string matching — the half a hand-written
@@ -1356,7 +2229,7 @@ fn cst_composition_census_every_family_method_is_overridden() {
   let cst_body = &cst[cst.find("pub trait CstEmitter<").unwrap()..cst.find("for &mut U").unwrap()];
   assert_eq!(
     count(cst_body, "  fn "),
-    4,
+    5,
     "CstEmitter method count drifted"
   );
   // The capability surface, DERIVED on both sides — no constant, because a hard-coded total is
@@ -2329,7 +3202,9 @@ fn placement_drive(
   let mut sink = verbose_sink(src);
   for op in ops {
     match *op {
-      PlacementOp::Start(kind) => sink.cst_start(kind),
+      PlacementOp::Start(kind) => {
+        let _up_front = sink.cst_start(kind);
+      }
       PlacementOp::Finish(kind) => sink.cst_finish(kind),
       PlacementOp::Tok(byte, lo, hi) => sink.record_token(&MiniTok(byte), &span(lo, hi)),
       PlacementOp::Diag(lo, hi) => {
@@ -5726,13 +6601,25 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'i
 /// could not carry a CST parse at all (`CstEmitter` is a bound, not a default, on the `node()`
 /// combinators), so the realistic adversary is a wrapper that forwards everything a tree needs
 /// and still hides the binding. Pin 5 is the shape that needs it.
+///
+/// One of the five is no longer forwarded voluntarily: as of 0.9.0 `cst_demote` is a **required**
+/// method, so rustc refuses this impl unless the line below is present. That is the whole reach of
+/// that change and it is worth stating here, next to the residue it does *not* touch — this type's
+/// omission is `Emitter::bound_source`, which is defaulted on the **core** trait and stays that
+/// way, so what the three cells below pin is unchanged. What is gone is the *silent* half of the
+/// same shape on the CST surface: a wrapper can still discard the failing exit, but only by
+/// writing the discard where its own reviewer reads it.
 impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'inp> {
-  fn cst_start(&mut self, kind: u16) {
-    self.0.cst_start(kind);
+  fn cst_start(&mut self, kind: u16) -> EventMark {
+    self.0.cst_start(kind)
   }
 
   fn cst_finish(&mut self, kind: u16) {
     self.0.cst_finish(kind);
+  }
+
+  fn cst_demote(&mut self, mark: EventMark, kind: u16) {
+    self.0.cst_demote(mark, kind);
   }
 
   fn cst_mark(&mut self) -> EventMark {
@@ -6180,6 +7067,17 @@ fn conformance_emitter_kit_refuses_a_non_forwarding_wrapper() {
 /// published bypasses is the `## Panics` fiction this release deleted nine of, in a different
 /// medium.
 ///
+/// **What 0.9.0 narrowed, and what it left alone.** The cell used to state the general form as
+/// "a wrapper writing `impl CstEmitter for W {}` satisfies every CST bound while inheriting every
+/// default". That sentence is now stale in the good direction and is reworded below: `cst_demote`
+/// — the node bracket's failing exit — is a **required** method, so the empty impl no longer
+/// compiles and the one default whose inheritance produced a *silently wrong tree* cannot be
+/// inherited at all. The residue this cell pins is untouched by that, and the reason is worth
+/// keeping next to it: `bound_source` lives on the **core** `Emitter` trait, where the defaults
+/// are the promise diagnostics-only emitters were made, and its inheritance fails toward an
+/// *absence* (the check does not run) rather than toward a wrong tree. Same grading, opposite
+/// answer — see `CstEmitter::cst_demote`'s *Required, not defaulted*.
+///
 /// **The handle no longer hands out the sink; a callback parameter still does.** Wrapping a
 /// sink needs a `Sink` value or a `&mut Sink`, and the *handle* routes are shut — `Sink::new`,
 /// `InputRef::emitter` and `Input::emitter`/`into_emitter` are crate-private,
@@ -6212,7 +7110,8 @@ fn a_non_forwarding_wrapper_is_not_caught() {
     "XY",
     "the residue: an emitter wrapper that does not forward `bound_source` gives up the \
      guarantee for whatever it wraps, and no bound can see the omission — a wrapper writing \
-     `impl CstEmitter for W {{}}` satisfies every CST bound while inheriting every default"
+     `impl CstEmitter for W {{ fn cst_demote(..) {{}} }}`, the smallest impl that still \
+     compiles, satisfies every CST bound while inheriting every default it is still allowed to"
   );
 }
 
@@ -6593,12 +7492,16 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForward<'_, 'inp> {
 }
 
 impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for HalfForward<'_, 'inp> {
-  fn cst_start(&mut self, kind: u16) {
-    self.0.cst_start(kind);
+  fn cst_start(&mut self, kind: u16) -> EventMark {
+    self.0.cst_start(kind)
   }
 
   fn cst_finish(&mut self, kind: u16) {
     self.0.cst_finish(kind);
+  }
+
+  fn cst_demote(&mut self, mark: EventMark, kind: u16) {
+    self.0.cst_demote(mark, kind);
   }
 
   fn cst_mark(&mut self) -> EventMark {
@@ -6684,12 +7587,16 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForwardPartial<'_, 'inp
 }
 
 impl<'inp> CstEmitter<'inp, MiniLexer<'inp>> for HalfForwardPartial<'_, 'inp> {
-  fn cst_start(&mut self, kind: u16) {
-    self.inner.cst_start(kind);
+  fn cst_start(&mut self, kind: u16) -> EventMark {
+    self.inner.cst_start(kind)
   }
 
   fn cst_finish(&mut self, kind: u16) {
     self.inner.cst_finish(kind);
+  }
+
+  fn cst_demote(&mut self, mark: EventMark, kind: u16) {
+    self.inner.cst_demote(mark, kind);
   }
 
   fn cst_mark(&mut self) -> EventMark {

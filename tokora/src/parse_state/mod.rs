@@ -193,11 +193,11 @@ where
   /// Opens a CST node of `kind` —
   /// [`CstEmitter::cst_start`](crate::emitter::CstEmitter::cst_start), forwarded.
   #[inline(always)]
-  pub fn cst_start(&mut self, kind: u16)
+  pub fn cst_start(&mut self, kind: u16) -> crate::cst::event::EventMark
   where
     Ctx::Emitter: crate::emitter::CstEmitter<'inp, L, Lang>,
   {
-    self.inp.cst_start(kind);
+    self.inp.cst_start(kind)
   }
 
   /// Closes the innermost open CST node —
@@ -208,6 +208,16 @@ where
     Ctx::Emitter: crate::emitter::CstEmitter<'inp, L, Lang>,
   {
     self.inp.cst_finish(kind);
+  }
+
+  /// Un-opens the node started at `mark` —
+  /// [`CstEmitter::cst_demote`](crate::emitter::CstEmitter::cst_demote), forwarded.
+  #[inline(always)]
+  pub fn cst_demote(&mut self, mark: crate::cst::event::EventMark, kind: u16)
+  where
+    Ctx::Emitter: crate::emitter::CstEmitter<'inp, L, Lang>,
+  {
+    self.inp.cst_demote(mark, kind);
   }
 
   /// Appends a retro-wrap anchor —
