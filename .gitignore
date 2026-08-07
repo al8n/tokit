@@ -20,3 +20,16 @@ Cargo.lock
 
 # Python bytecode from the ci/ helper scripts.
 __pycache__/
+
+# Local design docs / plans / investigation reports (never committed; the
+# issue tracker covers real defects and measurable optimisations, docs/ is
+# for everything else — same convention as the sibling smear repo).
+#
+# Root-anchored on purpose: a leading "/" with no "**" prefix. A bare
+# `docs/` or a `**`-prefixed `**docs/` both match a docs/ directory at
+# *any* depth (git only anchors a pattern via a leading or middle slash;
+# a trailing slash alone does not anchor it), which would also catch a
+# nested `*/docs/` some crate might add later. `/docs/` matches only the
+# top-level tree, which is the actual intent. (Mirrors `/target` above,
+# which is already anchored the same way.)
+/docs/
