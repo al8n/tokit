@@ -22,11 +22,15 @@ reads `<a id="…"></a>` as a paragraph of inline HTML, and a renderer that inst
 lone tag on its own line as an HTML *block* would swallow the line below it — the blank line
 is correct under both readings, and it gives the gate one deterministic place to look.
 
-When `## Unreleased` becomes `## 0.9.0 (date)`, its anchors and the links to them change key
-with it. `ci/changelog_structure.sh` enforces every clause above and will red until they do.
+When `## Unreleased` becomes `## <version> (date)` at a tag, the section key changes from
+`unreleased` to that version, so its anchors and every link to them change key with it. Do not
+write the next release's number down anywhere it can be overtaken — `ci/changelog_structure.sh`
+refuses two sections sharing a key, and a hard-coded `0.9.0` in the selftest's own fixture went
+red the day this section became `0.9.0`. `ci/changelog_structure.sh` enforces every clause above
+and will red until they do.
 -->
 
-## Unreleased
+## 0.9.0 (2026-08-07)
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
@@ -424,6 +428,22 @@ row on `Cst` takes the pre-existing-owner shape rather than the seven original o
   whose body is byte-identical to 0.15.19's), and Tree Borrows still reds in `cursor::free`
   (line 219 → 136) when a red-tree `SyntaxNode` is dropped. Both sites moved line numbers and
   neither changed behaviour. The `rowan` Miri exclusion stays exactly as #235 recorded it.
+
+  **No tool reported this break, and this paragraph is the whole of the warning.**
+  `cargo semver-checks` 0.49.0 — the version the `semver-checks (advisory)` job pins — models
+  **half** of what this entry describes, and after the version bump it models none of it. Run
+  against the published 0.8.0 baseline while the manifest still said `0.8.0`, it reported four
+  major failures, and exactly one belongs here: `trait_method_missing` on
+  `Node::clone_for_update`, the removal above. The dependency major itself is **invisible** to
+  it. `Cst::checkpoint`, `Cst::finish` and `cst::cast::token` have the same rustdoc-JSON
+  spelling on both sides — `rowan::Checkpoint`, `rowan::GreenNode` and `rowan::SyntaxToken` are
+  *paths*, and a path does not carry the version it resolved through — so the tool compares two
+  identical signatures across an incompatible major and has nothing to say. Then the bump
+  removes even the half it had: 0.8.0 → 0.9.0 *is* a major change for a `0.x` crate, so on the
+  release commit the run is `0 checks: 0 pass, 253 skip` and `no semver update required`. The
+  advisory job that has been red on `main` for this whole cycle goes green having executed not
+  one check. A consumer who takes 0.9.0 and leaves `rowan = "0.16"` in place gets the two-crate
+  link error described above, with no tooling anywhere on the path that would have told them.
   — *(#237)*
 
 ### Changed

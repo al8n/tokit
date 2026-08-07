@@ -240,8 +240,15 @@ generate() {
     # `cast::tokens` entry, #160) turned this pass-case red on a document it never touched. At
     # EOF the synthetic section has nothing following it to swallow, so it can only ever
     # exercise the anchor-above-h2 rule it exists to test.
+    #
+    # The version is DELIBERATELY unreachable, and that is the second time this case was bitten
+    # by the same class. It used to be `0.9.0`, a plausible next release — and the moment
+    # `## Unreleased` was renamed to `## 0.9.0` at the tag, the synthetic section collided with
+    # the real one on the section key and this pass-case went red on a document it never
+    # touched, exactly as the paragraph above describes for headings. A section key the
+    # changelog can never mint is the only version that cannot be overtaken by a release.
     cp "$2" "$3"
-    printf '\n<a id="0.9.0"></a>\n\n## 0.9.0 (2026-09-09)\n\n### Added\n\nan entry\n' >> "$3" ;;
+    printf '\n<a id="99999.0.0"></a>\n\n## 99999.0.0 (2026-09-09)\n\n### Added\n\nan entry\n' >> "$3" ;;
 
   g13-inline-comment-html)
     # MANDATORY GUARD. An inline comment is stripped by GitHub — `text <!-- <div id="x"> --> m`
