@@ -20,3 +20,5 @@ Cargo.lock
 
 # Python bytecode from the ci/ helper scripts.
 __pycache__/
+
+/docs/
