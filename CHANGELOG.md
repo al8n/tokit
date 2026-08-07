@@ -391,6 +391,41 @@ row on `Cst` takes the pre-existing-owner shape rather than the seven original o
   signal there would be.
   — *(#169)*
 
+- **`rowan` moves from 0.16 to 0.17, and that is a breaking change for every consumer of the
+  lossless tower.** `rowan` is not an implementation detail here: it is in tokora's *public
+  API*. [`Cst::checkpoint`](https://docs.rs/tokora/latest/tokora/cst/struct.Cst.html) returns
+  `rowan::Checkpoint`, `Cst::finish` returns `rowan::GreenNode`, and `cst::cast::token` returns
+  `rowan::SyntaxToken`. Cargo treats 0.16 and 0.17 as incompatible majors, so a consumer that
+  stays on 0.16 while tokora moves does not get a deprecation — it gets two `rowan` crates
+  linked into one binary and type errors saying `GreenNode` is not `GreenNode`. **Bump both in
+  the same commit.**
+
+  It lands here rather than in 0.9.1 for exactly that reason: a public dependency's major is a
+  breaking change, and 0.9.0 is the release allowed to make one.
+
+  **One tokora API is removed with no replacement.** `rowan` 0.17 deletes the mutable red-tree
+  API in full — `SyntaxNode::clone_for_update`, `new_root_mut`, `is_mutable`, `detach`,
+  `splice_children` — along with the `sll` module that backed it. `cst::Node::clone_for_update`
+  was a one-line forward to the first of those, so it is gone too. There is nothing to
+  re-point it at. An edit is now a rebuild: read the green tree, emit a new one through
+  `SyntaxTreeBuilder`, re-root it. `Node::clone_subtree` is **unaffected** — that is an
+  immutable deep copy, it still exists upstream, and it is what most callers of
+  `clone_for_update` actually wanted.
+
+  `NodeChildren::by_kind` **keeps its exact signature and behaviour**. 0.17 also removed
+  rowan's `SyntaxNodeChildren::by_kind` (and `first_child_by_kind`, `next_sibling_by_kind`,
+  and the `by_kind` iterator types), so the filter is now applied in tokora instead of
+  delegated. Same predicate, same comparison against `SyntaxNode::kind`, same yielded
+  sequence — only the crate running the comparison moved.
+
+  **This does not fix the `rowan` UB.** It would be easy to read a dependency bump as closing
+  #235, and it does not. Measured on 0.17.0 with a two-site reproducer under both aliasing
+  models: Stacked Borrows still reds in `arc.rs` (line 260 → 264, the `HeaderSlice` deref,
+  whose body is byte-identical to 0.15.19's), and Tree Borrows still reds in `cursor::free`
+  (line 219 → 136) when a red-tree `SyntaxNode` is dropped. Both sites moved line numbers and
+  neither changed behaviour. The `rowan` Miri exclusion stays exactly as #235 recorded it.
+  — *(#237)*
+
 ### Changed
 
 - **MSRV raised to 1.95.** The previous floor, 1.87, was not a forced minimum — the crate
@@ -1231,9 +1266,18 @@ The remaining 25 are not code Miri is missing: 14 are `doc(cfg(...))` docs.rs la
 doc-text alternations, and one is a `not(feature = "rowan")` arm the current runs do compile.
 
 **Enabling `rowan` there is not the fix — it reddens the cells.** `rowan 0.16.1`, the version
-`Cargo.lock` resolves, executes undefined behaviour on its ordinary public path, and the two
-models find it in two *different* places. Neither model is clean, so there is no
+`Cargo.lock` resolved when this was measured, executes undefined behaviour on its ordinary public
+path, and the two models find it in two *different* places. Neither model is clean, so there is no
 Tree-Borrows-only half-measure:
+
+> **This release ships `rowan 0.17.0`, not 0.16.1** — see the `rowan` bump under *Changed
+> (breaking)* above. The bump does **not** change anything below. Both sites were re-measured
+> against 0.17.0 and both survived, moving only line numbers: `arc.rs:260` → `arc.rs:264` and
+> `cursor.rs:219` → `cursor.rs:136`. The `arc.rs` `Deref` body is byte-identical across 0.15.19,
+> 0.16.1, 0.16.2 and 0.17.0, and deleting `sll.rs` and rewriting `cursor.rs` from 1592 lines to
+> 1003 did not clear the Tree Borrows half. The two frames, the two models and the conclusion are
+> unchanged; the version and the line numbers were the only stale text, and they are corrected in
+> `ci/miri_sb.sh`, `ci/miri_tb.sh`, `.github/workflows/miri.yml` and `tokora/Cargo.toml`.
 
 - **Stacked Borrows** — `rowan-0.16.1/src/arc.rs:260`, `<HeaderSlice<H, [T; 0]> as Deref>::deref`
   forging a `&HeaderSlice<H, [T]>` over the whole slice out of a `&self` retagged for the header

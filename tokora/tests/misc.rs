@@ -191,14 +191,10 @@ mod cst_coverage {
     assert_eq!(inner.source_string(), "a");
   }
 
-  #[test]
-  fn cst_node_clone_for_update() {
-    // Covers cst/mod.rs lines 482-486: clone_for_update()
-    let root = make_nested();
-    let inner: InnerNode = cast::child::<InnerNode, Lang>(&root).unwrap();
-    let updated = inner.clone_for_update();
-    assert_eq!(updated.source_string(), "a");
-  }
+  // `cst_node_clone_for_update` was deleted when `rowan` 0.17 removed the mutable
+  // red-tree API it exercised. There is no replacement to re-point it at: 0.17 has no
+  // `SyntaxNode::clone_for_update`, so `Node::clone_for_update` is gone too. The
+  // immutable deep copy below is a different operation and already had its own test.
 
   #[test]
   fn cst_node_clone_subtree() {
