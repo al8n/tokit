@@ -421,29 +421,31 @@ fn path_segment_counts_agree_with_the_accessor() {
   }
 }
 
-/// The adapters report the count up front and shrink as they are walked, on a `dyn` receiver.
+/// The adapters hint the count up front and shrink as they are walked, on a `dyn` receiver.
+///
+/// `size_hint` rather than `ExactSizeIterator::len`: the adapters deliberately do not carry that
+/// trait, and `tests/ui/diagnose_adapters_are_not_exact_size.rs` is what keeps it that way.
 #[test]
-fn the_adapters_are_exact_sized_and_fused() {
+fn the_adapters_hint_their_length_and_are_fused() {
   let subject: &dyn Diagnose = &rejected();
 
   let mut segments = subject.path_segments_iter();
-  assert_eq!(segments.len(), 2);
   assert_eq!(segments.size_hint(), (2, Some(2)));
   assert_eq!(segments.next(), Some(PathSegment::Field("heroes")));
-  assert_eq!(segments.len(), 1);
+  assert_eq!(segments.size_hint(), (1, Some(1)));
   assert_eq!(segments.next(), Some(PathSegment::Index(2)));
-  assert_eq!(segments.len(), 0);
+  assert_eq!(segments.size_hint(), (0, Some(0)));
   assert_eq!(segments.next(), None);
   // Fused: exhausted stays exhausted.
   assert_eq!(segments.next(), None);
 
   let mut labels = subject.labels_iter();
-  assert_eq!(labels.len(), 0);
+  assert_eq!(labels.size_hint(), (0, Some(0)));
   assert_eq!(labels.next(), None);
 
   let document: &dyn Diagnose = &redefined();
   let mut labels = document.labels_iter();
-  assert_eq!(labels.len(), 1);
+  assert_eq!(labels.size_hint(), (1, Some(1)));
   let label = labels.next().expect("one label");
   assert_eq!(label.text(), "first defined here");
   assert_eq!(label.location().source(), 1);
@@ -526,4 +528,229 @@ fn a_path_segment_renders_as_its_step() {
   assert_eq!(PathSegment::Field("heroes").to_string(), "heroes");
   assert_eq!(PathSegment::Index(0).to_string(), "0");
   assert_eq!(PathSegment::Index(12).to_string(), "12");
+}
+
+// ---------------------------------------------------------------------------------------------
+// the adapters against an implementor that breaks the count/accessor law
+// ---------------------------------------------------------------------------------------------
+
+/// The shapes in which a **safe** `Diagnose` impl can disagree with its own count.
+///
+/// None of these needs `unsafe`, a panic, or anything a reviewer would flag: each is an ordinary
+/// impl whose count method and accessor answer different questions.
+#[derive(Clone, Copy, Debug)]
+enum Shape {
+  /// `labels() == 2`, a hole at index 0, and an item at index 1.
+  EarlyHole,
+  /// `labels() == 3`, items only at 0 and 1.
+  Overcount,
+  /// `labels() == 1`, items at 0 and 1.
+  Undercount,
+  /// The number of items the value admits MOVES as it is read: none on the first read, two from
+  /// then on. `Diagnose` takes `&self`, so a `Cell` is all this needs — no impl has to opt out of
+  /// anything to do it.
+  MovingCount,
+}
+
+struct Adversary {
+  shape: Shape,
+  label_reads: Cell<usize>,
+  segment_reads: Cell<usize>,
+}
+
+impl Adversary {
+  fn new(shape: Shape) -> Self {
+    Self {
+      shape,
+      label_reads: Cell::new(0),
+      segment_reads: Cell::new(0),
+    }
+  }
+
+  fn declared(&self) -> usize {
+    match self.shape {
+      Shape::EarlyHole | Shape::MovingCount => 2,
+      Shape::Overcount => 3,
+      Shape::Undercount => 1,
+    }
+  }
+
+  fn present(&self, index: usize, reads: &Cell<usize>) -> bool {
+    match self.shape {
+      Shape::EarlyHole => index == 1,
+      Shape::Overcount | Shape::Undercount => index < 2,
+      Shape::MovingCount => {
+        let seen = reads.get();
+        reads.set(seen + 1);
+        seen > 0 && index < 2
+      }
+    }
+  }
+}
+
+impl fmt::Display for Adversary {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "{:?}", self.shape)
+  }
+}
+
+impl Diagnose for Adversary {
+  fn code(&self) -> Code {
+    Code::new("mylang::probe::adversary")
+  }
+  fn severity(&self) -> Severity {
+    Severity::Error
+  }
+  fn primary(&self) -> Location {
+    Location::entire(0)
+  }
+  fn primary_label(&self) -> Option<&'static str> {
+    None
+  }
+  fn labels(&self) -> usize {
+    self.declared()
+  }
+  fn label(&self, index: usize) -> Option<Label> {
+    self
+      .present(index, &self.label_reads)
+      .then(|| Label::new(Location::entire(0), "adversary"))
+  }
+  fn path_segments(&self) -> usize {
+    self.declared()
+  }
+  fn path_segment(&self, index: usize) -> Option<PathSegment<'_>> {
+    self
+      .present(index, &self.segment_reads)
+      .then_some(PathSegment::Index(0))
+  }
+  fn help(&self) -> Option<&'static str> {
+    None
+  }
+}
+
+/// Drives `iter` well past its declared end and returns every answer, including the `None`s.
+fn drive<I: Iterator>(mut iter: I, steps: usize) -> Vec<Option<I::Item>> {
+  (0..steps).map(|_| iter.next()).collect()
+}
+
+/// `FusedIterator`'s law: once `next` has answered `None`, it answers `None` forever.
+fn assert_fused<T: fmt::Debug>(answers: &[Option<T>], what: &str) {
+  if let Some(first_none) = answers.iter().position(Option::is_none) {
+    assert!(
+      answers[first_none..].iter().all(Option::is_none),
+      "{what}: `FusedIterator` promises nothing follows the first `None`, but the sequence was \
+       {answers:?}"
+    );
+  }
+}
+
+/// A hole before the declared end retires the iterator instead of resuming past it.
+///
+/// Measured red before the fail-closed fix, on this exact fixture: the sequence was
+/// `[None, Some(Label { .. }), None, None, None]` — a `Some` after a `None`, from a type
+/// carrying `FusedIterator`.
+#[test]
+fn an_early_hole_does_not_resume_the_iterator() {
+  let subject = Adversary::new(Shape::EarlyHole);
+  let erased: &dyn Diagnose = &subject;
+
+  let answers = drive(erased.labels_iter(), 5);
+  assert_fused(&answers, "EarlyHole labels");
+  assert!(
+    answers.iter().all(Option::is_none),
+    "the hole is at index 0, so nothing is yielded at all: {answers:?}"
+  );
+
+  let subject = Adversary::new(Shape::EarlyHole);
+  let erased: &dyn Diagnose = &subject;
+  let answers = drive(erased.path_segments_iter(), 5);
+  assert_fused(&answers, "EarlyHole path segments");
+  assert!(answers.iter().all(Option::is_none));
+}
+
+/// A count higher than the accessor supports yields what is there and then stops for good.
+#[test]
+fn an_overcount_stops_at_the_hole_and_stays_stopped() {
+  let subject = Adversary::new(Shape::Overcount);
+  let erased: &dyn Diagnose = &subject;
+
+  // The hint is the DECLARED count, and it over-estimates — which `Iterator::size_hint` allows
+  // and `ExactSizeIterator` would not have. This is the row that trait was removed for.
+  assert_eq!(erased.labels(), 3);
+  assert_eq!(erased.labels_iter().size_hint(), (3, Some(3)));
+
+  let answers = drive(erased.labels_iter(), 6);
+  assert_fused(&answers, "Overcount labels");
+  assert_eq!(answers.iter().filter(|a| a.is_some()).count(), 2);
+
+  // And the hint is exact again the moment the walk has discovered the hole.
+  let mut iter = erased.labels_iter();
+  while iter.next().is_some() {}
+  assert_eq!(iter.size_hint(), (0, Some(0)));
+
+  let subject = Adversary::new(Shape::Overcount);
+  let erased: &dyn Diagnose = &subject;
+  let answers = drive(erased.path_segments_iter(), 6);
+  assert_fused(&answers, "Overcount path segments");
+  assert_eq!(answers.iter().filter(|a| a.is_some()).count(), 2);
+}
+
+/// A count lower than the accessor supports yields the count, and the surplus is simply lost.
+///
+/// This one breaks neither marker law — the adapter has no way to learn the surplus exists — so
+/// it is a characterization pin rather than a repaired defect. It is here because "the extra item
+/// is silently dropped" is a behaviour a future change could alter without any other gate
+/// noticing.
+#[test]
+fn an_undercount_yields_the_declared_count_and_no_more() {
+  let subject = Adversary::new(Shape::Undercount);
+  let erased: &dyn Diagnose = &subject;
+
+  assert!(
+    erased.label(1).is_some(),
+    "the surplus item really is there"
+  );
+  let answers = drive(erased.labels_iter(), 4);
+  assert_fused(&answers, "Undercount labels");
+  assert_eq!(answers.iter().filter(|a| a.is_some()).count(), 1);
+
+  let subject = Adversary::new(Shape::Undercount);
+  let erased: &dyn Diagnose = &subject;
+  assert!(erased.path_segment(1).is_some());
+  let answers = drive(erased.path_segments_iter(), 4);
+  assert_fused(&answers, "Undercount path segments");
+  assert_eq!(answers.iter().filter(|a| a.is_some()).count(), 1);
+}
+
+/// The strongest shape: `Diagnose` takes `&self`, so a safe impl can move its own count between
+/// the call that sizes the walk and the calls that perform it.
+///
+/// Measured red before the fail-closed fix, for the same reason as the early hole: the first read
+/// admits nothing and the second admits two, so the adapter answered `None` and then `Some`.
+#[test]
+fn a_count_that_moves_under_interior_mutability_still_fuses() {
+  let subject = Adversary::new(Shape::MovingCount);
+  let erased: &dyn Diagnose = &subject;
+  let answers = drive(erased.labels_iter(), 5);
+  assert_fused(&answers, "MovingCount labels");
+
+  let subject = Adversary::new(Shape::MovingCount);
+  let erased: &dyn Diagnose = &subject;
+  let answers = drive(erased.path_segments_iter(), 5);
+  assert_fused(&answers, "MovingCount path segments");
+}
+
+/// The walk is sized ONCE, at construction, so a count that moves afterwards cannot lengthen a
+/// live iterator.
+#[test]
+fn the_declared_count_is_snapshotted_at_construction() {
+  let subject = Adversary::new(Shape::MovingCount);
+  let erased: &dyn Diagnose = &subject;
+  let iter = erased.labels_iter();
+  assert_eq!(iter.size_hint(), (2, Some(2)));
+  // Reading the accessor directly moves the value's state; the iterator's bound does not follow.
+  let _ = erased.label(0);
+  let _ = erased.label(0);
+  assert_eq!(iter.size_hint(), (2, Some(2)));
+  assert_eq!(iter.count(), 2);
 }

@@ -66,6 +66,34 @@ and will red until they do.
   `DiagnoseExt` puts the iterators back on top and is blanket-implemented, `dyn Diagnose`
   included.
 
+  **The adapters fail closed, and they carry `FusedIterator` but deliberately not
+  `ExactSizeIterator`.** `Diagnose`'s count and its accessor are required to agree, but nothing in
+  the type system makes them, and an impl that disagrees needs no `unsafe` and no panic — two
+  methods answering different questions is enough, and `&self` plus a `Cell` is enough to make the
+  answer move between calls. The marker traits on `Labels` and `PathSegments` are promises **the
+  adapters** make, which a generic renderer relies on without ever seeing the `Diagnose` impl, so
+  they have to hold regardless:
+
+  - reaching an index the accessor answers `None` for **retires the cursor**, and every later call
+    answers `None`. That makes `FusedIterator` true by construction rather than by trusting the
+    implementor. Anything past the hole is dropped, which is the direction to fail in — a renderer
+    showing too few labels is repairable, one walking a resumed iterator is not.
+  - `ExactSizeIterator` is **not** implemented and must not be. Its contract is that the length is
+    *exactly* known, and a length read through a trait object whose count may disagree with its
+    accessor is not. Documenting it as conditional would be a footnote against a `std` marker
+    nobody footnotes. `tests/ui/diagnose_adapters_are_not_exact_size.rs` is the rail: adding either
+    impl back makes that case compile, which trybuild reports as a failure.
+  - `Iterator::size_hint` still carries the declared count, where being an over-estimate is
+    specified to be allowed, so the pre-sizing the indexed shape exists for survives — and it
+    becomes exact the moment the walk discovers a hole.
+
+  Four adversarial impls pin this in `tests/diagnostic_contract.rs`: an early hole, an overcount,
+  an undercount, and a count that moves between calls through interior mutability. The early hole
+  and the moving count were each watched breaking `FusedIterator` before the fix — the recorded
+  sequence was `[None, Some(Label { .. }), None, None, None]` — and the early hole and the
+  overcount were each watched breaking `ExactSizeIterator::len`. The undercount breaks neither and
+  is a characterization pin: the surplus item is unreachable and no adapter can learn it exists.
+
   Every method is required, with no defaulted accessors: a defaulted `label` or `path_segment`
   lets a family under-report *silently*, which compiles and renders and is simply missing
   labels. A genuinely new axis added later may ship defaulted, because impls written before it

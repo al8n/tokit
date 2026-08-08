@@ -46,6 +46,31 @@
 //! [`DiagnoseExt`] puts the iterators back on top, for callers holding a concrete type or a
 //! `&dyn Diagnose` alike.
 //!
+//! # What the adapters do when an impl breaks the law
+//!
+//! [`Diagnose`]'s count and its accessor are required to agree (see the trait's own
+//! documentation), but nothing in the type system makes them, and an impl that disagrees needs
+//! no `unsafe` and no panic to do it — two methods answering different questions is enough, and
+//! `&self` plus a `Cell` is enough to make the answer move between calls.
+//!
+//! That is the implementor's defect, and [`Labels`] and [`PathSegments`] still have to be sound
+//! under it, because the marker traits they carry are **promises the adapters make**, not
+//! promises the implementor signed. A generic renderer relies on them without ever seeing the
+//! [`Diagnose`] impl.
+//!
+//! So the adapters **fail closed**: reaching an index the accessor answers `None` for retires the
+//! cursor, and every later call answers `None`. That makes
+//! [`FusedIterator`](core::iter::FusedIterator) true by construction. Anything past the hole is
+//! dropped, which is the direction to fail in — a renderer that shows too few labels is
+//! repairable, and one walking a resumed iterator is not.
+//!
+//! **Neither adapter implements [`ExactSizeIterator`], and neither should.** That trait's contract
+//! is that the length is *exactly* known, and a length read through a trait object whose count may
+//! disagree with its accessor is not. Documenting it as conditional would not help: nobody reads a
+//! crate's prose before trusting a `std` marker. [`Iterator::size_hint`] carries the count instead,
+//! where being an over-estimate is specified to be allowed — so a renderer still gets its
+//! `with_capacity` up front, and only the promise that cannot be kept is gone.
+//!
 //! # Every method is required
 //!
 //! There are no defaulted accessors here, and that is a decision about failure direction rather
@@ -107,8 +132,9 @@ pub use severity::Severity;
 ///   [`label`](Self::label) is `Some`, and `label(i)` must be `None` for every `i` at or beyond
 ///   it. The same holds for [`path_segments`](Self::path_segments) and
 ///   [`path_segment`](Self::path_segment). A renderer sizes its storage from the count and then
-///   walks the indices; a count that disagrees with the accessor is a truncated or a panicking
-///   render.
+///   walks the indices; a count that disagrees with the accessor is a truncated render. It cannot
+///   be worse than truncated through [`DiagnoseExt`] — the adapters stop at the first hole rather
+///   than resuming past it — but the labels are still lost, and nothing can recover them.
 /// - [`primary`](Self::primary) is **total**. Every diagnostic has one, and an input with no
 ///   positions in it answers [`Location::entire`] rather than a fabricated range.
 /// - Reading any of them must not allocate.
@@ -254,6 +280,9 @@ where
 }
 
 /// The iterator [`DiagnoseExt::labels_iter`] returns.
+///
+/// See [`PathSegments`]' sibling note and the [module documentation](self#what-the-adapters-do-when-an-impl-breaks-the-law)
+/// for what this does when [`Diagnose::labels`] and [`Diagnose::label`] disagree.
 #[derive(Debug)]
 pub struct Labels<'a, D: ?Sized> {
   diagnostic: &'a D,
@@ -272,23 +301,42 @@ where
     if self.next >= self.end {
       return None;
     }
-    let label = self.diagnostic.label(self.next);
+    let Some(label) = self.diagnostic.label(self.next) else {
+      // Fail closed. An accessor answering `None` before the count said to stop is an impl
+      // breaking `Diagnose`'s law, and simply returning that `None` would break a promise THIS
+      // TYPE made: the next call would read the following index and could answer `Some`, which
+      // is exactly what `FusedIterator` rules out. Retiring the cursor makes the marker true by
+      // construction rather than by trusting the implementor, at the cost of dropping anything
+      // past the hole — the direction to fail in, because a renderer that stops early is
+      // repairable and one that walks a resumed iterator is not.
+      self.next = self.end;
+      return None;
+    };
     self.next += 1;
-    label
+    Some(label)
   }
 
+  /// The declared count, less what has been yielded.
+  ///
+  /// A *hint*, and deliberately no more: it mirrors [`Diagnose::labels`], so an impl that
+  /// over-counts makes this an over-estimate until [`next`](Iterator::next) discovers the hole,
+  /// at which point it becomes `(0, Some(0))`. That is what [`Iterator::size_hint`] is specified
+  /// to allow, and it is what keeps the pre-sizing this contract's indexed shape exists for —
+  /// `Vec::with_capacity` off the lower bound, before the walk starts.
   #[inline]
   fn size_hint(&self) -> (usize, Option<usize>) {
+    // `next` is only ever advanced to a value at or below `end`, so this cannot underflow.
     let remaining = self.end - self.next;
     (remaining, Some(remaining))
   }
 }
 
-impl<D> ExactSizeIterator for Labels<'_, D> where D: Diagnose + ?Sized {}
-
 impl<D> core::iter::FusedIterator for Labels<'_, D> where D: Diagnose + ?Sized {}
 
 /// The iterator [`DiagnoseExt::path_segments_iter`] returns.
+///
+/// See [`Labels`]' sibling note and the [module documentation](self#what-the-adapters-do-when-an-impl-breaks-the-law)
+/// for what this does when [`Diagnose::path_segments`] and [`Diagnose::path_segment`] disagree.
 #[derive(Debug)]
 pub struct PathSegments<'a, D: ?Sized> {
   diagnostic: &'a D,
@@ -307,18 +355,23 @@ where
     if self.next >= self.end {
       return None;
     }
-    let segment = self.diagnostic.path_segment(self.next);
+    // Fail closed on a hole, for the reason written out on `Labels::next`.
+    let Some(segment) = self.diagnostic.path_segment(self.next) else {
+      self.next = self.end;
+      return None;
+    };
     self.next += 1;
-    segment
+    Some(segment)
   }
 
+  /// The declared count, less what has been yielded — a hint, on the same terms as
+  /// [`Labels`]'.
   #[inline]
   fn size_hint(&self) -> (usize, Option<usize>) {
+    // `next` is only ever advanced to a value at or below `end`, so this cannot underflow.
     let remaining = self.end - self.next;
     (remaining, Some(remaining))
   }
 }
-
-impl<D> ExactSizeIterator for PathSegments<'_, D> where D: Diagnose + ?Sized {}
 
 impl<D> core::iter::FusedIterator for PathSegments<'_, D> where D: Diagnose + ?Sized {}

@@ -201,6 +201,7 @@ const BOUND_CASES: &[&str] = &[
   "tests/ui/session_point_cannot_cross_into_a_bracket.rs",
   "tests/ui/session_point_cannot_cross_into_a_bracket_impl.rs",
   "tests/ui/cst_demote_cannot_be_inherited.rs",
+  "tests/ui/diagnose_adapters_are_not_exact_size.rs",
 ];
 
 /// Per case: the ui file, the curated headline its trait's attribute must produce, and
