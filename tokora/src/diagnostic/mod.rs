@@ -109,20 +109,25 @@
 //!
 //! # Nothing here allocates
 //!
-//! [`Code`], [`Severity`], [`Location`], [`Label`] and [`PathSegment`] are all `Copy`, so reading
-//! the structure off a diagnostic moves no ownership and reaches no allocator. What varies with
-//! the input is kept out of that structure by **two** mechanisms, and the difference between them
-//! is the design rather than an implementation detail:
+//! Not because input-varying data is kept out of the structure — most of it is right there — but
+//! because every part of the structure has a **representation** that reaches no allocator. There
+//! are three, and which one a field gets follows from what it has to hold:
 //!
-//! - **Variable prose stays in the message.** The name that was rejected, the type that was
-//!   expected, the two selections that would not merge — [`Display`](core::fmt::Display) formats
-//!   those, on demand and only if somebody asks. No accessor carries them, which is what lets
-//!   label and help text be `&'static str`.
-//! - **Variable structured data is borrowed.** A response key in a [`PathSegment::Field`] is taken
-//!   from the document, so it cannot be `&'static` — and it must **not** be pushed into the
-//!   message instead, because a result path that exists only as prose is not a result path and
-//!   nothing downstream can read it. It is borrowed from storage the diagnostic already holds,
-//!   which is what [`PathSegment`]'s lifetime parameter is for.
+//! - **Coordinates travel by value.** A [`Location`]'s source index and span, a
+//!   [`PathSegment::Index`], a [`Severity`]. These vary with the input and are `Copy`, so reading
+//!   them off a diagnostic moves no ownership.
+//! - **Fixed text is `&'static str`.** A [`Code`]'s identifier, a [`Label`]'s phrase, a `help`
+//!   line: what the rule always says, baked into the binary rather than built per diagnostic.
+//! - **Variable text is borrowed.** A response key in a [`PathSegment::Field`] comes from the
+//!   document, so it can be neither a coordinate nor `&'static`. It is a `&str` into a buffer the
+//!   producer already holds, which is what [`PathSegment`]'s lifetime parameter is for. It must
+//!   **not** be flattened into the message instead: a result path that exists only as prose is
+//!   not a result path, and nothing downstream can read it.
+//!
+//! Every one of those is `Copy`, which is what makes the whole structure readable through
+//! `&dyn Diagnose` without a single move. What is left for [`Display`](core::fmt::Display) is the
+//! variable *prose* — the name that was rejected, the type that was expected — rendered on demand
+//! and only if somebody asks.
 //!
 //! So a renderer can read a diagnostic's whole structure, and write its message into a buffer it
 //! already owns, without touching the allocator. `tests/diagnostic_contract.rs` measures that

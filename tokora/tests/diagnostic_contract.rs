@@ -551,26 +551,52 @@ fn a_path_segment_renders_as_its_step() {
 // the adapters against an implementor that breaks the count/accessor law
 // ---------------------------------------------------------------------------------------------
 
+/// What [`Shape::MovingCount`] moves its count to after the first read.
+///
+/// Bigger than any snapshot a test takes, so "the walk followed the count" and "the walk kept its
+/// snapshot" cannot be confused for one another.
+const MOVED_COUNT: usize = 64;
+
+/// The snapshot every test takes of [`Shape::MovingCount`] is `2`, so the moved value has to be
+/// something else or "kept its snapshot" and "followed the count" are the same reading. Checked at
+/// compile time rather than in a test, where it would be an assertion on a constant.
+const _: () = assert!(MOVED_COUNT > 2);
+
 /// The shapes in which a **safe** `Diagnose` impl can disagree with its own count.
 ///
 /// None of these needs `unsafe`, a panic, or anything a reviewer would flag: each is an ordinary
 /// impl whose count method and accessor answer different questions.
+///
+/// Each variant's name is its **mechanism**, and the two interior-mutability shapes are separate
+/// because they are separate mechanisms: one moves what the *accessor* answers, the other moves
+/// what the *count* answers. They were one variant called `MovingCount` whose count never moved,
+/// which left `a_live_iterator_cannot_lengthen_when_the_count_moves_under_it` unable to fail for
+/// the reason it named — an adapter re-reading the count every step passed it.
 #[derive(Clone, Copy, Debug)]
 enum Shape {
   /// `labels() == 2`, a hole at index 0, and an item at index 1.
   EarlyHole,
-  /// `labels() == 3`, items only at 0 and 1.
+  /// `labels() == 4`, items at 0, 1 and 3 — so the hole at 2 is **not** the last index, and an
+  /// adapter that resumed past it would have something to resume to.
   Overcount,
   /// `labels() == 1`, items at 0 and 1.
   Undercount,
-  /// The number of items the value admits MOVES as it is read: none on the first read, two from
-  /// then on. `Diagnose` takes `&self`, so a `Cell` is all this needs — no impl has to opt out of
-  /// anything to do it.
+  /// The **accessor** moves: it admits nothing on its first read and two items from then on, so
+  /// index 0 answers `None` and index 1 answers `Some`. The count is a fixed `2`.
+  DriftingAccessor,
+  /// The **count** moves: `labels()` answers `2` the first time it is asked and [`MOVED_COUNT`]
+  /// every time after. The accessor is well behaved and has no hole below [`MOVED_COUNT`], so the
+  /// only thing that could lengthen a walk is an adapter re-reading the count.
+  ///
+  /// `Diagnose` takes `&self`, so a `Cell` is all either of these needs — no impl has to opt out
+  /// of anything to do it.
   MovingCount,
 }
 
 struct Adversary {
   shape: Shape,
+  label_count_reads: Cell<usize>,
+  segment_count_reads: Cell<usize>,
   label_reads: Cell<usize>,
   segment_reads: Cell<usize>,
 }
@@ -579,24 +605,35 @@ impl Adversary {
   fn new(shape: Shape) -> Self {
     Self {
       shape,
+      label_count_reads: Cell::new(0),
+      segment_count_reads: Cell::new(0),
       label_reads: Cell::new(0),
       segment_reads: Cell::new(0),
     }
   }
 
-  fn declared(&self) -> usize {
+  /// The count method's answer. `count_reads` is the cell for whichever collection is asking, so
+  /// the label count and the path count move independently.
+  fn declared(&self, count_reads: &Cell<usize>) -> usize {
     match self.shape {
-      Shape::EarlyHole | Shape::MovingCount => 2,
-      Shape::Overcount => 3,
+      Shape::EarlyHole | Shape::DriftingAccessor => 2,
+      Shape::Overcount => 4,
       Shape::Undercount => 1,
+      Shape::MovingCount => {
+        let asked = count_reads.get();
+        count_reads.set(asked + 1);
+        if asked == 0 { 2 } else { MOVED_COUNT }
+      }
     }
   }
 
   fn present(&self, index: usize, reads: &Cell<usize>) -> bool {
     match self.shape {
       Shape::EarlyHole => index == 1,
-      Shape::Overcount | Shape::Undercount => index < 2,
-      Shape::MovingCount => {
+      Shape::Overcount => index < 4 && index != 2,
+      Shape::Undercount => index < 2,
+      Shape::MovingCount => index < MOVED_COUNT,
+      Shape::DriftingAccessor => {
         let seen = reads.get();
         reads.set(seen + 1);
         seen > 0 && index < 2
@@ -625,7 +662,7 @@ impl Diagnose for Adversary {
     None
   }
   fn labels(&self) -> usize {
-    self.declared()
+    self.declared(&self.label_count_reads)
   }
   fn label(&self, index: usize) -> Option<Label> {
     self
@@ -633,7 +670,7 @@ impl Diagnose for Adversary {
       .then(|| Label::new(Location::entire(0), "adversary"))
   }
   fn path_segments(&self) -> usize {
-    self.declared()
+    self.declared(&self.segment_count_reads)
   }
   fn path_segment(&self, index: usize) -> Option<PathSegment<'_>> {
     self
@@ -686,15 +723,23 @@ fn an_early_hole_does_not_resume_the_iterator() {
 }
 
 /// A count higher than the accessor supports yields what is there and then stops for good.
+///
+/// The hole is at index 2 of four, **not** at the last index, so "stays stopped" is a real
+/// assertion: index 3 answers `Some`, and an adapter that resumed past the hole would yield it.
 #[test]
 fn an_overcount_stops_at_the_hole_and_stays_stopped() {
   let subject = Adversary::new(Shape::Overcount);
   let erased: &dyn Diagnose = &subject;
 
+  assert!(
+    erased.label(3).is_some(),
+    "there is something past the hole to resume to"
+  );
+
   // The cap is the declared count and over-states what is there; the lower bound promises
   // nothing, which is what keeps `Vec` from reserving against a number the walk will not reach.
-  assert_eq!(erased.labels(), 3);
-  assert_eq!(erased.labels_iter().size_hint(), (0, Some(3)));
+  assert_eq!(erased.labels(), 4);
+  assert_eq!(erased.labels_iter().size_hint(), (0, Some(4)));
 
   let answers = drive(erased.labels_iter(), 6);
   assert_fused(&answers, "Overcount labels");
@@ -739,36 +784,59 @@ fn an_undercount_yields_the_declared_count_and_no_more() {
   assert_eq!(answers.iter().filter(|a| a.is_some()).count(), 1);
 }
 
-/// The strongest shape: `Diagnose` takes `&self`, so a safe impl can move its own count between
-/// the call that sizes the walk and the calls that perform it.
+/// `Diagnose` takes `&self`, so a safe impl can move what its **accessor** answers between calls.
 ///
 /// Measured red before the fail-closed fix, for the same reason as the early hole: the first read
 /// admits nothing and the second admits two, so the adapter answered `None` and then `Some`.
 #[test]
-fn a_count_that_moves_under_interior_mutability_still_fuses() {
-  let subject = Adversary::new(Shape::MovingCount);
+fn an_accessor_that_drifts_under_interior_mutability_still_fuses() {
+  let subject = Adversary::new(Shape::DriftingAccessor);
   let erased: &dyn Diagnose = &subject;
   let answers = drive(erased.labels_iter(), 5);
-  assert_fused(&answers, "MovingCount labels");
+  assert_fused(&answers, "DriftingAccessor labels");
 
-  let subject = Adversary::new(Shape::MovingCount);
+  let subject = Adversary::new(Shape::DriftingAccessor);
   let erased: &dyn Diagnose = &subject;
   let answers = drive(erased.path_segments_iter(), 5);
-  assert_fused(&answers, "MovingCount path segments");
+  assert_fused(&answers, "DriftingAccessor path segments");
 }
 
-/// The walk is sized ONCE, at construction, so a count that moves afterwards cannot lengthen a
-/// live iterator.
+/// The walk is sized ONCE, at construction, so a **count** that moves afterwards cannot lengthen
+/// a live iterator.
+///
+/// The fixture proves its own premise rather than assuming it: the count is read back after the
+/// iterator exists and must have moved to [`MOVED_COUNT`], and the accessor has no hole below
+/// that — so if the adapter re-read the count on every step there would be [`MOVED_COUNT`] items
+/// waiting for it, and this test is what notices. Measured red against exactly that plant.
 #[test]
-fn the_declared_count_is_snapshotted_at_construction() {
+fn a_live_iterator_cannot_lengthen_when_the_count_moves_under_it() {
   let subject = Adversary::new(Shape::MovingCount);
   let erased: &dyn Diagnose = &subject;
+
+  // Sizing the walk is the first read of the count, and it sees 2.
   let iter = erased.labels_iter();
   assert_eq!(iter.size_hint(), (0, Some(2)));
-  // Reading the accessor directly moves the value's state; the iterator's cap does not follow.
-  let _ = erased.label(0);
-  let _ = erased.label(0);
+
+  // The count has genuinely moved underneath it, and by more than the snapshot.
+  assert_eq!(erased.labels(), MOVED_COUNT);
+  assert_eq!(erased.labels(), MOVED_COUNT);
+  assert!(
+    erased.label(MOVED_COUNT - 1).is_some(),
+    "the accessor must have items waiting past the snapshot, or a re-reading adapter would stop \
+     anyway and this test would pass for the wrong reason"
+  );
+
+  // The live iterator keeps its own bound.
   assert_eq!(iter.size_hint(), (0, Some(2)));
+  assert_eq!(iter.count(), 2);
+
+  // And the same for the result path, whose count moves on its own cell.
+  let subject = Adversary::new(Shape::MovingCount);
+  let erased: &dyn Diagnose = &subject;
+  let iter = erased.path_segments_iter();
+  assert_eq!(iter.size_hint(), (0, Some(2)));
+  assert_eq!(erased.path_segments(), MOVED_COUNT);
+  assert!(erased.path_segment(MOVED_COUNT - 1).is_some());
   assert_eq!(iter.count(), 2);
 }
 
@@ -829,8 +897,9 @@ impl Diagnose for HugeCount {
 fn the_lower_bound_promises_nothing_the_adapters_cannot_deliver() {
   for (shape, declared) in [
     (Shape::EarlyHole, 2),
-    (Shape::Overcount, 3),
+    (Shape::Overcount, 4),
     (Shape::Undercount, 1),
+    (Shape::DriftingAccessor, 2),
     (Shape::MovingCount, 2),
   ] {
     let subject = Adversary::new(shape);

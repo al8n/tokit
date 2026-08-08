@@ -48,13 +48,15 @@ and will red until they do.
   would put a `cfg` on every consumer's re-export and buy back nothing that is not already
   free.
 
-  **Reading a diagnostic allocates nothing, and that is measured rather than asserted.** Every
-  vocabulary type is `Copy` and every label and help string is `&'static str`. What varies with
-  the input is kept out of the structure two different ways, and the distinction is load-bearing:
-  variable *prose* stays in the lazily rendered message, while variable *structured* data —
-  a `PathSegment::Field`'s response key, which is taken from the document and must stay readable
-  as a path rather than being flattened into a sentence — is **borrowed**, which is what
-  `PathSegment`'s lifetime parameter is for.
+  **Reading a diagnostic allocates nothing, and that is measured rather than asserted.** Not
+  because input-varying data is kept out of the structure — most of it is in there — but because
+  every part of the structure has a representation that reaches no allocator: coordinates travel
+  by value (`Location`'s span, `PathSegment::Index`, `Severity`), fixed text is `&'static str` (a
+  `Code`, a `Label`'s phrase, a `help` line), and variable text is **borrowed** — a
+  `PathSegment::Field`'s response key comes from the document, so it is a `&str` into a buffer the
+  producer already holds, which is what `PathSegment`'s lifetime parameter is for and why it must
+  not be flattened into the message. All three are `Copy`, so the whole structure reads through
+  `&dyn Diagnose` without a move.
   `tests/diagnostic_contract.rs` reads the whole contract through `&dyn Diagnose` — code,
   severity, primary, primary label, every secondary label, every path segment, help, and both
   iterator adapters — and renders the message into a fixed stack buffer under a counting global
