@@ -40,7 +40,7 @@ tokora = { version = "0.9", features = ["logos"] }
 enabled unless you set `default-features = false`.
 
 > **Which version this describes.** Every `[dependencies]` snippet in this README resolves against
-> the latest release, **0.9.0**. A feature that `main` has grown since is named with the version it
+> the latest release, **0.9.1**. A feature that `main` has grown since is named with the version it
 > will arrive in, rather than put in a copyable block you cannot resolve.
 
 ## Capabilities
