@@ -61,3 +61,62 @@ recursion/discarded
 commit_lexer_error/same_pick
 commit_lexer_error/later_pick_used
 commit_lexer_error/later_pick_discarded
+
+# ── `Diagnose` / `DiagnoseExt` — tokora implements NEITHER, for any type ─────────────────
+#
+# Every row below agrees on both sides, and the reason is one API fact rather than a property
+# of this probe's shape: `tokora::diagnostic` publishes a contract for a CONSUMER's error types
+# to implement, and tokora implements it for none of its own. `DiagnoseExt` is blanket over
+# `D: Diagnose`, so it reaches exactly as far — which is nowhere. tokora's items are therefore
+# candidates on NO receiver, on either side, and no subject this harness can name would change
+# that.
+#
+# `gen_probe.py` rides `UnexpectedEot::eot(7usize)` deliberately: it is one of tokora's own
+# error types, the natural first candidate for a `Diagnose` impl, so the agreement says "even
+# there, tokora's item is not a candidate" rather than "some unrelated value does not implement
+# it". Read the README's bound on `TRAITS` records before reading the verdict column — a subject
+# that does not implement the trait produces a clean run that means nothing, and here that is
+# the finding, not a mis-chosen subject.
+#
+# What the rows are evidence FOR, stated narrowly: no call site that already exists can change
+# which item it resolves to. Reaching `Diagnose::code` at all costs a consumer two source
+# changes they make themselves — implementing the trait for their own type, and importing the
+# trait, which is not in any prelude. Neither happens because tokora published a name.
+#
+# RE-OPEN CONDITION: the first time tokora implements `Diagnose` for one of its own types,
+# `TRAITS["Diagnose"]["recvr"]` becomes a value of THAT type and these rows are re-probed. Until
+# then they are trusted, not verified, and this paragraph plus the reviewer who agreed with it
+# are the whole of their protection.
+code/same_pick
+code/later_pick_used
+code/later_pick_discarded
+severity/same_pick
+severity/later_pick_used
+severity/later_pick_discarded
+primary/same_pick
+primary/later_pick_used
+primary/later_pick_discarded
+primary_label/same_pick
+primary_label/later_pick_used
+primary_label/later_pick_discarded
+labels/same_pick
+labels/later_pick_used
+labels/later_pick_discarded
+label/same_pick
+label/later_pick_used
+label/later_pick_discarded
+path_segments/same_pick
+path_segments/later_pick_used
+path_segments/later_pick_discarded
+path_segment/same_pick
+path_segment/later_pick_used
+path_segment/later_pick_discarded
+help/same_pick
+help/later_pick_used
+help/later_pick_discarded
+labels_iter/same_pick
+labels_iter/later_pick_used
+labels_iter/later_pick_discarded
+path_segments_iter/same_pick
+path_segments_iter/later_pick_used
+path_segments_iter/later_pick_discarded

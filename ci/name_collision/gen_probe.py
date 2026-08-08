@@ -402,6 +402,53 @@ TRAITS = {
         "scope": None,
         "fixture": EMITTER_SUBJECT_FIXTURE,
     },
+    # ── `Diagnose` / `DiagnoseExt` — TOKORA IMPLEMENTS NEITHER, FOR ANY TYPE ─────────────
+    #
+    # These two are the first traits in this harness with NO implementor inside tokora, and
+    # that is the whole content of their rows. `tokora::diagnostic` publishes a contract for a
+    # CONSUMER's error types to implement; tokora's own errors do not implement it, and the
+    # module's header says so in as many words. `DiagnoseExt` is blanket over `D: Diagnose`, so
+    # it reaches exactly as far.
+    #
+    # There is therefore no receiver, anywhere in this crate, on which tokora's items are
+    # candidates — so every row here AGREES on both sides and is justified by name in
+    # `no_collision.txt`. Read the README's bound before reading the verdict column: a subject
+    # that does not implement the trait produces a clean run that means nothing, and here that
+    # is the FINDING rather than a mis-chosen subject. `UnexpectedEot` is picked deliberately as
+    # one of tokora's own error types — the natural first candidate for a `Diagnose` impl — so
+    # the row says "even there, tokora's item is not a candidate" rather than "some unrelated
+    # value does not implement it".
+    #
+    # Reaching `Diagnose::code` at all costs a consumer two source changes they make
+    # themselves: implementing the trait for their own type, and importing the trait. Neither
+    # can happen to a call site that already exists because tokora published a name.
+    #
+    # RE-OPEN CONDITION, and it is not optional: the first time tokora implements `Diagnose`
+    # for one of its own types, `recvr` becomes a value of THAT type and these rows are
+    # re-probed. Until then the entry below is trusted, not verified, and the justification in
+    # `no_collision.txt` is the whole of its protection.
+    #
+    # `scope` stays absent for the same reason it is absent on `Emitter`, arrived at from the
+    # other direction: an import of a trait the base ref does not have makes the base side fail
+    # to compile, which destroys the before-state and scores every row INCONCL. A pre-existing
+    # glob cannot reach these names either, because the module is new and the crate root does
+    # not re-export them.
+    #
+    # `self_ty` stays absent because neither trait declares a receiver-less item, so no
+    # `trait_assoc_fn` row can arise; filling it in "just in case" is how a probe ends up
+    # riding a guess.
+    "Diagnose": {
+        "recvr": "UnexpectedEot::eot(7usize)",
+        "self_ty": None,
+        "scope": None,
+        "fixture": None,
+    },
+    "DiagnoseExt": {
+        "recvr": "UnexpectedEot::eot(7usize)",
+        "self_ty": None,
+        "scope": None,
+        "fixture": None,
+    },
 }
 
 
@@ -756,6 +803,45 @@ pub fn mini_cst() -> Cst<'static, Mini<'static>, Silent<PErr>> {
 '''
 
 
+# ── Reaching an owner that lives in a module the base ref does not have ──────────────────
+#
+# The indirection below is not decoration and must not be flattened to a direct import.
+#
+# `run.sh` grants `new-owner` only on positive evidence: a base-side diagnostic that NAMES this
+# row's owner. Every owner before this one lived in a module the base ref already had, so
+# `use tokora::EmitterView;` failed as `unresolved import \`tokora::EmitterView\`` — the owner in
+# the message. `tokora::diagnostic` is the first WHOLE MODULE a diff has added, and there the
+# same shape reports the module instead: `unresolved import \`tokora::diagnostic\``, with no
+# mention of `Code` anywhere in the output. Measured, all three spellings, on the base ref
+# `c14b936`:
+#
+#   use tokora::diagnostic::Code;   -> E0432 `tokora::diagnostic`      (1 error, no `Code`)
+#   use tokora::diagnostic::*;      -> E0432 `tokora::diagnostic`      (1 error, no `Code`)
+#   impl .. for tokora::diagnostic::Code -> E0433 `diagnostic` in `tokora`  (3, no `Code`)
+#
+# rustc suppresses the follow-on `cannot find type \`Code\`` in all three, which is the right
+# thing for a compiler to do and leaves the harness with no evidence: every row scores INCONCL
+# while the head side is measuring exactly what it should.
+#
+# Re-exporting through a local module splits the one failure into two, and the second one names
+# the owner:
+#
+#   error[E0432]: unresolved import `tokora::diagnostic`
+#   error[E0432]: unresolved import `new_module::Code`
+#
+# The head side resolves both hops and is unchanged. Any future diff adding a module takes this
+# shape; a direct import of a type inside a new module cannot reach `new-owner` at all.
+def new_module_imports(module, *names):
+    """Import `names` from `module` so a base ref lacking `module` names each one when it fails."""
+    tail = names[0] if len(names) == 1 else "{%s}" % ", ".join(names)
+    return (
+        "mod new_module {\n"
+        "  pub use %s::*;\n"
+        "}\n"
+        "use new_module::%s;\n" % (module, tail)
+    )
+
+
 # ── Inherent subjects whose OWNER this same diff introduces ──────────────────────────────
 #
 # `EmitterView` and `Cst` are minted by the diff that adds their items, so the BASE side cannot
@@ -856,6 +942,82 @@ INHERENT_SUBJECTS = {
         # drivers are the only minters. An empty table rather than an absent key, so the refusal
         # below reads "this owner has no such shape" instead of a KeyError.
         "assoc_calls": {},
+    },
+    # ── The `tokora::diagnostic` vocabulary types ────────────────────────────────────────
+    #
+    # `Code`, `Label` and `Location` are minted by the same diff as their items, so they take
+    # this table's shape and not the pre-existing-owner one: the base side cannot name the type
+    # at all, and only the head side's binding has to be right. Every call below is at the item's
+    # real arity and every `used` binding is the item's real return type.
+    #
+    # Their `imports` go through `new_module_imports` rather than naming the type directly, and
+    # that is what makes the base-side diagnostic mention the owner at all — read its header
+    # before touching them.
+    #
+    # All three are `Copy` and every accessor is `&self`, so the receiver walk finds tokora's
+    # inherent item at the `&T` step while the generated consumer's `&mut self` item sits one
+    # step later — tokora's takes the call, `witness=0`, which is the one shape `run.sh` accepts
+    # as evidence.
+    #
+    # WHICH names reach which owner: `surface_diff.py` records ONE owner per name, the
+    # alphabetically LAST that declares it, so `Code` < `Label` < `Location` decides the shared
+    # ones. `new` is declared by all three and routes to `Location`; it is written into all
+    # three tables anyway, for the reason `ERROR_SUBJECTS` gives — an entry for only today's
+    # winner is a template that reports FATAL over a name it has already probed the day that
+    # order moves.
+    #
+    # `diagnostic::Severity` needs no entry and has none, and the reason is worth writing down
+    # because it is a property of the harness rather than of the type: owners are identified by
+    # UNQUALIFIED name, and `emitter::Severity` already declares `as_str` on the base side, so
+    # `diagnostic::Severity::as_str` is absent from the inventory — masked by a same-named type
+    # in another module. Its analysis is `Code::as_str`'s exactly (a new owner no call site can
+    # predate), so nothing is lost; a future item on it that `emitter::Severity` does NOT also
+    # declare will surface and land here.
+    "Code": {
+        "imports": new_module_imports("tokora::diagnostic", "Code"),
+        "fixture": "",
+        "ty": "Code",
+        "setup": "",
+        "build": '  let mut subject: Code = Code::new("probe::name-collision::row");\n',
+        "calls": {
+            "as_str": ("", "&'static str"),
+        },
+        "assoc_calls": {
+            "new": ('"probe::name-collision::row"', "Code"),
+        },
+    },
+    "Label": {
+        "imports": "use tokora::SimpleSpan;\n" + new_module_imports("tokora::diagnostic", "Label", "Location"),
+        "fixture": "",
+        "ty": "Label",
+        "setup": "",
+        "build": (
+            "  let mut subject: Label =\n"
+            '    Label::new(Location::new(0, SimpleSpan::new(0, 1)), "probe");\n'
+        ),
+        "calls": {
+            "location": ("", "Location"),
+            "text": ("", "&'static str"),
+        },
+        "assoc_calls": {
+            "new": ('Location::new(0, SimpleSpan::new(0, 1)), "probe"', "Label"),
+        },
+    },
+    "Location": {
+        "imports": "use tokora::SimpleSpan;\n" + new_module_imports("tokora::diagnostic", "Location"),
+        "fixture": "",
+        "ty": "Location",
+        "setup": "",
+        "build": "  let mut subject: Location = Location::new(0, SimpleSpan::new(0, 1));\n",
+        "calls": {
+            "is_entire": ("", "bool"),
+            "source": ("", "u32"),
+            "span": ("", "Option<SimpleSpan>"),
+        },
+        "assoc_calls": {
+            "entire": ("0", "Location"),
+            "new": ("0, SimpleSpan::new(0, 1)", "Location"),
+        },
     },
 }
 
@@ -1159,6 +1321,21 @@ def trait_method(name, owner, spelling):
         # be what TOKORA's item would accept — which is the half a wrong-arity call gets wrong.
         "commit_lexer_error":
             "tokora::span::Spanned::new(tokora::SimpleSpan::new(0, 1), PErr)",
+        # `Diagnose`'s nine accessors and `DiagnoseExt`'s two, at their real arity. Nine take
+        # no argument beyond the receiver; `label` and `path_segment` take one `usize` index
+        # each, which is the single-argument shape this table already serves for `labelled`
+        # and `commit_lexer_error` — not the multi-argument support #225 declines.
+        "code": "",
+        "severity": "",
+        "primary": "",
+        "primary_label": "",
+        "labels": "",
+        "label": "0usize",
+        "path_segments": "",
+        "path_segment": "0usize",
+        "help": "",
+        "labels_iter": "",
+        "path_segments_iter": "",
     }.get(name)
     if args is None:
         # The pointer matters more than the refusal. An author who lands here reads "add a
