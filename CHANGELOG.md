@@ -61,10 +61,11 @@ and will red until they do.
   **Why indexed accessors rather than iterators.** `fn labels(&self) -> impl Iterator<Item =
   Label>` and its GAT spelling both make the trait dyn-incompatible, and `&dyn Diagnose` is the
   whole point: a renderer holds three families in one collection, and boxing each one to get
-  there would allocate for a value designed not to. A count plus an indexed accessor is
-  dyn-safe, allocation-free, and hands a renderer its length before it starts filling.
-  `DiagnoseExt` puts the iterators back on top and is blanket-implemented, `dyn Diagnose`
-  included.
+  there would allocate for a value designed not to. A count plus an indexed accessor is dyn-safe
+  and allocation-free, and that is the whole of what it buys: it gives a renderer structured,
+  erasable, allocation-free access to an error, and **no length promise of any kind** — see the
+  next entry. `DiagnoseExt` puts the iterators back on top and is blanket-implemented,
+  `dyn Diagnose` included.
 
   **The adapters fail closed, and they carry `FusedIterator` but deliberately not
   `ExactSizeIterator`.** `Diagnose`'s count and its accessor are required to agree, but nothing in

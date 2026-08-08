@@ -152,18 +152,28 @@ pub use severity::Severity;
 /// type that pairs the two is the implementor; where the error is self-contained, the error is. A
 /// collection of errors is not a diagnostic and should not pretend to be one: its elements are.
 ///
-/// The three accessor pairs are contracts, not conventions:
+/// The three accessor pairs are obligations on the impl, not conventions:
 ///
 /// - [`labels`](Self::labels) must equal the number of consecutive indices from `0` for which
 ///   [`label`](Self::label) is `Some`, and `label(i)` must be `None` for every `i` at or beyond
 ///   it. The same holds for [`path_segments`](Self::path_segments) and
-///   [`path_segment`](Self::path_segment). A renderer sizes its storage from the count and then
-///   walks the indices; a count that disagrees with the accessor is a truncated render. It cannot
-///   be worse than truncated through [`DiagnoseExt`] — the adapters stop at the first hole rather
-///   than resuming past it — but the labels are still lost, and nothing can recover them.
+///   [`path_segment`](Self::path_segment). Break it and your own labels go missing: the adapters
+///   stop at the first hole, so a reader sees a truncated diagnostic rather than a corrupted one,
+///   and nothing downstream can recover what was past it.
 /// - [`primary`](Self::primary) is **total**. Every diagnostic has one, and an input with no
 ///   positions in it answers [`Location::entire`] rather than a fabricated range.
 /// - Reading any of them must not allocate.
+///
+/// # Reading one
+///
+/// Walk the labels and the path through [`labels_iter`](DiagnoseExt::labels_iter) and
+/// [`path_segments_iter`](DiagnoseExt::path_segments_iter).
+///
+/// The counts above are an obligation the *implementor* took on, and they read to a consumer like
+/// a number to act on. They are not: a count is what one impl claims, the adapters are what it can
+/// actually produce, and only the second is something tokora stands behind. Above all a count is
+/// not a capacity — [the module documentation](self#a-declared-count-is-not-a-capacity) carries
+/// the measurement that settled it.
 ///
 /// ```
 /// use core::fmt;

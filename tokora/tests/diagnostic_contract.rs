@@ -9,11 +9,12 @@
 //!    usable in a request path, and it holds only because every vocabulary type is `Copy` and
 //!    every label and help string is `&'static`.
 //!
-//! 2. **The counts and the indexed accessors agree.** A renderer sizes its storage from
-//!    `labels()` / `path_segments()` and then walks the indices, so a count that disagrees with
-//!    its accessor is a truncated or a panicking render. The subjects below are checked for the
-//!    agreement, for `None` at and past the end, and for the two iterator adapters reporting the
-//!    same length.
+//! 2. **The counts and the indexed accessors agree — and the adapters hold when they do not.**
+//!    An impl owes a count equal to what its accessor yields, and nothing enforces that, so the
+//!    subjects below are checked both ways: the well-formed ones for agreement and for `None` at
+//!    and past the end, and five adversarial ones for what `Labels` / `PathSegments` do when the
+//!    law is broken — fail closed, stay fused, cap the upper bound and promise nothing through
+//!    the lower one.
 //!
 //! # How claim 1 is measured
 //!
@@ -432,7 +433,7 @@ fn path_segment_counts_agree_with_the_accessor() {
   }
 }
 
-/// The adapters hint the count up front and shrink as they are walked, on a `dyn` receiver.
+/// The adapters cap what is left and shrink the cap as they are walked, on a `dyn` receiver.
 ///
 /// `size_hint` rather than `ExactSizeIterator::len`: the adapters deliberately do not carry that
 /// trait, and `tests/ui/diagnose_adapters_are_not_exact_size.rs` is what keeps it that way. The
