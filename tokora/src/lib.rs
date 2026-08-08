@@ -171,6 +171,21 @@ pub mod emitter;
 /// All errors carry span information for precise diagnostic reporting.
 pub mod error;
 
+// Deliberately no outer doc comment, unlike every other `pub mod` in this file. Rustdoc resolves
+// the MERGED fragments of a module's documentation in the scope of whichever attribute came from
+// outside, so an outer comment here reinterprets every link in `diagnostic/mod.rs` as one rooted
+// in the crate: measured at 20 `unresolved link` errors plus 2 `redundant explicit link target`
+// under `RUSTDOCFLAGS="-D warnings"`, all for items that are right there in the module.
+//
+// The modules above get away with it because the names their headers link — `CstEmitter`,
+// `Emitter`, `Window` — are re-exported at the crate root, so the root scope happens to resolve
+// them. This module's are not, and should not be: `diagnostic::Severity` at the root would sit
+// beside `emitter::Severity` for anyone doing a glob import. The alternative fix, spelling the
+// header's links crate-absolute, trades an unresolved link for a redundant one and makes the
+// correct spelling depend on the crate root's re-export set — so the module's own header keeps
+// its own scope, and the crate index still shows its summary line from that header.
+pub mod diagnostic;
+
 /// Macro for defining punctuator types.
 ///
 /// Provides the [`punctuator!`] macro for generating zero-sized punctuator types with
