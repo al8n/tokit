@@ -30,6 +30,117 @@ red the day this section became `0.9.0`. `ci/changelog_structure.sh` enforces ev
 and will red until they do.
 -->
 
+## Unreleased
+
+### Added
+
+- **`tokora::diagnostic` — the structured half of an error, as one dyn-safe contract.** A front
+  end's lexical, syntactic and semantic errors come from three different places and, until now,
+  had only `Display` in common: a consumer wanting `miette`, `ariadne`, `codespan-reporting`, an
+  LSP `Diagnostic` or a protocol's own error object had to re-derive structure from a formatted
+  sentence, or go without. The new module publishes that structure and nothing else — `Diagnose`,
+  `DiagnoseExt`, `Code`, `Severity`, `Location`, `Label`, `PathSegment`, and the `Labels` /
+  `PathSegments` iterator adapters.
+
+  **It is not behind a feature, and does not want one.** It names no renderer, adds no
+  dependency, and is `core::fmt` plus `SimpleSpan`, so it compiles under
+  `--no-default-features` and for `thumbv6m-none-eabi` exactly as it does on a server. A gate
+  would put a `cfg` on every consumer's re-export and buy back nothing that is not already
+  free.
+
+  **Reading a diagnostic allocates nothing, and that is measured rather than asserted.** Every
+  vocabulary type is `Copy` and every label and help string is `&'static str`; everything that
+  varies with the input stays inside the lazily rendered message.
+  `tests/diagnostic_contract.rs` reads the whole contract through `&dyn Diagnose` — code,
+  severity, primary, primary label, every secondary label, every path segment, help, and both
+  iterator adapters — and renders the message into a fixed stack buffer under a counting global
+  allocator, for **0** allocation events. A discrimination check beside it shows the same
+  counter reporting a real allocation, so the zero means "nothing allocated" rather than
+  "nothing was looking"; both gates were watched going red against planted defects.
+
+  **Why indexed accessors rather than iterators.** `fn labels(&self) -> impl Iterator<Item =
+  Label>` and its GAT spelling both make the trait dyn-incompatible, and `&dyn Diagnose` is the
+  whole point: a renderer holds three families in one collection, and boxing each one to get
+  there would allocate for a value designed not to. A count plus an indexed accessor is
+  dyn-safe, allocation-free, and hands a renderer its length before it starts filling.
+  `DiagnoseExt` puts the iterators back on top and is blanket-implemented, `dyn Diagnose`
+  included.
+
+  Every method is required, with no defaulted accessors: a defaulted `label` or `path_segment`
+  lets a family under-report *silently*, which compiles and renders and is simply missing
+  labels. A genuinely new axis added later may ship defaulted, because impls written before it
+  existed cannot answer it — that direction is safe, this one is not.
+
+  tokora publishes the contract; it does not implement it for its own error types.
+
+- **`impl From<emitter::Severity> for diagnostic::Severity`.** The crate now spells `Severity`
+  twice and the two are not the same axis, so the relationship is a conversion rather than a
+  coincidence. `emitter::Severity` is a *channel selector*: it decides which of a collecting
+  emitter's two stores a record lands in, and `Fatal` reads it to decide whether to stop. It has
+  exactly the two tiers that machinery has channels for, and it is not `#[non_exhaustive]`.
+  `diagnostic::Severity` is a *reporting ladder* read after the fact by whatever renders the
+  finished diagnostic, and it carries the third rung — `Advice` — that a deprecation or
+  portability lint needs and that the emitter has no channel for.
+
+  The emitter's two tiers embed into the ladder totally, so the conversion exists in that
+  direction only. The reverse would have to answer which channel an `Advice` goes down, and the
+  honest answer is that there is none.
+
+  No consumer can already own this impl — both types are foreign to every other crate — so the
+  one way it is observable is an `.into()` whose target was previously fixed by elimination and
+  now has a second candidate. That fails loudly, at the call site, with an inference error.
+
+- One `tokora::diagnostic` note that is a source comment rather than an API fact, recorded here
+  because it will be re-litigated otherwise: `pub mod diagnostic;` in `src/lib.rs` deliberately
+  carries **no outer doc comment**, unlike every other `pub mod` in that file. Rustdoc resolves a
+  module's merged doc fragments in the scope of whichever attribute came from outside, so an
+  outer comment there reinterprets every link in the module's own `//!` header as one rooted in
+  the crate — measured at 20 `unresolved link` errors plus 2 `redundant explicit link target`
+  under `RUSTDOCFLAGS="-D warnings"`. The neighbouring modules get away with it because the names
+  *their* headers link are re-exported at the crate root; this module's are not, and should not
+  be, since `diagnostic::Severity` at the root would sit beside `emitter::Severity` for anyone
+  doing a glob import. The crate index still shows the module's summary line, taken from that
+  same header.
+
+### Changed
+
+- **The name-collision harness can now reach an owner that lives in a module the base ref does
+  not have, and could not before.** `tokora::diagnostic` is the first WHOLE MODULE a diff has
+  added, and that turns out to break `run.sh`'s `new-owner` verdict — which is granted only on a
+  base-side diagnostic *naming this row's owner*. Every owner before this one lived in a module
+  the base already had, so `use tokora::EmitterView;` failed as ``unresolved import
+  `tokora::EmitterView` ``, with the owner in the message. Measured on `c14b936`, all three
+  direct spellings report the **module** instead and never mention the type:
+
+  ```text
+  use tokora::diagnostic::Code;             -> E0432 `tokora::diagnostic`         (no `Code`)
+  use tokora::diagnostic::*;                -> E0432 `tokora::diagnostic`         (no `Code`)
+  impl .. for tokora::diagnostic::Code      -> E0433 `diagnostic` in `tokora`     (no `Code`)
+  ```
+
+  rustc suppresses the follow-on ``cannot find type `Code` `` in all three — correct compiler
+  behaviour, and it left every one of the sixteen inherent rows scoring `INCONCL` while the head
+  side was measuring exactly what it should. `gen_probe.py` now routes such an owner through a
+  local re-export (`new_module_imports`), which splits the one failure into two and puts the
+  owner in the second: ``unresolved import `new_module::Code` ``. The head side resolves both hops
+  unchanged. **Any future diff that adds a module takes this shape**; a direct import of a type
+  inside a new module cannot reach `new-owner` at all.
+
+  The run over this branch's 50 probes is `PASS`: 16 `new-owner`, 33 `ok*`, one glob row
+  rejected by the compiler, and no `SILENT`, `UNPROBED`, `INCONCL` or `FATAL`. The 33 are
+  `Diagnose` and `DiagnoseExt`'s items, justified in `no_collision.txt` on one API fact — tokora
+  implements neither trait for any type, so tokora's items are candidates on no receiver, and
+  reaching them at all costs a consumer both an impl of their own and an import. That entry
+  carries a re-open condition: the first tokora type to implement `Diagnose` replaces the record's
+  receiver and the rows are re-probed.
+
+  One bound found while doing it and left as it is, because nothing is lost by it: the harness
+  identifies an owner by its **unqualified type name**, so `diagnostic::Severity::as_str` is
+  absent from the inventory — masked by `emitter::Severity`, which already declares `as_str` on
+  the base side. Its pick analysis is `Code::as_str`'s exactly (an owner no call site can
+  predate), and a future item on it that `emitter::Severity` does not also declare will surface
+  normally.
+
 ## 0.9.0 (2026-08-07)
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
