@@ -6,7 +6,7 @@
 // object, and nothing makes that count agree with the accessor that actually produces the items:
 // a safe impl whose two methods answer different questions is enough, and `&self` plus a `Cell`
 // is enough to make the answer move between calls. `tests/diagnostic_contract.rs` measures five
-// such impls.
+// such shapes, across two fixtures.
 //
 // The distinction that makes this a rail rather than a preference: `FusedIterator` is a promise
 // the adapters can keep, because they can fail closed at the first hole, and they do.

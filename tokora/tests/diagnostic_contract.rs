@@ -6,14 +6,17 @@
 //!    ask a `&dyn Diagnose` every question the trait has — code, severity, primary, primary
 //!    label, every secondary label, every result-path segment, help — and write the message into
 //!    a buffer it already owns, without touching the allocator. That is what makes the contract
-//!    usable in a request path, and it holds only because every vocabulary type is `Copy` and
-//!    every label and help string is `&'static`.
+//!    usable in a request path. It holds because every vocabulary type is `Copy`, because label
+//!    and help text are `&'static`, and — the part a fixture has to carry or the measurement is
+//!    weaker than the claim — because variable *structured* data is **borrowed** rather than
+//!    owned or stringified. `Rejected` below stores a `String` and hands back
+//!    `PathSegment::Field(&self.field)`, so the borrowed arm is on the measured path.
 //!
 //! 2. **The counts and the indexed accessors agree — and the adapters hold when they do not.**
 //!    An impl owes a count equal to what its accessor yields, and nothing enforces that, so the
 //!    subjects below are checked both ways: the well-formed ones for agreement and for `None` at
-//!    and past the end, and five adversarial ones for what `Labels` / `PathSegments` do when the
-//!    law is broken — fail closed, stay fused, cap the upper bound and promise nothing through
+//!    and past the end, and five adversarial shapes for what `Labels` / `PathSegments` do when
+//!    the law is broken — fail closed, stay fused, cap the upper bound and promise nothing through
 //!    the lower one.
 //!
 //! # How claim 1 is measured

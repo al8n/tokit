@@ -49,8 +49,12 @@ and will red until they do.
   free.
 
   **Reading a diagnostic allocates nothing, and that is measured rather than asserted.** Every
-  vocabulary type is `Copy` and every label and help string is `&'static str`; everything that
-  varies with the input stays inside the lazily rendered message.
+  vocabulary type is `Copy` and every label and help string is `&'static str`. What varies with
+  the input is kept out of the structure two different ways, and the distinction is load-bearing:
+  variable *prose* stays in the lazily rendered message, while variable *structured* data —
+  a `PathSegment::Field`'s response key, which is taken from the document and must stay readable
+  as a path rather than being flattened into a sentence — is **borrowed**, which is what
+  `PathSegment`'s lifetime parameter is for.
   `tests/diagnostic_contract.rs` reads the whole contract through `&dyn Diagnose` — code,
   severity, primary, primary label, every secondary label, every path segment, help, and both
   iterator adapters — and renders the message into a fixed stack buffer under a counting global
@@ -104,9 +108,9 @@ and will red until they do.
     pre-size from its own counts — its trust decision about its own code, not advice tokora
     gives.
 
-  Five adversarial impls pin this in `tests/diagnostic_contract.rs`: an early hole, an overcount,
-  an undercount, a count that moves between calls through interior mutability, and a count of a
-  million behind a single real label. The early hole and the moving count were each watched
+  Five adversarial shapes pin this in `tests/diagnostic_contract.rs`, across two fixtures: an
+  early hole, an overcount, an undercount, a count that moves between calls through interior
+  mutability, and a count of a million behind a single real label. The early hole and the moving count were each watched
   breaking `FusedIterator` before the fix — the recorded sequence was
   `[None, Some(Label { .. }), None, None, None]`; the early hole and the overcount were each
   watched breaking `ExactSizeIterator::len`; all four count shapes were watched advertising a

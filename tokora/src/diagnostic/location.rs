@@ -91,9 +91,12 @@ impl Location {
 /// A secondary position with a phrase explaining what is there.
 ///
 /// "declared here", "first defined here", "the other selection" — the second half of a diagnostic
-/// that is about a *relationship* between two places. The text is `&'static str` on purpose:
-/// everything variable about a diagnostic belongs in the lazily rendered message, so that reading
-/// the labels off a diagnostic costs no allocation.
+/// that is about a *relationship* between two places. The text is `&'static str` on purpose: a
+/// label's phrase is the fixed thing its rule always says, not something computed from the input,
+/// so it needs neither a lifetime nor an allocation. What *does* vary with the input is handled
+/// elsewhere and in two different ways — prose in the lazily rendered message, structured data
+/// borrowed, as [`PathSegment`](super::PathSegment) borrows a response key. See the
+/// [module documentation](super#nothing-here-allocates).
 ///
 /// This is not the label stack a [`labelled`](crate::labelled) parser pushes and a collecting
 /// emitter captures. That one is the *"while parsing X"* context open at the moment of emission,
