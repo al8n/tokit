@@ -148,6 +148,34 @@ EXTRA_LEGS = [
         #
         # `combinators` is deliberately absent: `src/trace.rs` and `src/parser/labelled.rs` are
         # ungated, so this builds the trace surface without the families masking it.
+        #
+        # THAT ABSENCE DOES A SECOND JOB THIS SCRIPT CANNOT SEE, and it is recorded here because
+        # the only place it is visible is the leg itself. Eight integration suites carry the
+        # crate-level gate `all(std, any(logos_0_16, logos_0_15, logos_0_14))` with no family and
+        # no umbrella — `boost`, `error_extra`, `forwarding_discrimination`, `input_ref`,
+        # `lexer_error_paths`, `recovery_terminal_stop`, `session_points`, `sync`. No
+        # `--each-feature` leg supplies `std` AND a logos version at once, and every other
+        # configuration that does has `combinators` too — every `--all-features` job (`test`,
+        # `test (release)`, `msrv`, `sanitizer`, `coverage`), `test (valve-off)` and the Miri
+        # matrices (which name `--features logos` WITHOUT `--no-default-features`, so `default`
+        # brings the umbrella), the logos-parity matrix (which names it outright), and the
+        # `std,logos,combinators` leg above. So THIS is the only
+        # configuration in CI that type-checks those eight bodies with the families off, which is
+        # the configuration in which a family-only helper leaking into them would show up. One of
+        # the eight already depends on it: `forwarding_discrimination` gates imports, `From`
+        # impls, enum variants and whole test cases on `#[cfg(feature = "pratt")]` and
+        # `#[cfg(feature = "map")]`, so this is the only leg that compiles the file with those
+        # items ABSENT — and its own line 101 says as much, calling an import gate the thing that
+        # "keeps the `std,logos,trace` leg warning-free". Measured on 2026-08-08 at `ec337c8` by
+        # planting two `compile_error!`s in `tests/boost.rs`: an unconditional one fired under
+        # this leg (the body is compiled) and a `#[cfg(feature = "combinators")]` one did not
+        # (the umbrella is off).
+        #
+        # The coverage is INCIDENTAL — nothing derives it, because the scan below reads
+        # `tokora/src/` only. What holds the leg in place is its `unique_predicates` claim over
+        # `src/`: deleting the leg leaves the predicate named in `why` — one predicate, 3 sites —
+        # covered by nothing, and reds this gate. If those `trace` sites ever go away, this
+        # paragraph is the reason not to drop the leg with them.
         "why": "all(test, trace, any(logos_0_16, logos_0_15, logos_0_14), std)",
     },
 ]

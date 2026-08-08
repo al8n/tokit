@@ -50,6 +50,35 @@ logos_0_16 = ["dep:logos_0_16"]
 #
 # `combinators` is the umbrella and is ON by default, so a plain `tokora = "0.9"` sees exactly
 # the 0.8 surface. `default-features = false` consumers opt into the families they use.
+#
+# ── WHAT THE TEST SUITE GATES ON, AND WHY IT IS THE UMBRELLA ────────────────────────────────
+#
+# Measured at `ec337c8`: of 106 integration suites, 82 name `combinators` in their crate-level
+# `#![cfg(...)]` and NOT ONE names a family there. (Two files name one on an INNER item:
+# `tests/common/mod.rs` and `tests/forwarding_discrimination.rs`, both on `pratt`, plus `map`
+# in the latter.) The umbrella at the crate level is deliberate, and the reason is worth
+# writing down because the obvious repair does not do what it looks like it does.
+#
+# What is already covered. CI's `cargo hack -p tokora --each-feature --no-deps --tests` runs
+# clippy over each of the thirteen families ALONE, so the footprint claim above — a consumer
+# naming one family type-checks — is gated on the library, which is the artifact a consumer
+# gets. It stops at metadata and never links, so it is a compile claim and not a link one.
+#
+# What re-gating the 82 would NOT buy. Seventy-nine of them want `std` AND a logos version on
+# top of the umbrella; the other three want `rowan`+`std` (2) or `std` alone (1). No
+# `--each-feature` leg supplies a family together with the rest of what any of those shapes
+# needs — `std` alone has no lexer, `logos` alone has no `std`, `rowan` alone has no family, and
+# `default` has `std` and the families but no lexer. So swapping `combinators` for `pratt` in
+# `tests/parser_pratt.rs` does not make `--features pratt` compile it; the suite would go on
+# cfg-ing itself out, in one more configuration than before. Real per-family test coverage costs
+# thirteen further `std,logos,<family> --tests` legs, and that is the price to weigh — not the
+# file edits.
+#
+# Why the umbrella cannot hide a behaviour difference. `tokora/src/` contains NO
+# `#[cfg(not(feature = "<family>"))]` guarding code. The 32 negative-family occurrences there
+# are all `#[cfg_attr(not(feature = ...), doc = ...)]` — doc text that degrades an intra-doc
+# link to plain prose when the family is off. So a single-family build runs the same code the
+# umbrella build runs, and the gap is compile coverage of the test tree only.
 combinators = [
   "any",
   "fail",
