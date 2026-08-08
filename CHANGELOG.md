@@ -83,16 +83,30 @@ and will red until they do.
     accessor is not. Documenting it as conditional would be a footnote against a `std` marker
     nobody footnotes. `tests/ui/diagnose_adapters_are_not_exact_size.rs` is the rail: adding either
     impl back makes that case compile, which trybuild reports as a failure.
-  - `Iterator::size_hint` still carries the declared count, where being an over-estimate is
-    specified to be allowed, so the pre-sizing the indexed shape exists for survives — and it
-    becomes exact the moment the walk discovers a hole.
+  - `Iterator::size_hint` answers `(0, Some(remaining))`. The **upper** half may be loose and this
+    one is a genuine cap: the walk cannot run past the count it was sized from. The **lower** half
+    may not — it is a claim that at least that many items will be produced, and retire-on-hole
+    means the adapter can never raise it above zero, because the next index may be a hole. That is
+    not free to get wrong: `Vec`'s `FromIterator` and `Extend` both reserve from the lower bound,
+    so forwarding a declared count of a million behind one real label reserves for a million.
+    Measured at `capacity = 1_000_000` on a 48-byte `Label`, from `collect` and from `extend`, on
+    rustc 1.95.0, 1.97.1 and nightly — 48 MB of reservation reachable from any third-party
+    `Diagnose` impl, which is the population this trait exists for.
+  - **To pre-size, ask the diagnostic rather than the iterator**: call `Diagnose::labels` /
+    `Diagnose::path_segments` and `Vec::with_capacity`. That is the same number, obtained where it
+    is visibly the implementor's claim, and it leaves the caller to decide whether to trust its own
+    impls. The pre-sizing the indexed shape exists for is kept; only the false statement inside a
+    `std` contract is gone.
 
-  Four adversarial impls pin this in `tests/diagnostic_contract.rs`: an early hole, an overcount,
-  an undercount, and a count that moves between calls through interior mutability. The early hole
-  and the moving count were each watched breaking `FusedIterator` before the fix — the recorded
-  sequence was `[None, Some(Label { .. }), None, None, None]` — and the early hole and the
-  overcount were each watched breaking `ExactSizeIterator::len`. The undercount breaks neither and
-  is a characterization pin: the surplus item is unreachable and no adapter can learn it exists.
+  Five adversarial impls pin this in `tests/diagnostic_contract.rs`: an early hole, an overcount,
+  an undercount, a count that moves between calls through interior mutability, and a count of a
+  million behind a single real label. The early hole and the moving count were each watched
+  breaking `FusedIterator` before the fix — the recorded sequence was
+  `[None, Some(Label { .. }), None, None, None]`; the early hole and the overcount were each
+  watched breaking `ExactSizeIterator::len`; all four count shapes were watched advertising a
+  positive lower bound, and the millionth watched `collect` answering `len=1 capacity=1000000`.
+  The undercount breaks no marker law and is a characterization pin: the surplus item is
+  unreachable and no adapter can learn it exists.
 
   Every method is required, with no defaulted accessors: a defaulted `label` or `path_segment`
   lets a family under-report *silently*, which compiles and renders and is simply missing

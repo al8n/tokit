@@ -43,6 +43,11 @@
 //! which is what an LSP `relatedInformation` array and a `miette` label vector both want before
 //! they start filling.
 //!
+//! **Pre-size from [`Diagnose::labels`] and [`Diagnose::path_segments`], not from the adapters'
+//! [`size_hint`](Iterator::size_hint).** The count is right there and it is the number a renderer
+//! wants; taking it from the trait is also the spelling that shows whose claim it is, which
+//! matters because it is the implementor's. The adapters cannot forward it — see below.
+//!
 //! [`DiagnoseExt`] puts the iterators back on top, for callers holding a concrete type or a
 //! `&dyn Diagnose` alike.
 //!
@@ -67,9 +72,18 @@
 //! **Neither adapter implements [`ExactSizeIterator`], and neither should.** That trait's contract
 //! is that the length is *exactly* known, and a length read through a trait object whose count may
 //! disagree with its accessor is not. Documenting it as conditional would not help: nobody reads a
-//! crate's prose before trusting a `std` marker. [`Iterator::size_hint`] carries the count instead,
-//! where being an over-estimate is specified to be allowed — so a renderer still gets its
-//! `with_capacity` up front, and only the promise that cannot be kept is gone.
+//! crate's prose before trusting a `std` marker.
+//!
+//! **Nor does [`size_hint`](Iterator::size_hint) forward the count.** It answers
+//! `(0, Some(remaining))`. Its *upper* half may be loose and this one is a genuine cap — the walk
+//! cannot run past the count it was sized from. Its *lower* half may not: that is a claim the
+//! iterator will produce at least that many, and retire-on-hole means the adapter can never make
+//! it above zero, because the next index may be a hole and end the walk. `Vec`'s
+//! [`FromIterator`] and [`Extend`] both reserve from the lower bound, so forwarding a count of a
+//! million behind one real label reserves for a million — measured at `capacity = 1_000_000` on a
+//! 48-byte [`Label`], from both, on every toolchain this crate builds against. A renderer wanting
+//! to pre-size asks the diagnostic, as above; that is the same number with the implementor's name
+//! on it.
 //!
 //! # Every method is required
 //!
@@ -316,18 +330,31 @@ where
     Some(label)
   }
 
-  /// The declared count, less what has been yielded.
+  /// `(0, Some(what the count has left))`.
   ///
-  /// A *hint*, and deliberately no more: it mirrors [`Diagnose::labels`], so an impl that
-  /// over-counts makes this an over-estimate until [`next`](Iterator::next) discovers the hole,
-  /// at which point it becomes `(0, Some(0))`. That is what [`Iterator::size_hint`] is specified
-  /// to allow, and it is what keeps the pre-sizing this contract's indexed shape exists for —
-  /// `Vec::with_capacity` off the lower bound, before the walk starts.
+  /// The upper bound is real: [`next`](Iterator::next) can never run past the count it was
+  /// sized from, so nothing can yield more than this.
+  ///
+  /// The lower bound is `0`, and that is an obligation rather than a style choice.
+  /// [`Iterator::size_hint`]'s lower half is a claim that at least that many items *will* be
+  /// produced, and with retire-on-hole this adapter can never make it above zero — whatever
+  /// [`Diagnose::labels`] said, the very next index may be a hole and end the walk. Reporting the
+  /// count there is not a permissible over-estimate; only the upper bound is allowed to be loose.
+  ///
+  /// It is not free to get wrong. `Vec`'s [`FromIterator`] and [`Extend`] reserve from the lower
+  /// bound, so a count of a million behind one real label reserves for a million: measured at
+  /// `capacity = 1_000_000` on a 48-byte [`Label`], from both, on every toolchain this crate
+  /// builds against.
+  ///
+  /// **To pre-size, ask the diagnostic, not the iterator** — call [`Diagnose::labels`] and
+  /// `Vec::with_capacity` yourself. That is the same number, obtained where you can see whose
+  /// claim it is.
   #[inline]
   fn size_hint(&self) -> (usize, Option<usize>) {
-    // `next` is only ever advanced to a value at or below `end`, so this cannot underflow.
+    // `next` is only ever advanced to a value at or below `end`, so this cannot underflow. One
+    // expression with no branch: when `remaining` is 0 this is already the exact `(0, Some(0))`.
     let remaining = self.end - self.next;
-    (remaining, Some(remaining))
+    (0, Some(remaining))
   }
 }
 
@@ -364,13 +391,14 @@ where
     Some(segment)
   }
 
-  /// The declared count, less what has been yielded — a hint, on the same terms as
-  /// [`Labels`]'.
+  /// `(0, Some(what the count has left))`, on the same terms as [`Labels`]' — a true cap, and a
+  /// lower bound this adapter cannot raise above zero. To pre-size, call
+  /// [`Diagnose::path_segments`] and `Vec::with_capacity` yourself.
   #[inline]
   fn size_hint(&self) -> (usize, Option<usize>) {
     // `next` is only ever advanced to a value at or below `end`, so this cannot underflow.
     let remaining = self.end - self.next;
-    (remaining, Some(remaining))
+    (0, Some(remaining))
   }
 }
 

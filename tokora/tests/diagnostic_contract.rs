@@ -424,15 +424,17 @@ fn path_segment_counts_agree_with_the_accessor() {
 /// The adapters hint the count up front and shrink as they are walked, on a `dyn` receiver.
 ///
 /// `size_hint` rather than `ExactSizeIterator::len`: the adapters deliberately do not carry that
-/// trait, and `tests/ui/diagnose_adapters_are_not_exact_size.rs` is what keeps it that way.
+/// trait, and `tests/ui/diagnose_adapters_are_not_exact_size.rs` is what keeps it that way. The
+/// upper bound is the cap that shrinks as the walk proceeds; the lower bound is `0` throughout,
+/// for the reason `the_lower_bound_promises_nothing_the_adapters_cannot_deliver` pins.
 #[test]
-fn the_adapters_hint_their_length_and_are_fused() {
+fn the_adapters_cap_their_length_and_are_fused() {
   let subject: &dyn Diagnose = &rejected();
 
   let mut segments = subject.path_segments_iter();
-  assert_eq!(segments.size_hint(), (2, Some(2)));
+  assert_eq!(segments.size_hint(), (0, Some(2)));
   assert_eq!(segments.next(), Some(PathSegment::Field("heroes")));
-  assert_eq!(segments.size_hint(), (1, Some(1)));
+  assert_eq!(segments.size_hint(), (0, Some(1)));
   assert_eq!(segments.next(), Some(PathSegment::Index(2)));
   assert_eq!(segments.size_hint(), (0, Some(0)));
   assert_eq!(segments.next(), None);
@@ -445,7 +447,7 @@ fn the_adapters_hint_their_length_and_are_fused() {
 
   let document: &dyn Diagnose = &redefined();
   let mut labels = document.labels_iter();
-  assert_eq!(labels.size_hint(), (1, Some(1)));
+  assert_eq!(labels.size_hint(), (0, Some(1)));
   let label = labels.next().expect("one label");
   assert_eq!(label.text(), "first defined here");
   assert_eq!(label.location().source(), 1);
@@ -674,10 +676,10 @@ fn an_overcount_stops_at_the_hole_and_stays_stopped() {
   let subject = Adversary::new(Shape::Overcount);
   let erased: &dyn Diagnose = &subject;
 
-  // The hint is the DECLARED count, and it over-estimates — which `Iterator::size_hint` allows
-  // and `ExactSizeIterator` would not have. This is the row that trait was removed for.
+  // The cap is the declared count and over-states what is there; the lower bound promises
+  // nothing, which is what keeps `Vec` from reserving against a number the walk will not reach.
   assert_eq!(erased.labels(), 3);
-  assert_eq!(erased.labels_iter().size_hint(), (3, Some(3)));
+  assert_eq!(erased.labels_iter().size_hint(), (0, Some(3)));
 
   let answers = drive(erased.labels_iter(), 6);
   assert_fused(&answers, "Overcount labels");
@@ -747,10 +749,139 @@ fn the_declared_count_is_snapshotted_at_construction() {
   let subject = Adversary::new(Shape::MovingCount);
   let erased: &dyn Diagnose = &subject;
   let iter = erased.labels_iter();
-  assert_eq!(iter.size_hint(), (2, Some(2)));
-  // Reading the accessor directly moves the value's state; the iterator's bound does not follow.
+  assert_eq!(iter.size_hint(), (0, Some(2)));
+  // Reading the accessor directly moves the value's state; the iterator's cap does not follow.
   let _ = erased.label(0);
   let _ = erased.label(0);
-  assert_eq!(iter.size_hint(), (2, Some(2)));
+  assert_eq!(iter.size_hint(), (0, Some(2)));
   assert_eq!(iter.count(), 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// `size_hint`'s lower bound is an obligation, not an estimate
+// ---------------------------------------------------------------------------------------------
+
+/// A count far larger than the accessor supports, with one real item in front of the hole.
+///
+/// One item is what it takes to reach `Vec`'s reserve: both `FromIterator` and `Extend` call
+/// `next` first and read `size_hint` only after it has answered `Some`.
+struct HugeCount;
+
+impl fmt::Display for HugeCount {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("one label, a million declared")
+  }
+}
+
+const HUGE: usize = 1_000_000;
+
+impl Diagnose for HugeCount {
+  fn code(&self) -> Code {
+    Code::new("mylang::probe::huge-count")
+  }
+  fn severity(&self) -> Severity {
+    Severity::Error
+  }
+  fn primary(&self) -> Location {
+    Location::entire(0)
+  }
+  fn primary_label(&self) -> Option<&'static str> {
+    None
+  }
+  fn labels(&self) -> usize {
+    HUGE
+  }
+  fn label(&self, index: usize) -> Option<Label> {
+    (index == 0).then(|| Label::new(Location::entire(0), "the only one"))
+  }
+  fn path_segments(&self) -> usize {
+    HUGE
+  }
+  fn path_segment(&self, index: usize) -> Option<PathSegment<'_>> {
+    (index == 0).then_some(PathSegment::Index(0))
+  }
+  fn help(&self) -> Option<&'static str> {
+    None
+  }
+}
+
+/// The lower bound is `0` before the walk starts, because the next accessor call can end it.
+///
+/// [`Iterator::size_hint`]'s lower half is a claim that at least that many items will be
+/// produced, and retire-on-hole means the adapter can never make that claim above zero: whatever
+/// the count said, the very next index may be a hole. The upper bound is a real cap and stays.
+#[test]
+fn the_lower_bound_promises_nothing_the_adapters_cannot_deliver() {
+  for (shape, declared) in [
+    (Shape::EarlyHole, 2),
+    (Shape::Overcount, 3),
+    (Shape::Undercount, 1),
+    (Shape::MovingCount, 2),
+  ] {
+    let subject = Adversary::new(shape);
+    let erased: &dyn Diagnose = &subject;
+    assert_eq!(
+      erased.labels_iter().size_hint(),
+      (0, Some(declared)),
+      "{shape:?} labels: the lower bound must promise nothing before the walk starts"
+    );
+
+    let subject = Adversary::new(shape);
+    let erased: &dyn Diagnose = &subject;
+    assert_eq!(
+      erased.path_segments_iter().size_hint(),
+      (0, Some(declared)),
+      "{shape:?} path segments: the lower bound must promise nothing before the walk starts"
+    );
+  }
+}
+
+/// A well-formed impl gets the same conservative lower bound and the same true upper one.
+#[test]
+fn a_well_formed_impl_is_capped_but_not_promised() {
+  let document: &dyn Diagnose = &redefined();
+  assert_eq!(document.labels_iter().size_hint(), (0, Some(1)));
+  assert_eq!(document.path_segments_iter().size_hint(), (0, Some(0)));
+
+  let result: &dyn Diagnose = &rejected();
+  assert_eq!(result.labels_iter().size_hint(), (0, Some(0)));
+  assert_eq!(result.path_segments_iter().size_hint(), (0, Some(2)));
+}
+
+/// What the lower bound actually costs when it is wrong: `Vec` reserves from it.
+///
+/// Measured before the fix on rustc 1.95.0, 1.97.1 and nightly, `collect` and `extend` alike:
+/// `len=1 capacity=1000000` for a 48-byte `Label`, which is 48 MB of reservation reachable from
+/// any third-party `Diagnose` impl. The ceiling below is deliberately loose — it is checking that
+/// the declared count is not the reservation, not pinning an allocator growth policy.
+#[test]
+fn a_declared_count_does_not_become_a_reservation() {
+  const CEILING: usize = 4096;
+
+  let subject: &dyn Diagnose = &HugeCount;
+
+  let collected: Vec<Label> = subject.labels_iter().collect();
+  assert_eq!(collected.len(), 1);
+  assert!(
+    collected.capacity() < CEILING,
+    "`collect` reserved {} for one label out of {HUGE} declared",
+    collected.capacity()
+  );
+
+  let mut extended: Vec<Label> = Vec::new();
+  extended.extend(subject.labels_iter());
+  assert_eq!(extended.len(), 1);
+  assert!(
+    extended.capacity() < CEILING,
+    "`extend` reserved {} for one label out of {HUGE} declared",
+    extended.capacity()
+  );
+
+  let segments: Vec<PathSegment<'_>> = subject.path_segments_iter().collect();
+  assert_eq!(segments.len(), 1);
+  assert!(
+    segments.capacity() < CEILING,
+    "`collect` reserved {} for one segment out of {HUGE} declared",
+    segments.capacity()
+  );
 }
