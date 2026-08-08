@@ -39,17 +39,31 @@
 //! dyn-incompatible, and `&dyn Diagnose` is the entire point: a driver holds lexical errors,
 //! syntactic errors and a front end's own semantic diagnostics in one rendering pass, and boxing
 //! each one to get there would allocate for a value that was designed not to. A count plus an
-//! indexed accessor is dyn-safe, allocation-free, and hands a renderer its length up front —
-//! which is what an LSP `relatedInformation` array and a `miette` label vector both want before
-//! they start filling.
-//!
-//! **Pre-size from [`Diagnose::labels`] and [`Diagnose::path_segments`], not from the adapters'
-//! [`size_hint`](Iterator::size_hint).** The count is right there and it is the number a renderer
-//! wants; taking it from the trait is also the spelling that shows whose claim it is, which
-//! matters because it is the implementor's. The adapters cannot forward it — see below.
+//! indexed accessor is dyn-safe and allocation-free, and that is the whole of the reason.
 //!
 //! [`DiagnoseExt`] puts the iterators back on top, for callers holding a concrete type or a
 //! `&dyn Diagnose` alike.
+//!
+//! # A declared count is not a capacity
+//!
+//! The shape above was originally justified partly as a way to **pre-size** a renderer's storage —
+//! read the count, `Vec::with_capacity`, then fill. Written here so the next person does not
+//! re-propose it: that benefit was asserted and never measured, and the hazard on the other side
+//! of it was measured.
+//!
+//! A count comes from the implementor. This module documents, and `tests/diagnostic_contract.rs`
+//! exercises, safe impls that declare more than they can produce — one of them a million labels
+//! behind a single real one. `Vec`'s [`FromIterator`] and [`Extend`] reserve from whatever number
+//! they are handed, so that impl costs **48 MB for one 48-byte [`Label`]**, and a reservation made
+//! before the walk starts is made before [`DiagnoseExt`]'s fail-closed adapters can protect
+//! anything. Against that sits a handful of reallocations on a vector that in practice holds
+//! nought to five labels. That is not a trade; it is a hazard with a rationalisation attached.
+//!
+//! So tokora offers no pre-sizing route: not [`ExactSizeIterator`], not
+//! [`size_hint`](Iterator::size_hint), and not a recommendation to read the count and reserve from
+//! it. The adapters are the path. A consumer that owns every [`Diagnose`] impl it renders knows
+//! its own counts and may pre-size from them — that is its trust decision about its own code,
+//! not advice from here.
 //!
 //! # What the adapters do when an impl breaks the law
 //!
@@ -81,9 +95,7 @@
 //! it above zero, because the next index may be a hole and end the walk. `Vec`'s
 //! [`FromIterator`] and [`Extend`] both reserve from the lower bound, so forwarding a count of a
 //! million behind one real label reserves for a million — measured at `capacity = 1_000_000` on a
-//! 48-byte [`Label`], from both, on every toolchain this crate builds against. A renderer wanting
-//! to pre-size asks the diagnostic, as above; that is the same number with the implementor's name
-//! on it.
+//! 48-byte [`Label`], from both, on every toolchain this crate builds against.
 //!
 //! # Every method is required
 //!
@@ -344,11 +356,9 @@ where
   /// It is not free to get wrong. `Vec`'s [`FromIterator`] and [`Extend`] reserve from the lower
   /// bound, so a count of a million behind one real label reserves for a million: measured at
   /// `capacity = 1_000_000` on a 48-byte [`Label`], from both, on every toolchain this crate
-  /// builds against.
-  ///
-  /// **To pre-size, ask the diagnostic, not the iterator** — call [`Diagnose::labels`] and
-  /// `Vec::with_capacity` yourself. That is the same number, obtained where you can see whose
-  /// claim it is.
+  /// builds against. Reading the count off [`Diagnose`] and reserving from it by hand has the
+  /// same cost for the same reason — see
+  /// [the module documentation](self#a-declared-count-is-not-a-capacity).
   #[inline]
   fn size_hint(&self) -> (usize, Option<usize>) {
     // `next` is only ever advanced to a value at or below `end`, so this cannot underflow. One
@@ -392,8 +402,7 @@ where
   }
 
   /// `(0, Some(what the count has left))`, on the same terms as [`Labels`]' — a true cap, and a
-  /// lower bound this adapter cannot raise above zero. To pre-size, call
-  /// [`Diagnose::path_segments`] and `Vec::with_capacity` yourself.
+  /// lower bound this adapter cannot raise above zero.
   #[inline]
   fn size_hint(&self) -> (usize, Option<usize>) {
     // `next` is only ever advanced to a value at or below `end`, so this cannot underflow.

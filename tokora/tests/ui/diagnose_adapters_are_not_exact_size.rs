@@ -13,8 +13,9 @@
 // `ExactSizeIterator` is a promise they cannot keep at all, and a generic renderer reads a `std`
 // marker without reading this crate's prose — so documenting it as "conditional" would be a
 // footnote against a trait nobody footnotes. `size_hint` does not carry the count either — its
-// lower half is an obligation, not an estimate — so a renderer that wants to pre-size reads
-// `Diagnose::labels` itself, where the number visibly belongs to the implementor.
+// lower half is an obligation, not an estimate — and neither does any documented recipe for
+// reading the count and reserving from it: a declared count is not a capacity, and the module
+// header records why that benefit did not survive being measured.
 //
 // Adding either impl back makes this file COMPILE, which trybuild reports as a failure of the
 // case. That is the point: prose cannot notice an added impl and no other gate in this repository

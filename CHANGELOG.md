@@ -92,11 +92,16 @@ and will red until they do.
     Measured at `capacity = 1_000_000` on a 48-byte `Label`, from `collect` and from `extend`, on
     rustc 1.95.0, 1.97.1 and nightly — 48 MB of reservation reachable from any third-party
     `Diagnose` impl, which is the population this trait exists for.
-  - **To pre-size, ask the diagnostic rather than the iterator**: call `Diagnose::labels` /
-    `Diagnose::path_segments` and `Vec::with_capacity`. That is the same number, obtained where it
-    is visibly the implementor's claim, and it leaves the caller to decide whether to trust its own
-    impls. The pre-sizing the indexed shape exists for is kept; only the false statement inside a
-    `std` contract is gone.
+  - **There is no pre-sizing route at all, and the module says why.** Indexed access was
+    originally justified partly as a way to read the count and `Vec::with_capacity` from it. That
+    benefit was asserted and never measured; the hazard opposite it was measured at 48 MB, and a
+    reservation made before the walk starts is made before the fail-closed adapters can protect
+    anything. Against that sits a handful of reallocations on a vector that in practice holds
+    nought to five labels. So a declared count is not a capacity: not through
+    `ExactSizeIterator`, not through `size_hint`, and not through a documented recipe either. The
+    adapters are the path. A consumer that owns every `Diagnose` impl it renders may of course
+    pre-size from its own counts — its trust decision about its own code, not advice tokora
+    gives.
 
   Five adversarial impls pin this in `tests/diagnostic_contract.rs`: an early hole, an overcount,
   an undercount, a count that moves between calls through interior mutability, and a count of a

@@ -274,6 +274,17 @@ fn rejected() -> Rejected {
 /// Exhaustive by hand rather than by macro: a method added to `Diagnose` and not read here would
 /// leave the claim covering less than it says, and there is nothing that could notice.
 fn read_the_whole_contract(subject: &dyn Diagnose, sink: &mut StackBuffer<256>) {
+  // This walk trusts the declared count as a loop bound, which is exactly the thing the rest of
+  // this file exists to say you cannot do — safe here only because its two subjects are
+  // well-formed fixtures. `HugeCount` lives in the same file and declares a million, so hand it
+  // to this helper and the measurement below becomes a very slow way to read zero. Loud rather
+  // than latent.
+  assert!(
+    subject.labels() <= 8 && subject.path_segments() <= 8,
+    "`{}` declares more than this helper will walk; it is for well-formed subjects only",
+    subject.code()
+  );
+
   black_box(subject.code());
   black_box(subject.severity());
   black_box(subject.primary());
