@@ -38,8 +38,8 @@ concurrency:
   # regardless of that setting (see ci.yml, whose runs this exact way lost real main verdicts).
   # The `deploy` job below additionally carries its own `github-pages` group that must not be
   # interrupted.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && github.sha || '' }}
+  cancel-in-progress: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') }}
 
 permissions:
   contents: read

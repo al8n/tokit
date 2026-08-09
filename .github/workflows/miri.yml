@@ -94,8 +94,8 @@ concurrency:
   # run queued into a group that already has one in progress cancels whichever run was PENDING
   # there regardless of that setting — and this workflow is precisely the one whose runs stay
   # pending long enough for the next push to do it.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && github.sha || '' }}
+  cancel-in-progress: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') }}
 
 # `RUSTFLAGS` is carried over from `CI` verbatim even though `ci/miri_tb.sh` and `ci/miri_sb.sh`
 # both `export RUSTFLAGS="--cfg test_$CONFIG_FLAGS"` before any `cargo miri test`: the export

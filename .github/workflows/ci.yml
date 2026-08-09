@@ -174,8 +174,8 @@ concurrency:
   #
   # `${{ github.workflow }}` leading the group is also what keeps the two lanes apart: `CI-...`
   # and `Miri-...` are different groups, so neither can cancel the other's run.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && github.sha || '' }}
+  cancel-in-progress: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') }}
 
 env:
   CARGO_TERM_COLOR: always
