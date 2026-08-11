@@ -741,6 +741,16 @@ jobs:
   # The leg list is deliberately NOT repeated here. This job asks the script to print it and
   # runs what it prints, so the set CI builds and the set the script validates cannot drift.
   #
+  # THESE LEGS CARRY `--tests`, SO THEY COMPILE INTEGRATION SUITES, AND FOR SOME SUITES THIS IS
+  # THE ONLY PLACE. Eight are gated `all(std, any(logos_0_16, logos_0_15, logos_0_14))` with no
+  # combinator family and no umbrella, and `--no-default-features --features std,logos,trace
+  # --tests` is the only configuration anywhere in CI that type-checks their bodies with the
+  # families OFF — every other build that has `std` and a logos version at once also has
+  # `combinators`. That was documented and not derived until 2026-08-11, and the gate would
+  # have recommended deleting the leg the day its `src/` predicates went away; the script now
+  # scans `tokora/tests/` and refuses. Prune a leg on the strength of `--print-legs` alone and
+  # you can still retire a configuration nothing else builds — read what the script prints.
+  #
   # The self-test runs FIRST and is not optional, for the same reason the changelog one does.
   # A coverage script's OK path is the path everything already takes, which makes "passes by
   # not looking" its natural failure mode — the very first run of this gate reported zero
