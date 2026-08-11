@@ -39,6 +39,10 @@ WHAT IT DOES
      when no leg satisfies one; fails, naming the suite and its gate, when no leg compiles a
      suite BODY — then checks each declared leg's `unique_predicates` and `unique_suites`
      claims against what the tree actually says.
+  5. Classifies every NEGATIVE combinator-family occurrence in `tokora/src/` and fails on any
+     that is a real code gate rather than a doc-only `cfg_attr(..., doc = ...)`. Not a third
+     coverage question: it is the precondition the subset dominance in (4) is sound under, and
+     it prints the count it counted. See BOUNDS and `negative_family_gates`.
 
 `--all-features` IS DELIBERATELY NOT A COVERING LEG. It satisfies every satisfiable predicate
 by construction, so counting it would make this script pass unconditionally — it would be the
@@ -105,16 +109,25 @@ BOUNDS, stated so a green is not read as more than it is:
     `--all-features`-only by design; two `cargo check` legs covered all three, so the design was
     a leg nobody had priced. A gate that knows about a gap in the thing it measures and stays
     green is the defect it exists to detect, arrived at from the reporting side.
-  * SUBSET DOMINANCE IS SOUND FOR THE MONOTONE FRAGMENT. A predicate whose feature leaves all
-    occur positively is false under a subset of the features whenever it is false here, so a
-    dominating leg witnesses every absence the dominated one does. An item gated
-    `cfg(not(feature = "x"))` inverts that: a leg with `x` ON is the one that sees it absent,
-    and a leg with fewer features may not. `tokora/src/` does carry negative feature gates — on
-    `std`, `alloc`, `smallvec_1`, the logos versions and `unstable-raw` — and none on a
-    combinator family, which is the axis the suite scan is about (`tokora/Cargo.toml` measured
-    the 32 negative-family occurrences as all `cfg_attr(..., doc = ...)`). The sound-for-anything
+  * SUBSET DOMINANCE IS SOUND FOR THE MONOTONE FRAGMENT, AND THE BOUND IS CHECKED. A predicate
+    whose feature leaves all occur positively is false under a subset of the features whenever
+    it is false here, so a dominating leg witnesses every absence the dominated one does. An
+    item gated `cfg(not(feature = "x"))` inverts that: a leg with `x` ON is the one that sees it
+    absent, and a leg with fewer features may not. `tokora/src/` does carry negative feature
+    gates — on `std`, `alloc`, `smallvec_1`, the logos versions and `unstable-raw` — and the
+    ones that would bite are the ones on the combinator-family axis, which is what the suite
+    scan protects. `negative_family_gates` now enumerates those and fails on any that is a real
+    code gate rather than a doc-only `cfg_attr(..., doc = ...)`, and the live count is printed
+    on the green path BY THAT SAME PASS. It was a sentence with `32` copied into it from
+    `tokora/Cargo.toml` until 2026-08-11, and the tree said 33. The sound-for-anything
     alternative is `==`, which is degenerate; this bound is the price of the answer meaning
     something, not an oversight.
+  * THE PRECONDITION IS CHECKED OVER `tokora/src/` ONLY, matching the claim it replaces and the
+    predicate enumeration above. A real negative family gate inside a suite BODY would break
+    dominance the same way and is not seen; `tokora/tests/` carried none of either kind when
+    this was measured on 2026-08-11, so widening the scan would change no outcome today — what
+    it would change is the false-positive surface, since `tests/ui/` is a trybuild fixture tree
+    of deliberately ill-formed files that is never compiled as a target.
   * DELETING A LEG'S ENTRY DELETES ITS CLAIM. `unique_predicates` survives deletion because the
     predicate stays in `src/` and goes uncovered; `unique_suites` does not always, because the
     suite is still compiled — just in a larger configuration — and nothing in the tree records
@@ -327,6 +340,10 @@ CRATE = "tokora"
 SRC = pathlib.Path(CRATE) / "src"
 TESTS = pathlib.Path(CRATE) / "tests"
 
+# The umbrella the combinator-family axis is derived FROM, so that adding a family to the
+# feature extends the guarded axis without anyone remembering to. See `negative_family_gates`.
+UMBRELLA = "combinators"
+
 TRUE, UNKNOWN, FALSE = 1, 0, -1
 
 
@@ -458,17 +475,28 @@ def attributes(text: str, mask: bytearray):
 
 
 def split_top(s: str):
-    """Split on top-level commas."""
+    """Split on top-level commas, blind to anything inside a string literal.
+
+    The mask matters to the second caller, not the first. `predicate_of` only ever reads part
+    zero, which is a predicate and holds no comma outside `feature = "x"` — but `doc_only` asks
+    what the parts AFTER the predicate are, and this crate really does carry
+    `#[cfg_attr(not(feature = "filter"), doc = "…, prefer using `filter_map`…")]`. Counting that
+    comma splits the doc text into a part that is not an attribute, and the classification the
+    whole monotone bound turns on would answer "not doc-only" on a doc-only gate.
+    """
+    code, mask = lex(s)
     parts, depth, start = [], 0, 0
-    for idx, ch in enumerate(s):
+    for idx, ch in enumerate(code):
+        if mask[idx]:
+            continue
         if ch == "(":
             depth += 1
         elif ch == ")":
             depth -= 1
         elif ch == "," and depth == 0:
-            parts.append(s[start:idx])
+            parts.append(code[start:idx])
             start = idx + 1
-    parts.append(s[start:])
+    parts.append(code[start:])
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -487,6 +515,28 @@ def predicate_of(body: str) -> str | None:
         parts = split_top(body[9:-1])
         return parts[0] if parts else None
     return None
+
+
+DOC_ATTR = re.compile(r"doc\s*[=(]")
+
+
+def doc_only(body: str) -> bool:
+    """True when an attribute gates NOTHING BUT documentation.
+
+    `#[cfg(...)]` is never doc-only: it decides whether the item exists at all. `#[cfg_attr(P,
+    A, ...)]` is, exactly when every `A` is a `doc` attribute — `doc = "…"` or `doc(...)`.
+    Anything else applied under a `cfg_attr` is a real compilation difference: `derive(...)` is
+    the obvious one and `cfg_attr(P, cfg(Q))` the sly one, and it is the same reason
+    `predicate_of` returns a `cfg_attr`'s predicate at all rather than skipping the form.
+
+    A `cfg_attr` applying no inner attribute is malformed Rust and answers False. The
+    conservative direction for this question is the one that reds: see `negative_family_gates`
+    for what a wrong `True` here would let through.
+    """
+    if not (body.startswith("cfg_attr(") and body.endswith(")")):
+        return False
+    inner = split_top(body[9:-1])[1:]
+    return bool(inner) and all(DOC_ATTR.match(a) for a in inner)
 
 
 def scan(root: pathlib.Path):
@@ -539,6 +589,74 @@ def scan_suites(root: pathlib.Path):
     trybuild fixture tree, compiled as part of a target rather than as one.
     """
     return {path: crate_gate(*lex(path.read_text())) for path in sorted(root.glob("*.rs"))}
+
+
+def negative_family_gates(root: pathlib.Path, axis: set[str]):
+    """`([(site, families)], [(site, predicate, families)], negatives)` — the antitone gates.
+
+    THE PRECONDITION `load_bearing_suites` RESTS ON, MADE EXECUTABLE. Subset dominance drops a
+    leg for a suite when a smaller leg compiles it, on the argument that a smaller configuration
+    has off everything this one has off and therefore witnesses the same absences. That argument
+    is monotone-only. An item gated `cfg(not(feature = "map"))` is COMPILED when `map` is off, so
+    the smaller leg HAS the item and this one does not — the dominator fails to witness exactly
+    the absence this leg was keeping, and the leg is called redundant when it is the only thing
+    standing between that configuration and nobody building it.
+
+    Two products, because the whole bound turns on telling them apart, and one count.
+
+      * A REAL CODE GATE — `#[cfg(not(...))]`, or a `cfg_attr` applying anything but `doc` —
+        changes what is compiled. It is returned as a failure.
+      * A DOC-ONLY `#[cfg_attr(not(feature = "map"), doc = "…")]` degrades an intra-doc link to
+        plain prose and compiles the same items either way, so it is inert for this question.
+        Every occurrence in the tree on 2026-08-11 was that shape, so a check that could not tell
+        the two apart would red on the unmodified tree and be deleted within the week.
+
+    THE AXIS IS DERIVED, NOT LISTED: `combinators` and everything it pulls, so a fourteenth
+    family is guarded the day it joins the umbrella. It is the combinator-family axis and not
+    every feature because that is the axis the suite scan protects — `tokora/src/` carries real
+    negative gates on `std` and `alloc` by construction, being a no-std crate, and a check that
+    reddened on those would be asking the crate to stop supporting no-std. What that leaves
+    unguarded is stated in BOUNDS.
+
+    `negatives` counts negative feature leaves over ALL features, not just the axis, and exists
+    as a positive control: `tokora/src/` cannot stop carrying negative `std` and `alloc` gates
+    without ceasing to be no-std, so zero is the polarity walk having stopped matching rather
+    than the tree having changed. It is stated as a property and not as a figure on purpose: the
+    only number this function produces is the one it returns, and the caller prints that.
+
+    The AXIS count is deliberately NOT controlled the same way. It can legitimately reach zero by
+    someone rewriting doc gates, so a control forbidding that would pin a number — which is the
+    defect this check exists to stop this file from repeating for a fourth time.
+    """
+    doc_gated: list[tuple[str, list[str]]] = []
+    code_gated: list[tuple[str, str, list[str]]] = []
+    negatives = 0
+    for path in sorted(root.rglob("*.rs")):
+        text, mask = lex(path.read_text())
+        for off, body, _end in attributes(text, mask):
+            pred = predicate_of(body)
+            if pred is None:
+                continue
+            norm = re.sub(r"\s+", " ", pred).strip()
+            try:
+                node = parse(norm)
+            except ValueError:
+                # Not this check's business. A predicate that does not parse is already reported
+                # by the coverage pass when it names two or more features, and reddening here
+                # too would print two messages for one defect — the less useful one second.
+                continue
+            found = negative_features(node, [])
+            negatives += len(found)
+            families = sorted({f for f in found if f in axis})
+            if not families:
+                continue
+            line = text.count("\n", 0, off) + 1
+            site = f"{path}:{line}"
+            if doc_only(body):
+                doc_gated.append((site, families))
+            else:
+                code_gated.append((site, norm, families))
+    return doc_gated, code_gated, negatives
 
 
 def load_bearing_suites(suite_hits, features_of):
@@ -680,6 +798,25 @@ def feature_names(node, acc: set[str]) -> set[str]:
     return acc
 
 
+def negative_features(node, acc: list[str], negated: bool = False) -> list[str]:
+    """The feature leaves under an ODD number of `not`s — the antitone occurrences.
+
+    Parity, not "is there a `not` anywhere above me": `not(not(feature = "x"))` is monotone
+    again, and `all` / `any` do not flip anything. A LIST and not a set, because two negative
+    occurrences of one feature in one predicate are two occurrences and the figure this feeds is
+    a count of occurrences — the same figure a comment used to state, wrongly.
+    """
+    kind = node[0]
+    if kind in ("all", "any"):
+        for child in node[1]:
+            negative_features(child, acc, negated)
+    elif kind == "not":
+        negative_features(node[1], acc, not negated)
+    elif negated and node[1] == "feature" and node[2] is not None:
+        acc.append(node[2])
+    return acc
+
+
 # ── The feature graph ────────────────────────────────────────────────────────────────────────
 
 def feature_map() -> dict[str, list[str]]:
@@ -769,6 +906,8 @@ def main() -> int:
     all_legs = legs(fmap)
     predicates, files = scan(SRC)
     suites = scan_suites(TESTS)
+    family_axis = closure([UMBRELLA], fmap) if UMBRELLA in fmap else set()
+    doc_gated, code_gated, negatives = negative_family_gates(SRC, family_axis)
 
     # ── Positive controls ────────────────────────────────────────────────────────────────────
     # A check that cannot fail is not a check, and this one's whole subject is gates that pass
@@ -793,6 +932,15 @@ def main() -> int:
         problems.append(f"expanded {len(all_legs)} legs; the feature table did not parse")
     if not EXTRA_LEGS:
         problems.append("EXTRA_LEGS is empty; nothing declares the pair legs CI runs")
+    if UMBRELLA not in fmap:
+        problems.append(f"{CRATE} declares no {UMBRELLA!r} feature, so the combinator-family "
+                        f"axis subset dominance is bounded on cannot be derived and the "
+                        f"precondition check below would pass by looking at nothing")
+    if negatives == 0:
+        problems.append(f"found 0 negative `not(feature = ...)` occurrences under {SRC}; this "
+                        f"crate carries them on `std` and `alloc` alone by being no-std, so the "
+                        f"polarity walk enforcing the subset-dominance precondition stopped "
+                        f"matching")
     # Two legs that resolve to the same feature set are not two legs. Everything below is a
     # question about what one leg reaches that another does not, and a pair like that answers
     # `nothing` in both directions at once — under `<=` each one dominates the other, so both
@@ -902,6 +1050,53 @@ def main() -> int:
               "CI runs whatever that list prints.", file=sys.stderr)
         return 1
 
+    # ── The precondition subset dominance rests on ───────────────────────────────────────────
+    # It sits here, immediately above its only consumer, because that is what it is: everything
+    # `load_bearing_suites` concludes below is conditional on it, and a reader who meets the
+    # dominance argument should have met its precondition one screen earlier.
+    #
+    # UNTIL 2026-08-11 THIS WAS A SENTENCE, and both halves of it failed the same way. The claim
+    # — no real `not(feature = "<family>")` code gate in `tokora/src/` — was checked by nobody,
+    # so a future one would have made the criterion unsound with CI green, which is this script's
+    # own defect class reached through its own soundness argument. And the count beside it was
+    # written as 32, taken from a comment in `tokora/Cargo.toml`, and was 33 by the time a
+    # reviewer recounted it — in a change whose entire thesis is that a written-down count drifts
+    # and must be derived, and which had just removed exactly such a count from the leg list.
+    # Third instance in this file's history, and the first two are described where they happened.
+    #
+    # So the count printed on the green path comes out of THIS pass, the one that enforces the
+    # bound. A check that enforces one thing and prints another is the same defect one layer on.
+    if code_gated:
+        n = len(code_gated)
+        print(f"feature-cfg-coverage: {n} real combinator-family `not(feature = ...)` code "
+              f"gate{'' if n == 1 else 's'} under {SRC}", file=sys.stderr)
+        print("", file=sys.stderr)
+        for site, pred, families in code_gated:
+            print(f"  {site}", file=sys.stderr)
+            print(f"    cfg({pred})  — negative on {', '.join(families)}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Subset dominance is sound only for the monotone fragment, and this breaks it. "
+              "`load_bearing_suites` drops a leg for a suite when another leg compiling that "
+              "suite has a SUBSET of its features, on the argument that the smaller "
+              "configuration has off everything this one has off. A negatively gated item is "
+              "COMPILED in the smaller configuration and absent from this one, so the dominator "
+              "does not witness this leg's absence of it — and the leg is called redundant when "
+              "it is the only configuration keeping that code out. Deletion advice follows from "
+              "that, which is the failure this whole suite scan exists to prevent.",
+              file=sys.stderr)
+        print("", file=sys.stderr)
+        print("The doc-only occurrences are not this: `cfg_attr(not(feature = ...), doc = ...)` "
+              "changes documentation text and compiles the same items either way, and every "
+              "occurrence in the tree was that shape when this check was added.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Fix: make the gate doc-only, or gate the item positively on what it needs. If a "
+              "real negative family gate has to stay, the criterion itself has to change — "
+              "`load_bearing_suites` would need `==`, which is sound for any predicate and was "
+              "measured DEGENERATE (43 of 43 test legs load-bearing, against 8 under `<=`), so "
+              "it does not weaken the answer, it stops there being one. Read the `<=` versus "
+              "`==` fork there before reaching for it.", file=sys.stderr)
+        return 1
+
     # ── The declaration self-check ───────────────────────────────────────────────────────────
     # `unique_predicates` is an assertion about the tree, so it is verified against the tree. A
     # leg that claims to be the only one reaching a predicate, and is not, is a leg whose reason
@@ -1003,6 +1198,13 @@ def main() -> int:
           f"{len(all_legs)} covering legs ({len(EXTRA_LEGS)} declared, --all-features excluded)")
     print(f"  and {len(suites)} integration-test targets under {TESTS}, {gated} of them "
           f"crate-gated")
+    # THE COUNT COMES OUT OF THE CHECK, not from beside it. This is the figure `code_gated` was
+    # empty of; printing any other one would reintroduce the drift the check was added for.
+    occurrences = sum(len(f) for _site, f in doc_gated)
+    print(f"  and {occurrences} negative combinator-family cfg occurrence"
+          f"{'' if occurrences == 1 else 's'} over {len(doc_gated)} attribute"
+          f"{'' if len(doc_gated) == 1 else 's'}, every one doc-only — the monotone bound "
+          f"subset dominance rests on, enumerated by the check that enforces it")
     print("")
     print("declared legs:")
     for leg in EXTRA_LEGS:
