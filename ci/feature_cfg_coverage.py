@@ -36,8 +36,9 @@ WHAT IT DOES
   3. Expands the leg set: the `--each-feature` legs, resolved through the feature graph from
      `cargo metadata`, plus `EXTRA_LEGS` below.
   4. Evaluates every predicate against every leg and fails, naming the predicate and a site,
-     when no leg satisfies one — then checks each declared leg's `unique_predicates` and
-     `unique_suites` claims against what the tree actually says.
+     when no leg satisfies one; fails, naming the suite and its gate, when no leg compiles a
+     suite BODY — then checks each declared leg's `unique_predicates` and `unique_suites`
+     claims against what the tree actually says.
 
 `--all-features` IS DELIBERATELY NOT A COVERING LEG. It satisfies every satisfiable predicate
 by construction, so counting it would make this script pass unconditionally — it would be the
@@ -80,10 +81,17 @@ those eight suites — `std,logos,combinators` does too — so a sole-compile te
 needs the `trace` leg and recommends deleting it all over again, one layer down. What is
 unique is not that the leg compiles them but WITHOUT WHAT: it is the only leg that compiles
 them with the thirteen combinator families off, the configuration in which a family-only
-helper leaking into a suite would show up. So the derived quantity is, for each suite a leg
-compiles, the features every OTHER leg compiling that suite turns on and this one does not.
-Non-empty means deleting the leg retires a configuration nothing else provides. Nothing names
-`combinators`; it falls out.
+helper leaking into a suite would show up.
+
+Nor is it "is there a feature every other covering leg has on that I have off". That is a
+question about ONE feature, and a leg protects a CONFIGURATION — everything it has off, at
+once. The two agree on today's tree and come apart on a change `tokora/Cargo.toml` already
+discusses: split the umbrella into per-family `std,logos,<family> --tests` legs and every
+family is on in some legs and off in others, so no single feature is common to all the
+alternatives, while none of them compiles the eight with ALL thirteen off. The derived quantity
+is therefore SUBSET DOMINANCE — another covering leg whose enabled features are a subset of
+this one's has off everything this one has off — and `load_bearing_suites` carries the argument
+for `<=` over `==`. Nothing names `combinators`; it falls out.
 
 BOUNDS, stated so a green is not read as more than it is:
 
@@ -92,10 +100,28 @@ BOUNDS, stated so a green is not read as more than it is:
     else — the `cfg`s inside a suite body are not enumerated, so "this leg compiles the suite"
     means the body is type-checked in that configuration, not that every branch inside it is.
   * Suite coverage is measured over the same legs as predicate coverage, `--all-features`
-    excluded for the same reason. A suite no declared leg compiles is REPORTED by name on the
-    green path, not failed: the ones there today are gated on `rowan`, `--all-features` is
-    genuinely their only build, and reddening on them would be asking for legs the argument
-    above rejects.
+    excluded for the same reason — and a suite no declared leg compiles is a FAILURE. It was
+    reported on the green path until 2026-08-11, over three `rowan`-gated suites argued to be
+    `--all-features`-only by design; two `cargo check` legs covered all three, so the design was
+    a leg nobody had priced. A gate that knows about a gap in the thing it measures and stays
+    green is the defect it exists to detect, arrived at from the reporting side.
+  * SUBSET DOMINANCE IS SOUND FOR THE MONOTONE FRAGMENT. A predicate whose feature leaves all
+    occur positively is false under a subset of the features whenever it is false here, so a
+    dominating leg witnesses every absence the dominated one does. An item gated
+    `cfg(not(feature = "x"))` inverts that: a leg with `x` ON is the one that sees it absent,
+    and a leg with fewer features may not. `tokora/src/` does carry negative feature gates — on
+    `std`, `alloc`, `smallvec_1`, the logos versions and `unstable-raw` — and none on a
+    combinator family, which is the axis the suite scan is about (`tokora/Cargo.toml` measured
+    the 32 negative-family occurrences as all `cfg_attr(..., doc = ...)`). The sound-for-anything
+    alternative is `==`, which is degenerate; this bound is the price of the answer meaning
+    something, not an oversight.
+  * DELETING A LEG'S ENTRY DELETES ITS CLAIM. `unique_predicates` survives deletion because the
+    predicate stays in `src/` and goes uncovered; `unique_suites` does not always, because the
+    suite is still compiled — just in a larger configuration — and nothing in the tree records
+    that the smaller one was wanted. Measured on 2026-08-11 by deleting each declared leg in a
+    copy and running this script: three of the five reddened, two did not. `--print-legs` is a
+    declaration, and for those two the comment beside the leg is the only record of what its
+    absence buys. Deleting an entry and re-running is how to find out which kind a leg is.
   * A leg satisfying a predicate means that CONFIGURATION gets compiled. It does not mean the
     gated code is executed, and it does not mean the predicate is the only thing standing
     between the code and a consumer.
@@ -137,9 +163,11 @@ import sys
 #
 # `unique_suites` is the same assertion one level out: whether some integration suite under
 # `tokora/tests/` is compiled by this leg in a configuration no other leg reproduces — meaning
-# with some feature OFF that every other leg compiling that suite has on. It is checked both
-# ways too, and it is the reason a leg is never recommended for deletion on the strength of its
-# predicates alone — see WHY THE SUITES ARE SCANNED in the module docstring.
+# no other leg compiling that suite has a SUBSET of this leg's features, which is what it would
+# take to have off everything this leg has off. It is checked both ways too, and it is the
+# reason a leg is never recommended for deletion on the strength of its predicates alone. See
+# `load_bearing_suites` for why the criterion is `<=` and not `==`, and WHY THE SUITES ARE
+# SCANNED in the module docstring for what it is protecting.
 #
 # NO LIVE COUNT IS WRITTEN IN THIS FILE. Every "N predicates over M sites" this list used to
 # state is derived and printed on the green path instead, because the one that was written down
@@ -175,7 +203,14 @@ EXTRA_LEGS = [
     {
         "features": "std,logos,combinators",
         "tests": True,
-        "unique_predicates": True,
+        # FALSE SINCE THE `rowan,logos,combinators` LEG BELOW EXISTED, AND THAT IS NOT A DEMOTION
+        # OF THIS LEG. `rowan = ["dep:rowan", "std"]`, so that leg resolves to a strict SUPERSET
+        # of this one and satisfies every predicate this one does; sole coverage is a claim about
+        # the leg list, and the leg list grew. What holds this leg is `unique_suites`: it is the
+        # smallest configuration compiling the 82 suites gated on the umbrella, the only one that
+        # compiles them with `rowan` off. Delete the rowan legs and the gate will say to set this
+        # back to True, in those words — the check runs in both directions.
+        "unique_predicates": False,
         "unique_suites": True,
         # The leg that carries the real hole: the logos+std predicates no `--each-feature` leg
         # reaches, most of them reachable from no other leg at all and the rest only from the
@@ -196,7 +231,7 @@ EXTRA_LEGS = [
         # `all(test, logos, std, combinators)`. Naming `logos` satisfies both, because it pulls
         # `logos_0_16` transitively. Getting this backwards produces a leg that looks right and
         # covers one of the two.
-        "why": "the logos+std predicates, incl. all(std, logos_0_16, combinators)",
+        "why": "the smallest leg compiling the 82 umbrella-gated suites, and with `rowan` off",
     },
     {
         "features": "std,logos,trace",
@@ -225,7 +260,7 @@ EXTRA_LEGS = [
         # `test (release)`, `msrv`, `sanitizer`, `coverage`), `test (valve-off)` and the Miri
         # matrices (which name `--features logos` WITHOUT `--no-default-features`, so `default`
         # brings the umbrella), the logos-parity matrix (which names it outright), and the
-        # `std,logos,combinators` leg above. So THIS is the only
+        # `std,logos,combinators` and `rowan,logos,combinators` legs. So THIS is the only
         # configuration in CI that type-checks those eight bodies with the families off, which is
         # the configuration in which a family-only helper leaking into them would show up. One of
         # the eight already depends on it: `forwarding_discrimination` gates imports, `From`
@@ -246,8 +281,45 @@ EXTRA_LEGS = [
         #
         # It is derived now: `unique_suites` above is computed from the crate-level gates in
         # `tokora/tests/`, checked in both directions, and the deletion advice is suppressed for
-        # any leg that still holds a suite. This paragraph is the history, not the mechanism.
+        # any leg that still holds a suite. The first derivation asked whether one feature was on
+        # in every alternative, which this leg satisfies only because `combinators` happens to be
+        # that feature today; split the umbrella into per-family legs and it would have gone back
+        # to recommending deletion. It is subset dominance now. This paragraph is the history,
+        # not the mechanism.
         "why": "all(test, trace, any(logos_0_16, logos_0_15, logos_0_14), std)",
+    },
+    {
+        "features": "rowan,combinators",
+        "tests": True,
+        "unique_predicates": False,
+        "unique_suites": True,
+        # DECLARED FOR SUITES, NOT FOR A PREDICATE. `tokora/src/` has no multi-feature predicate
+        # naming `rowan` at all; what this leg is for is `tokora/tests/`, where
+        # `cst_resource_trips` and `parser_node` carry the crate-level gate
+        # `all(rowan, std, combinators)`. Until 2026-08-11 no declared leg compiled either, so
+        # `--all-features` was their only build anywhere — the configuration this whole script
+        # refuses to count as coverage — and the gate reported that in a green log line instead
+        # of failing on it.
+        #
+        # `rowan = ["dep:rowan", "std"]`, so naming `rowan` reaches `std` and the feature string
+        # does not have to. This is the LOGOS-OFF half of the pair: the only configuration that
+        # type-checks those two bodies without a lexer, which is what would catch one of them
+        # growing a dependency on the `logos` surface it does not gate on. Measured on
+        # 2026-08-11 by planting an unconditional `compile_error!` in all three `rowan` suites:
+        # this leg fired the two above and not `pratt_recovery`, which wants a logos version.
+        "why": "cst_resource_trips + parser_node, the only build of them without a lexer",
+    },
+    {
+        "features": "rowan,logos,combinators",
+        "tests": True,
+        "unique_predicates": False,
+        "unique_suites": True,
+        # The other half: `pratt_recovery` gates on `all(std, rowan, combinators, any(logos_*))`,
+        # so it needs a lexer version too and the leg above cannot reach it. Any leg that can is
+        # a superset of `std,logos,combinators`, which is why that leg's `unique_predicates` is
+        # now False — see the note there. It is not a reason to fold the two into one: this leg
+        # has a lexer, so it cannot make the logos-off claim the leg above exists for.
+        "why": "pratt_recovery, all(std, rowan, combinators, any(logos_0_16, _15, _14))",
     },
 ]
 
@@ -470,34 +542,65 @@ def scan_suites(root: pathlib.Path):
 
 
 def load_bearing_suites(suite_hits, features_of):
-    """`{leg flags: {suite name: features only this leg has OFF}}` — what a leg alone protects.
+    """`{leg flags: {suite name: what the alternatives add}}` — the suites a leg alone protects.
 
-    "Sole compile" is the wrong question and answers itself: every leg builds a suite under a
-    feature set no other leg has, so every leg would be sole something. The question that has
-    content is what a leg is the only place to see WITHOUT. For each suite and each leg
-    compiling it, this is the set of features that every OTHER leg compiling that suite turns
-    on and this one does not: delete the leg and the suite's body is never again type-checked
-    with those features absent, and a helper from one of them leaking into the suite stops
-    being visible anywhere.
+    Deleting a leg is safe for a suite when another leg REPRODUCES this one's configuration of
+    it, and everything turns on what "reproduces" is allowed to mean. Three candidates; the
+    middle one is the only one that is both sound and says anything.
 
-    The suites that motivated this are exactly that shape. `std,logos,combinators --tests` and
-    `std,logos,trace --tests` both compile them, so neither is a sole compile — but the `trace`
-    leg is the only one that compiles them with the thirteen combinator families OFF, which is
-    the whole reason it is declared. An empty set means every absence this leg offers is
-    offered by another leg too. A suite no other leg compiles at all maps to an empty set as
-    well, and is reported separately: nothing needs saying about which features are off when
-    the alternative is not compiling the suite.
+    "SOLE COMPILE" answers itself. Every leg builds a suite under a feature set no other leg
+    has, so every leg is sole something and nothing is ever deletable.
+
+    "IS THERE A FEATURE EVERY OTHER COVERING LEG HAS ON THAT I HAVE OFF" — the intersection of
+    the others, minus mine — asks about ONE feature. What a leg protects is a CONFIGURATION:
+    everything it has off, at once. Split the alternatives finely enough and no single feature
+    is common to all of them while the configuration is reproduced by none. That is not
+    hypothetical here. Add the per-family `std,logos,<family> --tests` legs that
+    `tokora/Cargo.toml` already discusses under WHAT RE-GATING THE 82 WOULD NOT BUY, and every
+    combinator family becomes absent from some other leg, so the intersection for
+    `std,logos,trace` empties — while no remaining leg compiles those eight suites with all
+    thirteen families off, which is the only reason that leg is declared. Case H of the
+    self-test is that tree, and it is red under the intersection.
+
+    SUBSET DOMINANCE is what is used: a leg is dropped from the result for a suite when some
+    other leg compiling it has enabled features that are a SUBSET of this leg's. That leg has
+    off everything this one has off, so every absence this one witnesses it witnesses too.
+
+    `<=` AND NOT `==`, and the fork is worth the paragraph because the next person meets it:
+
+      * `==` is sound for ANY predicate, negative ones included, and it is degenerate. Every
+        declared leg resolves to a distinct feature set — one that did not would be a duplicate,
+        which `main` now reds on — so `==` finds no dominator anywhere, marks every `--tests`
+        leg load-bearing for every suite it compiles, and lands back on "sole compile" one layer
+        down. Measured on the 2026-08-11 tree: 43 of 43 test legs held something under `==`,
+        against 8 under `<=`.
+      * `<=` is sound for the monotone fragment. A predicate whose feature leaves all occur
+        positively is false under a subset of the features whenever it is false here, so the
+        absence carries over. Where it does not carry over is stated in BOUNDS.
+      * The two errors are not symmetric, because the answer is used to REFUSE deletion. Marking
+        a leg load-bearing when it is not keeps a leg somebody could have pruned. Failing to mark
+        one prints `delete the leg` over a configuration nothing else builds, with CI green —
+        the defect the whole suite scan exists for. `<=` marks a superset of what the
+        intersection marked (a leg with a dominator always had an empty remainder), so it can
+        only move legs into the protected set, never out.
+
+    The value recorded is what the alternatives ADD: the union, over the other legs compiling
+    the suite, of the features they have and this one does not. Every one of them is off in this
+    leg and every other leg compiling the suite turns at least one of them on, which is the
+    sentence the output prints. It is empty exactly when no other leg compiles the suite at all
+    — nothing needs saying about which features are off when the alternative is not compiling
+    it — and those are reported separately.
     """
     out: dict[str, dict[str, frozenset]] = {}
     for path, hits in suite_hits.items():
         for flags in hits:
+            mine = features_of[flags]
             others = [features_of[o] for o in hits if o != flags]
-            if not others:
-                out.setdefault(flags, {})[path.name] = frozenset()
+            if any(other <= mine for other in others):
                 continue
-            missing = frozenset.intersection(*others) - features_of[flags]
-            if missing:
-                out.setdefault(flags, {})[path.name] = missing
+            out.setdefault(flags, {})[path.name] = frozenset().union(
+                *(other - mine for other in others)
+            )
     return out
 
 
@@ -690,6 +793,20 @@ def main() -> int:
         problems.append(f"expanded {len(all_legs)} legs; the feature table did not parse")
     if not EXTRA_LEGS:
         problems.append("EXTRA_LEGS is empty; nothing declares the pair legs CI runs")
+    # Two legs that resolve to the same feature set are not two legs. Everything below is a
+    # question about what one leg reaches that another does not, and a pair like that answers
+    # `nothing` in both directions at once — under `<=` each one dominates the other, so both
+    # look deletable and deleting both is wrong. Cheaper to red than to make the dominance
+    # relation carry a tie-break nobody would find.
+    resolved: dict[tuple, list[str]] = {}
+    for flags, feats, tests in all_legs:
+        resolved.setdefault((feats, tests), []).append(flags)
+    for group in sorted(sorted(g) for g in resolved.values() if len(g) > 1):
+        problems.append(
+            f"legs {' and '.join('`' + f + '`' for f in group)} resolve to the same feature set, "
+            f"so neither reaches anything the other does not. Delete one, or name the feature "
+            f"that was meant to differ"
+        )
     if problems:
         for p in problems:
             print(f"feature-cfg-coverage: {p}", file=sys.stderr)
@@ -755,6 +872,36 @@ def main() -> int:
               "`test`). CI runs whatever that list prints.", file=sys.stderr)
         return 1
 
+    # ── Integration suites no declared leg compiles ──────────────────────────────────────────
+    # This was computed, printed on the green path and not enforced until 2026-08-11, with a
+    # BOUNDS paragraph arguing the three then-current ones were `--all-features`-only by design.
+    # A green log line is not an enforcement mechanism: the gate knew about a gap in the thing
+    # it measures and stayed green, which is the same defect as a leg list that has gone stale,
+    # arrived at from the reporting side. The three were `rowan`-gated and cost two `cargo
+    # check` legs to cover, so the argument for waiving them was never the argument it claimed
+    # to be. It is a failure now, and the two legs are declared above.
+    orphans = [(path.name, suites[path]) for path, hits in suite_hits.items() if not hits]
+    if orphans:
+        print(f"feature-cfg-coverage: {len(orphans)} integration suite"
+              f"{'' if len(orphans) == 1 else 's'} no declared leg compiles", file=sys.stderr)
+        print("", file=sys.stderr)
+        for name, gate in orphans:
+            print(f"  {TESTS / name}", file=sys.stderr)
+            print(f"    #![cfg({gate})]", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("`--all-features` is the only build that type-checks "
+              f"{'these bodies' if len(orphans) > 1 else 'this body'}, and `--all-features` "
+              "satisfies every predicate by construction — a suite reachable from nowhere else "
+              "is a suite whose only compile is in the configuration this gate exists to "
+              "distrust. It is also invisible to `cargo hack --each-feature`, which never runs "
+              "a proper subset of size two or more.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Fix: add a leg to EXTRA_LEGS in ci/feature_cfg_coverage.py naming the smallest "
+              "feature set that satisfies the crate-level gate, with `\"tests\": True` — "
+              "without it the leg builds no integration target and compiles no suite at all. "
+              "CI runs whatever that list prints.", file=sys.stderr)
+        return 1
+
     # ── The declaration self-check ───────────────────────────────────────────────────────────
     # `unique_predicates` is an assertion about the tree, so it is verified against the tree. A
     # leg that claims to be the only one reaching a predicate, and is not, is a leg whose reason
@@ -780,8 +927,13 @@ def main() -> int:
         head = ", ".join(names[:limit])
         return head if len(names) <= limit else f"{head}, +{len(names) - limit} more"
 
-    def absences(witness: dict[str, frozenset]) -> str:
-        """`X, Y` — what this leg alone has OFF, reduced to the features that imply the rest.
+    def additions(witness: dict[str, frozenset]) -> str:
+        """`X, Y` — what the alternatives add, reduced to the features that imply the rest.
+
+        Read jointly, never one at a time: every one of these is OFF in this leg, and every
+        other leg compiling those suites turns at least ONE of them on. Some of them will be off
+        in some other leg — that is the whole point of the fork in `load_bearing_suites`, and
+        a per-feature reading of this line would be the intersection question again.
 
         The raw set is every family the umbrella pulls, which reads as noise and buries the one
         name that carries the argument. `combinators` implies all thirteen, so the thirteen go.
@@ -801,7 +953,7 @@ def main() -> int:
             drift.append(
                 f"leg `{flags}` declares unique_predicates=True, but every predicate it "
                 f"satisfies is also satisfied by another leg. DO NOT DELETE THE LEG: it is "
-                f"still the only leg that compiles {held} with {absences(witness)} off "
+                f"still the only leg that compiles {held} without {additions(witness)} "
                 f"({listing(witness.keys())}). Set unique_predicates=False; unique_suites=True "
                 f"is what holds it now."
             )
@@ -821,14 +973,15 @@ def main() -> int:
         if leg["unique_suites"] and not witness:
             drift.append(
                 f"leg `{flags}` declares unique_suites=True, but every integration suite it "
-                f"compiles is compiled by another leg with the same features off. Fix the "
-                f"claim — and read what the leg's comment says it protects before concluding "
-                f"it protects nothing."
+                f"compiles is also compiled by a leg whose features are a subset of this one's "
+                f"— which therefore has off everything this one has off. Fix the claim — and "
+                f"read what the leg's comment says it protects before concluding it protects "
+                f"nothing."
             )
         if not leg["unique_suites"] and witness:
             drift.append(
                 f"leg `{flags}` declares unique_suites=False, but it is now the only leg "
-                f"compiling {held} with {absences(witness)} off ({listing(witness.keys())}). Set "
+                f"compiling {held} without {additions(witness)} ({listing(witness.keys())}). Set "
                 f"it to True so nobody prunes it as redundant."
             )
     if drift:
@@ -844,7 +997,6 @@ def main() -> int:
     # carried through a release unrecomputed — because a comment is the one part of a gate
     # nothing recomputes. Anything a reader needs to know about a leg's size is derived here.
     each_feature = {flags for flags, _f, _t in all_legs} - {leg_flags(l) for l in EXTRA_LEGS}
-    orphan_suites = sorted(p.name for p, hits in suite_hits.items() if not hits)
     gated = sum(1 for g in suites.values() if g)
     print(f"feature-cfg-coverage OK: {len(predicates)} multi-feature cfg predicates over "
           f"{sum(len(v) for v in predicates.values())} sites in {files} files, "
@@ -869,18 +1021,14 @@ def main() -> int:
               f"{sum(len(predicates[p]) for p in beyond)} sites that no --each-feature leg "
               f"reaches; sole cover of {len(mine)}")
         print(f"      {len(witness)} integration suite"
-              f"{'' if len(witness) == 1 else 's'} no other leg compiles the same way")
+              f"{'' if len(witness) == 1 else 's'} no other leg compiles with everything this "
+              f"one has off")
         if alone:
             print(f"          {len(alone):3d} compiled by no other leg at all")
         if shared:
-            print(f"          {len(shared):3d} compiled elsewhere, but never with "
-                  f"{absences(shared)} off")
+            print(f"          {len(shared):3d} compiled elsewhere, only by legs that add "
+                  f"{additions(shared)}")
         print(f"      why: {leg['why']}")
-    if orphan_suites:
-        print("")
-        print(f"{len(orphan_suites)} suite(s) no declared leg compiles — `--all-features` is "
-              f"their only build, by design (see BOUNDS):")
-        print(f"  {listing(orphan_suites)}")
     print("")
     for count, pred, hit in sorted(rows, key=lambda r: (-r[0], r[1])):
         print(f"  {count:4d}  cfg({pred})")

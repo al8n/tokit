@@ -50,6 +50,22 @@
 #
 #   G. A STALE unique_suites CLAIM, the same shape as C one level out.
 #
+#   H. THE SAME REFUSAL, WITH THE ALTERNATIVES SPLIT. F's leg is held because ONE feature is on
+#      in every other leg compiling its suites. That is a fact about today's leg list, not about
+#      the leg: split the alternatives finely enough and no single feature is common to all of
+#      them while the CONFIGURATION the leg protects is still reproduced by none. This case
+#      appends two further legs that compile one of the leg's shared suites with a different
+#      extra feature each — the per-family split `tokora/Cargo.toml` already discusses — strips
+#      the leg's `src/` sites as F does, and demands the same refusal. It is the case that tells
+#      "is there a feature they all have" apart from "does another leg reproduce this
+#      configuration"; the first answers no here and recommends deletion.
+#
+#   I. AN ORPHANED SUITE — case A one level out. A throwaway `tokora/tests/*.rs` is planted whose
+#      crate-level gate no declared leg satisfies, and the gate must red AND name the file. It
+#      is here because the tree itself cannot supply the case: the live count of suites no leg
+#      compiles is zero, so without a plant the failure path that enforces that has never been
+#      watched to fire, and "reported, not enforced" is what it was until 2026-08-11.
+#
 # Every case runs against a COPY of the tree, so a failed case cannot leave the checkout
 # mutated. Exit codes are captured directly, never through a pipe: `cmd | tail; rc=$?` reads
 # `tail`'s status, and that has shipped broken checks in this repository before.
@@ -102,6 +118,188 @@ clone() {
   rm -rf "${work:?}/$1"
   cp -R "$base" "$work/$1" || exit 1
 }
+
+# The mutation cases F and H share, written once. Both strip the `src/` sites that hold a leg
+# through its predicates; H first splits the alternatives that cover the leg's suites. They are
+# one script because the stripping is subtle enough that two copies would drift, and a selftest
+# whose two halves disagree about what "the sites went away" means is worse than no second half.
+cat > "$work/mutate.py" <<'PY'
+#!/usr/bin/env python3
+"""Mutate one fixture:  mutate.py <fixture root> <leg features> <strip|split>
+
+`strip` (case F) blanks every `tokora/src/` site of the predicates this leg ALONE covers, so its
+`unique_predicates` claim evaporates and only its suites can still hold it.
+
+`split` (case H) does the same after appending two legs that compile one of the leg's SHARED
+suites — one it does not compile alone — with one extra feature each. Which suite, which
+features and how many are all derived; nothing here names a leg, a family or a file.
+
+Sites are blanked IN PLACE rather than deleted with the items they gate: offsets and line
+numbers stay put, no neighbouring predicate is caught in the truncation, and the gate is a
+textual scan that never compiles the fixture, so what "the sites went away" means to it is
+exactly that the attribute text is gone.
+"""
+
+import ast
+import importlib.util
+import os
+import pathlib
+import sys
+
+root, feats, mode = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+gate_path = root / "ci" / "feature_cfg_coverage.py"
+os.chdir(root)
+
+_loads = 0
+
+
+def load():
+    """Import the fixture's own copy of the gate. Re-imported after an edit, never reloaded."""
+    global _loads
+    _loads += 1
+    spec = importlib.util.spec_from_file_location(f"gate{_loads}", gate_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def flags_of(g):
+    return g.leg_flags(next(l for l in g.EXTRA_LEGS if l["features"] == feats))
+
+
+def split_alternatives(g):
+    """Append two legs that compile a shared suite of `feats`, each adding one feature.
+
+    The construction is what makes the case discriminate, so it is worth stating why it works.
+    `base` is the intersection of the features of EVERY leg compiling the chosen suite, so
+    `base` is a subset of this leg's own features. The two appended legs are `base` plus one
+    distinct feature each, so their intersection is `base` — and the intersection over all the
+    other covering legs is therefore inside this leg's features, which is exactly the condition
+    under which "is there a feature they all have that I lack" answers no. The leg's protected
+    configuration is untouched: neither appended leg has everything it has off.
+    """
+    fmap = g.feature_map()
+    all_legs = g.legs(fmap)
+    features_of = {f: ft for f, ft, _t in all_legs}
+    test_legs = [(f, ft, t) for f, ft, t in all_legs if t]
+    declared = set(fmap)
+    flags = flags_of(g)
+    mine = features_of[flags]
+
+    shared = []
+    for path, gate in sorted(g.scan_suites(g.TESTS).items()):
+        if gate is None:
+            continue
+        node = g.parse(gate)
+        if g.feature_names(node, set()) - declared:
+            continue
+        hits = [f for f, ft, t in test_legs if g.evaluate(node, set(ft), t) >= g.UNKNOWN]
+        if flags in hits and len(hits) > 1:
+            shared.append((path, hits, node))
+    if not shared:
+        raise SystemExit(f"selftest: every suite {feats!r} compiles, it compiles alone — there "
+                         "are no alternatives to split, so case H is vacuous for this leg")
+
+    path, hits, node = shared[0]
+    base = frozenset.intersection(*(features_of[o] for o in hits))
+    added = frozenset().union(*(features_of[o] - mine for o in hits if o != flags))
+    # Only features that do not pull another candidate: `combinators` implies all thirteen
+    # families and `fold` implies `many`, and a leg naming either would not be a one-feature
+    # step away from `base`.
+    leaves = sorted(f for f in added if not (g.closure([f], fmap) - {f}) & added)
+
+    existing = {ft for _f, ft, t in all_legs if t}
+    names = []
+    for leaf in leaves:
+        want = g.closure(sorted(base | {leaf}), fmap)
+        # A synthesised leg that resolves to a leg already declared is not an alternative, it is
+        # a duplicate — and two legs with the same features reproduce each other's configuration
+        # exactly, which would make the leg it duplicates look deletable for a reason that has
+        # nothing to do with what this case is testing.
+        if want in existing or g.evaluate(node, want, True) < g.UNKNOWN:
+            continue
+        names.append(",".join(sorted(want)))
+        if len(names) == 2:
+            break
+    if len(names) < 2:
+        raise SystemExit(
+            f"selftest: the legs covering {path.name} alongside {feats!r} offer "
+            f"{len(names)} usable one-feature alternative(s); two are needed to split them, so "
+            "case H is not constructible from this leg"
+        )
+
+    text = gate_path.read_text()
+    lines = text.splitlines(keepends=True)
+    for stmt in ast.parse(text).body:
+        if isinstance(stmt, ast.Assign) and any(
+            getattr(t, "id", None) == "EXTRA_LEGS" for t in stmt.targets
+        ):
+            at = stmt.value.elts[-1].end_lineno
+            break
+    else:
+        raise SystemExit("selftest: the fixture gate has no EXTRA_LEGS assignment")
+    lines.insert(at, "".join(
+        '    {\n'
+        f'        "features": "{name}",\n'
+        '        "tests": True,\n'
+        '        "unique_predicates": False,\n'
+        '        "unique_suites": True,\n'
+        '        "why": "selftest: one of the split alternatives",\n'
+        '    },\n'
+        for name in names
+    ))
+    gate_path.write_text("".join(lines))
+    return path.name, names
+
+
+def strip_sole_sites(g):
+    """Blank every `src/` site of the predicates this leg alone covers."""
+    fmap = g.feature_map()
+    all_legs = g.legs(fmap)
+    predicates, _ = g.scan(g.SRC)
+    flags = flags_of(g)
+
+    doomed = []
+    for pred, sites in predicates.items():
+        node = g.parse(pred)
+        hits = [f for f, ft, t in all_legs if g.evaluate(node, set(ft), t) >= g.UNKNOWN]
+        if hits == [flags]:
+            doomed.extend(sites)
+    if not doomed:
+        raise SystemExit(f"selftest: leg {feats!r} covers no predicate alone; the case is "
+                         "vacuous — there is nothing to take away from it")
+
+    by_file = {}
+    for site in doomed:
+        path, line = site.rsplit(":", 1)
+        by_file.setdefault(path, []).append(int(line))
+
+    for path, wanted in by_file.items():
+        p = pathlib.Path(path)
+        text = p.read_text()
+        code, mask = g.lex(text)
+        starts = {off for off, _b, _e in g.attributes(code, mask)
+                  if code.count("\n", 0, off) + 1 in wanted}
+        out = list(text)
+        for off, _body, end in g.attributes(code, mask):
+            if off in starts:
+                for k in range(off, end):
+                    if out[k] != "\n":
+                        out[k] = " "
+        p.write_text("".join(out))
+    return len(doomed)
+
+
+gate = load()
+note = ""
+if mode == "split":
+    suite, added = split_alternatives(gate)
+    gate = load()  # EXTRA_LEGS grew; the stripping must see the new leg set
+    note = f", after splitting {suite}'s alternatives into {' and '.join(added)}"
+elif mode != "strip":
+    raise SystemExit(f"selftest: unknown mutation mode {mode!r}")
+print(f"{strip_sole_sites(gate)} site(s){note}")
+PY
 
 # $1 case name  $2 expected exit (0, or 1 meaning "nonzero")  $3 marker required in the output
 # ("" for none)  $4 what to say when the expectation is not met  $5 marker that must NOT appear
@@ -226,16 +424,12 @@ EOF
 run_case covered 0 "feature-cfg-coverage OK" \
   "peek+punct is built by the '--features combinators' leg; reddening on it would be a false positive"
 
-# ── F. the predicates that hold a suite-bearing leg, removed ─────────────────────────────────
+# ── F and H. the predicates that hold a suite-bearing leg, removed ───────────────────────────
 #
 # Which sites to strip is DERIVED, not listed: the gate is imported and asked which predicates
 # each leg alone covers, and every site of those predicates is blanked. A hardcoded line range
-# would pin today's `src/trace.rs`, not the property.
-#
-# Blanked in place rather than deleted with the items they gate: offsets and line numbers stay
-# put, no neighbouring predicate is caught in the truncation, and the gate is a textual scan
-# that never compiles the fixture — what "the sites went away" means to it is exactly that the
-# attribute text is gone.
+# would pin today's `src/trace.rs`, not the property. See `$work/mutate.py` above for the
+# mutation itself and for how H's split alternatives are constructed.
 suite_legs=$(python3 - "$root/$GATE" <<'PY'
 import ast, sys
 for node in ast.parse(open(sys.argv[1]).read()).body:
@@ -257,52 +451,7 @@ i=0
 for feats in $suite_legs; do
   i=$((i + 1))
   clone "hold$i"
-  stripped=$(python3 - "$work/hold$i" "$feats" <<'PY'
-import importlib.util, pathlib, sys
-
-root, feats = pathlib.Path(sys.argv[1]), sys.argv[2]
-spec = importlib.util.spec_from_file_location("gate", root / "ci" / "feature_cfg_coverage.py")
-g = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(g)
-
-import os
-os.chdir(root)
-fmap = g.feature_map()
-all_legs = g.legs(fmap)
-predicates, _ = g.scan(g.SRC)
-leg = next(l for l in g.EXTRA_LEGS if l["features"] == feats)
-flags = g.leg_flags(leg)
-
-doomed = []
-for pred, sites in predicates.items():
-    node = g.parse(pred)
-    hits = [f for f, ft, t in all_legs if g.evaluate(node, set(ft), t) >= g.UNKNOWN]
-    if hits == [flags]:
-        doomed.extend(sites)
-if not doomed:
-    raise SystemExit(f"selftest: leg {feats!r} covers no predicate alone; case F is vacuous")
-
-by_file = {}
-for site in doomed:
-    path, line = site.rsplit(":", 1)
-    by_file.setdefault(path, []).append(int(line))
-
-for path, lines in by_file.items():
-    p = pathlib.Path(path)
-    text = p.read_text()
-    code, mask = g.lex(text)
-    starts = {off for off, _b, _e in g.attributes(code, mask)
-              if code.count("\n", 0, off) + 1 in lines}
-    out = list(text)
-    for off, _body, end in g.attributes(code, mask):
-        if off in starts:
-            for k in range(off, end):
-                if out[k] != "\n":
-                    out[k] = " "
-    p.write_text("".join(out))
-print(f"{len(doomed)} site(s)")
-PY
-)
+  stripped=$(python3 "$work/mutate.py" "$work/hold$i" "$feats" strip)
   if [ $? -ne 0 ]; then
     echo "  FAIL  hold$i: could not strip the sites holding '$feats'"
     fails=$((fails + 1))
@@ -312,6 +461,29 @@ PY
   run_case "hold$i" 1 "DO NOT DELETE THE LEG" \
     "'$feats' still compiles integration suites no other leg does; losing its predicates must not produce a deletion recommendation" \
     "Either the predicate it existed for is gone"
+
+  # H, on the same leg. Not every leg can carry it — a leg held because it is the only one
+  # compiling its suites at all has no alternatives to split — so `mutate.py` says so and the
+  # case is skipped rather than counted, while a leg that CAN carry it and does not refuse is a
+  # failure.
+  clone "split$i"
+  split=$(python3 "$work/mutate.py" "$work/split$i" "$feats" split 2>&1)
+  split_rc=$?
+  if [ "$split_rc" -ne 0 ]; then
+    case "$split" in
+      *"is vacuous"*|*"not constructible"*)
+        echo "  skip  split$i (${split#selftest: })" ;;
+      *)
+        echo "  FAIL  split$i: could not split the alternatives covering '$feats' suites"
+        echo "$split" | sed 's/^/          /'
+        fails=$((fails + 1)) ;;
+    esac
+  else
+    echo "        split$i: stripped $split"
+    run_case "split$i" 1 "DO NOT DELETE THE LEG" \
+      "with the alternatives split no single feature is common to all of them, but nothing else compiles '$feats' suites with everything it has off; the refusal must survive that" \
+      "Either the predicate it existed for is gone"
+  fi
 done
 
 # ── G. a stale unique_suites claim ───────────────────────────────────────────────────────────
@@ -330,6 +502,21 @@ if [ $? -eq 0 ]; then
 else
   echo "  skip  stale_suites (no leg declares unique_suites=False)"
 fi
+
+# ── I. a planted suite no leg compiles ───────────────────────────────────────────────────────
+#
+# The same `peek` + `bstr_1` pair case A plants as a predicate, planted as a crate-level gate
+# instead: a combinator family and a string backing, which nothing pulls together except
+# `--all-features`. So the only build of this body would be the one the whole script refuses to
+# count, which is what the orphan check is for.
+clone orphan
+cat > "$work/orphan/tokora/tests/selftest_orphan.rs" <<'EOF'
+#![cfg(all(feature = "peek", feature = "bstr_1"))]
+
+//! Planted by ci/feature_cfg_coverage_selftest.sh. Never committed, never compiled.
+EOF
+run_case orphan 1 "selftest_orphan.rs" \
+  "a suite whose crate gate no declared leg satisfies has --all-features as its only build, and must red naming the file"
 
 echo ""
 if [ "$fails" -ne 0 ]; then

@@ -734,21 +734,24 @@ jobs:
   # this workflow and the argument was partly a wall-clock one; Miri is in `miri.yml` now and the
   # argument is unchanged, because ~780 `cargo check` legs would themselves make this lane the
   # slow one. So the legs are derived from the cfgs that ACTUALLY EXIST, and
-  # `ci/feature_cfg_coverage.py` is what stops that derivation going stale — three legs are a
-  # snapshot, and the next `all(...)` predicate someone writes would be uncovered again with
+  # `ci/feature_cfg_coverage.py` is what stops that derivation going stale — a fixed leg list is
+  # a snapshot, and the next `all(...)` predicate someone writes would be uncovered again with
   # green CI.
   #
   # The leg list is deliberately NOT repeated here. This job asks the script to print it and
   # runs what it prints, so the set CI builds and the set the script validates cannot drift.
   #
-  # THESE LEGS CARRY `--tests`, SO THEY COMPILE INTEGRATION SUITES, AND FOR SOME SUITES THIS IS
-  # THE ONLY PLACE. Eight are gated `all(std, any(logos_0_16, logos_0_15, logos_0_14))` with no
-  # combinator family and no umbrella, and `--no-default-features --features std,logos,trace
-  # --tests` is the only configuration anywhere in CI that type-checks their bodies with the
-  # families OFF — every other build that has `std` and a logos version at once also has
-  # `combinators`. That was documented and not derived until 2026-08-11, and the gate would
-  # have recommended deleting the leg the day its `src/` predicates went away; the script now
-  # scans `tokora/tests/` and refuses. Prune a leg on the strength of `--print-legs` alone and
+  # MOST OF THESE LEGS CARRY `--tests`, SO THEY COMPILE INTEGRATION SUITES, AND FOR SOME SUITES
+  # THIS IS THE ONLY PLACE. Eight are gated `all(std, any(logos_0_16, logos_0_15, logos_0_14))`
+  # with no combinator family and no umbrella, and `--no-default-features --features
+  # std,logos,trace --tests` is the only configuration anywhere in CI that type-checks their
+  # bodies with the families OFF — every other build that has `std` and a logos version at once
+  # also has `combinators`. That was documented and not derived until 2026-08-11, and the gate
+  # would have recommended deleting the leg the day its `src/` predicates went away; the script
+  # now scans `tokora/tests/` and refuses. Three more suites were reachable from no leg at all,
+  # so `--all-features` — the build this whole job exists to distrust — was their only compile;
+  # the two `rowan` legs are what closed that, and a suite no leg compiles is a failure now
+  # rather than a line in the green log. Prune a leg on the strength of `--print-legs` alone and
   # you can still retire a configuration nothing else builds — read what the script prints.
   #
   # The self-test runs FIRST and is not optional, for the same reason the changelog one does.
