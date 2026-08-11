@@ -75,10 +75,17 @@ logos_0_16 = ["dep:logos_0_16"]
 # file edits.
 #
 # Why the umbrella cannot hide a behaviour difference. `tokora/src/` contains NO
-# `#[cfg(not(feature = "<family>"))]` guarding code. The 32 negative-family occurrences there
-# are all `#[cfg_attr(not(feature = ...), doc = ...)]` — doc text that degrades an intra-doc
-# link to plain prose when the family is off. So a single-family build runs the same code the
-# umbrella build runs, and the gap is compile coverage of the test tree only.
+# `#[cfg(not(feature = "<family>"))]` guarding code: every negative-family occurrence there is a
+# `#[cfg_attr(not(feature = ...), doc = ...)]` — doc text that degrades an intra-doc link to
+# plain prose when the family is off. So a single-family build runs the same code the umbrella
+# build runs, and the gap is compile coverage of the test tree only.
+#
+# THAT IS CHECKED, NOT ASSERTED, and more rides on it than the footprint claim:
+# `ci/feature_cfg_coverage.py` drops a test leg as redundant when a leg with FEWER features
+# compiles the same integration suite, which is sound only while this paragraph holds. It reds on
+# a real one now. The count used to be written here — "the 32 negative-family occurrences" — and
+# the tree said 33 by the time anyone recounted. The gate derives and prints it; do not write it
+# down again.
 combinators = [
   "any",
   "fail",

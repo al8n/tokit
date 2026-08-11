@@ -66,6 +66,20 @@
 #      compiles is zero, so without a plant the failure path that enforces that has never been
 #      watched to fire, and "reported, not enforced" is what it was until 2026-08-11.
 #
+#   J. A REAL NEGATIVE-FAMILY CODE GATE. `#[cfg(not(feature = "map"))]` on an item, which is the
+#      shape that makes subset dominance unsound: the item is COMPILED when `map` is off, so a
+#      smaller leg has it and the leg it dominates does not, and the dominator stops witnessing
+#      the absence the leg was keeping. The gate must red. Like I, the tree cannot supply this
+#      case — the live count of real negative-family code gates is zero, which is exactly the
+#      property being defended, so only a plant can watch the defence fire.
+#
+#   K. A DOC-ONLY NEGATIVE-FAMILY GATE, and J is worth nothing without it. Every negative-family
+#      occurrence in the tree is `cfg_attr(not(feature = ...), doc = ...)`, which changes
+#      documentation text and compiles the same items either way — so a check that could not tell
+#      K from J would red on the unmodified tree (case D), and one that waved J through to avoid
+#      that would be no check. The pair is the distinction the whole monotone bound turns on, so
+#      it is asserted in both directions, the way F asserts its refusal in both directions.
+#
 # Every case runs against a COPY of the tree, so a failed case cannot leave the checkout
 # mutated. Exit codes are captured directly, never through a pipe: `cmd | tail; rc=$?` reads
 # `tail`'s status, and that has shipped broken checks in this repository before.
@@ -517,6 +531,36 @@ cat > "$work/orphan/tokora/tests/selftest_orphan.rs" <<'EOF'
 EOF
 run_case orphan 1 "selftest_orphan.rs" \
   "a suite whose crate gate no declared leg satisfies has --all-features as its only build, and must red naming the file"
+
+# ── J. a real negative-family code gate ──────────────────────────────────────────────────────
+#
+# The precondition subset dominance rests on, violated. A single-feature `cfg` is invisible to
+# the multi-feature predicate scan, so this plant can only be caught by the check it is aimed at
+# — nothing else in the gate has an opinion about it, and a red here cannot be a red for some
+# other reason.
+clone negcode
+cat >> "$work/negcode/tokora/src/lib.rs" <<'EOF'
+
+#[cfg(not(feature = "map"))]
+pub(crate) const SELFTEST_NEGATIVE_CODE_GATE: () = ();
+EOF
+run_case negcode 1 'not(feature = "map")' \
+  "a real negative combinator-family code gate makes subset dominance unsound and must red naming the site"
+
+# ── K. a doc-only negative-family gate ───────────────────────────────────────────────────────
+#
+# The other side of J. `cfg_attr(..., doc = ...)` compiles the same items either way, so it does
+# not break monotonicity and must NOT red — and the doc text carries a comma on purpose, because
+# the classification splits the `cfg_attr` body and a split that is blind to string literals cuts
+# this attribute into a part that is not an attribute and calls a doc gate a code gate.
+clone negdoc
+cat >> "$work/negdoc/tokora/src/lib.rs" <<'EOF'
+
+#[cfg_attr(not(feature = "peek"), doc = "The lookahead family is off, so this is prose, not a link")]
+pub(crate) const SELFTEST_NEGATIVE_DOC_GATE: () = ();
+EOF
+run_case negdoc 0 "feature-cfg-coverage OK" \
+  "a doc-only negative gate compiles the same code either way; reddening on it would red on the real tree, where every negative-family occurrence is this shape"
 
 echo ""
 if [ "$fails" -ne 0 ]; then
