@@ -113,11 +113,23 @@ for n in d["trait_method_names"]:
 for n in d["trait_assoc_fn_names"]:
     for sp in ("used", "discarded"):
         rows.append(("trait_assoc_fn", n, to[n], sp))
-# An associated TYPE or CONST on a trait. `gen_probe.py` has no template and exits non-zero
-# by name; the row exists so that refusal is attached to the item rather than the item being
-# dropped from the plan. Dropping it is the failure mode this whole harness was built after.
+# An associated TYPE or CONST on a trait — two different resolution classes, and only one of
+# them is expressible here. An associated CONST is reached by a path, so a consumer's own const
+# of the same name on the same type is a second applicable candidate and rustc reports E0034:
+# that is a real collision and it gets a real probe. An associated TYPE resolves in the type
+# namespace by rules `gen_probe.py` still has no template for, so it keeps the refusal — which
+# exits non-zero by name, so the row is attached to the item rather than dropped from the plan.
+# Dropping it is the failure mode this whole harness was built after.
+#
+# An absent or unrecognised kind routes to the REFUSAL, never to the probe: a probe riding a
+# guessed resolution class is the vacuous experiment this harness exists to refuse.
+tok = d.get("trait_other_kinds", {})
 for n in d["trait_other_names"]:
-    rows.append(("trait_assoc_item", n, to[n], "no_template"))
+    if tok.get(n) == "assoc_const":
+        for sp in ("used", "discarded"):
+            rows.append(("trait_assoc_const", n, to[n], sp))
+    else:
+        rows.append(("trait_assoc_item", n, to[n], "no_template"))
 # Presence, not truthiness. `{}` is what a well-formed inventory looks like when the diff
 # added no glob-reachable names; treating that as a malformed inventory turns "this PR adds
 # no public surface" into a FATAL. Absence is still fatal, and the required-key check above

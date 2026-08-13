@@ -139,9 +139,15 @@ def trait_items(idx):
     typecheck for an item that declares no receiver, so a receiver-less trait associated
     function had no expressible probe and the run could only go FATAL.
 
-    `is_fn` is carried too, because an associated TYPE or CONST is a third resolution class
-    with no probe of its own. It used to land silently in the method bucket and fail with a
-    message about a missing argument template, which named the wrong problem.
+    `is_fn` is carried too, because an associated TYPE or CONST is a third resolution class.
+    It used to land silently in the method bucket and fail with a message about a missing
+    argument template, which named the wrong problem.
+
+    `kind` splits that third class in two, and the split is the difference between a probe and
+    a refusal. An associated CONST is expressible — a path to it competes with a consumer's own
+    const of the same name and rustc reports E0034 — while an associated TYPE resolves in the
+    type namespace by rules this harness still has no template for. Merging them meant the
+    expressible half was refused along with the other.
     """
     out = defaultdict(set)
     for _tid, it in idx.items():
@@ -152,8 +158,22 @@ def trait_items(idx):
         for cid in inner["trait"].get("items", []):
             sub = get(idx, cid)
             if sub and sub.get("name"):
-                out[tname].add((sub["name"], _is_fn(sub), _has_self(sub)))
+                out[tname].add((sub["name"], _is_fn(sub), _has_self(sub), _kind(sub)))
     return out
+
+
+def _kind(item):
+    """The rustdoc-JSON discriminant of an item's `inner` — `assoc_const`, `assoc_type`, …
+
+    Only consulted for non-fn trait items, where it decides probe versus refusal. An `inner`
+    that is not the single-key map rustdoc emits answers `""`, which routes to the refusal —
+    the safe direction, since a guessed kind is exactly the vacuous probe this harness exists
+    to refuse.
+    """
+    inner = item.get("inner")
+    if not isinstance(inner, dict) or len(inner) != 1:
+        return ""
+    return next(iter(inner))
 
 
 def inherent_items(idx):
@@ -258,14 +278,20 @@ def main():
     trait_names = set()
     trait_assoc_names = set()
     trait_other_names = set()
+    trait_other_kinds = {}
     trait_owners = {}
     for t in sorted(ptm, key=lambda x: (x is None, x)):
-        for m, is_fn, has_self in sorted(ptm[t] - btm.get(t, set()), key=str):
+        for m, is_fn, has_self, item_kind in sorted(ptm[t] - btm.get(t, set()), key=str):
             tag = "EXISTING trait" if t in btm else "NEW trait"
             trait_owners[m] = str(t)
             if not is_fn:
                 trait_other_names.add(m)
-                kind = "NON-FN ITEM (no probe template)"
+                trait_other_kinds[m] = item_kind
+                kind = (
+                    "ASSOCIATED CONST (path-resolved)"
+                    if item_kind == "assoc_const"
+                    else "NON-FN ITEM (no probe template)"
+                )
             elif has_self:
                 trait_names.add(m)
                 kind = "method"
@@ -323,6 +349,10 @@ def main():
         "trait_method_names": sorted(trait_names),
         "trait_assoc_fn_names": sorted(trait_assoc_names),
         "trait_other_names": sorted(trait_other_names),
+        # Which resolution class each non-fn name is in. `run.sh` routes an `assoc_const` to a
+        # real probe and leaves everything else on the refusal path; an absent or unrecognised
+        # kind therefore refuses, which is the safe direction.
+        "trait_other_kinds": trait_other_kinds,
         "inherent_names": sorted(inherent_names),
         "inherent_method_names": sorted(method_names),
         "inherent_assoc_fn_names": sorted(assoc_names),

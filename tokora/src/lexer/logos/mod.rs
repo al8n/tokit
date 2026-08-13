@@ -227,7 +227,7 @@ macro_rules! bail {
       ///
       /// `logos` hands out `span`, `slice` and `remainder`, and nothing at all about where its
       /// DFA probed before settling. So this adapter cannot answer
-      /// [`ReadFrontier::SpanEnd`](crate::ReadFrontier::SpanEnd) unconditionally — the engine
+      /// [`ReadFrontier::SpanEnd`] unconditionally — the engine
       /// **backtracks to the last accepting prefix after probing past it**, so a vocabulary with a
       /// prefix-accepting longer pattern (an integer beside a float or exponent literal) reads
       /// past every short item it emits — and it cannot compute a

@@ -54,7 +54,7 @@
 //! are unfaithful under truncation (token identity depending on input beyond `(state, offset)`),
 //! and it is what falsifies a wrong
 //! [`read_frontier`](crate::Lexer::read_frontier) — including a wrong
-//! [`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS) claim behind the logos
+//! [`READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS) claim behind the logos
 //! adapter.
 //!
 //! The non-final leg asks for a *prefix*, not equality, because **over-withholding is sound**: a

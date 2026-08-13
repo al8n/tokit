@@ -346,6 +346,97 @@ and will red until they do.
   from `iter` — `S::Component` is only `Clone + Eq + Hash + Display`, so there was never a
   generic sort to lose.
 
+- **`Lexer` gains a required method, `read_frontier`, and the partial-input holdback keys on it
+  instead of on the item's span** (#282). The holdback that keeps a partial parse equivalent to
+  the complete one used to withhold *the item whose span reaches the buffer end*. That is a
+  **proxy** for "more input could change this item", and it is exact only for a lexer that never
+  reads past what it emits. An ordered trial that attempts several readings and backtracks reads
+  past the span it emits by construction, so the proxy committed exactly the items appending one
+  byte would change: for the non-final prefix `5m5` a failed duration trial emits `Number("5")`
+  spanning byte 0, and `5m5s` is one `Duration`.
+
+  `read_frontier` reports the fact instead: **the maximum offset at which the lexer probed the
+  input while deciding the item, inclusive, where a probe answered by end of input counts at the
+  offset probed.** The driver withholds iff that frontier is **at or past the buffer end** —
+  probing at `len` is precisely "end of input was observable". The convention is deliberately
+  probe-*inclusive*; the exclusive reading does not count an end-of-input answer as a consult at
+  all, so a decision that observed "there is no byte at offset k" could report below the buffer
+  end and be committed, which is the break this fixes.
+
+  **`ReadFrontier::SpanEnd` keeps the previous behaviour bit for bit.** It means *no probe beyond
+  the item's own span end*, and it explicitly permits the terminator probe **at** `span.end` —
+  the one-boundary-byte lookahead a maximal-munch lexer performs, which is safe because that byte
+  is present exactly when the item is yielded. A lexer that answers `SpanEnd` is unaffected by
+  this release except that it now has to say so.
+
+  **Two other things move with it.** The driver computes `max(span.end, reported)`, so
+  monotonicity is a property of the driver rather than of the ecosystem: a lexer reporting
+  `ReadTo(0)` cannot un-withhold an item the previous rule withheld. And a withheld item's
+  `Incomplete` now carries the **buffer end** rather than the item's span end. Those two
+  coincided under the old predicate — the tests asserted the coincidence — and diverge under this
+  one (span end 1, frontier 3); `Incomplete`'s offset is documented as the frontier the caller
+  resumes from, and the span end would have claimed the input ran out at 1.
+
+  **What a caller sees change.** A refill loop, a run driven to `seal`, and every
+  [`Complete`](https://docs.rs/tokora/latest/tokora/input/struct.Complete.html) parse are
+  unaffected. A caller that drives `Partial` non-final **exactly once** and treats `Incomplete`
+  as failure will see tokens it used to be handed come back as `Incomplete`. Those commitments
+  were the unsound ones, so withholding them is the fix — but it is visible, and for a lexer that
+  answers `Unbounded` it is *every* token until the stream is sealed. That is sound and it is not
+  free: the caller buffers the whole stream, every attempt re-lexes from the base under
+  `RedriveFromBase`, and a `Budget` calibrated for one-token latency can trip terminally on a
+  perfectly valid stream.
+
+  **`cargo-semver-checks` did not catch this break, and its silence is not evidence.** The tool
+  reports "semver requires new major version" for this release, but on the unrelated
+  `IncompleteSyntax::as_mut_slice` removal above; `trait_method_added` **passed**. That is not a
+  configuration accident — adding a fresh required method to a second public, unsealed, unimplemented
+  trait (`Lexable`) reproduced the same PASS on cargo-semver-checks 0.49.0, stable toolchain,
+  `--all-features`, against the published 0.9.1 baseline. The break here is recorded from the
+  diff.
+
+- **The `Lexer` contract's claim that the Logos backend is faithful under truncation was false,
+  and is retracted** (#282). The clause asserted that "a maximal-munch lexer (the Logos backend,
+  and every hand-written lexer that commits each item from its own bytes) satisfies this". It does
+  not, and **no callback is required to break it**: `logos` backtracks to the last accepting prefix
+  after probing past it, which is ordinary DFA behaviour and is not what its "prevents
+  backtracking" README line is about (that one concerns ReDoS inside a single definition). With
+  pure `#[regex]` rules for `[0-9]+`, `[0-9]+\.[0-9]+` and `[0-9]+e[+-]?[0-9]+`, `"1."` lexes as
+  `Int@0..1  Dot@1..2` — the `Float` trial probed offset 2, found end of input, and rolled back —
+  while `"1.5"` is one `Float@0..3`. Any vocabulary with a prefix-accepting longer pattern, which
+  is most real vocabularies, was affected. The conformance kit's `run_partial` check already
+  failed such a vocabulary under the previous holdback, so the falsifier predated the fix.
+
+  Because `logos` exposes `span`, `slice` and `remainder` but not its probe frontier, the adapter
+  cannot answer from anything it can see, and its blanket impl means the answer cannot come from
+  an impl the dialect writes. It therefore delegates through **two** channels, both landing now:
+
+  - `Token::READ_FRONTIER_CLASS`, a const on the vocabulary — the same delegation shape as
+    `Token::SURFACES_TRIVIA`. It answers for an item whose scan recorded nothing, and it defaults
+    to the conservative `ReadFrontierClass::Unbounded`, because a vocabulary that has not thought
+    about it must not be silently assumed safe. Declaring `SpanEnd` is a claim about the generated
+    DFA, and `run_partial` is what falsifies a wrong one.
+  - `State::probed_to` and `State::clear_probe`, the per-item **value** channel, read off the
+    logos `Extras` — the one thing a `logos` callback can write to. A callback that peeks with
+    `lexer.remainder()` knows exactly how far it looked and records the absolute offset; the
+    adapter calls `clear_probe` before every scan, so what it reads back belongs to *that* item
+    and never to an earlier one. Both methods are defaulted (`None` and a no-op), so no existing
+    `State` impl breaks and a state that records nothing pays nothing.
+
+  A recorded value answers the contract for its item outright, so it must cover the engine's
+  backtracking too and not only the callback's own peek.
+
+- **`Harness::run_partial`'s non-final leg asks for a prefix rather than an equality** (#282). It
+  required a non-final drain of `src[0..k]` to yield *exactly* the complete-parse tokens ending
+  before `k`. Under the frontier holdback that is no longer attainable and never was the property:
+  a lexer that reports reading past what it emits withholds more, and one that reports `Unbounded`
+  withholds everything. Over-withholding is sound and converges — a refill strictly grows the
+  buffer and sealing ends the game — so requiring equality would have failed every conforming
+  lookahead lexer while testing precision instead of correctness. Yielding a token the complete
+  parse does not have before the cut, or a different one at the same position, still fails, and
+  the **final** leg still pins full equality. The trait tier also gains a check that
+  `read_frontier` is a pure read: repeated calls agree, and asking does not move the lexer.
+
 ### Fixed
 
 - **`IncompleteSyntax::as_slice` no longer stops at the ring boundary** (#245). The components

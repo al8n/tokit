@@ -346,7 +346,7 @@ pub enum ReadFrontier<O> {
 /// shape as [`Token::SURFACES_TRIVIA`].
 ///
 /// The claim answers for **an item whose scan recorded no frontier in the lexer state**; an item
-/// that did record one is answered by that value (see [`State::probed_to`](crate::State::probed_to)).
+/// that did record one is answered by that value (see [`State::probed_to`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ReadFrontierClass {

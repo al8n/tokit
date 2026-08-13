@@ -947,6 +947,13 @@ mod logos_adapter {
     type Kind = SynKind;
     type Error = ();
 
+    // `[a-z]+` and `[0-9]+` are over disjoint character classes and neither is a prefix of the
+    // other, so the DFA never probes into a longer candidate and backtracks. `SpanEnd` is
+    // honest, and it is what keeps the partial cell below checking real chunked equivalence:
+    // at the conservative default this fixture would withhold everything and the check would
+    // pass vacuously.
+    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
+
     fn kind(&self) -> SynKind {
       match self {
         SynTok::Word => SynKind::Word,
@@ -1027,9 +1034,21 @@ mod logos_adapter {
   }
 }
 
-// ── TEMPORARY PROBE (pre-change falsifier) — removed before commit ──────────────────
+// ── The falsifier that predates the feature ───────────────────────────────────────────
+//
+// A float-and-exponent vocabulary over the real logos adapter, with **zero callbacks**. This is
+// the shape #282's fix exists for, and the check that catches it is older than the fix: run
+// against tokora 0.9.1 — the pre-`read_frontier` holdback, which keyed on the item's span —
+// `run_partial` over `"1.5"` and `"5e-3"` already failed at split k=2 with
+//
+//   tokora conformance [input #0 partial-equivalence] split k=2: prefix token count diverges
+//   from the complete prefix: expected 0, got 1
+//
+// The extra token is `Int@0..1`. logos probes into the `Float`/`Sci` arm, hits the end of the
+// truncated buffer, and backtracks to the accepting prefix; the span rule then saw end 1 < 2 and
+// committed it. Append the missing byte and the complete parse says `Float@0..3`.
 #[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
-mod fr_probe {
+mod prefix_backtracking {
   use super::Harness;
   use crate::Token;
   use crate::lexer::LogosLexer;
@@ -1055,48 +1074,81 @@ mod fr_probe {
     }
   }
 
-  #[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
-  #[logos(crate = crate::logos, skip r"[ \t\r\n]+")]
-  enum NumTok {
-    #[regex(r"[0-9]+")]
-    Int,
-    #[regex(r"[0-9]+\.[0-9]+")]
-    Float,
-    #[regex(r"[0-9]+e[+-]?[0-9]+")]
-    Sci,
-    #[token(".")]
-    Dot,
-    #[regex(r"[a-z]+")]
-    Word,
-  }
-
-  impl Token<'_> for NumTok {
-    type Kind = NumKind;
-    type Error = ();
-
-    fn kind(&self) -> NumKind {
-      match self {
-        NumTok::Int => NumKind::Int,
-        NumTok::Float => NumKind::Float,
-        NumTok::Sci => NumKind::Sci,
-        NumTok::Dot => NumKind::Dot,
-        NumTok::Word => NumKind::Word,
+  macro_rules! num_vocabulary {
+    // No class declared: the vocabulary takes `Token`'s own default. Written as a separate arm
+    // rather than as `$class = <Self as Token>::READ_FRONTIER_CLASS`, which is a const cycle —
+    // and the point of this arm is to exercise the DEFAULT, not to restate it.
+    ($name:ident) => {
+      num_vocabulary!(@body $name,);
+    };
+    ($name:ident, $class:expr) => {
+      num_vocabulary!(@body $name, const READ_FRONTIER_CLASS: crate::ReadFrontierClass = $class;);
+    };
+    (@body $name:ident, $($class:tt)*) => {
+      #[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+      #[logos(crate = crate::logos, skip r"[ \t\r\n]+")]
+      enum $name {
+        #[regex(r"[0-9]+")]
+        Int,
+        #[regex(r"[0-9]+\.[0-9]+")]
+        Float,
+        #[regex(r"[0-9]+e[+-]?[0-9]+")]
+        Sci,
+        #[token(".")]
+        Dot,
+        #[regex(r"[a-z]+")]
+        Word,
       }
-    }
-    fn is_trivia(&self) -> bool {
-      false
-    }
+
+      impl Token<'_> for $name {
+        type Kind = NumKind;
+        type Error = ();
+
+        $($class)*
+
+        fn kind(&self) -> NumKind {
+          match self {
+            $name::Int => NumKind::Int,
+            $name::Float => NumKind::Float,
+            $name::Sci => NumKind::Sci,
+            $name::Dot => NumKind::Dot,
+            $name::Word => NumKind::Word,
+          }
+        }
+        fn is_trivia(&self) -> bool {
+          false
+        }
+      }
+    };
   }
 
-  type NumLexer<'a> = LogosLexer<'a, NumTok>;
+  // The claim a vocabulary like this must NOT make, and the claim it gets by default.
+  num_vocabulary!(LyingNum, crate::ReadFrontierClass::SpanEnd);
+  num_vocabulary!(DefaultNum);
+
+  type LyingLexer<'a> = LogosLexer<'a, LyingNum>;
+  type DefaultLexer<'a> = LogosLexer<'a, DefaultNum>;
 
   #[test]
-  fn fr_probe_float_vocabulary_partial() {
-    Harness::<NumLexer<'_>>::over(["1.5"]).run_partial();
+  #[should_panic(expected = "partial-equivalence")]
+  fn a_span_end_claim_over_a_float_vocabulary_is_falsified() {
+    // `"1.5"` at split k=2: the prefix `"1."` commits `Int@0..1` under a `SpanEnd` claim, and
+    // the complete parse has no token ending before 2 at all.
+    Harness::<LyingLexer<'_>>::over(["1.5"]).run_partial();
   }
 
   #[test]
-  fn fr_probe_sci_vocabulary_partial() {
-    Harness::<NumLexer<'_>>::over(["5e-3"]).run_partial();
+  #[should_panic(expected = "partial-equivalence")]
+  fn a_span_end_claim_over_an_exponent_vocabulary_is_falsified() {
+    // `"5e-3"` at split k=2, the PromQL shape from the issue, with no callback in sight.
+    Harness::<LyingLexer<'_>>::over(["5e-3"]).run_partial();
+  }
+
+  #[test]
+  fn the_conservative_default_is_sound_over_the_same_vocabulary() {
+    // The same two sources, with the class left at its `Unbounded` default: nothing is yielded
+    // while the stream is open, so nothing unstable is committed and the check passes. Sound,
+    // and the cost §7 of the design names — the caller buffers to the seal.
+    Harness::<DefaultLexer<'_>>::over(["1.5", "5e-3", "1.", "5e", "5ex"]).run_partial();
   }
 }

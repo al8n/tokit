@@ -45,7 +45,7 @@
 //! input, the rules are inert and the last token yields immediately.
 //!
 //! **How many tokens that is depends on the lexer, and since 0.10.0 it is not always one.** A lexer
-//! that never reads past what it emits reports [`ReadFrontier::SpanEnd`](crate::ReadFrontier) and
+//! that never reads past what it emits reports [`ReadFrontier::SpanEnd`] and
 //! keeps the one-token latency exactly as before. A lookahead lexer that probes ahead and
 //! backtracks reports where it actually read, so an item behind the end is withheld too — that is
 //! the fix, not a regression: committing it was what made a partial parse disagree with the
@@ -53,7 +53,7 @@
 //! [`Unbounded`](crate::ReadFrontier::Unbounded), which withholds **everything** until the stream
 //! is sealed. That last one is sound but expensive — see [`Lexer::read_frontier`] — and it is the
 //! answer the bundled logos adapter gives unless the vocabulary declares otherwise
-//! ([`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS)).
+//! ([`Token::READ_FRONTIER_CLASS`]).
 //!
 //! ## Terminal beats incomplete, and they never substitute
 //!
