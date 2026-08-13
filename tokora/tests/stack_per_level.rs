@@ -23,10 +23,13 @@
 //! whole frame chain of a level, not one function's prologue, which is the number that decides
 //! how deep a document can nest before the native stack aborts the process.
 //!
-//! The assertion here is only that both doors accept the same document and agree on the shape
-//! they parsed. The stack numbers are printed, not asserted: they move with the toolchain, the
-//! target and `-Cdebuginfo`, and a threshold on them would be a flake rather than a contract.
-//! Run with `--nocapture` to see them.
+//! No THRESHOLD is asserted on the numbers — they move with the toolchain, the target and
+//! `-Cdebuginfo`, and a bound on them would be a flake rather than a contract. What *is*
+//! asserted is that the samples can bear the reading at all: see [`per_level`], which refuses
+//! rather than reports whenever the address sequence is not a native frame chain. A measurement
+//! harness that cannot fail is not a measurement; the first version of this file differenced
+//! with `saturating_sub`, which turns every layout it does not model into a printed `0 B`.
+//! Run with `--nocapture` to see the numbers.
 
 mod common;
 
@@ -67,14 +70,58 @@ fn take_marks() -> Vec<usize> {
 
 /// The per-level cost, taken as the median of the consecutive differences so that one
 /// irregular level (the outermost, the innermost) does not set the number.
+///
+/// # What this refuses to answer
+///
+/// Differencing two addresses is only a frame size on a **contiguous native stack**, and
+/// nothing in the type system says the samples came from one. Three ways they might not, each
+/// of which this function rejects rather than reports:
+///
+/// - **The stack grows upward.** Then inner frames have HIGHER addresses. `w[0] - w[1]`
+///   underflows; written as `saturating_sub` it produces `0` for every level and the harness
+///   prints a plausible `0 B`. [`usize::abs_diff`] measures the magnitude in either direction,
+///   so an upward-growing stack is *supported* here, not merely detected.
+/// - **The addresses are not a chain at all.** An interpreter that gives each frame's locals
+///   its own virtual allocation produces addresses with no relation to frame size — possibly
+///   monotone, possibly not. The monotonicity check below catches the unordered case; the
+///   ordered case is what the `miri` refusal is for, since Miri is exactly that interpreter and
+///   `cargo miri test` selects this file's feature set (`std` + `combinators` + `logos`).
+/// - **A delta is zero.** Every level here is a real recursive call, so a zero means the
+///   samples are not measuring what the caller thinks. Zero is the value both other failures
+///   degrade to, so it is rejected on its own as well.
 fn per_level(marks: &[usize]) -> usize {
-  let mut deltas: Vec<usize> = marks
-    .windows(2)
-    .map(|w| w[0].saturating_sub(w[1]))
-    .collect();
-  assert!(!deltas.is_empty(), "need at least two levels to difference");
+  // A backstop, not the primary guard: the test itself is `#[ignore]`d under Miri, and this
+  // catches a `cargo miri test -- --ignored` that walks past that.
+  assert!(
+    !cfg!(miri),
+    "stack-pointer differencing has no meaning under Miri: frame locals are separate virtual \
+     allocations, not a contiguous native stack"
+  );
+  assert!(
+    marks.len() >= 2,
+    "need at least two levels to difference, got {}",
+    marks.len()
+  );
+
+  let descending = marks.windows(2).all(|w| w[0] > w[1]);
+  let ascending = marks.windows(2).all(|w| w[0] < w[1]);
+  assert!(
+    descending || ascending,
+    "stack samples are not monotone in one direction, so consecutive differences are not frame \
+     sizes: {marks:?}"
+  );
+
+  let mut deltas: Vec<usize> = marks.windows(2).map(|w| w[0].abs_diff(w[1])).collect();
+  assert!(
+    deltas.iter().all(|&d| d != 0),
+    "a nesting level cost zero bytes of stack, which no real call does; the samples are not a \
+     frame chain: {marks:?}"
+  );
+
   deltas.sort_unstable();
-  deltas[deltas.len() / 2]
+  let median = deltas[deltas.len() / 2];
+  assert_ne!(median, 0, "median of nonzero deltas is zero: {deltas:?}");
+  median
 }
 
 // ── error type ────────────────────────────────────────────────────────────────
@@ -298,6 +345,12 @@ fn nested(depth: usize) -> String {
 }
 
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "a stack-pointer probe needs a contiguous native stack; Miri models frame locals as \
+            separate virtual allocations, so the deltas are allocation spacing rather than frame \
+            sizes"
+)]
 fn per_nesting_level_stack_cost() {
   const DEPTH: usize = 12;
   let src = nested(DEPTH);
