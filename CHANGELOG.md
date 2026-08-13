@@ -34,6 +34,24 @@ and will red until they do.
 
 ### Added
 
+- **`ErrorContainer::clear`.** `Errors` is now the only door onto its container (#247), so it has
+  to serve the removals that door used to reach through `DerefMut`. The method is defaulted
+  through `pop`, so an existing implementation keeps compiling unchanged; the four built-in
+  containers override it with their own.
+
+- **`ErrorContainer::from_errors` — the bulk-construction hook `FromIterator` cannot be** (#284).
+  `Errors::from_iter` has to know what its container refused, and `FromIterator` has no channel for
+  saying. This one returns `(Self, bool)`: the container, and whether it declined any of the errors
+  it was offered. It is **defaulted to the per-item `try_push` funnel**, so a container that ignores
+  it accounts exactly as it did and no existing implementation changes; `Vec` and `VecDeque`
+  override it with their own `FromIterator` and answer `false`, which is sound because neither can
+  refuse an error — not because the standard library specialises the fill underneath.
+
+  It is trusted no further than `try_push` already is. A container that keeps only what fits and
+  answers `false` makes `Errors::overflowed()` report clean over dropped errors, which is precisely
+  what a `try_push` answering `Ok(())` after dropping one has always been able to do. Same door on
+  the same caller-implemented trait, one call wider.
+
 - **`InputRef::peek_map` — a windowed read whose return type can express a terminal stop.** The
   terminal-aware reads this crate shipped were all **head-only**: `peek_kind`, `head_satisfies` and
   `peek_head_map` raise on a resource-limit trip or a latched poison boundary and reserve
@@ -71,6 +89,145 @@ and will red until they do.
   distinguish, and `peek_with_emitter_terminal` or `peek_map` is what can.
 
 ### Changed (breaking)
+
+- **`Emitter::checkpoint` takes `&mut self`** (#257). Capturing a mark is a capability, not an
+  observation — for a recording emitter it registers per-mark state a later `rewind` or `release`
+  must find, and the input layer owns the lineage those marks belong to. The `&self` receiver put
+  that capability on *every* shared reference to an emitter, and two of those are public and
+  documented as observation-only: `InputRef::emitter_ref` and `EmitterView::emitter_ref`, which
+  exist so a parser can read a concrete emitter's own state mid-parse. The module header claimed
+  the boundary held — "a **shared** reference cannot re-enter an emitter slot: every recording
+  method on the trait family takes `&mut self`" — and that was true of every *recording* method
+  and false of the one that captures.
+
+  What it cost, through stable safe public APIs and the built-in sink:
+  `Emitter::checkpoint(inp.emitter_ref())` pushed a mark-stack row that no `InputRef` checkpoint
+  lineage owned and no settle would ever spend. A row's index is a structural floor for
+  `emit_skipped_region`'s hole wrap, so a recovery whose diagnostic spanned both tokens of `"ab"`
+  produced an error node covering `"b"` alone — a materialized, fully covered, silently wrong
+  tree rather than a refusal. Repeated calls retained one row each until the sink was consumed.
+
+  Documenting the obligation was the alternative, and it is the class of promise this crate has
+  been removing: a source census over the crate's own call sites cannot reach a downstream
+  caller, and the type signature said the call was allowed. The receiver says otherwise now, and
+  it says it for every emitter rather than for the one whose corruption was found. Two things
+  follow. `Sink::rows` is a plain `Vec` again — it was a `RefCell` **only** to satisfy the
+  `&self` receiver, so the sink now holds no cell at all and `&Sink` is observation-only
+  structurally rather than by convention. And an emitter that reached for interior mutability
+  for the same reason can drop it too.
+
+  Migration is the receiver and nothing else: an `impl Emitter` writes `fn checkpoint(&mut
+  self)`. A caller that reached the method through a shared reference wanted an observation, and
+  should ask for one — `Verbose`'s mark, for instance, *is* its emission-log length, which
+  `Verbose::diagnostics().len()` reports without capturing anything. What a shared reference
+  still cannot promise is anything about a concrete emitter's *own* interior mutability; Rust has
+  no bound that excludes it, so that is now stated on both accessors as a logic error in the
+  terms `HashSet` uses for a key, and deliberately enumerates nothing.
+
+- **`Errors`' `DerefMut` and its derived `AsMut<C>` impl are removed** (#247). `overflowed()`
+  promises to report whether any error was dropped for want of capacity, and that fact exists
+  nowhere but the wrapper: a bounded container that is full and one that is full *and has refused
+  ten errors* are the same container, so the flag cannot be derived and has to be maintained.
+  Only `push`/`try_push` maintained it — and `DerefMut`, with the derived `AsMut<C>` beside it,
+  handed callers the container's own insertion API, through which a bounded container rejected a
+  value, returned it, and `overflowed()` went on saying `false`. In a `no_std` or otherwise
+  bounded configuration that is silent diagnostic truncation, reported as complete.
+
+  Both doors are gone rather than documented, for the reason #279 removed `as_mut_slice`: some
+  invariants can be maintained behind the caller's back and this one cannot. Removing only
+  `DerefMut` would have relocated the door rather than closed it, which is why the derived
+  `AsMut<C>` went with it.
+
+  What survives is everything that cannot invent a dropped error. The shared views are untouched
+  (`Deref`, the derived `AsRef<C>`, `IntoIterator for &Errors`, `Display`), `AsMut<[E]>` still
+  hands out the elements where the container is contiguous, and three inherent methods replace
+  what the removed doors were legitimately used for: `Errors::pop`, `Errors::clear` and
+  `Errors::iter_mut` — the last bounded on the method (`&'a mut C: IntoIterator<Item = &'a mut
+  E>`) rather than on `ErrorContainer`, so it costs no existing container implementation
+  anything. None of the three can create the fact `overflowed` reports, and none clears it
+  either: it is historical, and removing an error that *is* held does not un-drop one that never
+  entered. A caller that inserted through the container moves to `try_push`, which reports the
+  rejection the container's own door swallowed.
+
+  As with #279, the shared side cannot be made structural: `C` is the caller's type and Rust has
+  no bound against interior mutability, so a self-mutating container reaches the same state
+  through `Deref`. That is stated generically on the type, in the terms `HashSet` uses for a key,
+  and enumerates nothing.
+
+- **`FromIterator<E>` and `From<E>` for `Errors<E, C>` are bounded on `ErrorContainer<E>` instead
+  of `C: FromIterator<E>`, and collect through `try_push`** (#284). #247 above closed every door
+  that *mutates* an already-wrapped container. Construction is an insertion door too, and it
+  reached the same lie by a route that mutates nothing: `Errors::from_iter` delegated straight to
+  `C::from_iter` and then set `overflowed_flag` to `false`. A bounded `C` collecting more errors
+  than it holds can only keep what fits — `FromIterator` has no channel for reporting a value it
+  refused — so `collect()` truncated silently and `overflowed()` reported clean over what was
+  left. `From<E>` inherited it: into a zero-capacity `C` the sole error vanished with the flag
+  still `false`. That is #247's defect one category over, reachable **without** `DerefMut` or
+  `AsMut<C>`, and the enumeration that found those two could not see it because it enumerated
+  mutation.
+
+  Both conversions now take the container's own accounting answer instead of assuming there was
+  nothing to answer. `From<E>` offers its one error to `try_push`; `FromIterator` hands the whole
+  iterator to `ErrorContainer::from_errors` (above), which is a loop of that same `try_push` unless
+  the container overrides it, and which reports what did not fit either way. `From<E>` stays
+  **infallible**: a capacity *floor* is what would make it unconditionally lossless and there is
+  nothing on `ErrorContainer` to express one with — `remaining_capacity(&self)` reads an instance, and an associated
+  `const MIN_CAPACITY` would be a caller's declaration, which is the class of promise this type
+  already refuses to rest on. The zero-capacity case is answered by the flag rather than by a
+  `Result`.
+
+  **The bound is a swap, not an addition, and it is the same bound that makes the flag readable at
+  all.** `overflowed`, `push`, `try_push`, `pop`, `clear`, `remaining_capacity` and `with_capacity`
+  all live on the `ErrorContainer<E>` impl, so a container that could *lie* about an overflow
+  already satisfied the new bound and keeps its `collect()`. What it costs is `collect()` into a
+  `C` that is `FromIterator<E>` and not an `ErrorContainer<E>` — `BTreeSet`, `HashSet`,
+  `LinkedList` and the like, which yield an `Errors` with no insertion, no removal and no
+  `overflowed()` at all, only the shared views. Those build with
+  `Errors::from_container(iter.collect())`, one line and no loss. In the other direction it
+  *gains* the containers with no `FromIterator` of their own, which is both of this crate's
+  bounded ones — `Option<E>` and `GenericArrayDeque<E, N>`, so `DefaultContainer` in a no-alloc
+  build had no `collect()` before this and has an accounting one now.
+
+  The reservation the funnel makes is taken **after the first error is observed**, not from the
+  size hint alone. A hint is a hint: an empty iterator reporting `usize::MAX` is a
+  capacity-overflow panic if it is reserved for, where a delegated fill returns empty without
+  allocating at all. `Vec`'s own `FromIterator` unrolls its first `next` ahead of its own reserve
+  for the same reason. An overstated hint on a *non-empty* iterator still panics, as it does on a
+  delegated fill — that is a protocol violation by the iterator, not a property of this change.
+
+  **What the funnel costs, and why it is the container's default rather than the mechanism.**
+  Offering the errors one at a time is what makes the count honest, and for a bounded container it
+  is the only thing available. For an unbounded one it is a tax with no accounting to show for it:
+  `Vec`'s and `VecDeque`'s `FromIterator` specialise on a `Vec`/`VecDeque` `IntoIter` and take the
+  source's allocation outright, where a per-item fill holds the source buffer alive beside an
+  equally large destination until the last error has been copied across. Measured over 1 Mi `u64`,
+  zero allocations and a peak equal to the source became one allocation and a peak of twice it, and
+  a fill that was O(1) at 13-17 ns for every length became 22 ns at 16 errors, 115 ns at 256,
+  375 ns at 1024 and 1.29 ms at 1 Mi.
+
+  **And peak is the wrong axis.** Between roughly one and two times the source in available memory
+  the delegated fill completes and the per-item one asks for a second buffer it cannot get — and a
+  failed allocation is not a diagnostic that a caller handles. It is `handle_alloc_error`, which
+  aborts the process. So for a caller-controlled error count the funnel does not make an unbounded
+  `collect()` slower, it **halves the largest collection that survives a given ceiling**: measured
+  against a 12 MiB allocator ceiling, 1 572 864 `u64` errors collected before this change and
+  786 432 with the per-item fill, the difference being an abort rather than a truncation.
+
+  Which fill runs is therefore the container's own answer, through `ErrorContainer::from_errors`,
+  whose **default is that per-item funnel**. `Vec` and `VecDeque` override it with their own
+  `FromIterator`, and every number goes back to where it was: zero allocations, a peak equal to the
+  source, and the same 1 572 864-error ceiling. That the override is *correct* rests on neither
+  container being able to refuse an error; that it is *fast* rests on the standard library's
+  in-place-collect specialisation, and a standard library that stopped specialising would leave an
+  unbounded `collect()` costing what the funnel costs with the accounting exactly as sound.
+
+  `Errors::from_container` is unchanged and is the one construction door that is deliberately
+  *not* an insertion door: the caller builds the container, the wrapper adopts it, and the flag
+  starts `false` covering only what is offered afterwards. Whether that container's own
+  construction refused an error is a history the container does not record and no wrapper can
+  read. The obligation is stated on the method, and unlike a residual it can be discharged — a
+  caller filling a bounded container *from errors* has `collect()`, `From`, `push` and `try_push`,
+  and all four now account.
 
 - **`IncompleteSyntax::as_mut_slice` and its `AsMut<[S::Component]>` impl are removed** (#245).
   The type documents its components as a *set*: insertion deduplicates, nothing removes, and
@@ -333,6 +490,64 @@ and will red until they do.
   `SliceVec` adapters without a heap. Every other `/default` entry in the `std` list was checked
   against its own crate's `default` at the version `Cargo.lock` resolves; tinyvec's was the only
   empty one.
+
+### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+#247 removes `Errors`' `DerefMut` and replaces the three legitimate uses it served with inherent
+methods. `Errors` has shipped since 0.7.3 **with no inherent item of its own**, so a consumer who
+wanted `pop`, `clear` or `iter_mut` in a shape the deref did not give them wrote an extension
+trait — and that helper now competes with a tokora method of the same name on the same receiver.
+An inherent item wins the pick.
+
+**You are exposed if you wrote a `pop`, `clear` or `iter_mut` method of your own on
+[`Errors`](https://docs.rs/tokora/latest/tokora/error/struct.Errors.html).** Reproduced two-sided
+by `ci/name_collision/`, base `40694dc` against this branch, on rustc 1.99.0-nightly:
+
+```text
+loud    clear/used          base=witness=1  head=no-compile
+SILENT  clear/discarded     base=witness=1  head=witness=0
+loud    iter_mut/used       base=witness=1  head=no-compile
+SILENT  iter_mut/discarded  base=witness=1  head=witness=0
+loud    pop/used            base=witness=1  head=no-compile
+SILENT  pop/discarded       base=witness=1  head=witness=0
+```
+
+On the three discarded rows both sides compile, **neither emits any diagnostic**, and the two run
+different programs: yours before, tokora's after. Every `used` row is `loud` on the same probe
+(`E0308` against the consumer's `-> u8`), so a **discarded return** is the whole of the
+difference. The discriminator is the lint rather than a `#[must_use]` attribute, measured per
+name: `clear` returns `()`; `pop` returns an `Option`, which is not `#[must_use]` as a type; and
+`iter_mut` returns the container's own `IterMut`, which the lint did not fire on either — the row
+a rule of thumb would have called `warned`, and the reason the set is measured rather than
+reasoned about. **The remedy is UFCS**: `MyTrait::pop(&mut errors)` pins your method by name and
+is immune to this.
+
+The deref does not enter it, which is worth saying because the base side still had one: a deref
+step is walked only after every pick on `Errors` itself has failed, and the consumer's item is
+found at the `&mut Errors` pick. The before-state is the consumer's item on both readings.
+
+`ErrorContainer`'s two new names are **not** in this section, and for two different reasons.
+`clear` is a `&mut self` trait method, so it sits at a strictly later pick than either consumer
+shape the harness can generate, the three rows agree on both sides, and they are justified by name
+in `no_collision.txt` rather than read as green — `Emitter::commit_lexer_error`'s analysis exactly.
+`from_errors` declares no receiver, so a call to it walks no receiver chain at all: tokora's item
+and a consumer's own extension item are both applicable at the one pick, and rustc refuses to
+choose. Both rows are loud, by `E0034`:
+
+```text
+loud    from_errors/used        base=witness=1  head=no-compile
+loud    from_errors/discarded   base=witness=1  head=no-compile
+```
+
+It is the trait's first receiver-less item since it shipped, which is why `gen_probe.py`'s
+`ErrorContainer` record gains a `self_ty`. That field was absent on the reading that `new` and
+`with_capacity` were the only receiver-less items and both pre-existing — true when written, and
+the kind of statement a new constructor falsifies. A missing `self_ty` is FATAL rather than a
+skipped row, so the harness would have said so.
+
+Recorded in `ci/name_collision/disclosed.txt`, and on **this** branch: the probe's inventory is a
+two-sided delta, so once this merges the names exist on both sides, the rows leave every future
+plan, and the harness can never re-litigate them.
 
 ## 0.9.1 (2026-08-08)
 

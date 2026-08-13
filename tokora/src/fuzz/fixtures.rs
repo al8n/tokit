@@ -399,7 +399,7 @@ where
   }
 
   #[inline]
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     self.count
   }
 

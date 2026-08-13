@@ -25,8 +25,15 @@
 //!
 //! [`emitter_ref`](InputRef::emitter_ref) remains public and hands back `&Ctx::Emitter` — the
 //! door for reading a concrete emitter's own state mid-parse (a collecting emitter's diagnostics,
-//! say). A **shared** reference cannot re-enter an emitter slot: every recording method on the
-//! trait family takes `&mut self`, so a wrapper built around `&Sink` can forward none of them.
+//! say). A **shared** reference cannot re-enter an emitter slot, and cannot reach the lineage
+//! either: every method on the trait family that records *or captures* anything takes
+//! `&mut self`, so a wrapper built around `&Sink` can forward none of them.
+//!
+//! That second half is newer than the first. [`Emitter::checkpoint`] took `&self` through 0.9.1,
+//! so the observation-only door handed out a capture — and the recording sink, whose `checkpoint`
+//! pushes a mark-stack row, gained a row no settle would ever spend and a structural floor that
+//! changed which tokens recovery wrapped (al8n/tokora#257). The repair is the receiver rather
+//! than a warning: capture is not an observation, so it does not travel on the observation door.
 //!
 //! # What is deliberately *not* forwarded
 //!
@@ -94,10 +101,22 @@ where
   /// while the parse is running (a collecting emitter's recorded diagnostics, a counter, a
   /// label stack).
   ///
-  /// Shared on purpose, and that is the whole of the difference: every method that *records*
-  /// anything — on [`Emitter`], on [`CstEmitter`], on the atomic emitter family — takes
-  /// `&mut self`, so a wrapper type built around this reference can forward none of them and
-  /// cannot stand in an emitter slot. To emit, call the forwarding methods on this handle.
+  /// Shared on purpose, and the receiver is the whole of the difference: every method that
+  /// *records* anything — on [`Emitter`], on [`CstEmitter`], on the atomic emitter family — and
+  /// every method that *captures* a mark takes `&mut self`, so a wrapper type built around this
+  /// reference can forward none of them, cannot stand in an emitter slot, and cannot mint a
+  /// checkpoint the input layer never took. To emit, call the forwarding methods on this handle.
+  ///
+  /// # What a shared reference does not promise
+  ///
+  /// `Ctx::Emitter` is the caller's own type, and Rust has no bound that excludes interior
+  /// mutability, so an emitter that mutates itself through `&self` can be driven to do so from
+  /// here. Nothing the crate accounts for is reachable that way — the event log, the mark stack
+  /// and the checkpoint lineage all sit behind `&mut` receivers — but an emitter's own
+  /// guarantees about its own state are its own to keep, in the terms
+  /// [`HashSet`](https://doc.rust-lang.org/std/collections/struct.HashSet.html) uses for a key
+  /// that changes while it is in the set: a logic error, with unspecified rather than undefined
+  /// behavior, and deliberately not enumerated.
   #[inline(always)]
   pub const fn emitter_ref(&self) -> &Ctx::Emitter {
     &*self.session.emitter

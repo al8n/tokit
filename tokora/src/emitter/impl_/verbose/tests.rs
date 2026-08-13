@@ -195,7 +195,7 @@ fn verbose_hole_records_interleave_into_diagnostics_in_emission_order() {
   exit(&mut v);
 
   // Every record advanced the shared checkpoint.
-  let ckp = <Verbose<(), SimpleSpan> as Emitter<'_, crate::lexer::DummyLexer>>::checkpoint(&v);
+  let ckp = <Verbose<(), SimpleSpan> as Emitter<'_, crate::lexer::DummyLexer>>::checkpoint(&mut v);
   assert_eq!(ckp, 3, "the hole record rides the shared emission log");
 
   // The hole is still readable through its own accessor, labels captured like any record.

@@ -137,3 +137,43 @@ exit_label/discarded
 # `used` binding for this row is the CONSUMER's `u8` rather than the item's real `usize`, which is
 # the shape the table's header prescribes for a pre-existing owner.
 resource_trips/discarded
+
+# ── `Errors`' three replacement methods — a PRE-EXISTING struct that had NO inherent item ─
+#
+# `Errors` has shipped since 0.7.3 with `DerefMut` onto its container and no inherent removal
+# or element-mutation door of its own, so `errors.pop()`, `errors.clear()` and
+# `errors.iter_mut()` all reached the container's API through the deref — or, for a consumer
+# who wanted a different shape, an extension trait of their own. #247 removes `DerefMut` (it
+# was also the insertion bypass that defeated `overflowed()`) and replaces those three with
+# inherent methods, so every such consumer now competes with a tokora method of the same name
+# on the same receiver, and an inherent item wins the pick.
+#
+# Reproduced, two-sided, base 40694dc against this branch, on rustc 1.99.0-nightly:
+#
+#     loud    clear/used          base=witness=1  head=no-compile
+#     SILENT  clear/discarded     base=witness=1  head=witness=0
+#     loud    iter_mut/used       base=witness=1  head=no-compile
+#     SILENT  iter_mut/discarded  base=witness=1  head=witness=0
+#     loud    pop/used            base=witness=1  head=no-compile
+#     SILENT  pop/discarded       base=witness=1  head=witness=0
+#
+# Both sides compile on the discarded rows, neither emits a diagnostic, and the two run
+# different programs. Every `used` row is `loud` by E0308 against the consumer's `-> u8`, so
+# the discarded return is the whole of the difference — the same discriminator as every row
+# above, and measured per name rather than assumed: `clear` returns `()`; `pop` returns an
+# `Option`, which is not `#[must_use]` as a type; and `iter_mut` returns the container's own
+# `IterMut`, which — despite "iterators are lazy" being the canonical `#[must_use]` — the lint
+# did not fire on here. That third one is why the set is measured: it is the row a rule of
+# thumb would have predicted `warned`.
+#
+# NOT a bounded receiver. `Errors<E, C>` is a concrete public struct; there is no blanket impl
+# to reject anybody, exactly as for `RecursionLimiter::unlimited`, `ParseState`'s four and
+# `Cst::resource_trips`.
+#
+# THE DEREF DOES NOT ENTER IT, and that is worth stating because the base side still had one:
+# a deref step is walked only after every pick on `Errors` itself has failed, and the
+# consumer's item is found at the `&mut Errors` pick. So what the base side runs is the
+# consumer's item, not `VecDeque`'s — the before-state is a real one either way.
+clear/discarded
+iter_mut/discarded
+pop/discarded

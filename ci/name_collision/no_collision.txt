@@ -120,3 +120,28 @@ labels_iter/later_pick_discarded
 path_segments_iter/same_pick
 path_segments_iter/later_pick_used
 path_segments_iter/later_pick_discarded
+
+# ── `ErrorContainer::clear` — the `&mut self` trait method, for the third time ────────────
+#
+# tokora's is `fn clear(&mut self)`, defaulted on the `ErrorContainer` trait. The subject is
+# `Option::<PErr>::None`, one of the four types tokora implements the trait for, chosen over
+# `Vec`/`VecDeque` because those carry an inherent `clear` of their own that would confound the
+# walk, and over a `GenericArrayDeque` because it needs construction. `Option` derefs to
+# nothing, so there is exactly one step and three picks on it: by value, `&`, then `&mut`. The
+# `trait_method` template's consumer is `impl<T> ConsumerComb for T`, supplying a candidate at
+# every pick, and its three spellings declare `self` or `&self` — the first and second picks.
+# tokora's sits at the third. The earlier pick wins, on both sides, and tokora's item is never
+# a candidate.
+#
+# This is `Emitter::commit_lexer_error` exactly: same rule, same trait shape, same conclusion.
+# The verdict is FOREKNOWN from the receiver kinds, which is #225's ruling — the consumer that
+# would genuinely compete declares `&mut self`, collides at the same pick, and is E0034-loud,
+# and `trait_method` cannot generate it.
+#
+# Read these three as "the `self`/`&self` consumer keeps its call", never as "`clear` cannot be
+# stolen". The `&mut self` competitor is real and is disclosed on the INHERENT side of the same
+# change: `Errors::clear` is measured SILENT in `disclosed.txt`, on the same name, because
+# there tokora's item and the consumer's do meet at one pick.
+clear/same_pick
+clear/later_pick_used
+clear/later_pick_discarded

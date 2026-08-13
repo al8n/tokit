@@ -193,6 +193,18 @@ fn every_ui_case_file_is_registered() {
 /// panic's, so no sink-side check and no other gate can see it. Same reason the two session-point
 /// cases exist — the guarantee lives entirely in the type system, so it needs a test that compiles
 /// nothing.
+///
+/// The last two pin **removed capability**, where a compile failure is not a proxy for the
+/// guarantee but *is* the guarantee. `emitter_ref_cannot_checkpoint` holds the receiver on
+/// `Emitter::checkpoint`: capturing a mark is a capability, so it must not travel on the shared
+/// reference `InputRef::emitter_ref` hands a parser (#257). It is written against a generic
+/// `Ctx::Emitter` on purpose — the wall is not the recording sink's, even though the sink is where
+/// the corruption was found. `errors_has_no_structural_mutation_door` holds **both** halves of
+/// #247's removal, `DerefMut` and the derived `AsMut<C>`, in one file: they were the same door
+/// under two names, and a case pinning one would go green over a re-derived other. Neither has a
+/// runtime shadow after the fix — that is what "unreachable" means — so the sibling tests in
+/// `src/cst/sink/tests.rs` and `src/error/errors/tests.rs` cover what still compiles, and these
+/// two cover what must not.
 const BOUND_CASES: &[&str] = &[
   "tests/ui/session_sink.rs",
   "tests/ui/bundle1_policy.rs",
@@ -201,6 +213,8 @@ const BOUND_CASES: &[&str] = &[
   "tests/ui/session_point_cannot_cross_into_a_bracket.rs",
   "tests/ui/session_point_cannot_cross_into_a_bracket_impl.rs",
   "tests/ui/cst_demote_cannot_be_inherited.rs",
+  "tests/ui/emitter_ref_cannot_checkpoint.rs",
+  "tests/ui/errors_has_no_structural_mutation_door.rs",
   "tests/ui/diagnose_adapters_are_not_exact_size.rs",
 ];
 

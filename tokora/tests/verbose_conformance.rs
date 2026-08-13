@@ -188,8 +188,14 @@ impl<O, Lang: ?Sized> From<NonAssociativeChain<O, Lang>> for ConfError {
 
 type Vb = Verbose<ConfError>;
 
+/// The emission mark, read rather than captured.
+///
+/// `Emitter::checkpoint` returns the same number, but it is a **capture** — it takes `&mut self`
+/// because for a recording emitter it registers a row a later settle must spend (al8n/tokora#257).
+/// What this suite asks is an observation, and `Verbose` answers it on its own read surface: the
+/// mark *is* the emission log's length, and `diagnostics()` replays exactly that log.
 fn mark(v: &Vb) -> u64 {
-  <Vb as Emitter<'_, TestLexer<'_>>>::checkpoint(v)
+  v.diagnostics().len() as u64
 }
 
 fn enter(v: &mut Vb, label: &'static str) {
@@ -1028,7 +1034,7 @@ mod sink_leg {
   use super::ConfError;
 
   use tokora::{
-    Emitter, InputRef, Lexer, SimpleSpan, Token, cache::DefaultCache, emitter::Verbose,
+    InputRef, Lexer, SimpleSpan, Token, cache::DefaultCache, emitter::Verbose,
     error::syntax::TooFew,
   };
 
@@ -1165,17 +1171,14 @@ mod sink_leg {
       profile,
       DefaultCache::<ByteLexer<'_>>::default(),
       |inp: &mut SinkIr<'_, '_>| -> Result<(), ConfError> {
-        let inner_before = <Verbose<ConfError> as Emitter<'_, ByteLexer<'_>>>::checkpoint(
-          inp.emitter_ref().inner_ref(),
-        );
+        // The inner's own reading, observed rather than captured — see `mark` above.
+        let inner_before = inp.emitter_ref().inner_ref().diagnostics().len();
         {
           let mut tx = inp.begin();
           tx.emit_too_few(TooFew::new(span, 1, 3))?;
           tx.rollback();
         }
-        let inner_after = <Verbose<ConfError> as Emitter<'_, ByteLexer<'_>>>::checkpoint(
-          inp.emitter_ref().inner_ref(),
-        );
+        let inner_after = inp.emitter_ref().inner_ref().diagnostics().len();
         assert_eq!(
           inner_after, inner_before,
           "the sink's rewind restores the inner emitter's own reading"

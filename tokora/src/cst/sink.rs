@@ -25,7 +25,7 @@
 //! recounts the suffix above the nearest frozen fact. A cached counter would need its own
 //! restore rule; a derived one is restored by truncation for free.
 
-use core::{cell::RefCell, marker::PhantomData, num::NonZeroU32};
+use core::{marker::PhantomData, num::NonZeroU32};
 
 use std::vec::Vec;
 
@@ -423,10 +423,14 @@ where
   journal: Vec<JournalEntry>,
   /// E4 — the mark stack: one row per live checkpoint capture, holding the frozen depth and
   /// the inner emitter's own checkpoint reading (the inner's rewind target).
-  /// Interior mutability because [`Emitter::checkpoint`] is `&self` by contract; every
-  /// borrow is method-local and non-reentrant, and the `&mut` paths use `get_mut` (no
-  /// runtime flag traffic).
-  rows: RefCell<Vec<MarkRow>>,
+  ///
+  /// Plain storage, and that is load-bearing rather than incidental: this was a `RefCell`
+  /// solely because [`Emitter::checkpoint`] used to take `&self`, and a cell reachable from a
+  /// shared reference is a mutation door on every `&Sink` — which is what
+  /// [`InputRef::emitter_ref`](crate::InputRef::emitter_ref) hands a parser. The receiver
+  /// carries the capability now (al8n/tokora#257), so no `&Sink` can push a row, and the sink
+  /// holds no cell for one to push through.
+  rows: Vec<MarkRow>,
   /// The newest *released* row: a frozen `(mark, depth)` fact that keeps depth derivation
   /// O(events-since-last-settle) instead of O(buffer) across commit-heavy loops.
   floor: MarkRow,
@@ -477,7 +481,7 @@ where
     f.debug_struct("Sink")
       .field("inner", &self.inner)
       .field("events", &self.events.len())
-      .field("live_marks", &self.rows.borrow().len())
+      .field("live_marks", &self.rows.len())
       .field("degraded", &self.degraded)
       .field("error_kind", &self.profile.error_kind())
       .field("gap_kind", &self.profile.gap_kind())
@@ -597,7 +601,7 @@ where
       events: Vec::with_capacity(capacity),
       demotes: false,
       journal: Vec::new(),
-      rows: RefCell::new(Vec::new()),
+      rows: Vec::new(),
       floor: MarkRow::ZERO,
       ledger: TruncationLedger::new(),
       base_inner: None,
@@ -657,7 +661,7 @@ where
   /// deltas of the events above it. Depth is **never** cached live — this recount is the
   /// restore rule (truncation restores it for free).
   fn derived_depth(&self) -> i64 {
-    let top = self.rows.borrow().last().copied();
+    let top = self.rows.last().copied();
     let base = match top {
       Some(row) if row.mark >= self.floor.mark => row,
       _ => self.floor,
@@ -985,7 +989,6 @@ where
     // immunity is gone and the floor must be extended to cover them.**
     let floor = self
       .rows
-      .borrow()
       .last()
       .map_or(0, |row| row.mark)
       .max(self.floor.mark) as usize;
@@ -1055,7 +1058,7 @@ where
     match self.base_inner {
       Some(mark) => mark,
       None => {
-        let mark = <E as Emitter<'inp, L, Lang>>::checkpoint(&self.inner);
+        let mark = <E as Emitter<'inp, L, Lang>>::checkpoint(&mut self.inner);
         self.base_inner = Some(mark);
         mark
       }
@@ -1232,11 +1235,11 @@ where
   /// every one after is undone. This requires a value-keyed inner (a pure monotone
   /// `checkpoint`, a drop-by-value `rewind`, a no-op `release`); the `commit_token`-forwarding
   /// token-tracking inner the sink now supports is exactly that shape.
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     let mark = self.events.len() as u64;
     let depth = self.derived_depth();
     let inner = self.inner.checkpoint();
-    self.rows.borrow_mut().push(MarkRow { mark, depth, inner });
+    self.rows.push(MarkRow { mark, depth, inner });
     mark
   }
 
@@ -1340,7 +1343,6 @@ where
       && mark < len
       && !self
         .rows
-        .get_mut()
         .iter()
         .rev()
         .copied()
@@ -1381,7 +1383,7 @@ where
     // rewound to. `None` is the no-row case, resolved below by what the sink still knows —
     // and the preflight above has already removed the one no-row case with no answer.
     let target_inner = {
-      let rows = self.rows.get_mut();
+      let rows = &mut self.rows;
       while rows.last().is_some_and(|row| row.mark > mark) {
         rows.pop();
       }
@@ -1509,7 +1511,7 @@ where
   /// way a *live* capture loses its row is a double settle, and that surfaces where it should:
   /// at the later `rewind`, which panics.
   fn release(&mut self, checkpoint: u64) {
-    let rows = self.rows.get_mut();
+    let rows = &mut self.rows;
     let row = if rows.last().map(|row| row.mark) == Some(checkpoint) {
       rows.pop()
     } else {
@@ -1922,7 +1924,7 @@ where
 {
   /// The number of live mark-stack rows (the release no-growth oracle).
   pub(crate) fn rows_len(&self) -> usize {
-    self.rows.borrow().len()
+    self.rows.len()
   }
 }
 

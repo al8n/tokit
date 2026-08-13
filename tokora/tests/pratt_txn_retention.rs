@@ -1488,7 +1488,7 @@ impl<'inp> Emitter<'inp, CountLexer<'inp>> for CollectingEm {
     LOG.with(|d| d.borrow_mut().push(Rec::Settle(span.start())));
   }
 
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     LOG.with(|d| d.borrow().len() as u64)
   }
 

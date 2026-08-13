@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/emitter_ref_cannot_checkpoint.rs:41:28
+   |
+41 |   Emitter::<L>::checkpoint(inp.emitter_ref())
+   |   ------------------------ ^^^^^^^^^^^^^^^^^ types differ in mutability
+   |   |
+   |   arguments to this function are incorrect
+   |
+   = note: expected mutable reference `&mut _`
+                      found reference `&<Ctx as ParseContext<'_, L>>::Emitter`
+note: method defined here
+  --> src/emitter/mod.rs
+   |
+   |   fn checkpoint(&mut self) -> u64 {
+   |      ^^^^^^^^^^

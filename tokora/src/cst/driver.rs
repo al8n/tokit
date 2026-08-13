@@ -240,12 +240,11 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 ///
 /// The *Inner-emitter contract* on [`Sink`] is in the type system, and this is where it is
 /// spent: `inner` must be a [`ValueKeyedEmitter`]. A **table-keyed** emitter — one that
-/// allocates per-`checkpoint` bookkeeping behind interior mutability and expects to reclaim it
-/// per-`release` — is refused here rather than accepted and then silently stranded (the sink's
-/// `release` forwards nothing, so such an inner would leak one row per committed capture):
+/// allocates per-`checkpoint` bookkeeping and expects to reclaim it per-`release` — is refused
+/// here rather than accepted and then silently stranded (the sink's `release` forwards nothing,
+/// so such an inner would leak one row per committed capture):
 ///
 /// ```rust,compile_fail
-/// use core::cell::RefCell;
 /// use tokora::{
 ///   Emitter, InputRef, Lexer, ParseContext, SimpleSpan, Token,
 ///   cache::DefaultCache,
@@ -257,7 +256,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// /// A table-keyed emitter: `checkpoint` allocates a row and hands back its index.
 /// #[derive(Default)]
 /// struct TableKeyed {
-///   rows: RefCell<Vec<u64>>,
+///   rows: Vec<u64>,
 /// }
 ///
 /// impl<'a, L, Lang: ?Sized> Emitter<'a, L, Lang> for TableKeyed {
@@ -272,10 +271,9 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 ///   ) -> Result<(), MiniErr> where L: Lexer<'a> { Ok(()) }
 ///   fn emit_error(&mut self, _e: Spanned<MiniErr, L::Span>) -> Result<(), MiniErr>
 ///   where L: Lexer<'a> { Ok(()) }
-///   fn checkpoint(&self) -> u64 {
-///     let mut rows = self.rows.borrow_mut();
-///     rows.push(0);
-///     rows.len() as u64 - 1 // a KEY, not a reading of the emission state
+///   fn checkpoint(&mut self) -> u64 {
+///     self.rows.push(0);
+///     self.rows.len() as u64 - 1 // a KEY, not a reading of the emission state
 ///   }
 ///   fn rewind(&mut self, _c: &Cursor<'a, '_, L>, _m: u64) where L: Lexer<'a> {}
 /// }

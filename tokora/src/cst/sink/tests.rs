@@ -228,6 +228,24 @@ fn map_tok(_: &MiniTok) -> u16 {
 type VerboseSink<'inp> = Sink<'inp, MiniLexer<'inp>, Verbose<TestErr>>;
 type FatalSink<'inp> = Sink<'inp, MiniLexer<'inp>, Fatal<TestErr>>;
 
+/// CELL_CENSUS's type-level half: **the sink holds no cell**, so `&Sink` — which is exactly what
+/// [`InputRef::emitter_ref`](crate::InputRef::emitter_ref) hands a parser mid-parse — writes
+/// nothing. The mark stack was a `RefCell` until al8n/tokora#257 purely because
+/// [`Emitter::checkpoint`] took `&self`, and a caller could push a row through it that no settle
+/// would ever spend.
+///
+/// `Sync` is the pin because every cell in `core::cell` is `!Sync`: reintroducing one fails this
+/// line rather than a comment. It is a pin on that mechanism and not a proof of immutability in
+/// general — an atomic is `Sync` and would pass — and it is not a threading promise; nothing in
+/// the crate sends a live sink anywhere. The claim being held is the one in the field's own doc:
+/// there is no cell for a shared reference to write through.
+#[test]
+fn the_sink_holds_no_cell_a_shared_reference_could_write_through() {
+  const fn assert_sync<T: Sync>() {}
+  assert_sync::<VerboseSink<'_>>();
+  assert_sync::<FatalSink<'_>>();
+}
+
 /// The fixture dialect's whole kind space: the synthetic root, the node/list/wrap kinds, the
 /// one token image, and the two kinds the sink synthesizes. A real range predicate, because
 /// `accept_all` is the escape hatch and not the default.
@@ -312,7 +330,7 @@ fn mark_appends_an_inert_tombstone() {
 #[should_panic(expected = "stale EventMark")]
 fn stale_mark_spend_panics_after_truncate_and_regrow() {
   let mut sink = verbose_sink("ab");
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   let mark = sink.cst_mark();
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   rewind(&mut sink, ckp);
@@ -327,7 +345,7 @@ fn stale_mark_spend_panics_after_truncate_and_regrow() {
 #[should_panic(expected = "stale EventMark")]
 fn stale_mark_panics_even_over_a_regrown_tombstone() {
   let mut sink = verbose_sink("");
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   let dead = sink.cst_mark();
   rewind(&mut sink, ckp);
   // Regrow a fresh tombstone at the very same index.
@@ -385,7 +403,7 @@ fn mark_survives_rewinds_strictly_above_it() {
   let mut sink = verbose_sink("abc");
   let mark = sink.cst_mark();
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
   rewind(&mut sink, ckp);
   sink.record_token(&MiniTok(b'c'), &span(1, 2));
@@ -502,7 +520,7 @@ fn demote_survives_a_truncation_strictly_above_it() {
   let mark = sink.cst_start(K_NODE);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_demote(mark, K_NODE);
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
   rewind(&mut sink, ckp);
 
@@ -536,7 +554,7 @@ fn demote_survives_a_truncation_strictly_above_it() {
 #[test]
 fn demote_dies_with_a_truncation_at_or_below_it() {
   let mut sink = verbose_sink("a");
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   let mark = sink.cst_start(K_NODE);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_demote(mark, K_NODE);
@@ -557,7 +575,7 @@ fn demote_dies_with_a_truncation_at_or_below_it() {
 #[should_panic(expected = "cst_demote on a mark")]
 fn stale_demote_panics_even_over_a_regrown_start_of_the_same_kind() {
   let mut sink = verbose_sink("");
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   let dead = sink.cst_start(K_NODE);
   rewind(&mut sink, ckp);
   let live = sink.cst_start(K_NODE);
@@ -1107,7 +1125,7 @@ fn a_start_left_open_by_an_escaping_panic_is_refused_by_finish_and_closed_by_fin
 fn a_rollback_into_the_demote_window_reopens_the_node() {
   let mut sink = verbose_sink("ab");
   let m = sink.cst_start(K_NODE); // slot 0
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // len 1: [StartNode(K_NODE)]
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink); // len 1: [StartNode(K_NODE)]
   sink.record_token(&MiniTok(b'a'), &span(0, 1)); // len 2
   sink.cst_demote(m, K_NODE); // len 3 — an APPEND above the checkpoint
   rewind(&mut sink, ckp); // truncate to len 1
@@ -1145,7 +1163,7 @@ fn a_rollback_into_the_demote_window_reopens_the_node() {
 fn a_demote_ticks_the_length_clock_so_no_rewind_can_straddle_it() {
   let mut sink = verbose_sink("ab");
   let m = sink.cst_start(K_NODE); // slot 0
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // len 1
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink); // len 1
   sink.cst_demote(m, K_NODE); // len 2 — the clock ticked
   assert_eq!(
     sink.events().len(),
@@ -1172,7 +1190,7 @@ fn a_demote_ticks_the_length_clock_so_no_rewind_can_straddle_it() {
 fn the_success_exit_rollback_into_the_window_is_exact_and_reclosable() {
   let mut sink = verbose_sink("ab");
   let _m = sink.cst_start(K_NODE);
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE); // success exit: an append
   rewind(&mut sink, ckp); // rollback into the window
@@ -1205,7 +1223,7 @@ fn the_success_exit_rollback_into_the_window_is_exact_and_reclosable() {
 fn a_reclose_after_a_rollback_into_the_demote_window_is_legal() {
   let mut sink = verbose_sink("ab");
   let m = sink.cst_start(K_NODE);
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_demote(m, K_NODE);
   rewind(&mut sink, ckp);
@@ -1235,9 +1253,9 @@ fn a_reclose_after_a_rollback_into_the_demote_window_is_legal() {
 fn a_frozen_row_depth_stays_true_across_a_demote_and_its_rollback() {
   let mut sink = verbose_sink("ab");
   let m = sink.cst_start(K_NODE); // slot 0
-  let _outer = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // row(mark 1, depth 1) — stays live
+  let _outer = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink); // row(mark 1, depth 1) — stays live
   sink.record_token(&MiniTok(b'a'), &span(0, 1)); // len 2
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // row(mark 2, depth 1)
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink); // row(mark 2, depth 1)
   sink.record_token(&MiniTok(b'b'), &span(1, 2)); // len 3
   sink.cst_demote(m, K_NODE); // len 4 — appended, ABOVE both rows
   rewind(&mut sink, ckp); // spends row(mark 2), keeps row(mark 1)
@@ -1281,7 +1299,7 @@ fn rewind_reverses_the_forward_parent_write() {
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   let mark = sink.cst_mark();
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
 
   // The speculative wrap: StartAt + finish, with the journaled fp write onto index 1.
   sink.cst_start_at(mark, K_WRAP);
@@ -1310,7 +1328,7 @@ fn regrown_branch_cannot_inherit_a_dead_wrap() {
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   let mark = sink.cst_mark();
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.cst_start_at(mark, K_WRAP);
   sink.record_token(&MiniTok(b'c'), &span(2, 3));
   sink.cst_finish(K_WRAP);
@@ -1459,7 +1477,7 @@ fn orphan_finish_debug_asserts_at_emission() {
 fn mismatched_finish_kind_is_a_typed_error() {
   let mut sink = verbose_sink("a");
   sink.cst_start(K_NODE);
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.cst_start(K_LIST); // the start this finish was meant to close …
   rewind(&mut sink, ckp); //  … rolled back: K_LIST never existed
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
@@ -1486,7 +1504,7 @@ fn mismatched_finish_kind_is_a_typed_error() {
 fn cst_finish_across_a_live_checkpoint_is_legal_and_materializes() {
   let mut sink = verbose_sink("a");
   sink.cst_start(K_NODE);
-  let _ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let _ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -1506,7 +1524,7 @@ fn cst_finish_across_a_live_checkpoint_is_legal_and_materializes() {
 fn legal_cross_checkpoint_close_still_accepted() {
   let mut sink = verbose_sink("a");
   sink.cst_start(K_NODE);
-  let _ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let _ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE);
   let (green, _emitter) = sink.finish(K_ROOT);
@@ -1523,7 +1541,7 @@ fn legal_cross_checkpoint_close_still_accepted() {
 #[should_panic(expected = "global underflow")]
 fn cst_finish_debug_asserts_on_genuine_global_underflow_across_a_checkpoint() {
   let mut sink = verbose_sink("a");
-  let _ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let _ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   sink.cst_finish(K_NODE); // nothing was ever open — global underflow, checkpoint or not
 }
@@ -1540,7 +1558,7 @@ fn cst_finish_debug_asserts_on_genuine_global_underflow_across_a_checkpoint() {
 fn rewind_recovers_the_inner_mark_from_the_mark_row() {
   let mut sink = verbose_sink("");
   emit_error(&mut sink, 0, 1);
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   emit_error(&mut sink, 1, 2);
   emit_error(&mut sink, 2, 3);
   assert_eq!(sink.inner_ref().errors().len(), 3);
@@ -1617,7 +1635,7 @@ fn rewind_ignores_out_of_range_marks() {
 fn rewind_to_current_mark_is_truncation_free() {
   let mut sink = verbose_sink("");
   let mark = sink.cst_mark();
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   assert_eq!(sink.rows_len(), 1);
   rewind(&mut sink, ckp);
   assert_eq!(sink.rows_len(), 0, "the capture was spent");
@@ -1633,9 +1651,9 @@ fn rewind_to_current_mark_is_truncation_free() {
 #[test]
 fn checkpoint_rows_freeze_derived_depth() {
   let mut sink = verbose_sink("");
-  let first = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let first = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.cst_start(K_NODE);
-  let second = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let second = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   assert_eq!(sink.rows_len(), 2);
 
   // Kept captures release newest-first (the LIFO settle order).
@@ -1722,7 +1740,7 @@ fn tokenless_hole_makes_no_node() {
 fn hole_wrap_rewinds_with_the_log() {
   let mut sink = verbose_sink("xab");
   sink.record_token(&MiniTok(b'x'), &span(0, 1));
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.record_token(&MiniTok(b'a'), &span(1, 2));
   sink.record_token(&MiniTok(b'b'), &span(2, 3));
   Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(1, 3), 2).expect("collects");
@@ -1754,7 +1772,7 @@ fn hole_wrap_floors_at_the_youngest_live_row() {
   sink.record_token(&MiniTok(b'a'), &span(0, 1)); // idx 0 — committed
   sink.record_token(&MiniTok(b' '), &span(1, 2)); // idx 1 — committed trivia
   let before = sink.events().to_vec();
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // mark 2
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink); // mark 2
   sink.record_token(&MiniTok(b'j'), &span(2, 3)); // idx 2 — the junk this transaction skipped
 
   // The span widens BACKWARD over the already-committed trivia at idx 1 — the shape an
@@ -1802,7 +1820,7 @@ fn hole_wrap_floors_at_the_youngest_live_row() {
 fn hole_wrap_covers_a_post_checkpoint_hole_whole() {
   let mut sink = verbose_sink("xyab");
   sink.record_token(&MiniTok(b'x'), &span(0, 1)); // idx 0
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // mark 1 — the floor
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink); // mark 1 — the floor
   sink.record_token(&MiniTok(b'y'), &span(1, 2)); // idx 1 — settled, outside the hole
   sink.record_token(&MiniTok(b'a'), &span(2, 3)); // idx 2 — the hole
   sink.record_token(&MiniTok(b'b'), &span(3, 4)); // idx 3 — the hole
@@ -1872,6 +1890,59 @@ fn hole_wrap_with_no_rows_floors_at_zero() {
   );
 }
 
+/// The positive twin of al8n/tokora#257, on the geometry the audit probe attacked: **the
+/// observation door observes.** Every operation a parser can reach through the `&Sink` that
+/// [`InputRef::emitter_ref`](crate::InputRef::emitter_ref) hands it — the emitter trait's one
+/// shared query, the sink's own shared readers, and `Debug` — runs between the two tokens, and
+/// the hole still wraps both of them because the mark stack is still empty.
+///
+/// The probe's one extra call was `Emitter::checkpoint` through the same reference. It pushed a
+/// row at mark 1, which floored the wrap there: the error node covered `"b"` alone while the
+/// diagnostic said `"ab"`. That call no longer compiles — the receiver is `&mut self` — so what
+/// remains to pin is that nothing which *does* compile through this door moves a row.
+#[test]
+fn permitted_inspection_through_a_shared_sink_reference_moves_no_row() {
+  let mut sink = verbose_sink("ab");
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+
+  {
+    // The reference the handle actually hands out, and everything reachable from it.
+    let observed: &VerboseSink<'_> = &sink;
+    let _ = Emitter::<MiniLexer<'_>>::bound_source(observed);
+    let _ = observed.inner_ref().errors().len();
+    let _ = observed.error_kind();
+    let _ = observed.gap_kind();
+    let _ = observed.trivia_policy();
+    let _ = std::format!("{observed:?}");
+    assert_eq!(observed.rows_len(), 0, "an observation captures nothing");
+  }
+
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+  Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(0, 2), 2).expect("collects");
+
+  assert_eq!(sink.rows_len(), 0, "and still nothing to settle");
+  assert_eq!(
+    sink.events(),
+    &[
+      Event::StartNode {
+        kind: K_ERR,
+        forward_parent: None
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(0, 1)
+      },
+      Event::Token {
+        kind: K_TOK,
+        span: span(1, 2)
+      },
+      Event::FinishNode { kind: K_ERR },
+      Event::Diag { error_span: None },
+    ],
+    "the recovery node covers both tokens — the diagnostic's span and the wrap agree"
+  );
+}
+
 /// The boundary itself: the wrap starts at exactly the mark index. A row with `mark == at`
 /// names the prefix `0..at`, which an insert *at* `at` leaves byte-for-byte alone — so the
 /// rewind is still exact at the tightest legal splice point.
@@ -1880,7 +1951,7 @@ fn hole_wrap_at_the_floor_boundary_rewinds_exactly() {
   let mut sink = verbose_sink("ab");
   sink.record_token(&MiniTok(b'a'), &span(0, 1)); // idx 0
   let before = sink.events().to_vec();
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // mark 1 == the eventual wrap start
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink); // mark 1 == the eventual wrap start
   sink.record_token(&MiniTok(b'b'), &span(1, 2)); // idx 1
 
   Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(1, 2), 1).expect("collects");
@@ -1925,12 +1996,12 @@ fn hole_wrap_floors_at_the_released_floor_too() {
   let mut sink = verbose_sink("abcde");
   sink.cst_start(K_NODE); // idx 0 — depth +1, still open at the end
   sink.record_token(&MiniTok(b'a'), &span(0, 1)); // idx 1
-  let outer = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // mark 2 — stays live
+  let outer = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink); // mark 2 — stays live
   let before = sink.events().to_vec();
   sink.record_token(&MiniTok(b'b'), &span(1, 2)); // idx 2
   sink.record_token(&MiniTok(b'c'), &span(2, 3)); // idx 3
   sink.record_token(&MiniTok(b'd'), &span(3, 4)); // idx 4
-  let inner = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // mark 5
+  let inner = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink); // mark 5
   Emitter::<MiniLexer<'_>>::release(&mut sink, inner); // committed → Sink::floor = mark 5
   sink.record_token(&MiniTok(b'e'), &span(4, 5)); // idx 5
 
@@ -2092,7 +2163,7 @@ fn cst_forward_census_one_helper_carries_every_channel() {
   );
   // The inner's reading is captured in exactly two places: the mark-stack row and the base.
   assert!(
-    count(src, "self.inner.checkpoint()") == 1 && count(src, "checkpoint(&self.inner)") == 1,
+    count(src, "self.inner.checkpoint()") == 1 && count(src, "checkpoint(&mut self.inner)") == 1,
     "CST_FORWARD_CENSUS drift: the inner's reading is captured in exactly two places — the \
      mark-stack row (sink checkpoint) and the base prime (base_inner_mark)"
   );
@@ -4073,7 +4144,7 @@ fn declined_wrap_leaves_the_retry_tree_pristine() {
   sink.record_token(&MiniTok(b'a'), &span(0, 1));
   let mark = sink.cst_mark();
   sink.record_token(&MiniTok(b'b'), &span(1, 2));
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   sink.cst_start_at(mark, K_WRAP);
   sink.record_token(&MiniTok(b'c'), &span(2, 3));
   sink.cst_finish(K_WRAP);
@@ -4112,7 +4183,7 @@ fn backtrack_equivalence_yields_identical_green_trees() {
   let (straight_green, _emitter) = straight.finish(K_ROOT);
 
   let mut backtracked = verbose_sink("ab");
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&backtracked);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut backtracked);
   backtracked.cst_start(K_LIST);
   backtracked.record_token(&MiniTok(b'a'), &span(0, 1));
   rewind(&mut backtracked, ckp);
@@ -4524,7 +4595,7 @@ impl<'a, L, Lang: ?Sized> Emitter<'a, L, Lang> for JournalingEmitter {
     Ok(())
   }
 
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     self.journal.len() as u64
   }
 
@@ -4761,7 +4832,7 @@ fn caught_unpaired_settle_panic_leaves_the_sink_exactly_as_it_was() {
   // destroy, and a retro-wrap mark so the journal and the ledger do too.
   let tomb = CstEmitter::<MiniLexer<'_>, ()>::cst_mark(&mut sink);
   Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'a'), &span(0, 1));
-  let live = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let live = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'b'), &span(1, 2));
   CstEmitter::<MiniLexer<'_>, ()>::cst_start_at(&mut sink, tomb, K_NODE);
   CstEmitter::<MiniLexer<'_>, ()>::cst_finish(&mut sink, K_NODE);
@@ -5022,9 +5093,9 @@ fn release_of_a_non_innermost_mark_is_lawful_and_silent() {
   let mut sink = verbose_sink("abc");
 
   // An outer capture, some traffic, then an inner capture: two rows at distinct marks.
-  let outer = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let outer = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'a'), &span(0, 1));
-  let inner = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let inner = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'b'), &span(1, 2));
   assert!(outer < inner, "the captures sit at distinct marks");
   assert_eq!(sink.rows_len(), 2);
@@ -5197,7 +5268,7 @@ fn out_of_range_rewind_spends_no_live_row() {
 
   // One settled token, then a live checkpoint AT the current length: len == 1, row at 1.
   Emitter::<MiniLexer<'_>>::commit_token(&mut sink, &MiniTok(b'a'), &span(0, 1));
-  let c = Emitter::<MiniLexer<'_>>::checkpoint(&sink);
+  let c = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
   assert_eq!(c, 1, "the checkpoint sits exactly at the current length");
   assert_eq!(sink.rows_len(), 1);
 
@@ -5853,7 +5924,7 @@ fn wrap_chain_survives_rewind_and_regrow() {
   let mut sink = verbose_sink("a");
   let mark = sink.cst_mark(); // index 0
   sink.record_token(&MiniTok(b'a'), &span(0, 1)); // index 1
-  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&sink); // the truncation point, index 2
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink); // the truncation point, index 2
 
   // The branch that dies: one wrap declared and then rolled back.
   sink.cst_start_at(mark, K_WRAP); // index 2
@@ -6576,8 +6647,8 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for NonForwardingWrapper<'_, 'i
     self.0.emit_skipped_region(span, skipped)
   }
 
-  fn checkpoint(&self) -> u64 {
-    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::checkpoint(&*self.0)
+  fn checkpoint(&mut self) -> u64 {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::checkpoint(&mut *self.0)
   }
 
   fn rewind(&mut self, cursor: &crate::input::Cursor<'inp, '_, MiniLexer<'inp>>, ckp: u64) {
@@ -7545,8 +7616,8 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForward<'_, 'inp> {
     self.0.emit_error(err)
   }
 
-  fn checkpoint(&self) -> u64 {
-    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::checkpoint(&*self.0)
+  fn checkpoint(&mut self) -> u64 {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::checkpoint(&mut *self.0)
   }
 
   fn rewind(&mut self, cursor: &Cursor<'inp, '_, MiniLexer<'inp>>, ckp: u64) {
@@ -7633,8 +7704,8 @@ impl<'inp> crate::Emitter<'inp, MiniLexer<'inp>> for HalfForwardPartial<'_, 'inp
     self.inner.emit_error(err)
   }
 
-  fn checkpoint(&self) -> u64 {
-    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::checkpoint(&*self.inner)
+  fn checkpoint(&mut self) -> u64 {
+    crate::Emitter::<'inp, MiniLexer<'inp>, ()>::checkpoint(&mut *self.inner)
   }
 
   fn rewind(&mut self, cursor: &Cursor<'inp, '_, MiniLexer<'inp>>, ckp: u64) {
