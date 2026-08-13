@@ -95,22 +95,35 @@ pub type DefaultContainer<E> = VecDeque<E>;
 /// let first: Option<&&str> = errors.front();
 /// assert_eq!(first, Some(&"Error 1"));
 /// ```
-#[derive(
-  Debug,
-  Clone,
-  PartialEq,
-  Eq,
-  Hash,
-  derive_more::Deref,
-  derive_more::DerefMut,
-  derive_more::AsRef,
-  derive_more::AsMut,
-)]
+/// # Why there is no mutable door onto the container
+///
+/// `overflowed_flag` is wrapper metadata about something the container does not record: that an
+/// error was *offered* and did not fit. Only an insertion can create that fact, so only the
+/// wrapper's own insertion gateway ([`push`](Self::push) / [`try_push`](Self::try_push)) can
+/// maintain it — and a `DerefMut`/`AsMut<C>` onto `C` handed callers the container's own
+/// insertion API, through which a bounded container rejects a value and
+/// [`overflowed`](Self::overflowed) never learns of it (al8n/tokora#247). Both doors are gone.
+/// Documenting the obligation was the alternative, and it is the kind of promise the compiler
+/// does not keep: the flag cannot be *derived* from the container either, because a full
+/// container and a full container that has refused ten errors are the same container.
+///
+/// What survives is everything that cannot invent that fact: the shared views
+/// ([`Deref`](core::ops::Deref), [`AsRef`](core::convert::AsRef)), in-place element mutation
+/// ([`iter_mut`](Self::iter_mut), and `AsMut<[E]>` where the container is contiguous), and
+/// removal ([`pop`](Self::pop), [`clear`](Self::clear)) — removal cannot un-drop an error, so
+/// the flag is a historical fact and stays set.
+///
+/// `C` is the caller's own type and Rust has no bound that excludes interior mutability, so a
+/// container that mutates itself through `&self` will do so through the shared views. **It is a
+/// logic error for the container to be modified, after it is wrapped, in a way that changes what
+/// this type reports** — the same obligation
+/// [`HashSet`](https://doc.rust-lang.org/std/collections/struct.HashSet.html) states for a key,
+/// and, like it, the behavior that follows is unspecified rather than undefined and is
+/// deliberately not enumerated.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::Deref, derive_more::AsRef)]
 pub struct Errors<E, C = DefaultContainer<E>> {
   #[deref]
-  #[deref_mut]
   #[as_ref]
-  #[as_mut]
   container: C,
   overflowed_flag: bool,
   _phantom: core::marker::PhantomData<E>,
@@ -211,10 +224,35 @@ where
     }
   }
 
-  /// Returns `true` if any error has been dropped because of limited capacity.
+  /// Returns `true` if any error has **ever** been dropped because of limited capacity.
+  ///
+  /// A historical fact, not a reading of the container: it latches on the first rejected error
+  /// and no removal clears it, because removing an error that *is* held does not un-drop one
+  /// that never was. So a caller reading `false` may conclude that every error offered to
+  /// [`push`](Self::push) / [`try_push`](Self::try_push) is accounted for, whatever the
+  /// container has since done with them.
+  ///
+  /// That conclusion is only sound because those two are the *only* doors that can offer an
+  /// error; see the note on the type about why there is no mutable door onto the container.
   #[inline(always)]
   pub const fn overflowed(&self) -> bool {
     self.overflowed_flag
+  }
+
+  /// Removes and returns the oldest collected error.
+  ///
+  /// The replacement for reaching the container's own removal API through `DerefMut`. Removal
+  /// cannot invalidate [`overflowed`](Self::overflowed) — it is a fact about errors that never
+  /// entered — so this door needs no accounting of its own.
+  #[inline(always)]
+  pub fn pop(&mut self) -> Option<E> {
+    super::ErrorContainer::pop(&mut self.container)
+  }
+
+  /// Discards every collected error, leaving [`overflowed`](Self::overflowed) as it was.
+  #[inline(always)]
+  pub fn clear(&mut self) {
+    super::ErrorContainer::clear(&mut self.container);
   }
 
   /// Reports the remaining capacity when the backing container is bounded.
@@ -363,6 +401,22 @@ where
 }
 
 impl<E, C> Errors<E, C> {
+  /// Mutable access to the errors already collected, one at a time.
+  ///
+  /// Element mutation, never structural: the iterator yields `&mut E` and cannot add or remove
+  /// an element, so it cannot create the dropped-error fact
+  /// [`overflowed`](Self::overflowed) reports. It is the replacement for reaching the
+  /// container's own `iter_mut` through `DerefMut`, and it is bounded on the *method* rather
+  /// than on [`ErrorContainer`](super::ErrorContainer) so that adding it breaks no existing
+  /// container implementation — every standard container satisfies it.
+  #[inline]
+  pub fn iter_mut<'a>(&'a mut self) -> <&'a mut C as IntoIterator>::IntoIter
+  where
+    &'a mut C: IntoIterator<Item = &'a mut E>,
+  {
+    (&mut self.container).into_iter()
+  }
+
   /// Creates an `Errors` instance from an existing container.
   ///
   /// ## Examples

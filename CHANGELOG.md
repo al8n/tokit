@@ -34,6 +34,11 @@ and will red until they do.
 
 ### Added
 
+- **`ErrorContainer::clear`.** `Errors` is now the only door onto its container (#247), so it has
+  to serve the removals that door used to reach through `DerefMut`. The method is defaulted
+  through `pop`, so an existing implementation keeps compiling unchanged; the four built-in
+  containers override it with their own.
+
 - **`InputRef::peek_map` — a windowed read whose return type can express a terminal stop.** The
   terminal-aware reads this crate shipped were all **head-only**: `peek_kind`, `head_satisfies` and
   `peek_head_map` raise on a resource-limit trip or a latched poison boundary and reserve
@@ -105,6 +110,36 @@ and will red until they do.
   still cannot promise is anything about a concrete emitter's *own* interior mutability; Rust has
   no bound that excludes it, so that is now stated on both accessors as a logic error in the
   terms `HashSet` uses for a key, and deliberately enumerates nothing.
+
+- **`Errors`' `DerefMut` and its derived `AsMut<C>` impl are removed** (#247). `overflowed()`
+  promises to report whether any error was dropped for want of capacity, and that fact exists
+  nowhere but the wrapper: a bounded container that is full and one that is full *and has refused
+  ten errors* are the same container, so the flag cannot be derived and has to be maintained.
+  Only `push`/`try_push` maintained it — and `DerefMut`, with the derived `AsMut<C>` beside it,
+  handed callers the container's own insertion API, through which a bounded container rejected a
+  value, returned it, and `overflowed()` went on saying `false`. In a `no_std` or otherwise
+  bounded configuration that is silent diagnostic truncation, reported as complete.
+
+  Both doors are gone rather than documented, for the reason #279 removed `as_mut_slice`: some
+  invariants can be maintained behind the caller's back and this one cannot. Removing only
+  `DerefMut` would have relocated the door rather than closed it, which is why the derived
+  `AsMut<C>` went with it.
+
+  What survives is everything that cannot invent a dropped error. The shared views are untouched
+  (`Deref`, the derived `AsRef<C>`, `IntoIterator for &Errors`, `Display`), `AsMut<[E]>` still
+  hands out the elements where the container is contiguous, and three inherent methods replace
+  what the removed doors were legitimately used for: `Errors::pop`, `Errors::clear` and
+  `Errors::iter_mut` — the last bounded on the method (`&'a mut C: IntoIterator<Item = &'a mut
+  E>`) rather than on `ErrorContainer`, so it costs no existing container implementation
+  anything. None of the three can create the fact `overflowed` reports, and none clears it
+  either: it is historical, and removing an error that *is* held does not un-drop one that never
+  entered. A caller that inserted through the container moves to `try_push`, which reports the
+  rejection the container's own door swallowed.
+
+  As with #279, the shared side cannot be made structural: `C` is the caller's type and Rust has
+  no bound against interior mutability, so a self-mutating container reaches the same state
+  through `Deref`. That is stated generically on the type, in the terms `HashSet` uses for a key,
+  and enumerates nothing.
 
 - **`IncompleteSyntax::as_mut_slice` and its `AsMut<[S::Component]>` impl are removed** (#245).
   The type documents its components as a *set*: insertion deduplicates, nothing removes, and
@@ -367,6 +402,50 @@ and will red until they do.
   `SliceVec` adapters without a heap. Every other `/default` entry in the `std` list was checked
   against its own crate's `default` at the version `Cargo.lock` resolves; tinyvec's was the only
   empty one.
+
+### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+#247 removes `Errors`' `DerefMut` and replaces the three legitimate uses it served with inherent
+methods. `Errors` has shipped since 0.7.3 **with no inherent item of its own**, so a consumer who
+wanted `pop`, `clear` or `iter_mut` in a shape the deref did not give them wrote an extension
+trait — and that helper now competes with a tokora method of the same name on the same receiver.
+An inherent item wins the pick.
+
+**You are exposed if you wrote a `pop`, `clear` or `iter_mut` method of your own on
+[`Errors`](https://docs.rs/tokora/latest/tokora/error/struct.Errors.html).** Reproduced two-sided
+by `ci/name_collision/`, base `40694dc` against this branch, on rustc 1.99.0-nightly:
+
+```text
+loud    clear/used          base=witness=1  head=no-compile
+SILENT  clear/discarded     base=witness=1  head=witness=0
+loud    iter_mut/used       base=witness=1  head=no-compile
+SILENT  iter_mut/discarded  base=witness=1  head=witness=0
+loud    pop/used            base=witness=1  head=no-compile
+SILENT  pop/discarded       base=witness=1  head=witness=0
+```
+
+On the three discarded rows both sides compile, **neither emits any diagnostic**, and the two run
+different programs: yours before, tokora's after. Every `used` row is `loud` on the same probe
+(`E0308` against the consumer's `-> u8`), so a **discarded return** is the whole of the
+difference. The discriminator is the lint rather than a `#[must_use]` attribute, measured per
+name: `clear` returns `()`; `pop` returns an `Option`, which is not `#[must_use]` as a type; and
+`iter_mut` returns the container's own `IterMut`, which the lint did not fire on either — the row
+a rule of thumb would have called `warned`, and the reason the set is measured rather than
+reasoned about. **The remedy is UFCS**: `MyTrait::pop(&mut errors)` pins your method by name and
+is immune to this.
+
+The deref does not enter it, which is worth saying because the base side still had one: a deref
+step is walked only after every pick on `Errors` itself has failed, and the consumer's item is
+found at the `&mut Errors` pick. The before-state is the consumer's item on both readings.
+
+`ErrorContainer::clear` is the same change's other new name, and it is **not** in this section:
+it is a `&mut self` trait method, so it sits at a strictly later pick than either consumer shape
+the harness can generate, the three rows agree on both sides, and they are justified by name in
+`no_collision.txt` rather than read as green — `Emitter::commit_lexer_error`'s analysis exactly.
+
+Recorded in `ci/name_collision/disclosed.txt`, and on **this** branch: the probe's inventory is a
+two-sided delta, so once this merges the names exist on both sides, the rows leave every future
+plan, and the harness can never re-litigate them.
 
 ## 0.9.1 (2026-08-08)
 

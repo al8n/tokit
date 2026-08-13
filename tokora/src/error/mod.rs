@@ -451,6 +451,17 @@ pub trait ErrorContainer<E> {
   /// Pop an error from the first of the collection.
   fn pop(&mut self) -> Option<E>;
 
+  /// Remove every error from the collection.
+  ///
+  /// Defaulted through [`pop`](Self::pop) so that an existing implementation keeps compiling;
+  /// override it wherever the container has a cheaper way. It exists because
+  /// [`Errors`] is the only door onto its container and therefore has to serve the
+  /// removals that door used to reach through `DerefMut`.
+  #[inline(always)]
+  fn clear(&mut self) {
+    while self.pop().is_some() {}
+  }
+
   /// Returns `true` if the collection is empty.
   #[inline(always)]
   fn is_empty(&self) -> bool {
@@ -506,6 +517,11 @@ impl<E> ErrorContainer<E> for Option<E> {
   }
 
   #[inline(always)]
+  fn clear(&mut self) {
+    *self = None;
+  }
+
+  #[inline(always)]
   fn len(&self) -> usize {
     if self.is_some() { 1 } else { 0 }
   }
@@ -556,6 +572,11 @@ impl<E, N: ArrayLength> ErrorContainer<E> for GenericArrayDeque<E, N> {
   #[inline(always)]
   fn pop(&mut self) -> Option<E> {
     self.pop_front()
+  }
+
+  #[inline(always)]
+  fn clear(&mut self) {
+    self.clear();
   }
 
   #[inline(always)]
@@ -618,6 +639,11 @@ const _: () = {
     }
 
     #[inline(always)]
+    fn clear(&mut self) {
+      self.clear();
+    }
+
+    #[inline(always)]
     fn len(&self) -> usize {
       self.len()
     }
@@ -659,6 +685,11 @@ const _: () = {
     #[inline(always)]
     fn pop(&mut self) -> Option<E> {
       self.pop_front()
+    }
+
+    #[inline(always)]
+    fn clear(&mut self) {
+      self.clear();
     }
 
     #[inline(always)]
