@@ -187,9 +187,15 @@ where
   /// The emitter, by **shared** reference — for reading a concrete emitter's own state while the
   /// parse is running (a collecting emitter's recorded diagnostics, a counter, a label stack).
   ///
-  /// Shared on purpose, and that is the whole of the difference: every method that *records*
-  /// anything takes `&mut self`, so a wrapper type built around this reference can forward none of
-  /// them and cannot stand in an emitter slot. To emit, call the forwarding methods on this view.
+  /// Shared on purpose, and the receiver is the whole of the difference: every method that
+  /// *records* anything and every method that *captures* a mark takes `&mut self`, so a wrapper
+  /// type built around this reference can forward none of them, cannot stand in an emitter slot,
+  /// and cannot mint a checkpoint the input layer never took ([`Emitter::checkpoint`] took
+  /// `&self` through 0.9.1 — al8n/tokora#257). To emit, call the forwarding methods on this view.
+  ///
+  /// The same residue [`InputRef::emitter_ref`](crate::InputRef::emitter_ref) states applies: `E`
+  /// is the caller's type, and what an emitter does to its own state through its own cells is
+  /// its own to account for.
   #[inline(always)]
   pub const fn emitter_ref(&self) -> &E {
     self.emitter

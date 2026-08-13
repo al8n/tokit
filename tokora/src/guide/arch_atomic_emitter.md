@@ -68,7 +68,7 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
     // fail-fast emitter inherits empty bodies and the calls inline to nothing.
     fn emit_warning(&mut self, warning: Spanned<Self::Error, L::Span>) -> Result<(), Self::Error> { Ok(()) }
     fn emit_skipped_region(&mut self, span: L::Span, skipped: usize) -> Result<(), Self::Error> { Ok(()) }
-    fn checkpoint(&self) -> u64 { 0 }
+    fn checkpoint(&mut self) -> u64 { 0 }
     fn release(&mut self, checkpoint: u64) {}
     fn commit_token(&mut self, tok: &L::Token, span: &L::Span) {}
     fn commit_lexer_error(&mut self, err: Spanned<..>) -> Result<(), Self::Error> { self.emit_lexer_error(err) }

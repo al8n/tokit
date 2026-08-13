@@ -72,6 +72,40 @@ and will red until they do.
 
 ### Changed (breaking)
 
+- **`Emitter::checkpoint` takes `&mut self`** (#257). Capturing a mark is a capability, not an
+  observation — for a recording emitter it registers per-mark state a later `rewind` or `release`
+  must find, and the input layer owns the lineage those marks belong to. The `&self` receiver put
+  that capability on *every* shared reference to an emitter, and two of those are public and
+  documented as observation-only: `InputRef::emitter_ref` and `EmitterView::emitter_ref`, which
+  exist so a parser can read a concrete emitter's own state mid-parse. The module header claimed
+  the boundary held — "a **shared** reference cannot re-enter an emitter slot: every recording
+  method on the trait family takes `&mut self`" — and that was true of every *recording* method
+  and false of the one that captures.
+
+  What it cost, through stable safe public APIs and the built-in sink:
+  `Emitter::checkpoint(inp.emitter_ref())` pushed a mark-stack row that no `InputRef` checkpoint
+  lineage owned and no settle would ever spend. A row's index is a structural floor for
+  `emit_skipped_region`'s hole wrap, so a recovery whose diagnostic spanned both tokens of `"ab"`
+  produced an error node covering `"b"` alone — a materialized, fully covered, silently wrong
+  tree rather than a refusal. Repeated calls retained one row each until the sink was consumed.
+
+  Documenting the obligation was the alternative, and it is the class of promise this crate has
+  been removing: a source census over the crate's own call sites cannot reach a downstream
+  caller, and the type signature said the call was allowed. The receiver says otherwise now, and
+  it says it for every emitter rather than for the one whose corruption was found. Two things
+  follow. `Sink::rows` is a plain `Vec` again — it was a `RefCell` **only** to satisfy the
+  `&self` receiver, so the sink now holds no cell at all and `&Sink` is observation-only
+  structurally rather than by convention. And an emitter that reached for interior mutability
+  for the same reason can drop it too.
+
+  Migration is the receiver and nothing else: an `impl Emitter` writes `fn checkpoint(&mut
+  self)`. A caller that reached the method through a shared reference wanted an observation, and
+  should ask for one — `Verbose`'s mark, for instance, *is* its emission-log length, which
+  `Verbose::diagnostics().len()` reports without capturing anything. What a shared reference
+  still cannot promise is anything about a concrete emitter's *own* interior mutability; Rust has
+  no bound that excludes it, so that is now stated on both accessors as a logic error in the
+  terms `HashSet` uses for a key, and deliberately enumerates nothing.
+
 - **`IncompleteSyntax::as_mut_slice` and its `AsMut<[S::Component]>` impl are removed** (#245).
   The type documents its components as a *set*: insertion deduplicates, nothing removes, and
   every other door preserves that. An unrestricted `&mut [Component]` is the one door that did

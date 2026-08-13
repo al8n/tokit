@@ -5132,7 +5132,7 @@ where
     self.record(Emission::Hole(span, skipped), span, ByValErr::Lex)
   }
 
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     self.log.len() as u64
   }
 
@@ -6974,7 +6974,7 @@ where
     Ok(())
   }
 
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     let id = self.next.get() + 1;
     self.next.set(id);
     self.live.borrow_mut().push((id, self.log.len()));
@@ -7953,7 +7953,7 @@ where
     self.commits.push((n, n));
   }
 
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     if self.panic_on_checkpoint {
       record_bomb_fired();
     }

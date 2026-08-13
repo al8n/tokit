@@ -325,14 +325,13 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// # Contract: `checkpoint` is fail-atomic, and a returned mark is settled exactly once
   ///
   /// If this call unwinds, the emitter's observable state and any per-mark bookkeeping must be
-  /// as if it never happened. It takes `&self` — registering per-mark state therefore requires
-  /// interior mutability, which is precisely the implementation opting into managing its own
-  /// atomicity: **reserve before you publish**. Grow your storage first, while nothing is
-  /// registered; then write into the reserved capacity, which cannot unwind. That is also why
-  /// this trait has no `reserve_checkpoint` hook: everything such a hook could do is expressible
-  /// inside this body, and the input layer already orders its own capture so that nothing
-  /// crate-side is pending when this is called — a hook would add a second method and no new
-  /// capability, on a trait every wrapper must remember to forward.
+  /// as if it never happened. Registering per-mark state is an implementation opting into
+  /// managing its own atomicity: **reserve before you publish**. Grow your storage first, while
+  /// nothing is registered; then write into the reserved capacity, which cannot unwind. That is
+  /// also why this trait has no `reserve_checkpoint` hook: everything such a hook could do is
+  /// expressible inside this body, and the input layer already orders its own capture so that
+  /// nothing crate-side is pending when this is called — a hook would add a second method and no
+  /// new capability, on a trait every wrapper must remember to forward.
   ///
   /// A mark that *is* returned is settled exactly once — by [`rewind`](Self::rewind) if the
   /// branch was abandoned, by [`release`](Self::release) if it was kept — and a call that
@@ -342,7 +341,23 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// mid-`checkpoint` still strands its own state; nothing in the crate can release what was
   /// never returned to it. This clause is what tells you not to — uphold it and there is
   /// nothing to strand. The recording CST sink's `checkpoint` is the reference implementation:
-  /// it reads, and registers nothing that a later settle must find.
+  /// it reads first and publishes its one row last, so a call that unwinds has registered
+  /// nothing for a settle to find, and a call that returns has registered exactly the row its
+  /// settle spends.
+  ///
+  /// # Why this takes `&mut self`
+  ///
+  /// Capturing a mark is a **capability**, not an observation: for a recording emitter it
+  /// registers per-mark state that a later `rewind` or `release` must find, and the input layer
+  /// owns the lineage those marks belong to. A `&self` receiver put that capability on every
+  /// shared reference to an emitter — including
+  /// [`InputRef::emitter_ref`](crate::InputRef::emitter_ref) and
+  /// [`EmitterView::emitter_ref`](crate::EmitterView::emitter_ref), which exist to *read* a
+  /// concrete emitter mid-parse. Parser code could then mint a mark the input layer never took
+  /// and no settle ever spends, and for the recording CST sink that stray row becomes a
+  /// structural floor that changes which tokens recovery wraps (al8n/tokora#257). The receiver
+  /// is what enforces the boundary: the two shared readers hand out `&Self`, so this method is
+  /// simply not callable through them.
   ///
   /// # Which operations take a mark is **not** part of the contract
   ///
@@ -391,7 +406,7 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// third way of losing inertness that nobody has thought of yet. The requirement is the one
   /// sentence, not the two bullets under it.
   #[inline(always)]
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     0
   }
 
@@ -814,7 +829,7 @@ where
   }
 
   #[inline(always)]
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     (**self).checkpoint()
   }
 

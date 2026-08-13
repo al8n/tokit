@@ -263,16 +263,16 @@ trait Emitter<'a, L, Lang = ()> {
     // stateless emitters write the trivially empty body by hand.
     fn rewind(.., u64);
     // defaulted surface — override only what your emitter records:
-    fn emit_warning(..)          // second, never-fatal channel
-    fn emit_skipped_region(..)   // one note per recovery hole (chapter 8)
-    fn checkpoint(&self) -> u64  //  ┐ the marks of that rewindable timeline: a reading
-    fn release(&mut self, u64)   //  ┘ taken at a save, reclaimed when a branch is kept
-    fn commit_token(.., ..)      // the auto-CST hook (see CstEmitter)
-    fn commit_lexer_error(..)    // its refusal-side twin: the INPUT LAYER's own lexer error,
-                                 // whose span is what licenses an untokenized byte in a CST
-                                 // parse. Defaults to emit_lexer_error, so a diagnostics-only
-                                 // emitter never notices the split.
-    fn enter_label / exit_label  // the "while parsing X" stack for `labelled`
+    fn emit_warning(..)              // second, never-fatal channel
+    fn emit_skipped_region(..)       // one note per recovery hole (chapter 8)
+    fn checkpoint(&mut self) -> u64  //  ┐ the marks of that rewindable timeline: a reading
+    fn release(&mut self, u64)       //  ┘ taken at a save, reclaimed when a branch is kept
+    fn commit_token(.., ..)          // the auto-CST hook (see CstEmitter)
+    fn commit_lexer_error(..)        // its refusal-side twin: the INPUT LAYER's own lexer error,
+                                     // whose span is what licenses an untokenized byte in a CST
+                                     // parse. Defaults to emit_lexer_error, so a diagnostics-only
+                                     // emitter never notices the split.
+    fn enter_label / exit_label      // the "while parsing X" stack for `labelled`
 }
 ```
 

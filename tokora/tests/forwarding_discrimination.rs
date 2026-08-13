@@ -396,7 +396,7 @@ impl<'inp> Emitter<'inp, TestLexer<'inp>> for Ledger {
     Ok(())
   }
 
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     self.note(Call::Checkpoint);
     self.emissions.get()
   }

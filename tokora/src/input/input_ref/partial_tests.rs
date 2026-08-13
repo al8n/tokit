@@ -2473,7 +2473,7 @@ where
     self.committed.push(*span);
   }
 
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     let id = self.next.get() + 1;
     self.next.set(id);
     self

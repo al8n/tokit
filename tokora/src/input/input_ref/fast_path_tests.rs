@@ -1920,7 +1920,7 @@ where
     note(Effect::CommitToken);
   }
 
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     note(Effect::Checkpoint);
     assert!(
       !fire(&CHECKPOINT_BOMB),

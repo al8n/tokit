@@ -837,7 +837,7 @@ where
     Ok(())
   }
 
-  fn checkpoint(&self) -> u64 {
+  fn checkpoint(&mut self) -> u64 {
     let id = self.next.get() + 1;
     self.next.set(id);
     self.live.borrow_mut().push(id);
