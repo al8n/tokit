@@ -49,19 +49,29 @@
 //! `usize`-offset `str` / `[u8]` sources) — driving the input in
 //! [`Partial`] mode over **every split point** and requiring
 //! chunked-equivalence under the frontier rules: a non-final drain of each prefix yields a
-//! **prefix of** the complete-parse tokens before the cut and always ends incomplete, while a
+//! **prefix of** the complete-parse items before the cut and always ends incomplete, while a
 //! final drain of the whole source reproduces the complete parse **exactly**. Catches lexers that
-//! are unfaithful under truncation (token identity depending on input beyond `(state, offset)`),
+//! are unfaithful under truncation (item identity depending on input beyond `(state, offset)`),
 //! and it is what falsifies a wrong
 //! [`read_frontier`](crate::Lexer::read_frontier) — including a wrong
 //! [`READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS) claim behind the logos
 //! adapter.
 //!
+//! An **item** is a committed token *or* a lexer error the input layer raised, and both halves are
+//! load-bearing: the layer lexes bytes and then either commits or refuses, and truncation can turn
+//! one into the other. A tier that compared only tokens could not see the error arm at all — a
+//! refusal leaves no token behind, so a lexer that errors on a truncated prefix and tokenizes the
+//! full input showed up as "nothing yielded yet", which is a legal prefix. See
+//! [`PartialRecorder`] for exactly what an error contributes to the comparison and what it
+//! deliberately does not.
+//!
 //! The non-final leg asks for a *prefix*, not equality, because **over-withholding is sound**: a
 //! lexer that reports reading past what it emits withholds more than the pre-0.10.0 span rule did,
 //! and one that reports [`Unbounded`](crate::ReadFrontier::Unbounded) withholds everything until
 //! the stream is sealed. Requiring equality would fail every conforming lookahead lexer. The final
-//! leg is where full equality is pinned.
+//! leg is where full equality is pinned. That relaxation is also why the items have to carry
+//! errors: once the length may legitimately be short, "withheld" and "reported and thrown away"
+//! are the same observation, and only an arm the harness *records* can be told apart.
 //!
 //! # Violation posture
 //!
@@ -79,14 +89,15 @@ pub mod emitter;
 ))]
 mod cache_tests;
 
-use std::{format, string::String, vec, vec::Vec};
+use std::{cell::RefCell, format, rc::Rc, string::String, vec, vec::Vec};
 
 use crate::{
   Lexer, Slice, Source, Span, Token,
   cache::DefaultCache,
-  emitter::Silent,
-  error::{Incomplete, MaybeIncomplete},
-  input::{Complete, Input, InputRef, Partial},
+  emitter::{Emitter, Silent},
+  error::{Incomplete, MaybeIncomplete, token::UnexpectedTokenOf},
+  input::{Complete, Cursor, Input, InputRef, Partial},
+  span::Spanned,
 };
 
 /// Default anti-hang budget: a run may not exceed `8 * source_len + 64` items.
@@ -285,12 +296,17 @@ where
   /// A separate entry point from [`run`](Self::run) because it needs a `usize`-offset,
   /// prefix-sliceable source (`str` / `[u8]`) and drives the input in
   /// [`Partial`] mode. For every split point `k` of each source it verifies that a **non-final**
-  /// drain of the prefix `src[0..k]` yields a **prefix of** the complete-parse tokens lying
+  /// drain of the prefix `src[0..k]` yields a **prefix of** the complete-parse items lying
   /// strictly before `k` and always terminates as incomplete, while a **final** drain of the whole
   /// source reproduces the complete parse **exactly**. Together these are the chunked-equivalence
   /// guarantee: reassembling the chunk-by-chunk prefixes reproduces the single-shot parse.
   ///
-  /// This is where a lexer that is not faithful under truncation is caught — one whose token
+  /// The sequence is **tokens and lexer errors interleaved**, not tokens alone: refusing a region
+  /// is as much a decision about bytes as tokenizing it, and turning one into the other on append
+  /// is precisely the unfaithfulness this tier exists to reject. See [`PartialRecorder`] for what
+  /// an error contributes and what is deliberately left out of the comparison.
+  ///
+  /// This is where a lexer that is not faithful under truncation is caught — one whose item
   /// identity depends on input beyond what it reports having read (lookahead past a token that
   /// [`read_frontier`](crate::Lexer::read_frontier) does not admit to, or a
   /// [`with_state`](crate::Lexer::with_state) + [`bump`](crate::Lexer::bump) resume that does not
@@ -304,7 +320,7 @@ where
   /// logos adapter gives by default — withholds every item until the stream is sealed. Both
   /// converge, because a refill strictly grows the buffer and sealing ends the game. Requiring
   /// equality would therefore reject every conforming lookahead lexer while testing precision
-  /// rather than correctness. Yielding a token the complete parse does not have there, or a
+  /// rather than correctness. Yielding an item the complete parse does not have there, or a
   /// different one, still fails, and the final leg still pins full equality.
   ///
   /// # Panics
@@ -324,10 +340,9 @@ where
 }
 
 /// The emitter error the partial check surfaces: the input layer builds it from the frontier
-/// [`Incomplete`] (via [`SurfaceIncomplete`](crate::input::SurfaceIncomplete)), and the
-/// [`Silent`] emitter — which needs no bound on its error — swallows every real lexer error, so the
-/// check compares only committed token streams. It never inspects the payload, only that `next`
-/// returned `Err` at the frontier.
+/// [`Incomplete`] (via [`SurfaceIncomplete`](crate::input::SurfaceIncomplete)), and it is the only
+/// thing that reaches the `Err` channel — [`PartialRecorder`] never rejects a diagnostic. The
+/// check never inspects the payload, only that `next` returned `Err` at the frontier.
 enum PartialProbe {
   Incomplete,
 }
@@ -346,23 +361,177 @@ impl MaybeIncomplete for PartialProbe {
   }
 }
 
-/// The partial-check context: a [`Silent`] emitter over [`PartialProbe`] and the default cache.
-type PartialConfCtx<'inp, L> = (Silent<PartialProbe>, DefaultCache<'inp, L>);
+/// One item of the sequence the partial tier compares — the unit chunked equivalence is a
+/// statement *about*.
+///
+/// A committed **token** and a **lexer error** are both items, because the input layer lexes bytes
+/// and then either commits a token or refuses the region and reports it. Truncation can turn one
+/// into the other, and a comparison over tokens alone cannot see that: a refusal leaves no trace
+/// in the token stream at all. So the error is an item here, and the prefix property is asked of
+/// the interleaved sequence.
+enum PartialItem<'inp, L>
+where
+  L: Lexer<'inp>,
+{
+  /// A committed token: its kind and its span.
+  Token(<L::Token as Token<'inp>>::Kind, L::Span),
+  /// A lexer error the input layer raised over bytes it lexed and refused: its span, and the
+  /// `Debug` rendering of the payload — see [`PartialRecorder`] for what that does and does not
+  /// assert.
+  LexerError(L::Span, String),
+}
 
-/// Drives a partial input over `src` at `is_final`, returning the committed `(kind, span)` stream
-/// and whether the drain terminated incomplete (rather than at genuine end of input).
+impl<'inp, L> Clone for PartialItem<'inp, L>
+where
+  L: Lexer<'inp>,
+{
+  fn clone(&self) -> Self {
+    match self {
+      Self::Token(kind, span) => Self::Token(*kind, span.clone()),
+      Self::LexerError(span, sig) => Self::LexerError(span.clone(), sig.clone()),
+    }
+  }
+}
+
+impl<'inp, L> PartialItem<'inp, L>
+where
+  L: Lexer<'inp>,
+{
+  /// The item's span end — the offset the "strictly before the cut" filter reads.
+  fn end(&self) -> &L::Offset {
+    match self {
+      Self::Token(_, span) | Self::LexerError(span, _) => span.end_ref(),
+    }
+  }
+
+  /// Whether two items agree on discriminant, span, and kind-or-error-signature.
+  fn sig_eq(&self, other: &Self) -> bool
+  where
+    <L::Token as Token<'inp>>::Kind: PartialEq,
+  {
+    match (self, other) {
+      (Self::Token(a, sa), Self::Token(b, sb)) => a == b && sa == sb,
+      (Self::LexerError(sa, a), Self::LexerError(sb, b)) => sa == sb && a == b,
+      _ => false,
+    }
+  }
+
+  /// A human-readable one-line rendering for panic context.
+  fn describe(&self) -> String
+  where
+    <L::Token as Token<'inp>>::Kind: core::fmt::Debug,
+  {
+    match self {
+      Self::Token(kind, span) => format!("token {kind:?}@{span:?}"),
+      Self::LexerError(span, sig) => format!("lexer error {sig}@{span:?}"),
+    }
+  }
+}
+
+/// The shared, ordered log both partial-tier drains append to: [`PartialRecorder`] pushes each
+/// lexer error the input layer reports, the drain loop pushes each token `next` hands back, and
+/// because the layer reports an error during the very `next` call that goes on to find the
+/// following token, the vector ends up being the interleaved item stream in production order.
+type PartialLog<'inp, L> = Rc<RefCell<Vec<PartialItem<'inp, L>>>>;
+
+/// The emitter the partial tier drives, and the reason it is not [`Silent`].
+///
+/// `Silent` discards every lexer error, which made the whole error arm invisible to chunked
+/// equivalence: a lexer could refuse a region on a truncated buffer and tokenize the same region
+/// once the missing bytes arrived, and the check saw an empty token list on one side and a token
+/// on the other — a legal *prefix*, and green.
+///
+/// # What it compares, and what it deliberately does not
+///
+/// It records exactly three things per error: that the item **was** an error, its **span**, and
+/// the **`Debug` rendering of the lexer's error payload**. That is the minimum that separates the
+/// two divergences the token-only comparison could not see — an error that becomes a token at the
+/// same span, and an error whose payload changes once the missing bytes arrive.
+///
+/// It deliberately records **nothing from the diagnostic channel**: no rendered message, no
+/// [`Severity`](crate::emitter::Severity), no label stack, no `Diagnostic`. That is why this is a
+/// purpose-built recorder and not [`Verbose`](crate::emitter::Verbose) — collecting diagnostics
+/// would put presentation into a correctness check. Nor does it record the parser-facing doors
+/// ([`emit_error`](Emitter::emit_error),
+/// [`emit_unexpected_token`](Emitter::emit_unexpected_token)); the tier runs no parser, so the
+/// only route into [`emit_lexer_error`](Emitter::emit_lexer_error) is the input layer's own
+/// deduped refusal, arriving through the default
+/// [`commit_lexer_error`](Emitter::commit_lexer_error) forward.
+///
+/// The `Debug` rendering is not an assertion on wording, and cannot become one. Both sides of
+/// every comparison come from the **same build of the same lexer** inside one
+/// [`run_partial`](Harness::run_partial) call — the complete parse is the oracle, never a recorded
+/// string — so editing an error type's `Debug` moves `expected` and `got` together. The check reds
+/// only when one build renders the same span differently for a prefix than for the full input,
+/// which is the defect. `Debug` is also the only signature available: [`Token::Error`] is
+/// `Clone + Debug` and nothing more, and it is already the comparison key the trait tier uses.
+struct PartialRecorder<'inp, L>
+where
+  L: Lexer<'inp>,
+{
+  log: PartialLog<'inp, L>,
+}
+
+impl<'inp, L> Emitter<'inp, L> for PartialRecorder<'inp, L>
+where
+  L: Lexer<'inp>,
+{
+  type Error = PartialProbe;
+
+  fn emit_lexer_error(
+    &mut self,
+    err: Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
+  ) -> Result<(), Self::Error> {
+    let (span, payload) = err.into_components();
+    self
+      .log
+      .borrow_mut()
+      .push(PartialItem::LexerError(span, format!("{payload:?}")));
+    Ok(())
+  }
+
+  fn emit_unexpected_token(&mut self, _: UnexpectedTokenOf<'inp, L>) -> Result<(), Self::Error> {
+    Ok(())
+  }
+
+  fn emit_error(&mut self, _: Spanned<Self::Error, L::Span>) -> Result<(), Self::Error> {
+    Ok(())
+  }
+
+  /// A recording emitter owes the log the same rollback discipline a collecting one does, so the
+  /// mark is the log's length and a rewind truncates to it. Both drains here are straight forward
+  /// drains and never save or restore, so nothing calls this today; implementing it means a later
+  /// schedule that does backtrack cannot silently accumulate phantom items.
+  fn checkpoint(&mut self) -> u64 {
+    self.log.borrow().len() as u64
+  }
+
+  fn rewind(&mut self, _: &Cursor<'inp, '_, L>, checkpoint: u64) {
+    self.log.borrow_mut().truncate(checkpoint as usize);
+  }
+}
+
+/// The partial-check context: a [`PartialRecorder`] over [`PartialProbe`] and the default cache.
+type PartialConfCtx<'inp, L> = (PartialRecorder<'inp, L>, DefaultCache<'inp, L>);
+
+/// Drives a partial input over `src` at `is_final`, returning the committed **item** stream —
+/// tokens and lexer errors interleaved in production order — and whether the drain terminated
+/// incomplete (rather than at genuine end of input).
 fn partial_stream<'inp, L>(
   src: &'inp L::Source,
   is_final: bool,
   budget: usize,
   idx: usize,
-) -> (Vec<(<L::Token as Token<'inp>>::Kind, L::Span)>, bool)
+) -> (Vec<PartialItem<'inp, L>>, bool)
 where
   L: Lexer<'inp>,
   L::State: Clone,
 {
+  let log: PartialLog<'inp, L> = Rc::new(RefCell::new(Vec::new()));
   let context = crate::input::InputContext::new(
-    Silent::<PartialProbe>::new(),
+    PartialRecorder {
+      log: Rc::clone(&log),
+    },
     DefaultCache::<'inp, L>::default(),
   );
   let state = L::new(src).into_state();
@@ -374,37 +543,41 @@ where
     input.seal();
   }
   let mut ir = input.as_ref();
-  let mut out = Vec::new();
-  loop {
-    if out.len() > budget {
+  let incomplete = loop {
+    if log.borrow().len() > budget {
       panic!(
-        "tokora conformance [input #{idx} partial-equivalence] a partial drain exceeded the budget of {budget} tokens (the lexer may not terminate or re-lexes without progress)"
+        "tokora conformance [input #{idx} partial-equivalence] a partial drain exceeded the budget of {budget} items (the lexer may not terminate or re-lexes without progress)"
       );
     }
     match ir.next() {
       Ok(Some(spanned)) => {
         let (span, tok) = spanned.into_components();
-        out.push((tok.kind(), span));
+        log.borrow_mut().push(PartialItem::Token(tok.kind(), span));
       }
-      Ok(None) => return (out, false),
-      Err(_) => return (out, true),
+      Ok(None) => break false,
+      Err(_) => break true,
     }
-  }
+  };
+  let out = core::mem::take(&mut *log.borrow_mut());
+  (out, incomplete)
 }
 
-/// Drives a complete input over `src`, returning the committed `(kind, span)` stream — the oracle a
-/// chunked partial run is checked against.
+/// Drives a complete input over `src`, returning the committed item stream — the oracle a chunked
+/// partial run is checked against.
 fn complete_stream<'inp, L>(
   src: &'inp L::Source,
   budget: usize,
   idx: usize,
-) -> Vec<(<L::Token as Token<'inp>>::Kind, L::Span)>
+) -> Vec<PartialItem<'inp, L>>
 where
   L: Lexer<'inp>,
   L::State: Clone,
 {
+  let log: PartialLog<'inp, L> = Rc::new(RefCell::new(Vec::new()));
   let context = crate::input::InputContext::new(
-    Silent::<PartialProbe>::new(),
+    PartialRecorder {
+      log: Rc::clone(&log),
+    },
     DefaultCache::<'inp, L>::default(),
   );
   let state = L::new(src).into_state();
@@ -412,11 +585,10 @@ where
     src, state, context,
   );
   let mut ir = input.as_ref();
-  let mut out = Vec::new();
   loop {
-    if out.len() > budget {
+    if log.borrow().len() > budget {
       panic!(
-        "tokora conformance [input #{idx} partial-equivalence] a complete drain exceeded the budget of {budget} tokens"
+        "tokora conformance [input #{idx} partial-equivalence] a complete drain exceeded the budget of {budget} items"
       );
     }
     match ir
@@ -425,11 +597,12 @@ where
     {
       Some(spanned) => {
         let (span, tok) = spanned.into_components();
-        out.push((tok.kind(), span));
+        log.borrow_mut().push(PartialItem::Token(tok.kind(), span));
       }
-      None => return out,
+      None => break,
     }
   }
+  core::mem::take(&mut *log.borrow_mut())
 }
 
 /// The partial-equivalence check for one source: exhaustive over every split point.
@@ -443,13 +616,13 @@ where
   let complete = complete_stream::<L>(src, budget, idx);
 
   // The "complete over the full input" leg: a final partial drain reproduces the complete parse.
-  let (final_tokens, final_incomplete) = partial_stream::<L>(src, true, budget, idx);
+  let (final_items, final_incomplete) = partial_stream::<L>(src, true, budget, idx);
   if final_incomplete {
     panic!(
       "tokora conformance [input #{idx} partial-equivalence] a FINAL partial drain surfaced Incomplete; a final input must reach genuine end of input like a complete parse"
     );
   }
-  assert_partial_stream_eq::<L>(idx, usize::MAX, &complete, &final_tokens);
+  assert_partial_stream_eq::<L>(idx, usize::MAX, &complete, &final_items);
 
   let len = src.len();
   for k in 0..=len {
@@ -457,9 +630,9 @@ where
       continue;
     }
     let prefix: &L::Source = &src[..k];
-    let (prefix_tokens, incomplete) = partial_stream::<L>(prefix, false, budget, idx);
+    let (prefix_items, incomplete) = partial_stream::<L>(prefix, false, budget, idx);
 
-    // A non-final prefix yields a PREFIX of the complete tokens strictly before the cut. Equality
+    // A non-final prefix yields a PREFIX of the complete ITEMS strictly before the cut. Equality
     // is not the property, and since 0.10.0 it is not even attainable: the holdback keys on the
     // lexer's reported read frontier, so a lexer that reads past what it emits withholds more than
     // the span rule did, and one that reports `Unbounded` withholds everything. Over-withholding
@@ -467,15 +640,19 @@ where
     // — so requiring equality here would fail every conforming lookahead lexer, and the check
     // would be a check on precision rather than on correctness.
     //
-    // What is never sound, and still fails: a token the complete parse does not have before the
-    // cut, or a different one at the same position. Those are exactly what a lexer whose items
-    // change under truncation produces, and they are what the *final* leg above pins in full.
+    // What is never sound, and still fails: an item the complete parse does not have before the
+    // cut, or a different one at the same position. "Different" includes an error where the
+    // complete parse has a token and an error whose payload moved, which is why the sequence
+    // carries lexer errors and not only tokens: relaxing the LENGTH to a prefix is what makes
+    // "withheld" indistinguishable from "reported and discarded", so an arm the harness discards
+    // is an arm the relaxation makes invisible. Those are exactly what a lexer whose items change
+    // under truncation produces, and they are what the *final* leg above pins in full.
     let expected: Vec<_> = complete
       .iter()
-      .filter(|(_, span)| *span.end_ref() < k)
+      .filter(|item| *item.end() < k)
       .cloned()
       .collect();
-    assert_partial_prefix_of::<L>(idx, k, &expected, &prefix_tokens);
+    assert_partial_prefix_of::<L>(idx, k, &expected, &prefix_items);
 
     if !incomplete {
       panic!(
@@ -485,58 +662,61 @@ where
   }
 }
 
-/// Asserts two committed `(kind, span)` streams are identical, tagged `partial-equivalence`.
+/// Asserts two committed item streams are identical, tagged `partial-equivalence`.
 fn assert_partial_stream_eq<'inp, L>(
   idx: usize,
   k: usize,
-  expected: &[(<L::Token as Token<'inp>>::Kind, L::Span)],
-  got: &[(<L::Token as Token<'inp>>::Kind, L::Span)],
+  expected: &[PartialItem<'inp, L>],
+  got: &[PartialItem<'inp, L>],
 ) where
   L: Lexer<'inp>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
 {
   let n = expected.len().min(got.len());
   for i in 0..n {
-    if expected[i] != got[i] {
+    if !expected[i].sig_eq(&got[i]) {
       panic!(
-        "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix token diverges from the complete prefix: expected {:?}, got {:?}",
-        expected[i], got[i]
+        "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix item diverges from the complete prefix: expected {}, got {}",
+        expected[i].describe(),
+        got[i].describe()
       );
     }
   }
   if expected.len() != got.len() {
     panic!(
-      "tokora conformance [input #{idx} partial-equivalence] split k={k}: prefix token count diverges from the complete prefix: expected {}, got {}",
+      "tokora conformance [input #{idx} partial-equivalence] split k={k}: prefix item count diverges from the complete prefix: expected {}, got {}",
       expected.len(),
       got.len()
     );
   }
 }
 
-/// Asserts a non-final prefix drain is a **prefix of** the complete tokens before the cut: every
-/// token it yielded matches, and it yielded no *extra* one. Withholding more is allowed — see
-/// [`check_partial`] for why that is the property rather than equality.
+/// Asserts a non-final prefix drain is a **prefix of** the complete items before the cut: every
+/// item it yielded matches — a token against a token, an error against the same error — and it
+/// yielded no *extra* one. Withholding more is allowed; changing what an item **is** never was —
+/// see [`check_partial`] for why that is the property rather than equality.
 fn assert_partial_prefix_of<'inp, L>(
   idx: usize,
   k: usize,
-  expected: &[(<L::Token as Token<'inp>>::Kind, L::Span)],
-  got: &[(<L::Token as Token<'inp>>::Kind, L::Span)],
+  expected: &[PartialItem<'inp, L>],
+  got: &[PartialItem<'inp, L>],
 ) where
   L: Lexer<'inp>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
 {
   let n = expected.len().min(got.len());
   for i in 0..n {
-    if expected[i] != got[i] {
+    if !expected[i].sig_eq(&got[i]) {
       panic!(
-        "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix token diverges from the complete prefix: expected {:?}, got {:?}",
-        expected[i], got[i]
+        "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix item diverges from the complete prefix: expected {}, got {}. An item that is an ERROR on the truncated buffer and a TOKEN on the full one — or an error whose payload moved — was decided from bytes that had not arrived.",
+        expected[i].describe(),
+        got[i].describe()
       );
     }
   }
   if got.len() > expected.len() {
     panic!(
-      "tokora conformance [input #{idx} partial-equivalence] split k={k}: a non-final prefix drain yielded {} tokens but the complete parse has only {} ending strictly before the cut. The extra one was decided from bytes that had not arrived; report a read frontier that reaches the buffer end (Lexer::read_frontier) so it is withheld.",
+      "tokora conformance [input #{idx} partial-equivalence] split k={k}: a non-final prefix drain yielded {} items but the complete parse has only {} ending strictly before the cut. The extra one was decided from bytes that had not arrived; report a read frontier that reaches the buffer end (Lexer::read_frontier) so it is withheld.",
       got.len(),
       expected.len()
     );

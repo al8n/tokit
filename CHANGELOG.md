@@ -460,6 +460,21 @@ and will red until they do.
   the **final** leg still pins full equality. The trait tier also gains a check that
   `read_frontier` is a pure read: repeated calls agree, and asking does not move the lexer.
 
+  **The sequence being prefix-checked is now items, not tokens: a lexer error the input layer
+  raised is an item too.** Both legs previously drove the input under a discarding emitter, so the
+  error arm was invisible to the check — and relaxing the length is exactly what made it invisible,
+  because once a short answer is legal, "withheld at the frontier" and "reported and thrown away"
+  are the same observation. A lexer that refused a region on a truncated buffer and tokenized it
+  once the missing byte arrived produced an empty list against a token, which is a legal prefix.
+  Two divergences that used to pass now fail: an item that is an **error** on the prefix and a
+  **token** on the full input at the same span, and an **error whose payload changes** on append.
+  What is compared is the discriminant, the span, and the `Debug` rendering of the lexer error's
+  payload — a signature. Nothing from the diagnostic channel is: no rendered message, no severity,
+  no labels. Nor can the payload rendering become a wording assertion, because both sides of every
+  comparison come from the same build of the same lexer inside one `run_partial` call — the
+  complete parse is the oracle, never a recorded string — so editing an error type's `Debug` moves
+  both sides together.
+
 ### Fixed
 
 - **`IncompleteSyntax::as_slice` no longer stops at the ring boundary** (#245). The components
