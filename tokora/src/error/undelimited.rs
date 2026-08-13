@@ -488,7 +488,7 @@ impl<Delimiter, S, Lang: ?Sized> Undelimited<Delimiter, S, Lang> {
   /// let error = Undelimited::<char>::new(SimpleSpan::new(5, 10), "[]".into());
   /// assert_eq!(error.name(), "[]".into());
   /// ```
-  #[inline(always)]
+  #[inline]
   #[cfg(not(any(feature = "std", feature = "alloc")))]
   pub const fn name(&self) -> CowStr {
     self.name
