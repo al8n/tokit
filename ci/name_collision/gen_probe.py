@@ -1087,6 +1087,33 @@ INHERENT_SUBJECTS = {
             "new": ('Location::new(0, SimpleSpan::new(0, 1)), "probe"', "Label"),
         },
     },
+    # `Probe` is minted by the same diff as its three items, so it takes this table's
+    # new-owner shape: the base side cannot name the type at all, and only the head side's
+    # binding has to be right. Its module (`tokora::state`) is NOT new, so a plain
+    # `use tokora::Probe;` already names the owner in the base-side diagnostic and the
+    # `new_module_imports` indirection the `diagnostic` types need buys nothing here.
+    #
+    # It is `Copy` and both accessors are `&self`, so the receiver walk is `Code`'s exactly:
+    # tokora's inherent item is found at the `&T` step, one step before the generated
+    # consumer's `&mut self` item, and takes the call.
+    #
+    # `new` routes HERE rather than to `Location`, because `surface_diff.py` keeps the
+    # alphabetically last owner declaring a name and `Location` < `Probe`. It is written into
+    # this table for that reason and stays in the other three for the reason their header gives.
+    "Probe": {
+        "imports": "use tokora::Probe;\n",
+        "fixture": "",
+        "ty": "Probe",
+        "setup": "",
+        "build": "  let mut subject: Probe = Probe::new(3, 7);\n",
+        "calls": {
+            "scanned_from": ("", "usize"),
+            "probed_to": ("", "usize"),
+        },
+        "assoc_calls": {
+            "new": ("3, 7", "Probe"),
+        },
+    },
     "Location": {
         "imports": "use tokora::SimpleSpan;\n" + new_module_imports("tokora::diagnostic", "Location"),
         "fixture": "",
@@ -1459,11 +1486,17 @@ def trait_method(name, owner, spelling):
         "clear": "",
         # #282's read frontier. All three take no argument beyond the receiver, so they are the
         # empty-argument shape this table already serves — not the multi-argument support #225
-        # declines. `read_frontier` and `probed_to` are `&self`; `clear_probe` is `&mut self`,
+        # declines. `read_frontier` and `probe` are `&self`; `clear_probe` is `&mut self`,
         # which is the foreknown-vacuous shape #225 names, so read its verdict against the
         # bound written in `no_collision.txt` rather than as evidence the name is safe.
+        #
+        # `probe` is `State::probed_to` renamed, not a new name: the value channel now returns a
+        # `Probe` carrying the offset its scan started at, so the old name described half of it.
+        # The row keeps `probed_to`'s analysis because the shape is unchanged — `&self`, no
+        # argument — and `probed_to` itself moved to an INHERENT method on `Probe`, which is a
+        # different template and a different row.
         "read_frontier": "",
-        "probed_to": "",
+        "probe": "",
         "clear_probe": "",
     }.get(name)
     if args is None:

@@ -152,15 +152,22 @@ clear/later_pick_discarded
 # the same templates and the same subjects, which is what says these five are a property of
 # their SHAPE and not a broken probe or a mis-chosen receiver.
 #
-# `*/same_pick` — `read_frontier`, `probed_to`, `clear_probe`. The `trait_method` template's
+# `*/same_pick` — `read_frontier`, `probe`, `clear_probe`. The `trait_method` template's
 # `same_pick` consumer declares `self` BY VALUE, which is the first step of the receiver walk.
 # tokora's three items declare `&self`, `&self` and `&mut self`, every one of them a later
 # step. The subjects are `PLexer<'static>` and `()`, neither of which derefs to anything, so
 # there is no earlier step for tokora's item to be found at. The consumer's item claims the
 # call on both sides and tokora's is never a candidate. The control is in the same run: the
-# `later_pick_*` rows for `read_frontier` and `probed_to` put the consumer at `&self`, where
+# `later_pick_*` rows for `read_frontier` and `probe` put the consumer at `&self`, where
 # tokora's items also sit, and both go `loud` — so this template does construct collisions on
 # these subjects when the receivers agree.
+#
+# `probe` is `State::probed_to` renamed — the value channel returns a `Probe` carrying the
+# offset its scan started at, so the old name described half of it. Same receiver, same
+# arity, same subject, so the analysis above is unchanged and the row is renamed rather than
+# re-derived. `probed_to` is now an inherent method on `Probe`, which is a different owner and
+# a different template, and it needs no entry here: `Probe` is minted by this same diff, so
+# its rows can only reach `new-owner`.
 #
 # `clear_probe/later_pick_used`, `clear_probe/later_pick_discarded` — this is issue #225's
 # foreknown-vacuous shape verbatim: a `&mut self` trait method on a non-deref subject. The
@@ -176,7 +183,7 @@ clear/later_pick_discarded
 # ()` in `state/mod.rs`), and it is what a `logos` vocabulary declaring no `extras` actually
 # uses, which `Tok` is.
 read_frontier/same_pick
-probed_to/same_pick
+probe/same_pick
 clear_probe/same_pick
 clear_probe/later_pick_used
 clear_probe/later_pick_discarded
