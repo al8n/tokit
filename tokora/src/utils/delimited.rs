@@ -204,21 +204,21 @@ pub struct Delimited<Open, Close, Data, S = SimpleSpan> {
 }
 
 impl<Open, Close, Data, S> AsRef<S> for Delimited<Open, Close, Data, S> {
-  #[inline(always)]
+  #[inline]
   fn as_ref(&self) -> &S {
     self.span_ref()
   }
 }
 
 impl<Open, Close, Data, S> AsSpan<S> for Delimited<Open, Close, Data, S> {
-  #[inline(always)]
+  #[inline]
   fn as_span(&self) -> &S {
     AsRef::as_ref(self)
   }
 }
 
 impl<Open, Close, Data, S> IntoSpan<S> for Delimited<Open, Close, Data, S> {
-  #[inline(always)]
+  #[inline]
   fn into_span(self) -> S {
     self.span
   }
@@ -227,14 +227,14 @@ impl<Open, Close, Data, S> IntoSpan<S> for Delimited<Open, Close, Data, S> {
 impl<Open, Close, Data, S> core::ops::Deref for Delimited<Open, Close, Data, S> {
   type Target = Data;
 
-  #[inline(always)]
+  #[inline]
   fn deref(&self) -> &Self::Target {
     &self.data
   }
 }
 
 impl<Open, Close, Data, S> core::ops::DerefMut for Delimited<Open, Close, Data, S> {
-  #[inline(always)]
+  #[inline]
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.data
   }
@@ -244,7 +244,7 @@ impl<Open, Close, Data, S> core::fmt::Display for Delimited<Open, Close, Data, S
 where
   Data: core::fmt::Display,
 {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.data.fmt(f)
   }
@@ -262,7 +262,7 @@ where
 impl<Open, Close, Data, S> IntoComponents for Delimited<Open, Close, Data, S> {
   type Components = (S, Open, Close, Data);
 
-  #[inline(always)]
+  #[inline]
   fn into_components(self) -> Self::Components {
     (self.span, self.open, self.close, self.data)
   }
@@ -270,7 +270,7 @@ impl<Open, Close, Data, S> IntoComponents for Delimited<Open, Close, Data, S> {
 
 impl<Open, Close, Data, S> Delimited<&Open, &Close, &Data, &S> {
   /// Returns a copied version of the delimited value.
-  #[inline(always)]
+  #[inline]
   pub const fn copied(&self) -> Delimited<Open, Close, Data, S>
   where
     Open: Copy,
@@ -287,7 +287,7 @@ impl<Open, Close, Data, S> Delimited<&Open, &Close, &Data, &S> {
   }
 
   /// Returns a cloned version of the delimited value.
-  #[inline(always)]
+  #[inline]
   pub fn cloned(&self) -> Delimited<Open, Close, Data, S>
   where
     Open: Clone,
@@ -301,7 +301,7 @@ impl<Open, Close, Data, S> Delimited<&Open, &Close, &Data, &S> {
 
 impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// Create a new delimited value.
-  #[inline(always)]
+  #[inline]
   pub const fn new(open: Open, close: Close, data: Data, span: S) -> Self {
     Self {
       open,
@@ -321,7 +321,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// let delimited = Delimited::new('(', ')', "data", SimpleSpan::new(0, 6));
   /// assert_eq!(delimited.open(), '(');
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn open(&self) -> Open
   where
     Open: Copy,
@@ -339,7 +339,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// let delimited = Delimited::new(String::from("("), String::from(")"), "data", SimpleSpan::new(0, 6));
   /// assert_eq!(delimited.open_ref(), &"(");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn open_ref(&self) -> &Open {
     &self.open
   }
@@ -355,7 +355,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// *delimited.open_mut() = '[';
   /// assert_eq!(delimited.open(), '[');
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn open_mut(&mut self) -> &mut Open {
     &mut self.open
   }
@@ -370,7 +370,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// let delimited = Delimited::new('(', ')', "data", SimpleSpan::new(0, 6));
   /// assert_eq!(delimited.close(), ')');
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn close(&self) -> Close
   where
     Close: Copy,
@@ -388,7 +388,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// let delimited = Delimited::new(String::from("("), String::from(")"), "data", SimpleSpan::new(0, 6));
   /// assert_eq!(delimited.close_ref(), &")");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn close_ref(&self) -> &Close {
     &self.close
   }
@@ -404,7 +404,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// *delimited.close_mut() = ']';
   /// assert_eq!(delimited.close(), ']');
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn close_mut(&mut self) -> &mut Close {
     &mut self.close
   }
@@ -419,7 +419,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// let delimited = Delimited::new('(', ')', "data", SimpleSpan::new(5, 10));
   /// assert_eq!(delimited.span(), SimpleSpan::new(5, 10));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -437,7 +437,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// let delimited = Delimited::new('(', ')', "data", SimpleSpan::new(5, 10));
   /// assert_eq!(delimited.span_ref(), &SimpleSpan::new(5, 10));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &S {
     &self.span
   }
@@ -453,7 +453,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// delimited.span_mut().set_end(15);
   /// assert_eq!(delimited.span().end(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> &mut S {
     &mut self.span
   }
@@ -468,7 +468,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// let delimited = Delimited::new('(', ')', 42, SimpleSpan::new(0, 4));
   /// assert_eq!(*delimited.data(), 42);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn data(&self) -> &Data {
     &self.data
   }
@@ -484,7 +484,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// *delimited.data_mut() = 100;
   /// assert_eq!(*delimited.data(), 100);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn data_mut(&mut self) -> &mut Data {
     &mut self.data
   }
@@ -500,7 +500,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// let borrowed: Delimited<&char, &char, &String, &SimpleSpan> = delimited.as_ref();
   /// assert_eq!(borrowed.data(), &"hello");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn as_ref(&self) -> Delimited<&Open, &Close, &Data, &S> {
     Delimited {
       open: &self.open,
@@ -522,7 +522,7 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   /// borrowed.data_mut().push_str(" world");
   /// assert_eq!(delimited.data(), &"hello world");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn as_mut(&mut self) -> Delimited<&mut Open, &mut Close, &mut Data, &mut S> {
     Delimited {
       open: &mut self.open,
@@ -533,31 +533,31 @@ impl<Open, Close, Data, S> Delimited<Open, Close, Data, S> {
   }
 
   /// Consume the delimited value and return the opening delimiter.
-  #[inline(always)]
+  #[inline]
   pub fn into_open(self) -> Open {
     self.open
   }
 
   /// Consume the delimited value and return the closing delimiter.
-  #[inline(always)]
+  #[inline]
   pub fn into_close(self) -> Close {
     self.close
   }
 
   /// Consume the delimited value and return the span.
-  #[inline(always)]
+  #[inline]
   pub fn into_span(self) -> S {
     self.span
   }
 
   /// Consume the delimited value and return the data.
-  #[inline(always)]
+  #[inline]
   pub fn into_data(self) -> Data {
     self.data
   }
 
   /// Decompose the delimited value into its components.
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (S, Open, Close, Data) {
     (self.span, self.open, self.close, self.data)
   }

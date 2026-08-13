@@ -20,7 +20,7 @@ where
     + UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>
     + TooManyEmitter<'inp, L, Lang>,
 {
-  #[inline(always)]
+  #[inline]
   fn handle_start_state(
     &self,
     num_elems: usize,
@@ -34,7 +34,7 @@ where
     self.parser.check(inp, anchor, num_elems)
   }
 
-  #[inline(always)]
+  #[inline]
   fn handle_element_state(
     &self,
     num_elems: usize,
@@ -48,7 +48,7 @@ where
     self.parser.check(inp, anchor, num_elems)
   }
 
-  #[inline(always)]
+  #[inline]
   fn handle_leading_state(
     &self,
     num_elems: usize,
@@ -68,7 +68,7 @@ where
       .and_then(|_| self.parser.check(inp, anchor, num_elems))
   }
 
-  #[inline(always)]
+  #[inline]
   fn handle_separator_state(
     &self,
     num_elems: usize,
@@ -91,7 +91,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + TooManyEmitter<'inp, L, Lang>,
 {
-  #[inline(always)]
+  #[inline]
   fn handle_start_state(
     &self,
     _: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
@@ -113,7 +113,7 @@ where
   Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>,
   Sep: Punctuator<'inp, L, Lang>,
 {
-  #[inline(always)]
+  #[inline]
   fn handle_start_state(
     &self,
     inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,

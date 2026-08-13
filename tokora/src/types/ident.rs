@@ -165,7 +165,7 @@ pub struct Ident<S: ?Sized, Span = SimpleSpan, Lang: ?Sized = ()> {
 }
 
 impl<S: ?Sized, Span, Lang: ?Sized> AsSpan<Span> for Ident<S, Span, Lang> {
-  #[inline(always)]
+  #[inline]
   fn as_span(&self) -> &Span {
     self.span_ref()
   }
@@ -174,7 +174,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> AsSpan<Span> for Ident<S, Span, Lang> {
 impl<S, Span, Lang: ?Sized> IntoComponents for Ident<S, Span, Lang> {
   type Components = (Span, S);
 
-  #[inline(always)]
+  #[inline]
   fn into_components(self) -> Self::Components {
     (self.span, self.ident)
   }
@@ -193,7 +193,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   ///
   /// assert_eq!(ident.span(), SimpleSpan::new(5, 10));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> Span
   where
     Span: Copy,
@@ -216,7 +216,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   /// let span_ref = ident.span_ref();
   /// assert_eq!(*span_ref, SimpleSpan::new(0, 3));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &Span {
     &self.span
   }
@@ -237,13 +237,13 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   /// *ident.span_mut() = SimpleSpan::new(10, 13);
   /// assert_eq!(ident.span(), SimpleSpan::new(10, 13));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> &mut Span {
     &mut self.span
   }
 
   /// Bumps the span of the identifier by the given offset.
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, by: &Span::Offset) -> &mut Self
   where
     Span: crate::span::Span,
@@ -268,7 +268,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   /// *ident.source_mut() = "bar".to_string();
   /// assert_eq!(ident.source_ref(), "bar");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn source_mut(&mut self) -> &mut S {
     &mut self.ident
   }
@@ -289,25 +289,25 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   /// assert_eq!(ident.source_ref(), &"variable");
   /// assert_eq!(ident.source_ref().len(), 8);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn source_ref(&self) -> &S {
     &self.ident
   }
 
   /// Returns `true` is this identifier represents an error identifier.
-  #[inline(always)]
+  #[inline]
   pub const fn is_error(&self) -> bool {
     matches!(self.status, Status::Error)
   }
 
   /// Returns `true` is this identifier represents a missing identifier.
-  #[inline(always)]
+  #[inline]
   pub const fn is_missing(&self) -> bool {
     matches!(self.status, Status::Missing)
   }
 
   /// Returns `true` is this identifier is valid (not error or missing).
-  #[inline(always)]
+  #[inline]
   pub const fn is_valid(&self) -> bool {
     matches!(self.status, Status::Valid)
   }
@@ -334,12 +334,12 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   /// assert_eq!(ident.span(), span);
   /// assert_eq!(ident.source_ref(), &"count");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: Span, source: S) -> Self {
     Self::with_status(span, source, Status::Valid)
   }
 
-  #[inline(always)]
+  #[inline]
   const fn with_status(span: Span, source: S, status: Status) -> Self {
     Self {
       span,
@@ -371,7 +371,7 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   /// // ident is still usable
   /// assert_eq!(ident.source_ref(), &"id");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn source(&self) -> S
   where
     S: Copy,
@@ -380,7 +380,7 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   }
 
   /// Maps the source string to a new type, preserving the span and language.
-  #[inline(always)]
+  #[inline]
   pub fn map<U>(self, f: impl FnOnce(S) -> U) -> Ident<U, Span, Lang> {
     Ident::new(self.span, f(self.ident))
   }
@@ -405,7 +405,7 @@ where
   /// // Parser found "123abc" where an identifier was expected
   /// let bad_ident = Ident::<String, SimpleSpan, YulLang>::error(span);
   /// ```
-  #[inline(always)]
+  #[inline]
   fn error(span: Span) -> Self {
     Self::with_status(span.clone(), S::error(span), Status::Error)
   }
@@ -427,7 +427,7 @@ where
   /// // Found:   let = 5;
   /// let missing_ident = Ident::<String, SimpleSpan, YulLang>::missing(span);
   /// ```
-  #[inline(always)]
+  #[inline]
   fn missing(span: Span) -> Self {
     Self::with_status(span.clone(), S::missing(span), Status::Missing)
   }

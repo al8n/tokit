@@ -268,7 +268,7 @@ mod sep_while;
 ///
 /// The latch is read only on the refusal arm, so the success path is exactly the pre-existing
 /// `push` plus the increment.
-#[inline(always)]
+#[inline]
 pub(super) fn push_element<'inp, 'closure, C, O, L, Ctx, Lang: ?Sized, Cmpl>(
   nums: &mut usize,
   full: &mut bool,
@@ -371,7 +371,7 @@ where
 /// case an inner rollback creates: element *n* trips and Accepts, element *n+1* then fails against
 /// the truncated remainder having tripped nothing itself. [`absence_after_element`] states the same
 /// asymmetry for the exits with no error in hand.
-#[inline(always)]
+#[inline]
 pub(super) fn file_element_failure<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
   err: <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
@@ -515,7 +515,7 @@ where
 /// `let _ = <that term>;` above the `if`, leaving the others in the condition, and run
 /// `cargo test -p tokora --all-features --no-fail-fast`. The suite named for that witness must go
 /// red and the census must stay green. Repeat per witness.
-#[inline(always)]
+#[inline]
 pub(super) fn absence_after_element<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   latch: &Option<L::Offset>,
@@ -615,7 +615,7 @@ where
 /// declines — or accepts consuming nothing — with the closer genuinely present, over both sinks.
 /// Neuter the term (`let _ = inp.tripped_during_attempt(trips);` above the `if`) and that section
 /// reds while the census stays green.
-#[inline(always)]
+#[inline]
 pub(super) fn close_after_element<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   trips: usize,

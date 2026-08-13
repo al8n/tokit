@@ -117,7 +117,7 @@ where
   /// [`HashSet`](https://doc.rust-lang.org/std/collections/struct.HashSet.html) uses for a key
   /// that changes while it is in the set: a logic error, with unspecified rather than undefined
   /// behavior, and deliberately not enumerated.
-  #[inline(always)]
+  #[inline]
   pub const fn emitter_ref(&self) -> &Ctx::Emitter {
     &*self.session.emitter
   }
@@ -127,7 +127,7 @@ where
   /// Crate-private, and it does not need to be more: the forwarding methods below *are* this
   /// view's methods, reached one call shorter. It exists so the handle and the callback traits
   /// share one implementation of the forwarding rather than two that can drift.
-  #[inline(always)]
+  #[inline]
   pub(crate) fn emitter_view(&mut self) -> EmitterView<'_, 'inp, L, Ctx::Emitter, Lang> {
     EmitterView::new(self.session.emitter)
   }
@@ -169,7 +169,7 @@ where
     doc = " `Cst::finish_partial`, which tiles it — not by reporting"
   )]
   /// a lexer error over it.
-  #[inline(always)]
+  #[inline]
   pub fn emit_lexer_error(
     &mut self,
     err: Spanned<<L::Token as Token<'inp>>::Error, L::Span>,
@@ -182,7 +182,7 @@ where
   /// This does **not** publish the front-report watermark the input layer maintains for the
   /// token at the stream front, so a later close-miss report about the same token is not
   /// suppressed by it. Same direction as above: an extra diagnostic, never a missing one.
-  #[inline(always)]
+  #[inline]
   pub fn emit_unexpected_token(
     &mut self,
     err: UnexpectedTokenOf<'inp, L, Lang>,
@@ -191,7 +191,7 @@ where
   }
 
   /// Emits an application error — [`Emitter::emit_error`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_error(
     &mut self,
     err: Spanned<<Ctx::Emitter as Emitter<'inp, L, Lang>>::Error, L::Span>,
@@ -200,7 +200,7 @@ where
   }
 
   /// Emits a warning — [`Emitter::emit_warning`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_warning(
     &mut self,
     warning: Spanned<<Ctx::Emitter as Emitter<'inp, L, Lang>>::Error, L::Span>,
@@ -221,7 +221,7 @@ where
   /// transaction boundary: checkpoint marks are event-log positions, and a node spliced
   /// beneath one would rename it. `sync_balanced`'s own spans postdate every live capture, so
   /// this bound never narrows the crate's own recovery.
-  #[inline(always)]
+  #[inline]
   pub fn emit_skipped_region(
     &mut self,
     span: L::Span,
@@ -234,13 +234,13 @@ where
   ///
   /// Pairs with [`exit_label`](Self::exit_label); prefer [`labelled`](crate::labelled), which
   /// pairs them through a drop guard.
-  #[inline(always)]
+  #[inline]
   pub fn enter_label(&mut self, label: &'static str) {
     self.emitter_view().enter_label(label);
   }
 
   /// Pops the innermost diagnostic label — [`Emitter::exit_label`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn exit_label(&mut self) {
     self.emitter_view().exit_label();
   }
@@ -254,7 +254,7 @@ where
   /// [`EmitterView`](crate::EmitterView): a view is built from a `&mut` borrow, which a shared
   /// method has not got. The view carries the same method under the emitter's own name,
   /// `bound_source`.
-  #[inline(always)]
+  #[inline]
   pub fn emitter_bound_source(&self) -> Option<crate::source::SourceIdentity> {
     Emitter::<'inp, L, Lang>::bound_source(&*self.session.emitter)
   }
@@ -264,7 +264,7 @@ where
   /// Raw transport: pair it with [`cst_finish`](Self::cst_finish) through a both-exits
   /// bracket, or use the `node`-shaped combinators. The returned mark is the failing exit's
   /// handle — spend it on [`cst_demote`](Self::cst_demote).
-  #[inline(always)]
+  #[inline]
   pub fn cst_start(&mut self, kind: u16) -> EventMark
   where
     Ctx::Emitter: CstEmitter<'inp, L, Lang>,
@@ -273,7 +273,7 @@ where
   }
 
   /// Closes the innermost open CST node — [`CstEmitter::cst_finish`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn cst_finish(&mut self, kind: u16)
   where
     Ctx::Emitter: CstEmitter<'inp, L, Lang>,
@@ -282,7 +282,7 @@ where
   }
 
   /// Un-opens the node started at `mark` — [`CstEmitter::cst_demote`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn cst_demote(&mut self, mark: EventMark, kind: u16)
   where
     Ctx::Emitter: CstEmitter<'inp, L, Lang>,
@@ -291,7 +291,7 @@ where
   }
 
   /// Appends a retro-wrap anchor — [`CstEmitter::cst_mark`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn cst_mark(&mut self) -> EventMark
   where
     Ctx::Emitter: CstEmitter<'inp, L, Lang>,
@@ -300,7 +300,7 @@ where
   }
 
   /// Retro-opens a node of `kind` at `mark` — [`CstEmitter::cst_start_at`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn cst_start_at(&mut self, mark: EventMark, kind: u16)
   where
     Ctx::Emitter: CstEmitter<'inp, L, Lang>,
@@ -309,7 +309,7 @@ where
   }
 
   /// [`TooFewEmitter::emit_too_few`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_too_few(
     &mut self,
     err: crate::error::syntax::TooFew<L::Span, Lang>,
@@ -321,7 +321,7 @@ where
   }
 
   /// [`TooManyEmitter::emit_too_many`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_too_many(
     &mut self,
     err: crate::error::syntax::TooMany<L::Span, Lang>,
@@ -333,7 +333,7 @@ where
   }
 
   /// [`FullContainerEmitter::emit_full_container`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_full_container(
     &mut self,
     err: crate::error::syntax::FullContainer<L::Span, Lang>,
@@ -345,7 +345,7 @@ where
   }
 
   /// [`SeparatedEmitter::emit_missing_separator`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_missing_separator(
     &mut self,
     name: crate::utils::CowStr,
@@ -358,7 +358,7 @@ where
   }
 
   /// [`SeparatedEmitter::emit_missing_element`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_missing_element(
     &mut self,
     err: crate::error::syntax::MissingSyntaxOf<'inp, L, Lang>,
@@ -370,7 +370,7 @@ where
   }
 
   /// [`MissingLeadingSeparatorEmitter::emit_missing_leading_separator`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_missing_leading_separator(
     &mut self,
     name: crate::utils::CowStr,
@@ -385,7 +385,7 @@ where
   }
 
   /// [`MissingTrailingSeparatorEmitter::emit_missing_trailing_separator`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_missing_trailing_separator(
     &mut self,
     name: crate::utils::CowStr,
@@ -400,7 +400,7 @@ where
   }
 
   /// [`UnexpectedLeadingSeparatorEmitter::emit_unexpected_leading_separator`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_unexpected_leading_separator(
     &mut self,
     name: crate::utils::CowStr,
@@ -415,7 +415,7 @@ where
   }
 
   /// [`UnexpectedTrailingSeparatorEmitter::emit_unexpected_trailing_separator`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_unexpected_trailing_separator(
     &mut self,
     name: crate::utils::CowStr,
@@ -430,7 +430,7 @@ where
   }
 
   /// [`UnclosedEmitter::emit_unclosed`], forwarded.
-  #[inline(always)]
+  #[inline]
   pub fn emit_unclosed<Delimiter>(
     &mut self,
     err: crate::error::Unclosed<Delimiter, L::Span, Lang>,
@@ -445,7 +445,7 @@ where
   /// [`PrattEmitter::emit_unexpected_end_of_lhs`], forwarded.
   #[cfg(feature = "pratt")]
   #[cfg_attr(docsrs, doc(cfg(feature = "pratt")))]
-  #[inline(always)]
+  #[inline]
   pub fn emit_unexpected_end_of_lhs(
     &mut self,
     err: crate::error::UnexpectedEoLhs<L::Offset, Lang>,
@@ -459,7 +459,7 @@ where
   /// [`PrattEmitter::emit_unexpected_end_of_rhs`], forwarded.
   #[cfg(feature = "pratt")]
   #[cfg_attr(docsrs, doc(cfg(feature = "pratt")))]
-  #[inline(always)]
+  #[inline]
   pub fn emit_unexpected_end_of_rhs(
     &mut self,
     err: crate::error::UnexpectedEoRhs<L::Offset, Lang>,

@@ -255,7 +255,7 @@ impl<S> Event<S> {
   /// model): `+1` for a real [`StartNode`](Self::StartNode) or a [`StartAt`](Self::StartAt),
   /// `-1` for a [`FinishNode`](Self::FinishNode) or a [`Demote`](Self::Demote), `0` for
   /// everything else (tombstones included).
-  #[inline(always)]
+  #[inline]
   pub(crate) const fn depth_delta(&self) -> i64 {
     match self {
       Self::StartNode { kind, .. } => {
@@ -273,7 +273,7 @@ impl<S> Event<S> {
 
   /// Whether this event is a live tombstone: a [`StartNode`](Self::StartNode) still
   /// carrying the [`TOMBSTONE`] kind. The positional half of [`EventMark`] validation.
-  #[inline(always)]
+  #[inline]
   pub(crate) const fn is_tombstone(&self) -> bool {
     matches!(
       self,
@@ -353,7 +353,7 @@ impl EventMark {
   /// Creates a mark naming the tombstone at `index`, issued under `era` by the sink
   /// witnessed as `sink`. Crate-private: only a recording sink mints live marks.
   #[cfg(feature = "rowan")]
-  #[inline(always)]
+  #[inline]
   pub(crate) const fn new(index: u64, era: u64, sink: usize) -> Self {
     Self { index, era, sink }
   }
@@ -369,7 +369,7 @@ impl EventMark {
   /// It is a compile-time constant of a `Copy` POD, which is what makes the up-front
   /// bracket's handback free over a diagnostics-only emitter: the value is dead on arrival
   /// and the whole bracket inlines away.
-  #[inline(always)]
+  #[inline]
   pub(crate) const fn inert() -> Self {
     Self {
       index: u64::MAX,
@@ -379,20 +379,20 @@ impl EventMark {
   }
 
   /// The buffer index of the tombstone this mark names.
-  #[inline(always)]
+  #[inline]
   pub const fn index(&self) -> u64 {
     self.index
   }
 
   /// The truncation era this mark was issued under.
-  #[inline(always)]
+  #[inline]
   pub const fn era(&self) -> u64 {
     self.era
   }
 
   /// The issuing sink's witness id (validated at every spend, in every build).
   #[cfg(feature = "rowan")]
-  #[inline(always)]
+  #[inline]
   pub(crate) const fn sink(&self) -> usize {
     self.sink
   }
@@ -431,7 +431,7 @@ pub(crate) struct TruncationLedger {
 #[cfg(feature = "rowan")]
 impl TruncationLedger {
   /// A fresh history: era 0, no truncations.
-  #[inline(always)]
+  #[inline]
   pub(crate) const fn new() -> Self {
     Self {
       era: 0,
@@ -440,7 +440,7 @@ impl TruncationLedger {
   }
 
   /// The era to stamp into marks issued now.
-  #[inline(always)]
+  #[inline]
   pub(crate) const fn era(&self) -> u64 {
     self.era
   }
@@ -570,13 +570,13 @@ pub struct Marker {
 impl Marker {
   /// Wraps a freshly minted mark (from
   /// [`cst_mark`](crate::emitter::CstEmitter::cst_mark)) in the single-use typestate.
-  #[inline(always)]
+  #[inline]
   pub const fn new(mark: EventMark) -> Self {
     Self { mark }
   }
 
   /// The underlying mark.
-  #[inline(always)]
+  #[inline]
   pub const fn mark(&self) -> EventMark {
     self.mark
   }
@@ -591,7 +591,7 @@ impl Marker {
   /// `&mut Ctx::Emitter` during a parse any more; a grammar's route to the same two events is
   /// the handle's own `cst_start_at` / `cst_finish` pair (see the type's docs). This verb is for
   /// code that owns an `E: CstEmitter` outright.
-  #[inline(always)]
+  #[inline]
   pub fn complete<'a, L, Lang, E>(self, emitter: &mut E, kind: u16) -> CompletedMarker
   where
     L: Lexer<'a>,
@@ -606,7 +606,7 @@ impl Marker {
   /// Abandons the intent: no node is created, the tombstone stays in the buffer inert and
   /// materializes into nothing. Consumes the marker, so a later `precede`-shaped wrap of
   /// the abandoned region is unrepresentable.
-  #[inline(always)]
+  #[inline]
   pub fn abandon(self) {}
 }
 
@@ -625,14 +625,14 @@ pub struct CompletedMarker {
 
 impl CompletedMarker {
   /// The underlying mark.
-  #[inline(always)]
+  #[inline]
   pub const fn mark(&self) -> EventMark {
     self.mark
   }
 
   /// Opens a fresh wrap intent **around** this completed node (and everything recorded
   /// since its mark): the returned [`Marker`], when completed, becomes the outer node.
-  #[inline(always)]
+  #[inline]
   pub const fn precede(&self) -> Marker {
     Marker { mark: self.mark }
   }

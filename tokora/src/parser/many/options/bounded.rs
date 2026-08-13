@@ -10,7 +10,7 @@ pub struct Bounded<P> {
 
 impl<P> Bounded<P> {
   /// Creates a new `Bounded` parser that matches its inner parser between `minimum` and `maximum` times.
-  #[inline(always)]
+  #[inline]
   pub const fn new(parser: P, maximum: usize, minimum: usize) -> Self {
     Self {
       maximum: Maximum::new(maximum),
@@ -20,13 +20,13 @@ impl<P> Bounded<P> {
   }
 
   /// Returns the maximum number of times the inner parser should match.
-  #[inline(always)]
+  #[inline]
   pub const fn maximum(&self) -> Maximum {
     self.maximum
   }
 
   /// Returns the minimum number of times the inner parser should match.
-  #[inline(always)]
+  #[inline]
   pub const fn minimum(&self) -> Minimum {
     self.minimum
   }
@@ -34,13 +34,13 @@ impl<P> Bounded<P> {
   define_many_delimited_methods!();
 
   /// Returns a mutable reference to the inner parser.
-  #[inline(always)]
+  #[inline]
   pub const fn parser_mut(&mut self) -> &mut P {
     &mut self.parser
   }
 
   /// Returns a mutable `Bounded` parser with a mutable reference to the inner parser.
-  #[inline(always)]
+  #[inline]
   pub const fn as_mut(&mut self) -> Bounded<&mut P> {
     Bounded {
       maximum: self.maximum,
@@ -49,13 +49,13 @@ impl<P> Bounded<P> {
     }
   }
 
-  #[inline(always)]
+  #[inline]
   pub(crate) const fn to_with(&self) -> With<Minimum, Maximum> {
     With::new(self.minimum(), self.maximum())
   }
 
   /// Maps the inner parser to a new parser using the given function.
-  #[inline(always)]
+  #[inline]
   pub fn map_parser_mut<'a, F, NP>(&'a mut self, f: F) -> Bounded<NP>
   where
     F: FnOnce(&'a mut P) -> NP,

@@ -176,7 +176,7 @@ impl<Delimiter, O, Lang: ?Sized> core::fmt::Display for Unclosed<Delimiter, O, L
 where
   Delimiter: core::fmt::Display,
 {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "unclosed delimiter '{}'", self.name)
   }
@@ -205,7 +205,7 @@ impl<S> Unclosed<Paren, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(3, 4));
   /// assert_eq!(error.name_ref(), "()");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn paren(span: S) -> Self {
     Self::paren_of(span)
   }
@@ -226,7 +226,7 @@ impl<S, Lang: ?Sized> Unclosed<Paren<(), (), Lang>, S, Lang> {
   /// assert_eq!(error.span(), SimpleSpan::new(3, 4));
   /// assert_eq!(error.name_ref(), "()");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn paren_of(span: S) -> Self {
     Self::of(span, DelimiterKind::Paren, CowStr::from_static("()"))
   }
@@ -247,7 +247,7 @@ impl<S> Unclosed<Bracket, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(8, 9));
   /// assert_eq!(error.name_ref(), "[]");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn bracket(span: S) -> Self {
     Self::bracket_of(span)
   }
@@ -268,7 +268,7 @@ impl<S, Lang: ?Sized> Unclosed<Bracket<(), (), Lang>, S, Lang> {
   /// assert_eq!(error.span(), SimpleSpan::new(8, 9));
   /// assert_eq!(error.name_ref(), "[]");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn bracket_of(span: S) -> Self {
     Self::of(span, DelimiterKind::Bracket, CowStr::from_static("[]"))
   }
@@ -289,7 +289,7 @@ impl<S> Unclosed<Brace, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(12, 13));
   /// assert_eq!(error.name_ref(), "{}");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn brace(span: S) -> Self {
     Self::brace_of(span)
   }
@@ -310,7 +310,7 @@ impl<S, Lang: ?Sized> Unclosed<Brace<(), (), Lang>, S, Lang> {
   /// assert_eq!(error.span(), SimpleSpan::new(12, 13));
   /// assert_eq!(error.name_ref(), "{}");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn brace_of(span: S) -> Self {
     Self::of(span, DelimiterKind::Brace, CowStr::from_static("{}"))
   }
@@ -331,7 +331,7 @@ impl<S> Unclosed<Angle, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(20, 21));
   /// assert_eq!(error.name_ref(), "<>");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn angle(span: S) -> Self {
     Self::angle_of(span)
   }
@@ -352,7 +352,7 @@ impl<S, Lang: ?Sized> Unclosed<Angle<(), (), Lang>, S, Lang> {
   /// assert_eq!(error.span(), SimpleSpan::new(20, 21));
   /// assert_eq!(error.name_ref(), "<>");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn angle_of(span: S) -> Self {
     Self::of(span, DelimiterKind::Angle, CowStr::from_static("<>"))
   }
@@ -383,7 +383,7 @@ impl<Delimiter, S> Unclosed<Delimiter, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(5, 6));
   /// assert_eq!(error.name_ref(), "{");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: S, kind: DelimiterKind, name: CowStr) -> Self {
     Self::of(span, kind, name)
   }
@@ -414,7 +414,7 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// assert_eq!(error.span(), SimpleSpan::new(5, 6));
   /// assert_eq!(error.name_ref(), "{");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn of(span: S, kind: DelimiterKind, name: CowStr) -> Self {
     Self {
       span,
@@ -450,7 +450,7 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// outside tokora a built-in arm is written `DelimiterKind::Paren { .. }`, the pattern form
   /// `#[non_exhaustive]` leaves open. `name_ref` remains available and remains correct for
   /// rendering.
-  #[inline(always)]
+  #[inline]
   pub const fn kind(&self) -> DelimiterKind {
     self.kind
   }
@@ -467,7 +467,7 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// let error = Unclosed::<char>::new(SimpleSpan::new(10, 11), DelimiterKind::Custom("probe"), "(".into());
   /// assert_eq!(error.span(), SimpleSpan::new(10, 11));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -476,13 +476,13 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   }
 
   /// Returns a reference to the span of the opening delimiter.
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &S {
     &self.span
   }
 
   /// Returns a mutable reference to the span of the opening delimiter.
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> &mut S {
     &mut self.span
   }
@@ -497,7 +497,7 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// let error = Unclosed::<char>::new(SimpleSpan::new(5, 6), DelimiterKind::Custom("probe"), "{".into());
   /// assert_eq!(error.name_ref(), "{");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn name_ref(&self) -> &str {
     self.name.as_str()
   }
@@ -515,7 +515,7 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   ///   Unclosed::<char>::new(SimpleSpan::new(5, 6), DelimiterKind::Custom("probe"), "[".into());
   /// assert_eq!(error.name(), CowStr::from_static("["));
   /// ```
-  #[inline(always)]
+  #[inline]
   #[cfg(not(any(feature = "alloc", feature = "std")))]
   pub const fn name(&self) -> CowStr {
     self.name
@@ -536,7 +536,7 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// error.bump(&100);
   /// assert_eq!(error.span(), SimpleSpan::new(105, 106));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &S::Offset) -> &mut Self
   where
     S: Span,
@@ -558,7 +558,7 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   /// assert_eq!(span, SimpleSpan::new(10, 11));
   /// assert_eq!(delimiter, CowStr::from_static("\""));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (S, CowStr) {
     (self.span, self.name)
   }
@@ -568,6 +568,6 @@ impl<'inp, L, Lang: ?Sized> FromUnclosed<'inp, L, Lang> for ()
 where
   L: Lexer<'inp>,
 {
-  #[inline(always)]
+  #[inline]
   fn from_unclosed<Delimiter>(_: Unclosed<Delimiter, L::Span, Lang>) -> Self {}
 }

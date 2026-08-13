@@ -231,13 +231,13 @@ where
   Container: super::ErrorContainer<E>,
 {
   /// Pushes an error into the collection, marking `overflowed` if it doesn't fit.
-  #[inline(always)]
+  #[inline]
   pub fn push(&mut self, error: E) {
     let _ = self.try_push(error);
   }
 
   /// Attempts to push an error, returning it back if capacity is exhausted.
-  #[inline(always)]
+  #[inline]
   pub fn try_push(&mut self, error: E) -> Result<(), E> {
     match super::ErrorContainer::try_push(&mut self.container, error) {
       Ok(()) => Ok(()),
@@ -270,7 +270,7 @@ where
   /// [`into_iter`](IntoIterator::into_iter) and collecting the yielded errors into another does
   /// not, because that is a different collection and it kept everything it was offered. The
   /// dropped error is not among them to be re-offered.
-  #[inline(always)]
+  #[inline]
   pub const fn overflowed(&self) -> bool {
     self.overflowed_flag
   }
@@ -280,25 +280,25 @@ where
   /// The replacement for reaching the container's own removal API through `DerefMut`. Removal
   /// cannot invalidate [`overflowed`](Self::overflowed) — it is a fact about errors that never
   /// entered — so this door needs no accounting of its own.
-  #[inline(always)]
+  #[inline]
   pub fn pop(&mut self) -> Option<E> {
     super::ErrorContainer::pop(&mut self.container)
   }
 
   /// Discards every collected error, leaving [`overflowed`](Self::overflowed) as it was.
-  #[inline(always)]
+  #[inline]
   pub fn clear(&mut self) {
     super::ErrorContainer::clear(&mut self.container);
   }
 
   /// Reports the remaining capacity when the backing container is bounded.
-  #[inline(always)]
+  #[inline]
   pub fn remaining_capacity(&self) -> Option<usize> {
     super::ErrorContainer::remaining_capacity(&self.container)
   }
 
   /// Returns `true` when a bounded container cannot accept more errors.
-  #[inline(always)]
+  #[inline]
   pub fn is_full(&self) -> bool {
     matches!(self.remaining_capacity(), Some(0))
   }
@@ -313,7 +313,7 @@ where
   /// let errors: Errors<String> = Errors::with_capacity(5);
   /// assert_eq!(errors.len(), 0);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn with_capacity(capacity: usize) -> Self {
     Self::new_in(Container::with_capacity(capacity))
   }
@@ -535,7 +535,7 @@ impl<E, C> Errors<E, C> {
   /// assert_eq!(errors.len(), 2);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn from_container(container: C) -> Self {
     Self::new_in(container)
   }

@@ -321,7 +321,7 @@ where
   S: Syntax,
   Sp: PartialEq,
 {
-  #[inline(always)]
+  #[inline]
   fn eq(&self, other: &Self) -> bool {
     self.span == other.span && self.components == other.components
   }
@@ -339,7 +339,7 @@ where
   S: Syntax,
   Sp: Hash,
 {
-  #[inline(always)]
+  #[inline]
   fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
     self.span.hash(state);
     self.components.hash(state);
@@ -355,7 +355,7 @@ impl<S, Sp> AsRef<[S::Component]> for IncompleteSyntax<S, Sp>
 where
   S: Syntax,
 {
-  #[inline(always)]
+  #[inline]
   fn as_ref(&self) -> &[S::Component] {
     self.as_slice()
   }
@@ -412,7 +412,7 @@ where
   /// assert_eq!(error.span(), SimpleSpan::new(10, 15));
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn new(span: Sp, component: S::Component) -> Self {
     if S::COMPONENTS::USIZE == 0 {
       panic!("IncompleteSyntax requires S::COMPONENTS to be non-zero");
@@ -499,7 +499,7 @@ where
   /// assert_eq!(error.as_slice(), &[Component::A, Component::B]);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   #[allow(clippy::should_implement_trait)]
   pub fn from_iter(span: Sp, iter: impl IntoIterator<Item = S::Component>) -> Option<Self> {
     let mut components = GenericArrayDeque::new();
@@ -528,7 +528,7 @@ where
   /// instead of a claim about the order the doors were called in. Removing it leaves the whole
   /// suite green today, and leaves the next removal or rotation operation added to this type
   /// to rediscover why the invariant used to hold.
-  #[inline(always)]
+  #[inline]
   fn try_push_impl(
     components: &mut GenericArrayDeque<S::Component, S::COMPONENTS>,
     component: S::Component,
@@ -548,7 +548,7 @@ where
   ///
   /// A front insertion is what moves the head off zero, so this is the door that would leave
   /// the ring wrapped; `make_contiguous` is what stops it, and is not optional here.
-  #[inline(always)]
+  #[inline]
   fn try_push_front_impl(
     components: &mut GenericArrayDeque<S::Component, S::COMPONENTS>,
     component: S::Component,
@@ -609,7 +609,7 @@ where
   /// assert_eq!(error.len(), 2);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   #[allow(clippy::len_without_is_empty)]
   pub fn len(&self) -> usize {
     self.components.len()
@@ -657,7 +657,7 @@ where
   /// assert_eq!(error.capacity(), 3);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn capacity(&self) -> usize {
     self.components.capacity()
   }
@@ -708,7 +708,7 @@ where
   /// assert!(error.is_full());
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn is_full(&self) -> bool {
     self.components.is_full()
   }
@@ -767,7 +767,7 @@ where
   /// assert_eq!(error.len(), 2);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn push(&mut self, component: S::Component) {
     if self.try_push(component).is_some() {
       panic!("IncompleteSyntax buffer overflow: cannot push more components")
@@ -828,7 +828,7 @@ where
   /// assert_eq!(error.len(), 2);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn push_front(&mut self, component: S::Component) {
     if self.try_push_front(component).is_some() {
       panic!("IncompleteSyntax buffer overflow: cannot push more components")
@@ -882,7 +882,7 @@ where
   /// assert_eq!(error.try_push(Component::C), Some(Component::C)); // Full!
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn try_push(&mut self, component: S::Component) -> Option<S::Component> {
     Self::try_push_impl(&mut self.components, component)
   }
@@ -934,7 +934,7 @@ where
   /// assert_eq!(error.try_push_front(Component::C), Some(Component::C)); // Full!
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn try_push_front(&mut self, component: S::Component) -> Option<S::Component> {
     Self::try_push_front_impl(&mut self.components, component)
   }
@@ -1010,7 +1010,7 @@ where
   /// assert_eq!(error.as_slice(), &[Component::A, Component::B]);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn as_slice(&self) -> &[S::Component] {
     let (contiguous, wrapped) = self.components.as_slices();
     debug_assert!(
@@ -1066,7 +1066,7 @@ where
   /// assert_eq!(collected, vec![&Component::A, &Component::B]);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn iter(&self) -> generic_arraydeque::Iter<'_, S::Component> {
     self.components.iter()
   }
@@ -1110,7 +1110,7 @@ where
   /// assert_eq!(error.span(), SimpleSpan::new(10, 15));
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> Sp
   where
     Sp: Copy,
@@ -1119,13 +1119,13 @@ where
   }
 
   /// Returns a reference to the span of the incomplete syntax.
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &Sp {
     &self.span
   }
 
   /// Returns a mutable reference to the span of the incomplete syntax.
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> &mut Sp {
     &mut self.span
   }
@@ -1173,7 +1173,7 @@ where
   /// assert_eq!(error.span(), SimpleSpan::new(15, 20));
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &Sp::Offset) -> &mut Self
   where
     Sp: Span,

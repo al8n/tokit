@@ -147,7 +147,7 @@ pub struct DelimitedBy<P, Delim> {
 
 impl<P, Delim> DelimitedBy<P, Delim> {
   /// Creates a new `DelimitedBy` combinator wrapping the given parser.
-  #[inline(always)]
+  #[inline]
   pub const fn new(parser: P) -> Self {
     Self {
       parser,
@@ -156,7 +156,7 @@ impl<P, Delim> DelimitedBy<P, Delim> {
   }
 
   /// Maps the inner parser via a mutable reference, returning a new `DelimitedBy`.
-  #[inline(always)]
+  #[inline]
   pub fn map_parser_mut<'a, Q, F>(&'a mut self, f: F) -> DelimitedBy<Q, Delim>
   where
     F: FnOnce(&'a mut P) -> Q,

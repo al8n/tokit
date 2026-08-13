@@ -228,7 +228,7 @@ impl<Char, O> MalformedFixedUnicodeEscape<Char, O> {
   /// );
   /// let error = MalformedFixedUnicodeEscape::new(digits, SimpleSpan::new(10, 14));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(digits: InvalidFixedUnicodeHexDigits<Char, O>, span: SimpleSpan<O>) -> Self {
     Self { digits, span }
   }
@@ -247,7 +247,7 @@ impl<Char, O> MalformedFixedUnicodeEscape<Char, O> {
   /// let error = MalformedFixedUnicodeEscape::new(digits, SimpleSpan::new(10, 14));
   /// assert_eq!(error.digits().len(), 1);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn digits(&self) -> InvalidFixedUnicodeHexDigits<Char, O>
   where
     Char: Clone,
@@ -270,13 +270,13 @@ impl<Char, O> MalformedFixedUnicodeEscape<Char, O> {
   /// let error = MalformedFixedUnicodeEscape::new(digits, SimpleSpan::new(10, 14));
   /// assert_eq!(error.digits_ref().len(), 1);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn digits_ref(&self) -> &InvalidFixedUnicodeHexDigits<Char, O> {
     &self.digits
   }
 
   /// Returns a mutable reference to the invalid unicode hex digits.
-  #[inline(always)]
+  #[inline]
   pub const fn digits_mut(&mut self) -> &mut InvalidFixedUnicodeHexDigits<Char, O> {
     &mut self.digits
   }
@@ -295,7 +295,7 @@ impl<Char, O> MalformedFixedUnicodeEscape<Char, O> {
   /// );
   /// assert_eq!(error.span(), SimpleSpan::new(10, 16));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> SimpleSpan<O>
   where
     O: Copy,
@@ -304,13 +304,13 @@ impl<Char, O> MalformedFixedUnicodeEscape<Char, O> {
   }
 
   /// Returns a reference to the span of the malformed unicode escape.
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> SimpleSpan<&O> {
     self.span.as_ref()
   }
 
   /// Returns a mutable reference to the span of the malformed unicode escape.
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> SimpleSpan<&mut O> {
     self.span.as_mut()
   }
@@ -457,7 +457,7 @@ impl<O> InvalidUnicodeScalarValue<O> {
   ///     InvalidUnicodeScalarKind::Surrogate
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(value: u32, span: SimpleSpan<O>, kind: InvalidUnicodeScalarKind) -> Self {
     Self { value, span, kind }
   }
@@ -477,7 +477,7 @@ impl<O> InvalidUnicodeScalarValue<O> {
   /// );
   /// assert_eq!(error.codepoint(), 0xD800);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn codepoint(&self) -> u32 {
     self.value
   }
@@ -497,7 +497,7 @@ impl<O> InvalidUnicodeScalarValue<O> {
   /// );
   /// assert_eq!(error.span(), SimpleSpan::new(5, 15));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> SimpleSpan<O>
   where
     O: Copy,
@@ -506,13 +506,13 @@ impl<O> InvalidUnicodeScalarValue<O> {
   }
 
   /// Returns a reference to the span.
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> SimpleSpan<&O> {
     self.span.as_ref()
   }
 
   /// Returns a mutable reference to the span.
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> SimpleSpan<&mut O> {
     self.span.as_mut()
   }
@@ -560,7 +560,7 @@ impl<O> InvalidUnicodeScalarValue<O> {
   /// );
   /// assert_eq!(error.kind(), InvalidUnicodeScalarKind::Surrogate);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn kind(&self) -> InvalidUnicodeScalarKind {
     self.kind
   }
@@ -600,7 +600,7 @@ impl<O> EmptyVariableUnicodeEscape<O> {
   /// let error = EmptyVariableUnicodeEscape::new(SimpleSpan::new(5, 9));
   /// assert_eq!(error.span(), SimpleSpan::new(5, 9));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: SimpleSpan<O>) -> Self {
     Self(span)
   }
@@ -616,7 +616,7 @@ impl<O> EmptyVariableUnicodeEscape<O> {
   /// let error = EmptyVariableUnicodeEscape::new(SimpleSpan::new(10, 14));
   /// assert_eq!(error.span(), SimpleSpan::new(10, 14));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> SimpleSpan<O>
   where
     O: Copy,
@@ -635,7 +635,7 @@ impl<O> EmptyVariableUnicodeEscape<O> {
   /// let error = EmptyVariableUnicodeEscape::new(SimpleSpan::new(10, 14));
   /// assert_eq!(error.span_ref(), SimpleSpan::new(&10, &14));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> SimpleSpan<&O> {
     self.0.as_ref()
   }
@@ -653,7 +653,7 @@ impl<O> EmptyVariableUnicodeEscape<O> {
   /// assert_eq!(**span.start_ref(), 10);
   /// assert_eq!(**span.end_ref(), 14);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> SimpleSpan<&mut O> {
     self.0.as_mut()
   }
@@ -723,7 +723,7 @@ where
   Char: DisplayHuman,
   O: core::fmt::Display,
 {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match self.lexeme_ref() {
       Lexeme::Char(positioned_char) => write!(
@@ -760,7 +760,7 @@ impl<Char, O> MalformedVariableUnicodeSequence<Char, O> {
   /// let lexeme = Lexeme::from(PositionedChar::with_position('Z', 15));
   /// let error = MalformedVariableUnicodeSequence::new(lexeme);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(lexeme: Lexeme<Char, O>) -> Self {
     Self(lexeme)
   }
@@ -778,7 +778,7 @@ impl<Char, O> MalformedVariableUnicodeSequence<Char, O> {
   ///     "invalid variable-length unicode escape character 'X' at position 42"
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn from_char(pos: O, ch: Char) -> Self {
     Self::from_positioned_char(PositionedChar::with_position(ch, pos))
   }
@@ -796,7 +796,7 @@ impl<Char, O> MalformedVariableUnicodeSequence<Char, O> {
   ///     "invalid variable-length unicode escape character 'X' at position 42"
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn from_positioned_char(ch: PositionedChar<Char, O>) -> Self {
     Self(Lexeme::Char(ch))
   }
@@ -812,7 +812,7 @@ impl<Char, O> MalformedVariableUnicodeSequence<Char, O> {
   /// let error: MalformedVariableUnicodeSequence<char> =
   ///     MalformedVariableUnicodeSequence::from_range(SimpleSpan::new(10, 15));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn from_range(span: SimpleSpan<O>) -> Self {
     Self(Lexeme::Range(span))
   }
@@ -828,7 +828,7 @@ impl<Char, O> MalformedVariableUnicodeSequence<Char, O> {
   /// let error = MalformedVariableUnicodeSequence::from_char(10, 'G');
   /// assert_eq!(error.span(), SimpleSpan::new(10, 11));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn span(&self) -> SimpleSpan<O>
   where
     Char: CharLen,
@@ -849,7 +849,7 @@ impl<Char, O> MalformedVariableUnicodeSequence<Char, O> {
   /// let error = MalformedVariableUnicodeSequence::from_char(10, 'G');
   /// assert!(error.lexeme().is_char());
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn lexeme(&self) -> Lexeme<Char, O>
   where
     Char: Copy,
@@ -859,7 +859,7 @@ impl<Char, O> MalformedVariableUnicodeSequence<Char, O> {
   }
 
   /// Returns a reference to the lexeme.
-  #[inline(always)]
+  #[inline]
   pub const fn lexeme_ref(&self) -> &Lexeme<Char, O> {
     &self.0
   }
@@ -879,7 +879,7 @@ impl<Char, O> MalformedVariableUnicodeSequence<Char, O> {
   /// error.bump(&5);
   /// assert_eq!(error.span(), SimpleSpan::new(15, 16));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, n: &O) -> &mut Self
   where
     O: for<'a> AddAssign<&'a O> + Clone,
@@ -927,7 +927,7 @@ impl<O> TooManyDigitsInVariableUnicodeEscape<O> {
   /// let error = TooManyDigitsInVariableUnicodeEscape::new(SimpleSpan::new(5, 15), 8);
   /// assert_eq!(error.count(), 8);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: SimpleSpan<O>, count: usize) -> Self {
     Self(span, count)
   }
@@ -943,7 +943,7 @@ impl<O> TooManyDigitsInVariableUnicodeEscape<O> {
   /// let error = TooManyDigitsInVariableUnicodeEscape::new(SimpleSpan::new(10, 20), 7);
   /// assert_eq!(error.span(), SimpleSpan::new(10, 20));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> SimpleSpan<O>
   where
     O: Copy,
@@ -962,7 +962,7 @@ impl<O> TooManyDigitsInVariableUnicodeEscape<O> {
   /// let error = TooManyDigitsInVariableUnicodeEscape::new(SimpleSpan::new(10, 20), 7);
   /// assert_eq!(error.span(), SimpleSpan::new(10, 20));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> SimpleSpan<&O> {
     self.0.as_ref()
   }
@@ -978,7 +978,7 @@ impl<O> TooManyDigitsInVariableUnicodeEscape<O> {
   /// let error = TooManyDigitsInVariableUnicodeEscape::new(SimpleSpan::new(10, 20), 7);
   /// assert_eq!(error.span(), SimpleSpan::new(10, 20));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> SimpleSpan<&mut O> {
     self.0.as_mut()
   }
@@ -994,7 +994,7 @@ impl<O> TooManyDigitsInVariableUnicodeEscape<O> {
   /// let error = TooManyDigitsInVariableUnicodeEscape::new(SimpleSpan::new(10, 20), 7);
   /// assert_eq!(error.count(), 7);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn count(&self) -> usize {
     self.1
   }
@@ -1014,7 +1014,7 @@ impl<O> TooManyDigitsInVariableUnicodeEscape<O> {
   /// error.bump(&5);
   /// assert_eq!(error.span(), SimpleSpan::new(15, 25));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, n: &O) -> &mut Self
   where
     O: for<'a> AddAssign<&'a O> + Clone,
@@ -1353,7 +1353,7 @@ impl<O> IncompleteFixedUnicodeEscape<O> {
   ///
   /// let error = IncompleteFixedUnicodeEscape::new(SimpleSpan::new(10, 12));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: SimpleSpan<O>) -> Self {
     Self(span)
   }
@@ -1369,7 +1369,7 @@ impl<O> IncompleteFixedUnicodeEscape<O> {
   /// let error = IncompleteFixedUnicodeEscape::new(SimpleSpan::new(10, 13));
   /// assert_eq!(error.span(), SimpleSpan::new(10, 13));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> SimpleSpan<O>
   where
     O: Copy,
@@ -1388,7 +1388,7 @@ impl<O> IncompleteFixedUnicodeEscape<O> {
   /// let error = IncompleteFixedUnicodeEscape::new(SimpleSpan::new(10, 13));
   /// assert_eq!(error.span_ref(), SimpleSpan::new(&10, &13));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> SimpleSpan<&O> {
     self.0.as_ref()
   }
@@ -1406,7 +1406,7 @@ impl<O> IncompleteFixedUnicodeEscape<O> {
   /// assert_eq!(**span.start_ref(), 10);
   /// assert_eq!(**span.end_ref(), 13);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> SimpleSpan<&mut O> {
     self.0.as_mut()
   }
@@ -1618,7 +1618,7 @@ impl<Char, O> FixedUnicodeEscapeError<Char, O> {
   ///       10, 14)));
   /// assert_eq!(error.span(), SimpleSpan::new(10, 14));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn span(&self) -> SimpleSpan<O>
   where
     Char: CharLen,

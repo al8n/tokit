@@ -30,7 +30,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   ///   '0'
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn leading_zero(token: SimpleSpan<O>, pos: O, ch: Char) -> Self
   where
     Knowledge: DenyLeadingZero,
@@ -56,7 +56,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   ///   SimpleSpan::new(0, 6)
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn leading_zeros(token: SimpleSpan<O>, span: SimpleSpan<O>) -> Self
   where
     Knowledge: DenyLeadingZero,
@@ -84,7 +84,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   ///     Lexeme::Char(PositionedChar::with_position('x', 0))
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn new(token: SimpleSpan<O>, prefix: Lexeme<Char, O>) -> Self
   where
     Char: CharLen,
@@ -119,7 +119,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   ///   'x'
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn from_char(token: SimpleSpan<O>, pos: O, ch: Char) -> Self
   where
     Char: CharLen,
@@ -144,7 +144,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   ///    PositionedChar::with_position('x', 0)
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn from_positioned_char(token: SimpleSpan<O>, ch: PositionedChar<Char, O>) -> Self
   where
     Char: CharLen,
@@ -155,7 +155,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   }
 
   /// Adds knowledge to the `UnexpectedPrefix` error.
-  #[inline(always)]
+  #[inline]
   pub const fn with_knowledge_const(mut self, knowledge: Knowledge) -> Self
   where
     Knowledge: Copy,
@@ -165,7 +165,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   }
 
   /// Adds knowledge to the `UnexpectedPrefix` error.
-  #[inline(always)]
+  #[inline]
   pub fn with_knowledge(mut self, knowledge: Knowledge) -> Self {
     self.knowledge = Some(knowledge);
     self
@@ -186,7 +186,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   ///   SimpleSpan::new(0, 6)
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn from_prefix(token: SimpleSpan<O>, span: SimpleSpan<O>) -> Self
   where
     Char: CharLen,
@@ -209,7 +209,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   /// );
   /// assert_eq!(error.span(), SimpleSpan::new(0, 5));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn span(&self) -> SimpleSpan<O>
   where
     Char: CharLen,
@@ -236,7 +236,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   /// );
   /// assert_eq!(error.token(), SimpleSpan::new(1, 5));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn token(&self) -> SimpleSpan<O>
   where
     O: Copy,
@@ -261,7 +261,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   ///   &Lexeme::Char(PositionedChar::with_position('x', 0))
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn prefix(&self) -> &Lexeme<Char, O> {
     &self.prefix
   }
@@ -284,7 +284,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   ///   Lexeme::Char(PositionedChar::with_position('x', 0))
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (SimpleSpan<O>, Lexeme<Char, O>) {
     (self.token, self.prefix)
   }
@@ -306,7 +306,7 @@ impl<Char, Knowledge, O> UnexpectedPrefix<Char, Knowledge, O> {
   /// error.bump(&10);
   /// assert_eq!(error.token(), SimpleSpan::new(11, 15));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &O) -> &mut Self
   where
     O: for<'a> AddAssign<&'a O> + Clone,
@@ -321,7 +321,7 @@ where
   Char: DisplayHuman,
   Knowledge: DisplayHuman,
 {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match &self.prefix {
       Lexeme::Char(positioned_char) => match &self.knowledge {

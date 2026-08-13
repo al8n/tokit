@@ -13,7 +13,7 @@ pub struct TooFew<S = SimpleSpan, Lang: ?Sized = ()> {
 
 impl<S> TooFew<S> {
   /// Creates a new `TooFew` error.
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: S, nums: usize, minimum: usize) -> Self {
     Self::of(span, nums, minimum)
   }
@@ -21,7 +21,7 @@ impl<S> TooFew<S> {
 
 impl<S, Lang: ?Sized> TooFew<S, Lang> {
   /// Creates a new `TooFew` error for the given language.
-  #[inline(always)]
+  #[inline]
   pub const fn of(span: S, nums: usize, minimum: usize) -> Self {
     Self::new_in(span, nums, minimum)
   }
@@ -38,13 +38,13 @@ impl<S, Lang: ?Sized> TooFew<S, Lang> {
   }
 
   /// Returns the span associated with this error.
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &S {
     &self.span
   }
 
   /// Returns the span associated with this error.
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -53,13 +53,13 @@ impl<S, Lang: ?Sized> TooFew<S, Lang> {
   }
 
   /// Returns the mutable reference to the span associated with this error.
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> &mut S {
     &mut self.span
   }
 
   /// Bumps the span by n offsets.
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, by: &S::Offset) -> &mut Self
   where
     S: Span,
@@ -69,20 +69,20 @@ impl<S, Lang: ?Sized> TooFew<S, Lang> {
   }
 
   /// Returns the number of elements found.
-  #[inline(always)]
+  #[inline]
   pub const fn nums(&self) -> usize {
     self.nums
   }
 
   /// Returns the limit that was violated.
-  #[inline(always)]
+  #[inline]
   pub const fn limit(&self) -> usize {
     self.limit
   }
 }
 
 impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for () {
-  #[inline(always)]
+  #[inline]
   fn from(_: TooFew<S, Lang>) -> Self {}
 }
 
@@ -90,7 +90,7 @@ impl<S, Lang: ?Sized> core::fmt::Display for TooFew<S, Lang>
 where
   S: core::fmt::Display,
 {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(
       f,

@@ -8,13 +8,13 @@ pub struct RequireLeading<P> {
 
 impl<P> RequireLeading<P> {
   /// Creates a new `RequireLeading` parser that requires leading separators.
-  #[inline(always)]
+  #[inline]
   pub const fn new(parser: P) -> Self {
     Self { parser }
   }
 
   /// Sets the parser to require trailing separator.
-  #[inline(always)]
+  #[inline]
   pub fn require_trailing(self) -> RequireLeading<RequireTrailing<P>> {
     RequireLeading {
       parser: RequireTrailing {
@@ -24,7 +24,7 @@ impl<P> RequireLeading<P> {
   }
 
   /// Sets the parser to allow trailing separator.
-  #[inline(always)]
+  #[inline]
   pub fn allow_trailing(self) -> RequireLeading<AllowTrailing<P>> {
     RequireLeading {
       parser: AllowTrailing {
@@ -34,7 +34,7 @@ impl<P> RequireLeading<P> {
   }
 
   /// Sets the maximum number of elements to parse.
-  #[inline(always)]
+  #[inline]
   pub fn at_most(self, maximum: usize) -> RequireLeading<AtMost<P>> {
     RequireLeading {
       parser: AtMost::new(self.parser, maximum),
@@ -42,7 +42,7 @@ impl<P> RequireLeading<P> {
   }
 
   /// Sets the minimum number of elements to parse.
-  #[inline(always)]
+  #[inline]
   pub fn at_least(self, minimum: usize) -> RequireLeading<AtLeast<P>> {
     RequireLeading {
       parser: AtLeast::new(self.parser, minimum),
@@ -50,7 +50,7 @@ impl<P> RequireLeading<P> {
   }
 
   /// Sets both the minimum and maximum number of elements to parse.
-  #[inline(always)]
+  #[inline]
   pub fn bounded(self, minimum: usize, maximum: usize) -> RequireLeading<Bounded<P>> {
     RequireLeading {
       parser: Bounded::new(self.parser, maximum, minimum),
@@ -58,13 +58,13 @@ impl<P> RequireLeading<P> {
   }
 
   /// Returns a mutable reference to the inner parser.
-  #[inline(always)]
+  #[inline]
   pub const fn parser_mut(&mut self) -> &mut P {
     &mut self.parser
   }
 
   /// Returns a mutable reference to the `RequireLeading` parser wrapping the inner parser.
-  #[inline(always)]
+  #[inline]
   pub const fn as_mut(&mut self) -> RequireLeading<&mut P> {
     RequireLeading {
       parser: &mut self.parser,
@@ -74,7 +74,7 @@ impl<P> RequireLeading<P> {
   define_many_delimited_methods!();
 
   /// Maps the inner parser to a new parser using the given function.
-  #[inline(always)]
+  #[inline]
   pub fn map_parser_mut<'a, F, NP>(&'a mut self, f: F) -> RequireLeading<NP>
   where
     F: FnOnce(&'a mut P) -> NP,

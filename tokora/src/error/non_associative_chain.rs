@@ -192,7 +192,7 @@ pub struct NonAssociativeChain<O = usize, Lang: ?Sized = ()> {
 
 impl<O, Lang: ?Sized> NonAssociativeChain<O, Lang> {
   /// Creates the error for a repeat handed back at `at`.
-  #[inline(always)]
+  #[inline]
   pub const fn of(at: O) -> Self {
     Self {
       at,
@@ -208,7 +208,7 @@ impl<O, Lang: ?Sized> NonAssociativeChain<O, Lang> {
   /// [`Recover`](crate::parser::Recover) and
   /// [`skip_then_retry`](crate::ParseInput::skip_then_retry) restore their own attempt origin
   /// first and restart there instead — see the type's docs.
-  #[inline(always)]
+  #[inline]
   pub const fn offset(&self) -> O
   where
     O: Copy,
@@ -217,14 +217,14 @@ impl<O, Lang: ?Sized> NonAssociativeChain<O, Lang> {
   }
 
   /// Returns a reference to the handback offset.
-  #[inline(always)]
+  #[inline]
   pub const fn offset_ref(&self) -> &O {
     &self.at
   }
 
   /// Rewrites the offset — the shape a nested parse uses to lift an inner offset into its
   /// enclosing document's coordinates.
-  #[inline(always)]
+  #[inline]
   pub fn map_offset<U, F>(self, f: F) -> NonAssociativeChain<U, Lang>
   where
     F: FnOnce(O) -> U,
@@ -254,6 +254,6 @@ impl<O, Lang: ?Sized> crate::error::MaybeTerminal for NonAssociativeChain<O, Lan
 /// discarding conversion by latching the input session rather than by riding in the payload. Two
 /// classifications, two mechanisms, and neither one lets the grammar's error type decide.
 impl<O, Lang: ?Sized> From<NonAssociativeChain<O, Lang>> for () {
-  #[inline(always)]
+  #[inline]
   fn from(_: NonAssociativeChain<O, Lang>) -> Self {}
 }

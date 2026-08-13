@@ -41,7 +41,7 @@ macro_rules! punctuator {
           };
 
           #[doc = "Returns a unit instance of the `" $punct "` punctuator."]
-          #[inline(always)]
+          #[inline]
           pub const fn unit() -> Self {
             Self::UNIT
           }
@@ -57,7 +57,7 @@ macro_rules! punctuator {
 
         impl<S> $name<S> {
           /// Creates a new punctuator with the given span.
-          #[inline(always)]
+          #[inline]
           pub const fn new(span: S) -> Self {
             Self { span, source: (), _lang: ::core::marker::PhantomData }
           }
@@ -65,7 +65,7 @@ macro_rules! punctuator {
 
         impl<S, C> $name<S, C> {
           #[doc = "Creates a new `" $punct "` punctuator with the given span and content."]
-          #[inline(always)]
+          #[inline]
           pub const fn with_content(span: S, content: C) -> Self {
             Self { span, source: content, _lang: ::core::marker::PhantomData }
           }
@@ -173,7 +173,7 @@ macro_rules! punctuator {
         }
 
         impl<S, C, Lang: ?::core::marker::Sized> ::core::fmt::Display for $name<S, C, Lang> {
-          #[inline(always)]
+          #[inline]
           fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
             ::core::fmt::Display::fmt($punct, f)
           }
@@ -412,7 +412,7 @@ pub trait Punctuator<'inp, L, Lang: ?Sized = ()> {
   fn name() -> CowStr;
 
   /// Returns the description of the punctuator.
-  #[inline(always)]
+  #[inline]
   fn description() -> Option<CowStr> {
     None
   }
@@ -423,7 +423,7 @@ pub trait Punctuator<'inp, L, Lang: ?Sized = ()> {
     L: Lexer<'inp>;
 
   /// Evaluates whether the given token kind matches the punctuator's kind.
-  #[inline(always)]
+  #[inline]
   fn eval(knd: &<L::Token as Token<'inp>>::Kind) -> bool
   where
     L: Lexer<'inp>,
@@ -432,7 +432,7 @@ pub trait Punctuator<'inp, L, Lang: ?Sized = ()> {
   }
 
   /// Creates an `UnexpectedToken` error for the punctuator.
-  #[inline(always)]
+  #[inline]
   fn unexpected_token(
     tok: Spanned<L::Token, L::Span>,
   ) -> UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>
@@ -446,17 +446,17 @@ pub trait Punctuator<'inp, L, Lang: ?Sized = ()> {
 
 macro_rules! impl_deref {
   (@impl<$ty:ty>) => {
-    #[inline(always)]
+    #[inline]
     fn name() -> CowStr {
       <$ty>::name()
     }
 
-    #[inline(always)]
+    #[inline]
     fn description() -> Option<CowStr> {
       <$ty>::description()
     }
 
-    #[inline(always)]
+    #[inline]
     fn kind() -> <L::Token as Token<'inp>>::Kind
     where
       L: Lexer<'inp>,
@@ -464,7 +464,7 @@ macro_rules! impl_deref {
       <$ty>::kind()
     }
 
-    #[inline(always)]
+    #[inline]
     fn eval(knd: &<<L>::Token as Token<'inp>>::Kind) -> bool
     where
       L: Lexer<'inp>,
@@ -472,7 +472,7 @@ macro_rules! impl_deref {
       <$ty>::eval(knd)
     }
 
-    #[inline(always)]
+    #[inline]
     fn unexpected_token(
       tok: Spanned<<L>::Token, <L>::Span>,
     ) -> UnexpectedToken<'inp, <L>::Token, <<L>::Token as Token<'inp>>::Kind, <L>::Span, Lang>

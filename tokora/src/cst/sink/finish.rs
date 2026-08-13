@@ -360,14 +360,14 @@ pub enum FinishError {
 /// One tick of [`W`](w) — a real increment under `cfg(test)`, an empty inlined body
 /// otherwise, so no shipped build carries the instrument.
 #[cfg(test)]
-#[inline(always)]
+#[inline]
 fn w_tick() {
   w::tick();
 }
 
 /// The release form of [`w_tick`]: nothing.
 #[cfg(not(test))]
-#[inline(always)]
+#[inline]
 const fn w_tick() {}
 
 /// Charges `n` units of [`W`](w) at once: the honest price of one bulk library call whose
@@ -375,14 +375,14 @@ const fn w_tick() {}
 /// over gathered diagnostic spans). Charging the element count is what makes a sort migrating
 /// into the per-event body visible: it would then cost `k` per event instead of `k` per finish.
 #[cfg(test)]
-#[inline(always)]
+#[inline]
 fn w_tick_n(n: u64) {
   w::add(n);
 }
 
 /// The release form of [`w_tick_n`]: nothing.
 #[cfg(not(test))]
-#[inline(always)]
+#[inline]
 const fn w_tick_n(_n: u64) {}
 
 /// One open node during the replay walk: a direct start, a hoisted retro-wrap (carrying
@@ -1286,13 +1286,13 @@ pub(crate) mod w {
   }
 
   /// One unit of replay work.
-  #[inline(always)]
+  #[inline]
   pub(crate) fn tick() {
     W.with(|w| w.set(w.get().saturating_add(1)));
   }
 
   /// `n` units at once — see [`w_tick_n`](super::w_tick_n).
-  #[inline(always)]
+  #[inline]
   pub(crate) fn add(n: u64) {
     W.with(|w| w.set(w.get().saturating_add(n)));
   }

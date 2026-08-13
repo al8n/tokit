@@ -106,7 +106,7 @@ impl<'a, F, S> UnexpectedKeyword<'a, F, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(5, 8));
   /// assert_eq!(format!("{}", error), "unexpected 'let', expected 'const' keyword");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: S, found: F, expected: Expected<'a, &'a str>) -> Self {
     Self {
       span,
@@ -132,7 +132,7 @@ impl<'a, F, S> UnexpectedKeyword<'a, F, S> {
   /// assert_eq!(error.found(), &"var");
   /// assert_eq!(format!("{}", error), "unexpected 'var', expected 'let' keyword");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn expected_one(span: S, found: F, expected: &'a str) -> Self {
     Self::new(span, found, Expected::one(expected))
   }
@@ -157,7 +157,7 @@ impl<'a, F, S> UnexpectedKeyword<'a, F, S> {
   ///     "unexpected 'function', expected one of: 'fn', 'async', 'const' keyword"
   /// );
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn expected_one_of(span: S, found: F, expected: &'a [&'a str]) -> Self {
     Self::new(span, found, Expected::one_of(expected))
   }
@@ -176,7 +176,7 @@ impl<'a, F, S> UnexpectedKeyword<'a, F, S> {
   /// );
   /// assert_eq!(error.span(), SimpleSpan::new(20, 26));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -198,7 +198,7 @@ impl<'a, F, S> UnexpectedKeyword<'a, F, S> {
   /// );
   /// assert_eq!(error.span(), SimpleSpan::new(20, 26));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &S {
     &self.span
   }
@@ -217,7 +217,7 @@ impl<'a, F, S> UnexpectedKeyword<'a, F, S> {
   /// );
   /// assert_eq!(error.found(), &"import");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn found(&self) -> &F {
     &self.found
   }
@@ -239,7 +239,7 @@ impl<'a, F, S> UnexpectedKeyword<'a, F, S> {
   ///     assert_eq!(keyword, "pub");
   /// }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn expected(&self) -> Expected<'a, &'a str> {
     self.expected.clone()
   }
@@ -262,7 +262,7 @@ impl<'a, F, S> UnexpectedKeyword<'a, F, S> {
   /// error.bump(&5);
   /// assert_eq!(error.span(), SimpleSpan::new(15, 18));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &S::Offset) -> &mut Self
   where
     S: Span,
@@ -273,7 +273,7 @@ impl<'a, F, S> UnexpectedKeyword<'a, F, S> {
 }
 
 impl<S: core::fmt::Display> core::fmt::Display for UnexpectedKeyword<'_, S> {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match &self.expected {
       Expected::One(expected) => {

@@ -110,7 +110,7 @@ impl<T, S> AsSpan<S> for Recoverable<T, S>
 where
   T: AsSpan<S>,
 {
-  #[inline(always)]
+  #[inline]
   fn as_span(&self) -> &S {
     match self {
       Self::Node(node) => node.as_span(),
@@ -144,19 +144,19 @@ where
 }
 
 impl<T> ErrorNode for Recoverable<T> {
-  #[inline(always)]
+  #[inline]
   fn error(span: SimpleSpan) -> Self {
     Self::Error(span)
   }
 
-  #[inline(always)]
+  #[inline]
   fn missing(span: SimpleSpan) -> Self {
     Self::Missing(span)
   }
 }
 
 impl<T> From<T> for Recoverable<T> {
-  #[inline(always)]
+  #[inline]
   fn from(node: T) -> Self {
     Self::Node(node)
   }

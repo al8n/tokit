@@ -145,14 +145,14 @@ where
 impl<Char, Knowledge, O> core::ops::Deref for UnknownLexeme<Char, Knowledge, O> {
   type Target = Lexeme<Char, O>;
 
-  #[inline(always)]
+  #[inline]
   fn deref(&self) -> &Self::Target {
     &self.lexeme
   }
 }
 
 impl<Char, Knowledge, O> core::ops::DerefMut for UnknownLexeme<Char, Knowledge, O> {
-  #[inline(always)]
+  #[inline]
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.lexeme
   }
@@ -175,7 +175,7 @@ impl<Char, O> UnknownLexeme<Char, crate::utils::knowledge::Characters, O> {
   /// assert!(!error.is_char());
   /// assert_eq!(error.unwrap_range().start(), 7);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn unknown_characters(span: SimpleSpan<O>) -> Self {
     Self::new(Lexeme::Range(span), sealed::Sealed::INIT)
   }
@@ -196,7 +196,7 @@ impl<Char, O> UnknownLexeme<Char, crate::utils::knowledge::Characters, O> {
   /// assert!(error.is_char());
   /// assert_eq!(error.unwrap_char().position(), 7);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn unknown_character(pos: O, ch: Char) -> Self {
     Self::from_char(pos, ch, sealed::Sealed::INIT)
   }
@@ -215,7 +215,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   ///
   /// assert_eq!(*error.knowledge(), "valid: identifier");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(lexeme: Lexeme<Char, O>, knowledge: Knowledge) -> Self {
     Self { lexeme, knowledge }
   }
@@ -235,7 +235,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// assert!(error.is_char());
   /// assert_eq!(error.unwrap_char().position(), 42);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn from_char(pos: O, ch: Char, knowledge: Knowledge) -> Self {
     Self::from_positioned_char(PositionedChar::with_position(ch, pos), knowledge)
   }
@@ -255,7 +255,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// assert!(error.is_char());
   /// assert_eq!(error.unwrap_char().position(), 42);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn from_positioned_char(pc: PositionedChar<Char, O>, knowledge: Knowledge) -> Self {
     Self::new(Lexeme::Char(pc), knowledge)
   }
@@ -276,7 +276,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   ///
   /// assert!(error.is_range());
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn from_range_const(span: SimpleSpan<O>, knowledge: Knowledge) -> Self {
     Self::new(Lexeme::Range(span), knowledge)
   }
@@ -293,7 +293,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// assert!(error.is_range());
   /// assert_eq!(error.unwrap_range().start(), 10);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn from_range(span: impl Into<SimpleSpan<O>>, knowledge: Knowledge) -> Self {
     Self::new(Lexeme::Range(span.into()), knowledge)
   }
@@ -312,7 +312,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   ///
   /// assert!(error.lexeme().is_char());
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn lexeme(&self) -> &Lexeme<Char, O> {
     &self.lexeme
   }
@@ -331,7 +331,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   ///
   /// assert_eq!(*error.knowledge(), "valid: digit");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn knowledge(&self) -> &Knowledge {
     &self.knowledge
   }
@@ -351,7 +351,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// error.lexeme_mut().bump(&10);
   /// assert_eq!(error.unwrap_char().position(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn lexeme_mut(&mut self) -> &mut Lexeme<Char, O> {
     &mut self.lexeme
   }
@@ -371,7 +371,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// error.knowledge_mut().push_str(" or letter");
   /// assert_eq!(error.knowledge(), "valid: digit or letter");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn knowledge_mut(&mut self) -> &mut Knowledge {
     &mut self.knowledge
   }
@@ -392,7 +392,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// assert!(lexeme.is_char());
   /// assert_eq!(knowledge, "identifier");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (Lexeme<Char, O>, Knowledge) {
     (self.lexeme, self.knowledge)
   }
@@ -412,7 +412,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// let lexeme = error.into_lexeme();
   /// assert!(lexeme.is_char());
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_lexeme(self) -> Lexeme<Char, O> {
     self.lexeme
   }
@@ -432,7 +432,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// let knowledge = error.into_knowledge();
   /// assert_eq!(knowledge, "identifier");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_knowledge(self) -> Knowledge {
     self.knowledge
   }
@@ -455,7 +455,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// assert_eq!(span.start(), 5);
   /// assert_eq!(span.end(), 8); // '€' is 3 bytes
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn span_with(&self, len_of: impl FnOnce(&Char) -> usize) -> SimpleSpan<O>
   where
     O: Clone + Ord,
@@ -480,7 +480,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   ///
   /// assert_eq!(error.span(), SimpleSpan::new(10, 11));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn span(&self) -> SimpleSpan<O>
   where
     Char: CharLen,
@@ -506,7 +506,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// assert_eq!(upper.unwrap_char().char(), 'A');
   /// assert_eq!(*upper.knowledge(), "digit");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn map_char<F, NewChar>(self, f: F) -> UnknownLexeme<NewChar, Knowledge, O>
   where
     F: FnMut(Char) -> NewChar,
@@ -532,7 +532,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// let detailed = error.map_knowledge(|h| format!("unrecognized, valid: {}", h));
   /// assert_eq!(detailed.knowledge(), "unrecognized, valid: digit");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn map_knowledge<F, NewKnowledge>(self, f: F) -> UnknownLexeme<Char, NewKnowledge, O>
   where
     F: FnOnce(Knowledge) -> NewKnowledge,
@@ -563,7 +563,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// assert_eq!(transformed.unwrap_char().char(), 'A');
   /// assert_eq!(transformed.knowledge(), "unrecognized, valid: number");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn map<F, NewChar, G, NewKnowledge>(
     self,
     f: F,
@@ -596,7 +596,7 @@ impl<Char, Knowledge, O> UnknownLexeme<Char, Knowledge, O> {
   /// error.bump(&10);
   /// assert_eq!(error.unwrap_char().position(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, n: &O) -> &mut Self
   where
     O: for<'a> AddAssign<&'a O> + Clone,

@@ -15,7 +15,7 @@ impl<'source, 'data: 'source> Slice<'source> for HipStr<'data> {
   where
     Self: 'a;
 
-  #[inline(always)]
+  #[inline]
   fn iter<'a>(&'a self) -> Self::Iter<'a>
   where
     Self: 'a,
@@ -23,7 +23,7 @@ impl<'source, 'data: 'source> Slice<'source> for HipStr<'data> {
     self.chars()
   }
 
-  #[inline(always)]
+  #[inline]
   fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
   where
     Self: 'a,
@@ -31,7 +31,7 @@ impl<'source, 'data: 'source> Slice<'source> for HipStr<'data> {
     self.char_indices()
   }
 
-  #[inline(always)]
+  #[inline]
   fn len(&self) -> usize {
     <HipStr<'data>>::len(self)
   }
@@ -50,7 +50,7 @@ impl<'source, 'data: 'source> Slice<'source> for HipByt<'data> {
   where
     Self: 'a;
 
-  #[inline(always)]
+  #[inline]
   fn iter<'a>(&'a self) -> Self::Iter<'a>
   where
     Self: 'a,
@@ -58,7 +58,7 @@ impl<'source, 'data: 'source> Slice<'source> for HipByt<'data> {
     <[u8]>::iter(self).copied()
   }
 
-  #[inline(always)]
+  #[inline]
   fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
   where
     Self: 'a,
@@ -66,7 +66,7 @@ impl<'source, 'data: 'source> Slice<'source> for HipByt<'data> {
     self.iter().enumerate()
   }
 
-  #[inline(always)]
+  #[inline]
   fn len(&self) -> usize {
     <HipByt<'data>>::len(self)
   }

@@ -66,13 +66,13 @@ pub struct Incomplete<O = usize> {
 
 impl<O> Incomplete<O> {
   /// Creates an `Incomplete` sentinel for input that ran out at `offset`.
-  #[inline(always)]
+  #[inline]
   pub const fn new(offset: O) -> Self {
     Self { offset }
   }
 
   /// Returns the offset at which the input ended mid-construct.
-  #[inline(always)]
+  #[inline]
   pub const fn offset(&self) -> O
   where
     O: Copy,
@@ -81,19 +81,19 @@ impl<O> Incomplete<O> {
   }
 
   /// Returns a reference to the offset at which the input ended mid-construct.
-  #[inline(always)]
+  #[inline]
   pub const fn offset_ref(&self) -> &O {
     &self.offset
   }
 
   /// Returns a mutable reference to the offset at which the input ended mid-construct.
-  #[inline(always)]
+  #[inline]
   pub const fn offset_mut(&mut self) -> &mut O {
     &mut self.offset
   }
 
   /// Consumes the sentinel and returns its offset.
-  #[inline(always)]
+  #[inline]
   pub fn into_offset(self) -> O {
     self.offset
   }
@@ -113,14 +113,14 @@ impl<O> Incomplete<O> {
 pub trait MaybeIncomplete {
   /// Returns `true` iff this error value is (or currently represents) an [`Incomplete`]
   /// partial-input sentinel. Defaults to `false`.
-  #[inline(always)]
+  #[inline]
   fn is_incomplete(&self) -> bool {
     false
   }
 }
 
 impl<O> MaybeIncomplete for Incomplete<O> {
-  #[inline(always)]
+  #[inline]
   fn is_incomplete(&self) -> bool {
     true
   }

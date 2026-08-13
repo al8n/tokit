@@ -276,7 +276,7 @@ pub struct Limiter {
 }
 
 impl Default for Limiter {
-  #[inline(always)]
+  #[inline]
   fn default() -> Self {
     Self::new()
   }
@@ -298,7 +298,7 @@ impl Limiter {
   /// assert_eq!(tracker.recursion().limitation(), 500);
   /// assert_eq!(tracker.token().limitation(), usize::MAX);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new() -> Self {
     Self::with_trackers(TokenLimiter::new(), RecursionLimiter::new())
   }
@@ -319,7 +319,7 @@ impl Limiter {
   /// assert_eq!(tracker.token().limitation(), 10000);
   /// assert_eq!(tracker.recursion().limitation(), 500);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn with_token_tracker(token_tracker: TokenLimiter) -> Self {
     Self::with_trackers(token_tracker, RecursionLimiter::new())
   }
@@ -339,7 +339,7 @@ impl Limiter {
   /// assert_eq!(tracker.recursion().limitation(), 100);
   /// assert_eq!(tracker.token().limitation(), usize::MAX);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn with_recursion_tracker(recursion_tracker: RecursionLimiter) -> Self {
     Self::with_trackers(TokenLimiter::new(), recursion_tracker)
   }
@@ -361,7 +361,7 @@ impl Limiter {
   /// assert_eq!(tracker.token().limitation(), 5000);
   /// assert_eq!(tracker.recursion().limitation(), 200);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn with_trackers(
     token_tracker: TokenLimiter,
     recursion_tracker: RecursionLimiter,
@@ -382,7 +382,7 @@ impl Limiter {
   /// let tracker = Limiter::new();
   /// assert_eq!(tracker.token().tokens(), 0);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn token(&self) -> &TokenLimiter {
     &self.token_tracker
   }
@@ -398,7 +398,7 @@ impl Limiter {
   /// tracker.token_mut().increase();
   /// assert_eq!(tracker.token().tokens(), 1);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn token_mut(&mut self) -> &mut TokenLimiter {
     &mut self.token_tracker
   }
@@ -413,7 +413,7 @@ impl Limiter {
   /// let tracker = Limiter::new();
   /// assert_eq!(tracker.recursion().depth(), 0);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn recursion(&self) -> &RecursionLimiter {
     &self.recursion_tracker
   }
@@ -429,7 +429,7 @@ impl Limiter {
   /// tracker.recursion_mut().increase();
   /// assert_eq!(tracker.recursion().depth(), 1);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn recursion_mut(&mut self) -> &mut RecursionLimiter {
     &mut self.recursion_tracker
   }
@@ -447,7 +447,7 @@ impl Limiter {
   /// tracker.increase_token();
   /// assert_eq!(tracker.token().tokens(), 1);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn increase_token(&mut self) {
     self.token_mut().increase();
   }
@@ -465,7 +465,7 @@ impl Limiter {
   /// tracker.increase_recursion();
   /// assert_eq!(tracker.recursion().depth(), 1);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn increase_recursion(&mut self) {
     self.recursion_mut().increase();
   }
@@ -484,7 +484,7 @@ impl Limiter {
   /// tracker.decrease_recursion();
   /// assert_eq!(tracker.recursion().depth(), 0);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn decrease_recursion(&mut self) {
     self.recursion_mut().decrease();
   }
@@ -515,7 +515,7 @@ impl Limiter {
   /// tracker.increase_token(); // Exceeds limit
   /// assert!(tracker.check().is_err());
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn check(&self) -> Result<(), LimitExceeded> {
     self
       .recursion_tracker
@@ -529,7 +529,7 @@ impl Limiter {
 impl State for Limiter {
   type Error = LimitExceeded;
 
-  #[inline(always)]
+  #[inline]
   fn check(&self) -> Result<(), Self::Error> {
     <Self as Tracker>::check(self)
   }
@@ -538,17 +538,17 @@ impl State for Limiter {
 impl RecursionTracker for Limiter {
   type Error = LimitExceeded;
 
-  #[inline(always)]
+  #[inline]
   fn increase(&mut self) {
     self.recursion_tracker.increase();
   }
 
-  #[inline(always)]
+  #[inline]
   fn decrease(&mut self) {
     self.recursion_tracker.decrease();
   }
 
-  #[inline(always)]
+  #[inline]
   fn check(&self) -> Result<(), Self::Error> {
     self.recursion_tracker.check().map_err(Into::into)
   }
@@ -557,12 +557,12 @@ impl RecursionTracker for Limiter {
 impl TokenTracker for Limiter {
   type Error = LimitExceeded;
 
-  #[inline(always)]
+  #[inline]
   fn increase(&mut self) {
     self.token_tracker.increase();
   }
 
-  #[inline(always)]
+  #[inline]
   fn check(&self) -> Result<(), Self::Error> {
     self.token_tracker.check().map_err(Into::into)
   }
@@ -586,35 +586,35 @@ pub trait Tracker {
   fn check(&self) -> Result<(), Self::Error>;
 
   /// Increase the token count and decrease recursion depth.
-  #[inline(always)]
+  #[inline]
   fn increase_token_and_decrease_recursion(&mut self) {
     self.increase_token();
     self.decrease_recursion();
   }
 
   /// Increases the token count and decreases recursion depth and checks limits.
-  #[inline(always)]
+  #[inline]
   fn increase_token_and_decrease_recursion_and_check(&mut self) -> Result<(), Self::Error> {
     self.increase_token_and_decrease_recursion();
     self.check()
   }
 
   /// Increases the token count and checks limits.
-  #[inline(always)]
+  #[inline]
   fn increase_token_and_check(&mut self) -> Result<(), Self::Error> {
     self.increase_token();
     self.check()
   }
 
   /// Increases the token count and recursion depth, then checks limits.
-  #[inline(always)]
+  #[inline]
   fn increase_both(&mut self) {
     self.increase_token();
     self.increase_recursion();
   }
 
   /// Increase the token count, decrease recursion depth, then checks limits.
-  #[inline(always)]
+  #[inline]
   fn increase_both_and_check(&mut self) -> Result<(), Self::Error> {
     self.increase_both();
     self.check()
@@ -624,35 +624,35 @@ pub trait Tracker {
 impl Tracker for Limiter {
   type Error = LimitExceeded;
 
-  #[inline(always)]
+  #[inline]
   fn increase_token(&mut self) {
     self.token_tracker.increase();
   }
 
-  #[inline(always)]
+  #[inline]
   fn increase_recursion(&mut self) {
     self.recursion_tracker.increase();
   }
 
-  #[inline(always)]
+  #[inline]
   fn decrease_recursion(&mut self) {
     self.recursion_tracker.decrease();
   }
 
-  #[inline(always)]
+  #[inline]
   fn increase_token_and_check(&mut self) -> Result<(), Self::Error> {
     self.token_tracker.increase();
     <Self as TokenTracker>::check(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn increase_token_and_decrease_recursion_and_check(&mut self) -> Result<(), Self::Error> {
     self.token_tracker.increase();
     self.recursion_tracker.decrease();
     <Self as TokenTracker>::check(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn check(&self) -> Result<(), Self::Error> {
     self
       .recursion_tracker
@@ -681,47 +681,47 @@ const _: () = {
       {
         type Error = <T::Extras as Tracker>::Error;
 
-        #[inline(always)]
+        #[inline]
         fn increase_token(&mut self) {
           self.extras.increase_token();
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_recursion(&mut self) {
           self.extras.increase_recursion();
         }
 
-        #[inline(always)]
+        #[inline]
         fn decrease_recursion(&mut self) {
           self.extras.decrease_recursion();
         }
 
-        #[inline(always)]
+        #[inline]
         fn check(&self) -> Result<(), Self::Error> {
           self.extras.check()
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_token_and_check(&mut self) -> Result<(), Self::Error> {
           self.extras.increase_token_and_check()
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_both(&mut self) {
           self.extras.increase_both();
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_both_and_check(&mut self) -> Result<(), Self::Error> {
           self.extras.increase_both_and_check()
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_token_and_decrease_recursion(&mut self) {
           self.extras.increase_token_and_decrease_recursion();
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_token_and_decrease_recursion_and_check(&mut self) -> Result<(), Self::Error> {
           self
             .extras
@@ -736,47 +736,47 @@ const _: () = {
       {
         type Error = <<T::Logos as Logos<'a>>::Extras as Tracker>::Error;
 
-        #[inline(always)]
+        #[inline]
         fn increase_token(&mut self) {
           self.inner_mut().increase_token();
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_recursion(&mut self) {
           self.inner_mut().increase_recursion();
         }
 
-        #[inline(always)]
+        #[inline]
         fn decrease_recursion(&mut self) {
           self.inner_mut().decrease_recursion();
         }
 
-        #[inline(always)]
+        #[inline]
         fn check(&self) -> Result<(), Self::Error> {
           self.inner().check()
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_token_and_check(&mut self) -> Result<(), Self::Error> {
           self.inner_mut().increase_token_and_check()
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_both(&mut self) {
           self.inner_mut().increase_both();
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_both_and_check(&mut self) -> Result<(), Self::Error> {
           self.inner_mut().increase_both_and_check()
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_token_and_decrease_recursion(&mut self) {
           self.inner_mut().increase_token_and_decrease_recursion();
         }
 
-        #[inline(always)]
+        #[inline]
         fn increase_token_and_decrease_recursion_and_check(&mut self) -> Result<(), Self::Error> {
           self
             .inner_mut()

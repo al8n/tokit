@@ -120,7 +120,7 @@ macro_rules! define_punctuator_token_traits {
         $(
           #[doc = "Returns `Some(_)` when " $punct " (`" $punct_char "`) is one of kinds of the token."]
           $(#[$meta])*
-          #[inline(always)]
+          #[inline]
           fn $punct() -> Option<Self::Kind> {
             None
           }
@@ -133,7 +133,7 @@ macro_rules! define_punctuator_token_traits {
           T: $crate::__private::token::PunctuatorToken<'inp> + ?::core::marker::Sized + 'inp,
           Lang: ?::core::marker::Sized,
         {
-          #[inline(always)]
+          #[inline]
           fn check(&self, target: &T) -> ::core::primitive::bool {
             target.[< is_ $punct >]()
           }
@@ -143,110 +143,110 @@ macro_rules! define_punctuator_token_traits {
       /// Extension trait providing default implementations for punctuator token methods.
       pub trait PunctuatorTokenExt<'a>: PunctuatorToken<'a> {
         /// Returns `true` when the token is a punctuator.
-        #[inline(always)]
+        #[inline]
         fn is_punctuator(&self) -> bool {
           is_punctuator!(self($($punct), +))
         }
 
         #[doc = "Returns `true` when the token is the less than punctuator (`<`)."]
-        #[inline(always)]
+        #[inline]
         fn is_less_than(&self) -> bool {
           self.is_open_angle()
         }
 
         #[doc = "Returns `true` when the token is the greater than punctuator (`>`)."]
-        #[inline(always)]
+        #[inline]
         fn is_greater_than(&self) -> bool {
           self.is_close_angle()
         }
 
         #[doc = "Returns `true` when the token is the bang punctuator (`!`)."]
-        #[inline(always)]
+        #[inline]
         fn is_bang(&self) -> bool {
           self.is_exclamation()
         }
 
         #[doc = "Returns `true` when the token is the hyphen punctuator (`-`)."]
-        #[inline(always)]
+        #[inline]
         fn is_hyphen(&self) -> bool {
           self.is_minus()
         }
 
         #[doc = "Returns `true` when the token is the thin arrow punctuator (`->`)."]
-        #[inline(always)]
+        #[inline]
         fn is_thin_arrow(&self) -> bool {
           self.is_arrow()
         }
 
         #[doc = "Returns `true` when the token is the add assign punctuator (`+=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_add_assign(&self) -> bool {
           self.is_plus_equal()
         }
 
         #[doc = "Returns `true` when the token is the sub assign punctuator (`-=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_sub_assign(&self) -> bool {
           self.is_hyphen_equal()
         }
 
         #[doc = "Returns `true` when the token is the mul assign punctuator (`*=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_mul_assign(&self) -> bool {
           self.is_asterisk_equal()
         }
 
         #[doc = "Returns `true` when the token is the exponentiation assign punctuator (`**=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_exponentiation_assign(&self) -> bool {
           self.is_exponentiation_equal()
         }
 
         #[doc = "Returns `true` when the token is the div assign punctuator (`/=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_div_assign(&self) -> bool {
           self.is_slash_equal()
         }
 
         #[doc = "Returns `true` when the token is the and assign punctuator (`&=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_bitand_assign(&self) -> bool {
           self.is_ampersand_equal()
         }
 
         #[doc = "Returns `true` when the token is the or assign punctuator (`|=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_bitor_assign(&self) -> bool {
           self.is_pipe_equal()
         }
 
         #[doc = "Returns `true` when the token is the xor assign punctuator (`^=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_bitxor_assign(&self) -> bool {
           self.is_caret_equal()
         }
 
         #[doc = "Returns `true` when the token is the shl assign punctuator (`<<=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_shl_assign(&self) -> bool {
           self.is_shl_equal()
         }
 
         #[doc = "Returns `true` when the token is the shr assign punctuator (`>>=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_shr_assign(&self) -> bool {
           self.is_shr_equal()
         }
 
         #[doc = "Returns `true` when the token is the sar assign punctuator (`>>>=`)."]
-        #[inline(always)]
+        #[inline]
         fn is_sar_assign(&self) -> bool {
           self.is_sar_equal()
         }
 
         $(
           #[doc = "Returns `true` when the token is the " $punct " punctuator (`" $punct_char "`)."]
-          #[inline(always)]
+          #[inline]
           fn [< is_ $punct >](&self) -> bool {
             Self::$punct().is_some_and(|k| self.kind().eq(&k))
           }
@@ -261,14 +261,14 @@ macro_rules! define_punctuator_token_traits {
         L::Token: PunctuatorToken<'a>,
       {
         #[doc = "Returns `Some(_)` when the token is hyphen (`-`)."]
-        #[inline(always)]
+        #[inline]
         fn expect_hyphen(self) -> Result<Spanned<L::Token, L::Span>, crate::error::token::UnexpectedToken<'a, L::Token, <L::Token as Token<'a>>::Kind, L::Span, Lang>>
         {
           self.expect_minus()
         }
 
         #[doc = "Returns `Some(_)` when the token is thin arrow (`->`)."]
-        #[inline(always)]
+        #[inline]
         fn expect_thin_arrow(self) -> Result<Spanned<L::Token, L::Span>, crate::error::token::UnexpectedToken<'a, L::Token, <L::Token as Token<'a>>::Kind, L::Span, Lang>>
         {
           self.expect_arrow()
@@ -287,7 +287,7 @@ macro_rules! define_punctuator_token_traits {
       {
         $(
           #[doc = "Returns `Some(_)` when the token is " $punct " (`" $punct_char "`)."]
-          #[inline(always)]
+          #[inline]
           fn [< expect_ $punct >](self) -> Result<Spanned<L::Token, L::Span>, crate::error::token::UnexpectedToken<'a, L::Token, <L::Token as Token<'a>>::Kind, L::Span, Lang>> {
             if self.data().[< is_ $punct >]() {
               Ok(self)

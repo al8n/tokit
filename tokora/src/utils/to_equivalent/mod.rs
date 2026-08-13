@@ -18,7 +18,7 @@ impl<T, O> ToEquivalent<O> for &T
 where
   T: ToEquivalent<O> + ?Sized,
 {
-  #[inline(always)]
+  #[inline]
   fn to_equivalent(&self) -> O {
     T::to_equivalent(self)
   }
@@ -31,14 +31,14 @@ impl sealed::Sealed<[u8]> for [u8] {}
 impl<'de: 'a, 'a> sealed::Sealed<&'a [u8]> for &'de [u8] {}
 
 impl<'de: 'a, 'a> ToEquivalent<&'a str> for &'de str {
-  #[inline(always)]
+  #[inline]
   fn to_equivalent(&self) -> &'a str {
     self
   }
 }
 
 impl<'de: 'a, 'a> ToEquivalent<&'a [u8]> for &'de [u8] {
-  #[inline(always)]
+  #[inline]
   fn to_equivalent(&self) -> &'a [u8] {
     self
   }
@@ -76,14 +76,14 @@ pub trait IntoEquivalent<T>: sealed::Sealed<T> {
 }
 
 impl<'de: 'a, 'a> IntoEquivalent<&'a str> for &'de str {
-  #[inline(always)]
+  #[inline]
   fn into_equivalent(self) -> &'a str {
     self
   }
 }
 
 impl<'de: 'a, 'a> IntoEquivalent<&'a [u8]> for &'de [u8] {
-  #[inline(always)]
+  #[inline]
   fn into_equivalent(self) -> &'a [u8] {
     self
   }

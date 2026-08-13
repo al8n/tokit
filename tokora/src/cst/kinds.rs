@@ -146,14 +146,14 @@ macro_rules! syntax_kinds {
       $vis const ALL: [Self; Self::COUNT as usize] = [$(Self::$variant),+];
 
       /// The raw `u16` the CST event stream carries.
-      #[inline(always)]
+      #[inline]
       $vis const fn raw(self) -> u16 {
         self as u16
       }
 
       /// The checked inverse of [`raw`](Self::raw): `None` for anything outside the
       /// declared space, including the reserved tombstone band.
-      #[inline(always)]
+      #[inline]
       $vis const fn from_raw(raw: u16) -> ::core::option::Option<Self> {
         if raw < Self::COUNT {
           // A generated comparison chain over the declaration, so this stays checked —
@@ -172,7 +172,7 @@ macro_rules! syntax_kinds {
 
       /// The dialect's `tokora::cst::KindValidator`: admits exactly the declared kinds,
       /// so the sink's validation and this declaration cannot disagree.
-      #[inline(always)]
+      #[inline]
       $vis const fn validator() -> $crate::cst::KindValidator {
         $crate::cst::KindValidator::new(|raw| raw < Self::COUNT)
       }

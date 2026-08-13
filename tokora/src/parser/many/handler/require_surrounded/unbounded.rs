@@ -22,7 +22,7 @@ where
     + MissingTrailingSeparatorEmitter<'inp, L, Lang>,
   Sep: Punctuator<'inp, L, Lang>,
 {
-  #[inline(always)]
+  #[inline]
   fn handle_start_state(
     &self,
     _: usize,
@@ -36,7 +36,7 @@ where
     Ok(inp.span_since(anchor))
   }
 
-  #[inline(always)]
+  #[inline]
   fn handle_element_state(
     &self,
     _: usize,
@@ -54,7 +54,7 @@ where
       .map(|_| span)
   }
 
-  #[inline(always)]
+  #[inline]
   fn handle_leading_state(
     &self,
     _: usize,
@@ -72,7 +72,7 @@ where
       .map(|_| inp.span_since(anchor))
   }
 
-  #[inline(always)]
+  #[inline]
   fn handle_separator_state(
     &self,
     _: usize,
@@ -97,7 +97,7 @@ where
   Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + MissingLeadingSeparatorEmitter<'inp, L, Lang>,
   Sep: Punctuator<'inp, L, Lang>,
 {
-  #[inline(always)]
+  #[inline]
   fn handle_start_state(
     &self,
     inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
@@ -121,7 +121,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + MissingLeadingSeparatorEmitter<'inp, L, Lang>,
 {
-  #[inline(always)]
+  #[inline]
   fn handle_start_state(
     &self,
     _: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,

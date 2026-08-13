@@ -86,7 +86,7 @@ pub enum TriviaPolicy {
 
 impl TriviaPolicy {
   /// The canonical name of this policy.
-  #[inline(always)]
+  #[inline]
   pub const fn as_str(&self) -> &'static str {
     match self {
       Self::AsEmitted => "as_emitted",
@@ -619,7 +619,7 @@ where
   /// Crate-private with the constructor: the public builder is
   /// [`Cst::with_trivia_policy`](super::Cst::with_trivia_policy), at the door that reads the
   /// policy.
-  #[inline(always)]
+  #[inline]
   #[must_use]
   pub(crate) fn with_trivia_policy(mut self, policy: TriviaPolicy) -> Self {
     self.trivia = policy;
@@ -633,25 +633,25 @@ where
   /// The mutable path to the inner emitter is the sink's own trait surface; ownership
   /// comes back from [`Cst::finish`](super::Cst::finish) /
   /// [`Cst::finish_partial`](super::Cst::finish_partial).
-  #[inline(always)]
+  #[inline]
   pub const fn inner_ref(&self) -> &E {
     &self.inner
   }
 
   /// The configured recovery-hole node kind.
-  #[inline(always)]
+  #[inline]
   pub const fn error_kind(&self) -> u16 {
     self.profile.error_kind()
   }
 
   /// The configured gap-tile token kind.
-  #[inline(always)]
+  #[inline]
   pub const fn gap_kind(&self) -> u16 {
     self.profile.gap_kind()
   }
 
   /// The configured trivia policy.
-  #[inline(always)]
+  #[inline]
   pub const fn trivia_policy(&self) -> TriviaPolicy {
     self.trivia
   }
@@ -1196,7 +1196,7 @@ where
   /// *different* buffer produces a tree whose structure came from one source and whose text
   /// came from another. Answering here is what lets the parse entry refuse that pairing; see
   /// [`Emitter::bound_source`] for the law and for what an inequality is allowed to prove.
-  #[inline(always)]
+  #[inline]
   fn bound_source(&self) -> Option<crate::source::SourceIdentity> {
     Some(crate::source::SourceIdentity::of(self.source))
   }

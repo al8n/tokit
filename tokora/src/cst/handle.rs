@@ -158,7 +158,7 @@ where
   ///
   /// `resource_trips` comes from `Input::resource_trips`, read **before** `into_emitter` consumes
   /// the input.
-  #[inline(always)]
+  #[inline]
   pub(crate) const fn from_sink(sink: Sink<'inp, L, E>, resource_trips: usize) -> Self {
     Self {
       sink,
@@ -215,7 +215,7 @@ where
   /// Frames admitted equals the limiter's `limitation` exactly — the `limitation + 1`th descent
   /// is the one refused. For a Pratt-driven grammar the root expression spends the first frame, so
   /// the deepest *nested* construct that parses clean is `limitation - 1`.
-  #[inline(always)]
+  #[inline]
   pub const fn resource_trips(&self) -> usize {
     self.resource_trips
   }
@@ -226,7 +226,7 @@ where
   /// materialization walk, and never during the parse: nothing a running parser does can
   /// observe it. A driver argument would put a knob that cannot influence the parse in the
   /// parse's own argument list; this door is the one that consumes it.
-  #[inline(always)]
+  #[inline]
   #[must_use]
   pub fn with_trivia_policy(mut self, policy: TriviaPolicy) -> Self {
     self.sink = self.sink.with_trivia_policy(policy);
@@ -234,26 +234,26 @@ where
   }
 
   /// The configured trivia policy.
-  #[inline(always)]
+  #[inline]
   pub const fn trivia_policy(&self) -> TriviaPolicy {
     self.sink.trivia_policy()
   }
 
   /// The configured recovery-hole node kind.
-  #[inline(always)]
+  #[inline]
   pub const fn error_kind(&self) -> u16 {
     self.sink.error_kind()
   }
 
   /// The configured gap-tile token kind.
-  #[inline(always)]
+  #[inline]
   pub const fn gap_kind(&self) -> u16 {
     self.sink.gap_kind()
   }
 
   /// The emitter the sink wrapped, by shared reference — the collected diagnostics of the parse
   /// that produced this tree, before materialization gives them back by value.
-  #[inline(always)]
+  #[inline]
   pub const fn inner_ref(&self) -> &E {
     self.sink.inner_ref()
   }

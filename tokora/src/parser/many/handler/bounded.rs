@@ -24,7 +24,7 @@ where
     + TooManyEmitter<'inp, L, Lang>,
   Sep: Punctuator<'inp, L, Lang>,
 {
-  #[inline(always)]
+  #[inline]
   fn handle_start_state(
     &self,
     num_elems: usize,
@@ -38,7 +38,7 @@ where
     self.check(inp, anchor, num_elems)
   }
 
-  #[inline(always)]
+  #[inline]
   fn handle_element_state(
     &self,
     num_elems: usize,
@@ -52,7 +52,7 @@ where
     self.check(inp, anchor, num_elems)
   }
 
-  #[inline(always)]
+  #[inline]
   fn handle_leading_state(
     &self,
     num_elems: usize,
@@ -67,7 +67,7 @@ where
     self.check(inp, anchor, num_elems)
   }
 
-  #[inline(always)]
+  #[inline]
   fn handle_separator_state(
     &self,
     num_elems: usize,
@@ -100,7 +100,7 @@ where
     + UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>,
   Sep: Punctuator<'inp, L, Lang>,
 {
-  #[inline(always)]
+  #[inline]
   fn handle_start_state(
     &self,
     _: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
@@ -122,7 +122,7 @@ where
   Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>,
   Sep: Punctuator<'inp, L, Lang>,
 {
-  #[inline(always)]
+  #[inline]
   fn handle_start_state(
     &self,
     inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
@@ -147,7 +147,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Ctx::Emitter: TooManyEmitter<'inp, L, Lang> + TooFewEmitter<'inp, L, Lang>,
 {
-  #[inline(always)]
+  #[inline]
   fn on_element(
     &self,
     nums: usize,
@@ -171,7 +171,7 @@ where
     Ok(())
   }
 
-  #[inline(always)]
+  #[inline]
   fn on_stop(
     &self,
     nums: usize,

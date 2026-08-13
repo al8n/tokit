@@ -23,13 +23,13 @@ macro_rules! define_many_delimited_methods {
   };
   (@emit [$($generics:tt)*] [$lang:ident]) => {
     /// Delimits the parser with the given delimiter.
-    #[inline(always)]
+    #[inline]
     pub const fn delimited<Delim>(self) -> $crate::parser::DelimitedBy<Self, Delim> {
       $crate::parser::DelimitedBy::<Self, Delim>::new(self)
     }
 
     /// Delimits the parser with parentheses.
-    #[inline(always)]
+    #[inline]
     pub const fn delimited_by_parens $($generics)* (
       self,
     ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Paren<(), (), $lang>> {
@@ -37,7 +37,7 @@ macro_rules! define_many_delimited_methods {
     }
 
     /// Delimits the parser with braces.
-    #[inline(always)]
+    #[inline]
     pub const fn delimited_by_braces $($generics)* (
       self,
     ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Brace<(), (), $lang>> {
@@ -45,7 +45,7 @@ macro_rules! define_many_delimited_methods {
     }
 
     /// Delimits the parser with brackets.
-    #[inline(always)]
+    #[inline]
     pub const fn delimited_by_brackets $($generics)* (
       self,
     ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Bracket<(), (), $lang>> {
@@ -53,7 +53,7 @@ macro_rules! define_many_delimited_methods {
     }
 
     /// Delimits the parser with angle brackets.
-    #[inline(always)]
+    #[inline]
     pub const fn delimited_by_angles $($generics)* (
       self,
     ) -> $crate::parser::DelimitedBy<Self, $crate::punct::Angle<(), (), $lang>> {
@@ -275,7 +275,7 @@ macro_rules! impl_separated_parse {
       Ctx: ParseContext<'inp, L, Lang>,
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L>,
     {
-      #[inline(always)]
+      #[inline]
       fn parse_input(
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
@@ -304,7 +304,7 @@ macro_rules! impl_separated_parse {
       Ctx: ParseContext<'inp, L, Lang>,
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L>,
     {
-      #[inline(always)]
+      #[inline]
       fn parse_input(
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
@@ -621,7 +621,7 @@ macro_rules! impl_separated_delim {
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L> + DelimiterHandler<'inp, L>,
       Delim: Delimiter<'inp, L, Lang>,
     {
-      #[inline(always)]
+      #[inline]
       fn parse_input(
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
@@ -650,7 +650,7 @@ macro_rules! impl_separated_delim {
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L> + DelimiterHandler<'inp, L>,
       Delim: Delimiter<'inp, L, Lang>,
     {
-      #[inline(always)]
+      #[inline]
       fn parse_input(
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
@@ -971,7 +971,7 @@ macro_rules! impl_separated_while_parse {
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L>,
       W: Window,
     {
-      #[inline(always)]
+      #[inline]
       fn parse_input(
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
@@ -1002,7 +1002,7 @@ macro_rules! impl_separated_while_parse {
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L>,
       W: Window,
     {
-      #[inline(always)]
+      #[inline]
       fn parse_input(
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
@@ -1348,7 +1348,7 @@ macro_rules! impl_separated_while_delim {
       Delim: Delimiter<'inp, L, Lang>,
       W: Window,
     {
-      #[inline(always)]
+      #[inline]
       fn parse_input(
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
@@ -1379,7 +1379,7 @@ macro_rules! impl_separated_while_delim {
       Delim: Delimiter<'inp, L, Lang>,
       W: Window,
     {
-      #[inline(always)]
+      #[inline]
       fn parse_input(
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,

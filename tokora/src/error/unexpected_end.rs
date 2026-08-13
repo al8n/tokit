@@ -258,7 +258,7 @@ impl<Hint, O, Lang> core::fmt::Display for UnexpectedEnd<Hint, O, Lang>
 where
   Hint: core::fmt::Display,
 {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match self.name() {
       Some(name) => write!(f, "unexpected end of {name}, expected {}", self.hint),
@@ -287,7 +287,7 @@ impl<O> UnexpectedEnd<PrattRhsHint, O> {
   /// assert_eq!(error.offset(), 100);
   /// assert_eq!(error.name(), Some("expression (right hand side)"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eorhs(offset: O) -> Self {
     Self::maybe_name(
       offset,
@@ -309,7 +309,7 @@ impl<O, Lang: ?Sized> UnexpectedEnd<PrattRhsHint, O, Lang> {
   /// assert_eq!(error.offset(), 100);
   /// assert_eq!(error.name(), Some("expression (right hand side)"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eorhs_of(offset: O) -> Self {
     Self::maybe_name_of(
       offset,
@@ -331,7 +331,7 @@ impl<O> UnexpectedEnd<PrattLhsHint, O> {
   /// assert_eq!(error.offset(), 100);
   /// assert_eq!(error.name(), Some("expression (left hand side)"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eolhs(offset: O) -> Self {
     Self::maybe_name(
       offset,
@@ -353,7 +353,7 @@ impl<O, Lang: ?Sized> UnexpectedEnd<PrattLhsHint, O, Lang> {
   /// assert_eq!(error.offset(), 100);
   /// assert_eq!(error.name(), Some("expression (left hand side)"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eolhs_of(offset: O) -> Self {
     Self::maybe_name_of(
       offset,
@@ -375,7 +375,7 @@ impl<O> UnexpectedEnd<FileHint, O> {
   /// assert_eq!(error.offset(), 100);
   /// assert_eq!(error.name(), Some("file"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eof(offset: O) -> Self {
     Self::maybe_name(offset, Some(CowStr::from_static("file")), FileHint)
   }
@@ -393,7 +393,7 @@ impl<O, Lang: ?Sized> UnexpectedEnd<FileHint, O, Lang> {
   /// assert_eq!(error.offset(), 100);
   /// assert_eq!(error.name(), Some("file"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eof_of(offset: O) -> Self {
     Self::maybe_name_of(offset, Some(CowStr::from_static("file")), FileHint)
   }
@@ -411,7 +411,7 @@ impl<O> UnexpectedEnd<TokenHint, O> {
   /// assert_eq!(error.offset(), 50);
   /// assert_eq!(error.name(), Some("token stream"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eot(offset: O) -> Self {
     Self::maybe_name(offset, Some(CowStr::from_static("token stream")), TokenHint)
   }
@@ -429,7 +429,7 @@ impl<O, Lang: ?Sized> UnexpectedEnd<TokenHint, O, Lang> {
   /// assert_eq!(error.offset(), 50);
   /// assert_eq!(error.name(), Some("token stream"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eot_of(offset: O) -> Self {
     Self::maybe_name_of(offset, Some(CowStr::from_static("token stream")), TokenHint)
   }
@@ -447,7 +447,7 @@ impl<O> UnexpectedEnd<CharacterHint, O> {
   /// assert_eq!(error.offset(), 25);
   /// assert_eq!(error.name(), Some("string"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eos(offset: O) -> Self {
     Self::maybe_name(offset, Some(CowStr::from_static("string")), CharacterHint)
   }
@@ -465,7 +465,7 @@ impl<O, Lang: ?Sized> UnexpectedEnd<CharacterHint, O, Lang> {
   /// assert_eq!(error.offset(), 25);
   /// assert_eq!(error.name(), Some("string"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eos_of(offset: O) -> Self {
     Self::maybe_name_of(offset, Some(CowStr::from_static("string")), CharacterHint)
   }
@@ -483,7 +483,7 @@ impl<Hint, O> UnexpectedEnd<Hint, O> {
   /// assert_eq!(error.name(), None);
   /// assert_eq!(error.offset(), 10);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(offset: O, hint: Hint) -> Self {
     Self::maybe_name(offset, None, hint)
   }
@@ -502,7 +502,7 @@ impl<Hint, O> UnexpectedEnd<Hint, O> {
   /// assert_eq!(error.offset(), 10);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn maybe_name(offset: O, name: Option<CowStr>, hint: Hint) -> Self {
     Self::maybe_name_of(offset, name, hint)
   }
@@ -520,7 +520,7 @@ impl<Hint, O> UnexpectedEnd<Hint, O> {
   /// assert_eq!(error.offset(), 20);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn with_name(offset: O, name: CowStr, hint: Hint) -> Self {
     Self::with_name_of(offset, name, hint)
   }
@@ -536,7 +536,7 @@ impl<Hint, O> UnexpectedEnd<Hint, O> {
   /// assert_eq!(error.name(), None);
   /// assert_eq!(error.offset(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn with_hint(offset: O, hint: Hint) -> Self {
     Self::with_hint_of(offset, hint)
   }
@@ -554,7 +554,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(error.name(), None);
   /// assert_eq!(error.offset(), 10);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn of(offset: O, hint: Hint) -> Self {
     Self::maybe_name_of(offset, None, hint)
   }
@@ -573,7 +573,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(error.offset(), 10);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn maybe_name_of(offset: O, name: Option<CowStr>, hint: Hint) -> Self {
     Self {
       offset,
@@ -598,7 +598,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(error.offset(), 20);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn with_name_of(offset: O, name: CowStr, hint: Hint) -> Self {
     Self::maybe_name_of(offset, Some(name), hint)
   }
@@ -614,7 +614,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(error.name(), None);
   /// assert_eq!(error.offset(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn with_hint_of(offset: O, hint: Hint) -> Self {
     Self {
       offset,
@@ -637,7 +637,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// error.set_name("expression");
   /// assert_eq!(error.name(), Some("expression"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn set_name(&mut self, name: impl Into<CowStr>) -> &mut Self {
     self.name = Some(name.into());
     self
@@ -656,7 +656,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(error.name(), Some("new"));
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn update_name(&mut self, name: Option<impl Into<CowStr>>) -> &mut Self {
     self.name = name.map(Into::into);
     self
@@ -675,7 +675,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(error.name(), None);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn clear_name(&mut self) -> &mut Self {
     self.name = None;
     self
@@ -692,7 +692,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// let old_hint = error.replace_hint(FileHint);
   /// // old_hint is FileHint
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn replace_hint(&mut self, new: Hint) -> Hint {
     core::mem::replace(&mut self.hint, new)
   }
@@ -709,7 +709,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(token_error.name(), Some("file"));
   /// assert_eq!(token_error.offset(), 100);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn map_hint<F, NewHint>(self, f: F) -> UnexpectedEnd<NewHint, O, Lang>
   where
     F: FnOnce(Hint) -> NewHint,
@@ -736,7 +736,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(token_error.name(), Some("block"));
   /// assert_eq!(token_error.offset(), 100);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn reconstruct<F, NewHint>(
     self,
     name: Option<impl Into<CowStr>>,
@@ -760,7 +760,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(token_error.name(), Some("expression"));
   /// assert_eq!(token_error.offset(), 100);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn reconstruct_with_name<F, NewHint>(
     self,
     name: impl Into<CowStr>,
@@ -786,7 +786,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(token_error.offset(), 10);
   /// # }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn reconstruct_without_name<F, NewHint>(self, f: F) -> UnexpectedEnd<NewHint, O, Lang>
   where
     F: FnOnce(Hint) -> NewHint,
@@ -795,7 +795,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   }
 
   /// Returns a mutable reference to the offset of the unexpected end.
-  #[inline(always)]
+  #[inline]
   pub const fn offset_mut(&mut self) -> &mut O {
     &mut self.offset
   }
@@ -814,7 +814,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// error.bump(&5);
   /// assert_eq!(error.offset(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, n: &O) -> &mut Self
   where
     O: for<'a> core::ops::AddAssign<&'a O>,
@@ -835,7 +835,7 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   /// assert_eq!(offset, 100);
   /// assert_eq!(name, Some("file".into()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (O, Option<CowStr>, Hint) {
     (self.offset, self.name, self.hint)
   }
@@ -863,7 +863,7 @@ where
   /// let error = UnexpectedEnd::eof(100);
   /// assert_eq!(error.offset(), 100);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn offset(&self) -> O
   where
     O: Copy,
@@ -872,7 +872,7 @@ where
   }
 
   /// Returns a reference to the offset of the unexpected end.
-  #[inline(always)]
+  #[inline]
   pub const fn offset_ref(&self) -> &O {
     &self.offset
   }
@@ -887,7 +887,7 @@ where
   /// let error = UnexpectedEnd::eof(100);
   /// assert_eq!(error.name(), Some("file"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn name(&self) -> Option<&str> {
     match &self.name {
       Some(name) => Some(name.as_str()),
@@ -906,7 +906,7 @@ where
   /// // FileHint is a zero-sized type
   /// let _ = error.hint();
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn hint(&self) -> &Hint {
     &self.hint
   }
@@ -928,7 +928,7 @@ where
   /// );
   /// assert!(matches!(error.expected(), Some(Expected::OneOf(_))));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn maybe_expected_of(
     offset: O,
     name: Option<CowStr>,
@@ -958,7 +958,7 @@ where
     doc = " `DispatchOnKind` failure at end of input reports its whole"
   )]
   /// dispatch table here.
-  #[inline(always)]
+  #[inline]
   pub const fn expected(&self) -> Option<&Expected<'static, Set>> {
     self.expected.as_ref()
   }
@@ -969,7 +969,7 @@ where
   /// `false` for every ordinary constructor; `true` only after [`into_terminal`](Self::into_terminal).
   /// This is the signal [`MaybeTerminal`](crate::error::MaybeTerminal) exposes so recovery re-raises
   /// the stop instead of spending it as a recoverable failure.
-  #[inline(always)]
+  #[inline]
   pub const fn is_terminal(&self) -> bool {
     self.terminal
   }
@@ -988,7 +988,7 @@ where
   /// to mark — so the same trip can reach a caller unmarked. See
   /// [`MaybeTerminal`](crate::error::MaybeTerminal#where-the-set-stops-being-closed) for the arm
   /// that answers for it.
-  #[inline(always)]
+  #[inline]
   #[must_use]
   pub fn into_terminal(mut self) -> Self {
     self.terminal = true;
@@ -1020,7 +1020,7 @@ where
   ///     assert_eq!(set.as_slice(), &["if", "while", "for"]);
   /// }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn eot_expected_one_of(offset: O, expected: &'static [Set]) -> Self {
     Self::maybe_expected_of(
       offset,
@@ -1035,7 +1035,7 @@ impl<Hint, O, Lang: ?Sized, Set> From<UnexpectedEnd<Hint, O, Lang, Set>> for ()
 where
   Set: Clone + 'static,
 {
-  #[inline(always)]
+  #[inline]
   fn from(_: UnexpectedEnd<Hint, O, Lang, Set>) -> Self {}
 }
 
@@ -1056,7 +1056,7 @@ pub type UnexpectedEoLhs<O = usize, Lang = (), Set = &'static str> =
   UnexpectedEnd<PrattLhsHint, O, Lang, Set>;
 
 impl<Hint, O, Lang: ?Sized> From<(O, Hint)> for UnexpectedEnd<Hint, O, Lang> {
-  #[inline(always)]
+  #[inline]
   fn from((offset, hint): (O, Hint)) -> Self {
     Self::of(offset, hint)
   }
@@ -1066,7 +1066,7 @@ impl<Hint, O, Lang: ?Sized, Set> crate::error::MaybeTerminal for UnexpectedEnd<H
 where
   Set: Clone + 'static,
 {
-  #[inline(always)]
+  #[inline]
   fn is_terminal(&self) -> bool {
     self.terminal
   }

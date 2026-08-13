@@ -13,7 +13,7 @@ pub struct UnexpectedRepeatedToken<T, S = SimpleSpan, Lang: ?Sized = ()> {
 
 impl<T, S> UnexpectedRepeatedToken<T, S> {
   /// Creates a new `UnexpectedRepeatedToken` error.
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: S, count: usize) -> Self {
     Self::of(span, count)
   }
@@ -21,7 +21,7 @@ impl<T, S> UnexpectedRepeatedToken<T, S> {
 
 impl<T, S, Lang: ?Sized> UnexpectedRepeatedToken<T, S, Lang> {
   /// Creates a new `UnexpectedRepeatedToken` error for the given language.
-  #[inline(always)]
+  #[inline]
   pub const fn of(span: S, count: usize) -> Self {
     Self {
       span,
@@ -32,19 +32,19 @@ impl<T, S, Lang: ?Sized> UnexpectedRepeatedToken<T, S, Lang> {
   }
 
   /// Returns the reference to the span covering the repeated tokens.
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &S {
     &self.span
   }
 
   /// Returns the mutable reference to the span covering the repeated tokens.
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> &mut S {
     &mut self.span
   }
 
   /// Returns the span covering the repeated tokens.
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -53,7 +53,7 @@ impl<T, S, Lang: ?Sized> UnexpectedRepeatedToken<T, S, Lang> {
   }
 
   /// Returns the number of repeated tokens found.
-  #[inline(always)]
+  #[inline]
   pub const fn count(&self) -> usize {
     self.count
   }
@@ -62,7 +62,7 @@ impl<T, S, Lang: ?Sized> UnexpectedRepeatedToken<T, S, Lang> {
   ///
   /// The `span` parameter is used to extend the end of the current span,
   /// and the `count` parameter indicates how many additional repeated tokens were found.
-  #[inline(always)]
+  #[inline]
   pub fn expand(&mut self, span: S, count: usize) -> &mut Self
   where
     S: Span,
@@ -74,7 +74,7 @@ impl<T, S, Lang: ?Sized> UnexpectedRepeatedToken<T, S, Lang> {
 }
 
 impl<T, S, Lang: ?Sized> From<UnexpectedRepeatedToken<T, S, Lang>> for () {
-  #[inline(always)]
+  #[inline]
   fn from(_: UnexpectedRepeatedToken<T, S, Lang>) -> Self {}
 }
 

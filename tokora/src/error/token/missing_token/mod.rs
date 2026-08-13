@@ -111,14 +111,14 @@ impl<Kind: Clone, O> MissingToken<'_, Kind, O> {
   ///
   /// This error indicates that a missing token was encountered,
   /// without specifying what token was found or expected.
-  #[inline(always)]
+  #[inline]
   pub const fn new(offset: O) -> Self {
     Self::of(offset)
   }
 }
 
 impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
-  #[inline(always)]
+  #[inline]
   pub(super) const fn new_in(
     offset: O,
     expected: Option<Expected<'a, Kind>>,
@@ -138,7 +138,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   ///
   /// This error indicates that a missing token was encountered,
   /// without specifying what token was found or expected.
-  #[inline(always)]
+  #[inline]
   pub const fn of(offset: O) -> Self {
     Self::new_in(offset, None, None, None)
   }
@@ -147,7 +147,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   ///
   /// This method allows attaching additional context or information
   /// to the error, which can be useful for debugging or reporting.
-  #[inline(always)]
+  #[inline]
   pub fn with_message(self, message: CowStr) -> Self {
     Self::new_in(self.offset, self.expected, Some(message), self.name)
   }
@@ -161,7 +161,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// conversion that declined to overwrite it would lose the name instead. Keeping the two
   /// apart also keeps the name safe from [`with_expected`](Self::with_expected), which clears
   /// the message channel.
-  #[inline(always)]
+  #[inline]
   pub fn with_name(self, name: CowStr) -> Self {
     Self::new_in(self.offset, self.expected, self.message, Some(name))
   }
@@ -184,7 +184,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   ///     assert_eq!(*value, "}");
   /// }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn with_expected(self, expected: Expected<'a, Kind>) -> Self {
     Self::new_in(self.offset, Some(expected), None, self.name)
   }
@@ -205,7 +205,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// );
   /// assert_eq!(error.offset(), SimpleSpan::new(50, 51));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn expected_one(offset: O, expected: Kind) -> Self {
     Self::new_in(offset, Some(Expected::one(expected)), None, None)
   }
@@ -226,7 +226,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// );
   /// assert_eq!(error.offset(), SimpleSpan::new(50, 51));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn expected_one_with_found(offset: O, expected: Kind) -> Self {
     Self::new_in(offset, Some(Expected::one(expected)), None, None)
   }
@@ -247,7 +247,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// );
   /// assert_eq!(error.offset(), SimpleSpan::new(25, 26));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn expected_one_of(offset: O, expected: &'static [Kind]) -> Self {
     Self::new_in(offset, Some(Expected::one_of(expected)), None, None)
   }
@@ -268,7 +268,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// );
   /// assert_eq!(error.offset(), SimpleSpan::new(25, 26));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn expected_one_of_with_found(offset: O, expected: &'static [Kind]) -> Self {
     Self::new_in(offset, Some(Expected::one_of(expected)), None, None)
   }
@@ -286,7 +286,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// );
   /// assert_eq!(error.offset(), SimpleSpan::new(10, 15));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn offset(&self) -> O
   where
     O: Copy,
@@ -304,7 +304,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// let error: MissingToken<'_, &str> = MissingToken::expected_one(10, "identifier");
   /// assert_eq!(error.offset_ref(), &10);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn offset_ref(&self) -> &O {
     &self.offset
   }
@@ -320,25 +320,25 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// *error.offset_mut() = 12;
   /// assert_eq!(error.offset(), 12);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn offset_mut(&mut self) -> &mut O {
     &mut self.offset
   }
 
   /// Returns a reference to the custom message, if any.
-  #[inline(always)]
+  #[inline]
   pub const fn message(&self) -> Option<&CowStr> {
     self.message.as_ref()
   }
 
   /// Returns a mutable reference to the custom message, if any.
-  #[inline(always)]
+  #[inline]
   pub fn message_mut(&mut self) -> Option<&mut CowStr> {
     self.message.as_mut()
   }
 
   /// Returns the stamped token name, if any — see [`with_name`](Self::with_name).
-  #[inline(always)]
+  #[inline]
   pub const fn name(&self) -> Option<&CowStr> {
     self.name.as_ref()
   }
@@ -353,7 +353,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// let error: MissingToken<'_, &str, SimpleSpan> = MissingToken::expected_one(SimpleSpan::new(5, 6), "}");
   /// assert!(matches!(error.expected(), Some(Expected::One(value)) if *value == "}"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn expected(&self) -> Option<&Expected<'a, Kind>> {
     self.expected.as_ref()
   }
@@ -372,7 +372,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// error.bump(&5);
   /// assert_eq!(error.offset(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &O)
   where
     O: for<'b> AddAssign<&'b O>,
@@ -438,7 +438,7 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
   /// assert_eq!(message, None);
   /// assert_eq!(name.as_ref().map(CowStr::as_str), Some("brace"));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_components(
     self,
   ) -> (
@@ -452,13 +452,13 @@ impl<'a, Kind: Clone, O, Lang: ?Sized> MissingToken<'a, Kind, O, Lang> {
 }
 
 impl<'a, Kind: Clone, O, Lang: ?Sized> From<MissingToken<'a, Kind, O, Lang>> for () {
-  #[inline(always)]
+  #[inline]
   fn from(_: MissingToken<'a, Kind, O, Lang>) -> Self {}
 }
 
 impl<Kind: Clone, O, Lang: ?Sized> MissingToken<'_, Kind, O, Lang> {
   /// Formats the error using the provided formatter in debug style.
-  #[inline(always)]
+  #[inline]
   pub fn debug_fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
   where
     O: core::fmt::Debug,
@@ -483,7 +483,7 @@ impl<Kind: Clone, O, Lang: ?Sized> MissingToken<'_, Kind, O, Lang> {
   ///
   /// Without a name the rendering is byte-for-byte what it always was, so the channel is
   /// purely additive for every error that never carried one.
-  #[inline(always)]
+  #[inline]
   pub fn display_fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
   where
     O: core::fmt::Display,

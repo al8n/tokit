@@ -39,7 +39,7 @@ pub trait Container<T> {
   fn len(&self) -> usize;
 
   /// Returns `true` if the container is empty.
-  #[inline(always)]
+  #[inline]
   fn is_empty(&self) -> bool {
     self.len() == 0
   }
@@ -56,27 +56,27 @@ impl<T, U> Container<T> for &mut U
 where
   U: Container<T>,
 {
-  #[inline(always)]
+  #[inline]
   fn max_capacity(&self) -> usize {
     U::max_capacity(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn push(&mut self, item: T) -> Result<(), T> {
     U::push(self, item)
   }
 
-  #[inline(always)]
+  #[inline]
   fn first(&self) -> Option<&T> {
     U::first(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn last(&self) -> Option<&T> {
     U::last(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn len(&self) -> usize {
     U::len(self)
   }
@@ -85,27 +85,27 @@ where
 macro_rules! blackhole {
   ($ty:ty) => {
     impl<T> Container<T> for $ty {
-      #[inline(always)]
+      #[inline]
       fn max_capacity(&self) -> usize {
         usize::MAX
       }
 
-      #[inline(always)]
+      #[inline]
       fn push(&mut self, _: T) -> Result<(), T> {
         Ok(())
       }
 
-      #[inline(always)]
+      #[inline]
       fn first(&self) -> Option<&T> {
         None
       }
 
-      #[inline(always)]
+      #[inline]
       fn last(&self) -> Option<&T> {
         None
       }
 
-      #[inline(always)]
+      #[inline]
       fn len(&self) -> usize {
         0
       }
@@ -118,12 +118,12 @@ blackhole!(core::marker::PhantomData<T>);
 blackhole!(crate::utils::marker::Ignored<T>);
 
 impl<T> Container<T> for Option<T> {
-  #[inline(always)]
+  #[inline]
   fn max_capacity(&self) -> usize {
     1
   }
 
-  #[inline(always)]
+  #[inline]
   fn push(&mut self, item: T) -> Result<(), T> {
     if self.is_none() {
       *self = Some(item);
@@ -133,17 +133,17 @@ impl<T> Container<T> for Option<T> {
     }
   }
 
-  #[inline(always)]
+  #[inline]
   fn first(&self) -> Option<&T> {
     self.as_ref()
   }
 
-  #[inline(always)]
+  #[inline]
   fn last(&self) -> Option<&T> {
     self.as_ref()
   }
 
-  #[inline(always)]
+  #[inline]
   fn len(&self) -> usize {
     if self.is_some() { 1 } else { 0 }
   }
@@ -153,12 +153,12 @@ impl<T, N> Container<T> for GenericArrayDeque<T, N>
 where
   N: ArrayLength,
 {
-  #[inline(always)]
+  #[inline]
   fn max_capacity(&self) -> usize {
     N::to_usize()
   }
 
-  #[inline(always)]
+  #[inline]
   fn push(&mut self, item: T) -> Result<(), T> {
     match GenericArrayDeque::push_back(self, item) {
       None => Ok(()),
@@ -166,17 +166,17 @@ where
     }
   }
 
-  #[inline(always)]
+  #[inline]
   fn first(&self) -> Option<&T> {
     GenericArrayDeque::front(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn last(&self) -> Option<&T> {
     GenericArrayDeque::back(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn len(&self) -> usize {
     GenericArrayDeque::len(self)
   }
@@ -188,56 +188,56 @@ const _: () = {
   use std::{collections::VecDeque, vec::Vec};
 
   impl<T> Container<T> for Vec<T> {
-    #[inline(always)]
+    #[inline]
     fn max_capacity(&self) -> usize {
       usize::MAX
     }
 
-    #[inline(always)]
+    #[inline]
     fn push(&mut self, item: T) -> Result<(), T> {
       Vec::push(self, item);
       Ok(())
     }
 
-    #[inline(always)]
+    #[inline]
     fn first(&self) -> Option<&T> {
       self.as_slice().first()
     }
 
-    #[inline(always)]
+    #[inline]
     fn last(&self) -> Option<&T> {
       self.as_slice().last()
     }
 
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
       Vec::len(self)
     }
   }
 
   impl<T> Container<T> for VecDeque<T> {
-    #[inline(always)]
+    #[inline]
     fn max_capacity(&self) -> usize {
       usize::MAX
     }
 
-    #[inline(always)]
+    #[inline]
     fn push(&mut self, item: T) -> Result<(), T> {
       VecDeque::push_back(self, item);
       Ok(())
     }
 
-    #[inline(always)]
+    #[inline]
     fn first(&self) -> Option<&T> {
       self.front()
     }
 
-    #[inline(always)]
+    #[inline]
     fn last(&self) -> Option<&T> {
       self.back()
     }
 
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
       VecDeque::len(self)
     }
@@ -253,28 +253,28 @@ const _: () = {
   where
     A: smallvec_1::Array<Item = T>,
   {
-    #[inline(always)]
+    #[inline]
     fn max_capacity(&self) -> usize {
       usize::MAX
     }
 
-    #[inline(always)]
+    #[inline]
     fn push(&mut self, item: T) -> Result<(), T> {
       SmallVec::push(self, item);
       Ok(())
     }
 
-    #[inline(always)]
+    #[inline]
     fn first(&self) -> Option<&T> {
       self.as_slice().first()
     }
 
-    #[inline(always)]
+    #[inline]
     fn last(&self) -> Option<&T> {
       self.as_slice().last()
     }
 
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
       SmallVec::len(self)
     }
@@ -287,12 +287,12 @@ const _: () = {
   use tinyvec_1::{Array, ArrayVec, SliceVec};
 
   impl<T> Container<T> for SliceVec<'_, T> {
-    #[inline(always)]
+    #[inline]
     fn max_capacity(&self) -> usize {
       self.capacity()
     }
 
-    #[inline(always)]
+    #[inline]
     fn push(&mut self, item: T) -> Result<(), T> {
       // `SliceVec::push` panics on capacity overflow and `tinyvec` publishes no fallible twin
       // of it, so the bound is tested here: the backing slice cannot grow, and an element count
@@ -306,17 +306,17 @@ const _: () = {
       }
     }
 
-    #[inline(always)]
+    #[inline]
     fn first(&self) -> Option<&T> {
       self.as_slice().first()
     }
 
-    #[inline(always)]
+    #[inline]
     fn last(&self) -> Option<&T> {
       self.as_slice().last()
     }
 
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
       SliceVec::len(self)
     }
@@ -326,12 +326,12 @@ const _: () = {
   where
     A: Array<Item = T>,
   {
-    #[inline(always)]
+    #[inline]
     fn max_capacity(&self) -> usize {
       A::CAPACITY
     }
 
-    #[inline(always)]
+    #[inline]
     fn push(&mut self, item: T) -> Result<(), T> {
       match self.try_push(item) {
         Some(t) => Err(t),
@@ -339,17 +339,17 @@ const _: () = {
       }
     }
 
-    #[inline(always)]
+    #[inline]
     fn first(&self) -> Option<&T> {
       self.as_slice().first()
     }
 
-    #[inline(always)]
+    #[inline]
     fn last(&self) -> Option<&T> {
       self.as_slice().last()
     }
 
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
       ArrayVec::len(self)
     }
@@ -364,28 +364,28 @@ const _: () = {
     where
       A: Array<Item = T>,
     {
-      #[inline(always)]
+      #[inline]
       fn max_capacity(&self) -> usize {
         usize::MAX
       }
 
-      #[inline(always)]
+      #[inline]
       fn push(&mut self, item: T) -> Result<(), T> {
         TinyVec::push(self, item);
         Ok(())
       }
 
-      #[inline(always)]
+      #[inline]
       fn first(&self) -> Option<&T> {
         self.as_slice().first()
       }
 
-      #[inline(always)]
+      #[inline]
       fn last(&self) -> Option<&T> {
         self.as_slice().last()
       }
 
-      #[inline(always)]
+      #[inline]
       fn len(&self) -> usize {
         TinyVec::len(self)
       }
@@ -402,64 +402,64 @@ const _: () = {
   where
     LenT: LenType,
   {
-    #[inline(always)]
+    #[inline]
     fn max_capacity(&self) -> usize {
       N
     }
 
-    #[inline(always)]
+    #[inline]
     fn push(&mut self, item: T) -> Result<(), T> {
       Vec::push(self, item)
     }
 
-    #[inline(always)]
+    #[inline]
     fn first(&self) -> Option<&T> {
       self.as_slice().first()
     }
 
-    #[inline(always)]
+    #[inline]
     fn last(&self) -> Option<&T> {
       self.as_slice().last()
     }
 
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
       self.as_slice().len()
     }
 
-    #[inline(always)]
+    #[inline]
     fn is_empty(&self) -> bool {
       Vec::is_empty(self)
     }
   }
 
   impl<T, const N: usize> Container<T> for Deque<T, N> {
-    #[inline(always)]
+    #[inline]
     fn max_capacity(&self) -> usize {
       N
     }
 
-    #[inline(always)]
+    #[inline]
     fn push(&mut self, item: T) -> Result<(), T> {
       Deque::push_back(self, item)
     }
 
-    #[inline(always)]
+    #[inline]
     fn first(&self) -> Option<&T> {
       self.front()
     }
 
-    #[inline(always)]
+    #[inline]
     fn last(&self) -> Option<&T> {
       self.back()
     }
 
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
       Deque::len(self)
     }
 
-    #[inline(always)]
+    #[inline]
     fn is_empty(&self) -> bool {
       Deque::is_empty(self)
     }

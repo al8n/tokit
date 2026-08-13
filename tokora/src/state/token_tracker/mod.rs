@@ -48,7 +48,7 @@ impl TokenLimitExceeded {
   ///     println!("Processed {} tokens", error.tokens());
   /// }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn tokens(&self) -> usize {
     self.0.tokens()
   }
@@ -69,7 +69,7 @@ impl TokenLimitExceeded {
   ///     println!("Maximum tokens allowed: {}", error.limitation());
   /// }
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn limitation(&self) -> usize {
     self.0.limitation()
   }
@@ -186,7 +186,7 @@ pub struct TokenLimiter {
 }
 
 impl Default for TokenLimiter {
-  #[inline(always)]
+  #[inline]
   fn default() -> Self {
     Self::new()
   }
@@ -207,7 +207,7 @@ impl TokenLimiter {
   /// assert_eq!(limiter.limitation(), usize::MAX);
   /// assert_eq!(limiter.tokens(), 0);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new() -> Self {
     Self {
       max: usize::MAX,
@@ -225,7 +225,7 @@ impl TokenLimiter {
   /// let limiter = TokenLimiter::with_limitation(1000);
   /// assert_eq!(limiter.limitation(), 1000);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn with_limitation(max: usize) -> Self {
     Self { max, current: 0 }
   }
@@ -242,7 +242,7 @@ impl TokenLimiter {
   /// limiter.increase();
   /// assert_eq!(limiter.tokens(), 2);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn tokens(&self) -> usize {
     self.current
   }
@@ -263,7 +263,7 @@ impl TokenLimiter {
   /// limiter.increase();
   /// assert_eq!(limiter.tokens(), 1);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn increase(&mut self) {
     self.current = self.current.saturating_add(1);
   }
@@ -278,7 +278,7 @@ impl TokenLimiter {
   /// let limiter = TokenLimiter::with_limitation(500);
   /// assert_eq!(limiter.limitation(), 500);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn limitation(&self) -> usize {
     self.max
   }
@@ -297,7 +297,7 @@ impl TokenLimiter {
   /// limiter.increase_token();
   /// assert_eq!(limiter.tokens(), 1);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn increase_token(&mut self) {
     self.increase();
   }
@@ -324,7 +324,7 @@ impl TokenLimiter {
   /// limiter.increase();
   /// assert!(limiter.check().is_err()); // Exceeded!
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn check(&self) -> Result<(), TokenLimitExceeded> {
     if self.tokens() > self.limitation() {
       Err(TokenLimitExceeded(*self))
@@ -337,7 +337,7 @@ impl TokenLimiter {
 impl State for TokenLimiter {
   type Error = TokenLimitExceeded;
 
-  #[inline(always)]
+  #[inline]
   fn check(&self) -> Result<(), Self::Error> {
     <Self as TokenTracker>::check(self)
   }
@@ -360,12 +360,12 @@ pub trait TokenTracker {
 impl TokenTracker for TokenLimiter {
   type Error = TokenLimitExceeded;
 
-  #[inline(always)]
+  #[inline]
   fn increase(&mut self) {
     self.current = self.current.saturating_add(1);
   }
 
-  #[inline(always)]
+  #[inline]
   fn check(&self) -> Result<(), Self::Error> {
     if self.tokens() > self.limitation() {
       Err(TokenLimitExceeded(*self))
@@ -393,12 +393,12 @@ const _: () = {
       {
         type Error = <T::Extras as TokenTracker>::Error;
 
-        #[inline(always)]
+        #[inline]
         fn increase(&mut self) {
           self.extras.increase();
         }
 
-        #[inline(always)]
+        #[inline]
         fn check(&self) -> Result<(), Self::Error> {
           self.extras.check()
         }
@@ -411,12 +411,12 @@ const _: () = {
       {
         type Error = <<T::Logos as Logos<'a>>::Extras as TokenTracker>::Error;
 
-        #[inline(always)]
+        #[inline]
         fn increase(&mut self) {
           self.inner_mut().extras.increase();
         }
 
-        #[inline(always)]
+        #[inline]
         fn check(&self) -> Result<(), Self::Error> {
           self.inner().extras.check()
         }

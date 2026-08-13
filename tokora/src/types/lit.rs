@@ -154,7 +154,7 @@ macro_rules! define_literal {
     impl<D: ?::core::marker::Sized, Span, Lang: ?::core::marker::Sized> AsSpan<Span>
       for $name<D, Span, Lang>
     {
-      #[inline(always)]
+      #[inline]
       fn as_span(&self) -> &Span {
         self.span_ref()
       }
@@ -163,7 +163,7 @@ macro_rules! define_literal {
     impl<D, Span, Lang: ?::core::marker::Sized> IntoComponents for $name<D, Span, Lang> {
       type Components = (Span, D);
 
-      #[inline(always)]
+      #[inline]
       fn into_components(self) -> Self::Components {
         (self.span, self.data)
       }
@@ -171,25 +171,25 @@ macro_rules! define_literal {
 
     impl<D: ?::core::marker::Sized, Span, Lang: ?::core::marker::Sized> $name<D, Span, Lang> {
       /// Returns the span (source location) of this literal.
-      #[inline(always)]
+      #[inline]
       pub const fn span(&self) -> Span where Span: ::core::marker::Copy {
         self.span
       }
 
       /// Returns an immutable reference to the span.
-      #[inline(always)]
+      #[inline]
       pub const fn span_ref(&self) -> &Span {
         &self.span
       }
 
       /// Returns a mutable reference to the span.
-      #[inline(always)]
+      #[inline]
       pub const fn span_mut(&mut self) -> &mut Span {
         &mut self.span
       }
 
       /// Bumps the span to of this literal by the specified offset.
-      #[inline(always)]
+      #[inline]
       pub fn bump(&mut self, by: &Span::Offset) -> &mut Self
       where
         Span: $crate::__private::span::Span,
@@ -199,7 +199,7 @@ macro_rules! define_literal {
       }
 
       /// Returns a mutable reference to the source string.
-      #[inline(always)]
+      #[inline]
       pub const fn data_mut(&mut self) -> &mut D {
         &mut self.data
       }
@@ -207,7 +207,7 @@ macro_rules! define_literal {
       /// Returns an immutable reference to the source string.
       ///
       /// This is the most common way to access the literal's text.
-      #[inline(always)]
+      #[inline]
       pub const fn data_ref(&self) -> &D {
         &self.data
       }
@@ -220,7 +220,7 @@ macro_rules! define_literal {
       ///
       /// - `span`: The source location of this literal
       /// - `data`: The literal's data
-      #[inline(always)]
+      #[inline]
       pub const fn new(span: Span, data: D) -> Self {
         Self {
           span,
@@ -232,7 +232,7 @@ macro_rules! define_literal {
       /// Returns a copy of the source string by value.
       ///
       /// Only available when `D` implements [`Copy`].
-      #[inline(always)]
+      #[inline]
       pub const fn data(&self) -> D
       where
         D: Copy,
@@ -247,13 +247,13 @@ macro_rules! define_literal {
       Span: Clone,
     {
       /// Creates a placeholder literal for **malformed content**.
-      #[inline(always)]
+      #[inline]
       fn error(span: Span) -> Self {
         Self::new(span.clone(), D::error(span))
       }
 
       /// Creates a placeholder literal for **missing required content**.
-      #[inline(always)]
+      #[inline]
       fn missing(span: Span) -> Self {
         Self::new(span.clone(), D::missing(span))
       }

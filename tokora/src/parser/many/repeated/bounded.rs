@@ -23,7 +23,7 @@ where
   <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Container: Default + crate::container::Container<O>,
 {
-  #[inline(always)]
+  #[inline]
   fn parse_input(
     &mut self,
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
@@ -59,7 +59,7 @@ where
   <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Container: Default + crate::container::Container<O>,
 {
-  #[inline(always)]
+  #[inline]
   fn parse_input(
     &mut self,
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,

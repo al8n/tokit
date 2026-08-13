@@ -149,7 +149,7 @@ pub struct Repeated<F, O, L, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
 
 impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cmpl> {
   /// Creates a new `Repeated` parser.
-  #[inline(always)]
+  #[inline]
   pub(crate) const fn new(f: F) -> Self {
     Self {
       f,
@@ -168,19 +168,19 @@ impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cmpl> {
 
 impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cmpl> {
   /// Sets the minimum number of elements to parse.
-  #[inline(always)]
+  #[inline]
   pub fn at_least(self, n: usize) -> AtLeast<Repeated<F, O, L, Ctx, Lang, Cmpl>> {
     self.apply(Minimum::new(n))
   }
 
   /// Sets the maximum number of elements to parse.
-  #[inline(always)]
+  #[inline]
   pub fn at_most(self, n: usize) -> AtMost<Repeated<F, O, L, Ctx, Lang, Cmpl>> {
     self.apply(Maximum::new(n))
   }
 
   /// Sets both the minimum and maximum number of elements to parse.
-  #[inline(always)]
+  #[inline]
   pub fn bounded(self, min: usize, max: usize) -> Bounded<Repeated<F, O, L, Ctx, Lang, Cmpl>> {
     self.apply(With::new(Maximum::new(max), Minimum::new(min)))
   }
@@ -189,7 +189,7 @@ impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cmpl> {
 impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Apply<AtLeast<Self>> for Repeated<F, O, L, Ctx, Lang, Cmpl> {
   type Options = Minimum;
 
-  #[inline(always)]
+  #[inline]
   fn apply(self, options: Self::Options) -> AtLeast<Self> {
     AtLeast::new(self, options.get())
   }
@@ -198,7 +198,7 @@ impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Apply<AtLeast<Self>> for Repeated<F, O, L
 impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Apply<AtMost<Self>> for Repeated<F, O, L, Ctx, Lang, Cmpl> {
   type Options = Maximum;
 
-  #[inline(always)]
+  #[inline]
   fn apply(self, options: Self::Options) -> AtMost<Self> {
     AtMost::new(self, options.get())
   }
@@ -207,7 +207,7 @@ impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Apply<AtMost<Self>> for Repeated<F, O, L,
 impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Apply<Bounded<Self>> for Repeated<F, O, L, Ctx, Lang, Cmpl> {
   type Options = With<Maximum, Minimum>;
 
-  #[inline(always)]
+  #[inline]
   fn apply(self, options: Self::Options) -> Bounded<Self> {
     Bounded::new(self, options.primary.get(), options.secondary.get())
   }
@@ -218,7 +218,7 @@ impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Apply<Bounded<Repeated<F, O, L, Ctx, Lang
 {
   type Options = Minimum;
 
-  #[inline(always)]
+  #[inline]
   fn apply(self, options: Self::Options) -> Bounded<Repeated<F, O, L, Ctx, Lang, Cmpl>> {
     Bounded::new(self.parser, self.maximum.get(), options.get())
   }
@@ -229,7 +229,7 @@ impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Apply<Bounded<Repeated<F, O, L, Ctx, Lang
 {
   type Options = Maximum;
 
-  #[inline(always)]
+  #[inline]
   fn apply(self, options: Self::Options) -> Bounded<Repeated<F, O, L, Ctx, Lang, Cmpl>> {
     Bounded::new(self.parser, options.get(), self.minimum.get())
   }

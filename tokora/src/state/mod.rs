@@ -23,7 +23,7 @@ pub trait State: core::fmt::Debug + Clone {
 impl State for () {
   type Error = ();
 
-  #[inline(always)]
+  #[inline]
   fn check(&self) -> Result<(), Self::Error> {
     Ok(())
   }
@@ -32,7 +32,7 @@ impl State for () {
 impl State for Infallible {
   type Error = Infallible;
 
-  #[inline(always)]
+  #[inline]
   fn check(&self) -> Result<(), Self::Error> {
     Ok(())
   }

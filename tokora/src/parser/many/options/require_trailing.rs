@@ -8,25 +8,25 @@ pub struct RequireTrailing<P> {
 
 impl<P> RequireTrailing<P> {
   /// Creates a new `RequireTrailing` parser that requires trailing separators.
-  #[inline(always)]
+  #[inline]
   pub const fn new(parser: P) -> Self {
     Self { parser }
   }
 
   /// Sets the parser to require leading separator.
-  #[inline(always)]
+  #[inline]
   pub fn require_leading(self) -> RequireLeading<RequireTrailing<P>> {
     RequireLeading { parser: self }
   }
 
   /// Sets the parser to allow leading separator.
-  #[inline(always)]
+  #[inline]
   pub fn allow_leading(self) -> AllowLeading<RequireTrailing<P>> {
     AllowLeading { parser: self }
   }
 
   /// Sets the maximum number of elements to parse.
-  #[inline(always)]
+  #[inline]
   pub fn at_most(self, maximum: usize) -> RequireTrailing<AtMost<P>> {
     RequireTrailing {
       parser: AtMost::new(self.parser, maximum),
@@ -34,7 +34,7 @@ impl<P> RequireTrailing<P> {
   }
 
   /// Sets the minimum number of elements to parse.
-  #[inline(always)]
+  #[inline]
   pub fn at_least(self, minimum: usize) -> RequireTrailing<AtLeast<P>> {
     RequireTrailing {
       parser: AtLeast::new(self.parser, minimum),
@@ -42,7 +42,7 @@ impl<P> RequireTrailing<P> {
   }
 
   /// Sets both the minimum and maximum number of elements to parse.
-  #[inline(always)]
+  #[inline]
   pub fn bounded(self, minimum: usize, maximum: usize) -> RequireTrailing<Bounded<P>> {
     RequireTrailing {
       parser: Bounded::new(self.parser, maximum, minimum),
@@ -50,13 +50,13 @@ impl<P> RequireTrailing<P> {
   }
 
   /// Returns a mutable reference to the inner parser.
-  #[inline(always)]
+  #[inline]
   pub const fn parser_mut(&mut self) -> &mut P {
     &mut self.parser
   }
 
   /// Returns a mutable reference to the `RequireTrailing` parser wrapping the inner parser.
-  #[inline(always)]
+  #[inline]
   pub const fn as_mut(&mut self) -> RequireTrailing<&mut P> {
     RequireTrailing {
       parser: &mut self.parser,
@@ -66,7 +66,7 @@ impl<P> RequireTrailing<P> {
   define_many_delimited_methods!();
 
   /// Maps the inner parser to a new parser using the given function.
-  #[inline(always)]
+  #[inline]
   pub fn map_parser_mut<'a, F, NP>(&'a mut self, f: F) -> RequireTrailing<NP>
   where
     F: FnOnce(&'a mut P) -> NP,
