@@ -187,10 +187,15 @@ fn display_renders_are_frozen() {
     "too many elements: found 4, but maximum is 3 at 0..3"
   );
 
+  // `FullContainer`'s two numbers are not a pair: the count is one construct's parsed elements,
+  // the capacity is the destination's total, and the driver never reads the occupancy that would
+  // bridge them. The text used to assert the first exceeded the second, and so rendered "found 1
+  // elements, which exceeds the maximum capacity of 1" for a conforming destination that was
+  // already occupied when the construct started.
   let full_c: FullContainer<SimpleSpan> = FullContainer::new(SimpleSpan::new(0usize, 3usize), 4, 3);
   assert_eq!(
     format!("{full_c}"),
-    "found 4 elements, which exceeds the maximum capacity of 3"
+    "element 4 of this construct was refused by a destination that holds at most 3"
   );
 
   // The delimiter family, whose `kind` field moved a derived `Debug` this release.

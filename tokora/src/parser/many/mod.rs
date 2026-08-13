@@ -200,10 +200,22 @@ mod sep_while;
 ///   including that a refused push left `len()` alone, that a successful one moved it by one,
 ///   and that it never passes `max_capacity()`. None of that is stated anywhere a downstream
 ///   implementor would read it, and `len() + 1` on a `len()` of `usize::MAX` overflows. The
-///   driver's own count needs none of it: `*nums + 1` is the count of elements this construct
-///   parsed including the refused one, which is what the payload's "found N … exceeds … C"
-///   sentence claims. For a container that refuses only when full the two agree, so the payload
-///   is unchanged.
+///   driver's own count needs none of it: `*nums + 1` is **which element of this construct the
+///   destination refused**, a fact about this loop and nothing else.
+///
+/// # What the diagnostic may therefore say
+///
+/// A refusal, and not an exceedance. Asserting that the count passes `max_capacity()` is a claim
+/// about the destination's **occupancy**, which the driver does not read and has no right to: a
+/// destination handed to `collect_with` already holding elements is perfectly conforming and
+/// refuses the construct's *first* element, so `*nums + 1` is `1` at any capacity. The obligation
+/// the trait does keep — a refusal means the destination cannot hold the item — says nothing
+/// about counts, so no count claim can rest on it.
+///
+/// The number is unchanged from the line above; the sentence built from it is not. The old
+/// `len() + 1` reached a larger value on that seeded path only by trusting the occupancy this
+/// function stopped reading, so restoring the arithmetic claim means restoring the dependency.
+/// [`FullContainer`]'s `Display` carries the rendered form and the rest of the reasoning.
 ///
 /// **The record is kept once per construct as a matter of diagnostic policy** — one report per
 /// construct, not one per dropped element — and *not* because a container that refused once is
@@ -2173,11 +2185,16 @@ pub(super) mod end_state_census {
 
   /// LIMIT_PAYLOAD_CENSUS 2b — every `TooMany` names a count that actually exceeds its limit.
   ///
-  /// Both `TooMany` and `FullContainer` render as "found {nums} … exceeds … {limit}", so a
-  /// `nums` equal to the limit renders a self-contradicting sentence. Each emission site
-  /// therefore passes `limit + 1`, which is also the smallest count every one of the eight
-  /// drivers can produce at its own detection point — the only value that makes one history
-  /// yield one payload whichever builder produced it.
+  /// `TooMany` renders as "found {nums}, but maximum is {limit}", so a `nums` equal to the limit
+  /// renders a self-contradicting sentence. Each emission site therefore passes `limit + 1`,
+  /// which is also the smallest count every one of the eight drivers can produce at its own
+  /// detection point — the only value that makes one history yield one payload whichever builder
+  /// produced it.
+  ///
+  /// The requirement is `TooMany`'s alone. `FullContainer` once shared the "found … exceeds …"
+  /// wording and so looked like it shared the law; it does not, because its two numbers describe
+  /// different things — one construct's parsed elements against a destination's total capacity —
+  /// and it states a refusal rather than an exceedance.
   ///
   /// The per-line conjunction assumes the site fits on one line, which all eight do at the
   /// current rustfmt width; a future wrap would need the needle re-cut rather than dropped.

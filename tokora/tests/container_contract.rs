@@ -18,8 +18,12 @@
 //! * **The drivers' numbers are their own.** `FullContainer`'s count used to be
 //!   `container.len() + 1`: a number a caller-implemented method invented, believed on the
 //!   strength of laws the trait never stated, and added to unchecked. The rows below drive
-//!   containers that answer `len()` in ways no documentation forbade and assert the diagnostic
-//!   is unmoved.
+//!   containers that answer `len()` in ways no documentation forbade.
+//! * **And so is what the drivers may say about them.** Dropping `len()` also dropped any
+//!   knowledge of the destination's *occupancy*, which is what an "exceeds the capacity" claim
+//!   rests on. A destination that is already occupied when the construct starts refuses the
+//!   construct's **first** element at any capacity, so the last rows pin the diagnostic's
+//!   rendered text and not only its numbers.
 
 mod common;
 
@@ -32,14 +36,18 @@ use tokora::{
   error::syntax::{FullContainer, MissingSyntax, TooFew, TooMany},
   error::token::{MissingToken, SeparatedError, UnexpectedToken},
   error::{Unclosed, UnexpectedEot},
+  parser::Collect,
   try_parse_input::ParseAttempt,
 };
 
 // ── A payload-preserving diagnostic ───────────────────────────────────────────
 
+/// `Full` carries the payload's two numbers **and what they render as**: the defect this file
+/// pins last was a payload whose numbers were individually defensible and whose sentence was
+/// false, so a row that reads only the numbers cannot see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Diag {
-  Full(usize, usize),
+  Full(usize, usize, String),
   Other,
 }
 
@@ -66,7 +74,7 @@ impl From<()> for Diag {
 
 impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Diag {
   fn from(e: FullContainer<S, Lang>) -> Self {
-    Diag::Full(e.nums(), e.capacity())
+    Diag::Full(e.nums(), e.capacity(), e.to_string())
   }
 }
 
@@ -212,7 +220,11 @@ fn a_repetition_parse_overflowing_a_slice_vec_reports_instead_of_unwinding() {
     .expect("capacity exhaustion is a diagnostic, never a panic and never a parse failure");
   assert_eq!(
     diags,
-    vec![Diag::Full(2, 1)],
+    vec![Diag::Full(
+      2,
+      1,
+      "element 2 of this construct was refused by a destination that holds at most 1".into()
+    )],
     "capacity exhaustion is one `FullContainer` naming the adapter's real capacity"
   );
 }
@@ -261,14 +273,20 @@ impl<const N: usize> Snapshot for ConstantLen<N> {
   }
 }
 
-/// `len()` of zero: the old `container.len() + 1` named a count of **one** against a capacity of
-/// one, a sentence that contradicts itself — "found 1 … exceeds … 1". The driver parsed two
-/// elements and says so.
+/// `len()` of zero: the old `container.len() + 1` named the refusal at the construct's **first**
+/// element when it was the second. The driver parsed two and says so.
 #[test]
 fn the_reported_count_is_the_drivers_not_the_containers() {
   let (collected, diags) = collect_into::<ConstantLen<0>>("1 2 3");
   assert_eq!(collected, vec![1]);
-  assert_eq!(diags, vec![Diag::Full(2, 1)]);
+  assert_eq!(
+    diags,
+    vec![Diag::Full(
+      2,
+      1,
+      "element 2 of this construct was refused by a destination that holds at most 1".into()
+    )]
+  );
 }
 
 /// `len()` of `usize::MAX`: the old `container.len() + 1` overflowed — a panic in debug and a
@@ -279,7 +297,14 @@ fn the_reported_count_is_the_drivers_not_the_containers() {
 fn a_saturated_len_cannot_overflow_the_reported_count() {
   let (collected, diags) = collect_into::<ConstantLen<{ usize::MAX }>>("1 2 3");
   assert_eq!(collected, vec![1]);
-  assert_eq!(diags, vec![Diag::Full(2, 1)]);
+  assert_eq!(
+    diags,
+    vec![Diag::Full(
+      2,
+      1,
+      "element 2 of this construct was refused by a destination that holds at most 1".into()
+    )]
+  );
 }
 
 /// The adversarial shape #258 names: a container that refuses for a reason that is **not**
@@ -334,7 +359,144 @@ fn a_non_sticky_refusal_is_reported_once_and_stops_nothing() {
   );
   assert_eq!(
     diags,
-    vec![Diag::Full(1, usize::MAX)],
+    vec![Diag::Full(
+      1,
+      usize::MAX,
+      "element 1 of this construct was refused by a destination that holds at most \
+       18446744073709551615"
+        .into()
+    )],
     "one report per construct, describing the refusal that was actually witnessed"
+  );
+}
+
+// ── The refusal is an event, not an arithmetic claim ──────────────────────────
+
+/// A destination that is **already occupied** when the construct starts.
+///
+/// `Option` is conforming — it refuses exactly when full — so this is not an adversarial
+/// container, and `collect_with` is the supported way to hand one to a driver. It refuses the
+/// construct's *first* element, and every number the driver has says so: one element parsed,
+/// destination capacity one. A diagnostic that asserted the first exceeded the second rendered
+/// *"found 1 elements, which exceeds the maximum capacity of 1"*, which is false; the payload
+/// before this branch said `2`, a total the driver can only reach by trusting an occupancy it
+/// never reads.
+///
+/// The refusal is what the driver witnessed and the refusal is what it reports.
+#[test]
+fn a_seeded_owning_destination_reports_the_refusal_at_its_first_element() {
+  fn go<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VCtx<'inp>>,
+  ) -> Result<Vec<Diag>, Diag> {
+    let collected: Option<i64> = try_num
+      .repeated()
+      .collect_with(Some(100i64))
+      .parse_input(inp)?;
+    assert_eq!(
+      collected,
+      Some(100),
+      "a destination that refuses keeps what it already held"
+    );
+    Ok(
+      inp
+        .emitter_ref()
+        .diagnostics()
+        .filter_map(|d| d.payload().cloned())
+        .collect(),
+    )
+  }
+
+  let diags = Parser::with_context(verbose_ctx())
+    .apply(go)
+    .parse_str("1 2")
+    .expect("a refused push is a diagnostic, never a parse failure");
+  assert_eq!(
+    diags,
+    vec![Diag::Full(
+      1,
+      1,
+      "element 1 of this construct was refused by a destination that holds at most 1".into()
+    )]
+  );
+}
+
+/// The same seeded destination through the **borrowed** collection path, where the caller owns
+/// the container and a driver never sees a `Default` one at all. This is where a pre-occupied
+/// destination is the ordinary case rather than the deliberate one, so a payload that assumed an
+/// empty start is wrong here by default.
+#[test]
+fn a_seeded_borrowed_destination_reports_the_refusal_at_its_first_element() {
+  fn go<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VCtx<'inp>>,
+  ) -> Result<Vec<Diag>, Diag> {
+    let mut inner = try_num.repeated();
+    let mut container = Some(100i64);
+    {
+      let mut collect = Collect::new(&mut inner, &mut container);
+      let _span = collect.parse_input(inp)?;
+    }
+    assert_eq!(
+      container,
+      Some(100),
+      "the caller's container is left holding what it held"
+    );
+    Ok(
+      inp
+        .emitter_ref()
+        .diagnostics()
+        .filter_map(|d| d.payload().cloned())
+        .collect(),
+    )
+  }
+
+  let diags = Parser::with_context(verbose_ctx())
+    .apply(go)
+    .parse_str("1 2")
+    .expect("a refused push is a diagnostic, never a parse failure");
+  assert_eq!(
+    diags,
+    vec![Diag::Full(
+      1,
+      1,
+      "element 1 of this construct was refused by a destination that holds at most 1".into()
+    )]
+  );
+}
+
+/// The empty-start control for the borrowed path: same driver, same destination type, same
+/// input, and the refusal lands on element **two**. The pair is what shows the count tracks the
+/// construct's own attempts and nothing about where the destination started.
+#[test]
+fn an_empty_borrowed_destination_reports_the_refusal_at_its_second_element() {
+  fn go<'inp>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VCtx<'inp>>,
+  ) -> Result<Vec<Diag>, Diag> {
+    let mut inner = try_num.repeated();
+    let mut container: Option<i64> = None;
+    {
+      let mut collect = Collect::new(&mut inner, &mut container);
+      let _span = collect.parse_input(inp)?;
+    }
+    assert_eq!(container, Some(1), "the first element fits");
+    Ok(
+      inp
+        .emitter_ref()
+        .diagnostics()
+        .filter_map(|d| d.payload().cloned())
+        .collect(),
+    )
+  }
+
+  let diags = Parser::with_context(verbose_ctx())
+    .apply(go)
+    .parse_str("1 2")
+    .expect("a refused push is a diagnostic, never a parse failure");
+  assert_eq!(
+    diags,
+    vec![Diag::Full(
+      2,
+      1,
+      "element 2 of this construct was refused by a destination that holds at most 1".into()
+    )]
   );
 }

@@ -36,7 +36,20 @@ fn full_container_into_unit() {
 fn full_container_display() {
   let err = FullContainer::new(SimpleSpan::new(2, 8), 10, 5);
   let msg = format!("{err}");
-  assert!(msg.contains("10"));
-  assert!(msg.contains("5"));
-  assert!(msg.contains("exceeds the maximum capacity"));
+  assert_eq!(
+    msg,
+    "element 10 of this construct was refused by a destination that holds at most 5"
+  );
+}
+
+/// The refusal is stated even when the two numbers cannot be ordered — a destination already
+/// occupied when the construct started refuses the first element it is handed, at any capacity.
+/// The old wording made this render "found 1 elements, which exceeds the maximum capacity of 1".
+#[test]
+fn full_container_display_does_not_claim_an_exceedance() {
+  let err = FullContainer::new(SimpleSpan::new(0, 1), 1, 1);
+  assert_eq!(
+    format!("{err}"),
+    "element 1 of this construct was refused by a destination that holds at most 1"
+  );
 }

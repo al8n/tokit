@@ -208,11 +208,32 @@ and will red until they do.
   push, to have moved by exactly one per accepted push, and never to exceed `max_capacity()`. No
   documentation said any of it, and `len() + 1` on a `len()` of `usize::MAX` overflows.
 
-  The drivers already had the number: `nums`, their own count of elements *parsed*, which for a
-  container that refuses only when full is the same value — so the payload is unchanged and the
-  four assumptions are simply gone. `first`, `last` and `len` are no longer read by the
-  repetition machinery at all. The remaining arithmetic cannot overflow for the reason the
-  counter itself cannot: `nums` is incremented once per parsed element by the same function.
+  The drivers already had the number: `nums`, their own count of elements *parsed*, so the four
+  assumptions are simply gone. `first`, `last` and `len` are no longer read by the repetition
+  machinery at all. The remaining arithmetic cannot overflow for the reason the counter itself
+  cannot: `nums` is incremented once per parsed element by the same function.
+
+  **`FullContainer` therefore states a refusal rather than an exceedance, and its rendered text
+  changed.** The old sentence — *"found {nums} elements, which exceeds the maximum capacity of
+  {limit}"* — related a count of *this construct's* parsed elements to the destination's *total*
+  capacity, which is a claim about how full the destination already was. Only `container.len()`
+  ever supplied that, and a payload the drivers compute for themselves cannot support it: an
+  `Option` handed to `collect_with` already holding a value is a conforming destination, refuses
+  the construct's first parsed element, and rendered *"found 1 elements, which exceeds the
+  maximum capacity of 1"*. `nums()` is now documented as **which element of the construct was
+  refused**, `capacity()` as the destination's total bound, the two are explicitly not
+  comparable, and the text reads:
+
+  ```text
+  element {nums} of this construct was refused by a destination that holds at most {limit}
+  ```
+
+  Both numbers keep the values they had on this branch, so a consumer reading `nums()` and
+  `capacity()` sees no change; a consumer that renders, matches or asserts on the text does. The
+  alternative — an occupancy contract that would let the arithmetic claim stand — was rejected:
+  it re-acquires the caller-implemented dependency this entry removes, and adds obligations
+  (a starting occupancy, that a refused push does not change it, that it never passes
+  `max_capacity`) that nothing can check.
 
   The suppression of later refusals is likewise no longer an inference. It used to be justified
   by *"a container that refuses one push refuses every later one"* — a law the trait never
