@@ -70,6 +70,7 @@ pub type OptOf<'inp, L, Ctx, Lang, O> = Result<Option<O>, ErrorOf<'inp, L, Ctx, 
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { ',' => Tok::Comma, '}' => Tok::CloseBrace, c => Tok::Ident(c) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;

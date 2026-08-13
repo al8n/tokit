@@ -3808,6 +3808,10 @@ impl<'inp> crate::Lexer<'inp> for ZeroWidthLexer<'inp> {
     Some(Ok(ZeroWidthTok))
   }
 
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, _n: &usize) {}
 }
 
@@ -7861,6 +7865,10 @@ impl<'a> crate::Lexer<'a> for BombLexer<'a> {
     Some(Ok(BombTok))
   }
 
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.end += *n;
   }
@@ -9607,6 +9615,10 @@ impl<'a> crate::Lexer<'a> for OffsetLexer<'a> {
       return Some(Err(BombErr::Limit));
     }
     Some(Ok(BombTok))
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<BombOffset> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &BombOffset) {

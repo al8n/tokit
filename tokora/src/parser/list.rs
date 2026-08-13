@@ -119,6 +119,7 @@ pub type ListOf<'inp, L, Ctx, Lang, T> = Result<Vec<T>, ErrorOf<'inp, L, Ctx, La
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { ',' => Tok::Comma, '}' => Tok::CloseBrace, c => Tok::Ident(c) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -239,6 +240,7 @@ where
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { ',' => Tok::Comma, '}' => Tok::CloseBrace, c => Tok::Ident(c) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;

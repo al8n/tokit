@@ -137,6 +137,11 @@ impl<'inp> Lexer<'inp> for BLexer<'inp> {
     }
   }
 
+  /// One byte per item, decided from that byte alone — nothing is probed past `span.end`.
+  fn read_frontier(&self) -> tokora::ReadFrontier<usize> {
+    tokora::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.pos += *n;
     self.start = self.pos;

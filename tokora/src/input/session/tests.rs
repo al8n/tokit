@@ -172,6 +172,10 @@ impl<'inp> Lexer<'inp> for WordLexer<'inp> {
     Some(Ok(Word))
   }
 
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.end += *n;
     self.start = self.end;

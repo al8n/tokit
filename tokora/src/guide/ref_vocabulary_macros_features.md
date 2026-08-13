@@ -171,6 +171,7 @@ Comma::try_parse(inp)  -> Result<ParseAttempt<Comma<L::Span, (), Lang>>, Error>/
 #       c => Tok::Ident(c),
 #     }))
 #   }
+#   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -369,6 +370,7 @@ one-character keyword, so the spelling is `"i"`; a real lexer reports the full w
 #       c => Tok::Ident(c),
 #     }))
 #   }
+#   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;

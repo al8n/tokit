@@ -1133,6 +1133,10 @@ mod sink_leg {
       Some(Ok(Tok(byte)))
     }
 
+    fn read_frontier(&self) -> tokora::ReadFrontier<usize> {
+      tokora::ReadFrontier::SpanEnd
+    }
+
     fn bump(&mut self, n: &usize) {
       self.pos += *n;
       self.tok_start = self.pos;

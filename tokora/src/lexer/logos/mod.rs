@@ -6,7 +6,7 @@ macro_rules! bail {
 
     use crate::span::SimpleSpan;
 
-    use super::super::{IntoLexer, Lexer, Source, State, Token};
+    use super::super::{IntoLexer, Lexer, ReadFrontier, ReadFrontierClass, Source, State, Token};
 
     /// A trait for token types that can be created from `logos::Logos` types.
     pub trait FromLogos<'inp>: Token<'inp> {
@@ -192,6 +192,12 @@ macro_rules! bail {
         if self.poisoned {
           return None;
         }
+        // The read-frontier value channel is per-ITEM, and this is what makes that true: clearing
+        // before the scan means whatever `State::probed_to` reports afterwards was recorded by
+        // THIS scan's callbacks, never left over from an earlier item — the one direction that
+        // would under-report a frontier and let an unstable item be committed. The default impl is
+        // an empty `#[inline(always)]` body, so a state that records nothing pays nothing.
+        self.inner.extras.clear_probe();
         match self.inner.next() {
           // ONE post-scan check, outside the `Ok`/`Err` split. A logos callback may mutate
           // `extras` and *still* return `Err` for the same matched item, so an item that arrives
@@ -214,6 +220,43 @@ macro_rules! bail {
           },
           // Untouched: no item was scanned, so there is no post-scan state to rank against.
           None => None,
+        }
+      }
+
+      /// # Two channels, because `logos` exposes neither the answer nor a way to compute it
+      ///
+      /// `logos` hands out `span`, `slice` and `remainder`, and nothing at all about where its
+      /// DFA probed before settling. So this adapter cannot answer
+      /// [`ReadFrontier::SpanEnd`](crate::ReadFrontier::SpanEnd) unconditionally — the engine
+      /// **backtracks to the last accepting prefix after probing past it**, so a vocabulary with a
+      /// prefix-accepting longer pattern (an integer beside a float or exponent literal) reads
+      /// past every short item it emits — and it cannot compute a
+      /// [`ReadTo`](crate::ReadFrontier::ReadTo) either. Both answers have to come from the
+      /// dialect, and the blanket impl means neither can be an impl the dialect writes:
+      ///
+      /// - the **class claim**, [`Token::READ_FRONTIER_CLASS`], a const on the vocabulary — the
+      ///   same delegation shape as [`Token::SURFACES_TRIVIA`]. It answers for an item whose scan
+      ///   recorded nothing, and it defaults to
+      ///   [`Unbounded`](crate::ReadFrontierClass::Unbounded);
+      /// - the **value channel**, [`State::probed_to`], read off the logos `Extras`. A callback
+      ///   that peeks with `remainder()` records how far it looked; that value answers for its own
+      ///   item outright, so it must cover the engine's backtracking too, not only the peek.
+      ///   [`State::clear_probe`] runs before each scan, so the value is per-item by construction.
+      ///
+      /// A recorded value that is behind the item's own span is not repaired here. The driver
+      /// floors at `max(span.end, reported)` and that floor is deliberately the *driver's* single
+      /// responsibility, so a violating dialect meets one containment, not two that could drift.
+      #[inline(always)]
+      fn read_frontier(&self) -> ReadFrontier<usize> {
+        match self.inner.extras.probed_to() {
+          Some(at) => ReadFrontier::ReadTo(at),
+          None => match <T as Token<'inp>>::READ_FRONTIER_CLASS {
+            ReadFrontierClass::SpanEnd => ReadFrontier::SpanEnd,
+            // Every other class, including any this build does not know, is the conservative
+            // answer. `ReadFrontierClass` is `#[non_exhaustive]`, and a variant added later can
+            // only ever describe a frontier `Unbounded` already covers.
+            _ => ReadFrontier::Unbounded,
+          },
         }
       }
 

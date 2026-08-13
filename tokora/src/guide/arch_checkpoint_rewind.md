@@ -335,6 +335,7 @@ parse; the lexer is the same tiny hand-written `CharLexer` over single-character
 #     self.tok = SimpleSpan::new(start, self.pos);
 #     Some(Ok(match c { '+' => Tok::Plus, _ => Tok::Digit(c as u32 - '0' as u32) }))
 #   }
+#   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 use tokora::{

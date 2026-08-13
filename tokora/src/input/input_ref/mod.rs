@@ -18,8 +18,8 @@ use crate::{
 };
 
 use super::{
-  Cache, Checkpoint, Complete, Completeness, Cursor, Lexed, Lexer, Lineage, Source, Span,
-  SurfaceIncomplete,
+  Cache, Checkpoint, Complete, Completeness, Cursor, Lexed, Lexer, Lineage, ReadFrontier, Source,
+  Span, SurfaceIncomplete,
 };
 
 pub(crate) use session::Session;
@@ -3268,20 +3268,85 @@ where
   }
 
   /// Asks the partial-input frontier holdback (rules 1 and 2) about one lexed item: in
-  /// [`Partial`](crate::input::Partial) non-final mode, an item whose span END touches the buffer
-  /// end may be a prefix of a longer construct once more input arrives, so it is neither yielded nor
-  /// emitted.
+  /// [`Partial`](crate::input::Partial) non-final mode, an item the lexer decided by **reading as
+  /// far as the buffer end** may still change once more input arrives, so it is neither yielded nor
+  /// emitted. Returns the offset the [`Incomplete`](crate::error::Incomplete) should carry, or
+  /// `None` to let the item through.
+  ///
+  /// # The predicate reads the lexer, not the span
+  ///
+  /// Until 0.10.0 this asked whether the item's *span* reached the buffer end. That is a proxy for
+  /// "more input could change this item", and it is exact only for a lexer that never reads past
+  /// what it emits. An ordered trial that attempts several readings and backtracks reads past the
+  /// span it emits by construction — so does the bundled logos backend's DFA, with no callback
+  /// involved — and the proxy let exactly those items commit. The predicate is now the fact the
+  /// lexer reports, [`Lexer::read_frontier`], and it withholds iff the frontier is **at or past**
+  /// the buffer end: probing at `len` is precisely "end of input was observable".
+  ///
+  /// # The floor is the driver's, not the ecosystem's
+  ///
+  /// `frontier >= span.end` is a doc contract, and the safety story must not rest on every
+  /// implementor honouring it: a buggy `ReadTo(0)` would otherwise yield an item the pre-0.10.0
+  /// holdback withheld — a regression introduced by the fix. So the effective frontier is
+  /// `max(span.end, reported)`, one comparison that makes monotonicity a property of *this
+  /// function* rather than of the ecosystem. It is the same posture the crate already takes on the
+  /// post-exhaustion span, where the frontier reader "floors and clamps as defence in depth
+  /// against a non-conforming lexer; that clamp is not the specification".
+  ///
+  /// Over-reporting only over-withholds, and that converges: a refill strictly grows the buffer
+  /// and sealing ends the game, so no livelock.
+  ///
+  /// # It reports the BUFFER END, not the span end
+  ///
+  /// Those coincided under the old predicate and the tests asserted the coincidence; under this
+  /// one they diverge — span end 1, frontier 3. [`Incomplete`](crate::error::Incomplete)'s offset
+  /// is documented as "the frontier the caller should resume from", and reporting the span end
+  /// would claim the input ran out at 1, which is false. A withheld item has an effective frontier
+  /// at or past `len` and no probe can exceed `len`, so the honest answer is exactly
+  /// `input.len()`.
+  ///
+  /// # Why the lexer read sits after both short circuits
+  ///
+  /// The two early returns are written as statements, not folded into one `&&` chain, so
+  /// [`read_frontier`](Lexer::read_frontier) is **syntactically** unreachable in
+  /// [`Complete`](crate::input::Complete) mode and in a sealed [`Partial`](crate::input::Partial)
+  /// one. The complete path does not merely optimise the call away — it never contains it — and
+  /// the trait's promise that the driver calls it only in partial non-final mode is structural
+  /// rather than an argument about the optimiser.
   ///
   /// **It may only ever be asked about a NON-TERMINAL item.** The holdback's whole premise is that
   /// more input could change the answer; a terminal condition is precisely the one that no input can
   /// change, so it is ranked first and never reaches here. [`classify`](Self::classify) is the only
-  /// caller, and it asks in that order — see its docs for the law.
-  ///
-  /// Const-gated: on a [`Complete`](crate::input::Complete) input `Cmpl::PARTIAL` is a `false`
-  /// constant, so this is dead-code-eliminated and `is_final()` is never even evaluated.
+  /// caller, and it asks in that order — see its docs for the law. That is also what keeps the
+  /// once-per-item promise: `classify` runs exactly one of its two arms per item, and each asks
+  /// here exactly once.
   #[inline(always)]
-  fn withhold_at_frontier(&self, span: &L::Span) -> bool {
-    Cmpl::PARTIAL && !self.is_final() && span.end_ref() >= &self.input.len()
+  fn withhold_at_frontier(&self, lexer: &L, span: &L::Span) -> Option<L::Offset> {
+    // Short circuit 1: `Complete::PARTIAL` is a `false` constant, so everything below — the
+    // `read_frontier` call included — is eliminated at monomorphization.
+    if !Cmpl::PARTIAL {
+      return None;
+    }
+    // Short circuit 2: a sealed stream is a complete input in all but the typestate.
+    if self.is_final() {
+      return None;
+    }
+
+    let len = self.input.len();
+    let reported = match lexer.read_frontier() {
+      // No probe beyond the item's own span end — the terminator probe AT `span.end` included.
+      // This reproduces the pre-0.10.0 predicate bit for bit.
+      ReadFrontier::SpanEnd => span.end_ref().clone(),
+      ReadFrontier::ReadTo(at) => at,
+      // "I cannot bound what I probed", which the predicate reads as "end of input was
+      // observable" — so every item is withheld while the stream is open.
+      ReadFrontier::Unbounded => len.clone(),
+      // Deliberately NO wildcard. `ReadFrontier` is `#[non_exhaustive]` for downstream wrappers,
+      // but this crate defines it, so a future variant must break the build HERE and be given an
+      // answer by the person who added it rather than silently inheriting one.
+    };
+    let effective = reported.max(span.end_ref().clone());
+    (effective >= len).then_some(len)
   }
 
   /// The fatal-emit exit every lexing driver shares: the emitter **rejected** a lexer error's
@@ -3386,8 +3451,8 @@ where
         // Frontier error (rule 2), now asked only of a NON-terminal error: a truncated buffer really
         // can make a valid token look like a lex error, so this one is withheld — un-emitted — and
         // the caller refills. That rule is correct and survives the ranking intact.
-        if self.withhold_at_frontier(&span) {
-          return Verdict::Withheld(span.end_ref().clone());
+        if let Some(at) = self.withhold_at_frontier(lexer, &span) {
+          return Verdict::Withheld(at);
         }
         Verdict::Error(Spanned::new(span, err))
       }
@@ -3395,8 +3460,8 @@ where
       // `Lexed::Error` on the tripping token (`check()` runs after each token; a failure *replaces*
       // it), so there is no terminal condition to outrank here and no `check()` on the token path.
       Lexed::Token(tok) => {
-        if self.withhold_at_frontier(&span) {
-          return Verdict::Withheld(span.end_ref().clone());
+        if let Some(at) = self.withhold_at_frontier(lexer, &span) {
+          return Verdict::Withheld(at);
         }
         Verdict::Token(Spanned::new(span, tok))
       }
@@ -3570,10 +3635,12 @@ where
   /// A **non-terminal** lexer error, clear of the frontier: the driver emits it (deduplicated) and
   /// skips over it. Nothing is latched — the scan goes on looking for a token.
   Error(Spanned<<L::Token as Token<'inp>>::Error, L::Span>),
-  /// The partial-input frontier holdback: a **non-terminal** item whose span end touches a non-final
-  /// buffer end, so later input could still change what it is. Carries the frontier offset the
-  /// [`Incomplete`](crate::error::Incomplete) reports. Built only under `Cmpl::PARTIAL`, so a
-  /// [`Complete`](crate::input::Complete) input never constructs it and the arm compiles away.
+  /// The partial-input frontier holdback: a **non-terminal** item the lexer decided by reading as
+  /// far as a non-final buffer end, so later input could still change what it is. Carries the
+  /// offset the [`Incomplete`](crate::error::Incomplete) reports — the **buffer end**, which is
+  /// where the input ran out, not the item's span end, which since 0.10.0 can be well behind it.
+  /// Built only under `Cmpl::PARTIAL`, so a [`Complete`](crate::input::Complete) input never
+  /// constructs it and the arm compiles away.
   Withheld(L::Offset),
 }
 

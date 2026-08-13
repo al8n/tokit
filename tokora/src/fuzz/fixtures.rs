@@ -295,6 +295,13 @@ impl<'a> Lexer<'a> for ScriptLexer<'a> {
     Some(Ok(FuzzTok { kind: kind_of(b) }))
   }
 
+  /// One source byte in, one item out: every item is decided from the single byte its own span
+  /// covers, so nothing is ever probed past `span.end`.
+  #[inline]
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   #[inline]
   fn bump(&mut self, n: &usize) {
     self.end += *n;

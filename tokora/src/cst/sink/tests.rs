@@ -115,6 +115,10 @@ impl<'inp> Lexer<'inp> for MiniLexer<'inp> {
     }
   }
 
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.pos += *n;
     self.tok_start = self.pos;
@@ -6254,6 +6258,10 @@ impl<'inp> Lexer<'inp> for ByteSrcLexer<'inp> {
     Some(Ok(MiniTok(byte)))
   }
 
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.pos += *n;
     self.tok_start = self.pos;
@@ -6454,6 +6462,10 @@ impl<'inp> Lexer<'inp> for OwnedLexer<'inp> {
     Some(Ok(OwnedTok(
       std::string::String::from_utf8_lossy(&[byte]).into_owned(),
     )))
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &usize) {

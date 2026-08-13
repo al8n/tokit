@@ -539,6 +539,7 @@ as a token, so `SURFACES_TRIVIA` is honestly `true` — and nothing but core tok
 #     self.tok = SimpleSpan::new(start, self.pos);
 #     Some(Ok(if c == b'+' { Tok::Plus } else { Tok::Num }))
 #   }
+#   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 use rowan::Language;

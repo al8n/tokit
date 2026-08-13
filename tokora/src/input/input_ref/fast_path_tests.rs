@@ -1819,6 +1819,10 @@ impl<'a> crate::Lexer<'a> for LedgerLexer<'a> {
     }))
   }
 
+  fn read_frontier(&self) -> crate::ReadFrontier<LedgerOffset> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &LedgerOffset) {
     self.end += n.0;
   }

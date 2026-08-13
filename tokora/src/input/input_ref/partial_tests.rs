@@ -115,6 +115,14 @@ impl Token<'_> for PTok {
   type Kind = PKind;
   type Error = ();
 
+  // `[a-z]+` and `[0-9]+` are over disjoint character classes and neither is a prefix of the
+  // other, so the DFA never probes into a longer candidate and backtracks: an item is decided
+  // from its own bytes plus the terminator at its span end, which is exactly `SpanEnd`. That
+  // makes this fixture's holdback behaviour identical to the pre-0.10.0 span rule, which is
+  // what the rule-1/2/3 tests below are pinning — they are about the holdback machinery, not
+  // about the class default.
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
+
   fn kind(&self) -> PKind {
     match self {
       PTok::Word => PKind::Word,
@@ -427,6 +435,10 @@ impl<'a> crate::Lexer<'a> for FrontierLexer<'a> {
       end: self.at,
     };
     Some(lexed)
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &Self::Offset) {
@@ -790,6 +802,12 @@ impl core::fmt::Display for LTok {
 impl Token<'_> for LTok {
   type Kind = PKind;
   type Error = PErr;
+
+  // One pattern, `[a-z]+`, so there is no longer candidate for the DFA to probe into and
+  // backtrack from; the callback only bumps a tally and reads nothing ahead. `SpanEnd` is the
+  // honest answer, and it keeps these terminal-beats-incomplete tests exercising the ranking
+  // rather than the class default.
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
 
   fn kind(&self) -> PKind {
     PKind::Word

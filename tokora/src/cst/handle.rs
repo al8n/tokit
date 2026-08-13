@@ -69,6 +69,7 @@ use super::{
 /// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(0, 0) }
 /// #   fn slice(&self) -> &'inp str { "" }
 /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, _: &usize) {}
 /// # }
 /// needs_emitter::<Lossless<'_>, Sink<'_, Lossless<'_>, Verbose<()>>>();
@@ -109,6 +110,7 @@ use super::{
 /// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(0, 0) }
 /// #   fn slice(&self) -> &'inp str { "" }
 /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, _: &usize) {}
 /// # }
 /// needs_emitter::<Lossless<'_>, Cst<'_, Lossless<'_>, Verbose<()>>>();

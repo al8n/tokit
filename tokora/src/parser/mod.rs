@@ -719,6 +719,7 @@ where
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(Digit(u32::from(byte - b'0'))))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// // A production the way a real grammar writes one: generic over the source type *and* over
@@ -791,6 +792,7 @@ where
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(Digit(u32::from(byte - b'0'))))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # fn two_digits<'inp, Src, Ctx>(

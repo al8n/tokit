@@ -38,10 +38,17 @@ On top of the trait tier it drives a real `Input` session through fixed, named
 save/peek/drain/restore schedules and requires the committed token stream to equal the
 straight-lex stream — no randomness, the schedules are enumerated — and
 [`run_partial`](crate::conformance::Harness::run_partial) adds chapter 9's tier: for **every**
-split point of every input, a non-final drain of the prefix must yield exactly the tokens
+split point of every input, a non-final drain of the prefix must yield a *prefix of* the tokens
 before the cut and end incomplete, while a final drain of the whole source must reproduce the
-complete parse. That is the check that catches a lexer which is unfaithful under truncation —
-and truncation is exactly what a stream does to you.
+complete parse exactly. That is the check that catches a lexer which is unfaithful under
+truncation — and truncation is exactly what a stream does to you.
+
+It asks for a prefix rather than equality because withholding *more* is always sound, and a lexer
+that reports a read frontier past its own spans does exactly that. Calc's lexer is logos-backed
+and does not declare [`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS), so it
+takes the conservative default and this run withholds every token until the input is final. The
+run still passes, and it still catches a token that *changes*. See
+[`Lexer::read_frontier`](crate::Lexer::read_frontier) for what declaring the class buys back.
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};

@@ -34,6 +34,10 @@
 //! 6. **Gap-free tiling** (optional, [`lossless`](crate::conformance::Harness::lossless)) — consecutive
 //!    spans abut, the first starts at `0`, and the last ends at the source end. Off by
 //!    default, since a syntactic lexer legitimately skips trivia.
+//! 7. **Read-frontier purity** — [`read_frontier`](crate::Lexer::read_frontier) answers the same
+//!    on every call within an item's window, and asking does not move the lexer. The *value* it
+//!    reports is checked by the partial tier below, not here; this checks only that it is a read
+//!    rather than a scan.
 //!
 //! **Integration tier** — driving an `Input` session through the machinery itself over
 //! a fixed set of named, deterministic save/peek/drain/restore schedules
@@ -44,10 +48,20 @@
 //! **Partial-input tier** (`run_partial`, a separate entry point for
 //! `usize`-offset `str` / `[u8]` sources) — driving the input in
 //! [`Partial`] mode over **every split point** and requiring
-//! chunked-equivalence under the frontier rules: a non-final drain of each prefix yields exactly
-//! the complete-parse tokens before the cut and always ends incomplete, while a final drain of the
-//! whole source reproduces the complete parse. Catches lexers that are unfaithful under truncation
-//! (token identity depending on input beyond `(state, offset)`).
+//! chunked-equivalence under the frontier rules: a non-final drain of each prefix yields a
+//! **prefix of** the complete-parse tokens before the cut and always ends incomplete, while a
+//! final drain of the whole source reproduces the complete parse **exactly**. Catches lexers that
+//! are unfaithful under truncation (token identity depending on input beyond `(state, offset)`),
+//! and it is what falsifies a wrong
+//! [`read_frontier`](crate::Lexer::read_frontier) — including a wrong
+//! [`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS) claim behind the logos
+//! adapter.
+//!
+//! The non-final leg asks for a *prefix*, not equality, because **over-withholding is sound**: a
+//! lexer that reports reading past what it emits withholds more than the pre-0.10.0 span rule did,
+//! and one that reports [`Unbounded`](crate::ReadFrontier::Unbounded) withholds everything until
+//! the stream is sealed. Requiring equality would fail every conforming lookahead lexer. The final
+//! leg is where full equality is pinned.
 //!
 //! # Violation posture
 //!
@@ -138,6 +152,7 @@ const BUDGET_FLOOR: usize = 64;
 ///     self.end = e;
 ///     Some(Ok(CharTok))
 ///   }
+///   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 ///   fn bump(&mut self, n: &usize) { self.end += *n; }
 /// }
 ///
@@ -269,17 +284,28 @@ where
   ///
   /// A separate entry point from [`run`](Self::run) because it needs a `usize`-offset,
   /// prefix-sliceable source (`str` / `[u8]`) and drives the input in
-  /// [`Partial`] mode. For every split point `k` of each source it verifies
-  /// that a **non-final** drain of the prefix `src[0..k]` yields exactly the complete-parse tokens
-  /// lying strictly before `k` (the frontier holdback withholds the one touching the cut) and
-  /// always terminates as incomplete, while a **final** drain of the whole source reproduces the
-  /// complete parse exactly. Together these are the chunked-equivalence guarantee: reassembling the
-  /// chunk-by-chunk prefixes reproduces the single-shot parse.
+  /// [`Partial`] mode. For every split point `k` of each source it verifies that a **non-final**
+  /// drain of the prefix `src[0..k]` yields a **prefix of** the complete-parse tokens lying
+  /// strictly before `k` and always terminates as incomplete, while a **final** drain of the whole
+  /// source reproduces the complete parse **exactly**. Together these are the chunked-equivalence
+  /// guarantee: reassembling the chunk-by-chunk prefixes reproduces the single-shot parse.
   ///
   /// This is where a lexer that is not faithful under truncation is caught — one whose token
-  /// identity depends on input beyond its own span (e.g. lookahead past a token, or a
+  /// identity depends on input beyond what it reports having read (lookahead past a token that
+  /// [`read_frontier`](crate::Lexer::read_frontier) does not admit to, or a
   /// [`with_state`](crate::Lexer::with_state) + [`bump`](crate::Lexer::bump) resume that does not
   /// reproduce the suffix) diverges from the complete prefix and trips this check.
+  ///
+  /// # Why the non-final leg asks for a prefix, not equality
+  ///
+  /// Because **over-withholding is sound and equality is not attainable**. A lexer that honestly
+  /// reports reading past what it emits withholds more items than the pre-0.10.0 span rule did,
+  /// and one that reports [`Unbounded`](crate::ReadFrontier::Unbounded) — the answer the bundled
+  /// logos adapter gives by default — withholds every item until the stream is sealed. Both
+  /// converge, because a refill strictly grows the buffer and sealing ends the game. Requiring
+  /// equality would therefore reject every conforming lookahead lexer while testing precision
+  /// rather than correctness. Yielding a token the complete parse does not have there, or a
+  /// different one, still fails, and the final leg still pins full equality.
   ///
   /// # Panics
   ///
@@ -433,14 +459,23 @@ where
     let prefix: &L::Source = &src[..k];
     let (prefix_tokens, incomplete) = partial_stream::<L>(prefix, false, budget, idx);
 
-    // A non-final prefix yields exactly the complete tokens strictly before the cut; the one whose
-    // span reaches (or crosses) `k` is held back.
+    // A non-final prefix yields a PREFIX of the complete tokens strictly before the cut. Equality
+    // is not the property, and since 0.10.0 it is not even attainable: the holdback keys on the
+    // lexer's reported read frontier, so a lexer that reads past what it emits withholds more than
+    // the span rule did, and one that reports `Unbounded` withholds everything. Over-withholding
+    // is sound — it converges, since a refill strictly grows the buffer and sealing ends the game
+    // — so requiring equality here would fail every conforming lookahead lexer, and the check
+    // would be a check on precision rather than on correctness.
+    //
+    // What is never sound, and still fails: a token the complete parse does not have before the
+    // cut, or a different one at the same position. Those are exactly what a lexer whose items
+    // change under truncation produces, and they are what the *final* leg above pins in full.
     let expected: Vec<_> = complete
       .iter()
       .filter(|(_, span)| *span.end_ref() < k)
       .cloned()
       .collect();
-    assert_partial_stream_eq::<L>(idx, k, &expected, &prefix_tokens);
+    assert_partial_prefix_of::<L>(idx, k, &expected, &prefix_tokens);
 
     if !incomplete {
       panic!(
@@ -474,6 +509,36 @@ fn assert_partial_stream_eq<'inp, L>(
       "tokora conformance [input #{idx} partial-equivalence] split k={k}: prefix token count diverges from the complete prefix: expected {}, got {}",
       expected.len(),
       got.len()
+    );
+  }
+}
+
+/// Asserts a non-final prefix drain is a **prefix of** the complete tokens before the cut: every
+/// token it yielded matches, and it yielded no *extra* one. Withholding more is allowed — see
+/// [`check_partial`] for why that is the property rather than equality.
+fn assert_partial_prefix_of<'inp, L>(
+  idx: usize,
+  k: usize,
+  expected: &[(<L::Token as Token<'inp>>::Kind, L::Span)],
+  got: &[(<L::Token as Token<'inp>>::Kind, L::Span)],
+) where
+  L: Lexer<'inp>,
+  <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
+{
+  let n = expected.len().min(got.len());
+  for i in 0..n {
+    if expected[i] != got[i] {
+      panic!(
+        "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix token diverges from the complete prefix: expected {:?}, got {:?}",
+        expected[i], got[i]
+      );
+    }
+  }
+  if got.len() > expected.len() {
+    panic!(
+      "tokora conformance [input #{idx} partial-equivalence] split k={k}: a non-final prefix drain yielded {} tokens but the complete parse has only {} ending strictly before the cut. The extra one was decided from bytes that had not arrived; report a read frontier that reaches the buffer end (Lexer::read_frontier) so it is withheld.",
+      got.len(),
+      expected.len()
     );
   }
 }
@@ -583,6 +648,25 @@ where
       None => panic!(
         "tokora conformance [input #{idx} span/slice-coherence] position {pos}: span {span:?} does not address a valid source slice"
       ),
+    }
+
+    // 7. The read frontier is a pure read of recorded fact: repeated calls agree, and asking does
+    // not advance the lexer or probe new input. Only the after-an-item window is specified, which
+    // is exactly where this asks — the same window `span()` and `slice()` answer in.
+    let frontier = lexer.read_frontier();
+    for probe in 0..3 {
+      let again = lexer.read_frontier();
+      if again != frontier {
+        panic!(
+          "tokora conformance [input #{idx} read-frontier] position {pos}: read_frontier() changed between calls: first read {frontier:?}, probe #{probe} read {again:?}. It must be a pure read of recorded fact — the input layer's contract lets it be called at most once per item, but nothing may depend on that."
+        );
+      }
+    }
+    if lexer.span() != span {
+      panic!(
+        "tokora conformance [input #{idx} read-frontier] position {pos}: read_frontier() moved the lexer: span() was {span:?} before the call and {:?} after. It must not advance the lexer or probe new input.",
+        lexer.span()
+      );
     }
 
     let (is_error, kind, err_dbg) = match res {

@@ -106,6 +106,10 @@ impl<'a> Lexer<'a> for TileLexer<'a> {
     self.end = boundary_after(self.src, self.start);
     Some(Ok(PTok))
   }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.end += *n;
   }
@@ -198,6 +202,10 @@ impl<'a> Lexer<'a> for SyntacticLexer<'a> {
     self.end = e;
     Some(Ok(PTok))
   }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.end += *n;
   }
@@ -271,6 +279,10 @@ impl<'a> Lexer<'a> for ZeroWidthLexer<'a> {
     self.yielded = true;
     Some(Ok(PTok))
   }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, _n: &usize) {}
 }
 
@@ -339,6 +351,10 @@ impl<'a> Lexer<'a> for BadSliceLexer<'a> {
     self.end = boundary_after(self.src, self.start);
     Some(Ok(PTok))
   }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.end += *n;
   }
@@ -416,6 +432,10 @@ impl<'a> Lexer<'a> for NonStickyLexer<'a> {
     self.end = boundary_after(self.src, self.start);
     Some(Ok(PTok))
   }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.end += *n;
   }
@@ -497,6 +517,10 @@ impl<'a> Lexer<'a> for DyingSpanLexer<'a> {
     self.end = boundary_after(self.src, self.start);
     Some(Ok(PTok))
   }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.end += *n;
   }
@@ -575,6 +599,10 @@ impl<'a> Lexer<'a> for OverReachingSpanLexer<'a> {
     self.end = boundary_after(self.src, self.start);
     Some(Ok(PTok))
   }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.end += *n;
   }
@@ -645,6 +673,10 @@ impl<'a> Lexer<'a> for IgnoreBumpLexer<'a> {
     self.end = boundary_after(self.src, self.start);
     Some(Ok(PTok))
   }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, _n: &usize) {
     // Wrong: ignores the resume offset entirely.
   }
@@ -725,6 +757,10 @@ impl<'a> Lexer<'a> for NonDetLexer<'a> {
     self.end = e;
     Some(Ok(PTok))
   }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.end += *n;
   }
@@ -846,6 +882,17 @@ impl<'a> Lexer<'a> for LastBytePeekLexer<'a> {
       PeekKind::Plain
     })))
   }
+  /// **A deliberately false claim, and half the point of this fixture.** The lexer reads the whole
+  /// buffer's last byte to decide every item, so its honest answer is
+  /// [`ReadFrontier::Unbounded`](crate::ReadFrontier::Unbounded). It claims to be decided within
+  /// its own span instead — exactly what a lookahead lexer whose author has not noticed the
+  /// lookahead would report. The frontier is a *contract*, not a checked fact, and `run_partial`
+  /// is what checks it: the false claim buys the fixture nothing, because the divergence it
+  /// produces is caught anyway.
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.end += *n;
   }
@@ -856,6 +903,10 @@ impl<'a> Lexer<'a> for LastBytePeekLexer<'a> {
 fn truncation_unfaithful_lexer_fails_partial_equivalence() {
   // On "abz" the complete parse marks every token; on the prefix "ab" the same positions come back
   // plain — an interior token changed under truncation, which chunked equivalence catches.
+  //
+  // It is caught DESPITE the lexer claiming `SpanEnd`, which is what makes this the check on the
+  // claim rather than on the frontier machinery: a lexer that under-reports its frontier is not
+  // trusted into safety, it is falsified.
   Harness::<LastBytePeekLexer<'_>>::new("abz").run_partial();
 }
 
@@ -973,5 +1024,79 @@ mod logos_adapter {
     Harness::<TileLogosLexer<'_>>::over(["ab 12 cd", "one two", "42"])
       .lossless()
       .run();
+  }
+}
+
+// ── TEMPORARY PROBE (pre-change falsifier) — removed before commit ──────────────────
+#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+mod fr_probe {
+  use super::Harness;
+  use crate::Token;
+  use crate::lexer::LogosLexer;
+
+  #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+  enum NumKind {
+    Int,
+    Float,
+    Sci,
+    Dot,
+    Word,
+  }
+
+  impl core::fmt::Display for NumKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+      f.write_str(match self {
+        NumKind::Int => "int",
+        NumKind::Float => "float",
+        NumKind::Sci => "sci",
+        NumKind::Dot => "dot",
+        NumKind::Word => "word",
+      })
+    }
+  }
+
+  #[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+  #[logos(crate = crate::logos, skip r"[ \t\r\n]+")]
+  enum NumTok {
+    #[regex(r"[0-9]+")]
+    Int,
+    #[regex(r"[0-9]+\.[0-9]+")]
+    Float,
+    #[regex(r"[0-9]+e[+-]?[0-9]+")]
+    Sci,
+    #[token(".")]
+    Dot,
+    #[regex(r"[a-z]+")]
+    Word,
+  }
+
+  impl Token<'_> for NumTok {
+    type Kind = NumKind;
+    type Error = ();
+
+    fn kind(&self) -> NumKind {
+      match self {
+        NumTok::Int => NumKind::Int,
+        NumTok::Float => NumKind::Float,
+        NumTok::Sci => NumKind::Sci,
+        NumTok::Dot => NumKind::Dot,
+        NumTok::Word => NumKind::Word,
+      }
+    }
+    fn is_trivia(&self) -> bool {
+      false
+    }
+  }
+
+  type NumLexer<'a> = LogosLexer<'a, NumTok>;
+
+  #[test]
+  fn fr_probe_float_vocabulary_partial() {
+    Harness::<NumLexer<'_>>::over(["1.5"]).run_partial();
+  }
+
+  #[test]
+  fn fr_probe_sci_vocabulary_partial() {
+    Harness::<NumLexer<'_>>::over(["5e-3"]).run_partial();
   }
 }

@@ -201,6 +201,36 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// `cst::FinishError::UncoveredGap`.
   const SURFACES_TRIVIA: bool = false;
 
+  /// The **read-frontier class** this vocabulary claims, for an adapter that cannot compute an
+  /// exact frontier of its own — in practice the bundled logos adapter.
+  ///
+  /// `logos` exposes `span`, `slice` and `remainder`, but not its DFA's probe frontier, so
+  /// `LogosLexer` cannot answer [`Lexer::read_frontier`](crate::Lexer::read_frontier) from
+  /// anything it can see. It delegates to the vocabulary here — the same const-delegation shape
+  /// [`SURFACES_TRIVIA`](Self::SURFACES_TRIVIA) uses, and for the same reason: the adapter is one
+  /// blanket impl over every token type, so the `Token` impl is the only per-dialect site.
+  ///
+  /// The claim answers for an item whose scan recorded **no** frontier in the lexer state. An item
+  /// whose scan did record one is answered by that value instead — see
+  /// [`State::probed_to`](crate::State::probed_to), the per-item value channel a `logos` callback
+  /// writes to.
+  ///
+  /// # The default is `Unbounded`, and claiming `SpanEnd` is a claim about the DFA
+  ///
+  /// [`SpanEnd`](crate::ReadFrontierClass::SpanEnd) promises that deciding an item never probes
+  /// beyond that item's own span end. For a `logos` vocabulary that is **false whenever one
+  /// pattern is a proper prefix of another** — `[0-9]+` beside `[0-9]+\.[0-9]+`, an integer beside
+  /// a float or an exponent literal — because the engine probes into the longer pattern and then
+  /// backtracks to the accepting prefix. It is a claim about the generated DFA, not only about
+  /// callbacks, and the `conformance` kit's `run_partial` check is what falsifies a wrong one.
+  ///
+  /// The default is therefore the conservative
+  /// [`Unbounded`](crate::ReadFrontierClass::Unbounded): a vocabulary that has not thought about
+  /// it is not silently assumed safe. Under a non-final partial input that withholds every item
+  /// until the stream is sealed, which is sound and costly — see
+  /// [`Lexer::read_frontier`](crate::Lexer::read_frontier) for the cost.
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   /// Returns the kind (category) of this token.
   ///
   /// This method is used extensively by parsers to determine what kind of token
@@ -282,6 +312,7 @@ impl<'a, T: Token<'a>> Token<'a> for &'a T {
   type Error = T::Error;
 
   const SURFACES_TRIVIA: bool = T::SURFACES_TRIVIA;
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = T::READ_FRONTIER_CLASS;
 
   #[inline(always)]
   fn kind(&self) -> Self::Kind {

@@ -185,6 +185,7 @@ drives two of the paths:
 #       c => Tok::Ident(c),
 #     }))
 #   }
+#   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -457,6 +458,7 @@ The example runs **one** generic parser under two emitters — fail-fast, then c
 #       c => Tok::Ident(c),
 #     }))
 #   }
+#   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 use tokora::{

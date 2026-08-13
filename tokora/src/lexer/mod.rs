@@ -279,6 +279,90 @@ impl<'a, T: Token<'a>> From<Lexed<'a, T>> for Result<T, T::Error> {
   }
 }
 
+/// How far a lexer probed the input while deciding the item its [`span`](Lexer::span) describes —
+/// the answer [`Lexer::read_frontier`] gives, and what the partial-input holdback withholds on.
+///
+/// # The convention is probe-INCLUSIVE
+///
+/// > The frontier is the **maximum offset at which the lexer probed the input while deciding the
+/// > item, inclusive**, where a probe answered by *end of input* counts at the offset probed.
+///
+/// The driver's predicate is **withhold iff `frontier >= buffer len`**, because probing at or past
+/// the buffer end is precisely "end of input was observable while deciding this item".
+///
+/// The exclusive reading — "up to, and not including" — is the **unsafe** one, and the difference
+/// is not academic. It does not count an end-of-input answer as a consult at all, so a lexer that
+/// honestly observed *"there is no byte at offset k"* could report a frontier below the buffer end
+/// and have its item committed. That commitment is exactly the chunked-equivalence break the
+/// holdback exists to prevent: append one byte and the same prefix lexes differently.
+///
+/// # The variants
+///
+/// | input | emitted | probed to | non-final buffer of that length |
+/// |---|---|---|---|
+/// | `5m5` | `Number("5")`, span `[0,1)` | 3 (end of input) | `3 >= 3`, **withheld** |
+/// | `5mX` | `Number("5")`, span `[0,1)` | 2 (a real byte killed the trial) | `2 < 3`, yielded |
+///
+/// [`SpanEnd`](Self::SpanEnd) is the common answer and it is not a weaker
+/// [`ReadTo`](Self::ReadTo): it means *no probe beyond the item's own span end*, so the
+/// **terminator probe at `span.end` is allowed**. That is the one-boundary-byte lookahead a
+/// maximal-munch lexer performs, and it is safe for the reason it has always been safe — the
+/// boundary byte is present exactly when the item is yielded. A `SpanEnd` claimant therefore
+/// keeps the pre-0.10.0 holdback behaviour bit for bit.
+///
+/// [`Unbounded`](Self::Unbounded) is the conservative degenerate answer, for an adapter over an
+/// engine that does not expose its probe frontier at all. It is sound and it is never precise:
+/// under a non-final partial input it withholds **every** item, so the caller buffers until the
+/// stream is sealed. See [`Lexer::read_frontier`] for the cost that carries.
+///
+/// # Wrapping a lexer
+///
+/// This enum is `#[non_exhaustive]`. A wrapper lexer that transforms an inner lexer's frontier
+/// must map any variant it does not know to [`Unbounded`](Self::Unbounded) — the conservative
+/// answer — and must never panic on one. A future variant can only ever describe a frontier
+/// `Unbounded` already covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ReadFrontier<O> {
+  /// No probe beyond the item's own span end. The terminator probe *at* `span.end` is included
+  /// in this claim, not excluded from it.
+  SpanEnd,
+  /// Deciding this item probed the input at most as far as this offset, **inclusive**. A probe
+  /// answered by end of input counts at the offset probed, so a decision that observed "no byte
+  /// at `k`" reports at least `k`.
+  ReadTo(O),
+  /// The lexer cannot bound what it probed. Treated as end of input, so the item is always
+  /// withheld under a non-final partial input.
+  Unbounded,
+}
+
+/// The read-frontier **class** a token vocabulary claims, for an adapter that cannot compute an
+/// exact frontier of its own.
+///
+/// The bundled logos adapter is the case this exists for: `logos` exposes `span`, `slice` and
+/// `remainder`, but not its DFA's probe frontier, so `LogosLexer` cannot answer
+/// [`ReadFrontier::SpanEnd`] unconditionally nor compute a [`ReadFrontier::ReadTo`] itself. It
+/// asks the vocabulary instead, through [`Token::READ_FRONTIER_CLASS`] — the same const-delegation
+/// shape as [`Token::SURFACES_TRIVIA`].
+///
+/// The claim answers for **an item whose scan recorded no frontier in the lexer state**; an item
+/// that did record one is answered by that value (see [`State::probed_to`](crate::State::probed_to)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ReadFrontierClass {
+  /// Items this vocabulary produces are decided without probing beyond their own span end —
+  /// [`ReadFrontier::SpanEnd`].
+  ///
+  /// For a `logos` vocabulary this is a claim about the **DFA**, not only about callbacks, and it
+  /// is false for most real vocabularies: see [`Lexer::read_frontier`] for why a prefix-accepting
+  /// longer pattern (a float or exponent literal beside an integer) makes the engine probe past
+  /// the span it goes on to emit.
+  SpanEnd,
+  /// The vocabulary refuses to bound what deciding an item probed — [`ReadFrontier::Unbounded`].
+  /// The safe default.
+  Unbounded,
+}
+
 /// A trait to convert a type into a lexer.
 pub trait IntoLexer<'inp, T: ?Sized> {
   /// The lexer type.
@@ -449,16 +533,39 @@ where
 ///
 /// When the input layer is driven in [`Partial`](crate::input::Partial) (Sans-I/O) mode, one
 /// further property is assumed — it is inert for a [`Complete`](crate::input::Complete) parse. A
-/// produced item (token or [`Error`](Lexed::Error)) whose span ends **strictly before the buffer
-/// end** must be **stable under appended input**: its decision — token-vs-error, kind, and span —
-/// must derive only from source bytes up to its own span end, never from bytes further ahead. The
-/// frontier holdback withholds exactly the one item whose span *reaches* the buffer end (the
-/// maximal-munch one-boundary-byte lookahead is safe, because that boundary byte is present
-/// precisely when the item is yielded), so a lexer that decides an item from bytes *beyond* its
-/// span breaks the chunked-equivalence guarantee — a prefix parse would produce a different item
-/// than the whole. A maximal-munch lexer (the Logos backend, and every hand-written lexer that
-/// commits each item from its own bytes) satisfies this; the `conformance` kit's `run_partial`
-/// check exercises it over every split point.
+/// produced item (token or [`Error`](Lexed::Error)) that the driver **yields** must be **stable
+/// under appended input**: its decision — token-vs-error, kind, and span — must not change if more
+/// bytes arrive after the buffer end.
+///
+/// A lexer does not have to satisfy that by construction. It has to *report* what it read, through
+/// [`read_frontier`](Self::read_frontier), and the driver withholds every item whose frontier
+/// reaches the buffer end. Lookahead is therefore supported rather than forbidden: an ordered trial
+/// that probes several readings and backtracks is a conforming lexer as long as it says so.
+///
+/// **The claim this clause used to make about the Logos backend was false, and is retracted in
+/// 0.10.0.** It asserted that "a maximal-munch lexer (the Logos backend, and every hand-written
+/// lexer that commits each item from its own bytes) satisfies this". The bundled backend does not,
+/// and no callback is needed to break it — `logos` **backtracks to the last accepting prefix after
+/// probing past it**, which is ordinary DFA behaviour and not what its "prevents backtracking"
+/// README line is about (that one is about ReDoS inside a single definition). With pure
+/// `#[regex]`/`#[token]` rules for `[0-9]+`, `[0-9]+\.[0-9]+` and `[0-9]+e[+-]?[0-9]+`:
+///
+/// ```text
+/// "1.5"  -> Float@0..3
+/// "1."   -> Int@0..1  Dot@1..2      the Float trial probed offset 2, hit end of input, rolled back
+/// "5e"   -> Int@0..1  Word@1..2     the same shape on the exponent arm
+/// "5ex"  -> Int@0..1  Word@1..3     the trial died on a REAL byte: append-stable, safely yieldable
+/// ```
+///
+/// Drive `"1."` non-final under the pre-0.10.0 holdback and `Int@0..1` commits, because its span
+/// end 1 is below the buffer end 2; append `5` and the complete parse says `Float@0..3`. That is
+/// the chunked-equivalence break, inside tokora's own shipped adapter, for any vocabulary with a
+/// prefix-accepting longer pattern — which is most real vocabularies. It is not a callback problem
+/// and it never was.
+///
+/// The `conformance` kit's `run_partial` check exercises the property over every split point, and
+/// it already failed such a vocabulary before this release, using the pre-0.10.0 holdback: the
+/// falsifier predates the feature that fixes it.
 ///
 /// ## Span / slice coherence
 ///
@@ -577,6 +684,69 @@ pub trait Lexer<'inp>: 'inp {
   /// `None` (exhaustion is sticky). Every produced token and error must have a nonempty
   /// span. See the [trait contract](Self#the-lexer-contract) for both clauses.
   fn lex(&mut self) -> Option<Result<Self::Token, <Self::Token as Token<'inp>>::Error>>;
+
+  /// How far this lexer probed the input while deciding the item [`span`](Self::span) describes.
+  ///
+  /// This is what makes a **lookahead** lexer usable under a partial input. The holdback that
+  /// keeps a partial parse equivalent to the complete one used to key on the item whose span
+  /// *reaches* the buffer end — a proxy, exact only for a lexer that never reads past what it
+  /// emits. An ordered trial that attempts several readings and backtracks necessarily reads past
+  /// the span it emits, so the proxy let it commit an item that appending one byte would change.
+  /// Reporting the frontier replaces the proxy with the fact.
+  ///
+  /// # The convention
+  ///
+  /// > The **maximum offset at which the lexer probed the input while deciding the item,
+  /// > inclusive**, where a probe answered by end of input counts at the offset probed.
+  ///
+  /// The driver withholds the item iff that frontier is **at or past the buffer end**. See
+  /// [`ReadFrontier`] for the variants, the worked table, and why the exclusive reading is unsafe.
+  ///
+  /// # Contract
+  ///
+  /// Parallel to [`span`](Self::span)'s, and read by the input layer under the same discipline:
+  ///
+  /// - it answers about the **most recently produced item — token *or* error**, the same item
+  ///   [`span`](Self::span) and [`slice`](Self::slice) answer about;
+  /// - **repeated calls must agree.** It is a pure read of recorded fact: it must **not advance
+  ///   the lexer and must not probe new input**;
+  /// - `frontier >= span().end` is the intended relation, but the driver does **not** trust it —
+  ///   it floors what it reads at the item's span end, so under-reporting can only cost precision,
+  ///   never soundness (see below);
+  /// - its value **outside the after-an-item window** — freshly constructed, after
+  ///   [`bump`](Self::bump), after exhaustion — is unspecified but must not panic. The driver
+  ///   commits to never reading it there;
+  /// - the driver calls it **at most once per item**, and **only** in
+  ///   [`Partial`](crate::input::Partial) non-final mode. A [`Complete`](crate::input::Complete)
+  ///   parse never calls it at all — the call sits syntactically after the `Cmpl::PARTIAL`
+  ///   const-false and the `is_final()` short circuits, so the complete path does not merely
+  ///   optimise it away, it never contains it;
+  /// - violation posture: unspecified but bounded, like the rest of this trait.
+  ///
+  /// # Over-reporting is safe; under-reporting is a bug the driver contains
+  ///
+  /// The driver computes `effective = max(span.end, reported)`. Monotonicity is therefore a
+  /// property of the *driver*, not of the ecosystem: a lexer that reports a frontier behind its
+  /// own span cannot make the driver yield an item the pre-0.10.0 holdback would have withheld.
+  /// It is the same defence-in-depth posture the crate already takes on the post-exhaustion span.
+  ///
+  /// Over-reporting only ever **over-withholds**, and that converges: a refill strictly grows the
+  /// buffer and sealing ends the game, so there is no livelock. The degenerate
+  /// [`Unbounded`](ReadFrontier::Unbounded) is the limit of that — always sound, and it withholds
+  /// everything until the stream is sealed. **That cost is real** and it is not free: the caller
+  /// buffers the whole stream, each attempt re-lexes from the base
+  /// ([`RedriveFromBase`](crate::input::RedriveFromBase)), and a
+  /// [`Budget`](crate::input::Budget) calibrated for one-token latency can trip terminally on a
+  /// perfectly valid stream. An honest bounded answer is worth computing.
+  ///
+  /// # What a partial-driving caller sees change
+  ///
+  /// A caller that drives Partial non-final in a refill loop, or to a seal, sees the same stream
+  /// it always did. A caller that drives Partial non-final **exactly once** and treats
+  /// `Incomplete` as failure will see tokens it used to be handed come back as
+  /// [`Incomplete`](crate::error::Incomplete) instead. Those commitments were the unsound ones —
+  /// withholding them is the fix — but the change is visible.
+  fn read_frontier(&self) -> ReadFrontier<Self::Offset>;
 
   /// Bumps the end of currently lexed token by `n` offsets.
   ///
@@ -738,6 +908,10 @@ const _: () = {
     }
 
     fn lex(&mut self) -> Option<Result<Self::Token, <Self::Token as Token<'inp>>::Error>> {
+      todo!()
+    }
+
+    fn read_frontier(&self) -> ReadFrontier<Self::Offset> {
       todo!()
     }
 

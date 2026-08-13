@@ -193,6 +193,7 @@ pub enum SessionRefusal {
 /// #     self.end = e;
 /// #     Some(Ok(Word))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.end += *n; self.start = self.end; }
 /// # }
 /// # #[derive(Debug, PartialEq)]
