@@ -155,11 +155,20 @@ use core::{
 /// The obligation is stated here so a `Syntax::Component` implementor knows the cost of
 /// choosing interior mutability, not because stating it enforces it.
 ///
-/// The behavior that follows a violation is unspecified, not undefined: equality between two
-/// `IncompleteSyntax` values, hashing one, the message [`Display`] produces, and the
-/// deduplicating door's decision about components inserted afterward may all disagree with
-/// what the mutated component now reports — including admitting what looks like a duplicate.
-/// No memory unsafety follows.
+/// The behavior that follows a violation is unspecified, not undefined — the same distinction
+/// `HashSet` and `HashMap` draw for a key, and, like them, this deliberately does not enumerate
+/// it: a finite list reads as the edge of the damage, and "unspecified" promises no edge. No
+/// memory unsafety follows, whatever shape the violation takes.
+///
+/// One shape is worth naming, because "unspecified" alone does not suggest it: this type also
+/// decides whether it has room, and [`is_full`](Self::is_full) counts physical slots, not how
+/// many components the current [`Eq`] view would call distinct — so a mutation that makes two
+/// held components compare equal does not free one back. A component genuinely new to the set
+/// can meet that stale fullness through either insertion door and get a different answer from
+/// each: [`try_push`](Self::try_push) silently hands it back instead of storing it, and
+/// [`push`](Self::push) — a door whose only other failure is the caller's own bug — panics
+/// instead of returning. Neither is the edge of what "unspecified" covers; both are this one
+/// shape, met through the door the caller happened to call.
 ///
 /// This closes a narrower door than `AsMut<[Component]>` was. `AsMut` would have handed
 /// *every* caller of `&mut IncompleteSyntax<S>` a way to write a duplicate, whatever

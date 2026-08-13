@@ -583,13 +583,14 @@ fn incomplete_syntax_interior_mutable_component_defeats_uniqueness_but_not_sound
   assert_eq!(b.len(), 2);
   assert_eq!(b.as_slice().len(), 2);
 
-  // This is the documented degradation — a logic error, not a panic and not undefined
-  // behaviour: equality between the two `IncompleteSyntax` values, hashing one, and the
-  // message `Display` produces all now disagree with what `b` was built from and agree with
-  // what its mutated component currently reports. (`hash_of` reads the value directly, rather
-  // than putting it in a real `HashSet`/`HashMap`, which is its own footgun clippy already
-  // names: `clippy::mutable_key_type` fires on exactly this key shape — corroborating evidence
-  // for the same hazard, one level up.)
+  // A logic error, not undefined behaviour: equality between the two `IncompleteSyntax`
+  // values, hashing one, and the message `Display` produces all now disagree with what `b`
+  // was built from and agree with what its mutated component currently reports. This is one
+  // shape the violation takes — `IncompleteSyntax`'s docs deliberately do not enumerate them —
+  // and the fullness path below is another. (`hash_of` reads the value directly, rather than
+  // putting it in a real `HashSet`/`HashMap`, which is its own footgun clippy already names:
+  // `clippy::mutable_key_type` fires on exactly this key shape — corroborating evidence for the
+  // same hazard, one level up.)
   assert_eq!(a, b);
   assert_eq!(format!("{a}"), format!("{b}"));
   assert_eq!(
@@ -603,6 +604,34 @@ fn incomplete_syntax_interior_mutable_component_defeats_uniqueness_but_not_sound
   // duplicate", exactly as documented.
   assert_eq!(b.try_push(MutableComponent(Cell::new(2))), None);
   assert_eq!(b.len(), 2);
+
+  // The fullness path: this type also decides whether it has room, and that decision does not
+  // re-derive itself from the current `Eq` view. `is_full` counts physical slots, and the slot
+  // `b`'s mutated component still occupies was never freed.
+  assert!(b.is_full());
+
+  // `3` is what `b`'s second component reported before the mutation above overwrote it in
+  // place. Pushed now, it is `Eq` to nothing `b` currently holds — a genuinely new component
+  // by the deduplicating door's own rules — yet `b` is full, so `try_push` hands it back
+  // instead of storing it.
+  assert_eq!(
+    b.try_push(MutableComponent(Cell::new(3))),
+    Some(MutableComponent(Cell::new(3))),
+    "3 is Eq to nothing b currently holds, so this is a genuinely new component — refused only \
+     because the slot the mutation made b look free of was never physically freed"
+  );
+  assert_eq!(b.len(), 2);
+
+  // `push` is `try_push` plus a panic on `Some` — a door whose only other documented failure
+  // is the caller's own bug. It panics here too, on a component the deduplicating door has
+  // never once called a duplicate.
+  let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    b.push(MutableComponent(Cell::new(3)));
+  }));
+  assert!(
+    panicked.is_err(),
+    "push should panic: b reports is_full() and 3 is not a duplicate of anything it holds"
+  );
 }
 
 // ── Located tests ─────────────────────────────────────────────────────────────
