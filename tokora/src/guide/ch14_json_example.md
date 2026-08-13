@@ -18,6 +18,15 @@ borrow for scalars, but `List(Vec<JsonValue<'inp>>)` and
 `Object(Vec<(&'inp str, JsonValue<'inp>)>)` allocate their container nodes. The lexer maps
 punctuation through `PunctuatorToken` so the delimiter types can remain generic.
 
+Strings arrive as **two** token variants, `String` and `EscapedString`, both reporting
+`TokenKind::String`. The split is what spelling RFC 8259's surrogate-pairing rule as a regex — a
+`\uXXXX` escape is admissible only outside `D800`–`DFFF`, or as a high half immediately followed
+by a `\u` low half — buys for nothing: the two rules are disjoint (one forbids a backslash, the
+other requires one), so the automaton is already deciding which applies. A consumer that needs
+the decoded value therefore knows from the variant whether the slice can be used as it borrows or
+has to be unescaped into an owned `String`. Validating the escape in a callback instead measured
+1.65× the shipped rule over the bundled `sample.json`; the folded regex measures 1.02–1.07×.
+
 ```rust
 use tokora::{
   Token as TokenT,

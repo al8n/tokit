@@ -34,11 +34,19 @@ macro_rules! bail {
     /// # Limit-error latching
     ///
     /// When the lexer state (`extras`) reports a limit error from
-    /// [`check`](Lexer::check) after a token is scanned, [`lex`](Lexer::lex) returns that
+    /// [`check`](Lexer::check) after an item is scanned, [`lex`](Lexer::lex) returns that
     /// error **once** and then latches: every subsequent [`lex`](Lexer::lex) returns
     /// `None`, exactly as if the input were exhausted. This bounds the work an
     /// error-recovery caller performs on untrusted input — once the limiter trips the
     /// lexer stops scanning rather than re-failing on every remaining token.
+    ///
+    /// **An *item*, not a token.** A `logos` callback is free to update `extras` and return
+    /// `Err` for the same matched input, so a scan that lands on a lexer error is a completed
+    /// scan whose state must be checked too. When both happen at once the state error wins and
+    /// latches; the raw `logos` error is forwarded only when [`check`](Lexer::check) is `Ok`.
+    /// A tripped limit is a fact about the accumulated tally, which no later input can clear,
+    /// while a lexer error is a fact about one item — the same ranking the input layer applies
+    /// when a trip meets an incomplete frontier.
     ///
     /// After latching, [`span`](Lexer::span), [`slice`](Lexer::slice) and
     /// [`bump`](Lexer::bump) continue to delegate to the inner lexer, which is positioned
@@ -185,14 +193,26 @@ macro_rules! bail {
           return None;
         }
         match self.inner.next() {
-          Some(Ok(tok)) => match self.check() {
-            Ok(_) => Some(Ok(T::from_logos(tok))),
+          // ONE post-scan check, outside the `Ok`/`Err` split. A logos callback may mutate
+          // `extras` and *still* return `Err` for the same matched item, so an item that arrives
+          // as a lexer error is a completed scan exactly as a token is. Asking `check` only on
+          // the token arm treats it as if nothing had been scanned: a limit trip that coincides
+          // with a lexer error is then reported as the raw lexer error, latches nothing, and a
+          // recovery loop keeps scanning past the configured limit.
+          //
+          // The check therefore also *ranks* the two. A tripped state outranks the raw lexer
+          // error it arrived with, for the reason it outranks everything else: the tally is
+          // monotone and no further input can clear it, while a lexer error is a fact about one
+          // item. That is the same precedence the input layer applies one level up, where a
+          // tripped limit outranks an incomplete frontier.
+          Some(scanned) => match self.check() {
+            Ok(()) => Some(scanned.map(T::from_logos).map_err(Into::into)),
             Err(e) => {
               self.poisoned = true;
               Some(Err(e))
             }
           },
-          Some(Err(err)) => Some(Err(err.into())),
+          // Untouched: no item was scanned, so there is no post-scan state to rank against.
           None => None,
         }
       }
