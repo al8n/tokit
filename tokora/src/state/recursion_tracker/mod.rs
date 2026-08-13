@@ -742,7 +742,15 @@ impl RecursionLimiter {
   /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter),
   /// [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter), or —
   /// for a lossless parse, whose driver builds its own context —
-  /// [`parse_lossless_with_context`](crate::cst::parse_lossless_with_context). That asymmetry is
+  #[cfg_attr(
+    feature = "rowan",
+    doc = "[`parse_lossless_with_context`](crate::cst::parse_lossless_with_context)."
+  )]
+  #[cfg_attr(
+    not(feature = "rowan"),
+    doc = "`cst::parse_lossless_with_context` (`rowan` only)."
+  )]
+  /// That asymmetry is
   /// deliberate and is the same one the type's docs argue: too low returns a clean, catchable
   /// [`RecursionLimitReached`](crate::error::RecursionLimitReached) naming the knob that raises it;
   /// too high aborts the process and takes the caller's whole program with it. Only one of the two
@@ -750,8 +758,16 @@ impl RecursionLimiter {
   ///
   /// **`stacker` is not the answer to "I need more depth" either**, and that is a change from the
   /// revision that introduced it: enabling the feature no longer moves this number. It moves what
-  /// *tokora's own Pratt frames* cost, and publishes the budget that fact justifies as
-  /// [`SEGMENTED_PRATT_DEPTH`](Self::SEGMENTED_PRATT_DEPTH) for a caller to request explicitly.
+  /// *tokora's own Pratt frames* cost, and publishes the budget that fact justifies for a caller
+  /// to request explicitly:
+  #[cfg_attr(
+    feature = "stacker",
+    doc = "[`SEGMENTED_PRATT_DEPTH`](Self::SEGMENTED_PRATT_DEPTH)."
+  )]
+  #[cfg_attr(
+    not(feature = "stacker"),
+    doc = "`SEGMENTED_PRATT_DEPTH`, published only when that feature is on."
+  )]
   ///
   /// # It is also keyed on the build profile, and today both cells read 16
   ///
@@ -789,7 +805,7 @@ impl RecursionLimiter {
   /// on the *same* shared budget cell, and 1024 of them at the heaviest measured per-level cost is
   /// ≈41 MiB against a 2 MiB thread — the native abort this crate's whole recursion story exists
   /// to delete. So: pass this constant when the deep part of your grammar is
-  /// [`pratt`](crate::ParseInput::pratt) or [`InputRef::pratt`](crate::InputRef::pratt) frames,
+  /// [`pratt`](crate::parser::pratt) or [`InputRef::pratt`](crate::InputRef::pratt) frames,
   /// and do not pass it because a build happens to have the feature on.
   ///
   /// # Why 1024

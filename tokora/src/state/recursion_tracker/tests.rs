@@ -59,10 +59,10 @@ fn the_segmented_pratt_depth_is_1024() {
     "the shipped debug segmented budget is 1024 — 64 MiB of stack segments at the binding ~41 KiB \
      per level. 512 is the value the old range-shaped guard accepted while the docs said 1024."
   );
-  assert!(
-    RecursionLimiter::SEGMENTED_PRATT_DEPTH > RecursionLimiter::PARSE_DEFAULT_DEPTH,
-    "the segmented budget must be the larger of the two, or there was no reason to name it apart"
-  );
+  // The *ordering* claim — that the segmented figure is the larger of the two, or there was no
+  // reason to name it apart — is settled at compile time beside the derivations, where clippy
+  // rightly insists a comparison of two constants belongs. Restating it here would be a second
+  // copy that reds at the same moment for the same reason.
 }
 
 /// The segmented-Pratt budget, release build. Same floor argument as the unsegmented pair.
