@@ -124,7 +124,11 @@ where
 
 type FCtx<'inp> = ParserContext<'inp, TestLexer<'inp>, Fatal<Diag>>;
 
-fn fatal_ctx() -> FCtx<'static> {
+/// Generic in `'inp` rather than fixed at `'static`: the amplification fixture below builds its
+/// inputs at run time, and a `'static` context would force those `String`s to be leaked to be
+/// borrowed from. This repository runs Miri with leak checking on, so a leaked fixture is a red
+/// cell — the context holds no input, so nothing here needs `'static`.
+fn fatal_ctx<'inp>() -> FCtx<'inp> {
   ParserContext::new(Fatal::new())
 }
 
@@ -183,7 +187,7 @@ fn go_failing<'inp>(
   try_num_or_fail.repeated().collect().parse_input(inp)
 }
 
-fn run_plain(src: &'static str) -> (Result<Cap1, Diag>, usize) {
+fn run_plain(src: &str) -> (Result<Cap1, Diag>, usize) {
   reset();
   let out = Parser::with_context(fatal_ctx())
     .apply(go_plain)
@@ -250,8 +254,10 @@ fn a_prefix_refusal_costs_the_same_whatever_follows_it() {
   let counts: Vec<(usize, usize)> = [0usize, 64, 512, 4096]
     .into_iter()
     .map(|n| {
-      let src: &'static str = Box::leak(trailing(n).into_boxed_str());
-      let (out, attempts) = run_plain(src);
+      // Owned, not `Box::leak`ed: the parse and the assertion both finish inside this closure,
+      // so the row's input is dropped with it.
+      let src = trailing(n);
+      let (out, attempts) = run_plain(&src);
       assert_eq!(out, Err(Diag::Full(2, 1)), "trailing={n}: same verdict");
       (n, attempts)
     })
