@@ -313,6 +313,27 @@ and will red until they do.
   attempt's starting point. Borrowed `Collect<_, &mut Container, _>` is a different contract —
   the caller owns and observes that container — and is unchanged.
 
+- **`std` without `alloc` no longer fails to compile the `tinyvec` adapters.** The `std` feature
+  listed `tinyvec_1?/default`, and **tinyvec's `default` is empty**, so that entry enabled nothing
+  at all while reading like every other line around it. `TinyVec` exists only under tinyvec's
+  `alloc`, and the three `TinyVec` impls — `Container`, `SeparatorHandler`, `DelimiterHandler` —
+  are gated on `any(std, alloc)`. So `--no-default-features --features std,tinyvec_1` type-checked
+  those bodies against a tinyvec that has no `TinyVec` and failed with `E0432`. `--all-features`
+  was the only build that ever compiled them, which is why nothing caught it until
+  `ci/feature_cfg_coverage.py` gained a `std,logos,combinators,tinyvec_1` leg, whose first run
+  reported it.
+
+  `std` now names `tinyvec_1?/alloc` — the identical entry the `alloc` feature already carries, so
+  the manifest states what the `cfg` states: either capability needs one thing from tinyvec, that
+  `TinyVec` exist. Narrowing the `cfg` to `alloc` compiles just as well and was rejected, because
+  it drops the impls from every `std` build, which is a behaviour change wearing a build fix's
+  clothes. Nothing else moved. tinyvec's own `std` is deliberately *not* enabled — it adds
+  `io::Write for TinyVec<[u8; N]>`, `Error for TryFromSliceError` and its own `no_std` opt-out,
+  none of which tokora names — and `--features tinyvec_1` alone still compiles the `ArrayVec` and
+  `SliceVec` adapters without a heap. Every other `/default` entry in the `std` list was checked
+  against its own crate's `default` at the version `Cargo.lock` resolves; tinyvec's was the only
+  empty one.
+
 ## 0.9.1 (2026-08-08)
 
 ### Added

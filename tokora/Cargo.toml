@@ -22,7 +22,33 @@ std = [
   "hipstr_0_8?/default",
   "bstr_1?/default",
   "smol_bytes_0_1?/default",
-  "tinyvec_1?/default",
+
+  # NOT `tinyvec_1?/default`, which is what this line used to say. **tinyvec's `default` is
+  # empty**, so that entry enabled nothing at all while reading exactly like the ones around it —
+  # and `TinyVec` exists only under tinyvec's `alloc`. `container/mod.rs` and
+  # `parser/many/handler/mod.rs` gate their three `TinyVec` impls on `any(std, alloc)`, so a
+  # `std`-without-`alloc` build type-checked those bodies against a tinyvec that has no `TinyVec`
+  # and failed with E0432. `--all-features` was the only build that ever compiled them until
+  # `ci/feature_cfg_coverage.py` declared the `std,logos,combinators,tinyvec_1` leg, which is what
+  # found this on its first run.
+  #
+  # **`alloc` and not `std`.** This is the identical entry the `alloc` list carries, so the
+  # manifest now says what the `cfg` says: both capabilities need one thing from tinyvec, that
+  # `TinyVec` exist. tinyvec's `std` is `["alloc"]` plus `io::Write for TinyVec<[u8; N]>`,
+  # `Error for TryFromSliceError` and dropping its own `no_std`; tokora names none of the three,
+  # and enabling it would take tinyvec out of `no_std` for every graph that unifies on it.
+  #
+  # Do NOT repair this by narrowing the `cfg` to `alloc`, which compiles just as well: that drops
+  # the impls from every `std` build instead, which is a behaviour change wearing a build fix's
+  # clothes. And do not fold `alloc` into `tinyvec_1` the way `smallvec_1` does — the `ArrayVec`
+  # and `SliceVec` impls in the same two files are ungated, and forcing `alloc` would charge a
+  # no-alloc consumer a heap for the two adapters that do not need one.
+  #
+  # Every other `/default` entry in this list was checked against its own crate's `default` at
+  # the version `Cargo.lock` resolves, on `7979e18`: tinyvec's was the only empty one. Re-check
+  # on a dependency bump — an upstream that empties its `default` turns its entry here into this
+  # same silent no-op.
+  "tinyvec_1?/alloc",
 
   "logos_0_14?/default",
   "logos_0_15?/default",
