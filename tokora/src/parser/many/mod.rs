@@ -515,7 +515,7 @@ where
 /// `let _ = <that term>;` above the `if`, leaving the others in the condition, and run
 /// `cargo test -p tokora --all-features --no-fail-fast`. The suite named for that witness must go
 /// red and the census must stay green. Repeat per witness.
-#[inline]
+#[inline(always)]
 pub(super) fn absence_after_element<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   latch: &Option<L::Offset>,
@@ -615,7 +615,7 @@ where
 /// declines — or accepts consuming nothing — with the closer genuinely present, over both sinks.
 /// Neuter the term (`let _ = inp.tripped_during_attempt(trips);` above the `if`) and that section
 /// reds while the census stays green.
-#[inline]
+#[inline(always)]
 pub(super) fn close_after_element<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
   trips: usize,
