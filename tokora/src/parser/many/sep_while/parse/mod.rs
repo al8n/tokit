@@ -61,7 +61,7 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
     // `many::absence_after_element` for why the two granularities differ.
     let scans = inp.scanner_trip_snapshot();
     let mut num_elems = 0;
-    let mut full = None;
+    let mut full = false;
 
     loop {
       // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
@@ -104,9 +104,6 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
               // cycle and this peek can trip. The same classification `sep/parse`'s empty
               // separator-slot return carries; see `many::absence_after_element`.
               let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
-              // The destination's capacity report goes last, after the count bounds this
-              // construct is judged on — see `many::report_full_container`.
-              report_full_container(&mut full, inp)?;
               return Ok(span);
             }
             Some(front) => front
@@ -130,9 +127,6 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
               // *accepting* one, which `many`'s module docs exempt.
               absence_after_element(inp, &latch, scans, trips)?;
               let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
-              // The destination's capacity report goes last, after the count bounds this
-              // construct is judged on — see `many::report_full_container`.
-              report_full_container(&mut full, inp)?;
               return Ok(span);
             }
             Action::Continue => {
@@ -165,9 +159,6 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
             // itself and answered with a value it consumed nothing for. Both are the chokepoint's.
             absence_after_element(inp, &latch, scans, trips)?;
             let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
-            // The destination's capacity report goes last, after the count bounds this
-            // construct is judged on — see `many::report_full_container`.
-            report_full_container(&mut full, inp)?;
             return Ok(span);
           }
           committed = new_committed;
@@ -246,7 +237,7 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
     anchor: &Cursor<'inp, 'closure, L>,
     peek_span: &L::Span,
     num_elems: &mut usize,
-    full: &mut Option<FullContainer<L::Span, Lang>>,
+    full: &mut bool,
     container: &mut Container,
     handler: &Handler,
   ) -> Result<State<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>

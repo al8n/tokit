@@ -312,7 +312,7 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
     // `many::absence_after_element` for why the two granularities differ.
     let scans = inp.scanner_trip_snapshot();
     let mut nums = 0;
-    let mut full = None;
+    let mut full = false;
 
     loop {
       // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
@@ -348,9 +348,6 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
           absence_after_element(inp, &latch, scans, trips)?;
           let span = inp.span_since(&anchor);
           rh.on_stop(nums, inp, &anchor)?;
-          // The destination's capacity report goes last, after the count bounds this construct
-          // is judged on — see `many::report_full_container`.
-          report_full_container(&mut full, inp)?;
           return Ok(span);
         }
         Action::Continue => {
@@ -384,9 +381,6 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
         absence_after_element(inp, &latch, scans, trips)?;
         let span = inp.span_since(&anchor);
         rh.on_stop(nums, inp, &anchor)?;
-        // The destination's capacity report goes last, after the count bounds this construct is
-        // judged on — see `many::report_full_container`.
-        report_full_container(&mut full, inp)?;
         return Ok(span);
       }
       committed = new_committed;

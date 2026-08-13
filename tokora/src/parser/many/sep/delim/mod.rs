@@ -125,7 +125,7 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     let mut state: State<L::Token, L::Span> = State::Start;
     let parser = &mut self.parser;
     let mut num_elems = 0;
-    let mut full = None;
+    let mut full = false;
 
     let mut cursor = inp.cursor().clone();
     let mut committed = inp.span().end();
@@ -187,9 +187,6 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
             // this cycle's baseline was taken a few lines above and nothing since it can trip.
             parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
             container.on_close_delimiter(tok);
-            // The destination's capacity report goes last, after the count bounds this
-            // construct is judged on — see `many::report_full_container`.
-            report_full_container(&mut full, inp)?;
             return Ok(inp.span_since(&anchor));
           } else {
             state = parser.handle_separator(state, inp, container, separator_state_handler, tok)?;
@@ -317,9 +314,6 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       container.on_close_delimiter(inp.commit_probed(ct));
     }
 
-    // The destination's capacity report goes last, after the count bounds this
-    // construct is judged on — see `many::report_full_container`.
-    report_full_container(&mut full, inp)?;
     Ok(inp.span_since(&anchor))
   }
 }

@@ -105,7 +105,7 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     }
 
     let mut nums = 0;
-    let mut full = None;
+    let mut full = false;
     let mut committed = inp.span().end();
     // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the opener's
     // own scan is not charged to the element loop. One offset clone per collection.
@@ -143,9 +143,6 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
           container.on_close_delimiter(inp.commit_probed(ct));
           let span = inp.span_since(&anchor);
           on_stop(nums, inp, &span)?;
-          // The destination's capacity report goes last, after the count bounds this construct
-          // is judged on — see `many::report_full_container`.
-          report_full_container(&mut full, inp)?;
           return Ok(span);
         }
         // A terminal scanner stop: its own diagnostic already explains the halt —
@@ -223,9 +220,6 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
               // the separated drivers established.
               let span = inp.span_since(&anchor);
               on_stop(nums, inp, &span)?;
-              // The destination's capacity report goes last, after the count bounds this
-              // construct is judged on — see `many::report_full_container`.
-              report_full_container(&mut full, inp)?;
               return Ok(span);
             }
             Action::Continue => {
@@ -307,9 +301,6 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
 
     let span = inp.span_since(&anchor);
     on_stop(nums, inp, &span)?;
-    // The destination's capacity report goes last, after the count bounds this construct is
-    // judged on — see `many::report_full_container`.
-    report_full_container(&mut full, inp)?;
     Ok(span)
   }
 }

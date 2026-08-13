@@ -247,31 +247,53 @@ and will red until they do.
   removable and was removed rather than written down, because an obligation nobody can check is
   a cost with no keeper.
 
-- **The eight repetition drivers no longer disagree about whether a violated `at_most` or a full
-  container is reported first** (#277). An element that both exceeded the count maximum and
-  filled the destination produced `[TooMany, FullContainer]` under `repeated` and
-  `repeated_while` and `[FullContainer, TooMany]` under the other six — and under a fail-fast
-  emitter the whole parse's error changed from `TooMany` to `FullContainer` purely on the
-  builder the caller picked. `end_state_parity`'s invariant is that one logical history yields
-  one diagnostic vector whichever builder produced it; the matrix missed this because every row
-  in it isolated a single condition.
+- **The destination's capacity report reaches the emitter at the refusal, so a fail-fast parse
+  stops there** (#277). `FullContainer` is emitted from `push_element`'s refusal arm, the moment
+  the destination says no. Under `Fatal` — documented to stop at the first error — a container
+  that refuses element 2 of a construct now ends the parse at element 2.
 
-  The cause is that the eight detect a violated maximum at three different moments — mid-loop,
-  from an end callback, from the end-state pass — so a `FullContainer` emitted at the refusal
-  landed on either side of it. `push_element` already forbids the container from disturbing the
-  count bounds' *arithmetic* ("a container that ran out of room must not … silently swallow a
-  violated `at_most`"); emitting at the refusal let it disturb their *reporting* instead, which
-  under `Fatal` is the same swallow by another route.
+  **What #277 originally asked for is the opposite, and it cannot be had.** The eight drivers
+  detect a violated maximum at three different moments — mid-loop in `repeated` and
+  `repeated_while`, from an end callback in the four delimited forms, from the end-state pass in
+  the four separated ones — so an element that both exceeds `at_most` and fills the destination
+  produces `[TooMany, FullContainer]` under two builders and `[FullContainer, TooMany]` under
+  the other six. Withholding the capacity report until each driver's end-state pass makes that
+  order uniform. It also moves *when the emitter is consulted*, and in a collection driver the
+  emitter is not a log — it is what decides whether the parse continues. Withheld, the report
+  cost three things:
 
-  The capacity report is now built at the refusal, where its facts are true, and emitted after
-  the end-state pass on every `Ok` exit of every driver — so it is the last diagnostic a
-  repetition construct produces and there is no position left for it to preempt a count bound
-  from. Observable changes beyond the ordering: a `Fatal` parse that overflows its container now
-  stops at the end of the construct rather than at the refusing element, so a diagnostic raised
-  in between wins; and a construct that exits with `Err` reports no capacity diagnostic, because
-  it never established a final count. `CAPACITY_REPORT_CENSUS` pins the report to the end-state
-  pass count in all eight sources — the emission previously rode one shared call and no census
-  could see it.
+  - `Fatal` no longer stopped at the refusal. It parsed the rest of the construct first — nine
+    element attempts over `1 2 3 4 5 6 7 8` into a capacity-1 destination, against two.
+  - Any later `Err` exit — a lexer error, an element failure, a delimiter, a recovery stop —
+    propagated past the withheld report and **discarded a diagnostic that had been witnessed**.
+    Over `1 2 oops` the parse's error was the element-3 failure, and the refusal at element 2
+    was never told.
+  - A refusal stopped being constant work. It is an O(1) decision made at element 2; withheld,
+    delivering it took O(n) over trailing input the caller does not choose — 4099 element
+    attempts against 4096 trailing elements, a 1366x amplification.
+
+  **The two emitter classes want opposite things and the trait cannot tell them apart.** A
+  rejecting emitter needs the call at the refusal; a recovering one would prefer it after the
+  count bounds. `Emitter` exposes no classification, and could not usefully expose one: the
+  class is a property of the **call and its argument**, not of the emitter — an error-budget
+  emitter recovers until its budget runs out. The only signal is the `Result` the call returns,
+  and reading it means having made the call. So the rule is applied in the direction that fails
+  safe: emitting at the refusal costs a recovering emitter one diagnostic's position in one
+  history, and withholding it costs a rejecting emitter its documented contract, a witnessed
+  diagnostic, and a bound on its work.
+
+  **What a recovering emitter sees instead.** The order is chronological, and it differs by
+  driver in the one history where both diagnostics fire: `[TooMany, FullContainer]` under
+  `repeated` and `repeated_while`, whose mid-loop maximum hook runs before the push, and
+  `[FullContainer, TooMany]` under the other six, whose maximum is detected after the loop.
+  `end_state_parity`'s case H asserts each driver's own order rather than one shared vector, and
+  `capacity_report_timing.rs` holds the three properties above. `CAPACITY_REPORT_CENSUS` pins
+  the emission to the region between `push_element`'s definition and the `*nums += 1` that ends
+  its refusal arm, so a call relocated to any exit fails it.
+
+  What `push_element` already forbade is unchanged: a container that ran out of room still
+  cannot disturb the count bounds' *arithmetic*, because `nums` counts the elements the driver
+  parsed and never the elements the container stored.
 
 - **An owning `Collect` no longer carries a failed attempt's elements into the next one** (#256).
   The container was transferred out of the parser with `parse(..).map(|_| mem::take(..))`, which

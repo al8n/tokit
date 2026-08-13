@@ -70,9 +70,10 @@ impl<S, Lang: ?Sized> FullContainer<S, Lang> {
   /// the capacity is. Subtracting the two, or reading one as exceeding the other, is not a
   /// supported reading of this payload.
   ///
-  /// The diagnostic is recorded once per construct, at the first refusal, and emitted after the
-  /// construct's count bounds have been judged. Once per construct is a reporting policy:
-  /// nothing here predicts what a later push does.
+  /// The diagnostic is emitted once per construct, **at the first refusal** — not held for the
+  /// construct's end, because the emitter's answer to it is also the decision whether the parse
+  /// continues, and a fail-fast one is entitled to stop there. Once per construct is a
+  /// reporting policy: nothing here predicts what a later push does.
   ///
   /// [`Container`]: crate::container::Container
   #[inline(always)]

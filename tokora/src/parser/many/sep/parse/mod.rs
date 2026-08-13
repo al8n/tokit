@@ -62,7 +62,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     // `many::absence_after_element` for why the two granularities differ.
     let scans = inp.scanner_trip_snapshot();
     let mut num_elems = 0;
-    let mut full = None;
+    let mut full = false;
 
     loop {
       let mut ps = None;
@@ -89,9 +89,6 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         None => match ps {
           None => {
             let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
-            // The destination's capacity report goes last, after the count bounds this
-            // construct is judged on — see `many::report_full_container`.
-            report_full_container(&mut full, inp)?;
             return Ok(span);
           }
           Some(span) => span,
@@ -121,9 +118,6 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         Ok(Decline) => {
           absence_after_element(inp, &latch, scans, trips)?;
           let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
-          // The destination's capacity report goes last, after the count bounds this
-          // construct is judged on — see `many::report_full_container`.
-          report_full_container(&mut full, inp)?;
           return Ok(span);
         }
         Ok(Accept(elem)) => {
@@ -156,9 +150,6 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // cleanly.
         absence_after_element(inp, &latch, scans, trips)?;
         let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
-        // The destination's capacity report goes last, after the count bounds this
-        // construct is judged on — see `many::report_full_container`.
-        report_full_container(&mut full, inp)?;
         return Ok(span);
       }
       committed = new_committed;
@@ -238,7 +229,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     peek_span: L::Span,
     element: O,
     num_elems: &mut usize,
-    full: &mut Option<FullContainer<L::Span, Lang>>,
+    full: &mut bool,
     container: &mut Container,
     handler: &Handler,
   ) -> Result<State<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>

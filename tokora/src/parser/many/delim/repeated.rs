@@ -108,7 +108,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     };
 
     let mut nums = 0;
-    let mut full = None;
+    let mut full = false;
     let mut elem_cur = inp.cursor().clone();
     let mut committed = inp.span().end();
     // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the
@@ -200,9 +200,6 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
 
           let span = inp.span_since(&anchor);
           on_stop(nums, inp, &span)?;
-          // The destination's capacity report goes last, after the count bounds this construct
-          // is judged on — see `many::report_full_container`.
-          report_full_container(&mut full, inp)?;
           return Ok(span);
         }
       }
@@ -273,9 +270,6 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
 
     let span = inp.span_since(&anchor);
     on_stop(nums, inp, &span)?;
-    // The destination's capacity report goes last, after the count bounds this construct is
-    // judged on — see `many::report_full_container`.
-    report_full_container(&mut full, inp)?;
     Ok(span)
   }
 }
