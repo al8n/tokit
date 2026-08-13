@@ -114,16 +114,16 @@ use core::{
 ///
 /// # The set is total, and so is every view of it
 ///
-/// Two properties hold for every value of this type, and neither is a caller obligation.
+/// Two properties hold for every value of this type, and they do not hold the same way. One is
+/// structural. The other is a documented obligation this type cannot enforce — see *Uniqueness
+/// is a logic error* below.
 ///
-/// - **No duplicates.** Components enter through one deduplicating door
-///   ([`push`](Self::push), [`push_front`](Self::push_front), their `try_` forms and
-///   [`from_iter`](Self::from_iter)), nothing removes one, and **no accessor hands out a
-///   `&mut` to an element**. So a duplicate cannot be written after the fact. That is why
-///   there is no `as_mut_slice` and no `AsMut<[Component]>`: an unrestricted mutable slice is
-///   exactly the door that lets a caller write one component over another, and the set
-///   property is worth more than the door. Reorder or edit by rebuilding from
-///   [`iter`](Self::iter).
+/// - **No duplicates, through this type's own operations.** Components enter through one
+///   deduplicating door ([`push`](Self::push), [`push_front`](Self::push_front), their `try_`
+///   forms and [`from_iter`](Self::from_iter)), nothing removes one, and no accessor hands out
+///   a `&mut` to an element, so there is no operation on `&mut IncompleteSyntax<S>` that writes
+///   one component over another. That is why there is no `as_mut_slice` and no
+///   `AsMut<[Component]>`. Reorder or edit by rebuilding from [`iter`](Self::iter).
 /// - **Every view is complete.** [`len`](Self::len), [`iter`](Self::iter),
 ///   [`as_slice`](Self::as_slice), the `AsRef<[Component]>` that delegates to it, and
 ///   [`Display`] all report the same components. The backing store is a ring buffer and
@@ -131,6 +131,43 @@ use core::{
 ///   that must return one borrowed slice can return **all** of it.
 ///
 /// [`push_front`]: Self::push_front
+///
+/// ## Uniqueness is a logic error, the way `HashSet` states it for a key
+///
+/// The deduplicating door above decides whether an incoming component is a duplicate by
+/// comparing it against every component already held, through `S::Component`'s own [`Eq`] —
+/// see `try_push_impl`. That comparison, this type's own [`Hash`], and [`Display`] are only as
+/// stable as `S::Component` keeps them: `as_slice`, `AsRef<[Component]>` and `iter` all hand out
+/// shared references, and a shared reference is not a proof of immutability if `S::Component`
+/// has interior mutability.
+///
+/// **It is a logic error for a component to be modified, after insertion, in a way that
+/// changes what its [`Eq`], [`Hash`], or [`Display`] impl reports.** This is normally only
+/// possible if `S::Component` wraps a `Cell`, an atomic, or other interior-mutable or ambient
+/// state and derives one of those impls from it — precisely the hazard
+/// [`HashSet`](https://doc.rust-lang.org/std/collections/struct.HashSet.html) and
+/// [`HashMap`](https://doc.rust-lang.org/std/collections/struct.HashMap.html) document for a
+/// key, in the same words: normally only possible through `Cell`, `RefCell`, global state,
+/// I/O, or unsafe code. Rust has no bound that forbids this generically: the compiler's own
+/// interior-mutability marker, `Freeze`, is unstable and gated behind `#![feature(freeze)]`
+/// (tracked at [rust-lang/rust#121675](https://github.com/rust-lang/rust/issues/121675)), so
+/// there is nothing this crate's MSRV — or any stable Rust today — lets it write as a bound.
+/// The obligation is stated here so a `Syntax::Component` implementor knows the cost of
+/// choosing interior mutability, not because stating it enforces it.
+///
+/// The behavior that follows a violation is unspecified, not undefined: equality between two
+/// `IncompleteSyntax` values, hashing one, the message [`Display`] produces, and the
+/// deduplicating door's decision about components inserted afterward may all disagree with
+/// what the mutated component now reports — including admitting what looks like a duplicate.
+/// No memory unsafety follows.
+///
+/// This closes a narrower door than `AsMut<[Component]>` was. `AsMut` would have handed
+/// *every* caller of `&mut IncompleteSyntax<S>` a way to write a duplicate, whatever
+/// `S::Component` was — no cooperation from the component type required. What remains needs
+/// `S::Component`'s own author to opt in to interior mutability and to wire it into `Eq`,
+/// `Hash`, or `Display`; an ordinary `S::Component`, including every one this module's examples
+/// define, has nothing here for a caller to reach. Removing `AsMut` closed that ordinary route
+/// for good — it did not, and could not, make uniqueness structural.
 ///
 /// # Design Philosophy
 ///
@@ -908,6 +945,10 @@ where
   /// `try_push_front_impl`. The `debug_assert` below is where that discipline is read: if a
   /// future insertion path forgets it, this is the accessor that would silently drop
   /// components, so this is where it says so.
+  ///
+  /// This accessor is shared, not exclusive, so it hands the caller a `&S::Component` for
+  /// every element — see *Uniqueness is a logic error* on [`IncompleteSyntax`] for what an
+  /// `S::Component` with interior mutability can do with that, and what it cannot.
   ///
   /// # Examples
   ///

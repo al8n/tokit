@@ -498,6 +498,113 @@ fn incomplete_syntax_push_front_overflow_panics() {
   e.push_front(Component::B); // This should panic: buffer full
 }
 
+// ── Interior mutability defeats uniqueness, not soundness (see `IncompleteSyntax`'s docs,
+// "Uniqueness is a logic error") ────────────────────────────────────────────────────────────
+
+#[test]
+fn incomplete_syntax_interior_mutable_component_defeats_uniqueness_but_not_soundness() {
+  // A component shaped exactly like the hazard the type-level docs describe: `Eq`, `Hash` and
+  // `Display` are all derived from a `Cell`, so a caller holding only `&self` — exactly what
+  // `as_slice`/`AsRef` hand out — can still change what they report.
+  use core::{
+    cell::Cell,
+    hash::{Hash, Hasher},
+  };
+  use std::collections::hash_map::DefaultHasher;
+
+  fn hash_of<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+  }
+
+  #[derive(Debug, Clone)]
+  struct MutableComponent(Cell<u8>);
+
+  impl PartialEq for MutableComponent {
+    fn eq(&self, other: &Self) -> bool {
+      self.0.get() == other.0.get()
+    }
+  }
+  impl Eq for MutableComponent {}
+
+  impl Hash for MutableComponent {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+      self.0.get().hash(state);
+    }
+  }
+
+  impl fmt::Display for MutableComponent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      write!(f, "{}", self.0.get())
+    }
+  }
+
+  #[derive(Debug, Clone, Copy)]
+  struct MutableSyntax;
+
+  impl Syntax for MutableSyntax {
+    type Lang = TestLang;
+    const KIND: TestSyntaxKind = TestSyntaxKind;
+    type Component = MutableComponent;
+    type COMPONENTS = U2;
+    type REQUIRED = U2;
+
+    // `IncompleteSyntax::new`/`push`/`try_push`/`as_slice` — everything this test calls —
+    // never call either accessor, so neither body runs here.
+    fn possible_components() -> &'static GenericArrayDeque<MutableComponent, U2> {
+      unimplemented!("not exercised by this test")
+    }
+    fn required_components() -> &'static GenericArrayDeque<MutableComponent, U2> {
+      unimplemented!("not exercised by this test")
+    }
+  }
+
+  let mut a =
+    IncompleteSyntax::<MutableSyntax>::new(SimpleSpan::new(0, 1), MutableComponent(Cell::new(1)));
+  a.push(MutableComponent(Cell::new(2)));
+
+  let mut b =
+    IncompleteSyntax::<MutableSyntax>::new(SimpleSpan::new(0, 1), MutableComponent(Cell::new(1)));
+  b.push(MutableComponent(Cell::new(3))); // distinct from `a` — dedup saw 1 != 3 at insertion
+
+  // Distinct as built: the deduplicating door told them apart using each component's `Eq` as
+  // it stood at insertion time.
+  assert_ne!(a, b);
+  assert_ne!(format!("{a}"), format!("{b}"));
+
+  // Mutate `b`'s second component through nothing but the shared accessor the type still
+  // exposes: `as_slice()` hands out `&MutableComponent`, and `Cell::set` needs only `&self`.
+  b.as_slice()[1].0.set(2);
+
+  // "Every view is complete" is unconditional and untouched by any of this: both still report
+  // two components — mutating a component does not change how many `IncompleteSyntax` holds.
+  assert_eq!(a.len(), 2);
+  assert_eq!(b.len(), 2);
+  assert_eq!(b.as_slice().len(), 2);
+
+  // This is the documented degradation — a logic error, not a panic and not undefined
+  // behaviour: equality between the two `IncompleteSyntax` values, hashing one, and the
+  // message `Display` produces all now disagree with what `b` was built from and agree with
+  // what its mutated component currently reports. (`hash_of` reads the value directly, rather
+  // than putting it in a real `HashSet`/`HashMap`, which is its own footgun clippy already
+  // names: `clippy::mutable_key_type` fires on exactly this key shape — corroborating evidence
+  // for the same hazard, one level up.)
+  assert_eq!(a, b);
+  assert_eq!(format!("{a}"), format!("{b}"));
+  assert_eq!(
+    hash_of(&a),
+    hash_of(&b),
+    "a == b now holds, so a correct Hash impl is required to agree too"
+  );
+
+  // The deduplicating door is fooled the same way: a component that now reports what `b`'s
+  // mutated component reports is absorbed as a duplicate — "admitting what looks like a
+  // duplicate", exactly as documented.
+  assert_eq!(b.try_push(MutableComponent(Cell::new(2))), None);
+  assert_eq!(b.len(), 2);
+}
+
 // ── Located tests ─────────────────────────────────────────────────────────────
 
 #[test]

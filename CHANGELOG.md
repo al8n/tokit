@@ -76,13 +76,17 @@ and will red until they do.
   The type documents its components as a *set*: insertion deduplicates, nothing removes, and
   every other door preserves that. An unrestricted `&mut [Component]` is the one door that did
   not — `error.as_mut_slice()[1] = Component::A` writes a duplicate the type says cannot exist,
-  and equality, hashing and formatting then observe a state the contract rules out. A caller
-  obligation would have been a documented promise the compiler does not keep, which is the
-  defect class this change is part of, so the door is gone instead and uniqueness is now
-  structural. The shared views are unaffected: `as_slice`, `AsRef<[S::Component]>`, `iter`,
-  `len` and `Display` all stay, and all of them got *more* complete in the same change. A
-  caller that reordered or rewrote components rebuilds from `iter` — `S::Component` is only
-  `Clone + Eq + Hash + Display`, so there was never a generic sort to lose.
+  and equality, hashing and formatting then observe a state the contract rules out. The door is
+  gone because it needed no cooperation from `Component` at all — the widest possible route to
+  the same duplicate. It is not the only route: `Component` is not, and cannot be, bounded
+  against interior mutability (Rust has no stable bound for that), so a `Component` wrapping a
+  `Cell` or an atomic can still reach a duplicate through the surviving shared views. That is
+  now a documented logic error, in the terms `HashSet` and `HashMap` use for the same hazard on
+  a key — not a claim that uniqueness is structural (#279). The shared views are unaffected:
+  `as_slice`, `AsRef<[S::Component]>`, `iter`, `len` and `Display` all stay, and all of them got
+  *more* complete in the same change. A caller that reordered or rewrote components rebuilds
+  from `iter` — `S::Component` is only `Clone + Eq + Hash + Display`, so there was never a
+  generic sort to lose.
 
 ### Fixed
 
