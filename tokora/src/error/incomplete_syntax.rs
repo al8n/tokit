@@ -117,6 +117,26 @@ use core::{
 /// construct during parsing. It stores components as a set (no duplicates) and
 /// always contains at least one missing component.
 ///
+/// # The set is total, and so is every view of it
+///
+/// Two properties hold for every value of this type, and neither is a caller obligation.
+///
+/// - **No duplicates.** Components enter through one deduplicating door
+///   ([`push`](Self::push), [`push_front`](Self::push_front), their `try_` forms and
+///   [`from_iter`](Self::from_iter)), nothing removes one, and **no accessor hands out a
+///   `&mut` to an element**. So a duplicate cannot be written after the fact. That is why
+///   there is no `as_mut_slice` and no `AsMut<[Component]>`: an unrestricted mutable slice is
+///   exactly the door that lets a caller write one component over another, and the set
+///   property is worth more than the door. Reorder or edit by rebuilding from
+///   [`iter`](Self::iter).
+/// - **Every view is complete.** [`len`](Self::len), [`iter`](Self::iter),
+///   [`as_slice`](Self::as_slice), the `AsRef<[Component]>` that delegates to it, and
+///   [`Display`] all report the same components. The backing store is a ring buffer and
+///   [`push_front`] wraps it; the insertion doors restore contiguity, so a `&self` accessor
+///   that must return one borrowed slice can return **all** of it.
+///
+/// [`push_front`]: Self::push_front
+///
 /// # Design Philosophy
 ///
 /// When parsing fails, it's valuable to report *all* missing components rather
@@ -285,6 +305,11 @@ where
   }
 }
 
+/// The complete logical collection, in order — the same components
+/// [`len`](IncompleteSyntax::len) counts and [`iter`](IncompleteSyntax::iter) yields.
+///
+/// There is deliberately no `AsMut<[S::Component]>` counterpart; see *The set is total* on
+/// [`IncompleteSyntax`].
 impl<S, Sp> AsRef<[S::Component]> for IncompleteSyntax<S, Sp>
 where
   S: Syntax,
@@ -292,16 +317,6 @@ where
   #[inline(always)]
   fn as_ref(&self) -> &[S::Component] {
     self.as_slice()
-  }
-}
-
-impl<S, Sp> AsMut<[S::Component]> for IncompleteSyntax<S, Sp>
-where
-  S: Syntax,
-{
-  #[inline(always)]
-  fn as_mut(&mut self) -> &mut [S::Component] {
-    self.as_mut_slice()
   }
 }
 
@@ -362,6 +377,9 @@ where
       panic!("IncompleteSyntax requires S::COMPONENTS to be non-zero");
     }
     let mut components = GenericArrayDeque::new();
+    // The contiguity discipline the two `try_push_*_impl` doors maintain has nothing to do
+    // here: a single `push_back` into a freshly created deque leaves the head at zero, which
+    // is one physical segment by construction.
     components.push_back(component);
     Self { span, components }
   }
@@ -431,32 +449,46 @@ where
   ///
   /// Returns `None` if the component was added or already exists (success),
   /// `Some(component)` if the buffer is full (failure).
+  ///
+  /// This and `try_push_front_impl` are the only two doors an element enters by, and both
+  /// leave the ring in **one physical segment** — see the note on `as_slice`.
+  ///
+  /// A back insertion cannot wrap a ring whose head is already at zero, so the call here is a
+  /// **postcondition rather than a repair**: it is what makes each door's guarantee local
+  /// instead of a claim about the order the doors were called in. Removing it leaves the whole
+  /// suite green today, and leaves the next removal or rotation operation added to this type
+  /// to rediscover why the invariant used to hold.
   #[inline(always)]
   fn try_push_impl(
     components: &mut GenericArrayDeque<S::Component, S::COMPONENTS>,
     component: S::Component,
   ) -> Option<S::Component> {
     if components.contains(&component) {
-      None
-    } else {
-      components.push_back(component)
+      return None;
     }
+    let rejected = components.push_back(component);
+    components.make_contiguous();
+    rejected
   }
 
   /// Helper function that tries to push a component with deduplication logic.
   ///
   /// Returns `None` if the component was added or already exists (success),
   /// `Some(component)` if the buffer is full (failure).
+  ///
+  /// A front insertion is what moves the head off zero, so this is the door that would leave
+  /// the ring wrapped; `make_contiguous` is what stops it, and is not optional here.
   #[inline(always)]
   fn try_push_front_impl(
     components: &mut GenericArrayDeque<S::Component, S::COMPONENTS>,
     component: S::Component,
   ) -> Option<S::Component> {
     if components.contains(&component) {
-      None
-    } else {
-      components.push_front(component)
+      return None;
     }
+    let rejected = components.push_front(component);
+    components.make_contiguous();
+    rejected
   }
 
   /// Returns the number of missing components.
@@ -837,7 +869,21 @@ where
     Self::try_push_front_impl(&mut self.components, component)
   }
 
-  /// Returns a slice of the missing components.
+  /// Returns a slice of **every** missing component, in order.
+  ///
+  /// The slice always has [`len`](Self::len) elements and yields what [`iter`](Self::iter)
+  /// yields — a borrowed view of the whole logical collection, never a prefix of it.
+  ///
+  /// # Why that needs saying
+  ///
+  /// The backing store is a ring buffer, and a ring buffer is not one physical slice: once
+  /// [`push_front`](Self::push_front) moves the head off zero it has two segments, and a
+  /// method returning `&[T]` can only return one of them. `&self` cannot normalize anything,
+  /// and the `AsRef<[S::Component]>` this method backs has that receiver by trait definition,
+  /// so the normalization happens at insertion time instead — see `try_push_impl` and
+  /// `try_push_front_impl`. The `debug_assert` below is where that discipline is read: if a
+  /// future insertion path forgets it, this is the accessor that would silently drop
+  /// components, so this is where it says so.
   ///
   /// # Examples
   ///
@@ -880,61 +926,27 @@ where
   /// );
   /// error.push(Component::B);
   /// assert_eq!(error.as_slice(), &[Component::A, Component::B]);
+  ///
+  /// // The same holds after a front insertion, which is what wraps the ring.
+  /// let mut error = IncompleteSyntax::<MySyntax>::new(
+  ///     tokora::SimpleSpan::new(10, 15),
+  ///     Component::B
+  /// );
+  /// error.push_front(Component::A);
+  /// assert_eq!(error.as_slice(), &[Component::A, Component::B]);
   /// # }
   /// ```
   #[inline(always)]
   pub fn as_slice(&self) -> &[S::Component] {
-    self.components.as_slices().0
-  }
-
-  /// Returns a mutable slice of the missing components.
-  ///
-  /// # Examples
-  ///
-  /// ```rust
-  /// # {
-  /// # use tokora::{utils::{typenum, GenericArrayDeque}, syntax::Syntax, error::IncompleteSyntax};
-  /// # use typenum::U2;
-  /// # use core::fmt;
-  /// # #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-  /// # enum Component { A, B }
-  /// # impl fmt::Display for Component {
-  /// #     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-  /// #         match self { Self::A => write!(f, "A"), Self::B => write!(f, "B") }
-  /// #     }
-  /// # }
-  /// # #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-  /// # struct MyLang;
-  /// # #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-  /// # enum MySyntaxKind { Syntax }
-  /// # impl tokora::syntax::Language for MyLang { type SyntaxKind = MySyntaxKind; }
-  /// # struct MySyntax;
-  /// # impl Syntax for MySyntax {
-  /// #     type Lang = MyLang;
-  /// #     const KIND: MySyntaxKind = MySyntaxKind::Syntax;
-  /// #     type Component = Component;
-  /// #     type COMPONENTS = U2;
-  /// #     type REQUIRED = U2;
-  /// #     fn possible_components() -> &'static GenericArrayDeque<Component, U2> {
-  /// #         const COMPONENTS: &GenericArrayDeque<Component, U2> = &GenericArrayDeque::from_array([Component::A, Component::B]);
-  /// #         COMPONENTS
-  /// #     }
-  /// #     fn required_components() -> &'static GenericArrayDeque<Component, U2> {
-  /// #         const REQUIRED: &GenericArrayDeque<Component, U2> = &GenericArrayDeque::from_array([Component::A, Component::B]);
-  /// #         REQUIRED
-  /// #     }
-  /// # }
-  /// let mut error = IncompleteSyntax::<MySyntax>::new(
-  ///     tokora::SimpleSpan::new(10, 15),
-  ///     Component::A
-  /// );
-  /// error.as_mut_slice()[0] = Component::B;
-  /// assert_eq!(error.as_slice()[0], Component::B);
-  /// # }
-  /// ```
-  #[inline(always)]
-  pub fn as_mut_slice(&mut self) -> &mut [S::Component] {
-    self.components.as_mut_slices().0
+    let (contiguous, wrapped) = self.components.as_slices();
+    debug_assert!(
+      wrapped.is_empty(),
+      "IncompleteSyntax: the component ring is wrapped, so this accessor is about to report \
+       {} of {} components — an insertion path skipped `make_contiguous`",
+      contiguous.len(),
+      self.components.len(),
+    );
+    contiguous
   }
 
   /// Returns an iterator over the missing components.

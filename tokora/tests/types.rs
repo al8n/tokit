@@ -218,11 +218,72 @@ fn incomplete_syntax_as_slice() {
   assert_eq!(e.as_slice(), &[Component::A]);
 }
 
+// ── The wrapped ring ─────────────────────────────────────────────────────────
+//
+// `new` + `push_front` is what puts the logical sequence across the ring boundary: the head
+// moves to the last physical cell, so the deque has two segments and an accessor returning
+// only the first reports a prefix. Capacity one cannot express that layout, so the
+// capacity-one slice tests here pass against the defect — these are the ones that do not.
+
 #[test]
-fn incomplete_syntax_as_mut_slice() {
-  let mut e = IncompleteSyntax::<MySyntax1>::new(SimpleSpan::new(0, 1), Component::A);
-  e.as_mut_slice()[0] = Component::B;
-  assert_eq!(e.as_slice(), &[Component::B]);
+fn incomplete_syntax_wrapped_slice_holds_every_component() {
+  let mut e = IncompleteSyntax::<MySyntax2>::new(SimpleSpan::new(0, 1), Component::B);
+  e.push_front(Component::A);
+
+  assert_eq!(e.len(), 2);
+  assert_eq!(
+    e.iter().collect::<Vec<_>>(),
+    vec![&Component::A, &Component::B]
+  );
+  // The views agree, which is what `len`/`iter` and the slice facade stopped doing.
+  assert_eq!(e.as_slice(), &[Component::A, Component::B]);
+  assert_eq!(e.as_slice().len(), e.len());
+  let via_as_ref: &[Component] = e.as_ref();
+  assert_eq!(via_as_ref, &[Component::A, Component::B]);
+}
+
+#[test]
+fn incomplete_syntax_wrapped_display_names_every_component() {
+  let mut e = IncompleteSyntax::<MySyntax2>::new(SimpleSpan::new(0, 1), Component::B);
+  e.push_front(Component::A);
+  // Not the singular "component A is missing": the count the grammar branches on is the
+  // slice's, so a truncated slice changed the sentence as well as its contents.
+  assert_eq!(
+    format!("{e}"),
+    "incomplete syntax: components A, B are missing"
+  );
+}
+
+#[test]
+fn incomplete_syntax_wrapped_then_pushed_back_holds_every_component() {
+  // A back insertion after a front one: a second physical layout the one-segment accessor
+  // reported a prefix of. Note what this one does NOT pin — removing the front door's
+  // `make_contiguous` leaves it green, because the later `push` normalizes the ring the
+  // `push_front` wrapped. The three tests around it are the ones that red on that plant.
+  let mut e = IncompleteSyntax::<MySyntax3>::new(SimpleSpan::new(0, 1), Component::B);
+  e.push_front(Component::A);
+  e.push(Component::C);
+
+  assert_eq!(e.len(), 3);
+  assert_eq!(e.as_slice(), &[Component::A, Component::B, Component::C]);
+  assert_eq!(
+    e.iter().collect::<Vec<_>>(),
+    vec![&Component::A, &Component::B, &Component::C]
+  );
+  assert_eq!(
+    format!("{e}"),
+    "incomplete syntax: components A, B, C are missing"
+  );
+}
+
+#[test]
+fn incomplete_syntax_wrapped_from_two_front_pushes() {
+  let mut e = IncompleteSyntax::<MySyntax3>::new(SimpleSpan::new(0, 1), Component::C);
+  e.push_front(Component::B);
+  e.push_front(Component::A);
+
+  assert_eq!(e.as_slice(), &[Component::A, Component::B, Component::C]);
+  assert_eq!(e.as_slice().len(), e.len());
 }
 
 #[test]
@@ -247,12 +308,19 @@ fn incomplete_syntax_as_ref() {
   assert_eq!(slice, &[Component::A]);
 }
 
+/// The impl that survived, pinned as a bound rather than as a call: the shared view is what
+/// generic code takes, and it is the one whose fixed `&self` receiver forced the contiguity
+/// discipline. `AsMut<[Component]>` is deliberately not implemented — see *The set is total*
+/// on `IncompleteSyntax`.
 #[test]
-fn incomplete_syntax_as_mut() {
-  let mut e = IncompleteSyntax::<MySyntax1>::new(SimpleSpan::new(0, 1), Component::A);
-  let slice: &mut [Component] = e.as_mut();
-  slice[0] = Component::C;
-  assert_eq!(e.as_slice(), &[Component::C]);
+fn incomplete_syntax_satisfies_as_ref_bound() {
+  fn takes_shared_slice<T: AsRef<[Component]>>(value: &T) -> usize {
+    value.as_ref().len()
+  }
+
+  let mut e = IncompleteSyntax::<MySyntax2>::new(SimpleSpan::new(0, 1), Component::B);
+  e.push_front(Component::A);
+  assert_eq!(takes_shared_slice(&e), 2);
 }
 
 #[test]

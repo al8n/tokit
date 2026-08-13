@@ -70,7 +70,40 @@ and will red until they do.
   that section stopped one step short of — the diagnostic is not hidden, the return value cannot
   distinguish, and `peek_with_emitter_terminal` or `peek_map` is what can.
 
+### Changed (breaking)
+
+- **`IncompleteSyntax::as_mut_slice` and its `AsMut<[S::Component]>` impl are removed** (#245).
+  The type documents its components as a *set*: insertion deduplicates, nothing removes, and
+  every other door preserves that. An unrestricted `&mut [Component]` is the one door that did
+  not — `error.as_mut_slice()[1] = Component::A` writes a duplicate the type says cannot exist,
+  and equality, hashing and formatting then observe a state the contract rules out. A caller
+  obligation would have been a documented promise the compiler does not keep, which is the
+  defect class this change is part of, so the door is gone instead and uniqueness is now
+  structural. The shared views are unaffected: `as_slice`, `AsRef<[S::Component]>`, `iter`,
+  `len` and `Display` all stay, and all of them got *more* complete in the same change. A
+  caller that reordered or rewrote components rebuilds from `iter` — `S::Component` is only
+  `Clone + Eq + Hash + Display`, so there was never a generic sort to lose.
+
 ### Fixed
+
+- **`IncompleteSyntax::as_slice` no longer stops at the ring boundary** (#245). The components
+  live in a `GenericArrayDeque`, and a deque is not one physical slice: `push_front` moves the
+  head off zero, after which `as_slices()` has two segments. The accessor returned the first
+  one. So a two-component error built as `new(B)` then `push_front(A)` reported `len() == 2`,
+  iterated `A, B`, and handed `AsRef` and `Display` only `[A]` — and because `Display` branches
+  its grammar on the slice's length, the message also changed to the singular *"component A is
+  missing"*. Parse diagnostics silently lost expected alternatives, and which ones depended on
+  the ring's internal head position rather than on the value.
+
+  **A `&self` accessor cannot fix this where it is read.** Making a wrapped ring contiguous
+  needs `&mut`, and `AsRef::as_ref`'s receiver is fixed by the trait, so the choice was to
+  normalize at *insertion* time or to give the shared slice view up. The two `try_push_*_impl`
+  doors are the only way an element enters, and both now leave the ring in one physical
+  segment; `as_slice` reads that with a `debug_assert` at the one site a future insertion path
+  that skipped it would silently truncate. `Display` is a consumer of the accessor and needed
+  no change of its own — it follows, grammar included. Cost to a caller: none at the API
+  level; a wrapping `push_front` pays one rotation of a buffer whose capacity is the syntax's
+  compile-time component count.
 
 - **A `logos` error no longer suppresses a state-limit trip that landed on the same item.**
   `LogosLexer`'s "Limit-error latching" contract is that a limit error from `Lexer::check` is
