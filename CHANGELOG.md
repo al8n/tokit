@@ -70,6 +70,32 @@ and will red until they do.
   that section stopped one step short of — the diagnostic is not hidden, the return value cannot
   distinguish, and `peek_with_emitter_terminal` or `peek_map` is what can.
 
+### Fixed
+
+- **A `logos` error no longer suppresses a state-limit trip that landed on the same item.**
+  `LogosLexer`'s "Limit-error latching" contract is that a limit error from `Lexer::check` is
+  returned **once** after a scan and then latches, so an error-recovery loop over untrusted input
+  cannot be made to scan past the configured limit. The post-scan check ran only on the
+  `Some(Ok(token))` arm.
+
+  A `logos` callback is free to mutate `extras` *and* return `Err` for the same matched item, and
+  that item is a completed scan too — the tally moved. When both happened at once the raw `logos`
+  error was forwarded with the state never consulted: `lex` kept answering `Some(Err(logos))` for
+  every remaining match, `poisoned` was never set, and the scan count went on growing past the
+  limit. All three supported `logos` majors shared the defect, because the adapter is one macro.
+
+  The check now runs once, outside the `Ok`/`Err` split, and ranks the two: a tripped state
+  outranks the raw `logos` error it arrived with, because the tally is monotone and no later input
+  can clear it while a lexer error is a fact about one item. A raw `logos` error whose `check()` is
+  still `Ok` is forwarded exactly as before, and the `None` arm is untouched.
+
+  `InputRef` was never unbounded here — classification asks `check()` itself and records a poison
+  boundary, so that path stayed latched — but it builds its trip verdict out of the error `lex`
+  returned, so a trip that arrived wearing a `logos` error was latched correctly and **diagnosed
+  wrongly**. Fixing the adapter fixes the payload on the complete and partial-frontier paths with
+  no change at the input layer. Reported by an external audit at `7789dcd`.
+
+
 ## 0.9.1 (2026-08-08)
 
 ### Added
