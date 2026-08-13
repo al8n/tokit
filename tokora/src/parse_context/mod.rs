@@ -83,7 +83,8 @@ where
   emitter: E,
   cache: Option<C::Options>,
   /// The recursion budget handed to the [`Input`](crate::input::Input) at
-  /// [`provide`](ParseContext::provide) — depth 64 unless
+  /// [`provide`](ParseContext::provide) —
+  /// [`RecursionLimiter::PARSE_DEFAULT_DEPTH`] unless
   /// [`with_recursion_limiter`](Self::with_recursion_limiter) says otherwise.
   recursion: RecursionLimiter,
   _marker: PhantomData<&'inp L>,
@@ -130,8 +131,9 @@ where
   /// Threaded straight to
   /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
   /// by [`provide`](ParseContext::provide); see it for what the budget covers. The default is
-  /// depth 64, protection on — the native-stack-safe figure requested explicitly, not
-  /// [`RecursionLimiter::new`]'s own (unrelated) general-purpose default of 500.
+  /// [`RecursionLimiter::PARSE_DEFAULT_DEPTH`], protection on — requested explicitly, not
+  /// [`RecursionLimiter::new`]'s own (unrelated) general-purpose default of 500. **Read that
+  /// constant rather than assuming a number: it is 16, or 1024 with the `stacker` feature.**
   ///
   /// ```rust,ignore
   /// // Deep but bounded grammar: raise the ceiling for this parse only.

@@ -334,10 +334,11 @@ pub struct InputContext<E, C> {
 impl<E, C> InputContext<E, C> {
   /// Creates a new `InputContext` with the given emitter and cache.
   ///
-  /// The recursion budget defaults to depth **64**, protection on — the native-stack-safe
-  /// figure tokora's own parser wiring requests explicitly, NOT
+  /// The recursion budget defaults to [`RecursionLimiter::PARSE_DEFAULT_DEPTH`], protection on —
+  /// the figure tokora's own parser wiring requests explicitly, NOT
   /// [`RecursionLimiter::new`]'s own (unrelated) general-purpose default of 500 — and is
-  /// changed with [`with_recursion_limiter`](Self::with_recursion_limiter).
+  /// changed with [`with_recursion_limiter`](Self::with_recursion_limiter). That constant is 16,
+  /// or 1024 with the `stacker` feature, so it is named here rather than written out.
   #[inline(always)]
   pub const fn new(emitter: E, cache: C) -> Self {
     Self {
@@ -629,7 +630,8 @@ where
   poison_boundary: Option<L::Offset>,
   /// The **recursion budget** this parse descends against: live descent depth plus the limit it
   /// may not exceed, configured at [`with_state_and_context`](Self::with_state_and_context) from
-  /// [`InputContext::with_recursion_limiter`] and defaulting to depth 64.
+  /// [`InputContext::with_recursion_limiter`] and defaulting to
+  /// [`RecursionLimiter::PARSE_DEFAULT_DEPTH`].
   ///
   /// Its one writer is the [`Descent`](InputRef::descend) guard: [`InputRef::descend`] raises the
   /// depth, and the guard's `Drop` lowers it on **every** exit of the guard's scope — return,

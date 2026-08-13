@@ -21,7 +21,15 @@ fn input_context_new_and_into_components() {
   // `new` carries the default budget: protection on, at tokora's own native-stack-safe depth —
   // NOT `RecursionLimiter::new()`'s own general-purpose default, which is a different number for
   // a different subject (see `RecursionLimiter`'s `Two Defaults, Two Subjects` docs).
-  assert_eq!(r.limitation(), 64);
+  //
+  // Named rather than written out: the figure depends on the `stacker` feature, and a literal
+  // here would pin whichever half the leg running this cell happens to build. The claim being
+  // made is that `new` carries the PARSE default at all — what that default IS, and why, belongs
+  // to `native_stack/tests.rs`, which derives it.
+  assert_eq!(
+    r.limitation(),
+    crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH
+  );
   assert_ne!(
     r.limitation(),
     crate::state::recursion_tracker::RecursionLimiter::new().limitation(),

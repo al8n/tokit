@@ -8,7 +8,8 @@
 //!
 //! * **R1 — the recursion budget.** Every pratt frame, in either engine, enters one level of the
 //!   input's [`RecursionLimiter`] through `InputRef::descend`, and exceeding it fails the parse
-//!   with the always-terminal `RecursionLimitReached`. On by default (depth 64), configurable
+//!   with the always-terminal `RecursionLimitReached`. On by default (at
+//!   `RecursionLimiter::PARSE_DEFAULT_DEPTH`, which the `stacker` feature changes), configurable
 //!   through the context, shared by every parser on one input, and released on every exit
 //!   including an unwind.
 //! * **R2 — the non-associative contract.** A second same-power `PrattInfix::Neither` operator in
@@ -2383,33 +2384,40 @@ fn two_composed_pratt_parsers_share_one_budget() {
   );
 }
 
-/// **Protection is on by default.** An unconfigured `parse_str` over a chain deeper than 64
-/// fails terminally instead of risking a native-stack abort — and `unlimited()` puts the deep
-/// parse back, which proves the default is the thing doing the refusing.
+/// **Protection is on by default.** An unconfigured `parse_str` over a chain deeper than the
+/// default fails terminally instead of risking a native-stack abort — and `unlimited()` puts the
+/// deep parse back, which proves the default is the thing doing the refusing.
 ///
 /// The chain is deeper than the default but still well inside every measured native ceiling, so
 /// what refuses it can only be the limiter. `on_a_deep_stack` stays on both halves anyway: the
 /// `unlimited()` half runs 1000 levels deep, which no 2 MiB stack survives in a debug build.
+///
+/// **Every figure is read off `RecursionLimiter::PARSE_DEFAULT_DEPTH`, never written out.** The
+/// default is `16` without the `stacker` feature and `1024` with it, so a literal here would pin
+/// whichever half the leg running this cell happened to build and would go quietly vacuous in the
+/// other. That constant became public partly so that this file could name it.
 #[test]
 fn the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it() {
-  let defaulted = on_a_deep_stack(|| {
-    let src = prefix_chain(80);
+  let default_depth = RecursionLimiter::PARSE_DEFAULT_DEPTH;
+  let past_it = default_depth + 16;
+
+  let defaulted = on_a_deep_stack(move || {
+    let src = prefix_chain(past_it);
     Parser::new()
       .apply(typed_probe)
       .parse_str(&src)
       .map_err(|e: LimErr| e)
       .unwrap()
   });
+  // `at` is left out on purpose: it is committed consumption at the tripping frame's entry, which
+  // moves with the default, and it is what the R1 offset cells above already pin.
   assert!(
     matches!(
       defaulted,
-      Err(LimErr::Limit {
-        depth: 65,
-        limitation: 64,
-        ..
-      })
+      Err(LimErr::Limit { depth, limitation, .. })
+        if depth == default_depth + 1 && limitation == default_depth
     ),
-    "the default budget is 64 and the 65th frame is refused; got {defaulted:?}"
+    "the default budget is {default_depth} and the frame after it is refused; got {defaulted:?}"
   );
 
   // Deliberately far below the measured native threshold: this cell proves `unlimited` removes
@@ -2430,8 +2438,8 @@ fn the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it() {
   );
 
   // And the same on the token engine, so "default on" is not a typed-only claim.
-  let token_defaulted = on_a_deep_stack(|| {
-    let src = prefix_chain(80);
+  let token_defaulted = on_a_deep_stack(move || {
+    let src = prefix_chain(past_it);
     Parser::new()
       .apply(token_probe)
       .parse_str(&src)
@@ -2441,11 +2449,8 @@ fn the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it() {
   assert!(
     matches!(
       token_defaulted,
-      Err(LimErr::Limit {
-        depth: 65,
-        limitation: 64,
-        ..
-      })
+      Err(LimErr::Limit { depth, limitation, .. })
+        if depth == default_depth + 1 && limitation == default_depth
     ),
     "the token engine honours the same default; got {token_defaulted:?}"
   );
@@ -2683,13 +2688,18 @@ fn a_trip_leaves_the_depth_unchanged() {
 /// 100 fit too, but only by 1.25× — close enough that a codegen change on another platform could
 /// turn this cell from a failure into a process abort, which is not a test result.
 ///
-/// The same table is why the shipped default is **64** and not the 500 this branch first carried.
+/// The same table is why the shipped default stopped being the 500 this branch first carried.
 /// 500 was sized against the *release* ceilings on the top row and cleared them by ~7.7×, but the
 /// bottom row is the one an unconfigured parse meets in a test suite, and 500 is four times the
-/// debug token engine's 125: the stack aborted before the limiter could return anything. 64 clears
-/// the tightest of the four by ~1.9×, so the same table now supports the default rather than
-/// contradicting it — and a cell that exercises the default no longer *needs* an enlarged stack,
-/// though the ones above keep `on_a_deep_stack` because their `unlimited()` halves still do.
+/// debug token engine's 125: the stack aborted before the limiter could return anything.
+///
+/// **The table above is tokora's own frames, and the shipped default is no longer derived from
+/// it.** Its replacement, 64, cleared the tightest of these four by ~1.9× and was still too high,
+/// because a consumer's grammar runs *inside* this recursion and pays for both frames: one
+/// measured consumer aborts at **51**, below 64. `RecursionLimiter::PARSE_DEFAULT_DEPTH` carries
+/// that derivation and is 16 today, or 1024 with the `stacker` feature. This cell's own 32 is
+/// unaffected — it is a *configured* budget chosen against the 125 in this table, which is the
+/// right table for a cell that runs tokora's grammar and nobody else's.
 #[test]
 fn a_configured_budget_holds_on_an_ordinary_thread_stack() {
   let src = prefix_chain(1_000);
@@ -2723,5 +2733,334 @@ fn a_configured_budget_holds_on_an_ordinary_thread_stack() {
       })
     ),
     "the token engine too; got {token:?}"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// R1 — what the `stacker` feature moves, and what it does not
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The thread every figure in `src/native_stack.rs`'s measurement table is stated on, and the one
+/// `std::thread::spawn` hands out by default.
+///
+/// Written out rather than inherited from the harness: libtest's worker threads are 2 MiB today,
+/// but that is its choice and not a contract, and a table stated in "the default thread size"
+/// would silently re-base itself the day that changed.
+const MEASUREMENT_STACK: usize = 2 * 1024 * 1024;
+
+/// A chain past every native ceiling in the table: 8× the 125 the binding cell records for a 2 MiB
+/// debug thread, 2.6× the 384 the typed driver holds there, and still two orders of magnitude
+/// inside what a segmented stack costs to reach.
+const FAR_PAST_THE_CEILING: usize = 1_000;
+
+/// Runs `f` on an explicitly sized **2 MiB** thread — the measurement stack, not an enlarged one.
+///
+/// The opposite of [`on_a_deep_stack`] and used for the opposite reason: these cells are about
+/// what happens when the stack is the ordinary one, so supplying a bigger one would make them pass
+/// for a build in which nothing under test worked.
+fn on_a_2mib_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+  common::bounded_wait(MEASUREMENT_STACK, DEEP_STACK_BUDGET, f)
+}
+
+/// **The claim that holds in both configurations, and the reason the budget is not optional.**
+///
+/// On a 2 MiB thread this chain is past every cell of the measurement table — without `stacker` by
+/// 8× on the binding one — so the only reason this call returns at all is that the budget refused
+/// it before the stack could. Deliberately **not** `on_a_deep_stack`: an enlarged stack is exactly
+/// what must not be supplied, or the cell would pass for a build in which the limiter did nothing.
+///
+/// The depth is the **larger** of the two things it has to exceed, and it has to exceed both or it
+/// tests nothing. Past the native ceiling, or an abort is not what it would have hit; past the
+/// configured default, or nothing refuses it. The two swap places between configurations — 1000 is
+/// far past the ceiling and far past 16, but it is *under* the 1024 the `stacker` default carries,
+/// and this cell failed exactly that way when it was written with the constant alone.
+#[test]
+fn a_chain_far_past_the_native_ceiling_comes_back_as_a_value_not_an_abort() {
+  let depth = FAR_PAST_THE_CEILING.max(RecursionLimiter::PARSE_DEFAULT_DEPTH + 16);
+  let got: Outcome = on_a_2mib_stack(move || {
+    let src = prefix_chain(depth);
+    Parser::new()
+      .apply(typed_probe)
+      .parse_str(&src)
+      .map_err(|e: LimErr| e)
+      .unwrap()
+  });
+  assert!(
+    matches!(
+      got,
+      Err(LimErr::Limit { limitation, .. })
+        if limitation == RecursionLimiter::PARSE_DEFAULT_DEPTH
+    ),
+    "the default budget must refuse a {depth}-deep chain on a 2 MiB thread, as a value; got {got:?}"
+  );
+}
+
+/// **What the feature buys, and — in the same cell — what it does not.**
+///
+/// The budget is raised out of the way, the thread is the same ordinary 2 MiB, and the chain is 8×
+/// the 125 that thread holds without segments. A build in which `native_stack::maybe_grow` were
+/// the identity would not fail this line, it would *die* on it.
+///
+/// Then the second half, which is the one that must never be deleted: a budget one frame lower
+/// still refuses, as an ordinary catchable value, at a depth the thread stack could never have
+/// reached. **That pair is the whole claim** — the ceiling moved from hardware to policy, and the
+/// thing enforcing the policy is still the limiter.
+///
+/// The limiter is `with_limitation` and never `unlimited()` here, deliberately. `unlimited()` at
+/// this depth is the negative property, and the negative property cannot be a test: its outcome
+/// is a dead process. It is measured by hand and recorded in `src/native_stack.rs`.
+#[cfg(feature = "stacker")]
+#[test]
+fn with_stacker_the_same_chain_parses_past_the_thread_it_runs_on() {
+  let carried: Outcome = on_a_2mib_stack(|| {
+    let src = prefix_chain(FAR_PAST_THE_CEILING);
+    Parser::with_context(limited(FAR_PAST_THE_CEILING + 1))
+      .apply(typed_probe)
+      .parse_str(&src)
+      .unwrap()
+  });
+  let (tree, front) = carried.expect("segments must carry a chain the thread stack cannot");
+  assert_eq!(front, None, "the whole chain was consumed");
+  assert_eq!(
+    tree.matches('-').count(),
+    FAR_PAST_THE_CEILING,
+    "every prefix operator folded"
+  );
+
+  let refused: Outcome = on_a_2mib_stack(|| {
+    let src = prefix_chain(FAR_PAST_THE_CEILING);
+    Parser::with_context(limited(FAR_PAST_THE_CEILING - 1))
+      .apply(typed_probe)
+      .parse_str(&src)
+      .unwrap()
+  });
+  assert!(
+    matches!(
+      refused,
+      Err(LimErr::Limit {
+        limitation, ..
+      }) if limitation == FAR_PAST_THE_CEILING - 1
+    ),
+    "the budget is what refuses, and it still does when segments are what carried the frames; \
+     got {refused:?}"
+  );
+
+  // And the token engine, so "segments carry it" is not a typed-only claim: the two prologues are
+  // separate lines of code and a fix that covered one and missed the other is exactly the shape
+  // this file pins everywhere else.
+  let token: TokOutcome = on_a_2mib_stack(|| {
+    let src = prefix_chain(FAR_PAST_THE_CEILING);
+    Parser::with_context(limited(FAR_PAST_THE_CEILING + 1))
+      .apply(token_probe)
+      .parse_str(&src)
+      .unwrap()
+  });
+  assert!(
+    token.is_ok(),
+    "the token driver's prologue grows too; got {token:?}"
+  );
+}
+
+/// A panic out of a frame that is running **on a segment** still unwinds, and the level it holds
+/// is still released.
+///
+/// The extension of `descent_tests.rs`'s `descending_releases_the_level_when_the_body_unwinds` to
+/// the case that file cannot reach: with `stacker` on, the frame body runs on a different stack
+/// than the `Descent` guard that owns its level, because `maybe_grow` sits *inside* the guard's
+/// scope. stacker catches the unwind on the segment and resumes it on the calling stack, so the
+/// guard's destructor runs on the stack it was created on — but that is stacker's contract, not
+/// tokora's, and a version bump could change it silently.
+///
+/// The depth is past the thread's ceiling on purpose: a shallow chain never leaves the original
+/// stack, so a shallow version of this cell would pass without ever testing the crossing.
+///
+/// # What witnesses that the panic really started on a segment
+///
+/// Two readings, and the cell asserts both. The folds run on the way back *up*, so the one that
+/// panics — the first at `FAR_PAST_THE_CEILING / 2` folded operators — is running in the frame at
+/// native depth 500. That is past the **384** the table records for the typed driver on a 2 MiB
+/// thread, and the parse had already gone to 1000 to get there: a build without segments does not
+/// reach either number, it dies. So arriving at the panic at all is the witness, and it is the
+/// same one `with_stacker_the_same_chain_parses_past_the_thread_it_runs_on` rests on.
+#[cfg(feature = "stacker")]
+#[test]
+fn a_panic_on_a_segment_unwinds_and_releases_every_level() {
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  /// The fold depth the panicking frame observed, recorded outside the `catch_unwind` because an
+  /// assertion inside one is swallowed exactly as happily as the deliberate panic.
+  static DEEPEST: AtomicUsize = AtomicUsize::new(0);
+  /// The depth read after the unwind, from inside the grammar, where the live cell is visible.
+  static AFTER: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+  fn probe<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<(), LimErr>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+  {
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      // A fold that panics once the chain is deep enough to be on a segment. The fold runs
+      // inside the frame body, which is inside `maybe_grow`'s closure — so this panic starts on
+      // a segment and has to cross back.
+      let deep = |_inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+                  operand: String,
+                  op: Precedenced<&'static str, Power>|
+       -> Result<String, LimErr> {
+        let d = operand.matches('-').count();
+        DEEPEST.fetch_max(d, Ordering::Relaxed);
+        assert!(d < FAR_PAST_THE_CEILING / 2, "the fold panics on a segment");
+        Ok(format!("({}{operand})", op.into_data()))
+      };
+      pratt(lhs, rhs, deep, fold_infix, fold_postfix).parse_input(inp)
+    }));
+    assert!(caught.is_err(), "the panic must reach this frame");
+    AFTER.store(inp.recursion().depth(), Ordering::Relaxed);
+    Ok(())
+  }
+
+  let previous = std::panic::take_hook();
+  std::panic::set_hook(std::boxed::Box::new(|_| {}));
+  let out = on_a_2mib_stack(|| {
+    let src = prefix_chain(FAR_PAST_THE_CEILING);
+    Parser::with_context(limited(FAR_PAST_THE_CEILING + 1))
+      .apply(probe)
+      .parse_str(&src)
+  });
+  std::panic::set_hook(previous);
+
+  assert_eq!(out, Ok(()), "the unwind was caught and the parse returned");
+  assert_eq!(
+    DEEPEST.load(Ordering::Relaxed),
+    FAR_PAST_THE_CEILING / 2,
+    "the panic did not fire where this cell needs it to. Folds run on the way back up, so this \
+     reading is also the native depth the panicking frame sat at — and it has to be past the 384 \
+     the measurement table records for the typed driver on a 2 MiB thread, or nothing crossed a \
+     stack boundary and the cell is testing the plain unwind `descent_tests.rs` already covers"
+  );
+  assert_eq!(
+    AFTER.load(Ordering::Relaxed),
+    0,
+    "every level entered on a segment was released by the unwind that crossed back off it"
+  );
+}
+
+/// **The negative property, and the reason it is a probe rather than an assertion.**
+///
+/// With the feature on and the budget set to [`RecursionLimiter::unlimited`], deepen the input and
+/// nothing on the `Result` channel ever stops it. There is no depth at which this returns `Err`:
+/// it returns `Ok`, using memory linear in the depth, until the machine's memory is gone — and
+/// then the process is killed, or stacker's own `mmap` assertion fires. Neither is a value a
+/// caller can match on, neither is [`MaybeTerminal`], and under `panic = "abort"` the second is
+/// not even an unwind.
+///
+/// **That is why `InputRef::descend` stays and why deleting it because this feature exists would
+/// restore the abort both defaults were written to delete.** `stacker` moved the ceiling from
+/// hardware to policy; it did not remove it, and it is not a safety mechanism on its own.
+///
+/// A cell cannot assert this, because the outcome it is about is a dead process — and running it
+/// to that point costs the whole machine, which is not something a test suite may do. So it is
+/// `#[ignore]`d and takes its depth from the environment, exactly as `fuzz_deep_run` does, and the
+/// run is recorded in `src/native_stack.rs`:
+///
+/// ```text
+/// TOKORA_PROBE_DEPTH=200000 cargo test -p tokora --all-features --test pratt_limit \
+///   -- --ignored --exact the_unlimited_budget_has_no_ceiling_to_refuse_at --nocapture
+/// ```
+///
+/// Every line it prints is a survival, and the survivals are the point: the interesting outcome is
+/// the run that prints nothing.
+#[test]
+#[ignore = "unbounded by construction — it ends when the machine's memory does; see the docs"]
+fn the_unlimited_budget_has_no_ceiling_to_refuse_at() {
+  let depth: usize = std::env::var("TOKORA_PROBE_DEPTH")
+    .expect("set TOKORA_PROBE_DEPTH to the depth to probe")
+    .parse()
+    .expect("TOKORA_PROBE_DEPTH must be a depth");
+
+  let got: Outcome = on_a_2mib_stack(move || {
+    let src = prefix_chain(depth);
+    Parser::with_context(fatal_ctx().with_recursion_limiter(RecursionLimiter::unlimited()))
+      .apply(typed_probe)
+      .parse_str(&src)
+      .unwrap()
+  });
+  // Reported, never asserted. An assertion here would describe the shallow runs and say nothing
+  // about the one that matters, and a cell that passes at every depth it survives is a cell that
+  // passes by not reaching the property.
+  match got {
+    Ok((tree, _)) => println!(
+      "depth={depth} SURVIVED ok, folded={} — no refusal, and none is coming",
+      tree.matches('-').count()
+    ),
+    Err(e) => println!("depth={depth} SURVIVED err={e:?}"),
+  }
+}
+
+/// A checkpoint whose save and restore **bracket a segment crossing** behaves exactly as one that
+/// never leaves the original stack.
+///
+/// # Why this is the shape, and what it is really guarding
+///
+/// A frame cannot straddle a boundary: `maybe_grow` wraps the **whole** frame body, so a frame runs
+/// entirely on the stack it started on and any save/restore pair inside one frame is same-segment
+/// by construction. The pair that can span a crossing is therefore the outer one — saved above the
+/// recursion, restored after it — which is what this cell writes.
+///
+/// The thing actually at risk is not the `Checkpoint`, which holds offsets, spans and marks and no
+/// pointer into a stack. It is the input-identity **nonce** the transaction and session-point
+/// machinery stamps: `core::ptr::from_ref(&*self.poison_boundary).addr()`, the one address-derived
+/// value on this path. It is safe because it addresses a field of the `Input`, which is built by
+/// the driver before any pratt frame exists and therefore never moves onto a segment — but "an
+/// address that happens not to move" is exactly the claim a segmented stack invites someone to get
+/// wrong, so it is pinned rather than reasoned about. The session point below is stamped on the
+/// original stack and settled after 1000 levels of it have run somewhere else.
+#[cfg(all(feature = "stacker", feature = "unstable-raw"))]
+#[test]
+fn a_checkpoint_bracketing_a_segment_crossing_restores_identically() {
+  fn probe<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  ) -> Result<(usize, usize, usize), LimErr>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = LimErr>,
+  {
+    // Stamped here, on the original stack, before a single segment exists.
+    let point = inp.begin_point();
+    let saved = inp.save();
+    let before = inp.span().end();
+
+    // 1000 levels, most of them on segments the frame above never saw.
+    let parsed = pratt(lhs, rhs, fold_prefix, fold_infix, fold_postfix).parse_input(inp)?;
+    let after_parse = inp.span().end();
+    assert!(
+      after_parse > before,
+      "the deep parse must have consumed something for the restore to have work to do"
+    );
+    assert_eq!(
+      parsed.matches('-').count(),
+      FAR_PAST_THE_CEILING,
+      "the whole chain folded before the restore"
+    );
+
+    // Restored here, back on the original stack — and the settle re-derives the nonce and
+    // compares it with the one stamped above. A moved `Input` panics on this line.
+    inp.restore(saved);
+    let after_restore = inp.span().end();
+    inp.commit_point(point);
+    Ok((before, after_parse, after_restore))
+  }
+
+  let (before, after_parse, after_restore) = on_a_2mib_stack(|| {
+    let src = prefix_chain(FAR_PAST_THE_CEILING);
+    Parser::with_context(limited(FAR_PAST_THE_CEILING + 1))
+      .apply(probe)
+      .parse_str(&src)
+      .unwrap()
+  });
+  assert_eq!(
+    after_restore, before,
+    "the restore put the input back exactly where the save found it, across {} levels that ran \
+     on other stacks (the parse had reached {after_parse})",
+    FAR_PAST_THE_CEILING
   );
 }

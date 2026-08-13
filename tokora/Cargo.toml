@@ -168,6 +168,34 @@ then = []
 # `validate` / `validate_with`.
 validate = []
 
+# A **segmented native stack** for the two Pratt frame prologues: each frame asks how much
+# native stack is left and, when it is inside the red zone, runs on a fresh heap-allocated
+# segment (`stacker::maybe_grow`). Composed with the recursion budget, never substituted for it.
+#
+# ── WHAT THIS DOES NOT DO ───────────────────────────────────────────────────────────────────
+#
+# **It does not make depth unlimited, and `InputRef::descend` stays.** A segment is a heap
+# allocation, stacker's allocator is `mmap` + `assert_ne!` rather than a fallible reserve, and a
+# deep enough input therefore still ends the process with nothing on any `Result` channel. What
+# changes is that **the ceiling stops being a hardware constant and becomes a number someone
+# chose** — `RecursionLimiter::PARSE_DEFAULT_DEPTH`, which this feature raises from 16 to 1024
+# because it is no longer the thread stack deciding. Deleting the limiter because this feature
+# exists restores exactly the abort the limiter was written to delete; `src/native_stack.rs`
+# carries the measurement, including the one taken with this feature ON and the limiter
+# `unlimited`, which still dies.
+#
+# **`std`-only**, and not by preference: stacker reads the running thread's stack bounds through
+# pthread or Win32, so a `no_std` build has nothing for it to query. It must stay off in every
+# no-std leg, and the `thumbv6m-none-eabi` matrix never names it.
+#
+# It also brings a `cc` build script in through `psm`, which is the class of dependency the
+# `[dev-dependencies]` note below refuses `criterion` for. Admissible here and not there for one
+# reason: this is an OPTIONAL NORMAL dependency, so it enters the graph only when a consumer asks
+# for it, whereas a dev-dependency is resolved per PACKAGE and would be built for every `--test`
+# target of this crate — including the Miri cells, which name `logos` and `logos,unstable-raw`
+# and never this.
+stacker = ["dep:stacker", "std"]
+
 # Parser tracing. Turns on `traced(name, parser)` — a wrapper that prints an indented
 # enter / exit-ok / exit-err / rollback event tree to stderr with an input preview — and
 # instruments the crate's own combinators (`try_expect`, `peek`, the `sync` family, the
@@ -274,6 +302,10 @@ derive_more = { version = "2", default-features = false, features = [
 ] }
 generic-arraydeque = { version = "0.2", default-features = false, features = ["unstable"] }
 paste = "1"
+# The `stacker` feature's whole implementation. `default-features = false` is not spelled
+# because stacker declares no features at all — it is unconditionally `std`, which is why the
+# feature above implies `std` rather than merely documenting that it needs one.
+stacker = { version = "0.1", optional = true }
 seq-macro = { version = "0.3", default-features = false }
 thiserror = { version = "2", default-features = false }
 

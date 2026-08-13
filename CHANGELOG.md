@@ -88,6 +88,35 @@ and will red until they do.
   that section stopped one step short of — the diagnostic is not hidden, the return value cannot
   distinguish, and `peek_with_emitter_terminal` or `peek_map` is what can.
 
+- **`stacker` — an optional, `std`-only segmented native stack for the two Pratt frame
+  prologues.** Each pratt frame now asks how much native stack is left and, when it is inside a
+  256 KiB red zone, runs on a fresh 2 MiB heap segment. The check sits on the same line
+  `InputRef::descend` already occupies, **composed with it and never substituted for it**, so a
+  recursion site added later inherits it for free. Off by default, and `std`-only because stacker
+  reads the running thread's stack bounds through pthread or Win32 — so it is off in every no-std
+  leg and the `thumbv6m-none-eabi` matrix never names it.
+
+  **It does not make depth unlimited, and the recursion limiter stays.** What changes is that the
+  ceiling stops being a hardware constant and becomes a number someone chose —
+  `RecursionLimiter::PARSE_DEFAULT_DEPTH`, which the feature moves from 16 to 1024. A segment is a
+  heap allocation, and stacker's allocator is `mmap` plus an assertion rather than a fallible
+  reserve, so a deep enough input still ends the process with nothing on any `Result` channel.
+  Measured, feature on and limiter set to `unlimited()`: a prefix chain returns `Ok` at 1 000 000
+  levels — 258× what a *release* build fits on a 2 MiB thread — using 5 588 MB and climbing
+  linearly at ~5.7 KiB per level, with no refusal at any depth. The sweep was ended by a ceiling
+  imposed from outside the process, because nothing inside it ends. The two real terminations are a
+  kernel kill and stacker's own `mmap failed to allocate stack` panic (exit 101, or exit 134 under
+  `panic = "abort"`), and neither is a value a caller can match on. **So the budget is what makes
+  deep input refusable, and this feature is not a substitute for it.** The derivations, both
+  tables and the run are in `src/native_stack.rs`.
+
+- **`RecursionLimiter::PARSE_DEFAULT_DEPTH` is public.** It was `pub(crate)`, so a caller could set
+  a budget through `InputContext::with_recursion_limiter` but could not name the default in order
+  to reason about it. That became material once the constant stopped being one number: it is **16**,
+  or **1024** with `stacker`, so neither a consumer nor a test can know what it is getting without
+  reading it — every depth in `pratt_limit.rs` and `pratt_recovery.rs` is now derived from it
+  rather than written out.
+
 ### Changed (breaking)
 
 - **`Emitter::checkpoint` takes `&mut self`** (#257). Capturing a mark is a capability, not an
@@ -228,6 +257,33 @@ and will red until they do.
   read. The obligation is stated on the method, and unlike a residual it can be discharged — a
   caller filling a bounded container *from errors* has `collect()`, `From`, `push` and `try_push`,
   and all four now account.
+- **The parser's default recursion budget drops from 64 to 16** (1024 with the new `stacker`
+  feature). **64 was above the depth at which a real grammar aborts**, which made the limiter
+  unreachable for that grammar: the native stack got there first, with `fatal runtime error: stack
+  overflow` and no diagnostic. It had been derived from tokora's own worst measured cell — the
+  debug token driver's 125 frames at ~16.4 KiB on a 2 MiB thread — with ~1.9× of margin, and that
+  is the wrong table. A consumer's grammar does not sit beside tokora's recursion, it sits
+  **inside** it: the productions the driver calls are the consumer's, so one level of nesting pays
+  for a tokora frame *and* a consumer frame. Measured on a real consumer grammar, debug, on the
+  same 2 MiB thread: it aborts at **51** levels — ~41 KiB each, 2.5× tokora's own — with four
+  further axes at 60, 57, 53 and 52.
+
+  16 is the largest power of two leaving more than 3× under that binding cell of 51. The next one
+  up, 32, leaves 1.59×, which is *below* the 1.9× that made 64 look safe and well inside the range
+  another platform's codegen moves. The direction to err in is settled by the asymmetry this
+  constant has always documented: too low returns a clean, catchable `RecursionLimitReached` naming
+  the knob that raises it, while too high aborts the process and takes the caller's program with
+  it. Only one of those can be recovered from.
+
+  **A grammar that legitimately nests deeper must now say so** — `with_recursion_limiter`, or the
+  `stacker` feature. The one place that cannot is `parse_lossless` / `parse_lossless_partial`,
+  which build their own context and expose no limiter. That gap predates this change and is
+  recorded where it bites, at `PARSE_DEPTH_BUDGET` in `tests/pratt_recovery.rs`.
+
+  The derivation is no longer prose. `PARSE_DEFAULT_DEPTH`, the red zone and the segment size are
+  each checked against the measurement they claim to come from by `const` assertions, so a tree
+  whose constants contradict their own table does not compile — putting the default back to 64
+  fails the build, by name.
 
 - **`IncompleteSyntax::as_mut_slice` and its `AsMut<[S::Component]>` impl are removed** (#245).
   The type documents its components as a *set*: insertion deduplicates, nothing removes, and

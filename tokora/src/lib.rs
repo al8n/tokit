@@ -327,6 +327,16 @@ pub mod try_parse_input;
 mod check;
 mod keyword;
 mod located;
+/// The native call stack the Pratt frames sit on: the `stacker` feature's `maybe_grow` seam, the
+/// red-zone and segment derivations, and the measurements both values of
+/// `RecursionLimiter::PARSE_DEFAULT_DEPTH` come from.
+///
+/// Gated on `pratt` because the two Pratt frame prologues are its only callers — `descend` has
+/// other ones, this does not. A `stacker` build without `pratt` therefore resolves the dependency
+/// and compiles nothing that calls it, which is what the `stacker`-alone `--each-feature` leg
+/// builds.
+#[cfg(feature = "pratt")]
+mod native_stack;
 mod parse_choice;
 mod parse_context;
 mod parse_input;

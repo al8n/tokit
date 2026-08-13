@@ -533,13 +533,22 @@ fn a_valid_parse_records_no_recovery_at_all() {
 
 /// tokora's parser-facing recursion budget, which this grammar inherits and cannot override.
 ///
-/// **This example did not choose 64.** `parse_lossless` builds its own `ParseContext`, and the
-/// only door to a caller-chosen budget — `ParserContext::with_recursion_limiter` — is not
+/// **This example did not choose the number.** `parse_lossless` builds its own `ParseContext`,
+/// and the only door to a caller-chosen budget — `ParserContext::with_recursion_limiter` — is not
 /// reachable through it (`Cst::from_sink`, `Sink::finish` and `Input::into_emitter` are all
-/// `pub(crate)`, so the plumbing cannot be hand-rolled either). The number is therefore a
-/// dependency on a library default, spelled out here so that a change to it turns this cell red
-/// instead of silently moving what the example demonstrates.
-const PARSE_DEPTH_BUDGET: usize = 64;
+/// `pub(crate)`, so the plumbing cannot be hand-rolled either). That gap is real, and it is
+/// recorded here because this is where it bites: a lossless consumer whose documents nest deeper
+/// than the default has no knob at all — only the `stacker` feature, which is a coarse one.
+///
+/// **It used to be the literal `64`, and it is now read off the library.** The literal was a
+/// canary — "a change to the default turns this cell red instead of silently moving what the
+/// example demonstrates" — and it fired exactly as intended when the default was re-derived. But
+/// the default is no longer one number: it is 16, or 1024 with `stacker`, so a literal would now
+/// pin whichever half the leg running this suite happens to build and go quietly vacuous in the
+/// other, which is the failure the canary existed to prevent. The canary's job moved to
+/// `src/native_stack/tests.rs`, which reds when the default moves *without* its derivation.
+const PARSE_DEPTH_BUDGET: usize =
+  tokora::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH;
 
 /// The deepest nesting that still parses. One frame short of the budget.
 const DEEPEST_CLEAN: usize = PARSE_DEPTH_BUDGET - 1;
@@ -608,8 +617,9 @@ fn a_recursion_trip_ends_the_parse_without_panicking() {
     assert_eq!(error_node_ranges(&p), []);
   }
 
-  // Well past the boundary, to show the trip is a floor and not a one-off at the edge.
-  let src = group(200);
+  // Well past the boundary, to show the trip is a floor and not a one-off at the edge. Relative
+  // to the budget for the reason the budget is: a literal that sat above 64 sits below 1024.
+  let src = group(PARSE_DEPTH_BUDGET * 3);
   let p = parse(&src);
   assert_round_trips(&src, &p);
   assert_eq!(p.terminated, Some(Diag::DepthExceeded));

@@ -192,170 +192,176 @@ where
     let mut frame = self.descend()?;
     let this = &mut *frame;
 
-    // A terminal scanner stop at the LHS position is not "no expression here" — surface it
-    // instead of declining, so a tripped limit cannot masquerade as an empty expression.
-    let Some((lhs, tok)) = this.try_expect_map_or_stop(|tok| tok.try_pratt_lhs())? else {
-      return Ok(None);
-    };
-
-    let mut lhs = match lhs {
-      PrattLHS::Operand(_) => tok,
-      PrattLHS::Prefix(precedenced) => {
-        let power = precedenced.into_precedence();
-        let floor = PrattFloor::Inclusive(power);
-        let Some(operand) = this.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
-          // Recovery posture: a prefix operator whose operand never arrived is returned as the
-          // expression's own token, after the diagnostic. Under a recording emitter the parse
-          // therefore continues with the bare operator standing in for the expression it could
-          // not build. Callers wanting the stricter posture — no value where no operand was
-          // parsed — use the typed driver, which has a node to withhold.
-          this
-            .session
-            .emitter
-            .emit_unexpected_end_of_lhs(UnexpectedEoLhs::eolhs_of(this.offset().clone()))?;
-          return Ok(Some(tok));
-        };
-
-        fold_prefix.fold_prefix(tok, operand, this.emitter_view())?
-      }
-    };
-
-    // Step 2: parse rhs -- either an infix/postfix operator or the end of this pratt expression.
-    //
-    // Unconditional: `try_expect_map_or_stop` is already the complete end channel here —
-    // `Ok(None)` is genuine exhaustion or a token this expression declines, and a terminal
-    // scanner stop is an `Err`. A pre-gate on the scanner's frontier asked a different
-    // question and truncated the expression whenever a legal peek had moved that frontier
-    // past the last operator this consumer still had to fold.
-    //
-    // No progress guard, and this is why — the typed driver's hazard has no seam here:
-    //
-    // * **A report cannot be accepted without consuming.** The report is
-    //   [`PrattToken::try_pratt_rhs`], a pure function of one token, and acceptance *is* the
-    //   commit: `try_expect_map_or_stop` commits the token exactly when the closure below
-    //   answers `Some`, and parks it — `Ok(None)`, which leaves the loop — when it answers
-    //   `None`. There is no position at which grammar code can admit an operator and leave
-    //   the input where it was.
-    //
-    //   That is also why this engine has no ordering question to answer between a stalled report
-    //   and the non-associative repeat, which the typed driver does have and had wrong: there is
-    //   no stall guard here because there is no report the guard could catch. A closure that
-    //   answers `Some` has committed its token, so the two conditions the typed driver must rank
-    //   — "this report consumed nothing" and "this operator repeats the chain" — cannot both hold
-    //   at once, and the first of them cannot hold at all. Restoring a stall guard here would be
-    //   dead code; the invariant that makes it dead is the three bullets around this one.
-    // * **No fold can move the input.** The token folds take `Spanned` tokens and the
-    //   emitter's operations; none of the three is handed an [`InputRef`], so no fold can advance the
-    //   cursor into a stalled report's place, nor rewind behind a committed one.
-    // * **Every descent is preceded by a commit.** The recursive call happens only in the
-    //   `TokRhs::Infix` arm, after that operator token is committed, and the lexer contract
-    //   makes every token nonzero-width — so depth is bounded by the token count. Bounded by
-    //   the token count is not bounded by anything a *machine* has; the frame prologue's
-    //   `descend` is what bounds it by the configured budget.
-    let mut prev_op_is_neither: Option<Power> = None;
-    loop {
-      // The non-associative repeat, flagged out of the classifying closure rather than answered
-      // inside it. Both the floor decline and the repeat must PARK the token — a decline commits
-      // nothing, and the trip is owed the same handback the `End` arm gets — so both answer
-      // `None`; the flag is what tells the two apart on the far side. Re-declared per cycle, and
-      // written at most once per `try_expect_map_or_stop` call: the closure runs against one
-      // token.
-      //
-      // A bare flag, and no offset rides in it. The offset is read on the far side, off the input
-      // itself, for the reason spelled out at the raise below.
-      let mut nonassoc_trip = false;
-      // A terminal scanner stop mid-loop is not "the expression is complete" — surface it
-      // rather than breaking, so a tripped limit cannot end the expression early.
-      let step = this.try_expect_map_or_stop(|tok| {
-        tok.try_pratt_rhs().and_then(|rhs| match rhs {
-          // A classifier may spell the decline as `End`; here it means exactly what `None`
-          // means — the token is not this expression's, and it stays in the stream.
-          PrattRHS::End => None,
-          PrattRHS::Postfix(precedenced) => {
-            let power = precedenced.into_precedence();
-            min_precedence.admits(&power).then_some(TokRhs::Postfix)
-          }
-          PrattRHS::Infix(precedenced) => {
-            let (infix, lpower) = precedenced.into_components();
-            // Below the floor: the operator belongs to an enclosing expression. Park it and end
-            // this one — an ordinary handback, and not an error.
-            if !min_precedence.admits(&lpower) {
-              return None;
-            }
-            // The same power as the `Neither` operator this frame just folded: a
-            // declared-non-associative chain. Park the token and flag it, so the loop below
-            // raises the diagnostic instead of quietly stopping.
-            if prev_op_is_neither.as_ref() == Some(&lpower) {
-              nonassoc_trip = true;
-              return None;
-            }
-            Some(TokRhs::Infix(infix, lpower))
-          }
-        })
-      })?;
-
-      // The `?` above fires FIRST, so a terminal scanner stop still outranks the repeat: the
-      // ranking law is unchanged. Only once the scanner has answered does the flag decide which
-      // of the two "no step" endings this is.
-      //
-      // THE OFFSET IS READ HERE, AFTER THE HANDBACK, and off the input rather than off the token.
-      // `NonAssociativeChain`'s offset is *defined* as the position the input was handed back at,
-      // and `self.span().end()` is that position by identity: `try_expect_map_or_stop` calls
-      // `commit_token` only when the closure accepts, so a declined token is parked and the
-      // committed span is still the one this cycle started from. That is the same quantity the
-      // typed driver's probe rollback restores, and the same one `try_expect_map_or_stop` builds
-      // its own terminal `UnexpectedEot` from when it stops for a scanner reason instead.
-      //
-      // Reading the PARKED TOKEN's start instead would be the operator's own head, and it is a
-      // different number whenever the lexer skipped anything to reach it — `1 ; 2 ; 3` parks the
-      // second `;` at 6 with the committed frontier at 5. That is the same over-reach the typed
-      // driver kept re-deriving from a position adjacent to its restore target, and reproducing it
-      // here would also split the two engines' answers on the one input shape they can both parse.
-      // The park is unchanged; only what is reported about it is.
-      let Some((rhs, tok)) = step else {
-        if nonassoc_trip {
-          return Err(NonAssociativeChain::of(this.span().end()).into());
-        }
-        break;
+    // …AND ONE FRAME, ONE STACK CHECK, on the same line and for the same frame. Composed with
+    // the level above, never substituted for it: `descend` is what REFUSES a too-deep input,
+    // and this is only what decides which stack the frame it just admitted runs on. With the
+    // `stacker` feature off it is the identity and this closure is the frame body verbatim.
+    crate::native_stack::maybe_grow(move || {
+      // A terminal scanner stop at the LHS position is not "no expression here" — surface it
+      // instead of declining, so a tripped limit cannot masquerade as an empty expression.
+      let Some((lhs, tok)) = this.try_expect_map_or_stop(|tok| tok.try_pratt_lhs())? else {
+        return Ok(None);
       };
 
-      match rhs {
-        TokRhs::Postfix => lhs = fold_postfix.fold_postfix(lhs, tok, this.emitter_view())?,
-        TokRhs::Infix(infix, lpower) => {
-          let is_neither = matches!(infix, PrattInfix::Neither(_));
-          let floor = if matches!(infix, PrattInfix::Right(_)) {
-            // Right-associative: the right operand admits this operator's own power.
-            PrattFloor::Inclusive(lpower.clone())
-          } else {
-            // Left- and non-associative: the right operand stops strictly above it.
-            PrattFloor::Exclusive(lpower.clone())
-          };
-          let Some(rhs) = this.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
-            // Same recovery posture as the prefix exit above: an infix operator whose right
-            // operand never arrived yields the LHS alone, after the diagnostic — the operator
-            // and its missing side are dropped from the returned expression rather than the
-            // whole parse failing. The typed driver is the stricter alternative.
+      let mut lhs = match lhs {
+        PrattLHS::Operand(_) => tok,
+        PrattLHS::Prefix(precedenced) => {
+          let power = precedenced.into_precedence();
+          let floor = PrattFloor::Inclusive(power);
+          let Some(operand) = this.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
+            // Recovery posture: a prefix operator whose operand never arrived is returned as the
+            // expression's own token, after the diagnostic. Under a recording emitter the parse
+            // therefore continues with the bare operator standing in for the expression it could
+            // not build. Callers wanting the stricter posture — no value where no operand was
+            // parsed — use the typed driver, which has a node to withhold.
             this
               .session
               .emitter
-              .emit_unexpected_end_of_rhs(UnexpectedEoRhs::eorhs_of(this.offset().clone()))?;
-            return Ok(Some(lhs));
+              .emit_unexpected_end_of_lhs(UnexpectedEoLhs::eolhs_of(this.offset().clone()))?;
+            return Ok(Some(tok));
           };
-          let infix = {
-            let (span, tok) = tok.into_components();
-            let infix = match infix {
-              PrattInfix::Left(_) => PrattInfix::Left(tok),
-              PrattInfix::Right(_) => PrattInfix::Right(tok),
-              PrattInfix::Neither(_) => PrattInfix::Neither(tok),
+
+          fold_prefix.fold_prefix(tok, operand, this.emitter_view())?
+        }
+      };
+
+      // Step 2: parse rhs -- either an infix/postfix operator or the end of this pratt expression.
+      //
+      // Unconditional: `try_expect_map_or_stop` is already the complete end channel here —
+      // `Ok(None)` is genuine exhaustion or a token this expression declines, and a terminal
+      // scanner stop is an `Err`. A pre-gate on the scanner's frontier asked a different
+      // question and truncated the expression whenever a legal peek had moved that frontier
+      // past the last operator this consumer still had to fold.
+      //
+      // No progress guard, and this is why — the typed driver's hazard has no seam here:
+      //
+      // * **A report cannot be accepted without consuming.** The report is
+      //   [`PrattToken::try_pratt_rhs`], a pure function of one token, and acceptance *is* the
+      //   commit: `try_expect_map_or_stop` commits the token exactly when the closure below
+      //   answers `Some`, and parks it — `Ok(None)`, which leaves the loop — when it answers
+      //   `None`. There is no position at which grammar code can admit an operator and leave
+      //   the input where it was.
+      //
+      //   That is also why this engine has no ordering question to answer between a stalled report
+      //   and the non-associative repeat, which the typed driver does have and had wrong: there is
+      //   no stall guard here because there is no report the guard could catch. A closure that
+      //   answers `Some` has committed its token, so the two conditions the typed driver must rank
+      //   — "this report consumed nothing" and "this operator repeats the chain" — cannot both hold
+      //   at once, and the first of them cannot hold at all. Restoring a stall guard here would be
+      //   dead code; the invariant that makes it dead is the three bullets around this one.
+      // * **No fold can move the input.** The token folds take `Spanned` tokens and the
+      //   emitter's operations; none of the three is handed an [`InputRef`], so no fold can advance the
+      //   cursor into a stalled report's place, nor rewind behind a committed one.
+      // * **Every descent is preceded by a commit.** The recursive call happens only in the
+      //   `TokRhs::Infix` arm, after that operator token is committed, and the lexer contract
+      //   makes every token nonzero-width — so depth is bounded by the token count. Bounded by
+      //   the token count is not bounded by anything a *machine* has; the frame prologue's
+      //   `descend` is what bounds it by the configured budget.
+      let mut prev_op_is_neither: Option<Power> = None;
+      loop {
+        // The non-associative repeat, flagged out of the classifying closure rather than answered
+        // inside it. Both the floor decline and the repeat must PARK the token — a decline commits
+        // nothing, and the trip is owed the same handback the `End` arm gets — so both answer
+        // `None`; the flag is what tells the two apart on the far side. Re-declared per cycle, and
+        // written at most once per `try_expect_map_or_stop` call: the closure runs against one
+        // token.
+        //
+        // A bare flag, and no offset rides in it. The offset is read on the far side, off the input
+        // itself, for the reason spelled out at the raise below.
+        let mut nonassoc_trip = false;
+        // A terminal scanner stop mid-loop is not "the expression is complete" — surface it
+        // rather than breaking, so a tripped limit cannot end the expression early.
+        let step = this.try_expect_map_or_stop(|tok| {
+          tok.try_pratt_rhs().and_then(|rhs| match rhs {
+            // A classifier may spell the decline as `End`; here it means exactly what `None`
+            // means — the token is not this expression's, and it stays in the stream.
+            PrattRHS::End => None,
+            PrattRHS::Postfix(precedenced) => {
+              let power = precedenced.into_precedence();
+              min_precedence.admits(&power).then_some(TokRhs::Postfix)
+            }
+            PrattRHS::Infix(precedenced) => {
+              let (infix, lpower) = precedenced.into_components();
+              // Below the floor: the operator belongs to an enclosing expression. Park it and end
+              // this one — an ordinary handback, and not an error.
+              if !min_precedence.admits(&lpower) {
+                return None;
+              }
+              // The same power as the `Neither` operator this frame just folded: a
+              // declared-non-associative chain. Park the token and flag it, so the loop below
+              // raises the diagnostic instead of quietly stopping.
+              if prev_op_is_neither.as_ref() == Some(&lpower) {
+                nonassoc_trip = true;
+                return None;
+              }
+              Some(TokRhs::Infix(infix, lpower))
+            }
+          })
+        })?;
+
+        // The `?` above fires FIRST, so a terminal scanner stop still outranks the repeat: the
+        // ranking law is unchanged. Only once the scanner has answered does the flag decide which
+        // of the two "no step" endings this is.
+        //
+        // THE OFFSET IS READ HERE, AFTER THE HANDBACK, and off the input rather than off the token.
+        // `NonAssociativeChain`'s offset is *defined* as the position the input was handed back at,
+        // and `self.span().end()` is that position by identity: `try_expect_map_or_stop` calls
+        // `commit_token` only when the closure accepts, so a declined token is parked and the
+        // committed span is still the one this cycle started from. That is the same quantity the
+        // typed driver's probe rollback restores, and the same one `try_expect_map_or_stop` builds
+        // its own terminal `UnexpectedEot` from when it stops for a scanner reason instead.
+        //
+        // Reading the PARKED TOKEN's start instead would be the operator's own head, and it is a
+        // different number whenever the lexer skipped anything to reach it — `1 ; 2 ; 3` parks the
+        // second `;` at 6 with the committed frontier at 5. That is the same over-reach the typed
+        // driver kept re-deriving from a position adjacent to its restore target, and reproducing it
+        // here would also split the two engines' answers on the one input shape they can both parse.
+        // The park is unchanged; only what is reported about it is.
+        let Some((rhs, tok)) = step else {
+          if nonassoc_trip {
+            return Err(NonAssociativeChain::of(this.span().end()).into());
+          }
+          break;
+        };
+
+        match rhs {
+          TokRhs::Postfix => lhs = fold_postfix.fold_postfix(lhs, tok, this.emitter_view())?,
+          TokRhs::Infix(infix, lpower) => {
+            let is_neither = matches!(infix, PrattInfix::Neither(_));
+            let floor = if matches!(infix, PrattInfix::Right(_)) {
+              // Right-associative: the right operand admits this operator's own power.
+              PrattFloor::Inclusive(lpower.clone())
+            } else {
+              // Left- and non-associative: the right operand stops strictly above it.
+              PrattFloor::Exclusive(lpower.clone())
             };
-            Spanned::new(span, infix)
-          };
-          lhs = fold_infix.fold_infix(lhs, rhs, infix, this.emitter_view())?;
-          prev_op_is_neither = if is_neither { Some(lpower) } else { None };
+            let Some(rhs) = this.pratt_in(floor, fold_prefix, fold_infix, fold_postfix)? else {
+              // Same recovery posture as the prefix exit above: an infix operator whose right
+              // operand never arrived yields the LHS alone, after the diagnostic — the operator
+              // and its missing side are dropped from the returned expression rather than the
+              // whole parse failing. The typed driver is the stricter alternative.
+              this
+                .session
+                .emitter
+                .emit_unexpected_end_of_rhs(UnexpectedEoRhs::eorhs_of(this.offset().clone()))?;
+              return Ok(Some(lhs));
+            };
+            let infix = {
+              let (span, tok) = tok.into_components();
+              let infix = match infix {
+                PrattInfix::Left(_) => PrattInfix::Left(tok),
+                PrattInfix::Right(_) => PrattInfix::Right(tok),
+                PrattInfix::Neither(_) => PrattInfix::Neither(tok),
+              };
+              Spanned::new(span, infix)
+            };
+            lhs = fold_infix.fold_infix(lhs, rhs, infix, this.emitter_view())?;
+            prev_op_is_neither = if is_neither { Some(lpower) } else { None };
+          }
         }
       }
-    }
 
-    Ok(Some(lhs))
+      Ok(Some(lhs))
+    })
   }
 }

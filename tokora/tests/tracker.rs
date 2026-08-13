@@ -100,7 +100,8 @@ fn recursion_limiter_new_defaults() {
 fn recursion_limiter_new_is_not_governed_by_the_parser_default() {
   // `RecursionLimiter::new` carries the type's own general-purpose depth. Only `ParserContext`'s
   // and the input layer's *internal* construction requests the stack-safety-derived one
-  // (`RecursionLimiter::PARSE_DEFAULT_DEPTH`, not public) — bare `RecursionLimiter::new` never
+  // (`RecursionLimiter::PARSE_DEFAULT_DEPTH`, now public and feature-dependent) — bare
+  // `RecursionLimiter::new` never
   // does, because it is also reachable as a lexer-side `State`/`Extras` nesting tracker with no
   // pratt parser anywhere near it.
   //

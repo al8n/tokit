@@ -80,39 +80,44 @@ impl RecursionLimitExceeded {
 /// stack at all, so no stack-safety math applies to it.
 ///
 /// **tokora's own Pratt-parser wiring does not use that default.**
-/// [`ParserContext`](crate::ParserContext) and the input layer each request **64** explicitly
-/// instead of inheriting [`new`](Self::new)'s, because on that path a level IS a live
-/// native-stack frame, and 500 of those is not safe everywhere a parse runs. The combined
+/// [`ParserContext`](crate::ParserContext) and the input layer each request
+/// [`PARSE_DEFAULT_DEPTH`](Self::PARSE_DEFAULT_DEPTH) explicitly instead of inheriting
+/// [`new`](Self::new)'s, because on that path a level IS a live native-stack frame, and 500 of
+/// those is not safe everywhere a parse runs. The combined
 /// [`Limiter`](crate::state::tracker::Limiter) is not part of that wiring — tokora's own parser
 /// never builds its recursion budget through it — so its constructors inherit this same
-/// general-purpose 500 rather than requesting 64 of their own. 64 is sized against the
-/// **tightest measured configuration**, not the most generous one:
+/// general-purpose 500 rather than requesting the parser's own.
+///
+/// That constant is **16**, or **1024** with the `stacker` feature, and the whole derivation of
+/// both — including why it was 64 and why 64 was wrong — is on
+/// [`PARSE_DEFAULT_DEPTH`](Self::PARSE_DEFAULT_DEPTH) rather than repeated here. What belongs here
+/// is the measurement table it is *not* derived from, because that table is this type's own and
+/// keeps being mistaken for the answer:
 ///
 /// Measured on this tree, one pratt frame per level of nesting, bisected to the last depth that
 /// completes on an explicitly sized **2 MiB** thread — the stack Rust gives every
 /// `std::thread::spawn` and every libtest harness thread, and so the smallest stack a parse is
-/// likely to get — before the native stack aborts the process. All four cells were measured, and
-/// all four are what 64 has to clear:
+/// likely to get — before the native stack aborts the process:
 ///
 /// | build | typed driver | token driver |
 /// |---|---|---|
 /// | release (`opt-level = 3`), 2 MiB thread | **3871** frames, ~0.53 KiB each | **4247** frames, ~0.48 KiB each |
 /// | debug (`opt-level = 0`), 2 MiB thread | **384** frames, ~5.3 KiB each | **125** frames, ~16.4 KiB each |
 ///
-/// The binding cell is the **debug token driver at 125**, not the release figures above it. Sizing
-/// the parser's default against the release ceiling was the mistake this number corrects: an
-/// unconfigured parse in a debug build — which is what every test suite runs — reached the native
-/// stack before the limiter, and the two failure modes are not symmetric. A limit that is too
-/// *low* returns a clean, catchable, documented
+/// The binding cell of *this* table is the **debug token driver at 125**, not the release figures
+/// above it, and sizing the parser's default against the release ceiling was one mistake it
+/// corrected: an unconfigured parse in a debug build — which is what every test suite runs —
+/// reached the native stack before the limiter. **Sizing it against this table at all was the
+/// second mistake**, because these are tokora's frames and a consumer's grammar runs *inside*
+/// them; that is what `PARSE_DEFAULT_DEPTH` records, and it is why the shipped figure is derived
+/// from a consumer measurement of **51** rather than from the 125 here.
+///
+/// The two failure modes are not symmetric, and that is what settles the direction to err in. A
+/// limit that is too *low* returns a clean, catchable, documented
 /// [`RecursionLimitReached`](crate::error::RecursionLimitReached) telling the caller to raise it.
 /// A limit that is too *high* aborts the process with no diagnostic at all and takes the whole
 /// suite with it. Only one of those can be recovered from, so the parser's own default is set
 /// where **every** measured configuration survives.
-///
-/// 64 is the largest power of two leaving roughly **1.9×** margin under 125, and it clears the
-/// debug typed driver by 6×, the release typed driver by 60× and the release token driver by 66×.
-/// It also sits far above any realistic nesting depth in a GraphQL document or an arithmetic
-/// expression, so raising it is a deliberate act rather than a routine one.
 ///
 /// This type's own 500 was never sized against anything, and that is not an oversight: nothing
 /// about tallying lexer nesting, or an arbitrary caller's own notion of "depth", implies a
@@ -141,8 +146,8 @@ impl RecursionLimitExceeded {
 /// configured through
 /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
 /// (or [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter))
-/// and defaulting to depth **64** — the native-stack-safe figure derived in `Two Defaults, Two
-/// Subjects` above, requested explicitly by that wiring, and NOT [`new`](Self::new)'s own 500.
+/// and defaulting to [`PARSE_DEFAULT_DEPTH`](Self::PARSE_DEFAULT_DEPTH) — requested explicitly by
+/// that wiring, and NOT [`new`](Self::new)'s own 500.
 /// Both Pratt engines enter one level per live frame through
 /// [`InputRef::descend`](crate::InputRef::descend), whose [`Descent`](crate::input::Descent)
 /// guard releases the level on every exit including an unwind; exceeding the limit fails the
@@ -160,9 +165,9 @@ impl RecursionLimitExceeded {
 /// different cell with a different subject: the lexer's tally is monotone in the input and its
 /// trip latches the poison boundary, while the parse's descent unwinds — and it is exactly why a
 /// tracker built through [`new`](Self::new) (or `#[derive(Default)]`, as the example below does)
-/// gets 500 rather than 64: lexing spends no native-stack frame per nesting level, so the
-/// stack-safety derivation above has nothing to say about it, and this type does not presume a
-/// caller reaching for it directly is on the parser's path.
+/// gets 500 rather than [`PARSE_DEFAULT_DEPTH`](Self::PARSE_DEFAULT_DEPTH): lexing spends no
+/// native-stack frame per nesting level, so the stack-safety derivation has nothing to say about
+/// it, and this type does not presume a caller reaching for it directly is on the parser's path.
 ///
 /// # Examples
 ///
@@ -277,17 +282,198 @@ impl Default for RecursionLimiter {
   }
 }
 
-impl RecursionLimiter {
-  /// tokora's own recursion budget for a Pratt-driven parse — native-stack-safety-derived, and
-  /// requested explicitly by `ParserContext` and the input layer instead of inherited from
-  /// [`new`](Self::new). See the type's `Two Defaults, Two Subjects` docs for the measurement
-  /// behind this number and why it does not belong to [`new`](Self::new) itself — nor to the
-  /// combined [`Limiter`](crate::state::tracker::Limiter), which tokora's own parser never
-  /// builds its budget through.
+/// **The measured figures every stack-safety number in this crate is derived from**, named once so
+/// that a constant and its derivation cannot drift apart.
+///
+/// They live here rather than in `native_stack`, which is the module that reads most of them,
+/// because that module is gated on the `pratt` feature and
+/// [`RecursionLimiter::PARSE_DEFAULT_DEPTH`] is not: a build without `pratt` still has to be one
+/// whose default is justified. The full tables, the platform, and the bisection method are on
+/// `native_stack`'s module docs and on the constant below.
+pub(crate) mod measured {
+  /// The binding cell: a real **consumer** grammar's debug build aborts at this depth on an
+  /// explicitly sized 2 MiB thread, on the tightest of its five measured axes (the others are 52,
+  /// 53, 57 and 60).
+  pub(crate) const CONSUMER_ABORTS_AT: usize = 51;
+
+  /// The tightest cell of **tokora's own** table — the debug token driver on the same thread.
   ///
-  /// Not public: the figures behind it are this crate's own pratt frame sizes on one platform
-  /// and one toolchain, not a number another caller's recursion should be measured against.
-  pub(crate) const PARSE_DEFAULT_DEPTH: usize = 64;
+  /// Kept beside the consumer figure precisely because it is the one the old default was sized
+  /// against. Every guard below that names `CONSUMER_ABORTS_AT` is a place where using this
+  /// number instead is the defect.
+  pub(crate) const TOKORA_ABORTS_AT: usize = 125;
+
+  /// The thread every figure is stated on, and the one `std::thread::spawn` hands out.
+  pub(crate) const STACK: usize = 2 * 1024 * 1024;
+
+  /// Bytes of native stack one level of the heaviest measured grammar spends — **derived** from
+  /// the bisection rather than written down separately, so the two cannot disagree.
+  pub(crate) const CONSUMER_BYTES_PER_LEVEL: usize = STACK / CONSUMER_ABORTS_AT;
+
+  /// The margin the old default was rejected for not having, in tenths.
+  ///
+  /// `100` under `125` is 1.25× and was called too thin to survive another platform's codegen;
+  /// `64` under `125` is 1.9× and was accepted. Any default this crate ships must clear its
+  /// binding cell by at least the accepted figure, and stating it as a constant is what makes the
+  /// next person to move a default move this line too.
+  ///
+  /// **A margin against a stack, so it exists only when a stack is what bounds the default.** With
+  /// the `stacker` feature on there is no native ceiling for the default to keep clear of, and a
+  /// figure kept alive there would be a number with nothing to compare against — which is how a
+  /// constant starts meaning two things.
+  #[cfg(not(feature = "stacker"))]
+  pub(crate) const MIN_MARGIN_TENTHS: usize = 19;
+}
+
+/// The derivation of [`RecursionLimiter::PARSE_DEFAULT_DEPTH`], enforced by the compiler.
+///
+/// These were `#[test]`s for one revision and clippy was right to refuse them: every operand is a
+/// constant, so the question is settled at compile time and a *test* is the weaker place to settle
+/// it. As `const` assertions a tree whose default contradicts its own measurement does not build,
+/// which is a stronger guarantee than one whose test suite reddens — and it holds in every leg,
+/// including the ones that never run a test.
+///
+/// The cost is the message: `panic!` in a const context takes a string literal and no arguments, so
+/// these cannot print the numbers they compared. They name what to go and read instead.
+const _: () = {
+  use measured::{CONSUMER_ABORTS_AT, CONSUMER_BYTES_PER_LEVEL, TOKORA_ABORTS_AT};
+
+  let default = RecursionLimiter::PARSE_DEFAULT_DEPTH;
+
+  #[cfg(not(feature = "stacker"))]
+  {
+    use measured::MIN_MARGIN_TENTHS;
+
+    // THE WHOLE DEFECT, AS ONE INEQUALITY. `PARSE_DEFAULT_DEPTH` was 64 and `CONSUMER_ABORTS_AT`
+    // is 51, so this assertion fails on the tree that shipped it: the native stack got there
+    // before the limiter could, and the refusal the budget exists to produce was unreachable.
+    assert!(
+      default * MIN_MARGIN_TENTHS <= CONSUMER_ABORTS_AT * 10,
+      "PARSE_DEFAULT_DEPTH does not clear CONSUMER_ABORTS_AT — the depth at which a measured \
+       consumer grammar aborts on a 2 MiB thread — by MIN_MARGIN_TENTHS, the margin this crate \
+       already requires of such a number. See PARSE_DEFAULT_DEPTH's derivation."
+    );
+    // A guard against the derivation being 'repaired' by re-reading the wrong row: sizing against
+    // tokora's own 125 admits 64, which is exactly the number that was wrong.
+    assert!(
+      TOKORA_ABORTS_AT > CONSUMER_ABORTS_AT,
+      "the two measured rows have stopped disagreeing, which means one was edited to match the \
+       other rather than re-measured"
+    );
+    assert!(
+      default <= CONSUMER_ABORTS_AT * 10 / MIN_MARGIN_TENTHS,
+      "PARSE_DEFAULT_DEPTH is inside what tokora's own row admits but outside what the consumer \
+       row does; that is the original defect, not a smaller version of it"
+    );
+    // And the other direction, read as bytes: a default that clears the abort point by being
+    // absurdly small is not an improvement either.
+    assert!(
+      default * CONSUMER_BYTES_PER_LEVEL < measured::STACK,
+      "an unconfigured parse can reach more native stack than the 2 MiB the derivation is \
+       stated on"
+    );
+  }
+
+  #[cfg(feature = "stacker")]
+  {
+    // With the feature on the ceiling is a policy choice about memory, so the guards are about
+    // memory. The default must buy a depth the thread stack could not have — otherwise the
+    // feature is paying for a ceiling it did not raise — while still costing an amount an
+    // unconfigured parse may reasonably reach.
+    assert!(
+      default > CONSUMER_ABORTS_AT * 4,
+      "the `stacker` PARSE_DEFAULT_DEPTH is not meaningfully past what a 2 MiB thread already \
+       gave that grammar, so the feature raised no ceiling"
+    );
+    assert!(
+      default * CONSUMER_BYTES_PER_LEVEL <= 64 * 1024 * 1024,
+      "an unconfigured parse can reach more stack-segment memory before the budget refuses it \
+       than PARSE_DEFAULT_DEPTH's derivation claims"
+    );
+    // Past BOTH measured rows, not just the consumer one. The consumer row is what the
+    // stack-bounded default is derived from, but the claim this feature makes is that neither
+    // row bounds it any more, and tokora's own is the larger of the two.
+    assert!(
+      default > TOKORA_ABORTS_AT * 4,
+      "the `stacker` PARSE_DEFAULT_DEPTH does not clear tokora's own measured ceiling by enough \
+       to be a policy figure rather than a stack one"
+    );
+  }
+};
+
+impl RecursionLimiter {
+  /// tokora's own recursion budget for a Pratt-driven parse — requested explicitly by
+  /// [`ParserContext`](crate::ParserContext) and the input layer instead of inherited from
+  /// [`new`](Self::new), and **not one number**:
+  ///
+  /// | build | value | what bounds it |
+  /// |---|---|---|
+  /// | default | **16** | the native stack of a 2 MiB thread, for a *consumer's* frames |
+  /// | `stacker` feature on | **1024** | a policy choice about heap, because the stack no longer decides |
+  ///
+  /// A single constant that silently meant two things is how the defect below happened, so the
+  /// two are stated apart and this one says which is active. Read it rather than assuming:
+  /// enabling a feature changes it.
+  ///
+  /// # Why the default is 16, and why it used to be 64
+  ///
+  /// **64 was wrong, and it was wrong in the direction that aborts.** It was derived from the
+  /// table in `Two Defaults, Two Subjects` — tokora's own worst cell, the debug token driver's
+  /// **125** frames at ~16.4 KiB on a 2 MiB thread — with roughly 1.9× of margin. But that table
+  /// measures *this crate's* frames, and a consumer's grammar does not sit beside tokora's
+  /// recursion, it sits **inside** it: the productions the pratt driver calls are the consumer's,
+  /// so one level of nesting pays for a tokora frame *and* a consumer frame, and the number to
+  /// size against is the sum.
+  ///
+  /// Measured on a real consumer grammar, debug, on the same explicitly sized 2 MiB thread: it
+  /// aborts at **51** levels — ~41 KiB each, 2.5× tokora's own — with four further axes at 60, 57,
+  /// 53 and 52. **So 64 sat above the depth at which a real grammar aborts**, and for that
+  /// consumer the limiter could never fire: the native stack got there first, with
+  /// `fatal runtime error: stack overflow` and no diagnostic. That is precisely the failure the
+  /// 500 → 64 change had been made to fix, surviving one layer further out.
+  ///
+  /// 16 is the largest power of two leaving more than 3× under the binding cell of 51 — the next
+  /// one up, 32, leaves 1.59×, which is *below* the 1.9× that made 64 look safe and well inside
+  /// the range a different platform's codegen moves. It clears tokora's own tightest cell by 7.8×.
+  ///
+  /// **This is a reduction, and a grammar that legitimately nests deeper must now say so** — with
+  /// [`with_limitation`](Self::with_limitation) through
+  /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter),
+  /// or by enabling `stacker`. That asymmetry is deliberate and is the same one the type's docs
+  /// argue: too low returns a clean, catchable
+  /// [`RecursionLimitReached`](crate::error::RecursionLimitReached) naming the knob that raises it;
+  /// too high aborts the process and takes the caller's whole program with it. Only one of the two
+  /// can be recovered from.
+  ///
+  /// # Why the `stacker` default is 1024, and what it is NOT
+  ///
+  /// With the `stacker` feature on, a pratt frame inside the red zone of its stack continues on a
+  /// fresh heap segment, so exceeding the thread stack is no longer fatal and the ceiling stops
+  /// being a hardware constant. It becomes a **policy choice about memory**: at the binding ~41
+  /// KiB per level, 1024 levels is ≈41 MiB of segments — generous for an unconfigured parse,
+  /// bounded, and reached by no realistic document. It is also 20× the depth at which that same
+  /// grammar aborts *without* the feature, which is the whole of what the feature buys.
+  ///
+  /// **It does not make depth unlimited, and this constant is not decoration under it.** A segment
+  /// is a heap allocation; stacker's allocator is `mmap` plus an assertion, not a fallible
+  /// reserve; so a deep enough input still ends the process, with nothing on any `Result` channel
+  /// for a caller to catch and nothing for
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal) to report. Measured, with the feature on and
+  /// the limiter set to [`unlimited`](Self::unlimited): the parse returns `Ok` past every depth a
+  /// thread stack could have held, and the run ends when the machine's memory does.
+  ///
+  /// So **the budget is what makes a too-deep input refusable, and `stacker` is not a substitute
+  /// for it.** A future reader concluding this constant is now redundant, and deleting the
+  /// [`InputRef::descend`](crate::InputRef::descend) that spends it, restores the abort both
+  /// numbers exist to delete.
+  ///
+  /// # One item, two values
+  ///
+  /// Written as a `cfg!` inside the initializer rather than as two `#[cfg]`-gated constants,
+  /// because rustdoc documents only the arm a given build selects: a `#[cfg]` pair would publish
+  /// whichever half `--all-features` happens to enable and leave everything above this line
+  /// invisible in the other configuration. One item is documented in both.
+  pub const PARSE_DEFAULT_DEPTH: usize = if cfg!(feature = "stacker") { 1024 } else { 16 };
 
   /// Creates a new recursion tracker.
   ///
