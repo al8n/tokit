@@ -25,10 +25,12 @@
 //! 1. **[`event`](crate::cst::event)**: The event vocabulary, the era-branded
 //!    [`EventMark`](crate::cst::event::EventMark), and the
 //!    [`Marker`](crate::cst::event::Marker) retro-wrap typestate
-//! 2. **`parse_lossless`** / **`parse_lossless_partial`** (`rowan`): The only doors that mint
-//!    a `Sink`. They take the source once and use that one argument for both the sink and the
-//!    input, so the buffer the tree's text comes from and the buffer the parse reads cannot be
-//!    two different buffers
+//! 2. **`parse_lossless`** / **`parse_lossless_partial`**, and their `_with_context` siblings
+//!    (`rowan`): The only doors that mint a `Sink`. They take the source once and use that one
+//!    argument for both the sink and the input, so the buffer the tree's text comes from and the
+//!    buffer the parse reads cannot be two different buffers. The `_with_context` pair takes the
+//!    parse's `InputContext` — and so its `RecursionLimiter` — from the caller; the sink is still
+//!    minted here from `src`, which is what keeps the one-argument property true of all four
 //! 3. **`Sink`** (`rowan`): The recording emitter — buffers events under the one
 //!    checkpoint/rewind mark, configured by a `CstProfile` (the dialect's kind space: mapper,
 //!    `KindValidator`, error and gap kinds) and reading its text through `CstText`
@@ -93,7 +95,10 @@ pub use profile::{CstProfile, KindValidator};
 
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
-pub use driver::{parse_lossless, parse_lossless_partial};
+pub use driver::{
+  parse_lossless, parse_lossless_partial, parse_lossless_partial_with_context,
+  parse_lossless_with_context,
+};
 
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]

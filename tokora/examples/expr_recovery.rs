@@ -101,28 +101,29 @@
 //! ordinary input; the other is a bug that should never fire. A single variant covering both
 //! would blunt the corpus tripwire that asserts the bug arm is unreachable.
 //!
-//! **On not choosing the number.** The 64 is tokora's default, not this example's preference. A
-//! grammar with deep-but-bounded nesting should name its own budget through
-//! [`ParserContext::with_recursion_limiter`](tokora::ParserContext::with_recursion_limiter) —
-//! but that door is not reachable from [`parse_lossless`](tokora::cst::parse_lossless), which
-//! builds its own context, so a lossless parse inherits the default and cannot currently
-//! override it. This example therefore depends on a number it did not pick, and says so rather
-//! than hiding it; the pins key off the same number and go red if it ever moves.
+//! **On not choosing the number.** [`parse`] takes tokora's default rather than a figure of this
+//! example's own, and the pins key off that same constant so they go red if it moves. That is a
+//! choice now and not a limitation: a lossless parse *can* name its own budget, through
+//! [`parse_lossless_with_context`](tokora::cst::parse_lossless_with_context), and [`parse_with_depth`]
+//! is this file's one-line demonstration of it. `parse` stays defaulted because a recovery example
+//! showing an unconfigured parse is the honest thing for a reader to copy — a deeper budget is a
+//! claim about the stack the parse runs on, and only the caller can make it.
 
 use rowan::{Language, NodeOrToken, SyntaxNode};
 use tokora::{
   Emitter, InputRef, ParseContext, ParseInput, SimpleSpan, Token as TokenT,
   cache::DefaultCache,
-  cst::{CstProfile, KindValidator, parse_lossless},
+  cst::{CstProfile, KindValidator, parse_lossless_with_context},
   emitter::{CstEmitter, DiagnosticKind, Verbose},
   error::{
     MaybeIncomplete, MaybeTerminal, NonAssociativeChain, RecursionLimitReached, UnexpectedEoLhs,
     UnexpectedEoRhs, UnexpectedEot, token::UnexpectedTokenOf,
   },
-  input::Cursor,
+  input::{Cursor, InputContext},
   logos::{self, Logos},
   parser::{PrattFoldOp, PrattInfix, PrattLHS, PrattPower, PrattRHS, Precedenced, pratt},
   span::Spanned,
+  state::recursion_tracker::RecursionLimiter,
 };
 
 // ── Lossless lexer ──────────────────────────────────────────────────────────────
@@ -763,7 +764,44 @@ pub(crate) struct Parsed {
 /// There is no `Result` here, and that is the point: **no input makes this function fail**.
 /// That is a weaker claim than "everything recovers", and the difference is
 /// [`Parsed::terminated`].
+///
+/// The recursion budget is tokora's default. [`parse_with_depth`] is the same parse with a budget
+/// this example chose.
 pub(crate) fn parse(src: &str) -> Parsed {
+  parse_in(src, InputContext::new(Verbose::<Diag>::new(), cache()))
+}
+
+/// [`parse`] with a **recursion budget of this example's own choosing**.
+///
+/// The module header used to say a lossless parse "inherits the default and cannot currently
+/// override it". That is what [`parse_lossless_with_context`] fixed, and this function is the
+/// whole of what using it costs: build an
+/// [`InputContext`](tokora::input::InputContext) — the same emitter and cache [`parse`] passes
+/// positionally — and hand it a [`RecursionLimiter`].
+///
+/// **A deeper budget is not free**, which is why the default is low and this is opt-in: one level
+/// of nesting is a live native stack frame, so a limit above what the running thread can hold
+/// trades a catchable [`Diag::DepthExceeded`] for a process abort. Pick it against the stack the
+/// parse will actually run on; see `RecursionLimiter::PARSE_DEFAULT_DEPTH` for the measurements.
+pub(crate) fn parse_with_depth(src: &str, depth: usize) -> Parsed {
+  parse_in(
+    src,
+    InputContext::new(Verbose::<Diag>::new(), cache())
+      .with_recursion_limiter(RecursionLimiter::with_limitation(depth)),
+  )
+}
+
+/// The lookahead cache both doors pass, named once so the two cannot differ in anything but the
+/// budget.
+fn cache<'inp>() -> DefaultCache<'inp, ExprLexer<'inp>> {
+  DefaultCache::<ExprLexer<'_>>::default()
+}
+
+/// The one body behind [`parse`] and [`parse_with_depth`].
+fn parse_in<'inp>(
+  src: &'inp str,
+  context: InputContext<Verbose<Diag>, DefaultCache<'inp, ExprLexer<'inp>>>,
+) -> Parsed {
   let profile = CstProfile::new(
     map_token,
     KindValidator::new(|kind| kind <= K::Root.raw()),
@@ -771,15 +809,14 @@ pub(crate) fn parse(src: &str) -> Parsed {
     K::Gap.raw(),
   );
 
-  let (cst, parsed) = parse_lossless(
+  let (cst, parsed) = parse_lossless_with_context(
     src,
     // The initial `L::State`. This lexer declares no logos `extras`, so its state is `()`;
     // spelled literally rather than as `Default::default()`, which clippy reads as passing a
     // unit value to a function.
     (),
-    Verbose::<Diag>::new(),
+    context,
     profile,
-    DefaultCache::<ExprLexer<'_>>::default(),
     program,
   );
 
@@ -947,11 +984,16 @@ fn main() {
 
   // ── The boundary: the one thing that does not recover ──
   //
-  // 64 nested groups is the parser-facing recursion budget, and a trip is terminal —
-  // `inplace_recover` re-raises the attempt it stopped rather than spending it, and there is no
-  // position at which to synthesize an error node. So this is the one input class the file
-  // cannot turn into a hole *in the tree*. What it can do, and does, is not panic.
-  for depth in [63usize, 64] {
+  // The parser-facing recursion budget. A trip is terminal — `inplace_recover` re-raises the
+  // attempt it stopped rather than spending it, and there is no position at which to synthesize
+  // an error node. So this is the one input class the file cannot turn into a hole *in the tree*.
+  // What it can do, and does, is not panic.
+  //
+  // The two depths are read off the constant rather than written out: the budget is a library
+  // figure derived from a stack measurement, and a literal here would state a number this file
+  // does not own.
+  let budget = RecursionLimiter::PARSE_DEFAULT_DEPTH;
+  for depth in [budget - 1, budget] {
     let src = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
     let p = parse(&src);
     assert_eq!(
@@ -974,6 +1016,26 @@ fn main() {
       }
     }
   }
+
+  // ── And the knob, because "terminated" above is a *default*, not a ceiling ──
+  //
+  // The same input the default refuses, parsed cleanly against a budget this example chose. That
+  // is the whole of what `parse_lossless_with_context` buys a lossless consumer: before it, the
+  // line above was the end of the story for a grammar whose documents legitimately nest deeper
+  // than tokora's conservative default, because the door built its own context.
+  //
+  // The raised figure is still bounded, and deliberately: `unlimited()` would hand the input back
+  // control of the native stack, which is the abort the budget exists to delete.
+  let src = format!("{}1{}", "(".repeat(budget), ")".repeat(budget));
+  let raised = parse_with_depth(&src, budget * 4);
+  assert_eq!(raised.terminated, None, "the raised budget must carry it");
+  assert_eq!(raised.diagnostics.len(), 0);
+  assert_eq!(raised.tree.text().to_string(), src);
+  println!(
+    "{budget} nested groups at a budget of {} -> {}",
+    budget * 4,
+    raised.ast
+  );
 
   println!("\nAll assertions passed.");
 }

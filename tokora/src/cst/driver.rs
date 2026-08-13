@@ -26,8 +26,9 @@
 //! `Sink`, and there is nowhere else for it to sit.
 
 use crate::{
-  Cache, Complete, Emitter, Lexer, ParseContext, ParseInput, Partial, SurfaceIncomplete,
-  emitter::ValueKeyedEmitter, input::Input,
+  Cache, Complete, Emitter, Lexer, ParseInput, Partial, SurfaceIncomplete,
+  emitter::ValueKeyedEmitter,
+  input::{Input, InputContext},
 };
 
 use super::{CstProfile, handle::Cst, sink::Sink};
@@ -1125,6 +1126,15 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// reach directly and by design. The wrong-*text* class the drivers exist to close has no route
 /// through it: a materialized tree's text is this buffer, covered by this parse's own tokens and
 /// explained by this parse's own lexer's refusals, or `finish` refuses it.
+/// # Configuring the parse
+///
+/// This entry point takes the emitter and the cache and settles everything else at its default —
+/// including the **recursion budget**, at
+/// [`RecursionLimiter::PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH).
+/// A grammar whose documents legitimately nest deeper than that drives
+/// [`parse_lossless_with_context`] instead, which takes the whole
+/// [`InputContext`](crate::input::InputContext) and is otherwise this function exactly. See it for
+/// why the escape hatch is a second door rather than a seventh argument.
 #[inline]
 pub fn parse_lossless<'inp, L, Lang, E, C, O, P>(
   src: &'inp L::Source,
@@ -1132,6 +1142,86 @@ pub fn parse_lossless<'inp, L, Lang, E, C, O, P>(
   inner: E,
   profile: CstProfile<L::Token>,
   cache: C,
+  f: P,
+) -> (
+  Cst<'inp, L, E>,
+  Result<O, <E as Emitter<'inp, L, Lang>>::Error>,
+)
+where
+  L: Lexer<'inp>,
+  Lang: ?Sized,
+  E: Emitter<'inp, L, Lang> + ValueKeyedEmitter,
+  C: Cache<'inp, L, Lang>,
+  P: ParseInput<'inp, L, O, (Sink<'inp, L, E>, C), Lang>,
+{
+  // Delegated rather than duplicated, so the defaulted door and the configured one cannot come to
+  // disagree about anything except the budget: `InputContext::new` is the *same* constructor the
+  // `(emitter, cache)` tuple's `ParseContext::provide` used to reach, carrying the same
+  // `PARSE_DEFAULT_DEPTH`.
+  parse_lossless_with_context(src, state, InputContext::new(inner, cache), profile, f)
+}
+
+/// [`parse_lossless`] with the parse's [`InputContext`] supplied by the caller — the door through
+/// which a lossless parse gets a **recursion budget of its own**.
+///
+/// Identical to [`parse_lossless`] in every other respect: same pinned sink minted from the same
+/// single `src`, same compile-time trivia wall, same `(tree, result)` pair. Read that function for
+/// all of it; what follows is only what this one adds.
+///
+/// # What it is for
+///
+/// [`InputContext`] carries three things — the emitter, the cache, and the
+/// [`RecursionLimiter`](crate::state::recursion_tracker::RecursionLimiter) the parse descends
+/// against — and until this door existed a lossless parse could choose the first two and not the
+/// third. That is a real gap and not a theoretical one: the budget defaults to
+/// [`PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH),
+/// which is deliberately conservative, and a grammar with legitimately deep documents had no way
+/// to say so. `ParserContext::with_recursion_limiter` is not reachable from here —
+/// [`Cst::from_sink`](Cst), `Sink::finish` and `Input::into_emitter` are all crate-private, so the
+/// plumbing cannot be hand-rolled either — so the escape hatch has to be a door.
+///
+/// ```rust,ignore
+/// use tokora::{input::InputContext, state::recursion_tracker::RecursionLimiter};
+///
+/// let (cst, parsed) = parse_lossless_with_context(
+///   src,
+///   Default::default(),
+///   InputContext::new(Verbose::new(), DefaultCache::new())
+///     .with_recursion_limiter(RecursionLimiter::with_limitation(256)),
+///   profile,
+///   run,
+/// );
+/// ```
+///
+/// # Why the emitter arrives *inside* the context and the sink still does not
+///
+/// The context this takes is `InputContext<E, C>` — the **inner** emitter, the one every
+/// diagnostic forwards to — and not `InputContext<Sink<'inp, L, E>, C>`. The sink is minted here,
+/// from `src`, exactly as the defaulted door mints it, and `Sink::new` stays crate-private.
+///
+/// That is deliberate and it is the module's whole invariant: a sink names the buffer its tree's
+/// text is sliced from, an input names the buffer the parse reads, and these drivers exist so that
+/// those are the same argument of the same call. A door taking a caller-built context whose
+/// emitter slot already held a sink would hand that argument back — and the wrongly-paired tree it
+/// permits is one nothing downstream can detect. So the caller supplies the two components that
+/// are theirs to choose and the budget that is theirs to set, and the pairing stays here.
+///
+/// # Why a second door rather than an extra argument
+///
+/// [`parse_lossless`] already takes six arguments and a seventh positional `RecursionLimiter`
+/// would be one more `Default::default()` at every existing call site — a breaking change to
+/// every lossless consumer, in exchange for a knob almost none of them set. This shape is
+/// **additive**: existing calls compile untouched, and [`parse_lossless`] is implemented by
+/// calling this one, so the two cannot drift.
+///
+/// It also *reduces* the argument count rather than raising it, because `inner` and `cache` are
+/// already exactly what [`InputContext::new`](crate::input::InputContext::new) takes.
+#[inline]
+pub fn parse_lossless_with_context<'inp, L, Lang, E, C, O, P>(
+  src: &'inp L::Source,
+  state: L::State,
+  context: InputContext<E, C>,
+  profile: CstProfile<L::Token>,
   mut f: P,
 ) -> (
   Cst<'inp, L, E>,
@@ -1144,11 +1234,10 @@ where
   C: Cache<'inp, L, Lang>,
   P: ParseInput<'inp, L, O, (Sink<'inp, L, E>, C), Lang>,
 {
-  let ctx = (Sink::new(src, inner, profile), cache);
   let mut input = Input::<L, (Sink<'inp, L, E>, C), Lang, Complete>::with_state_and_context(
     src,
     state,
-    ParseContext::provide(ctx),
+    sink_context(src, context, profile),
   );
   let parsed = f.parse_input(&mut input.as_ref());
   // Read the descent-trip count BEFORE `into_emitter`, which drops the input and every cell that
@@ -1157,6 +1246,31 @@ where
   // — the ordinary lossless shape — had nothing left to ask.
   let resource_trips = input.resource_trips();
   (Cst::from_sink(input.into_emitter(), resource_trips), parsed)
+}
+
+/// Mints the sink from `src` and re-seats the caller's context around it — the one place either
+/// driver turns an `InputContext<E, C>` into the `InputContext<Sink<'inp, L, E>, C>` an [`Input`]
+/// is built from.
+///
+/// **The budget is carried across explicitly**, and that line is the whole reason this is a
+/// function rather than two inlined expressions: [`InputContext::new`] re-seeds
+/// `PARSE_DEFAULT_DEPTH`, so a rebuild that forgot to re-apply the caller's limiter would silently
+/// hand back the default — the exact failure the configured door exists to remove, and one that no
+/// type error and no defaulted call site could see. `into_components` is destructuring rather than
+/// a getter precisely so that adding a fourth component to `InputContext` breaks this line.
+#[inline]
+fn sink_context<'inp, L, Lang, E, C>(
+  src: &'inp L::Source,
+  context: InputContext<E, C>,
+  profile: CstProfile<L::Token>,
+) -> InputContext<Sink<'inp, L, E>, C>
+where
+  L: Lexer<'inp>,
+  Lang: ?Sized,
+  E: Emitter<'inp, L, Lang> + ValueKeyedEmitter,
+{
+  let (inner, cache, recursion) = context.into_components();
+  InputContext::new(Sink::new(src, inner, profile), cache).with_recursion_limiter(recursion)
 }
 
 /// The [`Partial`] sibling of [`parse_lossless`]: the same pinned sink, driven in Sans-I/O
@@ -1183,6 +1297,18 @@ where
 /// re-lexes and re-records the whole prefix every attempt: cumulative work is
 /// **Θ(Σ attempt lengths)**, the same triangular figure
 /// [`parse_partial`](crate::parse_partial) documents, with the event log on top of the lexing.
+///
+/// # Configuring the parse
+///
+/// As with the complete door: this one settles the recursion budget at
+/// [`RecursionLimiter::PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH),
+/// and [`parse_lossless_partial_with_context`] is the same function with the
+/// [`InputContext`](crate::input::InputContext) supplied by the caller.
+///
+/// **A refill loop must pass the same budget on every attempt.** Each attempt builds a fresh
+/// input and therefore a fresh limiter, so a loop that configured only its first call would parse
+/// the longer buffers at the default — deeper input against a shallower budget, which is the one
+/// direction that turns a working parse into a refusal partway through a stream.
 #[inline]
 pub fn parse_lossless_partial<'inp, L, Lang, E, C, O, P>(
   src: &'inp L::Source,
@@ -1190,6 +1316,44 @@ pub fn parse_lossless_partial<'inp, L, Lang, E, C, O, P>(
   inner: E,
   profile: CstProfile<L::Token>,
   cache: C,
+  is_final: bool,
+  f: P,
+) -> (
+  Cst<'inp, L, E>,
+  Result<O, <E as Emitter<'inp, L, Lang>>::Error>,
+)
+where
+  L: Lexer<'inp>,
+  Lang: ?Sized,
+  E: Emitter<'inp, L, Lang> + ValueKeyedEmitter,
+  C: Cache<'inp, L, Lang>,
+  Partial: SurfaceIncomplete<'inp, L, (Sink<'inp, L, E>, C), Lang>,
+  P: ParseInput<'inp, L, O, (Sink<'inp, L, E>, C), Lang, Partial>,
+{
+  parse_lossless_partial_with_context(
+    src,
+    state,
+    InputContext::new(inner, cache),
+    profile,
+    is_final,
+    f,
+  )
+}
+
+/// [`parse_lossless_partial`] with the parse's [`InputContext`] supplied by the caller — the
+/// [`Partial`] sibling of [`parse_lossless_with_context`].
+///
+/// Read [`parse_lossless_with_context`] for what the context buys, why the emitter arrives inside
+/// it while the sink does not, and why this is a second door rather than an extra argument;
+/// nothing about any of that is mode-specific. Read [`parse_lossless_partial`] for `is_final` and
+/// the refill loop — including the note that **every attempt of a refill loop must be given the
+/// same budget**, since each one builds a fresh limiter.
+#[inline]
+pub fn parse_lossless_partial_with_context<'inp, L, Lang, E, C, O, P>(
+  src: &'inp L::Source,
+  state: L::State,
+  context: InputContext<E, C>,
+  profile: CstProfile<L::Token>,
   is_final: bool,
   mut f: P,
 ) -> (
@@ -1204,11 +1368,10 @@ where
   Partial: SurfaceIncomplete<'inp, L, (Sink<'inp, L, E>, C), Lang>,
   P: ParseInput<'inp, L, O, (Sink<'inp, L, E>, C), Lang, Partial>,
 {
-  let ctx = (Sink::new(src, inner, profile), cache);
   let mut input = Input::<L, (Sink<'inp, L, E>, C), Lang, Partial>::with_state_and_context(
     src,
     state,
-    ParseContext::provide(ctx),
+    sink_context(src, context, profile),
   );
   // The driver states the world fact BEFORE the parser ever sees a handle, exactly as
   // `parse_partial` does: `seal` takes `&mut Input`, so `f` cannot end the stream at any depth.
