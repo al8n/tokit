@@ -1152,3 +1152,146 @@ mod prefix_backtracking {
     Harness::<DefaultLexer<'_>>::over(["1.5", "5e-3", "1.", "5e", "5ex"]).run_partial();
   }
 }
+
+// ── The other half of the value channel: a recorded value that is too low ──────────────
+//
+// `run_partial` above falsifies a wrong CLASS CLAIM. A recorded [`Probe`](crate::Probe)
+// bypasses the class entirely — it answers for its item outright — so it needs its own
+// falsifier, and this is it.
+//
+// It is also the answer to the "several candidates at the same start" question. Within one
+// `lex()` call logos's scan starts are strictly increasing: a callback runs only at the leaf the
+// DFA accepted, and `Filter::Skip` advances `token_start` to that match's end before rescanning,
+// so no two scans in one call begin at the same offset and an accepted value always comes from
+// the scan that produced the item. What provenance therefore cannot police is what that scan's
+// callback did NOT see: the engine probes past its own match before settling, and a recorder
+// that reports only its own bytes under-reports for its own item. That is the burden
+// `State::probe` puts on the recorder, and the two cells below are the check on it.
+#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+mod recorded_value {
+  use super::Harness;
+  use crate::lexer::LogosLexer;
+  use crate::{Probe, State, Token};
+
+  #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+  enum NumKind {
+    Int,
+    Float,
+    Dot,
+  }
+
+  impl core::fmt::Display for NumKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+      f.write_str(match self {
+        NumKind::Int => "int",
+        NumKind::Float => "float",
+        NumKind::Dot => "dot",
+      })
+    }
+  }
+
+  /// A state that records exactly what its callback was told to record. `HONEST` is a const
+  /// parameter rather than a field because the kit builds its lexers with `L::new`, which takes
+  /// the state's `Default`.
+  #[derive(Clone, Copy, Debug, Default, PartialEq)]
+  struct Recorder<const HONEST: bool> {
+    probe: Option<Probe>,
+  }
+
+  impl<const HONEST: bool> State for Recorder<HONEST> {
+    type Error = ();
+
+    fn check(&self) -> Result<(), ()> {
+      Ok(())
+    }
+
+    fn probe(&self) -> Option<Probe> {
+      self.probe
+    }
+
+    fn clear_probe(&mut self) {
+      self.probe = None;
+    }
+  }
+
+  /// The integer callback, shared by both vocabularies and living OUTSIDE the macro so its
+  /// body is ordinary code: rustfmt does not format a `macro_rules!` body, and three
+  /// toolchains' idea of the indentation inside one is three different answers.
+  ///
+  /// The engine probes at most one byte past an integer in this vocabulary: it reads `.` at
+  /// `span.end` and then wants a digit at `span.end + 1` for the `Float` arm. `span.end + 1` is
+  /// therefore an upper bound on every probe — over-reporting by one where the byte at
+  /// `span.end` is not a `.`, which only over-withholds. `span.end` is the callback's own view,
+  /// "I read my own bytes", and it is a byte short of the truth exactly when the `Float` trial
+  /// ran off the end of the buffer.
+  fn record<'s, T, const HONEST: bool>(lex: &mut crate::logos::Lexer<'s, T>)
+  where
+    T: crate::logos::Logos<'s, Extras = Recorder<HONEST>>,
+  {
+    let span = lex.span();
+    let reach = if HONEST { span.end + 1 } else { span.end };
+    lex.extras.probe = Some(Probe::new(span.start, reach));
+  }
+
+  macro_rules! recording_vocabulary {
+    ($name:ident, $honest:expr) => {
+      #[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+      #[logos(crate = crate::logos, extras = Recorder<$honest>, skip r"[ \t\r\n]+")]
+      enum $name {
+        // The item's OWN scan records, so provenance accepts the value and the class claim is
+        // never consulted. `$honest` decides whether the value covers what deciding the item
+        // actually read — see `record`.
+        #[regex(r"[0-9]+", record)]
+        Int,
+        #[regex(r"[0-9]+\.[0-9]+")]
+        Float,
+        #[token(".")]
+        Dot,
+      }
+
+      impl Token<'_> for $name {
+        type Kind = NumKind;
+        type Error = ();
+
+        fn kind(&self) -> NumKind {
+          match self {
+            $name::Int => NumKind::Int,
+            $name::Float => NumKind::Float,
+            $name::Dot => NumKind::Dot,
+          }
+        }
+        fn is_trivia(&self) -> bool {
+          false
+        }
+      }
+    };
+  }
+
+  recording_vocabulary!(UnderReportingNum, false);
+  recording_vocabulary!(HonestNum, true);
+
+  type UnderReportingLexer<'a> = LogosLexer<'a, UnderReportingNum>;
+  type HonestLexer<'a> = LogosLexer<'a, HonestNum>;
+
+  #[test]
+  #[should_panic(expected = "partial-equivalence")]
+  fn a_recorded_value_that_misses_the_engines_backtracking_is_falsified() {
+    // `"1.5"` at split k=2. The prefix `"1."` probes offset 2, finds end of input, and
+    // backtracks to `Int@0..1`; the callback recorded `ReadTo(1)`, the driver floors that at the
+    // span end 1, and `1 < 2` commits it. The complete parse is one `Float@0..3` and has no
+    // token ending before 2 at all.
+    //
+    // The class default is `Unbounded` and would have withheld everything, so this cell fails
+    // only because the value was ACCEPTED — which makes it a check on the accept path as much
+    // as on the recorder.
+    Harness::<UnderReportingLexer<'_>>::over(["1.5"]).run_partial();
+  }
+
+  #[test]
+  fn a_recorded_value_that_covers_the_backtracking_passes() {
+    // Same vocabulary, same sources, one byte more honesty: `span.end + 1` covers the probe the
+    // `Float` trial makes, so the unstable integer is withheld and the stable ones still yield.
+    // What `run_partial` rejects is the under-report, not the recording.
+    Harness::<HonestLexer<'_>>::over(["1.5", "1.", "12 34", "1.5 2.5"]).run_partial();
+  }
+}
