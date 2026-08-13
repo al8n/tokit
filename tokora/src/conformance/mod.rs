@@ -61,9 +61,15 @@
 //! load-bearing: the layer lexes bytes and then either commits or refuses, and truncation can turn
 //! one into the other. A tier that compared only tokens could not see the error arm at all — a
 //! refusal leaves no token behind, so a lexer that errors on a truncated prefix and tokenizes the
-//! full input showed up as "nothing yielded yet", which is a legal prefix. See
-//! [`PartialRecorder`] for exactly what an error contributes to the comparison and what it
-//! deliberately does not.
+//! full input showed up as "nothing yielded yet", which is a legal prefix.
+//!
+//! An error contributes **that it was an error**, its **span**, and a **signature** — the `Debug`
+//! rendering of the lexer's error payload, which is all [`Token::Error`] offers and is already the
+//! trait tier's key. Nothing from the *diagnostic* channel is compared: no rendered message, no
+//! [`Severity`](crate::emitter::Severity), no label stack. Nor is the signature an assertion on
+//! wording, because both sides of every comparison come from the same build of the same lexer
+//! inside one call — the complete parse is the oracle, never a recorded string — so editing an
+//! error type's `Debug` moves both sides together.
 //!
 //! The non-final leg asks for a *prefix*, not equality, because **over-withholding is sound**: a
 //! lexer that reports reading past what it emits withholds more than the pre-0.10.0 span rule did,
@@ -89,7 +95,11 @@ pub mod emitter;
 ))]
 mod cache_tests;
 
-use std::{cell::RefCell, format, rc::Rc, string::String, vec, vec::Vec};
+use core::cell::RefCell;
+// `std` is `alloc` on a no-std build (`extern crate alloc as std`), and that is exactly the
+// configuration `conformance` selects — the feature enables `alloc`, not `std`. So `Rc` comes
+// through this alias and `RefCell` cannot: `cell` lives in `core`.
+use std::{format, rc::Rc, string::String, vec, vec::Vec};
 
 use crate::{
   Lexer, Slice, Source, Span, Token,
@@ -303,8 +313,10 @@ where
   ///
   /// The sequence is **tokens and lexer errors interleaved**, not tokens alone: refusing a region
   /// is as much a decision about bytes as tokenizing it, and turning one into the other on append
-  /// is precisely the unfaithfulness this tier exists to reject. See [`PartialRecorder`] for what
-  /// an error contributes and what is deliberately left out of the comparison.
+  /// is precisely the unfaithfulness this tier exists to reject. An error is compared on its
+  /// discriminant, its span, and the `Debug` rendering of its payload; nothing from the diagnostic
+  /// channel is compared. See the [module docs](crate::conformance) for why that is not an
+  /// assertion on message wording.
   ///
   /// This is where a lexer that is not faithful under truncation is caught — one whose item
   /// identity depends on input beyond what it reports having read (lookahead past a token that

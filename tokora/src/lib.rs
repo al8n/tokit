@@ -279,7 +279,10 @@ pub mod input;
 /// the [`Lexer`] contract — replay identity, state-resume faithfulness, monotone
 /// progress, sticky exhaustion, span/slice coherence, optional gap-free tiling — and,
 /// through the input machinery, a set of deterministic save/peek/drain/restore
-/// schedules. Requires the `conformance` feature (which implies `std`).
+/// schedules. Requires the `conformance` feature, which implies `alloc` — **not** `std`: the kit
+/// allocates but needs no operating system, and it builds on a no-std target. Reading it as
+/// `std` is how `core`-only items get imported through the crate's `extern crate alloc as std`
+/// alias, which resolves under `--all-features` and fails on the `conformance`-alone leg.
 #[cfg(feature = "conformance")]
 #[cfg_attr(docsrs, doc(cfg(feature = "conformance")))]
 pub mod conformance;
