@@ -11,8 +11,6 @@ use crate::{
 
 use super::*;
 
-use core::mem;
-
 mod allow_leading;
 mod allow_leading_require_trailing;
 mod allow_surrounded;
@@ -64,7 +62,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     // `many::absence_after_element` for why the two granularities differ.
     let scans = inp.scanner_trip_snapshot();
     let mut num_elems = 0;
-    let mut full = false;
+    let mut full = None;
 
     loop {
       let mut ps = None;
@@ -89,7 +87,13 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // be a constant `false`, since nothing between the top of this cycle and this probe can
         // trip. See `many::absence_after_element`.
         None => match ps {
-          None => return self.handle_end(state, inp, &anchor, num_elems, end_state_handler),
+          None => {
+            let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+            // The destination's capacity report goes last, after the count bounds this
+            // construct is judged on — see `many::report_full_container`.
+            report_full_container(&mut full, inp)?;
+            return Ok(span);
+          }
           Some(span) => span,
         },
         Some(tok) => {
@@ -116,7 +120,11 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // as the end of a list.
         Ok(Decline) => {
           absence_after_element(inp, &latch, scans, trips)?;
-          return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
+          let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+          // The destination's capacity report goes last, after the count bounds this
+          // construct is judged on — see `many::report_full_container`.
+          report_full_container(&mut full, inp)?;
+          return Ok(span);
         }
         Ok(Accept(elem)) => {
           // if the peeked token belongs to an element, check the current state
@@ -147,7 +155,11 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // the same element attempt: surface a stop that attempt hit rather than ending the list
         // cleanly.
         absence_after_element(inp, &latch, scans, trips)?;
-        return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
+        let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+        // The destination's capacity report goes last, after the count bounds this
+        // construct is judged on — see `many::report_full_container`.
+        report_full_container(&mut full, inp)?;
+        return Ok(span);
       }
       committed = new_committed;
       cursor = new_cursor;
@@ -226,7 +238,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     peek_span: L::Span,
     element: O,
     num_elems: &mut usize,
-    full: &mut bool,
+    full: &mut Option<FullContainer<L::Span, Lang>>,
     container: &mut Container,
     handler: &Handler,
   ) -> Result<State<L::Token, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>

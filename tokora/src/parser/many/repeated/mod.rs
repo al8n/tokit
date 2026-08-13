@@ -255,7 +255,7 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
   {
     trace_event!(inp, "repeated");
     let mut num = 0;
-    let mut full = false;
+    let mut full = None;
     let anchor = inp.cursor().clone();
     let mut cursor = anchor.clone();
     let mut committed = inp.span().end();
@@ -314,6 +314,10 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
     // matching the decision-window and consume gates.
     absence_after_element(inp, &latch, scans, elem_trips)?;
 
-    rh.on_stop(num, inp, &anchor)
+    let span = rh.on_stop(num, inp, &anchor)?;
+    // The destination's capacity report goes last, after the count bounds this construct is
+    // judged on — see `many::report_full_container`.
+    report_full_container(&mut full, inp)?;
+    Ok(span)
   }
 }

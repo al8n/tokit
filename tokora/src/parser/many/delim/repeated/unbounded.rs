@@ -32,10 +32,17 @@ where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
   {
-    DelimitedBy::<_, Delim>::new(&mut self.parser.parser).parse_repeated(
-      inp,
-      &mut self.container,
-      |_, _, _| Ok(()),
-    )
+    self
+      .attempt(|c| {
+        let Collect {
+          parser, container, ..
+        } = c;
+        DelimitedBy::<_, Delim>::new(&mut parser.parser).parse_repeated(
+          inp,
+          container,
+          |_, _, _| Ok(()),
+        )
+      })
+      .map(|(_, collected)| collected)
   }
 }

@@ -312,7 +312,7 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
     // `many::absence_after_element` for why the two granularities differ.
     let scans = inp.scanner_trip_snapshot();
     let mut nums = 0;
-    let mut full = false;
+    let mut full = None;
 
     loop {
       // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
@@ -347,7 +347,11 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
           // boundary is not mis-charged here.
           absence_after_element(inp, &latch, scans, trips)?;
           let span = inp.span_since(&anchor);
-          return rh.on_stop(nums, inp, &anchor).map(|_| span);
+          rh.on_stop(nums, inp, &anchor)?;
+          // The destination's capacity report goes last, after the count bounds this construct
+          // is judged on — see `many::report_full_container`.
+          report_full_container(&mut full, inp)?;
+          return Ok(span);
         }
         Action::Continue => {
           // The maximum hook runs only once the element has actually, successfully parsed —
@@ -379,7 +383,11 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
         // is the exit the measurement in `many`'s docs found spending the second of them.
         absence_after_element(inp, &latch, scans, trips)?;
         let span = inp.span_since(&anchor);
-        return rh.on_stop(nums, inp, &anchor).map(|_| span);
+        rh.on_stop(nums, inp, &anchor)?;
+        // The destination's capacity report goes last, after the count bounds this construct is
+        // judged on — see `many::report_full_container`.
+        report_full_container(&mut full, inp)?;
+        return Ok(span);
       }
       committed = new_committed;
     }

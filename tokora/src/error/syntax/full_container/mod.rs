@@ -43,17 +43,24 @@ impl<S, Lang: ?Sized> FullContainer<S, Lang> {
     &self.span
   }
 
-  /// Returns the number of elements found: the elements the container held when it refused a
-  /// push, **plus the refused one**. For any container that refuses only when full, that is
-  /// [`capacity()`](Self::capacity)` + 1`.
+  /// Returns the number of elements found: the elements the **construct had parsed** when the
+  /// container first refused a push, including the refused one. For any container that refuses
+  /// only when full, that is [`capacity()`](Self::capacity)` + 1`.
   ///
-  /// The diagnostic is emitted once per construct, at the first refusal — a container that
-  /// refuses one push refuses every later one, so a per-dropped-element count would climb past
-  /// the capacity it names.
+  /// The count is the repetition driver's own. It is not read back from the container, so no
+  /// property of [`len`](crate::container::Container::len) — that a refused push leaves it
+  /// alone, that an accepted one moves it by exactly one, that it never passes
+  /// [`max_capacity`](crate::container::Container::max_capacity) — is relied on to make this
+  /// number true.
+  ///
+  /// The diagnostic is recorded once per construct, at the first refusal, and emitted after the
+  /// construct's count bounds have been judged. Once per construct is a reporting policy: a
+  /// per-dropped-element count would climb past the capacity it names, and nothing here predicts
+  /// what a later push does.
   ///
   /// A custom container that refuses a push *below* its advertised
-  /// [`Container::max_capacity`](crate::container::Container::max_capacity) yields a `nums`
-  /// that does not exceed `capacity()`. That reports what actually happened and is left as is.
+  /// [`max_capacity`](crate::container::Container::max_capacity) yields a `nums` that does not
+  /// exceed `capacity()`. That reports what actually happened and is left as is.
   #[inline(always)]
   pub const fn nums(&self) -> usize {
     self.nums

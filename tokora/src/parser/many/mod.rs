@@ -180,27 +180,42 @@ mod options;
 mod sep;
 mod sep_while;
 
-/// Pushes one parsed element and reports a refused push exactly once per construct.
+/// Pushes one parsed element and records a refused push exactly once per construct.
 ///
 /// The single chokepoint for both container-accounting laws; it replaced twelve separate
 /// emission sites that had grown three different conventions between them.
 ///
+/// # Every number here is the driver's own
+///
+/// [`Container`](crate::container::Container) is implementable outside this crate, so it is
+/// **untrusted input to the accounting**, not a participant in it. Two consequences, and they
+/// are the same rule seen from two sides:
+///
 /// * **`nums` counts elements the driver PARSED**, not elements the container stored. Count
 ///   bounds are a property of the input: a container that ran out of room must not turn a
 ///   satisfied `at_least` into a `TooFew`, nor silently swallow a violated `at_most` by
-///   clamping the count it is judged on. Container inadequacy has its own diagnostic, below.
-/// * **`FullContainer` is emitted once**, at the first refusal, latched by `full`. A container
-///   that refuses one push refuses every later one, so the old per-dropped-element re-emission
-///   produced a count that climbed past the capacity it named. `nums` in the payload is the
-///   count at the refusal *including* the refused element, so the type's "found N … exceeds …
-///   C" reading is true.
+///   clamping the count it is judged on. Container inadequacy has its own diagnostic.
+/// * **`FullContainer`'s count is `nums` too.** It used to be `container.len() + 1`, which asked
+///   a caller-implemented method for a number the driver already had — and believed the answer,
+///   including that a refused push left `len()` alone, that a successful one moved it by one,
+///   and that it never passes `max_capacity()`. None of that is stated anywhere a downstream
+///   implementor would read it, and `len() + 1` on a `len()` of `usize::MAX` overflows. The
+///   driver's own count needs none of it: `*nums + 1` is the count of elements this construct
+///   parsed including the refused one, which is what the payload's "found N … exceeds … C"
+///   sentence claims. For a container that refuses only when full the two agree, so the payload
+///   is unchanged.
+///
+/// **The record is kept once per construct as a matter of diagnostic policy** — one report per
+/// construct, not one per dropped element — and *not* because a container that refused once is
+/// assumed to refuse again. The recorded numbers describe the refusal that was actually
+/// witnessed; nothing here predicts, or needs, what a later push does.
 ///
 /// The latch is read only on the refusal arm, so the success path is exactly the pre-existing
 /// `push` plus the increment.
 #[inline(always)]
 pub(super) fn push_element<'inp, 'closure, C, O, L, Ctx, Lang: ?Sized, Cmpl>(
   nums: &mut usize,
-  full: &mut bool,
+  full: &mut Option<FullContainer<L::Span, Lang>>,
   container: &mut C,
   item: O,
   inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
@@ -213,18 +228,53 @@ where
   Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>,
   C: ContainerT<O>,
 {
-  if container.push(item).is_err() && !*full {
-    *full = true;
+  if container.push(item).is_err() && full.is_none() {
     let span = inp.span_since(anchor);
-    let stored = container.len();
-    inp.emitter().emit_full_container(FullContainer::of(
-      span,
-      stored + 1,
-      container.max_capacity(),
-    ))?;
+    *full = Some(FullContainer::of(span, *nums + 1, container.max_capacity()));
   }
   *nums += 1;
   Ok(())
+}
+
+/// Emits the destination's capacity report, if the construct earned one — **the last diagnostic
+/// a repetition construct produces**, on every `Ok` exit of all eight collection drivers.
+///
+/// # Why the report waits for the end
+///
+/// `TooMany` and `TooFew` say the *input* disagrees with the grammar. `FullContainer` says the
+/// *caller's destination* was too small for an input that may be perfectly well formed. Those
+/// are not peers, and [`push_element`] already forbids the second from disturbing the first's
+/// arithmetic. Emitting at the refusal let it disturb the first's *reporting* instead: the eight
+/// drivers detect a violated maximum at three different moments — mid-loop in the two plain
+/// families, from an end callback in the four delimited ones, from the end-state pass in the
+/// four separated ones — so an element that both passed `at_most` and filled the destination
+/// produced `[TooMany, FullContainer]` under two builders and `[FullContainer, TooMany]` under
+/// the other six, and under a fail-fast emitter the container's refusal *suppressed the grammar
+/// error entirely* in six of eight. That is precisely the swallow `push_element` refuses to
+/// allow in the count, arriving through the diagnostic order instead.
+///
+/// Emitting after the end-state pass makes the order structural rather than coincidental: there
+/// is no position left for a capacity report to preempt anything, in any driver, under any
+/// emitter. The payload is the one built at the refusal, so it still describes the element that
+/// overflowed the destination rather than the whole construct.
+///
+/// A driver that exits with `Err` never reports: the construct did not complete, so it has no
+/// final count, and whatever error it raised is the one the caller asked to hear first.
+#[inline(always)]
+pub(super) fn report_full_container<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
+  full: &mut Option<FullContainer<L::Span, Lang>>,
+  inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
+) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Cmpl: crate::input::Completeness,
+  Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>,
+{
+  match full.take() {
+    Some(report) => inp.emitter().emit_full_container(report),
+    None => Ok(()),
+  }
 }
 
 /// Files one element failure as a diagnostic, or re-raises it — **the single place either can
@@ -1969,7 +2019,7 @@ pub(super) mod end_state_census {
       include_str!("delim/repeated.rs"),
       "on_stop(nums, inp, &span)",
       2,
-      ".map(|_| mem::take(container))",
+      "Ok(span)",
       2,
     ),
     (
@@ -1977,7 +2027,7 @@ pub(super) mod end_state_census {
       include_str!("delim/repeated_while.rs"),
       "on_stop(nums, inp, &span)",
       3,
-      ".map(|_| mem::take(container))",
+      "Ok(span)",
       3,
     ),
     (
@@ -1985,7 +2035,7 @@ pub(super) mod end_state_census {
       include_str!("sep/parse/mod.rs"),
       "self.handle_end(",
       3,
-      "return self.handle_end(",
+      "return Ok(span);",
       3,
     ),
     (
@@ -2001,7 +2051,7 @@ pub(super) mod end_state_census {
       include_str!("sep_while/parse/mod.rs"),
       "self.handle_end(",
       3,
-      "return self.handle_end(",
+      "return Ok(span);",
       3,
     ),
     (
@@ -2022,16 +2072,16 @@ pub(super) mod end_state_census {
   /// * `sep/delim` and `sep_while/delim` (the two rows where the defect actually lived): the
   ///   pass literal and the exit literal are **independent**, so pass-count == exit-count is a
   ///   real assertion. Reverting the mid-scan-closer arm moves both, independently.
-  /// * `sep{,_while}/parse`: the exit literal is a superstring of the pass literal, so equality
-  ///   asserts that every `handle_end` call is the `return` of it — a non-returning call fails.
-  /// * `repeated`, `repeated_while`, `delim/repeated{,_while}`: the exit and the pass are the
-  ///   same physical expression by construction (`rh.on_stop(…)` is the tail;
-  ///   `return on_stop(…).map(|_| mem::take(container))` fuses both), so equality holds
-  ///   structurally there and only the totals bite.
+  /// * `sep{,_while}/parse`: the pass binds the span the exit returns, so equality asserts that
+  ///   every `handle_end` call is the one an `Ok` exit is built on — a non-returning call fails.
+  /// * `repeated`, `repeated_while`, `delim/repeated{,_while}`: the exit and the pass are one
+  ///   statement pair by construction, so equality holds structurally there and only the totals
+  ///   bite.
   ///
   /// The bare-`return Ok(` check below is what closes the gap the equality leaves: it catches a
   /// *new* success exit of any shape, in any of the eight sources, including the six where the
-  /// equality cannot.
+  /// equality cannot. Its allow-list is the two shapes the drivers actually return — the
+  /// whole-construct span, and the span an end-state pass bound.
   #[test]
   fn every_driver_ok_exit_runs_the_end_state_pass() {
     for (name, src, pass, pass_n, exit, exit_n) in SITES {
@@ -2050,17 +2100,55 @@ pub(super) mod end_state_census {
         "{name}: every `Ok`-returning exit runs the end-state pass exactly once"
       );
 
-      // A driver's only bare `return Ok(...)` form is the whole-construct span the two
-      // delimited separated drivers return; the other six have none at all. Any other
-      // `return Ok(` is a success exit that was added without an end-state pass.
+      // Any `return Ok(` outside the two recognized shapes is a success exit that was added
+      // without an end-state pass — and, since the capacity report rides the same statement
+      // pair, without one of those either.
       let bare = code_matches(src, "return Ok(");
-      let anchored = code_matches(src, "return Ok(inp.span_since(&anchor))");
+      let anchored = code_matches(src, "return Ok(inp.span_since(&anchor))")
+        + code_matches(src, "return Ok(span);");
       assert_eq!(
         bare, anchored,
-        "{name}: a success exit that returns anything but the whole-construct span \
-         (`return Ok(inp.span_since(&anchor))`) has been added without its end-state pass"
+        "{name}: a success exit returning something other than the whole-construct span or the \
+         span its end-state pass bound has been added without that pass"
       );
     }
+  }
+
+  /// CAPACITY_REPORT_CENSUS — the destination's capacity report runs on **every** `Ok` exit of
+  /// **every** collection driver, and nowhere else.
+  ///
+  /// This is the ordering law of [`report_full_container`](super::report_full_container) made
+  /// countable. `FullContainer` used to be emitted from inside `push_element`, at the refusal, so
+  /// whether it preceded or followed the construct's `TooMany` depended on where each builder
+  /// happened to detect a violated maximum — mid-loop in two drivers, from an end callback or the
+  /// end-state pass in the other six. Nothing in the tree noticed, because no census watched a
+  /// site that did not exist: the emission lived at the push, and the push is one shared call.
+  ///
+  /// Pinning the report to the end-state pass count is what makes the law re-checkable. A driver
+  /// that grows an `Ok` exit without one silently drops a capacity diagnostic; a driver that
+  /// reports twice emits one twice. Both move a count here.
+  #[test]
+  fn every_driver_ok_exit_reports_the_destination_capacity() {
+    let mut total_emissions = code_matches(many_mod_production(), "emit_full_container(");
+    for (name, src, _, pass_n, ..) in SITES {
+      assert_eq!(
+        code_matches(src, "report_full_container(&mut full, inp)?"),
+        *pass_n,
+        "{name}: every `Ok` exit runs the capacity report exactly once, beside its end-state pass"
+      );
+      let direct = code_matches(src, "emit_full_container(");
+      assert_eq!(
+        direct, 0,
+        "{name}: drivers report through `report_full_container`, never `emit_full_container` \
+         directly — the direct call is what let the refusal preempt the count bounds"
+      );
+      total_emissions += direct;
+    }
+    assert_eq!(
+      total_emissions, 1,
+      "`emit_full_container(` is called once in the whole `many` tree, inside \
+       `report_full_container`"
+    );
   }
 
   /// LIMIT_PAYLOAD_CENSUS 2a — `FullContainer` has exactly one emission site in the whole

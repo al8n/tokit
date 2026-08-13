@@ -334,9 +334,10 @@ parity!(c_sep_while_delim, Vec<i64>, "[1]", vec![Diag::TooFew(1, 2)], inp =>
 // Case D — capacity-1 container, 3 elements, no count bounds: exactly one
 // `FullContainer(2, 1)`.
 //
-// A container that refuses one push refuses every later one, so re-emitting per dropped
-// element produced a count that climbed past the capacity it named. `nums` is the count at
-// the refusal *including* the refused element, so "found 2 … exceeds … 1" is true (LAW N).
+// One report per construct: re-emitting per dropped element produced a count that climbed past
+// the capacity it named. `nums` is the DRIVER's own parsed-element count at the first refusal,
+// including the refused element, so "found 2 … exceeds … 1" is true (LAW N) without the
+// container being asked to confirm it.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 parity!(d_repeated, Cap1, "1 2 3", vec![Diag::Full(2, 1)], inp =>
@@ -437,4 +438,104 @@ parity!(g_sep_while, Vec<i64>, "1+", vec![Diag::MissingSeparator], inp =>
 
 parity!(g_sep_while_delim, Vec<i64>, "[1]", vec![Diag::MissingSeparator], inp =>
   parse_num.separated_by_comma_while::<_, U1>(decide_num).require_trailing()
+    .delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Case H — the collision: `at_most(1)`, a capacity-1 container, and two parsed elements, so
+// the SAME element both exceeds the count maximum and is refused by the destination.
+//
+// Every earlier case isolates one condition, which is why the matrix stayed green while the
+// eight drivers disagreed about this one. They detect a violated maximum at three different
+// moments — mid-loop in the two plain families, from an end callback in the four delimited
+// ones, from the end-state pass in the four separated ones — so an emission taken at the
+// refusal landed on either side of it depending on the builder, and under a fail-fast emitter
+// the container's refusal became the whole parse's error in six of eight, hiding the grammar
+// violation entirely.
+//
+// The order asserted here is not a preference. `TooMany` says the input disagrees with the
+// grammar; `FullContainer` says the caller's destination was too small for it. The capacity
+// report is emitted after the end-state pass, so it cannot preempt a count bound in any
+// driver — see `many::report_full_container`.
+//
+// `parity_ordered!` reads the emission log rather than the span-keyed map: the two payloads
+// carry different spans in the delimited rows, so span order is not emission order there and
+// only the log can witness which came first.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Like [`parity!`], but asserts the diagnostics in **emission** order.
+macro_rules! parity_ordered {
+  ($name:ident, $out:ty, $src:literal, $expected:expr, $inp:ident => $build:expr) => {
+    #[test]
+    fn $name() {
+      fn go<'inp>(
+        $inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VCtx<'inp>>,
+      ) -> Result<Vec<Diag>, Diag> {
+        let _out: $out = $build;
+        Ok(
+          $inp
+            .emitter_ref()
+            .diagnostics()
+            .filter_map(|d| d.payload().cloned())
+            .collect(),
+        )
+      }
+      let got = Parser::with_context(verbose_ctx())
+        .apply(go)
+        .parse_str($src)
+        .unwrap();
+      let expected: Vec<Diag> = $expected;
+      assert_eq!(
+        got, expected,
+        concat!(
+          stringify!($name),
+          " on ",
+          $src,
+          ": the grammar's count bound is reported before the destination's capacity, in \
+           every driver (INVARIANT E / LAW N)"
+        )
+      );
+    }
+  };
+}
+
+parity_ordered!(h_repeated, Cap1, "1 2", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  try_num.repeated().at_most(1).collect().parse_input(inp)?);
+
+parity_ordered!(h_repeated_while, Cap1, "1 2 +", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  parse_num.repeated_while::<_, U1>(decide_num).at_most(1).collect().parse_input(inp)?);
+
+parity_ordered!(h_delim_repeated, Cap1, "[1 2]", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  try_num.repeated().at_most(1).delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+parity_ordered!(h_delim_repeated_while, Cap1, "[1 2]", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  parse_num.repeated_while::<_, U1>(decide_num).at_most(1)
+    .delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+parity_ordered!(h_sep, Cap1, "1,2", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  try_num.separated_by_comma().at_most(1).collect().parse_input(inp)?);
+
+parity_ordered!(h_sep_delim, Cap1, "[1,2]", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  try_num.separated_by_comma().at_most(1)
+    .delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+parity_ordered!(h_sep_while, Cap1, "1,2+", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  parse_num.separated_by_comma_while::<_, U1>(decide_num).at_most(1).collect().parse_input(inp)?);
+
+parity_ordered!(h_sep_while_delim, Cap1, "[1,2]", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  parse_num.separated_by_comma_while::<_, U1>(decide_num).at_most(1)
+    .delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+// The same collision under `.bounded(0, 1)`, whose maximum arm rides the same hooks: the four
+// plain rows would otherwise be the only proof that the mid-loop hook and the end pass agree.
+parity_ordered!(h_bounded_repeated, Cap1, "1 2", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  try_num.repeated().bounded(0, 1).collect().parse_input(inp)?);
+
+parity_ordered!(h_bounded_sep, Cap1, "1,2", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  try_num.separated_by_comma().bounded(0, 1).collect().parse_input(inp)?);
+
+parity_ordered!(h_bounded_delim_repeated, Cap1, "[1 2]", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  try_num.repeated().bounded(0, 1).delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+parity_ordered!(h_bounded_sep_delim, Cap1, "[1,2]", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  try_num.separated_by_comma().bounded(0, 1)
     .delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);

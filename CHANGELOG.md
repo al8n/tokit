@@ -188,6 +188,88 @@ and will red until they do.
   Measured over the bundled 107 KB `sample.json`, interleaved in one process against the rule as it
   shipped: a validating callback costs **1.65×**, the folded regex **1.02–1.07×**.
 
+- **`tinyvec::SliceVec` no longer panics when the input outgrows its backing slice** (#263). The
+  adapter called the panicking upstream `SliceVec::push` and then returned `Ok(())`
+  unconditionally, so a repetition parse collecting one element more than the slice can hold
+  unwound the parser instead of returning `Err(item)` and reaching the `FullContainer` path the
+  `Container` trait exposes a refusal channel for. Nothing unusual was needed to reach it: safe
+  public API, an ordinary element parser, and an element count the *input* chooses. Every other
+  fixed-capacity adapter — `Option`, `GenericArrayDeque`, `tinyvec::ArrayVec`, both `heapless`
+  containers — already refused through `Err`, so the behaviour also depended on which backend a
+  grammar happened to name. The adapter now tests the bound itself and hands the item back
+  unchanged; `SliceVec` still cannot grow, and the refusal is `FullContainer` naming the slice's
+  real capacity, because capacity exhaustion is exactly what that diagnostic is for and a second
+  refusal kind would contradict the contract below.
+
+- **`Container<T>` states the two obligations the repetition drivers actually rest on, and the
+  drivers stopped resting on the four they never stated** (#258). `push_element` built
+  `FullContainer`'s count out of `container.len() + 1`. `len()` is caller-implemented, so that
+  number was invented by the container and then believed — believed to be unchanged by a refused
+  push, to have moved by exactly one per accepted push, and never to exceed `max_capacity()`. No
+  documentation said any of it, and `len() + 1` on a `len()` of `usize::MAX` overflows.
+
+  The drivers already had the number: `nums`, their own count of elements *parsed*, which for a
+  container that refuses only when full is the same value — so the payload is unchanged and the
+  four assumptions are simply gone. `first`, `last` and `len` are no longer read by the
+  repetition machinery at all. The remaining arithmetic cannot overflow for the reason the
+  counter itself cannot: `nums` is incremented once per parsed element by the same function.
+
+  The suppression of later refusals is likewise no longer an inference. It used to be justified
+  by *"a container that refuses one push refuses every later one"* — a law the trait never
+  imposed and a downstream implementation was free to break. It is now a diagnostic policy, one
+  report per construct, describing the refusal that was actually witnessed and predicting
+  nothing about the next push.
+
+  What is left is stated on the two methods that mean it, generically and enumerating nothing:
+  `Container::push` refuses only when the container cannot hold the item, and
+  `Container::max_capacity` is the bound it refuses at. Those two are what give a refusal its only possible reading; the rest was
+  removable and was removed rather than written down, because an obligation nobody can check is
+  a cost with no keeper.
+
+- **The eight repetition drivers no longer disagree about whether a violated `at_most` or a full
+  container is reported first** (#277). An element that both exceeded the count maximum and
+  filled the destination produced `[TooMany, FullContainer]` under `repeated` and
+  `repeated_while` and `[FullContainer, TooMany]` under the other six — and under a fail-fast
+  emitter the whole parse's error changed from `TooMany` to `FullContainer` purely on the
+  builder the caller picked. `end_state_parity`'s invariant is that one logical history yields
+  one diagnostic vector whichever builder produced it; the matrix missed this because every row
+  in it isolated a single condition.
+
+  The cause is that the eight detect a violated maximum at three different moments — mid-loop,
+  from an end callback, from the end-state pass — so a `FullContainer` emitted at the refusal
+  landed on either side of it. `push_element` already forbids the container from disturbing the
+  count bounds' *arithmetic* ("a container that ran out of room must not … silently swallow a
+  violated `at_most`"); emitting at the refusal let it disturb their *reporting* instead, which
+  under `Fatal` is the same swallow by another route.
+
+  The capacity report is now built at the refusal, where its facts are true, and emitted after
+  the end-state pass on every `Ok` exit of every driver — so it is the last diagnostic a
+  repetition construct produces and there is no position left for it to preempt a count bound
+  from. Observable changes beyond the ordering: a `Fatal` parse that overflows its container now
+  stops at the end of the construct rather than at the refusing element, so a diagnostic raised
+  in between wins; and a construct that exits with `Err` reports no capacity diagnostic, because
+  it never established a final count. `CAPACITY_REPORT_CENSUS` pins the report to the end-state
+  pass count in all eight sources — the emission previously rode one shared call and no census
+  could see it.
+
+- **An owning `Collect` no longer carries a failed attempt's elements into the next one** (#256).
+  The container was transferred out of the parser with `parse(..).map(|_| mem::take(..))`, which
+  runs on the success arm only. An attempt that accepted elements and then failed left them in
+  the parser object, so reusing that parser appended to the residue and could return values the
+  caller never fed it — `at_most(1)` over `1 2 3` failed, then returned `[1, 3]` where the second
+  invocation had parsed only `3`. A long-lived parser reused across inputs mixed them, and
+  repeated failures grew the buffer for its lifetime.
+
+  The storage now moves out of `self` **before** the attempt, into attempt-local storage, through
+  one shared helper the twenty-eight owning transfer sites (plain, `*_while`, separated,
+  delimited, and every spanned form) all route through. Success hands back the attempt's own
+  storage; `Err` drops it; a **panic** drops it by ordinary unwinding, so a host that catches one
+  can reuse the parser — which taking the container on both arms afterwards cannot express. A
+  `collect_with` seed is the first attempt's storage and shares its fate: a failed attempt drops
+  the seed rather than leaving it, plus whatever was collected on top of it, as the next
+  attempt's starting point. Borrowed `Collect<_, &mut Container, _>` is a different contract —
+  the caller owns and observes that container — and is unchanged.
+
 ## 0.9.1 (2026-08-08)
 
 ### Added

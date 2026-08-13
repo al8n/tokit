@@ -1,8 +1,32 @@
 use generic_arraydeque::{ArrayLength, GenericArrayDeque};
 
 /// Trait for container types used in parsers.
+///
+/// # What the repetition drivers read
+///
+/// A `Container` is a **destination**, and the drivers treat it as one. They hand it parsed
+/// elements and read back exactly two things: whether [`push`](Self::push) took an element, and
+/// what [`max_capacity`](Self::max_capacity) says. Everything else a repetition construct
+/// reports — how many elements it parsed, whether that count satisfies `at_least` / `at_most`,
+/// and the count a [`FullContainer`](crate::error::syntax::FullContainer) names — is the
+/// drivers' own bookkeeping, computed without consulting this trait. That is deliberate:
+/// `Container` is implementable outside this crate, so an accounting law that rested on an
+/// implementation behaving itself would be a law with no keeper.
+///
+/// The two obligations below are the ones that cannot be replaced by the drivers' own
+/// bookkeeping, because they are what the two values *mean*. Nothing else an implementation
+/// does is relied upon.
 pub trait Container<T> {
-  /// Push an item into the container.
+  /// Takes `item`, or refuses it and hands it back unchanged.
+  ///
+  /// **Refuse an item only when the container cannot hold it.** `Err` is this crate's sole
+  /// capacity channel: a refusal becomes a
+  /// [`FullContainer`](crate::error::syntax::FullContainer) diagnostic naming
+  /// [`max_capacity`](Self::max_capacity), so a refusal for any other reason reports a capacity
+  /// the container never reached.
+  ///
+  /// A refusal is not a parse failure. The drivers drop the refused element, count it like any
+  /// other parsed element, and carry on.
   fn push(&mut self, item: T) -> Result<(), T>;
 
   /// Returns the first item in the container, if any.
@@ -20,10 +44,11 @@ pub trait Container<T> {
     self.len() == 0
   }
 
-  /// Returns the maximum capacity of the container.
+  /// Returns the number of items this container can hold.
   ///
-  /// If the container has no fixed maximum capacity, returns `usize::MAX`, e.g., for `Vec<T>`.
-  /// Otherwise, returns the actual maximum capacity.
+  /// `usize::MAX` when there is no fixed bound, e.g. for `Vec<T>`; the real bound otherwise.
+  /// This is the capacity a [`FullContainer`](crate::error::syntax::FullContainer) diagnostic
+  /// names, so it must be the bound [`push`](Self::push) refuses at.
   fn max_capacity(&self) -> usize;
 }
 
@@ -269,8 +294,16 @@ const _: () = {
 
     #[inline(always)]
     fn push(&mut self, item: T) -> Result<(), T> {
-      SliceVec::push(self, item);
-      Ok(())
+      // `SliceVec::push` panics on capacity overflow and `tinyvec` publishes no fallible twin
+      // of it, so the bound is tested here: the backing slice cannot grow, and an element count
+      // the input chooses would otherwise unwind the parser instead of reaching the refusal
+      // channel every other fixed-capacity adapter uses.
+      if SliceVec::len(self) < self.capacity() {
+        SliceVec::push(self, item);
+        Ok(())
+      } else {
+        Err(item)
+      }
     }
 
     #[inline(always)]

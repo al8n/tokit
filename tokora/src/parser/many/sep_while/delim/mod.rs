@@ -1,5 +1,3 @@
-use core::mem;
-
 use crate::{
   container::Container as ContainerT,
   emitter::{FromUnclosed, FullContainerEmitter, SeparatedEmitter, UnclosedEmitter},
@@ -123,7 +121,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     let mut state: State<L::Token, L::Span> = State::Start;
     let parser = &mut self.parser;
     let mut num_elems = 0;
-    let mut full = false;
+    let mut full = None;
 
     let mut committed = inp.span().end();
     // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the opener's
@@ -168,6 +166,9 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
           // `GATE_CENSUS` counts both as `direct` rather than leaving the exemption implicit.
           parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
           container.on_close_delimiter(tok);
+          // The destination's capacity report goes last, after the count bounds this
+          // construct is judged on — see `many::report_full_container`.
+          report_full_container(&mut full, inp)?;
           return Ok(inp.span_since(&anchor));
         }
         None => {
@@ -250,6 +251,9 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
               // recorded after the primary under a recovering emitter.
               parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
 
+              // The destination's capacity report goes last, after the count bounds this
+              // construct is judged on — see `many::report_full_container`.
+              report_full_container(&mut full, inp)?;
               return Ok(inp.span_since(&anchor));
             }
             Some(front) => front
@@ -332,6 +336,9 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
               if let Some(ct) = close_carrier {
                 container.on_close_delimiter(inp.commit_probed(ct));
               }
+              // The destination's capacity report goes last, after the count bounds this
+              // construct is judged on — see `many::report_full_container`.
+              report_full_container(&mut full, inp)?;
               return Ok(inp.span_since(&anchor));
             }
             Action::Continue => {
@@ -422,6 +429,9 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
                 if let Some(ct) = close_carrier {
                   container.on_close_delimiter(inp.commit_probed(ct));
                 }
+                // The destination's capacity report goes last, after the count bounds this
+                // construct is judged on — see `many::report_full_container`.
+                report_full_container(&mut full, inp)?;
                 return Ok(inp.span_since(&anchor));
               }
               committed = new_committed;
