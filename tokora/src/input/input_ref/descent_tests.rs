@@ -459,3 +459,129 @@ fn a_leaked_guard_holds_its_level_for_the_rest_of_the_parse() {
     );
   });
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// The shared budget against the stack it actually runs on
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// The thread every figure in the measurement table is stated on, and the one
+/// `std::thread::spawn` hands out.
+///
+/// Written out rather than read from `measured::STACK`: this is the stack the cell *asks for*, and
+/// a cell that requested "whatever the table says" would silently re-base itself if the table were
+/// ever restated on a different thread — which is precisely the drift the assertions in
+/// `state::recursion_tracker` exist to catch, arriving through the test suite instead.
+const MEASUREMENT_STACK: usize = 2 * 1024 * 1024;
+
+/// Bytes of native stack each level of [`heavy`] spends, set to the heaviest per-level cost
+/// anybody has measured: the consumer row, ~41 KiB.
+///
+/// This is what makes the cell below a statement about a *stack* rather than about a counter. A
+/// frame of a handful of bytes would let any budget whatever fit in 2 MiB, and the cell would pass
+/// for a build in which the shared default was 1024.
+const HEAVY_LEVEL: usize = crate::state::recursion_tracker::measured::CONSUMER_BYTES_PER_LEVEL;
+
+/// How deep [`heavy`] is willing to go before giving up and returning `Ok`.
+///
+/// **It exists so that a defect reds this cell instead of killing the process.** The budget is
+/// what should stop the recursion; if it does not, something has to, and an assertion failure is a
+/// test result while `fatal runtime error: stack overflow` is not. 24 levels at ~41 KiB is ≈0.94
+/// MiB — comfortably inside the 2 MiB thread — and it is above the shipped default, which is the
+/// other half of what it has to be or the cell would never reach the budget at all.
+const HEAVY_CAP: usize = 24;
+
+/// A **non-Pratt** recursive production with an ordinary, expensive native frame.
+///
+/// `descending` and a stack-resident array, which is all a consumer's own recursive combinator is.
+/// The `black_box` pair is what keeps the array live *across* the recursive call rather than
+/// letting LLVM shrink it to the two instants it is touched.
+fn heavy(inp: &mut Frame<'_, '_>, depth: usize) -> Result<usize, ProbeErr> {
+  let mut pad = [0u8; HEAVY_LEVEL];
+  core::hint::black_box(&mut pad);
+  let out = inp.descending(|inp| match depth {
+    // Not `Err`: the cell distinguishes "the budget refused" from "this ran out of patience", and
+    // conflating them would let a missing refusal read as a refusal.
+    HEAVY_CAP => Ok(inp.recursion().depth()),
+    n => heavy(inp, n + 1),
+  });
+  core::hint::black_box(&mut pad);
+  out
+}
+
+/// Builds an input at the **shipped default** budget — not [`LIMIT`] — and hands the handle to `f`.
+fn with_default_budget<O>(f: impl FnOnce(&mut Frame<'_, '_>) -> O) -> O {
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, ()>::with_state_and_context(
+    "1",
+    (),
+    InputContext::new(
+      Fatal::<ProbeErr>::new(),
+      DefaultCache::<'_, ProbeLexer<'_>>::default(),
+    ),
+  );
+  let mut inp = input.as_ref();
+  f(&mut inp)
+}
+
+/// **The shared budget must not authorise a depth the native stack cannot hold** — measured on a
+/// 2 MiB thread, through the path `stacker` never touches.
+///
+/// # The defect this is the regression for
+///
+/// `PARSE_DEFAULT_DEPTH` was `if cfg!(feature = "stacker") { 1024 } else { 16 }`. But
+/// `native_stack::maybe_grow` is called from the two Pratt frame prologues and from nowhere else,
+/// while that constant seeds **every** `InputContext` — including the budget a consumer's own
+/// `descending` production draws on, which is what this cell recurses through. So a `stacker`
+/// build authorised 1024 ordinary unsegmented frames, and 1024 × ~41 KiB is ≈41 MiB against a
+/// 2 MiB thread: the native abort the whole recursion budget exists to delete, reintroduced by the
+/// feature that was supposed to remove it.
+///
+/// It is deliberately **not** `#[cfg(feature = "stacker")]`. The property is that the shared
+/// budget is safe for unsegmented frames in *every* configuration, and a cell that only ran with
+/// the feature on would say nothing about the build that does not have it.
+///
+/// # Why it cannot simply recurse until something stops it
+///
+/// Because the failure mode under test *is* a dead process, and a dead process is not a test
+/// result. [`heavy`] therefore caps itself at [`HEAVY_CAP`] and returns `Ok`, so a build whose
+/// budget authorised too much comes back as a failed assertion on this line rather than as
+/// `fatal runtime error: stack overflow` in the harness. That is also what makes the plant
+/// legible: restore the `cfg!` arm and this cell reds, rather than taking the suite with it.
+#[test]
+fn the_shared_budget_refuses_unsegmented_descent_within_a_2mib_thread() {
+  let default = RecursionLimiter::PARSE_DEFAULT_DEPTH;
+
+  // FIRST, THE ARITHMETIC, so that a budget too large to probe safely is reported rather than
+  // executed. This is the whole claim in one line, and the runtime half below is its witness.
+  assert!(
+    default * HEAVY_LEVEL < MEASUREMENT_STACK,
+    "the shared recursion budget is {default}, which at the heaviest measured per-level cost of \
+     {HEAVY_LEVEL} bytes authorises {} bytes of native stack against a {MEASUREMENT_STACK}-byte \
+     thread. A budget only a segmented path could survive does not belong on the cell every \
+     unsegmented `descend` reads.",
+    default * HEAVY_LEVEL
+  );
+  assert!(
+    default < HEAVY_CAP,
+    "this cell recurses at most {HEAVY_CAP} levels, so a budget of {default} would never be \
+     reached and the pin below would be vacuous"
+  );
+
+  let out = std::thread::Builder::new()
+    .stack_size(MEASUREMENT_STACK)
+    .spawn(move || with_default_budget(|inp| heavy(inp, 0)))
+    .expect("spawning the measurement thread")
+    .join()
+    .expect("the budget must refuse this as a VALUE — a panic or an abort here is the defect");
+
+  assert_eq!(
+    out,
+    Err(ProbeErr::Trip {
+      at: 0,
+      depth: default + 1,
+      limitation: default
+    }),
+    "the shared budget must refuse the frame after the default, as an ordinary catchable value. \
+     An `Ok` here means the recursion reached {HEAVY_CAP} levels unrefused, which is the shared \
+     budget authorising more unsegmented native stack than it can account for"
+  );
+}
