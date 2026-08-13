@@ -28,7 +28,7 @@ pub fn pratt<
   L,
   O,
   Ctx,
-  Lang,
+  Lang: ?Sized,
 >(
   parse_lhs: Lhs,
   parse_rhs: Rhs,
