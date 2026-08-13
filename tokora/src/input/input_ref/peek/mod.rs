@@ -118,6 +118,28 @@ where
   /// holdback is consulted, so a peek can no more hide a tripped limit than a consume can. See
   /// [terminal beats incomplete](crate::input#terminal-beats-incomplete-and-they-never-substitute).
   ///
+  /// ## What that leaves: the return value cannot tell the three apart
+  ///
+  /// The paragraph above is about the **diagnostic**, and it is the whole truth about the
+  /// diagnostic. It is not a statement about this **return type**. A full window, a genuinely short
+  /// one, a partial-input frontier holdback and a terminal stop all arrive here as `Ok` holding a
+  /// window, and the last two are the same length for the same reason nothing distinguishes them:
+  /// the short window *is* the value. A production that decides on the width — *"is the second
+  /// token a `(`?"* — therefore reads a halted scanner as a grammar fact and picks the other
+  /// production, which is [`peek_one`](Self::peek_one)'s `Ok(None)` fold one width up.
+  ///
+  /// With a **fatal** emitter that is invisible, because the trip's own diagnostic ends the parse
+  /// either way. With a **non-fatal** emitter that accepts it, the caller is handed `Ok` with fewer
+  /// tokens than it asked for and no way to ask why — a silently different parse rather than a
+  /// stopped one.
+  ///
+  /// Two things can express it. [`peek_with_emitter_terminal`](Self::peek_with_emitter_terminal)
+  /// reports it as a flag beside the window, for a caller that wants the short window *and* the
+  /// reason; [`peek_map`](Self::peek_map) puts it in the error arm, reserving a short `Ok` window
+  /// for a genuine end of input, which is what [`peek_head_map`](Self::peek_head_map),
+  /// [`peek_kind`](Self::peek_kind) and [`head_satisfies`](Self::head_satisfies) do at the head.
+  /// Prefer one of them wherever the window's *length* decides a production.
+  ///
   /// # Stack footprint: one window, cache hit or miss
   ///
   /// The window this returns is the **only** `W::CAPACITY`-sized owned token storage a peek
@@ -702,7 +724,104 @@ where
     }
   }
 
+  /// Windowed observation in grammar vocabulary, terminal-aware by construction — the
+  /// [`peek::<W>`](Self::peek) analogue of [`peek_head_map`](Self::peek_head_map).
+  ///
+  /// `f` sees the filled window and its value is returned. A window that came back **short**
+  /// because the input genuinely ended — or because a non-final [`Partial`](crate::input::Partial)
+  /// frontier withheld the rest — is handed to `f` like any other, and is `Ok`. A window cut short
+  /// by a **terminal stop** — a resource-limit trip during the fill, or a latched poison boundary
+  /// at the cursor — raises the same terminal end-of-input error the `_or_stop` family raises, and
+  /// `f` does not run.
+  ///
+  /// That distinction is the whole of what this adds to [`peek::<W>`](Self::peek), and it is not
+  /// something a caller can recover afterwards. `peek` returns `Ok` in both cases, holding a window
+  /// of the same length, so a production that decides on the width — *"is the second token a
+  /// `(`?"* — reads a halted scanner as a grammar fact and picks the other production. The
+  /// diagnostic is not lost either way (see [`peek`](Self::peek)'s Partial-mode section); what is
+  /// lost is the *return value's* ability to say which of the two happened, and with a non-fatal
+  /// emitter that accepts the diagnostic, the difference is a silently different parse rather than
+  /// a stopped one.
+  ///
+  /// The mark carries the same qualification [`peek_head_map`](Self::peek_head_map)'s does: it is
+  /// what an **accepting** emitter earns, after the trip's own diagnostic has gone to it. A fatal
+  /// emitter's rejection of that diagnostic still propagates — from the fill here rather than from
+  /// a scan — but as *that emitter's* value, converted from the lexer error, so it carries **no**
+  /// terminal mark. (A fatal emitter is blind to the difference only on the *emitting* path: at an
+  /// already-latched boundary the fill emits nothing, so even there the short window is raised
+  /// rather than returned.)
+  ///
+  /// # The one contract difference from `peek_head_map`
+  ///
+  /// [`peek_head_map`](Self::peek_head_map) answers `Ok(None)` at a genuine end of input and does
+  /// not run `f`; here `f` runs on the window whatever its length, including an empty one. A head
+  /// read has two lengths and can lift the empty one into `None`; a `W`-wide window has `W + 1`,
+  /// and folding every short one into a single `None` would throw away the tokens that *are* there
+  /// — which for a two-token decision is the head the caller already committed to. So the `Option`
+  /// belongs to the caller's own projection, not to this return type:
+  ///
+  /// ```text
+  /// // "the second token's kind, if there is a second token"
+  /// inp.peek_map::<U2, _, _>(|w| w.iter().nth(1).map(|t| t.token().kind()))
+  /// //  Ok(Some(kind)) — a second token
+  /// //  Ok(None)       — the input genuinely ends after the head
+  /// //  Err(..)        — the scanner stopped while the window was filling
+  /// ```
+  ///
+  /// `f` may also hand the window straight back — `peek_map::<W, _, _>(|w| w)` is exactly
+  /// [`peek::<W>`](Self::peek) with the terminal stop moved into the error arm — so nothing the
+  /// unmapped form can express is lost. Taking `f` rather than returning the window is what lets
+  /// `O` be free of the borrow: the window borrows the cache for as long as it lives, and a
+  /// grammar that only wants a kind or a boolean out of it can go on using the input immediately.
+  ///
+  /// # What is guaranteed to `f`, and the condition on the caller
+  ///
+  /// `f` runs **exactly once** when it runs at all, is handed the window this call filled, and
+  /// nothing is consumed, committed or latched on its behalf. There is one route here and no fast
+  /// path, so the two-route reconciliation under *"what is guaranteed identical"* on
+  /// [`peek_head_map`](Self::peek_head_map) has no counterpart — but the **second clause of its
+  /// condition on the caller** applies verbatim, and for the same mechanism: this call takes
+  /// `self.span().end()` before the fill, for the terminal
+  /// end-of-input error, and [`peek::<W>`](Self::peek) does not. That is one caller-supplied
+  /// `L::Offset::clone` that the unmapped read never runs. An `f` that answers from the *values* of
+  /// the window it is handed cannot see it; an `f` that measures the input layer can, and is asking
+  /// which primitive this crate reached the window through rather than what the window holds.
+  ///
+  /// # Footprint and panics
+  ///
+  /// Rides the same fill as [`peek`](Self::peek), through
+  /// [`peek_with_emitter_terminal`](Self::peek_with_emitter_terminal): it reserves the same one
+  /// owned window, cache hit or miss, and panics on the same broken-[`Cache`](crate::cache::Cache)
+  /// condition. See [`peek`](Self::peek)'s stack-footprint and panics sections.
+  #[inline]
+  pub fn peek_map<'p, W, O, F>(
+    &'p mut self,
+    f: F,
+  ) -> Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    W: Window,
+    F: FnOnce(Peeked<'p, 'inp, L, W>) -> O,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+  {
+    // Hoisted before the fill, exactly as `peek_head_map` hoists it: the committed span does not
+    // move under a pure peek, and the window borrow (`peeked` ties to `&'p mut self`) must not
+    // overlap the read.
+    let end = self.span().end();
+    let (peeked, terminal, _emitter) = self.peek_with_emitter_terminal::<W>()?;
+    if terminal {
+      // The fill met the request short *because the scanner stopped*. Handing the window back
+      // here is the whole defect this exists to close: it is byte-for-byte what a genuinely
+      // short input produces, so the caller would read a halt as a grammar fact. `f` does not
+      // run — a decision taken on this window is a decision taken on a truncated one.
+      return Err(UnexpectedEot::eot_of(end).into_terminal().into());
+    }
+    Ok(f(peeked))
+  }
+
   /// Width-1 head observation in grammar vocabulary, terminal-aware by construction.
+  ///
+  /// The head-only sibling of [`peek_map`](Self::peek_map), which is the same treatment at an
+  /// arbitrary window width.
   ///
   /// `f` sees the head as `Spanned<&Token, &Span>` and its value is returned. `Ok(None)`
   /// is genuine end of input; a **terminal stop** — a resource-limit trip or a latched

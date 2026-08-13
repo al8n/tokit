@@ -30,6 +30,46 @@ red the day this section became `0.9.0`. `ci/changelog_structure.sh` enforces ev
 and will red until they do.
 -->
 
+## Unreleased
+
+### Added
+
+- **`InputRef::peek_map` — a windowed read whose return type can express a terminal stop.** The
+  terminal-aware reads this crate shipped were all **head-only**: `peek_kind`, `head_satisfies` and
+  `peek_head_map` raise on a resource-limit trip or a latched poison boundary and reserve
+  `Ok(None)` for a genuine end of input. A production needing *two* tokens of lookahead had only
+  `peek::<W>`, which answers a terminal stop with `Ok` holding a shorter window — the same value a
+  genuinely short input produces, and there is nothing in it to tell them apart.
+
+  **The gap was the return type, not the documentation.** `peek`'s Partial-mode section already
+  recorded that a limit trip "emits its diagnostic and latches the poison boundary before the
+  holdback is consulted, so a peek can no more hide a tripped limit than a consume can" — true of
+  the diagnostic, and never a claim about the value. With a **fatal** emitter the difference is
+  invisible, because the trip's diagnostic ends the parse either way; with a **non-fatal** emitter
+  that accepts it, the caller is handed `Ok` with fewer tokens than it asked for and reads that as
+  a grammar fact. A production distinguishing `other + fill` from `other + fill(0) x` on the second
+  token gets a silently different parse rather than an error.
+
+  `peek_map::<W, _, _>(f)` is `peek_head_map`'s treatment at an arbitrary width: `f` sees the
+  filled window and its value is returned; a window short because the input genuinely ended, or
+  because a `Partial` frontier withheld the rest, is handed to `f` like any other and is `Ok`; a
+  window cut short by a terminal stop raises the terminal end-of-input error and `f` does not run.
+  It rides the existing `peek_with_emitter_terminal` fill, so it reserves the same one owned window
+  and panics on the same broken-`Cache` condition.
+
+  One contract difference from `peek_head_map` is deliberate: there `Ok(None)` is the genuine end
+  of input and `f` does not run, while here `f` runs on the window whatever its length. A head read
+  has two lengths and can lift the empty one out; a `W`-wide window has `W + 1`, and folding every
+  short one into a single `None` would discard the tokens that *are* there. The `Option` belongs to
+  the caller's projection — `peek_map::<U2, _, _>(|w| w.iter().nth(1).map(|t| t.token().kind()))` —
+  and `peek_map::<W, _, _>(|w| w)` recovers the unmapped read with the stop moved into the error
+  arm.
+
+  **`peek::<W>` is unchanged.** It is public, its Partial-mode contract is documented and tested,
+  and a caller relying on the short window is not wrong. Its documentation now draws the conclusion
+  that section stopped one step short of — the diagnostic is not hidden, the return value cannot
+  distinguish, and `peek_with_emitter_terminal` or `peek_map` is what can.
+
 ## 0.9.1 (2026-08-08)
 
 ### Added

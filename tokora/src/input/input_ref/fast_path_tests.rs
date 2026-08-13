@@ -37,6 +37,15 @@
 //! end-of-input error rather than the `Ok(None)` that means a genuine end of input. Both are
 //! pinned below.
 //!
+//! [`peek_map`](InputRef::peek_map) is those same two edges one window wide, plus the third state a
+//! head read cannot have — a window that came back **part** resident — and it is pinned in the same
+//! place for that reason rather than because it has a fast path (it has none). What it does share
+//! with the pair above is the thing that decides whether any of it is observable: the **emitter**.
+//! A trip-truncated window and a genuinely short one are the same value, so only an emitter that
+//! ACCEPTS the trip's diagnostic leaves a caller holding it — under a fatal one the parse is over
+//! either way. Every cell there runs under `Verbose`, with one fatal cell beside them whose whole
+//! job is to show that it cannot see the difference.
+//!
 //! # And what the observable tuple cannot see: the caller code each route runs
 //!
 //! Agreeing on every value a caller can read back is **not** the same as running the same code.
@@ -61,11 +70,11 @@
 //! from shipped code, over the same stream, in the same residency, with nothing varying but the
 //! entry point.
 
-use generic_arraydeque::typenum::{U1, U2, U3};
+use generic_arraydeque::typenum::{U1, U2, U3, U4};
 
 use crate::{
   InputRef, Token,
-  cache::{Cache, CachedTokenOf, DefaultCache},
+  cache::{Cache, CachedTokenOf, DefaultCache, PeekedTokenExt as _},
   emitter::Verbose,
   input::Input,
   span::SimpleSpan,
@@ -82,6 +91,13 @@ use super::{
 type OneSlot<'a> = Option<CachedTokenOf<'a, BalLexer<'a>>>;
 
 type BalCtx<'a> = (Verbose<ByValErr>, DefaultCache<'a, BalLexer<'a>>);
+
+/// The same fixture with the one thing that decides whether a folded terminal stop is visible
+/// changed: an emitter that REJECTS the diagnostic rather than accepting it.
+type BalFatalCtx<'a> = (
+  crate::emitter::Fatal<ByValErr>,
+  DefaultCache<'a, BalLexer<'a>>,
+);
 
 /// What one run observed. `offset()`, [`is_eoi`](InputRef::is_eoi), the cache depth and the
 /// lexer's token tally are deliberately absent: those are **frontier** facts, and a prefill
@@ -625,6 +641,267 @@ fn peek_head_map_raises_on_a_latched_boundary_with_nothing_resident() {
     inp.next().unwrap().is_none(),
     "the drain stops at the latched boundary"
   );
+}
+
+// ── The same two edges, one window wide: `peek_map` ───────────────────────────────────────────
+//
+// `peek_head_map` has no fast path to defend at width > 1, so these cells are not about a route.
+// They are here because they are the WINDOWED FORM of the two edges pinned directly above, and
+// they add the third state a head read cannot have: a window that came back **part** resident.
+//
+//   width 1                                          width W
+//   ─────────────────────────────────────────────    ─────────────────────────────────────────
+//   the head is resident        → served, latch      the whole window is resident → served
+//   or no latch                                      (the fill's `want == 0` arm returns before
+//                                                     the boundary is consulted, exactly as for
+//                                                     the head)
+//   nothing resident, latched   → raises             SOME of it resident            → raises
+//                                                    none of it resident            → raises
+//
+// The middle row is the whole reason `peek_map` exists. `peek::<W>` answers it `Ok` with a short
+// window, and that value is byte-for-byte the one a genuinely short input produces — so a caller
+// deciding on the window's LENGTH reads a halted scanner as a grammar fact.
+//
+// WHICH EMITTER THESE RUN UNDER IS LOAD-BEARING, and it is why the fatal cell below exists beside
+// the rest. `BalCtx` is `Verbose`, which ACCEPTS a diagnostic and returns `Ok` from the emit, so
+// the fill comes back with a short window and a raise is the only thing that can turn it into an
+// `Err`. Under a **fatal** emitter the fill's own emit returns `Err` first and every shape in this
+// section passes for the wrong reason: `peek` and `peek_map` return the same value, and a fold
+// would too.
+
+/// The fatal twin of [`tripping_input`], for the control cell below: the emit that a trip performs
+/// REJECTS the diagnostic, so the fill fails before the terminal flag is ever read.
+fn fatal_tripping_input(src: &str, limit: usize) -> Input<'_, BalLexer<'_>, BalFatalCtx<'_>, ()> {
+  Input::with_state_and_context(
+    src,
+    TokenLimiter::with_limitation(limit),
+    crate::input::InputContext::new(
+      crate::emitter::Fatal::<ByValErr>::new(),
+      DefaultCache::<'_, BalLexer<'_>>::default(),
+    ),
+  )
+}
+
+/// Trips `"1 2 3 4"` at a budget of three and leaves the input at the latch with `1 2 3` cached:
+/// the `U4` fill lexes three tokens into the `U3` cache and the fourth trips, so the poison
+/// boundary lands on the end of `3` — which is also `offset()`, the back of the cache.
+///
+/// From there a `U3` request is already met and a `U4` request is not, which is the pair of states
+/// the two latched cells below need.
+fn latched_with_three_cached(src: &str) -> Input<'_, BalLexer<'_>, BalCtx<'_>, ()> {
+  let mut input = tripping_input(src, 3);
+  {
+    let mut inp = input.as_ref();
+    assert_eq!(
+      inp.peek::<U4>().map(|w| w.len()),
+      Ok(3),
+      "the wide fill trips on the fourth token and hands back the three it retained"
+    );
+  }
+  input
+}
+
+#[test]
+fn peek_map_serves_a_fully_resident_window_at_a_latched_boundary() {
+  // The windowed form of `peek_head_map_serves_a_resident_head_at_a_latched_boundary`, and the
+  // same reason it must hold: the fill's `want == 0` arm returns before the boundary is consulted,
+  // so a request the front of the stream already meets is answered whatever the latch says. A
+  // `peek_map` that probed the latch first would raise on a window it is holding.
+  let mut input = latched_with_three_cached("1 2 3 4");
+  let mut inp = input.as_ref();
+
+  assert_eq!(
+    inp.peek_map::<U3, _, _>(|w| w.len()),
+    Ok(3),
+    "a window the front of the stream already fills is served, latched or not"
+  );
+  assert_eq!(
+    inp.peek_map::<U3, _, _>(|w| w.iter().map(|t| *t.span()).collect::<std::vec::Vec<_>>()),
+    Ok(std::vec![
+      SimpleSpan::new(0, 1),
+      SimpleSpan::new(2, 3),
+      SimpleSpan::new(4, 5)
+    ]),
+    "and it is the same window `peek` reports, in stream order"
+  );
+  // Nothing was consumed by either read.
+  assert_eq!(
+    inp.next().unwrap().map(|t| *t.span_ref()),
+    Some(SimpleSpan::new(0, 1)),
+    "a read consumes nothing, latched or not"
+  );
+}
+
+#[test]
+fn peek_map_raises_when_a_latched_boundary_leaves_the_window_part_resident() {
+  // The middle row of the table above, and the state a head read cannot reach. Three of the four
+  // slots are sitting in the cache; the fourth is past a latched boundary and can never be lexed.
+  // `peek::<U4>` calls that `Ok` with three tokens — which is exactly what `"1 2 3"` under no
+  // budget at all produces (the control at the bottom of this file's next cell).
+  let mut input = latched_with_three_cached("1 2 3 4");
+  let mut inp = input.as_ref();
+
+  let ran = core::cell::Cell::new(0usize);
+  assert_eq!(
+    inp.peek_map::<U4, _, _>(|w| {
+      ran.set(ran.get() + 1);
+      w.len()
+    }),
+    Err(ByValErr::Lex),
+    "a window truncated by a latched boundary is a terminal stop, not a short input"
+  );
+  assert_eq!(
+    ran.get(),
+    0,
+    "`f` never sees a truncated window — a decision taken on one is a decision taken on a halt"
+  );
+  // Sticky, exactly as the head read's latch is.
+  assert_eq!(inp.peek_map::<U4, _, _>(|w| w.len()), Err(ByValErr::Lex));
+
+  // THE BEHAVIOUR THAT MUST NOT CHANGE. `peek::<U4>` is public, its Partial-mode contract is
+  // documented and tested, and a caller relying on the short window is not wrong today.
+  assert_eq!(
+    inp.peek::<U4>().map(|w| w.len()),
+    Ok(3),
+    "`peek` still hands the short window back; `peek_map` is an addition, not an alteration"
+  );
+}
+
+#[test]
+fn peek_map_tells_a_fresh_trip_apart_from_a_genuinely_short_input() {
+  // THE PROPERTY, on the fill's other terminal route: a fresh trip mid-window rather than a
+  // boundary latched before the call. Two streams, the same request, the same window length back
+  // from `peek` — and `peek_map` separates them.
+  fn window_len<'a>(
+    inp: &mut InputRef<'a, '_, BalLexer<'a>, BalCtx<'a>, ()>,
+  ) -> (Result<usize, ByValErr>, Result<usize, ByValErr>) {
+    (
+      inp.peek::<U3>().map(|w| w.len()),
+      inp.peek_map::<U3, _, _>(|w| w.len()),
+    )
+  }
+
+  // (a) the scanner halts while the window fills: `1` and `2` scan, `3` trips the budget.
+  let mut tripped = tripping_input("1 2 3 4", 2);
+  assert_eq!(
+    window_len(&mut tripped.as_ref()),
+    (Ok(2), Err(ByValErr::Lex)),
+    "a trip-truncated window is `Ok(2)` from `peek` and an error from `peek_map`"
+  );
+
+  // (b) the input genuinely ends after two tokens. `peek` cannot be told from (a), and `peek_map`
+  //     reserves the short `Ok` window for exactly this.
+  let mut short = tripping_input("1 2", usize::MAX);
+  assert_eq!(
+    window_len(&mut short.as_ref()),
+    (Ok(2), Ok(2)),
+    "a genuinely short input is a short window, not an error"
+  );
+
+  // (c) the control at full width: a met request is `Ok` on both.
+  let mut full = tripping_input("1 2 3 4", usize::MAX);
+  assert_eq!(window_len(&mut full.as_ref()), (Ok(3), Ok(3)));
+
+  // And the identity closure recovers `peek` itself, terminal stop aside — so nothing the unmapped
+  // read can express is lost by taking an `f`.
+  let mut same = tripping_input("1 2 3 4", usize::MAX);
+  let mut inp = same.as_ref();
+  assert_eq!(
+    inp.peek_map::<U3, _, _>(|w| w.iter().map(|t| *t.span()).collect::<std::vec::Vec<_>>()),
+    Ok(std::vec![
+      SimpleSpan::new(0, 1),
+      SimpleSpan::new(2, 3),
+      SimpleSpan::new(4, 5)
+    ])
+  );
+}
+
+#[test]
+fn the_second_token_projection_from_peek_maps_documentation_compiles_and_decides() {
+  // The shape `peek_map`'s doc comment shows, run rather than asserted — a doc that misdescribes
+  // an API is a contract defect, and a fenced `text` block is not compiled by anything else.
+  //
+  // It is also the motivating consumer: `other + fill` (an addition of a selector named `fill`)
+  // against `other + fill(0) x` (a fill modifier), where the token in second position is the only
+  // separator. Here `(` versus `;` stands in for it.
+  fn second_kind<'a>(
+    inp: &mut InputRef<'a, '_, BalLexer<'a>, BalCtx<'a>, ()>,
+  ) -> Result<Option<BalKind>, ByValErr> {
+    inp.peek_map::<U2, _, _>(|w| w.iter().nth(1).map(|t| t.token().kind()))
+  }
+
+  let mut modifier = tripping_input("1 ( 2", usize::MAX);
+  assert_eq!(
+    second_kind(&mut modifier.as_ref()),
+    Ok(Some(BalKind::LParen)),
+    "the second token decides the production"
+  );
+
+  let mut addition = tripping_input("1 ; 2", usize::MAX);
+  assert_eq!(second_kind(&mut addition.as_ref()), Ok(Some(BalKind::Semi)));
+
+  let mut ends = tripping_input("1", usize::MAX);
+  assert_eq!(
+    second_kind(&mut ends.as_ref()),
+    Ok(None),
+    "the input genuinely ends after the head — `None` is the caller's own projection"
+  );
+
+  // And the case the primitive exists for: the scanner halts while the second slot fills. `peek`
+  // answers this exactly as it answers the line above.
+  let mut halted = tripping_input("1 ( 2", 1);
+  assert_eq!(
+    halted.as_ref().peek::<U2>().map(|w| w.len()),
+    Ok(1),
+    "`peek` reports one token, the same as an input that genuinely ends after the head"
+  );
+  let mut halted = tripping_input("1 ( 2", 1);
+  assert_eq!(
+    second_kind(&mut halted.as_ref()),
+    Err(ByValErr::Lex),
+    "and the projection raises rather than answering `None` and picking the other production"
+  );
+}
+
+#[test]
+fn a_fatal_emitter_cannot_tell_the_two_apart_at_all() {
+  // THE CONTROL FOR THE THREE CELLS ABOVE, and the reason they are written against `Verbose`.
+  //
+  // Here the trip's diagnostic is REJECTED, so the fill returns the emitter's own error — a
+  // `Limit`, converted from the lexer error, and not the `Lex` that `From<UnexpectedEot>` produces
+  // above. `peek` and `peek_map` therefore agree, and a `peek_map` that folded the terminal stop
+  // into a short window would agree too. This cell is blind to the defect by construction; that is
+  // what it is here to show.
+  //
+  // A FRESH INPUT PER READ, deliberately. Two reads on one input do not compare the two
+  // primitives: the first read trips and LATCHES, so the second takes the boundary arm — which
+  // emits nothing, and where `peek_map` raises `Lex` under a fatal emitter exactly as it does
+  // under `Verbose`. That is the case named at the bottom of this cell, and running it here by
+  // accident is how a control quietly stops being one.
+  let mut by_peek = fatal_tripping_input("1 2 3 4", 2);
+  assert_eq!(
+    by_peek.as_ref().peek::<U3>().map(|w| w.len()),
+    Err(ByValErr::Limit),
+    "the fatal emit fails the fill itself, before any terminal flag is read"
+  );
+  let mut by_map = fatal_tripping_input("1 2 3 4", 2);
+  assert_eq!(
+    by_map.as_ref().peek_map::<U3, _, _>(|w| w.len()),
+    Err(ByValErr::Limit),
+    "so `peek_map` propagates the same value, and carries no terminal mark of its own"
+  );
+
+  // The genuinely short input is `Ok` on both here too — a fatal emitter changes nothing about the
+  // half of the distinction that was never in question.
+  let mut short = fatal_tripping_input("1 2", usize::MAX);
+  let mut inp = short.as_ref();
+  assert_eq!(inp.peek::<U3>().map(|w| w.len()), Ok(2));
+  assert_eq!(inp.peek_map::<U3, _, _>(|w| w.len()), Ok(2));
+
+  // WHAT IS DELIBERATELY NOT IN THIS CELL: an already-latched boundary. A fatal emitter is blind
+  // only on the EMITTING path — at a latch the fill emits nothing and returns `Ok` with the flag
+  // set, so `peek_map` raises there under a fatal emitter as readily as under `Verbose`. Putting
+  // that case here would make this cell able to see the defect, which would defeat its purpose.
 }
 
 // ── The two things leaving the scanner had to re-establish: the latch, and the unwind ─────────
