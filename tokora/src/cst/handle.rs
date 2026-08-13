@@ -292,11 +292,45 @@ where
   ///
   /// # Abort semantics
   ///
-  /// - An `Incomplete` parse (needs more input) should not be materialized: keep the handle
-  ///   — the buffered events *are* the resumable state.
+  /// - An `Incomplete` parse (needs more input) should not be materialized through this door:
+  ///   it left open nodes and an un-diagnosed tail, which is the pair `finish` refuses and
+  ///   [`finish_partial`](Self::finish_partial) tolerates. **The handle is not a
+  ///   continuation.** It holds *that attempt's* buffered events, and no operation on it takes
+  ///   a larger buffer, resumes the lexer, or writes another event into its sink. To carry on,
+  ///   drop it and drive [`parse_lossless_partial`](super::parse_lossless_partial) again over
+  ///   the enlarged slice, exactly as that function's own note says — each attempt builds a
+  ///   fresh input and a fresh sink and re-lexes the prefix, so cumulative work is
+  ///   **Θ(Σ attempt lengths)**.
   /// - A fatal abort leaves open nodes; `finish` refuses them
   ///   ([`FinishError::UnclosedNodes`]) — [`finish_partial`](Self::finish_partial) is
   ///   the explicit opt-in that closes them for tooling.
+  ///
+  /// ## What an incomplete handle *is* for
+  ///
+  /// Three things, and they are all readings of one finished attempt rather than steps toward
+  /// the next one:
+  ///
+  /// - [`resource_trips`](Self::resource_trips) — whether that attempt exceeded its recursion
+  ///   budget. This handle is the only place the fact survives, and for a partial drive the
+  ///   count is **per attempt**: a refill loop that wants the stream's total sums the handles
+  ///   it read.
+  /// - [`inner_ref`](Self::inner_ref) — the diagnostics the attempt collected, by shared
+  ///   reference, before a materialization gives the emitter back by value.
+  /// - [`finish_partial`](Self::finish_partial) — a deliberately truncated tree, when one is
+  ///   useful to tooling. It is a snapshot of what has been parsed so far, not a prefix that a
+  ///   later call extends.
+  ///
+  /// ## Why there is no resume
+  ///
+  /// Not an omission this door could quietly grow. A recording sink carried across redrives
+  /// corrupts its own event log, which is why [`Sink`] deliberately does **not** implement
+  /// [`ValueKeyedEmitter`](crate::emitter::ValueKeyedEmitter) and why
+  /// [`PartialSession::parse`](crate::input::PartialSession::parse) — the bounded cross-attempt
+  /// owner the ordinary partial parser hands untrusted input to — cannot be paired with one.
+  /// Resuming *this* handle is that composition, and the type system refuses it. A supported
+  /// bounded CST retry needs its own session type, owning the budget, the terminal latch and a
+  /// fresh sink per attempt; that is tracked as al8n/tokora#251 and is not something a
+  /// materialization handle can imply by documentation.
   ///
   /// # Where a gap lands
   ///

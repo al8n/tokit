@@ -3,16 +3,11 @@
 //! This module provides types for representing syntax elements with a known number
 //! of components, and errors for tracking missing components during parsing.
 //!
-//! Two implementations are provided:
-//! - **Const-generic** (default): Uses `const COMPONENTS: usize` for component count
-//! - **Type-level** (with `generic-array` feature): Uses `typenum` for type-level component count
-//!
-//! The implementation is chosen at compile time based on feature flags.
-//!
-//! # Feature Flags
-//!
-//! - Without `generic-array`: Uses const-generic implementation
-//! - With `generic-array`: Uses type-level implementation with `generic_arraydeque::ArrayLength`
+//! There is **one** implementation and no feature selects between them. The component count is
+//! the type-level `Syntax::COMPONENTS`, a `typenum` `ArrayLength`, and the components live in a
+//! `generic_arraydeque::GenericArrayDeque` sized by it. This header used to advertise a
+//! const-generic alternative chosen by a `generic-array` feature: the crate declares no such
+//! feature, this file carries no `cfg`, and `const COMPONENTS: usize` appears nowhere in it.
 //!
 //! # Design Philosophy
 //!

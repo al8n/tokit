@@ -105,6 +105,34 @@ and will red until they do.
   level; a wrapping `push_front` pays one rotation of a buffer whose capacity is the syntax's
   compile-time component count.
 
+- **`Cst::finish` no longer describes an incomplete handle as resumable** (#248). Its
+  abort-semantics note said an `Incomplete` parse should *"keep the handle — the buffered events
+  are the resumable state"*. No such capability exists: the handle's whole public surface is
+  `resource_trips`, `with_trivia_policy`, `trivia_policy`, `error_kind`, `gap_kind`,
+  `inner_ref`, `finish` and `finish_partial`, and not one of them accepts a buffer, resumes the
+  lexer, or writes another event into the sink. The contradiction was inside the crate's own
+  docs — `parse_lossless_partial` says to drop the handle and drive again over the larger slice
+  at Θ(Σ attempt lengths) — so a reader had two opposed continuation models and only the second
+  matched the API. It was not one sentence either: the same claim was repeated in guide chapter
+  16 and in a test comment, and all three now agree.
+
+  The sentence is corrected rather than the capability built, and deliberately. Resuming a
+  recording sink across redrives corrupts its event log; that is why `Sink` does not implement
+  `ValueKeyedEmitter` and cannot be paired with `PartialSession::parse`, so the promised
+  operation is one the type system refuses on purpose rather than one that was left out. A
+  bounded CST retry needs its own session type owning the budget, the terminal latch and a
+  fresh sink per attempt, which is al8n/tokora#251's subject. What the handle *is* for is now
+  stated where the wrong claim was: inspecting the attempt (`resource_trips`, `inner_ref`) and
+  opting into a truncated tree for tooling (`finish_partial`). The lifecycle is also executable
+  now — a test drives two incomplete attempts, drops each handle, re-drives the enlarged slice
+  and requires the resulting tree to equal the one-shot parse of the same bytes.
+
+- **`error::incomplete_syntax`'s module header described an implementation that does not
+  exist.** It advertised a choice between a const-generic and a type-level implementation,
+  selected by a `generic-array` feature. The crate declares no such feature, the file carries no
+  `cfg`, and `const COMPONENTS: usize` appears nowhere in it — there is one implementation.
+  Found by sweeping the two modules #245/#246/#248 touch for the same defect shape.
+
 - **`IncompleteSyntax::from_iter` reports the overflow its `Option` promises** (#246). The
   method documents `None` when the iterator yields more unique components than the buffer
   holds. It called `try_push_impl` for every component and discarded the result — and that

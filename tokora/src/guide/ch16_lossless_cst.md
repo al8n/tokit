@@ -2145,9 +2145,15 @@ that as an [`UncoveredGap`](crate::cst::FinishError::UncoveredGap) (a dropped co
 token and an abandoned tail are indistinguishable to it). `finish_partial` closes any open
 node *and* tiles the un-diagnosed tail — the aborted-parse example in the trivia section used
 exactly that door. And an [`Incomplete`](crate::Completeness) verdict from a
-[partial-input parse](super::ch09_streaming) should not be materialized at all: keep the
-sink — the buffered events *are* the resumable state — and `finish` once the parse
-completes.
+[partial-input parse](super::ch09_streaming) should not be materialized strictly either —
+though not because the handle is waiting to be finished later. **It is not a continuation.**
+It holds that one attempt's events, nothing on it accepts more input, and no later refill
+turns its `finish` into a success. To carry on, drop it and drive
+[`parse_lossless_partial`](crate::cst::parse_lossless_partial) again over the larger slice,
+paying Θ(Σ attempt lengths); reach for
+[`finish_partial`](crate::cst::Cst::finish_partial) only when a deliberately truncated tree
+is what you want. The *Abort semantics* note on [`Cst::finish`](crate::cst::Cst::finish)
+states the lifecycle in full.
 
 ## Reading the tree back: the cast layer
 
