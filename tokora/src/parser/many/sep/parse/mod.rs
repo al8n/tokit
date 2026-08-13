@@ -11,8 +11,6 @@ use crate::{
 
 use super::*;
 
-use core::mem;
-
 mod allow_leading;
 mod allow_leading_require_trailing;
 mod allow_surrounded;
@@ -89,7 +87,10 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // be a constant `false`, since nothing between the top of this cycle and this probe can
         // trip. See `many::absence_after_element`.
         None => match ps {
-          None => return self.handle_end(state, inp, &anchor, num_elems, end_state_handler),
+          None => {
+            let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+            return Ok(span);
+          }
           Some(span) => span,
         },
         Some(tok) => {
@@ -116,7 +117,8 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // as the end of a list.
         Ok(Decline) => {
           absence_after_element(inp, &latch, scans, trips)?;
-          return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
+          let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+          return Ok(span);
         }
         Ok(Accept(elem)) => {
           // if the peeked token belongs to an element, check the current state
@@ -147,7 +149,8 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // the same element attempt: surface a stop that attempt hit rather than ending the list
         // cleanly.
         absence_after_element(inp, &latch, scans, trips)?;
-        return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
+        let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+        return Ok(span);
       }
       committed = new_committed;
       cursor = new_cursor;

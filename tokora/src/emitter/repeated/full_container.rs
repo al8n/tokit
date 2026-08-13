@@ -29,7 +29,12 @@ where
   note = "implement `FullContainerEmitter` (usually alongside the other members of the `ComposableEmitter` bundle)"
 )]
 pub trait FullContainerEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
-  /// Emits an error indicating that the given container is full, and cannot accept more elements.
+  /// Emits an error indicating that a destination refused an element it could not hold.
+  ///
+  /// Reporting a refusal is not a prediction that the next push is refused too. The drivers
+  /// record one per construct as a matter of diagnostic policy, and
+  /// [`Container`](crate::container::Container) never obliged an implementation to keep
+  /// refusing.
   fn emit_full_container(&mut self, err: FullContainer<L::Span, Lang>) -> Result<(), Self::Error>
   where
     L: Lexer<'a>;

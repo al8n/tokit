@@ -188,6 +188,152 @@ and will red until they do.
   Measured over the bundled 107 KB `sample.json`, interleaved in one process against the rule as it
   shipped: a validating callback costs **1.65×**, the folded regex **1.02–1.07×**.
 
+- **`tinyvec::SliceVec` no longer panics when the input outgrows its backing slice** (#263). The
+  adapter called the panicking upstream `SliceVec::push` and then returned `Ok(())`
+  unconditionally, so a repetition parse collecting one element more than the slice can hold
+  unwound the parser instead of returning `Err(item)` and reaching the `FullContainer` path the
+  `Container` trait exposes a refusal channel for. Nothing unusual was needed to reach it: safe
+  public API, an ordinary element parser, and an element count the *input* chooses. Every other
+  fixed-capacity adapter — `Option`, `GenericArrayDeque`, `tinyvec::ArrayVec`, both `heapless`
+  containers — already refused through `Err`, so the behaviour also depended on which backend a
+  grammar happened to name. The adapter now tests the bound itself and hands the item back
+  unchanged; `SliceVec` still cannot grow, and the refusal is `FullContainer` naming the slice's
+  real capacity, because capacity exhaustion is exactly what that diagnostic is for and a second
+  refusal kind would contradict the contract below.
+
+- **`Container<T>` states the two obligations the repetition drivers actually rest on, and the
+  drivers stopped resting on the four they never stated** (#258). `push_element` built
+  `FullContainer`'s count out of `container.len() + 1`. `len()` is caller-implemented, so that
+  number was invented by the container and then believed — believed to be unchanged by a refused
+  push, to have moved by exactly one per accepted push, and never to exceed `max_capacity()`. No
+  documentation said any of it, and `len() + 1` on a `len()` of `usize::MAX` overflows.
+
+  The drivers already had the number: `nums`, their own count of elements *parsed*, so the four
+  assumptions are simply gone. `first`, `last` and `len` are no longer read by the repetition
+  machinery at all. The remaining arithmetic cannot overflow for the reason the counter itself
+  cannot: `nums` is incremented once per parsed element by the same function.
+
+  **`FullContainer` therefore states a refusal rather than an exceedance, and its rendered text
+  changed.** The old sentence — *"found {nums} elements, which exceeds the maximum capacity of
+  {limit}"* — related a count of *this construct's* parsed elements to the destination's *total*
+  capacity, which is a claim about how full the destination already was. Only `container.len()`
+  ever supplied that, and a payload the drivers compute for themselves cannot support it: an
+  `Option` handed to `collect_with` already holding a value is a conforming destination, refuses
+  the construct's first parsed element, and rendered *"found 1 elements, which exceeds the
+  maximum capacity of 1"*. `nums()` is now documented as **which element of the construct was
+  refused**, `capacity()` as the destination's total bound, the two are explicitly not
+  comparable, and the text reads:
+
+  ```text
+  element {nums} of this construct was refused by a destination that holds at most {limit}
+  ```
+
+  Both numbers keep the values they had on this branch, so a consumer reading `nums()` and
+  `capacity()` sees no change; a consumer that renders, matches or asserts on the text does. The
+  alternative — an occupancy contract that would let the arithmetic claim stand — was rejected:
+  it re-acquires the caller-implemented dependency this entry removes, and adds obligations
+  (a starting occupancy, that a refused push does not change it, that it never passes
+  `max_capacity`) that nothing can check.
+
+  The suppression of later refusals is likewise no longer an inference. It used to be justified
+  by *"a container that refuses one push refuses every later one"* — a law the trait never
+  imposed and a downstream implementation was free to break. It is now a diagnostic policy, one
+  report per construct, describing the refusal that was actually witnessed and predicting
+  nothing about the next push.
+
+  What is left is stated on the two methods that mean it, generically and enumerating nothing:
+  `Container::push` refuses only when the container cannot hold the item, and
+  `Container::max_capacity` is the bound it refuses at. Those two are what give a refusal its only possible reading; the rest was
+  removable and was removed rather than written down, because an obligation nobody can check is
+  a cost with no keeper.
+
+- **The destination's capacity report reaches the emitter at the refusal, so a fail-fast parse
+  stops there** (#277). `FullContainer` is emitted from `push_element`'s refusal arm, the moment
+  the destination says no. Under `Fatal` — documented to stop at the first error — a container
+  that refuses element 2 of a construct now ends the parse at element 2.
+
+  **What #277 originally asked for is the opposite, and it cannot be had.** The eight drivers
+  detect a violated maximum at three different moments — mid-loop in `repeated` and
+  `repeated_while`, from an end callback in the four delimited forms, from the end-state pass in
+  the four separated ones — so an element that both exceeds `at_most` and fills the destination
+  produces `[TooMany, FullContainer]` under two builders and `[FullContainer, TooMany]` under
+  the other six. Withholding the capacity report until each driver's end-state pass makes that
+  order uniform. It also moves *when the emitter is consulted*, and in a collection driver the
+  emitter is not a log — it is what decides whether the parse continues. Withheld, the report
+  cost three things:
+
+  - `Fatal` no longer stopped at the refusal. It parsed the rest of the construct first — nine
+    element attempts over `1 2 3 4 5 6 7 8` into a capacity-1 destination, against two.
+  - Any later `Err` exit — a lexer error, an element failure, a delimiter, a recovery stop —
+    propagated past the withheld report and **discarded a diagnostic that had been witnessed**.
+    Over `1 2 oops` the parse's error was the element-3 failure, and the refusal at element 2
+    was never told.
+  - A refusal stopped being constant work. It is an O(1) decision made at element 2; withheld,
+    delivering it took O(n) over trailing input the caller does not choose — 4099 element
+    attempts against 4096 trailing elements, a 1366x amplification.
+
+  **The two emitter classes want opposite things and the trait cannot tell them apart.** A
+  rejecting emitter needs the call at the refusal; a recovering one would prefer it after the
+  count bounds. `Emitter` exposes no classification, and could not usefully expose one: the
+  class is a property of the **call and its argument**, not of the emitter — an error-budget
+  emitter recovers until its budget runs out. The only signal is the `Result` the call returns,
+  and reading it means having made the call. So the rule is applied in the direction that fails
+  safe: emitting at the refusal costs a recovering emitter one diagnostic's position in one
+  history, and withholding it costs a rejecting emitter its documented contract, a witnessed
+  diagnostic, and a bound on its work.
+
+  **What a recovering emitter sees instead.** The order is chronological, and it differs by
+  driver in the one history where both diagnostics fire: `[TooMany, FullContainer]` under
+  `repeated` and `repeated_while`, whose mid-loop maximum hook runs before the push, and
+  `[FullContainer, TooMany]` under the other six, whose maximum is detected after the loop.
+  `end_state_parity`'s case H asserts each driver's own order rather than one shared vector, and
+  `capacity_report_timing.rs` holds the three properties above. `CAPACITY_REPORT_CENSUS` pins
+  the emission to the region between `push_element`'s definition and the `*nums += 1` that ends
+  its refusal arm, so a call relocated to any exit fails it.
+
+  What `push_element` already forbade is unchanged: a container that ran out of room still
+  cannot disturb the count bounds' *arithmetic*, because `nums` counts the elements the driver
+  parsed and never the elements the container stored.
+
+- **An owning `Collect` no longer carries a failed attempt's elements into the next one** (#256).
+  The container was transferred out of the parser with `parse(..).map(|_| mem::take(..))`, which
+  runs on the success arm only. An attempt that accepted elements and then failed left them in
+  the parser object, so reusing that parser appended to the residue and could return values the
+  caller never fed it — `at_most(1)` over `1 2 3` failed, then returned `[1, 3]` where the second
+  invocation had parsed only `3`. A long-lived parser reused across inputs mixed them, and
+  repeated failures grew the buffer for its lifetime.
+
+  The storage now moves out of `self` **before** the attempt, into attempt-local storage, through
+  one shared helper the twenty-eight owning transfer sites (plain, `*_while`, separated,
+  delimited, and every spanned form) all route through. Success hands back the attempt's own
+  storage; `Err` drops it; a **panic** drops it by ordinary unwinding, so a host that catches one
+  can reuse the parser — which taking the container on both arms afterwards cannot express. A
+  `collect_with` seed is the first attempt's storage and shares its fate: a failed attempt drops
+  the seed rather than leaving it, plus whatever was collected on top of it, as the next
+  attempt's starting point. Borrowed `Collect<_, &mut Container, _>` is a different contract —
+  the caller owns and observes that container — and is unchanged.
+
+- **`std` without `alloc` no longer fails to compile the `tinyvec` adapters.** The `std` feature
+  listed `tinyvec_1?/default`, and **tinyvec's `default` is empty**, so that entry enabled nothing
+  at all while reading like every other line around it. `TinyVec` exists only under tinyvec's
+  `alloc`, and the three `TinyVec` impls — `Container`, `SeparatorHandler`, `DelimiterHandler` —
+  are gated on `any(std, alloc)`. So `--no-default-features --features std,tinyvec_1` type-checked
+  those bodies against a tinyvec that has no `TinyVec` and failed with `E0432`. `--all-features`
+  was the only build that ever compiled them, which is why nothing caught it until
+  `ci/feature_cfg_coverage.py` gained a `std,logos,combinators,tinyvec_1` leg, whose first run
+  reported it.
+
+  `std` now names `tinyvec_1?/alloc` — the identical entry the `alloc` feature already carries, so
+  the manifest states what the `cfg` states: either capability needs one thing from tinyvec, that
+  `TinyVec` exist. Narrowing the `cfg` to `alloc` compiles just as well and was rejected, because
+  it drops the impls from every `std` build, which is a behaviour change wearing a build fix's
+  clothes. Nothing else moved. tinyvec's own `std` is deliberately *not* enabled — it adds
+  `io::Write for TinyVec<[u8; N]>`, `Error for TryFromSliceError` and its own `no_std` opt-out,
+  none of which tokora names — and `--features tinyvec_1` alone still compiles the `ArrayVec` and
+  `SliceVec` adapters without a heap. Every other `/default` entry in the `std` list was checked
+  against its own crate's `default` at the version `Cargo.lock` resolves; tinyvec's was the only
+  empty one.
+
 ## 0.9.1 (2026-08-08)
 
 ### Added

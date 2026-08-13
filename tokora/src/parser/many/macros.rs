@@ -65,24 +65,22 @@ macro_rules! define_many_delimited_methods {
 /// Generates 4 `ParseInput` impl blocks for `sep/parse/` leaf files.
 ///
 /// Due to `macro_rules!` hygiene, `self` cannot be passed through call-site token trees.
-/// Instead, blocks 1+2 use depth-based variant dispatch (`@map_self`/`@map_primary`),
+/// Instead, blocks 1+2 use depth-based variant dispatch (`@map_collect`),
 /// and blocks 3+4 use dispatch by `(cardinality, [policy_types])` (`@block3`/`@block4`).
 macro_rules! impl_separated_parse {
   // ── @inline helper ───────────────────────────────────────────────────
   (@inline true $($item:tt)*) => { #[inline(always)] $($item)* };
   (@inline false $($item:tt)*) => { $($item)* };
 
-  // ── @map_self: map_parser chain for block 1 ─────────────────────────
-  (@map_self 0 $self:ident) => { $self.as_mut().map_parser(|p| p.as_mut()) };
-  (@map_self 1 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
-  (@map_self 2 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
-  (@map_self 3 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
-
-  // ── @map_primary: map_parser chain for block 2 ──────────────────────
-  (@map_primary 0 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.as_mut()) };
-  (@map_primary 1 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
-  (@map_primary 2 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
-  (@map_primary 3 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
+  // ── @map_collect: map_parser chain for blocks 1 and 2 ───────────────
+  //
+  // The collector arrives already split from its owner by `Collect::attempt`, so both blocks
+  // start from the attempt's borrow rather than from `self.as_mut()`: the container an owning
+  // collection parses into is never the one that lives in the parser object.
+  (@map_collect 0 $c:ident) => { $c.map_parser(|p| p.as_mut()) };
+  (@map_collect 1 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
+  (@map_collect 2 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
+  (@map_collect 3 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
 
   // ── @block3: block 3 body dispatch ──────────────────────────────────
   // depth=0, no policy
@@ -282,9 +280,9 @@ macro_rules! impl_separated_parse {
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
       ) -> Result<Container, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-        Wrapper(impl_separated_parse!(@map_self $depth self))
-          .parse_input(inp)
-          .map(|_| mem::take(&mut self.container))
+        self
+          .attempt(|c| Wrapper(impl_separated_parse!(@map_collect $depth c)).parse_input(inp))
+          .map(|(_, collected)| collected)
       }
     }
 
@@ -311,9 +309,10 @@ macro_rules! impl_separated_parse {
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
       ) -> Result<Spanned<Container, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-        Wrapper(impl_separated_parse!(@map_primary $depth self))
-          .parse_input(inp)
-          .map(|span| Spanned::new(span, mem::take(&mut self.primary.container)))
+        self
+          .primary_mut()
+          .attempt(|c| Wrapper(impl_separated_parse!(@map_collect $depth c)).parse_input(inp))
+          .map(|(span, collected)| Spanned::new(span, collected))
       }
     }
 
@@ -394,17 +393,15 @@ macro_rules! impl_separated_delim {
   (@inline true $($item:tt)*) => { #[inline(always)] $($item)* };
   (@inline false $($item:tt)*) => { $($item)* };
 
-  // ── @map_self: map_parser chain for block 1 ─────────────────────────
-  (@map_self 1 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
-  (@map_self 2 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
-  (@map_self 3 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
-  (@map_self 4 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))))) };
-
-  // ── @map_primary: map_parser chain for block 2 ──────────────────────
-  (@map_primary 1 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
-  (@map_primary 2 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
-  (@map_primary 3 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
-  (@map_primary 4 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))))) };
+  // ── @map_collect: map_parser chain for blocks 1 and 2 ───────────────
+  //
+  // The collector arrives already split from its owner by `Collect::attempt`, so both blocks
+  // start from the attempt's borrow rather than from `self.as_mut()`: the container an owning
+  // collection parses into is never the one that lives in the parser object.
+  (@map_collect 1 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
+  (@map_collect 2 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
+  (@map_collect 3 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
+  (@map_collect 4 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))))) };
 
   // ── @block3: block 3 body dispatch ──────────────────────────────────
   // depth=0, no policy
@@ -629,9 +626,9 @@ macro_rules! impl_separated_delim {
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
       ) -> Result<Container, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-        Wrapper(impl_separated_delim!(@map_self $depth self))
-          .parse_input(inp)
-          .map(|_| mem::take(&mut self.container))
+        self
+          .attempt(|c| Wrapper(impl_separated_delim!(@map_collect $depth c)).parse_input(inp))
+          .map(|(_, collected)| collected)
       }
     }
 
@@ -658,9 +655,10 @@ macro_rules! impl_separated_delim {
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
       ) -> Result<Spanned<Container, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-        Wrapper(impl_separated_delim!(@map_primary $depth self))
-          .parse_input(inp)
-          .map(|span| Spanned::new(span, mem::take(&mut self.primary.container)))
+        self
+          .primary_mut()
+          .attempt(|c| Wrapper(impl_separated_delim!(@map_collect $depth c)).parse_input(inp))
+          .map(|(span, collected)| Spanned::new(span, collected))
       }
     }
 
@@ -734,17 +732,15 @@ macro_rules! impl_separated_while_parse {
   (@inline true $($item:tt)*) => { #[inline(always)] $($item)* };
   (@inline false $($item:tt)*) => { $($item)* };
 
-  // ── @map_self: map_parser chain for block 1 ─────────────────────────
-  (@map_self 0 $self:ident) => { $self.as_mut().map_parser(|p| p.as_mut()) };
-  (@map_self 1 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
-  (@map_self 2 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
-  (@map_self 3 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
-
-  // ── @map_primary: map_parser chain for block 2 ──────────────────────
-  (@map_primary 0 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.as_mut()) };
-  (@map_primary 1 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
-  (@map_primary 2 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
-  (@map_primary 3 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
+  // ── @map_collect: map_parser chain for blocks 1 and 2 ───────────────
+  //
+  // The collector arrives already split from its owner by `Collect::attempt`, so both blocks
+  // start from the attempt's borrow rather than from `self.as_mut()`: the container an owning
+  // collection parses into is never the one that lives in the parser object.
+  (@map_collect 0 $c:ident) => { $c.map_parser(|p| p.as_mut()) };
+  (@map_collect 1 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
+  (@map_collect 2 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
+  (@map_collect 3 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
 
   // ── @block3: block 3 body dispatch ──────────────────────────────────
   // depth=0, no policy
@@ -980,9 +976,9 @@ macro_rules! impl_separated_while_parse {
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
       ) -> Result<Container, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-        Wrapper(impl_separated_while_parse!(@map_self $depth self))
-          .parse_input(inp)
-          .map(|_| mem::take(&mut self.container))
+        self
+          .attempt(|c| Wrapper(impl_separated_while_parse!(@map_collect $depth c)).parse_input(inp))
+          .map(|(_, collected)| collected)
       }
     }
 
@@ -1011,9 +1007,10 @@ macro_rules! impl_separated_while_parse {
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
       ) -> Result<Spanned<Container, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-        Wrapper(impl_separated_while_parse!(@map_primary $depth self))
-          .parse_input(inp)
-          .map(|span| Spanned::new(span, mem::take(&mut self.primary.container)))
+        self
+          .primary_mut()
+          .attempt(|c| Wrapper(impl_separated_while_parse!(@map_collect $depth c)).parse_input(inp))
+          .map(|(span, collected)| Spanned::new(span, collected))
       }
     }
 
@@ -1091,17 +1088,15 @@ macro_rules! impl_separated_while_delim {
   (@inline true $($item:tt)*) => { #[inline(always)] $($item)* };
   (@inline false $($item:tt)*) => { $($item)* };
 
-  // ── @map_self: map_parser chain for block 1 ─────────────────────────
-  (@map_self 1 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
-  (@map_self 2 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
-  (@map_self 3 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
-  (@map_self 4 $self:ident) => { $self.as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))))) };
-
-  // ── @map_primary: map_parser chain for block 2 ──────────────────────
-  (@map_primary 1 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
-  (@map_primary 2 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
-  (@map_primary 3 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
-  (@map_primary 4 $self:ident) => { $self.primary_mut().as_mut().map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))))) };
+  // ── @map_collect: map_parser chain for blocks 1 and 2 ───────────────
+  //
+  // The collector arrives already split from its owner by `Collect::attempt`, so both blocks
+  // start from the attempt's borrow rather than from `self.as_mut()`: the container an owning
+  // collection parses into is never the one that lives in the parser object.
+  (@map_collect 1 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.as_mut())) };
+  (@map_collect 2 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))) };
+  (@map_collect 3 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut())))) };
+  (@map_collect 4 $c:ident) => { $c.map_parser(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.map_parser_mut(|p| p.as_mut()))))) };
 
   // ── @block3: block 3 body dispatch ──────────────────────────────────
   // depth=0, no policy
@@ -1358,9 +1353,9 @@ macro_rules! impl_separated_while_delim {
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
       ) -> Result<Container, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-        Wrapper(impl_separated_while_delim!(@map_self $depth self))
-          .parse_input(inp)
-          .map(|_| mem::take(&mut self.container))
+        self
+          .attempt(|c| Wrapper(impl_separated_while_delim!(@map_collect $depth c)).parse_input(inp))
+          .map(|(_, collected)| collected)
       }
     }
 
@@ -1389,9 +1384,10 @@ macro_rules! impl_separated_while_delim {
         &mut self,
         inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
       ) -> Result<Spanned<Container, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error> {
-        Wrapper(impl_separated_while_delim!(@map_primary $depth self))
-          .parse_input(inp)
-          .map(|span| Spanned::new(span, mem::take(&mut self.primary.container)))
+        self
+          .primary_mut()
+          .attempt(|c| Wrapper(impl_separated_while_delim!(@map_collect $depth c)).parse_input(inp))
+          .map(|(span, collected)| Spanned::new(span, collected))
       }
     }
 

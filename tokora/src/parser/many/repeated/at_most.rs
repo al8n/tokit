@@ -31,9 +31,8 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     self
-      .as_mut()
-      .parse_input(inp)
-      .map(|_| core::mem::take(&mut self.container))
+      .attempt(|mut c| c.parse_input(inp))
+      .map(|(_, collected)| collected)
   }
 }
 
@@ -66,9 +65,8 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     self
-      .as_mut()
-      .parse_input(inp)
-      .map(|span| Spanned::new(span, core::mem::take(&mut self.container)))
+      .attempt(|mut c| c.parse_input(inp))
+      .map(|(span, collected)| Spanned::new(span, collected))
   }
 }
 

@@ -1,5 +1,3 @@
-use core::mem;
-
 use crate::{
   TryParseInput,
   container::Container as ContainerT,

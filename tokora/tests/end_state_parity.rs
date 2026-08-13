@@ -334,9 +334,10 @@ parity!(c_sep_while_delim, Vec<i64>, "[1]", vec![Diag::TooFew(1, 2)], inp =>
 // Case D — capacity-1 container, 3 elements, no count bounds: exactly one
 // `FullContainer(2, 1)`.
 //
-// A container that refuses one push refuses every later one, so re-emitting per dropped
-// element produced a count that climbed past the capacity it named. `nums` is the count at
-// the refusal *including* the refused element, so "found 2 … exceeds … 1" is true (LAW N).
+// One report per construct: re-emitting per dropped element produced a count that climbed past
+// the capacity it named. `nums` is the DRIVER's own parsed-element count at the first refusal,
+// including the refused element, so "found 2 … exceeds … 1" is true (LAW N) without the
+// container being asked to confirm it.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 parity!(d_repeated, Cap1, "1 2 3", vec![Diag::Full(2, 1)], inp =>
@@ -437,4 +438,116 @@ parity!(g_sep_while, Vec<i64>, "1+", vec![Diag::MissingSeparator], inp =>
 
 parity!(g_sep_while_delim, Vec<i64>, "[1]", vec![Diag::MissingSeparator], inp =>
   parse_num.separated_by_comma_while::<_, U1>(decide_num).require_trailing()
+    .delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Case H — the collision: `at_most(1)`, a capacity-1 container, and two parsed elements, so
+// the SAME element both exceeds the count maximum and is refused by the destination.
+//
+// Every earlier case isolates one condition, which is why the matrix stayed green while the
+// eight drivers disagreed about this one.
+//
+// **The order here is CHRONOLOGICAL, and it is not uniform across the drivers.** Each row
+// asserts the order that driver's own detection points imply, and the two groups are:
+//
+// * `repeated` and `repeated_while` report a violated maximum from the mid-loop `on_element`
+//   hook, which runs BEFORE the element is pushed — so `TooMany` precedes the refusal;
+// * the four delimited and the four separated drivers detect it from an end callback or the
+//   end-state pass, both of which run after the loop — so the refusal, reported when it
+//   happens, precedes `TooMany`.
+//
+// This file used to assert `[TooMany, FullContainer]` in all twelve rows, bought by withholding
+// the capacity report until each driver's end-state pass. That is not payable here. The emitter
+// is not a log in this driver — it is what decides whether the parse continues — so withholding
+// the report also withheld the decision: `Fatal`, documented to stop at the first error, ran on
+// past the refusal to the end of the construct; any later `Err` exit propagated over the
+// withheld report and discarded it; and a destination that refuses at element 2 stopped being an
+// O(1) decision. `many::push_element` states why the ordering cannot be bought back, and
+// `capacity_report_timing.rs` pins the three properties that were paying for it.
+//
+// So the rows below are a real pin in both directions: withholding the report again flips the
+// nine that read `[Full, TooMany]`, and moving a maximum check flips one of the other three.
+//
+// `parity_ordered!` reads the emission log rather than the span-keyed map: the two payloads
+// carry different spans in the delimited rows, so span order is not emission order there and
+// only the log can witness which came first.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Like [`parity!`], but asserts the diagnostics in **emission** order.
+macro_rules! parity_ordered {
+  ($name:ident, $out:ty, $src:literal, $expected:expr, $inp:ident => $build:expr) => {
+    #[test]
+    fn $name() {
+      fn go<'inp>(
+        $inp: &mut InputRef<'inp, '_, TestLexer<'inp>, VCtx<'inp>>,
+      ) -> Result<Vec<Diag>, Diag> {
+        let _out: $out = $build;
+        Ok(
+          $inp
+            .emitter_ref()
+            .diagnostics()
+            .filter_map(|d| d.payload().cloned())
+            .collect(),
+        )
+      }
+      let got = Parser::with_context(verbose_ctx())
+        .apply(go)
+        .parse_str($src)
+        .unwrap();
+      let expected: Vec<Diag> = $expected;
+      assert_eq!(
+        got, expected,
+        concat!(
+          stringify!($name),
+          " on ",
+          $src,
+          ": each diagnostic is reported when its fact becomes true — the mid-loop maximum \
+           before the push it precedes, the destination's refusal at the refusal (INVARIANT E \
+           / LAW N)"
+        )
+      );
+    }
+  };
+}
+
+parity_ordered!(h_repeated, Cap1, "1 2", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  try_num.repeated().at_most(1).collect().parse_input(inp)?);
+
+parity_ordered!(h_repeated_while, Cap1, "1 2 +", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  parse_num.repeated_while::<_, U1>(decide_num).at_most(1).collect().parse_input(inp)?);
+
+parity_ordered!(h_delim_repeated, Cap1, "[1 2]", vec![Diag::Full(2, 1), Diag::TooMany(2, 1)], inp =>
+  try_num.repeated().at_most(1).delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+parity_ordered!(h_delim_repeated_while, Cap1, "[1 2]", vec![Diag::Full(2, 1), Diag::TooMany(2, 1)], inp =>
+  parse_num.repeated_while::<_, U1>(decide_num).at_most(1)
+    .delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+parity_ordered!(h_sep, Cap1, "1,2", vec![Diag::Full(2, 1), Diag::TooMany(2, 1)], inp =>
+  try_num.separated_by_comma().at_most(1).collect().parse_input(inp)?);
+
+parity_ordered!(h_sep_delim, Cap1, "[1,2]", vec![Diag::Full(2, 1), Diag::TooMany(2, 1)], inp =>
+  try_num.separated_by_comma().at_most(1)
+    .delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+parity_ordered!(h_sep_while, Cap1, "1,2+", vec![Diag::Full(2, 1), Diag::TooMany(2, 1)], inp =>
+  parse_num.separated_by_comma_while::<_, U1>(decide_num).at_most(1).collect().parse_input(inp)?);
+
+parity_ordered!(h_sep_while_delim, Cap1, "[1,2]", vec![Diag::Full(2, 1), Diag::TooMany(2, 1)], inp =>
+  parse_num.separated_by_comma_while::<_, U1>(decide_num).at_most(1)
+    .delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+// The same collision under `.bounded(0, 1)`, whose maximum arm rides the same hooks: the four
+// plain rows would otherwise be the only proof that the mid-loop hook and the end pass agree.
+parity_ordered!(h_bounded_repeated, Cap1, "1 2", vec![Diag::TooMany(2, 1), Diag::Full(2, 1)], inp =>
+  try_num.repeated().bounded(0, 1).collect().parse_input(inp)?);
+
+parity_ordered!(h_bounded_sep, Cap1, "1,2", vec![Diag::Full(2, 1), Diag::TooMany(2, 1)], inp =>
+  try_num.separated_by_comma().bounded(0, 1).collect().parse_input(inp)?);
+
+parity_ordered!(h_bounded_delim_repeated, Cap1, "[1 2]", vec![Diag::Full(2, 1), Diag::TooMany(2, 1)], inp =>
+  try_num.repeated().bounded(0, 1).delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);
+
+parity_ordered!(h_bounded_sep_delim, Cap1, "[1,2]", vec![Diag::Full(2, 1), Diag::TooMany(2, 1)], inp =>
+  try_num.separated_by_comma().bounded(0, 1)
     .delimited::<Bracket<(), (), ()>>().collect().parse_input(inp)?);

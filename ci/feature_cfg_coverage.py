@@ -334,6 +334,27 @@ EXTRA_LEGS = [
         # has a lexer, so it cannot make the logos-off claim the leg above exists for.
         "why": "pratt_recovery, all(std, rowan, combinators, any(logos_0_16, _15, _14))",
     },
+    {
+        "features": "std,logos,combinators,tinyvec_1",
+        "tests": True,
+        "unique_predicates": False,
+        "unique_suites": True,
+        # DECLARED FOR ONE SUITE. `container_contract` gates on
+        # `all(std, combinators, tinyvec_1, any(logos_*))`, and `tinyvec_1` is named by no other
+        # crate-level gate and by no multi-feature predicate in `tokora/src/` — so until this leg
+        # existed, `--all-features` was that body's only build anywhere, which is the
+        # configuration this script refuses to count as coverage.
+        #
+        # The suite is what makes `tinyvec_1` worth a leg rather than a footnote: it is the file
+        # that drives `SliceVec` through the refusal channel, and `SliceVec` is the adapter that
+        # used to call the panicking upstream `push` and return `Ok(())` over it. A build that
+        # never type-checks that body is a build in which the adapter's contract is unasserted.
+        #
+        # `tinyvec_1 = ["dep:tinyvec_1"]` pulls no other feature, so `std` and the umbrella have
+        # to be named — and `logos` rather than `logos_0_16`, for the reason the
+        # `std,logos,combinators` leg states at length.
+        "why": "container_contract, the only declared build of a tinyvec_1-gated suite",
+    },
 ]
 
 CRATE = "tokora"

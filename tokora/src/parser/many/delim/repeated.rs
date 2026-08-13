@@ -1,5 +1,3 @@
-use core::mem;
-
 use crate::{
   TryParseInput,
   container::Container as ContainerT,
@@ -28,7 +26,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
       &L::Span,
     ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
-  ) -> Result<Container, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  ) -> Result<L::Span, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
@@ -41,7 +39,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     Ctx::Emitter: FullContainerEmitter<'inp, L, Lang> + UnclosedEmitter<'inp, L, Lang>,
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
       From<UnexpectedEot<L::Offset, Lang>> + FromUnclosed<'inp, L, Lang>,
-    Container: Default + ContainerT<O> + DelimiterHandler<'inp, L>,
+    Container: ContainerT<O> + DelimiterHandler<'inp, L>,
   {
     // Sync the input to the next token boundary, any lexer errors will be emitted during this process.
     let anchor = inp.cursor().clone();
@@ -201,7 +199,8 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
           }
 
           let span = inp.span_since(&anchor);
-          return on_stop(nums, inp, &span).map(|_| mem::take(container));
+          on_stop(nums, inp, &span)?;
+          return Ok(span);
         }
       }
 
@@ -270,6 +269,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     }
 
     let span = inp.span_since(&anchor);
-    on_stop(nums, inp, &span).map(|_| mem::take(container))
+    on_stop(nums, inp, &span)?;
+    Ok(span)
   }
 }

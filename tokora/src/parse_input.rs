@@ -320,6 +320,11 @@ pub trait Accumulator<'inp, L, Container, Ctx, Lang: ?Sized = (), Cmpl = Complet
   }
 
   /// Collects the parsed elements with the given container.
+  ///
+  /// `container` is the **first attempt's** storage, and shares that attempt's fate: an attempt
+  /// that fails drops the seed along with whatever it collected on top of it, so a reused
+  /// collector never starts from a previous attempt's leftovers. A second attempt therefore
+  /// starts from `Container::default()`, exactly as [`collect`](Self::collect) does.
   #[inline(always)]
   fn collect_with(self, container: Container) -> Collect<Self, Container, Ctx, Lang, Cmpl>
   where

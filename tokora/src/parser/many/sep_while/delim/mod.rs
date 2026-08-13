@@ -1,5 +1,3 @@
-use core::mem;
-
 use crate::{
   container::Container as ContainerT,
   emitter::{FromUnclosed, FullContainerEmitter, SeparatedEmitter, UnclosedEmitter},
@@ -249,7 +247,6 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
               // SECONDARY — the end-state diagnostics (counts, separator policy),
               // recorded after the primary under a recovering emitter.
               parser.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
-
               return Ok(inp.span_since(&anchor));
             }
             Some(front) => front

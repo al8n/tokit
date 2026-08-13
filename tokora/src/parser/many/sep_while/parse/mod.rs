@@ -8,8 +8,6 @@ use crate::{
 
 use super::*;
 
-use core::mem;
-
 mod allow_leading;
 mod allow_leading_require_trailing;
 mod allow_surrounded;
@@ -105,7 +103,8 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
               // descent half would be a constant `false`, since nothing between the top of this
               // cycle and this peek can trip. The same classification `sep/parse`'s empty
               // separator-slot return carries; see `many::absence_after_element`.
-              return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
+              let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+              return Ok(span);
             }
             Some(front) => front
               .as_maybe_ref()
@@ -127,7 +126,8 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
               // runs, so the element that could have caught a trip is the PREVIOUS cycle's
               // *accepting* one, which `many`'s module docs exempt.
               absence_after_element(inp, &latch, scans, trips)?;
-              return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
+              let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+              return Ok(span);
             }
             Action::Continue => {
               // if the peeked token belongs to an element, check the current state
@@ -158,7 +158,8 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
             // can see, since the latch happens after both), or a descent budget trip it caught
             // itself and answered with a value it consumed nothing for. Both are the chokepoint's.
             absence_after_element(inp, &latch, scans, trips)?;
-            return self.handle_end(state, inp, &anchor, num_elems, end_state_handler);
+            let span = self.handle_end(state, inp, &anchor, num_elems, end_state_handler)?;
+            return Ok(span);
           }
           committed = new_committed;
         }

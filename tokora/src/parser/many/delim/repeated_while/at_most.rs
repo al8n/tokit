@@ -34,17 +34,24 @@ where
   {
     let max = self.parser.parser.maximum().get();
 
-    DelimitedBy::<_, Delim>::new(self.parser.parser.parser_mut()).parse_repeated(
-      inp,
-      &mut self.container,
-      |nums, inp, span| {
-        if nums > max {
-          inp
-            .emitter()
-            .emit_too_many(TooMany::of(span.clone(), max + 1, max))?;
-        }
-        Ok(())
-      },
-    )
+    self
+      .attempt(|c| {
+        let Collect {
+          parser, container, ..
+        } = c;
+        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
+          inp,
+          container,
+          |nums, inp, span| {
+            if nums > max {
+              inp
+                .emitter()
+                .emit_too_many(TooMany::of(span.clone(), max + 1, max))?;
+            }
+            Ok(())
+          },
+        )
+      })
+      .map(|(_, collected)| collected)
   }
 }
