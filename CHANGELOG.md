@@ -141,6 +141,46 @@ and will red until they do.
   through `Deref`. That is stated generically on the type, in the terms `HashSet` uses for a key,
   and enumerates nothing.
 
+- **`FromIterator<E>` and `From<E>` for `Errors<E, C>` are bounded on `ErrorContainer<E>` instead
+  of `C: FromIterator<E>`, and collect through `try_push`** (#284). #247 above closed every door
+  that *mutates* an already-wrapped container. Construction is an insertion door too, and it
+  reached the same lie by a route that mutates nothing: `Errors::from_iter` delegated straight to
+  `C::from_iter` and then set `overflowed_flag` to `false`. A bounded `C` collecting more errors
+  than it holds can only keep what fits — `FromIterator` has no channel for reporting a value it
+  refused — so `collect()` truncated silently and `overflowed()` reported clean over what was
+  left. `From<E>` inherited it: into a zero-capacity `C` the sole error vanished with the flag
+  still `false`. That is #247's defect one category over, reachable **without** `DerefMut` or
+  `AsMut<C>`, and the enumeration that found those two could not see it because it enumerated
+  mutation.
+
+  Both conversions build an empty container and feed every item through `try_push`, so a refusal
+  latches the flag exactly as a loop of `push` would. `From<E>` stays **infallible**: a capacity
+  *floor* is what would make it unconditionally lossless and there is nothing on `ErrorContainer`
+  to express one with — `remaining_capacity(&self)` reads an instance, and an associated
+  `const MIN_CAPACITY` would be a caller's declaration, which is the class of promise this type
+  already refuses to rest on. The zero-capacity case is answered by the flag rather than by a
+  `Result`.
+
+  **The bound is a swap, not an addition, and it is the same bound that makes the flag readable at
+  all.** `overflowed`, `push`, `try_push`, `pop`, `clear`, `remaining_capacity` and `with_capacity`
+  all live on the `ErrorContainer<E>` impl, so a container that could *lie* about an overflow
+  already satisfied the new bound and keeps its `collect()`. What it costs is `collect()` into a
+  `C` that is `FromIterator<E>` and not an `ErrorContainer<E>` — `BTreeSet`, `HashSet`,
+  `LinkedList` and the like, which yield an `Errors` with no insertion, no removal and no
+  `overflowed()` at all, only the shared views. Those build with
+  `Errors::from_container(iter.collect())`, one line and no loss. In the other direction it
+  *gains* the containers with no `FromIterator` of their own, which is both of this crate's
+  bounded ones — `Option<E>` and `GenericArrayDeque<E, N>`, so `DefaultContainer` in a no-alloc
+  build had no `collect()` before this and has an accounting one now.
+
+  `Errors::from_container` is unchanged and is the one construction door that is deliberately
+  *not* an insertion door: the caller builds the container, the wrapper adopts it, and the flag
+  starts `false` covering only what is offered afterwards. Whether that container's own
+  construction refused an error is a history the container does not record and no wrapper can
+  read. The obligation is stated on the method, and unlike a residual it can be discharged — a
+  caller filling a bounded container *from errors* has `collect()`, `From`, `push` and `try_push`,
+  and all four now account.
+
 - **`IncompleteSyntax::as_mut_slice` and its `AsMut<[S::Component]>` impl are removed** (#245).
   The type documents its components as a *set*: insertion deduplicates, nothing removes, and
   every other door preserves that. An unrestricted `&mut [Component]` is the one door that did
