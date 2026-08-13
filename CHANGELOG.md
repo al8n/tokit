@@ -94,11 +94,25 @@ and will red until they do.
   `InputRef::descend` already occupies, **composed with it and never substituted for it**, so a
   recursion site added later inherits it for free. Off by default, and `std`-only because stacker
   reads the running thread's stack bounds through pthread or Win32 — so it is off in every no-std
-  leg and the `thumbv6m-none-eabi` matrix never names it.
+  leg and the `thumbv6m-none-eabi` matrix never names it. **It implies `pratt`**, because
+  `mod native_stack` is `pratt`-gated and the two prologues are its only callers; without that,
+  `--features stacker` resolved the dependency and built `psm`'s `cc` script for a build that
+  compiled nothing able to call it.
 
-  **It does not make depth unlimited, and the recursion limiter stays.** What changes is that the
-  ceiling stops being a hardware constant and becomes a number someone chose —
-  `RecursionLimiter::PARSE_DEFAULT_DEPTH`, which the feature moves from 16 to 1024. A segment is a
+  **It does not move the shared default, and that is deliberate.**
+  `RecursionLimiter::PARSE_DEFAULT_DEPTH` seeds every `InputContext`, and that cell is what
+  hand-written public descent — `InputRef::descend` / `descending`, from a consumer's own
+  productions — draws on. Those frames are ordinary unsegmented frames on an ordinary thread stack,
+  so a feature that segments *tokora's* Pratt frames justifies no change to their budget: 1024 of
+  them at the heaviest measured per-level cost is ~41 MiB against a 2 MiB thread, which is the
+  abort the whole recursion story exists to delete. The figure the feature does justify is
+  published separately as **`RecursionLimiter::SEGMENTED_PRATT_DEPTH`** (1024, `stacker`-only), for
+  a caller whose whole descent is Pratt frames to pass to `with_recursion_limiter` — opt-in,
+  because only the caller knows whether that precondition holds of their grammar.
+
+  **It does not make depth unlimited, and the recursion limiter stays.** What changes is that for
+  a segmented frame the ceiling stops being a hardware constant and becomes a number someone
+  chose. A segment is a
   heap allocation, and stacker's allocator is `mmap` plus an assertion rather than a fallible
   reserve, so a deep enough input still ends the process with nothing on any `Result` channel.
   Measured, feature on and limiter set to `unlimited()`: a prefix chain returns `Ok` at 1 000 000
@@ -112,10 +126,30 @@ and will red until they do.
 
 - **`RecursionLimiter::PARSE_DEFAULT_DEPTH` is public.** It was `pub(crate)`, so a caller could set
   a budget through `InputContext::with_recursion_limiter` but could not name the default in order
-  to reason about it. That became material once the constant stopped being one number: it is **16**,
-  or **1024** with `stacker`, so neither a consumer nor a test can know what it is getting without
-  reading it — every depth in `pratt_limit.rs` and `pratt_recovery.rs` is now derived from it
-  rather than written out.
+  to reason about it. Most depths in `pratt_limit.rs` and `pratt_recovery.rs` are now read off it
+  rather than written out — though deliberately not all of them, since a suite that derives every
+  expectation from its subject moves its own boundary when the subject moves. The literal figures
+  live in `src/state/recursion_tracker/tests.rs`, one cell per configuration.
+
+  It is also keyed on the build profile now, and both cells currently read 16. Every measurement
+  behind it is a debug one, and a release frame is up to 31x cheaper, so a release build will
+  eventually carry a larger figure; it does not yet, because the five-axis consumer bisection has
+  not been run against a release build and extrapolating it from debug's ratio would be the same
+  derived-from-the-wrong-population mistake the constant was just repaired for. The release cell is
+  a floor equal to the debug one, held there by a `const` assertion that names what would lift it.
+
+- **`cst::parse_lossless_with_context` and `cst::parse_lossless_partial_with_context`** — the
+  lossless drivers with the parse's `InputContext`, and therefore its `RecursionLimiter`, supplied
+  by the caller. The existing pair built their own context, so a lossless parse could choose its
+  emitter and cache but not its recursion budget, and `Cst::from_sink` / `Sink::finish` /
+  `Input::into_emitter` are all crate-private, so the plumbing could not be hand-rolled either.
+  Additive: `parse_lossless` and `parse_lossless_partial` are now one-line delegations to the new
+  pair, so existing calls compile untouched and the four doors cannot drift.
+
+  The context carries the **inner** emitter, not the sink. The sink is still minted by the driver
+  from `src`, and `Sink::new` stays crate-private, so the module's invariant — the buffer the
+  tree's text is sliced from and the buffer the parse reads are the same argument of the same call
+  — holds for all four doors.
 
 ### Changed (breaking)
 
@@ -257,8 +291,8 @@ and will red until they do.
   read. The obligation is stated on the method, and unlike a residual it can be discharged — a
   caller filling a bounded container *from errors* has `collect()`, `From`, `push` and `try_push`,
   and all four now account.
-- **The parser's default recursion budget drops from 64 to 16** (1024 with the new `stacker`
-  feature). **64 was above the depth at which a real grammar aborts**, which made the limiter
+- **The parser's default recursion budget drops from 64 to 16**, in every build and under every
+  feature. **64 was above the depth at which a real grammar aborts**, which made the limiter
   unreachable for that grammar: the native stack got there first, with `fatal runtime error: stack
   overflow` and no diagnostic. It had been derived from tokora's own worst measured cell — the
   debug token driver's 125 frames at ~16.4 KiB on a 2 MiB thread — with ~1.9× of margin, and that
@@ -275,15 +309,26 @@ and will red until they do.
   the knob that raises it, while too high aborts the process and takes the caller's program with
   it. Only one of those can be recovered from.
 
-  **A grammar that legitimately nests deeper must now say so** — `with_recursion_limiter`, or the
-  `stacker` feature. The one place that cannot is `parse_lossless` / `parse_lossless_partial`,
-  which build their own context and expose no limiter. That gap predates this change and is
-  recorded where it bites, at `PARSE_DEPTH_BUDGET` in `tests/pratt_recovery.rs`.
+  **A grammar that legitimately nests deeper must now say so** — through
+  `with_recursion_limiter` on either context type, and, for a lossless parse, through the
+  `parse_lossless_with_context` pair added in this release. The one place that could not say so
+  used to be `parse_lossless` / `parse_lossless_partial`, which built their own context; lowering
+  the default without that hatch would have been a break with no remedy for a lossless consumer
+  whose documents nest between 16 and 64, so the two ship together.
 
-  The derivation is no longer prose. `PARSE_DEFAULT_DEPTH`, the red zone and the segment size are
-  each checked against the measurement they claim to come from by `const` assertions, so a tree
-  whose constants contradict their own table does not compile — putting the default back to 64
-  fails the build, by name.
+  **Enabling `stacker` is not the way to raise it**, and for one revision of this branch it was:
+  the feature moved this constant to 1024. It segments tokora's two Pratt frame prologues and
+  nothing else, so it says nothing about a consumer's own `descend`/`descending` frames — which
+  read the same shared cell. See `SEGMENTED_PRATT_DEPTH` above for the figure it does justify.
+
+  The derivation is no longer prose, and it is no longer a range. `PARSE_DEFAULT_DEPTH`,
+  `SEGMENTED_PRATT_DEPTH`, the red zone and the segment size are each asserted **equal** to a value
+  computed from a measurement and a named policy, with the arithmetic behind that computation
+  asserted separately — so a tree whose constants contradict their own table does not compile. The
+  earlier guards were inequalities only, which is weaker than it reads: they imposed upper bounds
+  alone, so a default of **1** satisfied every predicate and the segmented block accepted anything
+  from **501 to 1632**. Putting the default back to 64 now fails the build by name, and so does
+  putting it to 1, 32 or 512.
 
 - **`IncompleteSyntax::as_mut_slice` and its `AsMut<[S::Component]>` impl are removed** (#245).
   The type documents its components as a *set*: insertion deduplicates, nothing removes, and
