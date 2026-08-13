@@ -22,10 +22,11 @@ fn input_context_new_and_into_components() {
   // NOT `RecursionLimiter::new()`'s own general-purpose default, which is a different number for
   // a different subject (see `RecursionLimiter`'s `Two Defaults, Two Subjects` docs).
   //
-  // Named rather than written out: the figure depends on the `stacker` feature, and a literal
-  // here would pin whichever half the leg running this cell happens to build. The claim being
-  // made is that `new` carries the PARSE default at all — what that default IS, and why, belongs
-  // to `native_stack/tests.rs`, which derives it.
+  // Named rather than written out: the claim being made here is that `new` carries the PARSE
+  // default AT ALL, not what that default is. The number itself is stated as a literal in exactly
+  // one place — `state/recursion_tracker/tests.rs` — and derived from the measurement by the
+  // `const` assertions beside it. Writing it out here too would be a third copy that has to be
+  // found and edited whenever the first two move.
   assert_eq!(
     r.limitation(),
     crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH

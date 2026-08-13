@@ -21,8 +21,18 @@
 //!
 //! With the feature on, a frame that is inside `RED_ZONE` bytes of the end of its stack runs on a
 //! fresh `SEGMENT`-byte heap allocation instead. **The ceiling stops being a hardware constant and
-//! becomes a number someone chose** — `RecursionLimiter::PARSE_DEFAULT_DEPTH`, or whatever
-//! `InputContext::with_recursion_limiter` says instead.
+//! becomes a number someone chose** — whatever `InputContext::with_recursion_limiter` says.
+//!
+//! **FOR THESE FRAMES ONLY, and the feature therefore moves no default.** `maybe_grow` is called
+//! from the two Pratt frame prologues and from nowhere else, while
+//! `RecursionLimiter::PARSE_DEFAULT_DEPTH` seeds every `InputContext` — including the budget a
+//! consumer's own `descending` production draws on, which is an ordinary unsegmented frame on an
+//! ordinary thread stack. For one revision this feature raised that shared constant from 16 to
+//! 1024, which authorised ~41 MiB of unsegmented native stack against a 2 MiB thread: the abort
+//! this whole module is written around, reintroduced by the thing meant to remove it. The figure
+//! that IS defensible over segmented frames is published separately, as
+//! `RecursionLimiter::SEGMENTED_PRATT_DEPTH`, and a caller opts into it because only a caller
+//! knows whether the precondition holds of their grammar.
 //!
 //! **That is the whole of what it buys, and it is not a safety mechanism.** `InputRef::descend`
 //! stays, every call site of it stays, and the reason is measurable rather than cautious:
@@ -170,8 +180,9 @@ pub(crate) const RED_ZONE: usize = 256 * 1024;
 ///   most one 2 MiB segment however deep it goes. Per *level* the cost converges on that level's
 ///   own frame size, so a larger segment does not buy cheaper levels: it buys a larger worst-case
 ///   tail.
-/// * **bounded frequency** — one `mmap` per ~43 levels of the heaviest measured grammar. At the
-///   feature-on default depth of 1024 that is ≤ 24 allocations for a whole parse.
+/// * **bounded frequency** — one `mmap` per ~43 levels of the heaviest measured grammar. At
+///   `RecursionLimiter::SEGMENTED_PRATT_DEPTH`, the 1024 this feature publishes for a caller whose
+///   whole descent is segmented Pratt frames, that is <= 24 allocations for a whole parse.
 #[cfg(feature = "stacker")]
 pub(crate) const SEGMENT: usize = 2 * 1024 * 1024;
 

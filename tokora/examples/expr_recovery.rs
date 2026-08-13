@@ -66,8 +66,8 @@
 //!
 //! There is exactly one of the second kind here: the **recursion budget**. Every nested group
 //! and every prefix `-` enters the driver's descent, tokora's parser-facing default is
-//! `RecursionLimiter::PARSE_DEFAULT_DEPTH` (16, or 1024 with the `stacker` feature — this example
-//! cannot choose, see `tests/pratt_recovery.rs`), and a trip raises `RecursionLimitReached`. That
+//! `RecursionLimiter::PARSE_DEFAULT_DEPTH` (16 — and `parse_with_depth` is this file's
+//! demonstration of choosing otherwise), and a trip raises `RecursionLimitReached`. That
 //! error is *terminal*, and every
 //! recovery combinator — [`inplace_recover`](tokora::ParseInput::inplace_recover) included —
 //! re-raises a terminal error rather than spending it. Deliberately. A budget whose whole

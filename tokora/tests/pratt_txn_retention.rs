@@ -510,9 +510,9 @@ struct Measured {
 /// it sets its **own** recursion budget.
 ///
 /// [`DEPTHS`] tops out at 64 operators, which is 65 live driver frames, and the input's *default*
-/// budget is `RecursionLimiter::PARSE_DEFAULT_DEPTH` — 16, or 1024 with the `stacker` feature, and
-/// deliberately conservative in the first case because it is sized against the depth at which a
-/// measured *consumer* grammar aborts on a 2 MiB thread. Either way the probes outrun it: 65
+/// budget is `RecursionLimiter::PARSE_DEFAULT_DEPTH` — 16, in every build, and deliberately
+/// conservative because it is sized against the depth at which a measured *consumer* grammar
+/// aborts on a 2 MiB thread. The probes outrun it: 65
 /// frames is past 16 outright, and the point below stands whatever the figure is. A retention probe
 /// that inherited it would stop measuring retention and start measuring the budget, and it would
 /// do so silently: `measure` would fail at its `expect`, at one depth, for a reason that has

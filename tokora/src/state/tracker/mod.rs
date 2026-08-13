@@ -126,7 +126,8 @@ pub enum LimitExceeded {
 /// tokora's own Pratt-parser wiring uses: tokora's
 /// [`ParserContext`](crate::ParserContext) and [`InputContext`](crate::input::InputContext)
 /// never build their recursion budget through `Limiter` — each holds a [`RecursionLimiter`]
-/// directly and requests 64 explicitly instead of inheriting either type's default — so
+/// directly and requests `PARSE_DEFAULT_DEPTH` explicitly instead of inheriting either type's
+/// default — so
 /// `Limiter` does not presume a caller reaching for it directly is on that path. If you
 /// assemble your own recursive-descent parser around `Limiter` and a level of it does cost a
 /// native stack frame, size the recursion component for that cost yourself with

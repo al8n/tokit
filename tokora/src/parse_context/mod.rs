@@ -133,7 +133,7 @@ where
   /// by [`provide`](ParseContext::provide); see it for what the budget covers. The default is
   /// [`RecursionLimiter::PARSE_DEFAULT_DEPTH`], protection on — requested explicitly, not
   /// [`RecursionLimiter::new`]'s own (unrelated) general-purpose default of 500. **Read that
-  /// constant rather than assuming a number: it is 16, or 1024 with the `stacker` feature.**
+  /// constant rather than assuming a number.**
   ///
   /// ```rust,ignore
   /// // Deep but bounded grammar: raise the ceiling for this parse only.

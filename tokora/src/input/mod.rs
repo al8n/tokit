@@ -337,8 +337,9 @@ impl<E, C> InputContext<E, C> {
   /// The recursion budget defaults to [`RecursionLimiter::PARSE_DEFAULT_DEPTH`], protection on —
   /// the figure tokora's own parser wiring requests explicitly, NOT
   /// [`RecursionLimiter::new`]'s own (unrelated) general-purpose default of 500 — and is
-  /// changed with [`with_recursion_limiter`](Self::with_recursion_limiter). That constant is 16,
-  /// or 1024 with the `stacker` feature, so it is named here rather than written out.
+  /// changed with [`with_recursion_limiter`](Self::with_recursion_limiter). That constant is 16
+  /// in every build — no feature moves it, deliberately, because this cell is what unsegmented
+  /// hand-written descent reads — so it is named here rather than written out.
   #[inline(always)]
   pub const fn new(emitter: E, cache: C) -> Self {
     Self {

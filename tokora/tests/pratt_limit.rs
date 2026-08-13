@@ -9,7 +9,7 @@
 //! * **R1 — the recursion budget.** Every pratt frame, in either engine, enters one level of the
 //!   input's [`RecursionLimiter`] through `InputRef::descend`, and exceeding it fails the parse
 //!   with the always-terminal `RecursionLimitReached`. On by default (at
-//!   `RecursionLimiter::PARSE_DEFAULT_DEPTH`, which the `stacker` feature changes), configurable
+//!   `RecursionLimiter::PARSE_DEFAULT_DEPTH`), configurable
 //!   through the context, shared by every parser on one input, and released on every exit
 //!   including an unwind.
 //! * **R2 — the non-associative contract.** A second same-power `PrattInfix::Neither` operator in
@@ -2392,10 +2392,11 @@ fn two_composed_pratt_parsers_share_one_budget() {
 /// what refuses it can only be the limiter. `on_a_deep_stack` stays on both halves anyway: the
 /// `unlimited()` half runs 1000 levels deep, which no 2 MiB stack survives in a debug build.
 ///
-/// **Every figure is read off `RecursionLimiter::PARSE_DEFAULT_DEPTH`, never written out.** The
-/// default is `16` without the `stacker` feature and `1024` with it, so a literal here would pin
-/// whichever half the leg running this cell happened to build and would go quietly vacuous in the
-/// other. That constant became public partly so that this file could name it.
+/// **Every figure is read off `RecursionLimiter::PARSE_DEFAULT_DEPTH`, never written out.** What
+/// this cell is about is the *relationship* — the frame after the budget is the one refused — and
+/// a literal would state the budget a second time in a file that does not own it. The number
+/// itself is written out once, in `src/state/recursion_tracker/tests.rs`, so that the suite does
+/// not derive every one of its expectations from the subject.
 #[test]
 fn the_default_budget_refuses_a_deeper_chain_and_unlimited_restores_it() {
   let default_depth = RecursionLimiter::PARSE_DEFAULT_DEPTH;
@@ -2697,7 +2698,7 @@ fn a_trip_leaves_the_depth_unchanged() {
 /// it.** Its replacement, 64, cleared the tightest of these four by ~1.9× and was still too high,
 /// because a consumer's grammar runs *inside* this recursion and pays for both frames: one
 /// measured consumer aborts at **51**, below 64. `RecursionLimiter::PARSE_DEFAULT_DEPTH` carries
-/// that derivation and is 16 today, or 1024 with the `stacker` feature. This cell's own 32 is
+/// that derivation and is 16, in every build. This cell's own 32 is
 /// unaffected — it is a *configured* budget chosen against the 125 in this table, which is the
 /// right table for a cell that runs tokora's grammar and nobody else's.
 #[test]
@@ -2771,9 +2772,10 @@ fn on_a_2mib_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) ->
 ///
 /// The depth is the **larger** of the two things it has to exceed, and it has to exceed both or it
 /// tests nothing. Past the native ceiling, or an abort is not what it would have hit; past the
-/// configured default, or nothing refuses it. The two swap places between configurations — 1000 is
-/// far past the ceiling and far past 16, but it is *under* the 1024 the `stacker` default carries,
-/// and this cell failed exactly that way when it was written with the constant alone.
+/// configured default, or nothing refuses it. The `max` is kept even though the shared default is
+/// now 16 in every build: it costs nothing, and it is what stopped this cell going vacuous when
+/// the default was briefly 1024 under `stacker` — which is exactly the failure it would have to
+/// survive again if a future feature moved the number.
 #[test]
 fn a_chain_far_past_the_native_ceiling_comes_back_as_a_value_not_an_abort() {
   let depth = FAR_PAST_THE_CEILING.max(RecursionLimiter::PARSE_DEFAULT_DEPTH + 16);
