@@ -242,6 +242,12 @@ fn collecting_more_errors_than_fit_latches_the_flag() {
 /// and reading `size_hint` before the first `next` made a hint load-bearing: an empty iterator
 /// claiming `usize::MAX` panicked in `with_capacity` where the delegated path had returned empty
 /// without allocating at all.
+///
+/// Checked at both dispatch points of [`ErrorContainer::from_errors`], because round 4 moved the
+/// default container off the funnel: `Errors<&str>` is `VecDeque`-backed and now delegates, while
+/// `Truncating` inherits the default. A `Truncating<VecDeque<_>>` reserving `usize::MAX` is a
+/// capacity-overflow panic, so surviving the collect *is* the observation that nothing was
+/// reserved.
 #[cfg(any(feature = "alloc", feature = "std"))]
 #[test]
 fn an_empty_iterator_that_overstates_its_lower_bound_reserves_nothing() {
@@ -273,6 +279,143 @@ fn an_empty_iterator_that_overstates_its_lower_bound_reserves_nothing() {
   let errors: Errors<&str> = ["a", "b", "c"].into_iter().collect();
   assert_eq!(errors.len(), 3);
   assert!(errors.capacity() >= 3);
+
+  // The same claim where the funnel itself is what runs.
+  type Funnelled<'a> = Errors<&'a str, Truncating<std::collections::VecDeque<&'a str>>>;
+
+  let errors: Funnelled<'_> = EmptyClaimingMax.collect();
+  assert!(errors.is_empty());
+  assert!(!errors.overflowed());
+
+  let errors: Funnelled<'_> = ["a", "b", "c"].into_iter().collect();
+  assert_eq!(errors.len(), 3);
+}
+
+/// al8n/tokora#284, round 4. `FromIterator` asks the container to build itself, and the default
+/// answer is the per-item funnel — so a container that leaves
+/// [`ErrorContainer::from_errors`] alone accounts exactly as a loop of `try_push` would, and the
+/// two containers that override it are the two that cannot refuse an error.
+#[cfg(any(feature = "alloc", feature = "std"))]
+#[test]
+fn the_bulk_hook_defaults_to_the_funnel_and_the_unbounded_containers_override_it() {
+  use std::{collections::VecDeque, vec::Vec};
+
+  // Defaulted: a bounded container reports what it refused, through the funnel.
+  let (container, overflowed) =
+    <ConstGenericArrayDeque<&str, 1> as ErrorContainer<&str>>::from_errors(["kept", "dropped"]);
+  assert_eq!(ErrorContainer::len(&container), 1);
+  assert!(
+    overflowed,
+    "the default funnel offers every error and reports"
+  );
+
+  let (container, overflowed) =
+    <ConstGenericArrayDeque<&str, 2> as ErrorContainer<&str>>::from_errors(["a", "b"]);
+  assert_eq!(ErrorContainer::len(&container), 2);
+  assert!(!overflowed);
+
+  // Overridden: unbounded, so `false` is a property of the container rather than a reading.
+  let (container, overflowed) = <Vec<u8> as ErrorContainer<u8>>::from_errors(std::vec![1u8, 2, 3]);
+  assert_eq!(container, std::vec![1u8, 2, 3]);
+  assert!(!overflowed);
+
+  let (container, overflowed) =
+    <VecDeque<u8> as ErrorContainer<u8>>::from_errors(std::vec![1u8, 2, 3]);
+  assert_eq!(container, VecDeque::from(std::vec![1u8, 2, 3]));
+  assert!(!overflowed);
+
+  // And an empty iterator builds an empty container on both paths.
+  let (container, overflowed) =
+    <Vec<u8> as ErrorContainer<u8>>::from_errors(core::iter::empty::<u8>());
+  assert!(container.is_empty());
+  assert!(!overflowed);
+
+  let (container, overflowed) =
+    <ConstGenericArrayDeque<&str, 1> as ErrorContainer<&str>>::from_errors(
+      core::iter::empty::<&str>(),
+    );
+  assert_eq!(ErrorContainer::len(&container), 0);
+  assert!(!overflowed);
+}
+
+/// What a container that lies through the bulk hook can do, pinned next to what one that lies
+/// through the per-item door can do: the same thing. `overflowed()` is only ever as honest as the
+/// container's own report, and `from_errors` is trusted no further than `try_push` — the wrapper
+/// neither re-derives the flag nor cross-checks it against `len()`, on either door.
+#[test]
+fn a_container_that_lies_through_the_bulk_hook_fails_exactly_as_one_that_lies_through_try_push() {
+  /// Overrides the bulk hook to keep one error and report clean.
+  struct LyingBulk(Option<&'static str>);
+
+  /// Keeps one error and reports clean from the *per-item* door, which every `ErrorContainer`
+  /// has always been able to do.
+  struct LyingPush(Option<&'static str>);
+
+  macro_rules! lying_container {
+    ($ty:ident $(, $extra:item)?) => {
+      impl ErrorContainer<&'static str> for $ty {
+        type IntoIter = core::option::IntoIter<&'static str>;
+        type Iter<'a> = core::option::Iter<'a, &'static str>;
+
+        fn new() -> Self {
+          Self(None)
+        }
+
+        fn push(&mut self, error: &'static str) {
+          self.0.get_or_insert(error);
+        }
+
+        fn pop(&mut self) -> Option<&'static str> {
+          self.0.take()
+        }
+
+        fn len(&self) -> usize {
+          self.0.iter().count()
+        }
+
+        fn iter(&self) -> Self::Iter<'_> {
+          self.0.iter()
+        }
+
+        fn into_iter(self) -> Self::IntoIter {
+          IntoIterator::into_iter(self.0)
+        }
+
+        $($extra)?
+      }
+    };
+  }
+
+  lying_container!(
+    LyingBulk,
+    fn from_errors<I: IntoIterator<Item = &'static str>>(errors: I) -> (Self, bool) {
+      let mut this = Self(None);
+      for error in errors {
+        this.push(error);
+      }
+      (this, false)
+    }
+  );
+  // `try_push` is defaulted to an infallible `push`, so this one lies by omission — which is the
+  // shape every container implemented before the bulk hook existed.
+  lying_container!(LyingPush);
+
+  let bulk: Errors<&str, LyingBulk> = ["kept", "dropped"].into_iter().collect();
+  assert_eq!(bulk.len(), 1, "one of the two errors is gone");
+  assert!(!bulk.overflowed(), "and the container said nothing was");
+
+  let per_item: Errors<&str, LyingPush> = ["kept", "dropped"].into_iter().collect();
+  assert_eq!(per_item.len(), 1);
+  assert!(!per_item.overflowed());
+
+  let mut per_item: Errors<&str, LyingPush> = Errors::new_in(ErrorContainer::new());
+  per_item.push("kept");
+  assert!(
+    per_item.try_push("dropped").is_ok(),
+    "the container accepted"
+  );
+  assert_eq!(per_item.len(), 1, "and then dropped it");
+  assert!(!per_item.overflowed());
 }
 
 /// `From<E>` inherited the same silence, and stays infallible: a capacity floor is not expressible

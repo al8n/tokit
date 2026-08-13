@@ -128,11 +128,14 @@ pub type DefaultContainer<E> = VecDeque<E>;
 /// by a route that mutates nothing: the container arrives already full, already short, and the
 /// flag is initialised to `false` (al8n/tokora#284). So the conversions that are handed **errors**
 /// — [`FromIterator`] and [`From<E>`](From) — are bounded on
-/// [`ErrorContainer`](super::ErrorContainer) and feed every item through
-/// [`try_push`](Self::try_push), exactly as a loop of [`push`](Self::push) would. `FromIterator`
-/// is the case that made it worth a bound: it has no channel for reporting a value the container
-/// refused, so a bounded `C` collecting more errors than it holds can only drop them, and
-/// `collect()` is read as lossless.
+/// [`ErrorContainer`](super::ErrorContainer) and take the container's own accounting answer:
+/// [`From<E>`](From) offers its one error to [`try_push`](Self::try_push), and `FromIterator`
+/// hands the whole iterator to
+/// [`ErrorContainer::from_errors`](super::ErrorContainer::from_errors), which is a loop of that
+/// same [`try_push`](Self::try_push) unless the container overrides it, and which reports what
+/// the container refused either way. `FromIterator` is the case that made it worth a bound: it
+/// has no channel for reporting a value the container refused, so a bounded `C` collecting more
+/// errors than it holds can only drop them, and `collect()` is read as lossless.
 ///
 /// [`from_container`](Self::from_container) is the one construction door that is **not** an
 /// insertion door, and the difference is who did the dropping. There the caller builds the
@@ -255,9 +258,12 @@ where
   ///
   /// That conclusion is only sound because those two are the *only* doors that can offer an
   /// error: no mutable view reaches the container's own insertion API, and the conversions that
-  /// are handed errors ([`FromIterator`], [`From<E>`](From)) route through
-  /// [`try_push`](Self::try_push) rather than building the container themselves. See the notes
-  /// on the type.
+  /// are handed errors ([`FromIterator`], [`From<E>`](From)) ask the container what it refused
+  /// rather than assuming it refused nothing — through [`try_push`](Self::try_push) for a single
+  /// error, and through
+  /// [`ErrorContainer::from_errors`](super::ErrorContainer::from_errors) for an iterator of them,
+  /// which is a loop of that same `try_push` unless the container overrides it. See the notes on
+  /// the type.
   ///
   /// It is a fact about *this* collection. [`clone`](Clone::clone) carries it, because the clone
   /// is the same collection's history; consuming this one with
@@ -424,57 +430,50 @@ where
 /// of this crate's bounded ones: `Option<E>` and `GenericArrayDeque<E, N>`, and so
 /// [`DefaultContainer`] in a no-alloc build.
 ///
-/// # What the funnel costs, and the route around it
+/// # Why the funnel is the *default* rather than the mechanism
 ///
-/// Delegating to `Container::from_iter` was free for the case that matters most: `Vec`'s and
-/// `VecDeque`'s own `FromIterator` specialise on a `Vec`/`VecDeque` `IntoIter` and take the
-/// source's allocation outright rather than copying out of it. Offering the errors one at a time
-/// cannot, so a `collect()` out of an owned `Vec` now holds the source buffer alive beside an
-/// equally large destination: measured over a million `u64`, zero allocations and a peak equal to
-/// the source became one allocation and a peak of twice it.
+/// Offering the errors one at a time is what makes the count honest, and for a bounded container
+/// it is also the only thing that can be done. For an unbounded one it is a tax with no accounting
+/// to show for it, and the tax is not a constant factor: `Vec`'s and `VecDeque`'s own
+/// `FromIterator` specialise on a `Vec`/`VecDeque` `IntoIter` and take the source's allocation
+/// outright, where a per-item fill has to hold the source buffer alive beside an equally large
+/// destination until the last error is copied across. Over a million `u64` that is a peak of twice
+/// the source instead of once it.
 ///
-/// That is the price of the funnel, and [`ErrorContainer`](super::ErrorContainer) cannot be given
-/// it back. A bulk hook on that trait is a caller's code, so an override that quietly keeps only
-/// what fits reaches the same silence this impl exists to close, and stable Rust has no way to
-/// reserve the override for the containers this crate implements itself: specialisation is
-/// unstable, sealing the trait would revoke the extension point the wrapper exists to serve, and
-/// dispatching on `TypeId` would confine `collect()` to `E: 'static`, which this crate's own
-/// `Errors<&str, _>` is not. Verifying instead of trusting — tallying what was offered through an
-/// adapter and comparing it against what the container reports holding — does catch a lying
-/// override, and does keep the reuse, but only because the standard library's `Inspect` happens
-/// to carry the in-place-collect specialisation through: the same tally in an adapter written
-/// here measures the doubling again. The accounting is not worth hanging on an unspecified
-/// optimisation holding inside somebody else's crate.
+/// **Peak is not the axis that matters.** Between roughly one and two times the source in
+/// available memory, the delegated fill completes and a per-item one asks for a second buffer it
+/// cannot get — and a failed allocation is not a diagnostic. It is `handle_alloc_error`, which
+/// aborts the process. So the funnel does not make an unbounded `collect()` slower, it roughly
+/// halves the largest error count that survives at a given ceiling. Measured at a 12 MiB ceiling:
+/// 1 572 864 errors collected, against 786 432 for the per-item fill, and the difference is an
+/// abort rather than a truncation.
 ///
-/// A caller who *knows* their container is unbounded does not have to pay it.
-/// [`from_container`](Errors::from_container) adopts the collected container whole and keeps the
-/// reuse, and it is honest there for the reason stated on it: a container that refuses nothing
-/// has no dropped-error history for the flag to have missed.
+/// So the choice of fill is [`ErrorContainer::from_errors`](super::ErrorContainer::from_errors), a
+/// bulk-construction hook on the container that **defaults to that per-item funnel** and returns
+/// the overflow state alongside the container. A container that leaves it alone accounts exactly
+/// as before; `Vec` and `VecDeque` override it with their own `FromIterator` and report `false`,
+/// which is sound because neither can refuse an error rather than because std specialises. If the
+/// specialisation ever stops firing, an unbounded `collect()` costs what the funnel costs today —
+/// the improvement rests on it, never the accounting.
+///
+/// **The hook trusts the container no further than [`try_push`](Errors::try_push) already does.**
+/// An override that keeps only what fits and answers `false` makes
+/// [`overflowed`](Errors::overflowed) report clean over dropped errors — which is precisely what a
+/// `try_push` that answers `Ok(())` after dropping the error does, on a trait whose whole purpose
+/// is to be implemented by callers.
+/// The bulk door is the same door, one call wider.
 impl<E, Container> FromIterator<E> for Errors<E, Container>
 where
   Container: super::ErrorContainer<E>,
 {
   #[inline]
   fn from_iter<I: IntoIterator<Item = E>>(iter: I) -> Self {
-    let mut iter = iter.into_iter();
-
-    // A size hint is a hint and `with_capacity` is not, so the first error is observed before
-    // anything is reserved on the strength of one. Reading the hint first made an empty iterator
-    // that claims `usize::MAX` panic in the reservation, where the delegated path returned empty
-    // without allocating at all — and `Vec`'s own `FromIterator` unrolls the first `next` ahead
-    // of its own reserve for exactly this reason. What the hint may still do is overstate a
-    // *non-empty* iterator into a capacity overflow, which is a protocol violation by the
-    // iterator and panics on the delegated path too.
-    let Some(first) = iter.next() else {
-      return Self::new_in(Container::new());
-    };
-
-    let mut this = Self::with_capacity(iter.size_hint().0.saturating_add(1));
-    this.push(first);
-    for error in iter {
-      this.push(error);
+    let (container, overflowed_flag) = Container::from_errors(iter);
+    Self {
+      container,
+      overflowed_flag,
+      _phantom: core::marker::PhantomData,
     }
-    this
   }
 }
 

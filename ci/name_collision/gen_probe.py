@@ -449,7 +449,7 @@ TRAITS = {
         "scope": None,
         "fixture": None,
     },
-    # ── `ErrorContainer` — a PRE-EXISTING trait gaining a DEFAULTED `&mut self` method ──────
+    # ── `ErrorContainer` — a PRE-EXISTING trait gaining two DEFAULTED items ─────────────────
     #
     # `Option<E>` is one of the four types tokora implements `ErrorContainer` for, and the one
     # that needs no construction and carries no inherent item of its own to confound the
@@ -461,17 +461,24 @@ TRAITS = {
     # the import tokora's item is a candidate nowhere and every row is a clean run over an
     # experiment that never happened.
     #
-    # `self_ty` stays absent: every `ErrorContainer` item bar `new`/`with_capacity` takes a
-    # receiver, and those two are pre-existing.
+    # `self_ty` is the same subject in the type namespace, and it is filled in because #284 adds
+    # the trait's first RECEIVER-LESS item since it shipped: `from_errors` declares no `self`, so
+    # its row is a `trait_assoc_fn` and needs the path form. It used to be absent on the reading
+    # that `new`/`with_capacity` were the only receiver-less items and both pre-existing — true
+    # when it was written, and exactly the kind of statement that stops being true the moment the
+    # trait gains a constructor. A `None` here is FATAL rather than a skipped row, so the harness
+    # would have reported the gap rather than swallowing it.
     #
     # READ THE HEADER ABOVE BEFORE READING A VERDICT HERE. `clear` takes `&mut self`, so it sits
     # at a strictly LATER pick than either consumer item `trait_method` can generate (`self` and
     # `&self`) — the consumer wins on both sides, the row AGREES, and agreement here is the
     # foreknown outcome rather than evidence of safety. That is #225's ruling; the rows are
-    # justified by name in `no_collision.txt` rather than read as green.
+    # justified by name in `no_collision.txt` rather than read as green. `from_errors` is the
+    # other shape and is expected `loud`: a path call walks no receiver chain, so tokora's item
+    # and the consumer's are both applicable at the one pick and rustc refuses to choose.
     "ErrorContainer": {
         "recvr": "Option::<PErr>::None",
-        "self_ty": None,
+        "self_ty": "Option::<PErr>",
         "scope": "use tokora::error::ErrorContainer;",
         "fixture": None,
     },

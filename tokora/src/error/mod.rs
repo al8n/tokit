@@ -448,6 +448,52 @@ pub trait ErrorContainer<E> {
     Ok(())
   }
 
+  /// Builds a container out of an iterator of errors, reporting whether any of them were refused.
+  ///
+  /// The bulk analogue of [`try_push`](Self::try_push), and it exists for the same reason:
+  /// [`FromIterator`] has no channel for reporting a value a bounded container could not take, so
+  /// a wrapper that has to account for every error offered cannot delegate to one. The returned
+  /// flag is that channel — `true` when at least one error did not fit, which is what an `Err`
+  /// from [`try_push`](Self::try_push) reports for a single error.
+  ///
+  /// **The default is the per-item funnel**, so a container that leaves it alone accounts for
+  /// every error whatever its own [`FromIterator`] would have done with them. An override owes
+  /// exactly one thing: `true` whenever the container did not take every error the iterator
+  /// yielded. `Vec` and `VecDeque` override it by delegating to their own [`FromIterator`] and
+  /// answering `false` unconditionally — sound because neither can *refuse* an error, not because
+  /// none was observed — and the bulk fill that buys back is why the hook is here. Overriding is
+  /// worthwhile only for a container whose fill beats offering the errors one at a time; the
+  /// default is correct for every container and is what a bounded one should keep.
+  ///
+  /// An implementation that drops an error and answers `false` makes
+  /// [`Errors::overflowed`](Errors::overflowed) report clean over a dropped error. That is the
+  /// same logic error, with the same consequence, as a [`try_push`](Self::try_push) that answers
+  /// `Ok(())` after dropping one: this hook is trusted no further than the per-item door already
+  /// is, and a wrapper reading the flag neither re-derives nor cross-checks it.
+  ///
+  /// The reservation the default makes is taken **after the first error is observed**. A size
+  /// hint is a hint: an empty iterator claiming `usize::MAX` is a capacity-overflow panic if it
+  /// is reserved for, and `Vec`'s own [`FromIterator`] unrolls its first `next` ahead of its own
+  /// reserve for that reason.
+  #[inline]
+  fn from_errors<I>(errors: I) -> (Self, bool)
+  where
+    Self: Sized,
+    I: IntoIterator<Item = E>,
+  {
+    let mut errors = errors.into_iter();
+    let Some(first) = errors.next() else {
+      return (Self::new(), false);
+    };
+
+    let mut container = Self::with_capacity(errors.size_hint().0.saturating_add(1));
+    let mut overflowed = container.try_push(first).is_err();
+    for error in errors {
+      overflowed |= container.try_push(error).is_err();
+    }
+    (container, overflowed)
+  }
+
   /// Pop an error from the first of the collection.
   fn pop(&mut self) -> Option<E>;
 
@@ -629,6 +675,18 @@ const _: () = {
       self.push(error);
     }
 
+    /// A `Vec` grows until the allocator refuses, and an allocation failure is not a refusal it
+    /// can report — so it never declines an error and the flag is unconditionally `false`. That
+    /// is what makes delegating to its own `FromIterator` sound; the bulk fill std may perform
+    /// underneath is the payoff, not the justification.
+    #[inline(always)]
+    fn from_errors<I>(errors: I) -> (Self, bool)
+    where
+      I: IntoIterator<Item = E>,
+    {
+      (errors.into_iter().collect(), false)
+    }
+
     #[inline(always)]
     fn pop(&mut self) -> Option<E> {
       if self.is_empty() {
@@ -680,6 +738,15 @@ const _: () = {
     #[inline(always)]
     fn push(&mut self, error: E) {
       self.push_back(error);
+    }
+
+    /// Unbounded for the same reason [`Vec`] is, and sound for the same one.
+    #[inline(always)]
+    fn from_errors<I>(errors: I) -> (Self, bool)
+    where
+      I: IntoIterator<Item = E>,
+    {
+      (errors.into_iter().collect(), false)
     }
 
     #[inline(always)]

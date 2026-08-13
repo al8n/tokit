@@ -39,6 +39,19 @@ and will red until they do.
   through `pop`, so an existing implementation keeps compiling unchanged; the four built-in
   containers override it with their own.
 
+- **`ErrorContainer::from_errors` — the bulk-construction hook `FromIterator` cannot be** (#284).
+  `Errors::from_iter` has to know what its container refused, and `FromIterator` has no channel for
+  saying. This one returns `(Self, bool)`: the container, and whether it declined any of the errors
+  it was offered. It is **defaulted to the per-item `try_push` funnel**, so a container that ignores
+  it accounts exactly as it did and no existing implementation changes; `Vec` and `VecDeque`
+  override it with their own `FromIterator` and answer `false`, which is sound because neither can
+  refuse an error — not because the standard library specialises the fill underneath.
+
+  It is trusted no further than `try_push` already is. A container that keeps only what fits and
+  answers `false` makes `Errors::overflowed()` report clean over dropped errors, which is precisely
+  what a `try_push` answering `Ok(())` after dropping one has always been able to do. Same door on
+  the same caller-implemented trait, one call wider.
+
 - **`InputRef::peek_map` — a windowed read whose return type can express a terminal stop.** The
   terminal-aware reads this crate shipped were all **head-only**: `peek_kind`, `head_satisfies` and
   `peek_head_map` raise on a resource-limit trip or a latched poison boundary and reserve
@@ -153,10 +166,12 @@ and will red until they do.
   `AsMut<C>`, and the enumeration that found those two could not see it because it enumerated
   mutation.
 
-  Both conversions build an empty container and feed every item through `try_push`, so a refusal
-  latches the flag exactly as a loop of `push` would. `From<E>` stays **infallible**: a capacity
-  *floor* is what would make it unconditionally lossless and there is nothing on `ErrorContainer`
-  to express one with — `remaining_capacity(&self)` reads an instance, and an associated
+  Both conversions now take the container's own accounting answer instead of assuming there was
+  nothing to answer. `From<E>` offers its one error to `try_push`; `FromIterator` hands the whole
+  iterator to `ErrorContainer::from_errors` (above), which is a loop of that same `try_push` unless
+  the container overrides it, and which reports what did not fit either way. `From<E>` stays
+  **infallible**: a capacity *floor* is what would make it unconditionally lossless and there is
+  nothing on `ErrorContainer` to express one with — `remaining_capacity(&self)` reads an instance, and an associated
   `const MIN_CAPACITY` would be a caller's declaration, which is the class of promise this type
   already refuses to rest on. The zero-capacity case is answered by the flag rather than by a
   `Result`.
@@ -175,35 +190,36 @@ and will red until they do.
 
   The reservation the funnel makes is taken **after the first error is observed**, not from the
   size hint alone. A hint is a hint: an empty iterator reporting `usize::MAX` is a
-  capacity-overflow panic if it is reserved for, where the delegated path returned empty without
+  capacity-overflow panic if it is reserved for, where a delegated fill returns empty without
   allocating at all. `Vec`'s own `FromIterator` unrolls its first `next` ahead of its own reserve
-  for the same reason. An overstated hint on a *non-empty* iterator still panics, as it did on the
-  delegated path — that is a protocol violation by the iterator, not a property of this change.
+  for the same reason. An overstated hint on a *non-empty* iterator still panics, as it does on a
+  delegated fill — that is a protocol violation by the iterator, not a property of this change.
 
-  **What the funnel costs.** Offering the errors one at a time gives up the standard library's
-  bulk fill, and for the default container that fill was not a constant factor: `Vec`'s and
-  `VecDeque`'s `FromIterator` specialise on a `Vec`/`VecDeque` `IntoIter` and take the source's
-  allocation outright, so `Errors::from_iter` over an owned `Vec` used to be a pointer move.
-  Measured over 1 Mi `u64`, the delegated path made **zero** allocations and peaked at the size of
-  the source; the funnel makes one and peaks at **twice** it, because the source buffer stays alive
-  until the last error has been copied out of it. Interleaved in one process, the delegated fill is
-  O(1) at 13–17 ns for every length, against 22 ns at 16 errors, 115 ns at 256, 375 ns at 1024 and
-  1.29 ms at 1 Mi.
+  **What the funnel costs, and why it is the container's default rather than the mechanism.**
+  Offering the errors one at a time is what makes the count honest, and for a bounded container it
+  is the only thing available. For an unbounded one it is a tax with no accounting to show for it:
+  `Vec`'s and `VecDeque`'s `FromIterator` specialise on a `Vec`/`VecDeque` `IntoIter` and take the
+  source's allocation outright, where a per-item fill holds the source buffer alive beside an
+  equally large destination until the last error has been copied across. Measured over 1 Mi `u64`,
+  zero allocations and a peak equal to the source became one allocation and a peak of twice it, and
+  a fill that was O(1) at 13-17 ns for every length became 22 ns at 16 errors, 115 ns at 256,
+  375 ns at 1024 and 1.29 ms at 1 Mi.
 
-  That is not recoverable through `ErrorContainer`. A bulk hook on it is a caller's code, so an
-  override that keeps only what fits reaches the same silence this change closes — and stable Rust
-  cannot reserve the override for the containers this crate implements itself: specialisation is
-  unstable, sealing the trait would revoke the extension point the wrapper exists to serve, and
-  `TypeId` dispatch would confine `collect()` to `E: 'static`, which `Errors<&str, _>` is not.
-  Tallying what was offered and checking it against what the container reports holding *does* catch
-  a lying override and *does* keep the reuse — but only because the standard library's `Inspect`
-  carries the in-place-collect specialisation through; the same tally in an adapter written here
-  measures the doubling again. The accounting is not worth hanging on an unspecified optimisation
-  holding inside another crate.
+  **And peak is the wrong axis.** Between roughly one and two times the source in available memory
+  the delegated fill completes and the per-item one asks for a second buffer it cannot get — and a
+  failed allocation is not a diagnostic that a caller handles. It is `handle_alloc_error`, which
+  aborts the process. So for a caller-controlled error count the funnel does not make an unbounded
+  `collect()` slower, it **halves the largest collection that survives a given ceiling**: measured
+  against a 12 MiB allocator ceiling, 1 572 864 `u64` errors collected before this change and
+  786 432 with the per-item fill, the difference being an abort rather than a truncation.
 
-  `Errors::from_container(iter.collect())` keeps the reuse today — measured at zero allocations and
-  a peak equal to the source — and is honest for exactly the containers where the cost is felt: one
-  that refuses nothing has no dropped-error history for the flag to have missed.
+  Which fill runs is therefore the container's own answer, through `ErrorContainer::from_errors`,
+  whose **default is that per-item funnel**. `Vec` and `VecDeque` override it with their own
+  `FromIterator`, and every number goes back to where it was: zero allocations, a peak equal to the
+  source, and the same 1 572 864-error ceiling. That the override is *correct* rests on neither
+  container being able to refuse an error; that it is *fast* rests on the standard library's
+  in-place-collect specialisation, and a standard library that stopped specialising would leave an
+  unbounded `collect()` costing what the funnel costs with the accounting exactly as sound.
 
   `Errors::from_container` is unchanged and is the one construction door that is deliberately
   *not* an insertion door: the caller builds the container, the wrapper adopts it, and the flag
@@ -510,10 +526,24 @@ The deref does not enter it, which is worth saying because the base side still h
 step is walked only after every pick on `Errors` itself has failed, and the consumer's item is
 found at the `&mut Errors` pick. The before-state is the consumer's item on both readings.
 
-`ErrorContainer::clear` is the same change's other new name, and it is **not** in this section:
-it is a `&mut self` trait method, so it sits at a strictly later pick than either consumer shape
-the harness can generate, the three rows agree on both sides, and they are justified by name in
-`no_collision.txt` rather than read as green — `Emitter::commit_lexer_error`'s analysis exactly.
+`ErrorContainer`'s two new names are **not** in this section, and for two different reasons.
+`clear` is a `&mut self` trait method, so it sits at a strictly later pick than either consumer
+shape the harness can generate, the three rows agree on both sides, and they are justified by name
+in `no_collision.txt` rather than read as green — `Emitter::commit_lexer_error`'s analysis exactly.
+`from_errors` declares no receiver, so a call to it walks no receiver chain at all: tokora's item
+and a consumer's own extension item are both applicable at the one pick, and rustc refuses to
+choose. Both rows are loud, by `E0034`:
+
+```text
+loud    from_errors/used        base=witness=1  head=no-compile
+loud    from_errors/discarded   base=witness=1  head=no-compile
+```
+
+It is the trait's first receiver-less item since it shipped, which is why `gen_probe.py`'s
+`ErrorContainer` record gains a `self_ty`. That field was absent on the reading that `new` and
+`with_capacity` were the only receiver-less items and both pre-existing — true when written, and
+the kind of statement a new constructor falsifies. A missing `self_ty` is FATAL rather than a
+skipped row, so the harness would have said so.
 
 Recorded in `ci/name_collision/disclosed.txt`, and on **this** branch: the probe's inventory is a
 two-sided delta, so once this merges the names exist on both sides, the rows leave every future
