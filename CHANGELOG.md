@@ -95,6 +95,22 @@ and will red until they do.
   wrongly**. Fixing the adapter fixes the payload on the complete and partial-frontier paths with
   no change at the input layer. Reported by an external audit at `7789dcd`.
 
+- **`examples/json.rs` accepted lone surrogates, so the shipped JSON demonstration accepted
+  invalid JSON.** The string rule spelled its unicode escape `u[a-fA-F0-9]{4}`, which admits the
+  surrogate range `D800`–`DFFF`. RFC 8259 §7 admits a surrogate code unit only as the matching half
+  of a high/low pair, so `"\uD800"`, `"\uDC00"` and `"\uD800A"` are not JSON and the example
+  accepted all three. It is the example, not the library — but a lexer example's whole job is to be
+  a correct model of the language it names, and this one was already being copied as a reference
+  JSON lexer.
+
+  Surrogate pairing is now spelled in the regex rather than validated in a callback, and the rule
+  is split into `Token::String` (`" char* "`) and `Token::EscapedString` (`" char* esc
+  (char|esc)* "`) — disjoint by construction, so the DFA needs no priority tie-break. Both report
+  `TokenKind::String`, so the grammar and every diagnostic it raises are unchanged; what the split
+  buys is the fact a consumer wants, which is whether the slice needs decoding before use.
+
+  Measured over the bundled 107 KB `sample.json`, interleaved in one process against the rule as it
+  shipped: a validating callback costs **1.65×**, the folded regex **1.02–1.07×**.
 
 ## 0.9.1 (2026-08-08)
 

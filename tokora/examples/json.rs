@@ -217,8 +217,36 @@ enum Token<'a> {
   #[regex(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?", |lex| lex.slice().parse::<f64>().map_err(|e| JsonLexerError::ParseFloat(Spanned::new(lex.span().into(), e))))]
   Number(f64),
 
-  #[regex(r#""([^"\\\x00-\x1F]|\\(["\\bnfrt/]|u[a-fA-F0-9]{4}))*""#, |lex| lex.slice())]
+  // ── Strings, with surrogate pairing folded into the DFA ─────────────────────────────────
+  //
+  // RFC 8259 §7 admits a `\uXXXX` escape only when `XXXX` is *not* a surrogate, or when a high
+  // surrogate (`D800`–`DBFF`) is immediately followed by a `\u` low surrogate (`DC00`–`DFFF`).
+  // `u[a-fA-F0-9]{4}` admits every code unit including the halves, so it accepts `"\uD800"`,
+  // `"\uDC00"` and `"\uD800A"` — none of which are JSON.
+  //
+  // Validating the escape in a callback is the obvious repair and the wrong one: it re-reads
+  // the slice the DFA has already walked. Spelling the pairing rule as a regex costs nothing at
+  // run time, because the automaton is deciding those bytes anyway.
+  //
+  //   char = [^"\\\x00-\x1F]
+  //   esc  = \\ ( ["\\bnfrt/] | u nonsurrogate | u high \\ u low )
+  //     nonsurrogate = a first nibble that is not D, or D followed by 0–7
+  //     high         = D followed by 8–B          low = D followed by C–F
+  //
+  // TWO RULES, ONE KIND. `String` is `" char* "` and `EscapedString` is
+  // `" char* esc (char|esc)* "`: disjoint by construction (one forbids a backslash, the other
+  // requires one), so the DFA needs no priority tie-break and the split is free. What it buys is
+  // the fact a consumer actually wants — whether the slice needs unescaping before use, which is
+  // the difference between borrowing from the source and allocating. Both report
+  // `TokenKind::String`, so the grammar below and every diagnostic it raises are unchanged.
+  #[regex(r#""[^"\\\x00-\x1F]*""#, |lex| lex.slice())]
   String(&'a str),
+
+  #[regex(
+    r#""[^"\\\x00-\x1F]*\\(?:["\\bnfrt/]|u(?:[0-9a-cA-Ce-fE-F][0-9a-fA-F]{3}|[Dd][0-7][0-9a-fA-F]{2}|[Dd][89abAB][0-9a-fA-F]{2}\\u[Dd][c-fC-F][0-9a-fA-F]{2}))(?:[^"\\\x00-\x1F]|\\(?:["\\bnfrt/]|u(?:[0-9a-cA-Ce-fE-F][0-9a-fA-F]{3}|[Dd][0-7][0-9a-fA-F]{2}|[Dd][89abAB][0-9a-fA-F]{2}\\u[Dd][c-fC-F][0-9a-fA-F]{2})))*""#,
+    |lex| lex.slice()
+  )]
+  EscapedString(&'a str),
 }
 
 impl core::fmt::Display for Token<'_> {
@@ -233,12 +261,12 @@ impl core::fmt::Display for Token<'_> {
       Token::Comma => write!(f, ","),
       Token::Null => write!(f, "null"),
       Token::Number(n) => write!(f, "{}", n),
-      Token::String(s) => write!(f, "\"{}\"", s),
+      Token::String(s) | Token::EscapedString(s) => write!(f, "\"{}\"", s),
     }
   }
 }
 
-impl Token<'_> {
+impl<'a> Token<'a> {
   #[inline]
   fn is_value_start(&self) -> bool {
     matches!(
@@ -247,9 +275,23 @@ impl Token<'_> {
         | Token::Null
         | Token::Number(_)
         | Token::String(_)
+        | Token::EscapedString(_)
         | Token::BraceOpen
         | Token::BracketOpen
     )
+  }
+
+  /// The raw source slice of either string variant, quotes included.
+  ///
+  /// A consumer that needs the *decoded* value branches on the variant instead: `String` can be
+  /// used as it stands, and only `EscapedString` has to allocate. That is the whole payoff of
+  /// splitting the rule, and it is why this accessor is the only place the split is flattened.
+  #[inline]
+  fn as_json_string(&self) -> Option<&'a str> {
+    match self {
+      Token::String(s) | Token::EscapedString(s) => Some(s),
+      _ => None,
+    }
   }
 }
 
@@ -322,7 +364,9 @@ impl From<&Token<'_>> for TokenKind {
       Token::Comma => TokenKind::Comma,
       Token::Null => TokenKind::Null,
       Token::Number(_) => TokenKind::Number,
-      Token::String(_) => TokenKind::String,
+      // Both string variants answer the same kind: the escape split is a lexer fact, and the
+      // grammar's expected-sets should go on saying "string".
+      Token::String(_) | Token::EscapedString(_) => TokenKind::String,
     }
   }
 }
@@ -484,13 +528,16 @@ where
   Ctx::Emitter: Emitter<'inp, JsonLexer<'inp>, Error = JsonError<'inp>>,
 {
   expect(|t: &Token<'inp>| {
-    if matches!(t, Token::String(_)) {
+    if matches!(t, Token::String(_) | Token::EscapedString(_)) {
       Ok(())
     } else {
       Err(Expected::one(TokenKind::String))
     }
   })
-  .map(Token::unwrap_string)
+  .map(|t: Token<'inp>| {
+    t.as_json_string()
+      .expect("`expect` accepted only a string token")
+  })
   .parse_input(inp)
 }
 
@@ -581,7 +628,7 @@ where
             Token::Bool(_) => Branch::B0,
             Token::Null => Branch::B1,
             Token::Number(_) => Branch::B2,
-            Token::String(_) => Branch::B3,
+            Token::String(_) | Token::EscapedString(_) => Branch::B3,
             Token::BracketOpen => Branch::B4,
             Token::BraceOpen => Branch::B5,
             _ => return Ok(None),
@@ -626,7 +673,7 @@ where
             Token::Bool(_) => Ok(Branch::B0),
             Token::Null => Ok(Branch::B1),
             Token::Number(_) => Ok(Branch::B2),
-            Token::String(_) => Ok(Branch::B3),
+            Token::String(_) | Token::EscapedString(_) => Ok(Branch::B3),
             Token::BracketOpen => Ok(Branch::B4),
             Token::BraceOpen => Ok(Branch::B5),
             tok => Err(JsonError::UnexpectedToken(
@@ -659,12 +706,83 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-  use super::{JsonError, TokenKind};
+  use super::{JsonError, Token, TokenKind};
   use tokora::error::UnexpectedEot;
 
   #[test]
   fn test_example() {
     super::main();
+  }
+
+  /// The one token `src` is, or `None` if `src` is not exactly one token.
+  ///
+  /// This is the question RFC 8259 asks of the grammar and the one the parser cannot ask on its
+  /// own behalf: a source the string rule rejects still *parses* — as a lexer error the emitter
+  /// may recover from — so "the parse failed" is a weaker claim than "the text is not a string".
+  fn sole_token(src: &str) -> Option<Token<'_>> {
+    use tokora::logos::Logos;
+
+    let mut lexer = Token::lexer(src);
+    let first = lexer.next()?.ok()?;
+    if lexer.span() != (0..src.len()) || lexer.next().is_some() {
+      return None;
+    }
+    Some(first)
+  }
+
+  // A lone surrogate is not JSON (RFC 8259 §7): a surrogate code unit is admissible only as the
+  // matching half of a `\uD800`–`\uDBFF` / `\uDC00`–`\uDFFF` pair. The three the issue named are
+  // the first three here; the rest are the mismatches that a rule checking only the *high* half
+  // would still let through.
+  #[test]
+  fn lone_surrogate_escapes_are_rejected() {
+    for src in [
+      r#""\uD800""#,       // a lone high surrogate
+      r#""\uDC00""#,       // a lone low surrogate
+      r#""\uD800A""#,      // a high surrogate followed by something that is not a low one
+      r#""\uD800\u0041""#, // ... including a perfectly valid escape that is not a low one
+      r#""\uDBFF\uDBFF""#, // two highs
+      r#""\uDC00\uDFFF""#, // a low leading the pair
+      r#""\uD800\\""#,     // a high followed by an escape that is not a `\u` at all
+    ] {
+      assert!(
+        sole_token(src).is_none(),
+        "{src} is not JSON, but the lexer accepted it"
+      );
+    }
+  }
+
+  // The other side, which is what makes the rejection above a repair rather than a blanket ban:
+  // every well-formed escape still lexes, and the pair range is closed at both ends.
+  #[test]
+  fn paired_surrogates_and_ordinary_escapes_are_accepted() {
+    for src in [
+      r#""\uD83D\uDE00""#, // a paired surrogate: one astral code point
+      r#""\uD800\uDC00""#, // the lowest pair
+      r#""\uDBFF\uDFFF""#, // the highest pair
+      r#""\uD7FF""#,       // the code unit just below the surrogate range
+      r#""\uE000""#,       // and the one just above it
+      r#""\u0041""#,       // a plain BMP escape
+      r#""a\tb\u00e9""#,   // a mix of escapes among ordinary characters
+      r#""\\""#,           // a lone escaped backslash
+    ] {
+      assert!(
+        matches!(sole_token(src), Some(Token::EscapedString(_))),
+        "{src} is JSON, and it carries an escape"
+      );
+    }
+  }
+
+  // The split is disjoint, and it is what recovers `escaped` for free: the rule that matched says
+  // whether the slice needs decoding before use.
+  #[test]
+  fn the_two_string_rules_partition_by_whether_an_escape_is_present() {
+    assert!(matches!(sole_token(r#""abc""#), Some(Token::String(_))));
+    assert!(matches!(sole_token(r#""""#), Some(Token::String(_))));
+    assert!(matches!(
+      sole_token(r#""ab\ncd""#),
+      Some(Token::EscapedString(_))
+    ));
   }
 
   // The `Kind`-table spelling of end-of-input reaches `JsonError` with its position intact.
