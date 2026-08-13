@@ -355,6 +355,55 @@ EXTRA_LEGS = [
         # `std,logos,combinators` leg states at length.
         "why": "container_contract, the only declared build of a tinyvec_1-gated suite",
     },
+    {
+        "features": "std,logos,combinators,stacker",
+        "tests": True,
+        # Both claims are FALSE and the leg is kept anyway, exactly as `fold,alloc` is. Neither
+        # derived quantity can see what this leg protects, and saying so is the point.
+        #
+        # `unique_predicates`: no predicate in `tokora/src/` names `stacker` beside another
+        # feature. The two gates the feature owns are single-feature — `cfg(feature = "pratt")`
+        # on `mod native_stack`, `cfg(feature = "stacker")` on the two `maybe_grow` arms inside
+        # it — so the enumeration in (1) has nothing to attribute here. Writing an
+        # `all(pratt, stacker)` predicate the code does not need, purely so this leg became
+        # derivable, would be writing a `cfg` for the gate rather than for the program. The
+        # manifest states that pair instead: `stacker = [..., "pratt"]`, so the two features
+        # cannot come apart and no predicate has to say so.
+        #
+        # `unique_suites`: `std,logos,combinators --tests` is a strict SUBSET of this leg, so it
+        # dominates every suite this one compiles.
+        "unique_predicates": False,
+        "unique_suites": False,
+        # DECLARED FOR THE SUITES, NOT FOR THE LIBRARY. `stacker` composes with the `pratt`
+        # family and with nothing else: `mod native_stack` is `pratt`-gated and its only two
+        # callers are the two Pratt frame prologues — and since `stacker = [..., "pratt"]` the
+        # `--each-feature` `stacker` leg now carries `pratt` with it and does compile that module
+        # and both prologues. That closes the library half, and it is why this entry no longer
+        # claims to be the only build of the pair.
+        #
+        # What `--each-feature stacker` still cannot reach is any suite that EXERCISES the pair:
+        # 82 of the 106 integration suites gate on the umbrella and 79 of those want a logos
+        # version too, so a `stacker`-plus-`pratt` leg without `std,logos,combinators` compiles
+        # none of their bodies. Without this entry the only build that does is `--all-features`
+        # — precisely the configuration the docstring refuses to count, for the reason it gives:
+        # a third feature can supply whatever the pair is missing.
+        #
+        # What it buys, stated as what CI actually does with it and no wider: the
+        # `feature combinations` job runs `cargo check -p tokora <leg>`, so this leg
+        # TYPE-CHECKS the pratt wiring against the segmented prologue — with `--tests`, so the
+        # suites' bodies too, and with `rowan` and `tinyvec_1` off. It does not execute them.
+        # Executing the pair is `cargo test --all-features`'s job and stays there; what this leg
+        # adds is the compile of the pair in a configuration that is not the everything-on one.
+        #
+        # `pratt_limit` carries three `#[cfg(feature = "stacker")]` cells — the segment-crossing
+        # ones — that exist in no other declared leg's compile, and `recursion_tracker`'s literal
+        # pins on `SEGMENTED_PRATT_DEPTH` are gated the same way.
+        #
+        # `stacker = ["dep:stacker", "std", "pratt"]`, so `std` and `pratt` arrive with it and are
+        # named only for symmetry with the siblings; `logos` and the umbrella are named for the
+        # reasons the `std,logos,combinators` leg states at length.
+        "why": "the only leg compiling the stacker-gated suites against the pratt family",
+    },
 ]
 
 CRATE = "tokora"

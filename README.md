@@ -135,6 +135,7 @@ is `std` alone, and every combinator is compiled unconditionally.
 | `logos_0_14` | Enables the optional `logos@0.14` adapter. |
 | `logos_0_15` | Enables the optional `logos@0.15` adapter. |
 | `logos_0_16` | Enables the optional `logos@0.16` adapter used by `logos`. |
+| `stacker` | Runs each **Pratt frame prologue** on a fresh heap stack segment when the native stack is nearly exhausted; implies `std` and `pratt`. It segments those two prologues and nothing else — a consumer's own `descend`/`descending` frames are ordinary native frames and are untouched — so it does **not** move `RecursionLimiter::PARSE_DEFAULT_DEPTH`, the budget they share. `RecursionLimiter::SEGMENTED_PRATT_DEPTH` is the larger figure it does justify, for a caller whose whole descent is Pratt frames to opt into. It is not a substitute for the recursion budget: a segment is an `mmap`, so a deep enough input still ends the process with nothing on any `Result` channel. |
 | `trace` | Enables parser tracing; implies `std`. |
 | `unstable-raw` | Exposes the unstable raw checkpoint API. |
 | `conformance` | Enables the custom-lexer conformance test kit; implies `std`. |

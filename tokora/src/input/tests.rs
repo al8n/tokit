@@ -21,7 +21,16 @@ fn input_context_new_and_into_components() {
   // `new` carries the default budget: protection on, at tokora's own native-stack-safe depth —
   // NOT `RecursionLimiter::new()`'s own general-purpose default, which is a different number for
   // a different subject (see `RecursionLimiter`'s `Two Defaults, Two Subjects` docs).
-  assert_eq!(r.limitation(), 64);
+  //
+  // Named rather than written out: the claim being made here is that `new` carries the PARSE
+  // default AT ALL, not what that default is. The number itself is stated as a literal in exactly
+  // one place — `state/recursion_tracker/tests.rs` — and derived from the measurement by the
+  // `const` assertions beside it. Writing it out here too would be a third copy that has to be
+  // found and edited whenever the first two move.
+  assert_eq!(
+    r.limitation(),
+    crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH
+  );
   assert_ne!(
     r.limitation(),
     crate::state::recursion_tracker::RecursionLimiter::new().limitation(),

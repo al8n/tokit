@@ -531,15 +531,25 @@ fn a_valid_parse_records_no_recovery_at_all() {
 
 // ── The boundary of the posture: what ends the parse ────────────────────────────
 
-/// tokora's parser-facing recursion budget, which this grammar inherits and cannot override.
+/// tokora's parser-facing recursion budget, which [`parse`] inherits.
 ///
-/// **This example did not choose 64.** `parse_lossless` builds its own `ParseContext`, and the
-/// only door to a caller-chosen budget — `ParserContext::with_recursion_limiter` — is not
-/// reachable through it (`Cst::from_sink`, `Sink::finish` and `Input::into_emitter` are all
-/// `pub(crate)`, so the plumbing cannot be hand-rolled either). The number is therefore a
-/// dependency on a library default, spelled out here so that a change to it turns this cell red
-/// instead of silently moving what the example demonstrates.
-const PARSE_DEPTH_BUDGET: usize = 64;
+/// **This example did not choose the number, and that is now a choice rather than a wall.** It
+/// used to be a wall: `parse_lossless` built its own `ParseContext`, and the only door to a
+/// caller-chosen budget — `ParserContext::with_recursion_limiter` — was unreachable through it
+/// (`Cst::from_sink`, `Sink::finish` and `Input::into_emitter` are all `pub(crate)`, so the
+/// plumbing could not be hand-rolled either). `cst::parse_lossless_with_context` is that door, and
+/// `a_lossless_parse_can_raise_the_budget_the_default_refused_at` below is this file's pin on it.
+/// [`parse`] stays defaulted because an unconfigured parse is what the rest of the file is about.
+///
+/// **It used to be the literal `64`, and it is now read off the library.** The literal was a
+/// canary — "a change to the default turns this cell red instead of silently moving what the
+/// example demonstrates" — and it fired exactly as intended when the default was re-derived.
+/// Reading it off the library is right for *this* file, whose subject is the boundary and not the
+/// number; what a derived expectation cannot do is notice that the number moved, so that job is
+/// held by literal cells in `src/state/recursion_tracker/tests.rs` and by the `const` assertions
+/// beside the constant, which red when the default moves without its derivation.
+const PARSE_DEPTH_BUDGET: usize =
+  tokora::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH;
 
 /// The deepest nesting that still parses. One frame short of the budget.
 const DEEPEST_CLEAN: usize = PARSE_DEPTH_BUDGET - 1;
@@ -608,11 +618,70 @@ fn a_recursion_trip_ends_the_parse_without_panicking() {
     assert_eq!(error_node_ranges(&p), []);
   }
 
-  // Well past the boundary, to show the trip is a floor and not a one-off at the edge.
-  let src = group(200);
+  // Well past the boundary, to show the trip is a floor and not a one-off at the edge. Relative
+  // to the budget rather than a literal, because a literal chosen against one default silently
+  // stops being past the boundary when the default moves — which is what happened to the 200 that
+  // used to be here.
+  let src = group(PARSE_DEPTH_BUDGET * 3);
   let p = parse(&src);
   assert_round_trips(&src, &p);
   assert_eq!(p.terminated, Some(Diag::DepthExceeded));
+}
+
+/// **The escape hatch, on the exact input the default refuses.**
+///
+/// The cell above establishes that `PARSE_DEPTH_BUDGET` nested groups ends the parse. This one
+/// takes that same source, hands the lossless driver an `InputContext` carrying a larger
+/// `RecursionLimiter`, and requires it to parse **clean**: no trip, no diagnostic, no hole, and a
+/// real AST rather than `Expr::Error`.
+///
+/// # What it is a regression for
+///
+/// Lowering the parser's default from 64 to 16 is right — 64 sat above the depth at which a
+/// measured consumer grammar aborts — but on its own it would have been a break with no remedy for
+/// exactly this population: a lossless consumer whose documents legitimately nest between the two
+/// figures, and whose door built its own context. The lowering and the hatch belong in one change,
+/// and this is the cell that says so. **A fix that raised the default back instead would pass the
+/// cell above and fail this one's premise**, which is why the two are written as a pair and why
+/// this one asserts the default still refuses first.
+///
+/// The raised budget is a bounded number and not `unlimited()`, deliberately: the point is that a
+/// caller can pick a ceiling appropriate to their own stack, not that the ceiling can be removed.
+#[test]
+fn a_lossless_parse_can_raise_the_budget_the_default_refused_at() {
+  let src = format!(
+    "{}1{}",
+    "(".repeat(PARSE_DEPTH_BUDGET),
+    ")".repeat(PARSE_DEPTH_BUDGET)
+  );
+
+  // The premise, restated here rather than assumed from the cell above: if this ever stops
+  // holding, the rest of this cell is testing nothing.
+  let defaulted = parse(&src);
+  assert_eq!(
+    defaulted.terminated,
+    Some(Diag::DepthExceeded),
+    "the default must still refuse this input, or the hatch below has nothing to open"
+  );
+
+  // Four times the default: past the input's depth, and still a figure someone chose.
+  let raised = expr_recovery::parse_with_depth(&src, PARSE_DEPTH_BUDGET * 4);
+  assert_round_trips(&src, &raised);
+  assert_eq!(
+    raised.terminated, None,
+    "a lossless caller that asked for the depth must get it"
+  );
+  assert_eq!(raised.diagnostics, [], "and the parse is otherwise clean");
+  assert_eq!(error_node_ranges(&raised), [], "with no holes");
+  assert_ne!(raised.ast, Expr::Error, "and a real AST");
+
+  // And the hatch is a *budget*, not an opt-out: one frame short of the input's depth still trips.
+  let still_short = expr_recovery::parse_with_depth(&src, PARSE_DEPTH_BUDGET - 1);
+  assert_eq!(
+    still_short.terminated,
+    Some(Diag::DepthExceeded),
+    "a raised-but-insufficient budget must still refuse — the caller chose a number, not `off`"
+  );
 }
 
 /// The budget is a *depth* limit, not a length limit.

@@ -1323,9 +1323,10 @@ fn cells() -> Vec<Cell> {
 /// asserted** — see [`check_recursion_budget`], which runs the deepest fixture under a default
 /// [`Parser`] and requires it to fail, then under this ceiling and requires it to produce the
 /// right accumulator. The figure the library actually installs is deliberately not named here:
-/// it is `RecursionLimiter::PARSE_DEFAULT_DEPTH`, crate-private, and an earlier revision of this
-/// comment named `RecursionLimiter::new` for it — which is a *different* default, and a larger
-/// one.
+/// it is `RecursionLimiter::PARSE_DEFAULT_DEPTH` — public since the `stacker` feature work, and
+/// still not a literal worth copying, because it is a library figure derived from a stack
+/// measurement that this crate does not own. An earlier revision of this comment named
+/// `RecursionLimiter::new` for it, which is a *different* default and a larger one.
 ///
 /// # Why the fix is here, not in the fixture
 ///
