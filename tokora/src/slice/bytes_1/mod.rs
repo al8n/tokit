@@ -15,7 +15,7 @@ impl Slice<'_> for Bytes {
   where
     Self: 'a;
 
-  #[inline]
+  #[inline(always)]
   fn iter<'a>(&'a self) -> Self::Iter<'a>
   where
     Self: 'a,
@@ -23,7 +23,7 @@ impl Slice<'_> for Bytes {
     <[u8]>::iter(self).copied()
   }
 
-  #[inline]
+  #[inline(always)]
   fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
   where
     Self: 'a,
@@ -31,7 +31,7 @@ impl Slice<'_> for Bytes {
     self.iter().enumerate()
   }
 
-  #[inline]
+  #[inline(always)]
   fn len(&self) -> usize {
     Bytes::len(self)
   }

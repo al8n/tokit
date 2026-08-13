@@ -131,7 +131,7 @@ const _: () = {
   {
     const OBSERVES_SEPARATORS: bool = false;
 
-    #[inline]
+    #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -142,7 +142,7 @@ const _: () = {
   impl<'inp, L, T, const N: usize> SeparatorHandler<'inp, L> for Deque<T, N> {
     const OBSERVES_SEPARATORS: bool = false;
 
-    #[inline]
+    #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -186,7 +186,7 @@ const _: () = {
   {
     const OBSERVES_SEPARATORS: bool = false;
 
-    #[inline]
+    #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -206,7 +206,7 @@ const _: () = {
   {
     const OBSERVES_SEPARATORS: bool = false;
 
-    #[inline]
+    #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -217,7 +217,7 @@ const _: () = {
   impl<'inp, L, T> SeparatorHandler<'inp, L> for SliceVec<'_, T> {
     const OBSERVES_SEPARATORS: bool = false;
 
-    #[inline]
+    #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -234,7 +234,7 @@ const _: () = {
     {
       const OBSERVES_SEPARATORS: bool = false;
 
-      #[inline]
+      #[inline(always)]
       fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
       where
         L: Lexer<'inp>,
@@ -381,14 +381,14 @@ const _: () = {
   where
     N: smallvec_1::Array<Item = T>,
   {
-    #[inline]
+    #[inline(always)]
     fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
     {
     }
 
-    #[inline]
+    #[inline(always)]
     fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -406,14 +406,14 @@ const _: () = {
   where
     N: Array<Item = T>,
   {
-    #[inline]
+    #[inline(always)]
     fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
     {
     }
 
-    #[inline]
+    #[inline(always)]
     fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -422,14 +422,14 @@ const _: () = {
   }
 
   impl<'inp, L, T> DelimiterHandler<'inp, L> for SliceVec<'_, T> {
-    #[inline]
+    #[inline(always)]
     fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
     {
     }
 
-    #[inline]
+    #[inline(always)]
     fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -443,14 +443,14 @@ const _: () = {
     where
       A: Array<Item = T>,
     {
-      #[inline]
+      #[inline(always)]
       fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
       where
         L: Lexer<'inp>,
       {
       }
 
-      #[inline]
+      #[inline(always)]
       fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
       where
         L: Lexer<'inp>,
@@ -469,14 +469,14 @@ const _: () = {
   where
     LenT: heapless_0_9::LenType,
   {
-    #[inline]
+    #[inline(always)]
     fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
     {
     }
 
-    #[inline]
+    #[inline(always)]
     fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -485,14 +485,14 @@ const _: () = {
   }
 
   impl<'inp, L, T, const N: usize> DelimiterHandler<'inp, L> for Deque<T, N> {
-    #[inline]
+    #[inline(always)]
     fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
     {
     }
 
-    #[inline]
+    #[inline(always)]
     fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,

@@ -203,7 +203,7 @@ impl DisplayHuman for [u8] {
   }
 
   #[cfg(feature = "bstr_1")]
-  #[inline]
+  #[inline(always)]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     bstr_1::BStr::new(self).fmt(f)
   }
@@ -246,7 +246,7 @@ impl<const N: usize> DisplayHuman for [char; N] {
 #[cfg(feature = "bytes_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "bytes_1")))]
 impl DisplayHuman for bytes_1::Bytes {
-  #[inline]
+  #[inline(always)]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.as_ref().fmt(f)
   }
@@ -255,7 +255,7 @@ impl DisplayHuman for bytes_1::Bytes {
 #[cfg(feature = "bstr_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "bstr_1")))]
 impl DisplayHuman for bstr_1::BStr {
-  #[inline]
+  #[inline(always)]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     fmt::Display::fmt(self, f)
   }

@@ -515,7 +515,7 @@ impl<Delimiter, S, Lang: ?Sized> Unclosed<Delimiter, S, Lang> {
   ///   Unclosed::<char>::new(SimpleSpan::new(5, 6), DelimiterKind::Custom("probe"), "[".into());
   /// assert_eq!(error.name(), CowStr::from_static("["));
   /// ```
-  #[inline]
+  #[inline(always)]
   #[cfg(not(any(feature = "alloc", feature = "std")))]
   pub const fn name(&self) -> CowStr {
     self.name

@@ -471,7 +471,7 @@ impl<Delimiter, S, Lang: ?Sized> Unopened<Delimiter, S, Lang> {
   /// let error = Unopened::<char>::new(SimpleSpan::new(5, 6), "]".into());
   /// assert_eq!(error.name_ref(), "]");
   /// ```
-  #[inline]
+  #[inline(always)]
   #[cfg(not(any(feature = "alloc", feature = "std")))]
   pub const fn name(&self) -> CowStr {
     self.name

@@ -62,7 +62,7 @@ where
 #[cfg(feature = "bytes_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "bytes_1")))]
 impl CstText for bytes_1::Bytes {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     core::str::from_utf8(self)
   }
@@ -71,7 +71,7 @@ impl CstText for bytes_1::Bytes {
 #[cfg(feature = "bstr_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "bstr_1")))]
 impl CstText for bstr_1::BStr {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     core::str::from_utf8(self)
   }
@@ -80,7 +80,7 @@ impl CstText for bstr_1::BStr {
 #[cfg(feature = "smol_bytes_0_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "smol_bytes_0_1")))]
 impl CstText for smol_bytes_0_1::shared::Bytes {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     core::str::from_utf8(self)
   }
@@ -89,7 +89,7 @@ impl CstText for smol_bytes_0_1::shared::Bytes {
 #[cfg(feature = "smol_bytes_0_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "smol_bytes_0_1")))]
 impl CstText for smol_bytes_0_1::compact::Bytes {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     core::str::from_utf8(self)
   }
@@ -98,7 +98,7 @@ impl CstText for smol_bytes_0_1::compact::Bytes {
 #[cfg(feature = "smol_bytes_0_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "smol_bytes_0_1")))]
 impl CstText for smol_bytes_0_1::Utf8Bytes {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     Ok(self.as_str())
   }
@@ -107,7 +107,7 @@ impl CstText for smol_bytes_0_1::Utf8Bytes {
 #[cfg(feature = "smol_bytes_0_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "smol_bytes_0_1")))]
 impl CstText for smol_bytes_0_1::compact::Utf8Bytes {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     Ok(self.as_str())
   }
@@ -116,7 +116,7 @@ impl CstText for smol_bytes_0_1::compact::Utf8Bytes {
 #[cfg(feature = "hipstr_0_8")]
 #[cfg_attr(docsrs, doc(cfg(feature = "hipstr_0_8")))]
 impl CstText for hipstr_0_8::HipStr<'_> {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     Ok(self.as_str())
   }
@@ -125,7 +125,7 @@ impl CstText for hipstr_0_8::HipStr<'_> {
 #[cfg(feature = "hipstr_0_8")]
 #[cfg_attr(docsrs, doc(cfg(feature = "hipstr_0_8")))]
 impl CstText for hipstr_0_8::HipByt<'_> {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     core::str::from_utf8(self)
   }

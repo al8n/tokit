@@ -156,26 +156,26 @@ impl core::borrow::Borrow<str> for CowStr {
 #[cfg(not(any(feature = "std", feature = "alloc")))]
 const _: () = {
   impl CowStr {
-    #[inline]
+    #[inline(always)]
     const fn borrow_const(value: &'static str) -> Inner {
       value
     }
 
-    #[inline]
+    #[inline(always)]
     const fn as_str_inner(inner: &Inner) -> &str {
       inner
     }
   }
 
   impl From<CowStr> for &'static str {
-    #[inline]
+    #[inline(always)]
     fn from(value: CowStr) -> Self {
       value.inner
     }
   }
 
   impl From<&CowStr> for &'static str {
-    #[inline]
+    #[inline(always)]
     fn from(value: &CowStr) -> Self {
       value.inner
     }

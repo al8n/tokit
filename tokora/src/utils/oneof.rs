@@ -150,26 +150,26 @@ impl<T: Clone> core::borrow::Borrow<[T]> for OneOf<'_, T> {
 #[cfg(not(any(feature = "std", feature = "alloc")))]
 const _: () = {
   impl<'a, T: Clone> OneOf<'a, T> {
-    #[inline]
+    #[inline(always)]
     const fn borrow_const(value: &'a [T]) -> Inner<'a, T> {
       value
     }
 
-    #[inline]
+    #[inline(always)]
     const fn as_inner_helper(inner: &Inner<'a, T>) -> &'a [T] {
       inner
     }
   }
 
   impl<'a, T: Clone> From<OneOf<'a, T>> for &'a [T] {
-    #[inline]
+    #[inline(always)]
     fn from(value: OneOf<'a, T>) -> Self {
       value.inner
     }
   }
 
   impl<'a, T: Clone> From<&OneOf<'a, T>> for &'a [T] {
-    #[inline]
+    #[inline(always)]
     fn from(value: &OneOf<'a, T>) -> Self {
       value.inner
     }

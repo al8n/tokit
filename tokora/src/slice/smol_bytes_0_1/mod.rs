@@ -15,7 +15,7 @@ impl Slice<'_> for shared::Bytes {
   where
     Self: 'a;
 
-  #[inline]
+  #[inline(always)]
   fn iter<'a>(&'a self) -> Self::Iter<'a>
   where
     Self: 'a,
@@ -23,7 +23,7 @@ impl Slice<'_> for shared::Bytes {
     <[u8]>::iter(self).copied()
   }
 
-  #[inline]
+  #[inline(always)]
   fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
   where
     Self: 'a,
@@ -31,7 +31,7 @@ impl Slice<'_> for shared::Bytes {
     self.iter().enumerate()
   }
 
-  #[inline]
+  #[inline(always)]
   fn len(&self) -> usize {
     <shared::Bytes>::len(self)
   }
@@ -50,7 +50,7 @@ impl Slice<'_> for compact::Bytes {
   where
     Self: 'a;
 
-  #[inline]
+  #[inline(always)]
   fn iter<'a>(&'a self) -> Self::Iter<'a>
   where
     Self: 'a,
@@ -58,7 +58,7 @@ impl Slice<'_> for compact::Bytes {
     <[u8]>::iter(self).copied()
   }
 
-  #[inline]
+  #[inline(always)]
   fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
   where
     Self: 'a,
@@ -66,7 +66,7 @@ impl Slice<'_> for compact::Bytes {
     self.iter().enumerate()
   }
 
-  #[inline]
+  #[inline(always)]
   fn len(&self) -> usize {
     <compact::Bytes>::len(self)
   }
@@ -85,7 +85,7 @@ impl Slice<'_> for Utf8Bytes {
   where
     Self: 'a;
 
-  #[inline]
+  #[inline(always)]
   fn iter<'a>(&'a self) -> Self::Iter<'a>
   where
     Self: 'a,
@@ -93,7 +93,7 @@ impl Slice<'_> for Utf8Bytes {
     self.chars()
   }
 
-  #[inline]
+  #[inline(always)]
   fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
   where
     Self: 'a,
@@ -101,7 +101,7 @@ impl Slice<'_> for Utf8Bytes {
     self.char_indices()
   }
 
-  #[inline]
+  #[inline(always)]
   fn len(&self) -> usize {
     <Utf8Bytes>::len(self)
   }
@@ -120,7 +120,7 @@ impl Slice<'_> for compact::Utf8Bytes {
   where
     Self: 'a;
 
-  #[inline]
+  #[inline(always)]
   fn iter<'a>(&'a self) -> Self::Iter<'a>
   where
     Self: 'a,
@@ -128,7 +128,7 @@ impl Slice<'_> for compact::Utf8Bytes {
     self.chars()
   }
 
-  #[inline]
+  #[inline(always)]
   fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
   where
     Self: 'a,
@@ -136,7 +136,7 @@ impl Slice<'_> for compact::Utf8Bytes {
     self.char_indices()
   }
 
-  #[inline]
+  #[inline(always)]
   fn len(&self) -> usize {
     <compact::Utf8Bytes>::len(self)
   }
