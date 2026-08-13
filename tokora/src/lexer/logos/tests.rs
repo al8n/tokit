@@ -628,3 +628,281 @@ fn a_partial_frontier_diagnoses_the_trip_with_the_state_error() {
     "the frontier path reports the state payload too"
   );
 }
+
+// ── Provenance: `next()` is not a scan ───────────────────────────────────
+//
+// The value channel is read off `extras` after `inner.next()` returns, and the temptation is to
+// treat "recorded during this call" as "recorded for this item". It is not. `logos` handles
+// `Skip` INSIDE the same `next()` — `CallbackResult for Skip` does `lex.trivia(); T::lex(lex)`
+// recursively on 0.14/0.15, and 0.16's `_take_action` does `$lex.trivia(); ... continue` — so one
+// call can run several DFA scans and several callbacks before it returns an item.
+//
+// A trivia callback therefore records for a scan that produced NOTHING, and the scan that does
+// produce the item may run no callback at all. Freshness cannot tell those apart; the trivia's
+// value survives and is read as the item's. Because the skipped scan precedes the item, its
+// offset is BELOW the item's real DFA frontier — the one direction that under-reports, which is
+// the direction that lets an unstable item be committed.
+//
+// So a recorded value carries WHICH SCAN recorded it, and the adapter accepts it only for the
+// item that scan produced. The key is the scan's start offset: inside a callback `lex.span()`
+// is the current match, and `token_start` is reset by `trivia()` before each rescan, so a
+// recorder has it for free — and after `next()` the adapter has the returned item's span.
+
+/// Records `(scan start, probed-to)` exactly the way the doc tells a recorder to.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct PeekRecorder {
+  probe: Option<(usize, usize)>,
+}
+
+impl crate::State for PeekRecorder {
+  type Error = TripErr;
+
+  fn check(&self) -> Result<(), Self::Error> {
+    Ok(())
+  }
+
+  fn probe(&self) -> Option<crate::Probe> {
+    self.probe.map(|(from, to)| crate::Probe::new(from, to))
+  }
+
+  fn clear_probe(&mut self) {
+    self.probe = None;
+  }
+}
+
+/// The recorder body both callbacks below share: absolute offsets, keyed by the current match's
+/// start, which is what `lex.span()` reports inside a callback.
+fn record(lex: &mut logos::Lexer<'_, TriviaTok>, peek: usize) {
+  let span = lex.span();
+  lex.extras.probe = Some((span.start, span.end + peek));
+}
+
+#[derive(Debug, Clone, PartialEq, logos::Logos)]
+#[logos(crate = logos, extras = PeekRecorder, error = TripErr)]
+enum TriviaTok {
+  /// **The witness.** Trivia with a callback: it records and returns `Skip`, so the scan that
+  /// records is not the scan whose item `next()` returns. It records only its own end, which is
+  /// strictly below the frontier of anything scanned after it.
+  #[regex(r"[ \t]+", |lex| { record(lex, 0); logos::Skip })]
+  Ws,
+
+  /// The prefix-backtracking pair, both **callback-free**: deciding `Int` probes into the
+  /// `Float` arm and rolls back to the accepting prefix, and nothing records that.
+  #[regex(r"[0-9]+")]
+  Int,
+  #[regex(r"[0-9]+\.[0-9]+")]
+  Float,
+  #[token(".")]
+  Dot,
+
+  /// The accept path: a token whose OWN scan records. Provenance must not cost this precision.
+  #[regex(r"[a-z]+", |lex| { record(lex, 1); })]
+  Word,
+}
+
+impl core::fmt::Display for TriviaTok {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(f, "{}", self.kind())
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TriviaKind {
+  Ws,
+  Int,
+  Float,
+  Dot,
+  Word,
+}
+
+impl core::fmt::Display for TriviaKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      TriviaKind::Ws => "whitespace",
+      TriviaKind::Int => "int",
+      TriviaKind::Float => "float",
+      TriviaKind::Dot => "dot",
+      TriviaKind::Word => "word",
+    })
+  }
+}
+
+impl TokenTrait<'_> for TriviaTok {
+  type Kind = TriviaKind;
+  type Error = TripErr;
+
+  // Left at the default, `Unbounded`, deliberately: it is the answer an item whose own scan
+  // recorded nothing must fall back to, and every reject-path cell below reads it.
+  fn kind(&self) -> TriviaKind {
+    match self {
+      TriviaTok::Ws => TriviaKind::Ws,
+      TriviaTok::Int => TriviaKind::Int,
+      TriviaTok::Float => TriviaKind::Float,
+      TriviaTok::Dot => TriviaKind::Dot,
+      TriviaTok::Word => TriviaKind::Word,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    matches!(self, TriviaTok::Ws)
+  }
+}
+
+type TriviaLexer<'a> = super::LogosLexer<'a, TriviaTok>;
+
+#[test]
+fn a_skipped_scans_probe_does_not_answer_for_the_token_that_follows_it() {
+  // `"  1."`. One `lex()` call runs two scans: the `Ws` callback records `(0, 2)` and skips,
+  // then the DFA rescans from 2, probes into the `Float` arm, hits end of input at 4, and
+  // backtracks to `Int@2..3`. That second scan ran no callback, so nothing was recorded FOR IT
+  // and the honest answer is the vocabulary's class claim.
+  //
+  // Under the per-`next()` clear the trivia's `2` survives and is read as the integer's
+  // frontier — below the item's real DFA frontier, which is the unsound direction.
+  let mut lexer = TriviaLexer::new("  1.");
+  assert_eq!(lexer.lex(), Some(Ok(TriviaTok::Int)));
+  assert_eq!((lexer.span().start(), lexer.span().end()), (2, 3));
+  assert_eq!(
+    lexer.read_frontier(),
+    crate::ReadFrontier::Unbounded,
+    "the skipped trivia's probe belongs to the trivia, not to the integer scanned after it"
+  );
+}
+
+#[test]
+fn a_skipped_scans_probe_does_not_answer_for_the_error_that_follows_it() {
+  // The error arm, for the reason the post-scan `check()` covers both arms: a callback can
+  // mutate `extras` and the item can still arrive as an `Err`. Here the recording callback runs
+  // on the trivia and the item is a raw logos error for `#`, whose scan ran no callback at all.
+  let mut lexer = TriviaLexer::new("  #");
+  assert_eq!(lexer.lex(), Some(Err(TripErr::Lex)));
+  assert_eq!((lexer.span().start(), lexer.span().end()), (2, 3));
+  assert_eq!(
+    lexer.read_frontier(),
+    crate::ReadFrontier::Unbounded,
+    "an item that arrives as an error is a completed scan too, and it did not record this"
+  );
+}
+
+#[test]
+fn a_probe_the_items_own_scan_recorded_still_answers_for_it() {
+  // The accept path, and the control that keeps the two cells above from passing because the
+  // adapter simply stopped reading the channel. Same recording trivia in front, but the `Word`
+  // scan records for ITSELF — start 2, matching the item's span start — so the value answers.
+  let mut lexer = TriviaLexer::new("  ab");
+  assert_eq!(lexer.lex(), Some(Ok(TriviaTok::Word)));
+  assert_eq!((lexer.span().start(), lexer.span().end()), (2, 4));
+  assert_eq!(
+    lexer.read_frontier(),
+    crate::ReadFrontier::ReadTo(5),
+    "a value recorded by the scan that produced the item is exactly what the channel is for"
+  );
+}
+
+type TriviaCtx<'a> = (
+  crate::emitter::Verbose<TripErr>,
+  crate::cache::DefaultCache<'a, TriviaLexer<'a>>,
+);
+
+/// Drains a partial input over `src` with the trivia vocabulary, returning the kinds the driver
+/// actually YIELDED beside the result that stopped it.
+fn run_trivia_partial(
+  src: &str,
+  is_final: bool,
+) -> (std::vec::Vec<TriviaKind>, Result<Option<()>, TripErr>) {
+  let mut input = crate::input::Input::<
+    TriviaLexer<'_>,
+    TriviaCtx<'_>,
+    (),
+    crate::input::Partial,
+  >::with_state_and_context(
+    src,
+    PeekRecorder::default(),
+    crate::input::InputContext::new(
+      crate::emitter::Verbose::<TripErr>::new(),
+      crate::cache::DefaultCache::<'_, TriviaLexer<'_>>::default(),
+    ),
+  );
+  if is_final {
+    input.seal();
+  }
+  let mut inp = input.as_ref();
+  let mut kinds = std::vec::Vec::new();
+  let result = loop {
+    match inp.next() {
+      Ok(Some(t)) => kinds.push(t.data().kind()),
+      Ok(None) => break Ok(None),
+      Err(e) => break Err(e),
+    }
+  };
+  (kinds, result)
+}
+
+#[test]
+fn the_driver_withholds_the_item_a_skipped_scans_probe_would_have_released() {
+  // The same defect one level up, where it is an unsoundness rather than a wrong answer.
+  //
+  // Non-final `"  1."`, buffer end 4. `Int@2..3` reports the trivia's stale `2`; the driver
+  // floors that at the item's own span end, 3, and `3 < 4` COMMITS it. Append `5` and the same
+  // bytes are one `Float@2..5` — chunked equivalence broken, on exactly the trivia-skipping
+  // path the protocol claims to cover.
+  assert_eq!(
+    run_trivia_partial("  1.", false),
+    (std::vec![], Err(TripErr::Incomplete)),
+    "nothing may be committed out of a buffer whose last bytes are still being read"
+  );
+
+  // The append that proves the withholding was right and not merely conservative.
+  assert_eq!(
+    run_trivia_partial("  1.5", true).0,
+    std::vec![TriviaKind::Float],
+    "one byte more and the committed integer was never an integer"
+  );
+}
+
+#[test]
+fn a_probe_left_by_a_scan_that_produced_no_item_does_not_survive_the_next_call() {
+  // `"  "` is all trivia: the callback records `(0, 2)`, the rescan hits end of input, and
+  // `lex()` returns `None` with a value still sitting in the state. No item was produced, so
+  // nothing asks `read_frontier` about it — but the leftover must not be able to reach a later
+  // item either. `clear_probe` before each scan is what guarantees that, and it is the guard
+  // provenance cannot supply: a rebuilt lexer positioned by `bump` can start an item at exactly
+  // the offset a stale value was keyed to.
+  let mut lexer = TriviaLexer::new("  ");
+  assert_eq!(lexer.lex(), None);
+  assert_eq!(lexer.state().probe, Some((0, 2)), "the trivia did record");
+  assert_eq!(lexer.lex(), None);
+  assert_eq!(
+    lexer.state().probe,
+    None,
+    "the next scan cleared it before running, so no later item can inherit it"
+  );
+}
+
+#[test]
+fn a_probe_restored_with_the_state_cannot_answer_for_a_rebuilt_lexers_first_item() {
+  // Why `clear_probe` is kept rather than retired as redundant, spelled as a falsifier.
+  //
+  // The input layer rebuilds a lexer through `with_state` + `bump`
+  // (`InputRef::resume_from`), so a value recorded by some earlier scan — in another lexer, at
+  // another buffer length — travels in the state. An equal start is only *evidence* of
+  // provenance, and here it is misleading evidence: the state claims a scan from 0 probed to 1,
+  // and the rebuilt lexer's first item really does begin at 0, so the check would accept it.
+  //
+  // `Int@0..1` in `"1."` is decided by probing offset 2 and finding end of input, so accepting
+  // the restored `1` is the same under-report the skipped-trivia cells above pin. Clearing
+  // before the scan removes the value before any start can be matched against it.
+  let mut lexer = TriviaLexer::with_state(
+    "1.",
+    PeekRecorder {
+      probe: Some((0, 1)),
+    },
+  );
+  assert_eq!(lexer.lex(), Some(Ok(TriviaTok::Int)));
+  assert_eq!((lexer.span().start(), lexer.span().end()), (0, 1));
+  assert_eq!(
+    lexer.read_frontier(),
+    crate::ReadFrontier::Unbounded,
+    "the scan that produced this item recorded nothing — the value arrived with the state"
+  );
+}

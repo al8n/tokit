@@ -7,6 +7,84 @@ pub mod token_tracker;
 /// A tracker for tracking recursion depth and tokens.
 pub mod tracker;
 
+/// A recorded read-frontier value together with **which scan recorded it**.
+///
+/// The value channel behind [`Lexer::read_frontier`](crate::Lexer::read_frontier) for the
+/// bundled logos adapter lives in the lexer state, because the state *is* the `logos` `Extras`
+/// and that is the one thing a callback can write to. What a callback cannot do is decide
+/// whether the item the adapter is about to return is the item it was called for.
+///
+/// # One `lex` call is not one scan
+///
+/// `logos` handles `Skip` **inside** a single `next()` — `lex.trivia(); T::lex(lex)` recursively
+/// on 0.14/0.15, a `trivia()`-and-continue loop on 0.16 — so one call can run several DFA scans
+/// and several callbacks before it returns an item. A trivia callback records for a scan that
+/// produced *nothing*, and the scan that does produce the item may run no callback at all.
+///
+/// "Recorded during this call" is therefore not "recorded for this item", and the difference is
+/// not academic: a skipped scan **precedes** the item, so its offset is *below* the item's true
+/// frontier — the one direction that under-reports, and so the one direction that can let an
+/// unstable item be committed out of a buffer that is still growing.
+///
+/// # The key is the scan's start offset
+///
+/// A recorder gets it for free. Inside a `logos` callback `lexer.span()` is the *current* match,
+/// and `logos` resets `token_start` before each rescan, so `lexer.span().start` is always the
+/// scan that is running right now. After `next()` returns, the adapter has the returned item's
+/// span. It accepts the value **iff the two starts are equal** and otherwise answers from
+/// [`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS), which is conservative by
+/// construction.
+///
+/// That check lives in the adapter, not in an obligation on recorders: a recorder states a fact
+/// about the scan it is running in, and nothing it can get wrong turns into a frontier the
+/// driver trusts for a different item.
+///
+/// ```
+/// use tokora::Probe;
+///
+/// // A callback that matched `[ \t]+` at 3..5 and peeked two bytes further.
+/// let probe = Probe::new(3, 7);
+/// assert_eq!(probe.scanned_from(), 3);
+/// assert_eq!(probe.probed_to(), 7);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Probe {
+  scanned_from: usize,
+  probed_to: usize,
+}
+
+impl Probe {
+  /// Records that a scan beginning at `scanned_from` probed the input as far as `probed_to`,
+  /// **inclusive**, both absolute offsets in the source.
+  ///
+  /// A probe answered by end of input counts at the offset probed — the same probe-inclusive
+  /// convention [`ReadFrontier`](crate::ReadFrontier) documents — so a callback that peeked `n`
+  /// bytes past its match records `lexer.span().end + n`, not `n`.
+  #[inline(always)]
+  pub const fn new(scanned_from: usize, probed_to: usize) -> Self {
+    Self {
+      scanned_from,
+      probed_to,
+    }
+  }
+
+  /// Returns the offset the recording scan started at — `lexer.span().start` inside the
+  /// callback that recorded it.
+  ///
+  /// This is the provenance the adapter matches against the returned item's span start. It is
+  /// not a frontier and is never reported as one.
+  #[inline(always)]
+  pub const fn scanned_from(&self) -> usize {
+    self.scanned_from
+  }
+
+  /// Returns the furthest offset that scan probed, inclusive.
+  #[inline(always)]
+  pub const fn probed_to(&self) -> usize {
+    self.probed_to
+  }
+}
+
 /// The state trait for lexers
 pub trait State: core::fmt::Debug + Clone {
   /// The error type of the state.
@@ -19,29 +97,37 @@ pub trait State: core::fmt::Debug + Clone {
   /// typically wraps this one into the token's error type).
   fn check(&self) -> Result<(), Self::Error>;
 
-  /// The furthest source offset the **scan that produced the most recent item** probed, if that
-  /// scan recorded one here.
+  /// The [`Probe`] the most recent scan recorded here, if it recorded one.
   ///
-  /// This is the per-item **value channel** behind
-  /// [`Lexer::read_frontier`](crate::Lexer::read_frontier) for an adapter that cannot see its
-  /// engine's probe frontier. The bundled logos adapter is the case it exists for: such a lexer's
-  /// `State` *is* the logos `Extras`, which is the one thing a `logos` callback can write to, and
-  /// a callback that peeks with `lexer.remainder()` knows exactly how far it looked. Recording it
-  /// is what lets `LogosLexer::read_frontier` answer with an offset instead of falling back to the
-  /// vocabulary's coarse [`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS).
+  /// This is the **value channel** behind [`Lexer::read_frontier`](crate::Lexer::read_frontier)
+  /// for an adapter that cannot see its engine's probe frontier. The bundled logos adapter is the
+  /// case it exists for: such a lexer's `State` *is* the logos `Extras`, which is the one thing a
+  /// `logos` callback can write to, and a callback that peeks with `lexer.remainder()` knows
+  /// exactly how far it looked. Recording it is what lets `LogosLexer::read_frontier` answer with
+  /// an offset instead of falling back to the vocabulary's coarse
+  /// [`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS).
   ///
   /// Offsets are `usize` because that is the offset type of every source the logos adapter can
   /// carry. A hand-written lexer implements
   /// [`Lexer::read_frontier`](crate::Lexer::read_frontier) directly and never needs this.
   ///
-  /// # It is per-item, and the adapter is what makes that true
+  /// # It answers for ONE scan, and the recorded start is what says which
   ///
-  /// The value must describe **the item just scanned** — a value left over from an earlier item
-  /// could be lower than this item's true frontier, and that is the one direction that is
-  /// unsound. A recorder is not asked to arrange this: the adapter calls
-  /// [`clear_probe`](Self::clear_probe) immediately before each scan, so what
-  /// [`probed_to`](Self::probed_to) reports afterwards is exactly what *that* scan recorded, and
-  /// `None` when the scan recorded nothing.
+  /// A value left over from an earlier scan could be lower than this item's true frontier, and
+  /// that is the one direction that is unsound. A recorder is not asked to police that: it
+  /// records [`Probe::scanned_from`] — `lexer.span().start`, the scan it is running in — and the
+  /// **adapter** accepts the value only for the item that scan produced. Everything else falls
+  /// back to the class claim.
+  ///
+  /// That check is why one `lex` call may record several times without confusing anything:
+  /// `logos` resolves `Skip` inside a single `next()`, so a trivia callback records for a scan
+  /// that yields nothing, and the scan that does yield the item may run no callback at all. See
+  /// [`Probe`] for the mechanism.
+  ///
+  /// [`clear_probe`](Self::clear_probe) runs immediately before each scan as well, which is a
+  /// second, independent guard: provenance rejects a stale value by mismatch, and clearing
+  /// removes it, so a rebuilt lexer positioned by [`bump`](crate::Lexer::bump) cannot start an
+  /// item at exactly the offset a restored state's value was keyed to.
   ///
   /// # What a recorded value must cover
   ///
@@ -51,6 +137,12 @@ pub trait State: core::fmt::Debug + Clone {
   /// callback itself read. Recording just the callback's peek for an item the DFA also backtracked
   /// over under-reports, which is a contract violation the `conformance` kit's `run_partial` check
   /// is there to catch.
+  ///
+  /// That burden is what covers the case where `logos` runs a callback, backtracks, and settles
+  /// on a **different candidate beginning at the same offset**: the starts match, so the value is
+  /// accepted, and it may be the rejected candidate's. It is still the recorder's job to make it
+  /// an upper bound on everything deciding the item read — and `run_partial` still falsifies a
+  /// value that is not.
   ///
   /// Offsets are **absolute** in the source, so a callback records
   /// `lexer.span().end + bytes_peeked`, not the peek length.
@@ -65,19 +157,22 @@ pub trait State: core::fmt::Debug + Clone {
   /// state (see the [determinism clause](crate::Lexer#the-lexer-contract)). Living in the state is
   /// exactly what makes it rewind with a checkpoint restore and reproduce on replay.
   #[inline(always)]
-  fn probed_to(&self) -> Option<usize> {
+  fn probe(&self) -> Option<Probe> {
     None
   }
 
-  /// Clears whatever [`probed_to`](Self::probed_to) would report, so the next scan starts from
+  /// Clears whatever [`probe`](Self::probe) would report, so the next scan starts from
   /// "nothing recorded".
   ///
-  /// The adapter calls this immediately before each scan. It is what makes the value channel
-  /// per-item rather than a running high-water mark, and it is why a recorder does not have to
-  /// hook the items whose scan runs no callback at all.
+  /// The adapter calls this immediately before each scan. It is not what makes the value
+  /// per-item — [`Probe::scanned_from`] is, and it has to be, because one scan is not one `lex`
+  /// call. What clearing adds is the guard provenance cannot supply: an equal start is only
+  /// *evidence* of provenance, and a lexer rebuilt from a restored state and positioned by
+  /// [`bump`](crate::Lexer::bump) can begin an item at exactly the offset that state's value was
+  /// keyed to. Clearing removes the value before any scan can be matched against it.
   ///
-  /// The default is a no-op, matching [`probed_to`](Self::probed_to)'s `None`. A state that
-  /// records nothing pays nothing: both are `#[inline(always)]` and empty.
+  /// The default is a no-op, matching [`probe`](Self::probe)'s `None`. A state that records
+  /// nothing pays nothing: both are `#[inline(always)]` and empty.
   #[inline(always)]
   fn clear_probe(&mut self) {}
 }

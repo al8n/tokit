@@ -416,15 +416,38 @@ and will red until they do.
     to the conservative `ReadFrontierClass::Unbounded`, because a vocabulary that has not thought
     about it must not be silently assumed safe. Declaring `SpanEnd` is a claim about the generated
     DFA, and `run_partial` is what falsifies a wrong one.
-  - `State::probed_to` and `State::clear_probe`, the per-item **value** channel, read off the
-    logos `Extras` — the one thing a `logos` callback can write to. A callback that peeks with
-    `lexer.remainder()` knows exactly how far it looked and records the absolute offset; the
-    adapter calls `clear_probe` before every scan, so what it reads back belongs to *that* item
-    and never to an earlier one. Both methods are defaulted (`None` and a no-op), so no existing
-    `State` impl breaks and a state that records nothing pays nothing.
+  - `State::probe` and `State::clear_probe`, the **value** channel, read off the logos `Extras`
+    — the one thing a `logos` callback can write to. A callback that peeks with
+    `lexer.remainder()` knows exactly how far it looked and records the absolute offset. Both
+    methods are defaulted (`None` and a no-op), so no existing `State` impl breaks and a state
+    that records nothing pays nothing.
 
   A recorded value answers the contract for its item outright, so it must cover the engine's
   backtracking too and not only the callback's own peek.
+
+  **A value is accepted on provenance, not on freshness, because `Lexer::lex` is not one scan.**
+  `logos` resolves `Skip` *inside* a single `next()` — recursively through `lex.trivia();
+  T::lex(lex)` on 0.14/0.15, by `trivia()`-and-continue on 0.16 — so one call runs one DFA scan
+  per skipped item plus the scan that produces the item, and several callbacks with them. A
+  trivia callback records for a scan that yields nothing, and the scan that yields the item may
+  run no callback at all; reading "a value is present" as "this item recorded it" hands the
+  trivia's offset to the item. Because the skipped scan *precedes* the item, that offset is
+  **below** the item's real frontier — the one direction that under-reports, which is the
+  direction that lets an unstable item be committed. With a recording whitespace skip in front
+  of a callback-free integer, non-final `"  1."` committed `Int@2..3`; append `5` and the same
+  bytes are one `Float@2..5`, chunked equivalence broken on exactly the trivia-skipping path the
+  holdback claims to cover.
+
+  So the value is a `Probe`, carrying the offset its scan started at (`Probe::scanned_from`,
+  which is `lexer.span().start` inside the callback) beside `Probe::probed_to`, and the adapter
+  accepts it **iff that start equals the returned item's span start** — on the error arm exactly
+  as on the token arm, since a callback may mutate `extras` and the item still arrive as an
+  `Err`. Anything else falls back to `READ_FRONTIER_CLASS`, which is conservative by
+  construction. The check lives in the adapter rather than in a rule recorders must follow,
+  because a recorder can only state a fact about the scan it is running in. `clear_probe` is
+  kept beside it and is not redundant: an equal start is *evidence* of provenance, and a lexer
+  rebuilt by `Lexer::with_state` + `Lexer::bump` — which is how `InputRef` resumes — can begin
+  its first item at exactly the offset a restored state's value was keyed to.
 
 - **`Harness::run_partial`'s non-final leg asks for a prefix rather than an equality** (#282). It
   required a non-final drain of `src[0..k]` to yield *exactly* the complete-parse tokens ending

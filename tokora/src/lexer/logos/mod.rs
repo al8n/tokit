@@ -192,11 +192,16 @@ macro_rules! bail {
         if self.poisoned {
           return None;
         }
-        // The read-frontier value channel is per-ITEM, and this is what makes that true: clearing
-        // before the scan means whatever `State::probed_to` reports afterwards was recorded by
-        // THIS scan's callbacks, never left over from an earlier item — the one direction that
-        // would under-report a frontier and let an unstable item be committed. The default impl is
-        // an empty `#[inline(always)]` body, so a state that records nothing pays nothing.
+        // Drop any value carried in on a restored state, so nothing predating this lexer can be
+        // matched against a scan it has not run. It does NOT make the channel per-item: `next()`
+        // is not a scan — `logos` resolves `Skip` inside this very call, so what survives it may
+        // have been recorded by a scan that produced nothing. `Probe::scanned_from` is what makes
+        // the value per-item, and `read_frontier` below is where it is checked.
+        //
+        // What clearing adds is the case provenance cannot see: an equal start is evidence, and a
+        // lexer rebuilt by `with_state` + `bump` can begin its first item at exactly the offset a
+        // restored value was keyed to. The two guards fail in different directions and the default
+        // impl is an empty `#[inline(always)]` body, so a state that records nothing pays nothing.
         self.inner.extras.clear_probe();
         match self.inner.next() {
           // ONE post-scan check, outside the `Ok`/`Err` split. A logos callback may mutate
@@ -238,25 +243,52 @@ macro_rules! bail {
       ///   same delegation shape as [`Token::SURFACES_TRIVIA`]. It answers for an item whose scan
       ///   recorded nothing, and it defaults to
       ///   [`Unbounded`](crate::ReadFrontierClass::Unbounded);
-      /// - the **value channel**, [`State::probed_to`], read off the logos `Extras`. A callback
+      /// - the **value channel**, [`State::probe`], read off the logos `Extras`. A callback
       ///   that peeks with `remainder()` records how far it looked; that value answers for its own
       ///   item outright, so it must cover the engine's backtracking too, not only the peek.
-      ///   [`State::clear_probe`] runs before each scan, so the value is per-item by construction.
+      ///
+      /// # A value is accepted on PROVENANCE, not on freshness
+      ///
+      /// `next()` is not a scan. `logos` resolves `Skip` **inside** the same call — recursively
+      /// through `lex.trivia(); T::lex(lex)` on 0.14/0.15, by `trivia()`-and-continue on 0.16 —
+      /// so one call can run several DFA scans and several callbacks before it returns an item.
+      /// A trivia callback records for a scan that yields nothing, and the scan that yields the
+      /// item may run no callback at all. Reading "there is a value" as "this item recorded it"
+      /// hands the trivia's offset to the item, and because the skipped scan *precedes* the item
+      /// that offset is **below** the item's real frontier — the one direction that under-reports,
+      /// which is the direction that lets an unstable item be committed.
+      ///
+      /// So the value carries the offset its scan started at
+      /// ([`Probe::scanned_from`](crate::Probe::scanned_from)) and is
+      /// accepted **iff that equals the returned item's span start**. Anything else — a skipped
+      /// scan's value, a value carried in on a restored state — falls back to the class claim,
+      /// which is conservative by construction. The check is here rather than in a rule recorders
+      /// must follow, because a recorder can only state a fact about the scan it is running in.
+      ///
+      /// It is asked on the error arm exactly as on the token arm, for the same reason the
+      /// post-scan `check()` is: a callback may mutate `extras` and the item still arrive as an
+      /// `Err`, so an item that is a lexer error is a completed scan too.
       ///
       /// A recorded value that is behind the item's own span is not repaired here. The driver
       /// floors at `max(span.end, reported)` and that floor is deliberately the *driver's* single
       /// responsibility, so a violating dialect meets one containment, not two that could drift.
       #[inline(always)]
       fn read_frontier(&self) -> ReadFrontier<usize> {
-        match self.inner.extras.probed_to() {
-          Some(at) => ReadFrontier::ReadTo(at),
-          None => match <T as Token<'inp>>::READ_FRONTIER_CLASS {
-            ReadFrontierClass::SpanEnd => ReadFrontier::SpanEnd,
-            // Every other class, including any this build does not know, is the conservative
-            // answer. `ReadFrontierClass` is `#[non_exhaustive]`, and a variant added later can
-            // only ever describe a frontier `Unbounded` already covers.
-            _ => ReadFrontier::Unbounded,
-          },
+        // `self.inner.span()` is `token_start..token_end` for the item just returned, and a
+        // recorder keys on `lexer.span().start` inside its callback. `logos` resets `token_start`
+        // at the top of `next()` and again in `trivia()`, so the two are the same quantity read at
+        // the same granularity: one DFA scan.
+        if let Some(probe) = self.inner.extras.probe()
+          && probe.scanned_from() == self.inner.span().start
+        {
+          return ReadFrontier::ReadTo(probe.probed_to());
+        }
+        match <T as Token<'inp>>::READ_FRONTIER_CLASS {
+          ReadFrontierClass::SpanEnd => ReadFrontier::SpanEnd,
+          // Every other class, including any this build does not know, is the conservative
+          // answer. `ReadFrontierClass` is `#[non_exhaustive]`, and a variant added later can
+          // only ever describe a frontier `Unbounded` already covers.
+          _ => ReadFrontier::Unbounded,
         }
       }
 

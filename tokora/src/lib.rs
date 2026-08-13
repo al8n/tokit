@@ -69,7 +69,7 @@ pub use require::Require;
 pub use slice::Slice;
 pub use source::Source;
 pub use span::{SimpleSpan, Span};
-pub use state::State;
+pub use state::{Probe, State};
 pub use token::Token;
 pub use try_parse_input::TryParseInput;
 

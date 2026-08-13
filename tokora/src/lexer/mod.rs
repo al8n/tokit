@@ -345,8 +345,10 @@ pub enum ReadFrontier<O> {
 /// asks the vocabulary instead, through [`Token::READ_FRONTIER_CLASS`] — the same const-delegation
 /// shape as [`Token::SURFACES_TRIVIA`].
 ///
-/// The claim answers for **an item whose scan recorded no frontier in the lexer state**; an item
-/// that did record one is answered by that value (see [`State::probed_to`]).
+/// The claim answers for **an item whose scan recorded no frontier in the lexer state** — and for
+/// one whose state holds a value recorded by a *different* scan, which is what a skipped trivia
+/// callback leaves behind. Only a value the item's own scan recorded answers instead of the claim
+/// (see [`State::probe`] and [`Probe`](crate::Probe)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ReadFrontierClass {

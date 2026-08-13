@@ -210,10 +210,11 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// [`SURFACES_TRIVIA`](Self::SURFACES_TRIVIA) uses, and for the same reason: the adapter is one
   /// blanket impl over every token type, so the `Token` impl is the only per-dialect site.
   ///
-  /// The claim answers for an item whose scan recorded **no** frontier in the lexer state. An item
-  /// whose scan did record one is answered by that value instead — see
-  /// [`State::probed_to`](crate::State::probed_to), the per-item value channel a `logos` callback
-  /// writes to.
+  /// The claim answers for an item whose **own scan** recorded no frontier in the lexer state —
+  /// which includes an item that inherited a value from a scan `logos` skipped inside the same
+  /// `next()` call. An item whose own scan recorded one is answered by that value instead: see
+  /// [`State::probe`](crate::State::probe), the value channel a `logos` callback writes to, and
+  /// [`Probe`](crate::Probe) for how a value is matched to the scan that recorded it.
   ///
   /// # The default is `Unbounded`, and claiming `SpanEnd` is a claim about the DFA
   ///
