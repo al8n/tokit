@@ -390,6 +390,14 @@ where
   /// - The iterator yields no components
   /// - The iterator yields more unique components than the buffer can hold
   ///
+  /// Duplicates are **not** overflow: they are absorbed by the same deduplication
+  /// [`push`](Self::push) uses, so `[A, A, B]` fits a two-component syntax. Only a component
+  /// that is new *and* has nowhere to go refuses the whole construction — `Some` therefore
+  /// means every unique component the iterator yielded is present, never a prefix of them.
+  ///
+  /// The refusal is immediate: the iterator is dropped at the component that overflowed and
+  /// the rest of it is never advanced.
+  ///
   /// # Examples
   ///
   /// ```rust
@@ -398,10 +406,10 @@ where
   /// # use typenum::U2;
   /// # use core::fmt;
   /// # #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-  /// # enum Component { A, B }
+  /// # enum Component { A, B, C }
   /// # impl fmt::Display for Component {
   /// #     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-  /// #         match self { Self::A => write!(f, "A"), Self::B => write!(f, "B") }
+  /// #         match self { Self::A => write!(f, "A"), Self::B => write!(f, "B"), Self::C => write!(f, "C") }
   /// #     }
   /// # }
   /// # #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -433,6 +441,21 @@ where
   /// // Empty iterator returns None
   /// let error = IncompleteSyntax::<MySyntax>::from_iter(SimpleSpan::new(10, 15), std::iter::empty());
   /// assert!(error.is_none());
+  ///
+  /// // A third unique component has nowhere to go in a two-component syntax, so the whole
+  /// // construction is refused rather than truncated to its first two.
+  /// let error = IncompleteSyntax::<MySyntax>::from_iter(
+  ///     SimpleSpan::new(10, 15),
+  ///     vec![Component::A, Component::B, Component::C],
+  /// );
+  /// assert!(error.is_none());
+  ///
+  /// // A duplicate is not overflow.
+  /// let error = IncompleteSyntax::<MySyntax>::from_iter(
+  ///     SimpleSpan::new(10, 15),
+  ///     vec![Component::A, Component::A, Component::B],
+  /// ).unwrap();
+  /// assert_eq!(error.as_slice(), &[Component::A, Component::B]);
   /// # }
   /// ```
   #[inline(always)]
@@ -440,7 +463,13 @@ where
   pub fn from_iter(span: Sp, iter: impl IntoIterator<Item = S::Component>) -> Option<Self> {
     let mut components = GenericArrayDeque::new();
     for component in iter {
-      Self::try_push_impl(&mut components, component);
+      // `try_push_impl` answers `Some` only for a component that is new and did not fit, which
+      // is exactly the overflow this method's `Option` was documented to report. Discarding it
+      // made the return type describe a guarantee the body did not enforce: every rejected
+      // component vanished and the caller got `Some` over the surviving prefix.
+      if Self::try_push_impl(&mut components, component).is_some() {
+        return None;
+      }
     }
     (!components.is_empty()).then_some(Self { span, components })
   }

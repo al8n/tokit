@@ -353,6 +353,91 @@ fn incomplete_syntax_from_iter_dedup() {
   assert_eq!(e.unwrap().len(), 1);
 }
 
+// ── from_iter overflow ───────────────────────────────────────────────────────
+//
+// The documented behaviour on overflow is `None`, and that is what these assert. A test
+// phrased as "we did not truncate" — say `len() == 3` — would also pass on a `from_iter` that
+// grew the buffer, which is a different contract from the one the `Option` states.
+
+#[test]
+fn incomplete_syntax_from_iter_none_on_unique_overflow() {
+  let e = IncompleteSyntax::<MySyntax2>::from_iter(
+    SimpleSpan::new(0, 5),
+    vec![Component::A, Component::B, Component::C],
+  );
+  assert!(
+    e.is_none(),
+    "a third unique component does not fit a two-component syntax, so the documented answer \
+     is None — not Some holding the [A, B] prefix"
+  );
+}
+
+#[test]
+fn incomplete_syntax_from_iter_none_whatever_the_order() {
+  // An early prefix must not win: with truncation the answer depended on which two components
+  // the iterator happened to yield first, so every ordering has to be refused alike.
+  for order in [
+    vec![Component::A, Component::B, Component::C],
+    vec![Component::A, Component::C, Component::B],
+    vec![Component::B, Component::A, Component::C],
+    vec![Component::B, Component::C, Component::A],
+    vec![Component::C, Component::A, Component::B],
+    vec![Component::C, Component::B, Component::A],
+  ] {
+    let e = IncompleteSyntax::<MySyntax2>::from_iter(SimpleSpan::new(0, 5), order.clone());
+    assert!(e.is_none(), "expected None for {order:?}");
+  }
+}
+
+#[test]
+fn incomplete_syntax_from_iter_duplicates_do_not_count_as_overflow() {
+  let e = IncompleteSyntax::<MySyntax2>::from_iter(
+    SimpleSpan::new(0, 5),
+    vec![Component::A, Component::A, Component::B],
+  )
+  .expect("two unique components fit a two-component syntax");
+  assert_eq!(e.as_slice(), &[Component::A, Component::B]);
+}
+
+#[test]
+fn incomplete_syntax_from_iter_none_when_duplicates_precede_the_overflow() {
+  // The dedup pass must not be mistaken for headroom: `A, A, B` fills the buffer and `C` is
+  // still a unique component with nowhere to go.
+  let e = IncompleteSyntax::<MySyntax2>::from_iter(
+    SimpleSpan::new(0, 5),
+    vec![Component::A, Component::A, Component::B, Component::C],
+  );
+  assert!(e.is_none());
+}
+
+#[test]
+fn incomplete_syntax_from_iter_exactly_capacity_keeps_every_component() {
+  for order in [
+    vec![Component::A, Component::B],
+    vec![Component::B, Component::A],
+  ] {
+    let expected = order.clone();
+    let e = IncompleteSyntax::<MySyntax2>::from_iter(SimpleSpan::new(0, 5), order)
+      .expect("a full buffer is not an overflow");
+    assert_eq!(e.len(), 2);
+    assert_eq!(e.as_slice(), expected.as_slice());
+  }
+}
+
+#[test]
+fn incomplete_syntax_from_iter_stops_advancing_at_the_overflow() {
+  // The refusal is immediate, so the component that overflowed is the last one taken.
+  let mut taken = Vec::new();
+  let e = IncompleteSyntax::<MySyntax2>::from_iter(
+    SimpleSpan::new(0, 5),
+    [Component::A, Component::B, Component::C, Component::A]
+      .into_iter()
+      .inspect(|c| taken.push(c.clone())),
+  );
+  assert!(e.is_none());
+  assert_eq!(taken, vec![Component::A, Component::B, Component::C]);
+}
+
 #[test]
 fn incomplete_syntax_display_single() {
   let e = IncompleteSyntax::<MySyntax1>::new(SimpleSpan::new(0, 1), Component::A);

@@ -105,6 +105,17 @@ and will red until they do.
   level; a wrapping `push_front` pays one rotation of a buffer whose capacity is the syntax's
   compile-time component count.
 
+- **`IncompleteSyntax::from_iter` reports the overflow its `Option` promises** (#246). The
+  method documents `None` when the iterator yields more unique components than the buffer
+  holds. It called `try_push_impl` for every component and discarded the result — and that
+  result is precisely the overflow signal, `Some(component)` for a component that was new and
+  did not fit. Each rejected component was dropped on the floor and `from_iter` returned `Some`
+  over the surviving prefix, so a caller reading `Some` as *"every unique component is here"*
+  was reading a guarantee nothing enforced, and which components survived depended on the
+  iterator's order. It now refuses at the first component that overflows and stops advancing
+  the iterator there. Duplicates are unaffected: they are absorbed by the same deduplication
+  `push` uses and were never overflow, so `[A, A, B]` still fits a two-component syntax.
+
 - **A `logos` error no longer suppresses a state-limit trip that landed on the same item.**
   `LogosLexer`'s "Limit-error latching" contract is that a limit error from `Lexer::check` is
   returned **once** after a scan and then latches, so an error-recovery loop over untrusted input
