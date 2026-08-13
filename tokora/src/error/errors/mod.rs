@@ -423,17 +423,54 @@ where
 /// It also *gains* the containers that have no `FromIterator` of their own, which includes both
 /// of this crate's bounded ones: `Option<E>` and `GenericArrayDeque<E, N>`, and so
 /// [`DefaultContainer`] in a no-alloc build.
+///
+/// # What the funnel costs, and the route around it
+///
+/// Delegating to `Container::from_iter` was free for the case that matters most: `Vec`'s and
+/// `VecDeque`'s own `FromIterator` specialise on a `Vec`/`VecDeque` `IntoIter` and take the
+/// source's allocation outright rather than copying out of it. Offering the errors one at a time
+/// cannot, so a `collect()` out of an owned `Vec` now holds the source buffer alive beside an
+/// equally large destination: measured over a million `u64`, zero allocations and a peak equal to
+/// the source became one allocation and a peak of twice it.
+///
+/// That is the price of the funnel, and [`ErrorContainer`](super::ErrorContainer) cannot be given
+/// it back. A bulk hook on that trait is a caller's code, so an override that quietly keeps only
+/// what fits reaches the same silence this impl exists to close, and stable Rust has no way to
+/// reserve the override for the containers this crate implements itself: specialisation is
+/// unstable, sealing the trait would revoke the extension point the wrapper exists to serve, and
+/// dispatching on `TypeId` would confine `collect()` to `E: 'static`, which this crate's own
+/// `Errors<&str, _>` is not. Verifying instead of trusting — tallying what was offered through an
+/// adapter and comparing it against what the container reports holding — does catch a lying
+/// override, and does keep the reuse, but only because the standard library's `Inspect` happens
+/// to carry the in-place-collect specialisation through: the same tally in an adapter written
+/// here measures the doubling again. The accounting is not worth hanging on an unspecified
+/// optimisation holding inside somebody else's crate.
+///
+/// A caller who *knows* their container is unbounded does not have to pay it.
+/// [`from_container`](Errors::from_container) adopts the collected container whole and keeps the
+/// reuse, and it is honest there for the reason stated on it: a container that refuses nothing
+/// has no dropped-error history for the flag to have missed.
 impl<E, Container> FromIterator<E> for Errors<E, Container>
 where
   Container: super::ErrorContainer<E>,
 {
   #[inline]
   fn from_iter<I: IntoIterator<Item = E>>(iter: I) -> Self {
-    let iter = iter.into_iter();
-    // The lower bound, which is what `Vec`'s and `VecDeque`'s own `FromIterator` reserve from;
-    // a bounded container's `with_capacity` ignores it. Going through `push` is what makes the
-    // count honest, and it should not also make the collect quadratic.
-    let mut this = Self::with_capacity(iter.size_hint().0);
+    let mut iter = iter.into_iter();
+
+    // A size hint is a hint and `with_capacity` is not, so the first error is observed before
+    // anything is reserved on the strength of one. Reading the hint first made an empty iterator
+    // that claims `usize::MAX` panic in the reservation, where the delegated path returned empty
+    // without allocating at all — and `Vec`'s own `FromIterator` unrolls the first `next` ahead
+    // of its own reserve for exactly this reason. What the hint may still do is overstate a
+    // *non-empty* iterator into a capacity overflow, which is a protocol violation by the
+    // iterator and panics on the delegated path too.
+    let Some(first) = iter.next() else {
+      return Self::new_in(Container::new());
+    };
+
+    let mut this = Self::with_capacity(iter.size_hint().0.saturating_add(1));
+    this.push(first);
     for error in iter {
       this.push(error);
     }

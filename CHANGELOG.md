@@ -173,6 +173,38 @@ and will red until they do.
   bounded ones — `Option<E>` and `GenericArrayDeque<E, N>`, so `DefaultContainer` in a no-alloc
   build had no `collect()` before this and has an accounting one now.
 
+  The reservation the funnel makes is taken **after the first error is observed**, not from the
+  size hint alone. A hint is a hint: an empty iterator reporting `usize::MAX` is a
+  capacity-overflow panic if it is reserved for, where the delegated path returned empty without
+  allocating at all. `Vec`'s own `FromIterator` unrolls its first `next` ahead of its own reserve
+  for the same reason. An overstated hint on a *non-empty* iterator still panics, as it did on the
+  delegated path — that is a protocol violation by the iterator, not a property of this change.
+
+  **What the funnel costs.** Offering the errors one at a time gives up the standard library's
+  bulk fill, and for the default container that fill was not a constant factor: `Vec`'s and
+  `VecDeque`'s `FromIterator` specialise on a `Vec`/`VecDeque` `IntoIter` and take the source's
+  allocation outright, so `Errors::from_iter` over an owned `Vec` used to be a pointer move.
+  Measured over 1 Mi `u64`, the delegated path made **zero** allocations and peaked at the size of
+  the source; the funnel makes one and peaks at **twice** it, because the source buffer stays alive
+  until the last error has been copied out of it. Interleaved in one process, the delegated fill is
+  O(1) at 13–17 ns for every length, against 22 ns at 16 errors, 115 ns at 256, 375 ns at 1024 and
+  1.29 ms at 1 Mi.
+
+  That is not recoverable through `ErrorContainer`. A bulk hook on it is a caller's code, so an
+  override that keeps only what fits reaches the same silence this change closes — and stable Rust
+  cannot reserve the override for the containers this crate implements itself: specialisation is
+  unstable, sealing the trait would revoke the extension point the wrapper exists to serve, and
+  `TypeId` dispatch would confine `collect()` to `E: 'static`, which `Errors<&str, _>` is not.
+  Tallying what was offered and checking it against what the container reports holding *does* catch
+  a lying override and *does* keep the reuse — but only because the standard library's `Inspect`
+  carries the in-place-collect specialisation through; the same tally in an adapter written here
+  measures the doubling again. The accounting is not worth hanging on an unspecified optimisation
+  holding inside another crate.
+
+  `Errors::from_container(iter.collect())` keeps the reuse today — measured at zero allocations and
+  a peak equal to the source — and is honest for exactly the containers where the cost is felt: one
+  that refuses nothing has no dropped-error history for the flag to have missed.
+
   `Errors::from_container` is unchanged and is the one construction door that is deliberately
   *not* an insertion door: the caller builds the container, the wrapper adopts it, and the flag
   starts `false` covering only what is offered afterwards. Whether that container's own

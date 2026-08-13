@@ -238,6 +238,43 @@ fn collecting_more_errors_than_fit_latches_the_flag() {
   assert!(!errors.overflowed());
 }
 
+/// al8n/tokora#284, round 3. Funnelling the collect through `push` brought its own reservation,
+/// and reading `size_hint` before the first `next` made a hint load-bearing: an empty iterator
+/// claiming `usize::MAX` panicked in `with_capacity` where the delegated path had returned empty
+/// without allocating at all.
+#[cfg(any(feature = "alloc", feature = "std"))]
+#[test]
+fn an_empty_iterator_that_overstates_its_lower_bound_reserves_nothing() {
+  struct EmptyClaimingMax;
+
+  impl Iterator for EmptyClaimingMax {
+    type Item = &'static str;
+
+    fn next(&mut self) -> Option<&'static str> {
+      None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+      (usize::MAX, None)
+    }
+  }
+
+  let errors: Errors<&str> = EmptyClaimingMax.collect();
+  assert!(errors.is_empty());
+  assert!(!errors.overflowed());
+  assert_eq!(
+    errors.capacity(),
+    0,
+    "nothing is reserved on the strength of a hint no item backed"
+  );
+
+  // The reservation is still made once an error has been observed, so the collect does not
+  // become a sequence of growth reallocations.
+  let errors: Errors<&str> = ["a", "b", "c"].into_iter().collect();
+  assert_eq!(errors.len(), 3);
+  assert!(errors.capacity() >= 3);
+}
+
 /// `From<E>` inherited the same silence, and stays infallible: a capacity floor is not expressible
 /// on [`ErrorContainer`], so the zero-capacity case is answered by the flag rather than by a
 /// `Result`.
