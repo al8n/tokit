@@ -7824,7 +7824,8 @@ fn parse_lossless_partial_surfaces_incomplete_while_non_final() {
     matches!(parsed, Err(SesErr::Incomplete(_))),
     "non-final: the end of the buffer is the frontier, got {parsed:?}"
   );
-  // The events recorded so far are the resumable state; the tooling door still round-trips.
+  // The events recorded so far are this attempt's, not a continuation a later call extends;
+  // the tooling door still round-trips over the bytes this attempt saw.
   let (green, _emitter) = cst.finish_partial(K_ROOT);
   assert_eq!(
     text(green.expect("finish_partial tiles what is missing")),
@@ -7849,6 +7850,71 @@ fn parse_lossless_partial_completes_when_final() {
   assert_eq!(
     text(green.expect("a sealed, covered parse materializes")),
     "ab"
+  );
+}
+
+/// The retry lifecycle the `Cst::finish` abort-semantics note prescribes, executed: an
+/// `Incomplete` attempt's handle is **dropped**, and the next attempt re-drives the enlarged
+/// slice from byte zero into a fresh input and a fresh sink.
+///
+/// This is the shape the documentation used to contradict — it called the buffered events "the
+/// resumable state", which invited keeping the handle and finishing it once more input arrived.
+/// No operation on the handle does that, so the executable statement of the lifecycle is that
+/// discarding and re-driving reaches a tree identical to the one-shot parse of the same bytes.
+/// The prefix is re-lexed and re-recorded every attempt, which is the Θ(Σ attempt lengths) cost
+/// `parse_lossless_partial` documents and the reason #251 wants a bounded owner for it.
+#[test]
+fn an_incomplete_lossless_attempt_is_discarded_and_redriven_over_the_larger_slice() {
+  // Two refills, each a whole-buffer attempt over a prefix that is not yet final. Every handle
+  // is dropped at the end of its iteration: none of them carries into the next.
+  for prefix in ["a", "ab"] {
+    let (cst, parsed) = crate::cst::parse_lossless_partial(
+      prefix,
+      (),
+      Verbose::<SesErr>::new(),
+      profile(),
+      DefaultCache::<'_, MiniLexer<'_>>::default(),
+      false,
+      drv_drain::<crate::Partial>,
+    );
+    assert!(
+      matches!(parsed, Err(SesErr::Incomplete(_))),
+      "non-final {prefix:?}: the end of the buffer is the frontier, got {parsed:?}"
+    );
+    // Attempt-local, and readable while the handle lives: this is what an incomplete handle is
+    // for, in place of the resume it never had.
+    assert_eq!(cst.resource_trips(), 0);
+    assert!(cst.inner_ref().errors().is_empty());
+  }
+
+  // The final attempt re-lexes the whole buffer from zero, and its tree is the one a caller
+  // would have got from a single complete parse of the same bytes.
+  let (cst, parsed) = crate::cst::parse_lossless_partial(
+    "ab",
+    (),
+    Verbose::<SesErr>::new(),
+    profile(),
+    DefaultCache::<'_, MiniLexer<'_>>::default(),
+    true,
+    drv_drain::<crate::Partial>,
+  );
+  assert_eq!(parsed, Ok(2));
+  let (redriven, _emitter) = cst.finish(K_ROOT);
+
+  let (one_shot, parsed) = crate::cst::parse_lossless(
+    "ab",
+    (),
+    Verbose::<SesErr>::new(),
+    profile(),
+    DefaultCache::<'_, MiniLexer<'_>>::default(),
+    drv_drain::<crate::Complete>,
+  );
+  assert_eq!(parsed, Ok(2));
+  let (one_shot, _emitter) = one_shot.finish(K_ROOT);
+
+  assert_eq!(
+    redriven.expect("the sealed final attempt materializes"),
+    one_shot.expect("the one-shot parse materializes"),
   );
 }
 

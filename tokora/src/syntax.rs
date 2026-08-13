@@ -182,6 +182,15 @@ pub trait Syntax {
   ///
   /// Usually this is an enum representing different variants of syntax components.
   /// This type is used for error reporting to specify which components are missing.
+  ///
+  /// **Do not implement this so that [`Eq`], [`Hash`], or [`Display`] can report something
+  /// different for the same value over time** — most easily done by deriving one of them from
+  /// a `Cell`, an atomic, or other interior-mutable or ambient state.
+  /// [`IncompleteSyntax`](crate::error::IncompleteSyntax) stores `Component` values in a
+  /// deduplicating set keyed on exactly those impls, and after insertion can only ever hand
+  /// this type back out by shared reference — so `Component`'s own author is the only one able
+  /// to keep that promise, or break it. See *Uniqueness is a logic error* on
+  /// [`IncompleteSyntax`](crate::error::IncompleteSyntax) for what breaking it costs.
   type Component: Display + Debug + Clone + PartialEq + Eq + Hash;
 
   /// The number of components in this syntax, represented as a type-level unsigned integer.

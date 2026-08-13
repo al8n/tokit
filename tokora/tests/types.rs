@@ -218,11 +218,72 @@ fn incomplete_syntax_as_slice() {
   assert_eq!(e.as_slice(), &[Component::A]);
 }
 
+// ── The wrapped ring ─────────────────────────────────────────────────────────
+//
+// `new` + `push_front` is what puts the logical sequence across the ring boundary: the head
+// moves to the last physical cell, so the deque has two segments and an accessor returning
+// only the first reports a prefix. Capacity one cannot express that layout, so the
+// capacity-one slice tests here pass against the defect — these are the ones that do not.
+
 #[test]
-fn incomplete_syntax_as_mut_slice() {
-  let mut e = IncompleteSyntax::<MySyntax1>::new(SimpleSpan::new(0, 1), Component::A);
-  e.as_mut_slice()[0] = Component::B;
-  assert_eq!(e.as_slice(), &[Component::B]);
+fn incomplete_syntax_wrapped_slice_holds_every_component() {
+  let mut e = IncompleteSyntax::<MySyntax2>::new(SimpleSpan::new(0, 1), Component::B);
+  e.push_front(Component::A);
+
+  assert_eq!(e.len(), 2);
+  assert_eq!(
+    e.iter().collect::<Vec<_>>(),
+    vec![&Component::A, &Component::B]
+  );
+  // The views agree, which is what `len`/`iter` and the slice facade stopped doing.
+  assert_eq!(e.as_slice(), &[Component::A, Component::B]);
+  assert_eq!(e.as_slice().len(), e.len());
+  let via_as_ref: &[Component] = e.as_ref();
+  assert_eq!(via_as_ref, &[Component::A, Component::B]);
+}
+
+#[test]
+fn incomplete_syntax_wrapped_display_names_every_component() {
+  let mut e = IncompleteSyntax::<MySyntax2>::new(SimpleSpan::new(0, 1), Component::B);
+  e.push_front(Component::A);
+  // Not the singular "component A is missing": the count the grammar branches on is the
+  // slice's, so a truncated slice changed the sentence as well as its contents.
+  assert_eq!(
+    format!("{e}"),
+    "incomplete syntax: components A, B are missing"
+  );
+}
+
+#[test]
+fn incomplete_syntax_wrapped_then_pushed_back_holds_every_component() {
+  // A back insertion after a front one: a second physical layout the one-segment accessor
+  // reported a prefix of. Note what this one does NOT pin — removing the front door's
+  // `make_contiguous` leaves it green, because the later `push` normalizes the ring the
+  // `push_front` wrapped. The three tests around it are the ones that red on that plant.
+  let mut e = IncompleteSyntax::<MySyntax3>::new(SimpleSpan::new(0, 1), Component::B);
+  e.push_front(Component::A);
+  e.push(Component::C);
+
+  assert_eq!(e.len(), 3);
+  assert_eq!(e.as_slice(), &[Component::A, Component::B, Component::C]);
+  assert_eq!(
+    e.iter().collect::<Vec<_>>(),
+    vec![&Component::A, &Component::B, &Component::C]
+  );
+  assert_eq!(
+    format!("{e}"),
+    "incomplete syntax: components A, B, C are missing"
+  );
+}
+
+#[test]
+fn incomplete_syntax_wrapped_from_two_front_pushes() {
+  let mut e = IncompleteSyntax::<MySyntax3>::new(SimpleSpan::new(0, 1), Component::C);
+  e.push_front(Component::B);
+  e.push_front(Component::A);
+
+  assert_eq!(e.as_slice(), &[Component::A, Component::B, Component::C]);
+  assert_eq!(e.as_slice().len(), e.len());
 }
 
 #[test]
@@ -247,12 +308,19 @@ fn incomplete_syntax_as_ref() {
   assert_eq!(slice, &[Component::A]);
 }
 
+/// The impl that survived, pinned as a bound rather than as a call: the shared view is what
+/// generic code takes, and it is the one whose fixed `&self` receiver forced the contiguity
+/// discipline. `AsMut<[Component]>` is deliberately not implemented — see *The set is total*
+/// on `IncompleteSyntax`.
 #[test]
-fn incomplete_syntax_as_mut() {
-  let mut e = IncompleteSyntax::<MySyntax1>::new(SimpleSpan::new(0, 1), Component::A);
-  let slice: &mut [Component] = e.as_mut();
-  slice[0] = Component::C;
-  assert_eq!(e.as_slice(), &[Component::C]);
+fn incomplete_syntax_satisfies_as_ref_bound() {
+  fn takes_shared_slice<T: AsRef<[Component]>>(value: &T) -> usize {
+    value.as_ref().len()
+  }
+
+  let mut e = IncompleteSyntax::<MySyntax2>::new(SimpleSpan::new(0, 1), Component::B);
+  e.push_front(Component::A);
+  assert_eq!(takes_shared_slice(&e), 2);
 }
 
 #[test]
@@ -283,6 +351,91 @@ fn incomplete_syntax_from_iter_dedup() {
   );
   assert!(e.is_some());
   assert_eq!(e.unwrap().len(), 1);
+}
+
+// ── from_iter overflow ───────────────────────────────────────────────────────
+//
+// The documented behaviour on overflow is `None`, and that is what these assert. A test
+// phrased as "we did not truncate" — say `len() == 3` — would also pass on a `from_iter` that
+// grew the buffer, which is a different contract from the one the `Option` states.
+
+#[test]
+fn incomplete_syntax_from_iter_none_on_unique_overflow() {
+  let e = IncompleteSyntax::<MySyntax2>::from_iter(
+    SimpleSpan::new(0, 5),
+    vec![Component::A, Component::B, Component::C],
+  );
+  assert!(
+    e.is_none(),
+    "a third unique component does not fit a two-component syntax, so the documented answer \
+     is None — not Some holding the [A, B] prefix"
+  );
+}
+
+#[test]
+fn incomplete_syntax_from_iter_none_whatever_the_order() {
+  // An early prefix must not win: with truncation the answer depended on which two components
+  // the iterator happened to yield first, so every ordering has to be refused alike.
+  for order in [
+    vec![Component::A, Component::B, Component::C],
+    vec![Component::A, Component::C, Component::B],
+    vec![Component::B, Component::A, Component::C],
+    vec![Component::B, Component::C, Component::A],
+    vec![Component::C, Component::A, Component::B],
+    vec![Component::C, Component::B, Component::A],
+  ] {
+    let e = IncompleteSyntax::<MySyntax2>::from_iter(SimpleSpan::new(0, 5), order.clone());
+    assert!(e.is_none(), "expected None for {order:?}");
+  }
+}
+
+#[test]
+fn incomplete_syntax_from_iter_duplicates_do_not_count_as_overflow() {
+  let e = IncompleteSyntax::<MySyntax2>::from_iter(
+    SimpleSpan::new(0, 5),
+    vec![Component::A, Component::A, Component::B],
+  )
+  .expect("two unique components fit a two-component syntax");
+  assert_eq!(e.as_slice(), &[Component::A, Component::B]);
+}
+
+#[test]
+fn incomplete_syntax_from_iter_none_when_duplicates_precede_the_overflow() {
+  // The dedup pass must not be mistaken for headroom: `A, A, B` fills the buffer and `C` is
+  // still a unique component with nowhere to go.
+  let e = IncompleteSyntax::<MySyntax2>::from_iter(
+    SimpleSpan::new(0, 5),
+    vec![Component::A, Component::A, Component::B, Component::C],
+  );
+  assert!(e.is_none());
+}
+
+#[test]
+fn incomplete_syntax_from_iter_exactly_capacity_keeps_every_component() {
+  for order in [
+    vec![Component::A, Component::B],
+    vec![Component::B, Component::A],
+  ] {
+    let expected = order.clone();
+    let e = IncompleteSyntax::<MySyntax2>::from_iter(SimpleSpan::new(0, 5), order)
+      .expect("a full buffer is not an overflow");
+    assert_eq!(e.len(), 2);
+    assert_eq!(e.as_slice(), expected.as_slice());
+  }
+}
+
+#[test]
+fn incomplete_syntax_from_iter_stops_advancing_at_the_overflow() {
+  // The refusal is immediate, so the component that overflowed is the last one taken.
+  let mut taken = Vec::new();
+  let e = IncompleteSyntax::<MySyntax2>::from_iter(
+    SimpleSpan::new(0, 5),
+    [Component::A, Component::B, Component::C, Component::A]
+      .into_iter()
+      .inspect(|c| taken.push(c.clone())),
+  );
+  assert!(e.is_none());
+  assert_eq!(taken, vec![Component::A, Component::B, Component::C]);
 }
 
 #[test]
@@ -343,6 +496,142 @@ fn incomplete_syntax_push_overflow_panics() {
 fn incomplete_syntax_push_front_overflow_panics() {
   let mut e = IncompleteSyntax::<MySyntax1>::new(SimpleSpan::new(0, 1), Component::A);
   e.push_front(Component::B); // This should panic: buffer full
+}
+
+// ── Interior mutability defeats uniqueness, not soundness (see `IncompleteSyntax`'s docs,
+// "Uniqueness is a logic error") ────────────────────────────────────────────────────────────
+
+#[test]
+fn incomplete_syntax_interior_mutable_component_defeats_uniqueness_but_not_soundness() {
+  // A component shaped exactly like the hazard the type-level docs describe: `Eq`, `Hash` and
+  // `Display` are all derived from a `Cell`, so a caller holding only `&self` — exactly what
+  // `as_slice`/`AsRef` hand out — can still change what they report.
+  use core::{
+    cell::Cell,
+    hash::{Hash, Hasher},
+  };
+  use std::collections::hash_map::DefaultHasher;
+
+  fn hash_of<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+  }
+
+  #[derive(Debug, Clone)]
+  struct MutableComponent(Cell<u8>);
+
+  impl PartialEq for MutableComponent {
+    fn eq(&self, other: &Self) -> bool {
+      self.0.get() == other.0.get()
+    }
+  }
+  impl Eq for MutableComponent {}
+
+  impl Hash for MutableComponent {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+      self.0.get().hash(state);
+    }
+  }
+
+  impl fmt::Display for MutableComponent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      write!(f, "{}", self.0.get())
+    }
+  }
+
+  #[derive(Debug, Clone, Copy)]
+  struct MutableSyntax;
+
+  impl Syntax for MutableSyntax {
+    type Lang = TestLang;
+    const KIND: TestSyntaxKind = TestSyntaxKind;
+    type Component = MutableComponent;
+    type COMPONENTS = U2;
+    type REQUIRED = U2;
+
+    // `IncompleteSyntax::new`/`push`/`try_push`/`as_slice` — everything this test calls —
+    // never call either accessor, so neither body runs here.
+    fn possible_components() -> &'static GenericArrayDeque<MutableComponent, U2> {
+      unimplemented!("not exercised by this test")
+    }
+    fn required_components() -> &'static GenericArrayDeque<MutableComponent, U2> {
+      unimplemented!("not exercised by this test")
+    }
+  }
+
+  let mut a =
+    IncompleteSyntax::<MutableSyntax>::new(SimpleSpan::new(0, 1), MutableComponent(Cell::new(1)));
+  a.push(MutableComponent(Cell::new(2)));
+
+  let mut b =
+    IncompleteSyntax::<MutableSyntax>::new(SimpleSpan::new(0, 1), MutableComponent(Cell::new(1)));
+  b.push(MutableComponent(Cell::new(3))); // distinct from `a` — dedup saw 1 != 3 at insertion
+
+  // Distinct as built: the deduplicating door told them apart using each component's `Eq` as
+  // it stood at insertion time.
+  assert_ne!(a, b);
+  assert_ne!(format!("{a}"), format!("{b}"));
+
+  // Mutate `b`'s second component through nothing but the shared accessor the type still
+  // exposes: `as_slice()` hands out `&MutableComponent`, and `Cell::set` needs only `&self`.
+  b.as_slice()[1].0.set(2);
+
+  // "Every view is complete" is unconditional and untouched by any of this: both still report
+  // two components — mutating a component does not change how many `IncompleteSyntax` holds.
+  assert_eq!(a.len(), 2);
+  assert_eq!(b.len(), 2);
+  assert_eq!(b.as_slice().len(), 2);
+
+  // A logic error, not undefined behaviour: equality between the two `IncompleteSyntax`
+  // values, hashing one, and the message `Display` produces all now disagree with what `b`
+  // was built from and agree with what its mutated component currently reports. This is one
+  // shape the violation takes — `IncompleteSyntax`'s docs deliberately do not enumerate them —
+  // and the fullness path below is another. (`hash_of` reads the value directly, rather than
+  // putting it in a real `HashSet`/`HashMap`, which is its own footgun clippy already names:
+  // `clippy::mutable_key_type` fires on exactly this key shape — corroborating evidence for the
+  // same hazard, one level up.)
+  assert_eq!(a, b);
+  assert_eq!(format!("{a}"), format!("{b}"));
+  assert_eq!(
+    hash_of(&a),
+    hash_of(&b),
+    "a == b now holds, so a correct Hash impl is required to agree too"
+  );
+
+  // The deduplicating door is fooled the same way: a component that now reports what `b`'s
+  // mutated component reports is absorbed as a duplicate — "admitting what looks like a
+  // duplicate", exactly as documented.
+  assert_eq!(b.try_push(MutableComponent(Cell::new(2))), None);
+  assert_eq!(b.len(), 2);
+
+  // The fullness path: this type also decides whether it has room, and that decision does not
+  // re-derive itself from the current `Eq` view. `is_full` counts physical slots, and the slot
+  // `b`'s mutated component still occupies was never freed.
+  assert!(b.is_full());
+
+  // `3` is what `b`'s second component reported before the mutation above overwrote it in
+  // place. Pushed now, it is `Eq` to nothing `b` currently holds — a genuinely new component
+  // by the deduplicating door's own rules — yet `b` is full, so `try_push` hands it back
+  // instead of storing it.
+  assert_eq!(
+    b.try_push(MutableComponent(Cell::new(3))),
+    Some(MutableComponent(Cell::new(3))),
+    "3 is Eq to nothing b currently holds, so this is a genuinely new component — refused only \
+     because the slot the mutation made b look free of was never physically freed"
+  );
+  assert_eq!(b.len(), 2);
+
+  // `push` is `try_push` plus a panic on `Some` — a door whose only other documented failure
+  // is the caller's own bug. It panics here too, on a component the deduplicating door has
+  // never once called a duplicate.
+  let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    b.push(MutableComponent(Cell::new(3)));
+  }));
+  assert!(
+    panicked.is_err(),
+    "push should panic: b reports is_full() and 3 is not a duplicate of anything it holds"
+  );
 }
 
 // ── Located tests ─────────────────────────────────────────────────────────────

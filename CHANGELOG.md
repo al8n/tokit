@@ -70,7 +70,83 @@ and will red until they do.
   that section stopped one step short of — the diagnostic is not hidden, the return value cannot
   distinguish, and `peek_with_emitter_terminal` or `peek_map` is what can.
 
+### Changed (breaking)
+
+- **`IncompleteSyntax::as_mut_slice` and its `AsMut<[S::Component]>` impl are removed** (#245).
+  The type documents its components as a *set*: insertion deduplicates, nothing removes, and
+  every other door preserves that. An unrestricted `&mut [Component]` is the one door that did
+  not — `error.as_mut_slice()[1] = Component::A` writes a duplicate the type says cannot exist,
+  and equality, hashing and formatting then observe a state the contract rules out. The door is
+  gone because it needed no cooperation from `Component` at all — the widest possible route to
+  the same duplicate. It is not the only route: `Component` is not, and cannot be, bounded
+  against interior mutability (Rust has no stable bound for that), so a `Component` wrapping a
+  `Cell` or an atomic can still reach a duplicate through the surviving shared views. That is
+  now a documented logic error, in the terms `HashSet` and `HashMap` use for the same hazard on
+  a key — not a claim that uniqueness is structural (#279). The shared views are unaffected:
+  `as_slice`, `AsRef<[S::Component]>`, `iter`, `len` and `Display` all stay, and all of them got
+  *more* complete in the same change. A caller that reordered or rewrote components rebuilds
+  from `iter` — `S::Component` is only `Clone + Eq + Hash + Display`, so there was never a
+  generic sort to lose.
+
 ### Fixed
+
+- **`IncompleteSyntax::as_slice` no longer stops at the ring boundary** (#245). The components
+  live in a `GenericArrayDeque`, and a deque is not one physical slice: `push_front` moves the
+  head off zero, after which `as_slices()` has two segments. The accessor returned the first
+  one. So a two-component error built as `new(B)` then `push_front(A)` reported `len() == 2`,
+  iterated `A, B`, and handed `AsRef` and `Display` only `[A]` — and because `Display` branches
+  its grammar on the slice's length, the message also changed to the singular *"component A is
+  missing"*. Parse diagnostics silently lost expected alternatives, and which ones depended on
+  the ring's internal head position rather than on the value.
+
+  **A `&self` accessor cannot fix this where it is read.** Making a wrapped ring contiguous
+  needs `&mut`, and `AsRef::as_ref`'s receiver is fixed by the trait, so the choice was to
+  normalize at *insertion* time or to give the shared slice view up. The two `try_push_*_impl`
+  doors are the only way an element enters, and both now leave the ring in one physical
+  segment; `as_slice` reads that with a `debug_assert` at the one site a future insertion path
+  that skipped it would silently truncate. `Display` is a consumer of the accessor and needed
+  no change of its own — it follows, grammar included. Cost to a caller: none at the API
+  level; a wrapping `push_front` pays one rotation of a buffer whose capacity is the syntax's
+  compile-time component count.
+
+- **`Cst::finish` no longer describes an incomplete handle as resumable** (#248). Its
+  abort-semantics note said an `Incomplete` parse should *"keep the handle — the buffered events
+  are the resumable state"*. No such capability exists: the handle's whole public surface is
+  `resource_trips`, `with_trivia_policy`, `trivia_policy`, `error_kind`, `gap_kind`,
+  `inner_ref`, `finish` and `finish_partial`, and not one of them accepts a buffer, resumes the
+  lexer, or writes another event into the sink. The contradiction was inside the crate's own
+  docs — `parse_lossless_partial` says to drop the handle and drive again over the larger slice
+  at Θ(Σ attempt lengths) — so a reader had two opposed continuation models and only the second
+  matched the API. It was not one sentence either: the same claim was repeated in guide chapter
+  16 and in a test comment, and all three now agree.
+
+  The sentence is corrected rather than the capability built, and deliberately. Resuming a
+  recording sink across redrives corrupts its event log; that is why `Sink` does not implement
+  `ValueKeyedEmitter` and cannot be paired with `PartialSession::parse`, so the promised
+  operation is one the type system refuses on purpose rather than one that was left out. A
+  bounded CST retry needs its own session type owning the budget, the terminal latch and a
+  fresh sink per attempt, which is al8n/tokora#251's subject. What the handle *is* for is now
+  stated where the wrong claim was: inspecting the attempt (`resource_trips`, `inner_ref`) and
+  opting into a truncated tree for tooling (`finish_partial`). The lifecycle is also executable
+  now — a test drives two incomplete attempts, drops each handle, re-drives the enlarged slice
+  and requires the resulting tree to equal the one-shot parse of the same bytes.
+
+- **`error::incomplete_syntax`'s module header described an implementation that does not
+  exist.** It advertised a choice between a const-generic and a type-level implementation,
+  selected by a `generic-array` feature. The crate declares no such feature, the file carries no
+  `cfg`, and `const COMPONENTS: usize` appears nowhere in it — there is one implementation.
+  Found by sweeping the two modules #245/#246/#248 touch for the same defect shape.
+
+- **`IncompleteSyntax::from_iter` reports the overflow its `Option` promises** (#246). The
+  method documents `None` when the iterator yields more unique components than the buffer
+  holds. It called `try_push_impl` for every component and discarded the result — and that
+  result is precisely the overflow signal, `Some(component)` for a component that was new and
+  did not fit. Each rejected component was dropped on the floor and `from_iter` returned `Some`
+  over the surviving prefix, so a caller reading `Some` as *"every unique component is here"*
+  was reading a guarantee nothing enforced, and which components survived depended on the
+  iterator's order. It now refuses at the first component that overflows and stops advancing
+  the iterator there. Duplicates are unaffected: they are absorbed by the same deduplication
+  `push` uses and were never overflow, so `[A, A, B]` still fits a two-component syntax.
 
 - **A `logos` error no longer suppresses a state-limit trip that landed on the same item.**
   `LogosLexer`'s "Limit-error latching" contract is that a limit error from `Lexer::check` is
