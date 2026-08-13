@@ -910,6 +910,182 @@ fn truncation_unfaithful_lexer_fails_partial_equivalence() {
   Harness::<LastBytePeekLexer<'_>>::new("abz").run_partial();
 }
 
+// ── The error arm of chunked equivalence ────────────────────────────────────────────
+//
+// Every fixture above lexes without ever returning `Err`, so nothing in the partial tier
+// exercised the lexer-error arm at all. That arm diverges under truncation in two ways a
+// token-only comparison cannot see, and both are checked below.
+
+/// A lexer error with a **payload**: the thing the partial tier has to compare, and the reason a
+/// discarding emitter was not enough. [`Token::Error`](crate::Token::Error) is `Clone + Debug` and
+/// nothing more, so the `Debug` rendering is the only signature available — and it is compared
+/// against the *same build's* complete parse, never against a recorded string, so changing this
+/// rendering moves both sides together and can never red the check on its own.
+#[derive(Clone, Debug, PartialEq)]
+struct BadByte {
+  /// What the lexer decided about the bytes. A payload the lexer computed, not a rendered
+  /// diagnostic: the check reads it as data, and nothing here asserts on message wording.
+  reason: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct ETok;
+
+impl Token<'_> for ETok {
+  type Kind = PKind;
+  type Error = BadByte;
+
+  fn kind(&self) -> PKind {
+    PKind
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// Every item is decided by its own bytes: an item is an error iff its own byte is `?`. Faithful
+/// under truncation, errors and all.
+const FAITHFUL: u8 = 0;
+/// The first item is an **error** unless the buffer's last byte is `z` — so appending the missing
+/// byte turns a truncated error into a token at the same span.
+const FLIPS_TO_TOKEN: u8 = 1;
+/// The first item is always an error, but its **payload** is decided by the buffer's last byte —
+/// so appending the missing byte changes the error without changing its span.
+const PAYLOAD_DRIFTS: u8 = 2;
+
+/// A per-character lexer over `str` that can yield errors, parameterized by which truncation
+/// defect (if any) it carries. `MODE` is a const parameter rather than a field because the kit
+/// builds its lexers with `L::new`.
+///
+/// All three modes are deterministic on a *fixed* buffer, so the trait tier cannot tell them
+/// apart; only chunked equivalence can, and only if it carries errors.
+struct ErrLexer<'a, const MODE: u8> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a, const MODE: u8> Lexer<'a> for ErrLexer<'a, MODE> {
+  type State = ();
+  type Source = str;
+  type Token = ETok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), BadByte> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<ETok, BadByte>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    let bytes = self.src.as_bytes();
+    let sealed = bytes.last() == Some(&b'z');
+    match MODE {
+      FAITHFUL => {
+        if bytes[self.start] == b'?' {
+          Some(Err(BadByte { reason: "junk" }))
+        } else {
+          Some(Ok(ETok))
+        }
+      }
+      FLIPS_TO_TOKEN if self.start == 0 && !sealed => Some(Err(BadByte { reason: "junk" })),
+      PAYLOAD_DRIFTS if self.start == 0 => Some(Err(BadByte {
+        reason: if sealed { "junk" } else { "cut" },
+      })),
+      _ => Some(Ok(ETok)),
+    }
+  }
+  /// `SpanEnd`, and for the two defective modes a **deliberately false claim** — the same shape
+  /// [`LastBytePeekLexer`] uses. At the `Unbounded` default every item is withheld and the check
+  /// would pass vacuously; the claim is what puts the items in front of it.
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+type FaithfulErrLexer<'a> = ErrLexer<'a, FAITHFUL>;
+type FlippingErrLexer<'a> = ErrLexer<'a, FLIPS_TO_TOKEN>;
+type DriftingErrLexer<'a> = ErrLexer<'a, PAYLOAD_DRIFTS>;
+
+#[test]
+fn error_yielding_lexer_passes_every_check() {
+  // Errors decided by their own bytes are as stable under truncation as tokens are, on the trait
+  // tier and the partial tier both. The two defective siblings below differ from this one only in
+  // WHERE the verdict comes from.
+  Harness::<FaithfulErrLexer<'_>>::over(["a?b", "??", "?", "", "ab?cd"]).run();
+  Harness::<FaithfulErrLexer<'_>>::over(["a?b", "??", "?", "", "ab?cd"]).run_partial();
+}
+
+// Both cells below pin the split, the position and which SIDE held the token, not just the
+// `partial-equivalence` tag: a bare tag would also be satisfied by a length divergence or a
+// divergence at some other cut, and the whole point of these two is that they fire on the error
+// arm specifically. Neither pin reads the span's or the payload's rendering.
+
+#[test]
+#[should_panic(
+  expected = "partial-equivalence] split k=2, position 0: prefix item diverges from the complete prefix: expected token"
+)]
+fn an_error_that_becomes_a_token_on_append_is_falsified() {
+  // `"abz"` at split k=2: the prefix `"ab"` yields `Err@0..1` — emitted, since 1 < 2 puts it behind
+  // the frontier — and the complete parse has `Token@0..1` at the same span. The item is not
+  // withheld and it is not missing; it is a *different kind of item*, which is invisible to a
+  // comparison over committed tokens alone.
+  Harness::<FlippingErrLexer<'_>>::over(["abz"]).run_partial();
+}
+
+#[test]
+#[should_panic(
+  expected = "partial-equivalence] split k=2, position 0: prefix item diverges from the complete prefix: expected lexer error"
+)]
+fn an_error_whose_payload_changes_on_append_is_falsified() {
+  // `"abz"` at split k=2: both runs yield `Err@0..1`, so discriminant and span agree and only the
+  // payload moved — `"cut"` on the prefix, `"junk"` once the last byte arrives. An error whose
+  // content depends on bytes past its own span is exactly the unfaithfulness this tier exists to
+  // reject, and the span alone does not see it.
+  Harness::<DriftingErrLexer<'_>>::over(["abz"]).run_partial();
+}
+
 // ── Positive: the crate's real logos adapter (LogosLexer) ───────────────────────────
 
 #[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
