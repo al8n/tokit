@@ -129,7 +129,14 @@ asan_arm() {
   # feature point without a lexer, and a binary that ran no tests prints no banner either.
   grep -q "test result: ok. 1 passed" "$log" \
     || fail "detect_stack_use_after_return=${value}: ${ARM_TEST} did not run"
-  ARM="$(sed -n 's/^stack_per_level: CONTROL ARM \([a-z][a-z]*\)$/\1/p' "$log" | tail -1)"
+  # Matched anywhere on the line, for the reason `ci/stack_probe.sh` gives at its own copy: the
+  # announcement reaches the descriptor while libtest's unterminated progress line can still be
+  # sitting on it, and an anchored match then reads a run that announced its arm as one that did
+  # not. `--exact` makes it one test here rather than seventeen, which narrows the window without
+  # closing it, and the two copies are kept the same on purpose.
+  # `|| true` for the reason the sibling gives: no match is a result, and `grep`'s exit 1 must not
+  # be able to end the script before the arm is compared and named.
+  ARM="$(grep -o 'stack_per_level: CONTROL ARM [a-z][a-z]*' "$log" | tail -1 | sed 's/.* //' || true)"
 }
 
 both_fake_stack_settings() {

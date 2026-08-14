@@ -81,7 +81,19 @@ fi
 # control having run and the control having been filtered out of a green log, which is the same
 # thing `--exact` and `1 passed` buy for the witness below. Checked after the refusal and the
 # figure so those keep their own diagnoses.
-arm="$(sed -n 's/^stack_per_level: CONTROL ARM \([a-z][a-z]*\)$/\1/p' "$log" | tail -1)"
+#
+# Matched anywhere on the line rather than anchored at its start. The announcement goes straight to
+# the real stderr, while libtest's `test <name> ... ` for some *other* test can already have
+# reached the same descriptor without its terminating newline — this run has 17 tests and they run
+# in parallel. The two then share one physical line, `^` stops matching, and a perfectly good
+# `native` run reds as "no arm at all". Watched happening, on the run that planted a skipped
+# witness and got this diagnosis instead of its own. The name is written by one `write_str`, so a
+# prefix can be displaced onto the line but the word itself is never split.
+#
+# `|| true` because no match is a *result* here, not an error: `grep` exits 1 on it, and under
+# `set -e -o pipefail` that ends the script at this assignment — reporting the failure as a bare
+# exit code with the diagnosis below never printed. Watched happening.
+arm="$(grep -o 'stack_per_level: CONTROL ARM [a-z][a-z]*' "$log" | tail -1 | sed 's/.* //' || true)"
 if [ "$arm" != native ]; then
   fail "the frame-reuse control reported '${arm:-no arm at all}' where it must report 'native'; the figure above was read on the assumption that frames are reused, and that is the arm which asserts it"
 fi
