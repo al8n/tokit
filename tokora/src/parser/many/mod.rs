@@ -268,7 +268,7 @@ mod sep_while;
 ///
 /// The latch is read only on the refusal arm, so the success path is exactly the pre-existing
 /// `push` plus the increment.
-#[inline]
+#[inline(always)]
 pub(super) fn push_element<'inp, 'closure, C, O, L, Ctx, Lang: ?Sized, Cmpl>(
   nums: &mut usize,
   full: &mut bool,
@@ -371,7 +371,7 @@ where
 /// case an inner rollback creates: element *n* trips and Accepts, element *n+1* then fails against
 /// the truncated remainder having tripped nothing itself. [`absence_after_element`] states the same
 /// asymmetry for the exits with no error in hand.
-#[inline]
+#[inline(always)]
 pub(super) fn file_element_failure<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
   err: <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,

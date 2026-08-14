@@ -91,7 +91,7 @@ pub struct PositionedChar<Char, Offset = usize> {
 
 impl<Char, Offset> PositionedChar<Char, Offset> {
   /// Create a new positioned character with the given position.
-  #[inline]
+  #[inline(always)]
   pub const fn with_position(char: Char, position: Offset) -> Self {
     Self { char, position }
   }
@@ -106,7 +106,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// let pc = PositionedChar::with_position('x', 10);
   /// assert_eq!(pc.char(), 'x');
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn char(&self) -> Char
   where
     Char: Copy,
@@ -124,7 +124,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// let pc = PositionedChar::with_position('x', 10);
   /// assert_eq!(pc.char_ref(), &'x');
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn char_ref(&self) -> &Char {
     &self.char
   }
@@ -140,7 +140,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// *pc.char_mut() = 'b';
   /// assert_eq!(pc.char(), 'b');
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn char_mut(&mut self) -> &mut Char {
     &mut self.char
   }
@@ -155,7 +155,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// let pc = PositionedChar::with_position('x', 42);
   /// assert_eq!(pc.position(), 42);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn position_ref(&self) -> &Offset {
     &self.position
   }
@@ -170,7 +170,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// let pc = PositionedChar::with_position('x', 42);
   /// assert_eq!(pc.position(), 42);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn position(&self) -> Offset
   where
     Offset: Copy,
@@ -189,7 +189,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// let pc = PositionedChar::with_position('x', 42);
   /// assert_eq!(pc.span(), Span::new(42, 43));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn span(&self) -> SimpleSpan<Offset>
   where
     Char: CharLen,
@@ -212,7 +212,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// pc.set_position(20);
   /// assert_eq!(pc.position(), 20);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn set_position(&mut self, position: Offset) -> &mut Self {
     self.position = position;
     self
@@ -229,7 +229,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// pc.bump_position(&5);
   /// assert_eq!(pc.position(), 15);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn bump_position<'a>(&'a mut self, n: &'a Offset) -> &'a mut Self
   where
     Offset: core::ops::AddAssign<&'a Offset>,
@@ -250,7 +250,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// assert_eq!(**pc_ref.char_ref(), 'x');
   /// assert_eq!(pc_ref.position(), &10);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn as_ref(&self) -> PositionedChar<&Char, &Offset> {
     PositionedChar {
       char: &self.char,
@@ -272,7 +272,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// }
   /// assert_eq!(pc.char(), 'b');
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn as_mut(&mut self) -> PositionedChar<&mut Char, &mut Offset> {
     PositionedChar {
       char: &mut self.char,
@@ -292,7 +292,7 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// assert_eq!(upper.char(), 'A');
   /// assert_eq!(upper.position(), 10);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn map<NewChar, F>(self, f: F) -> PositionedChar<NewChar, Offset>
   where
     F: FnOnce(Char) -> NewChar,
@@ -315,14 +315,14 @@ impl<Char, Offset> PositionedChar<Char, Offset> {
   /// assert_eq!(ch, 'x');
   /// assert_eq!(pos, 42);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn into_components(self) -> (Char, Offset) {
     (self.char, self.position)
   }
 }
 
 impl<Char: core::fmt::Display, Offset> core::fmt::Display for PositionedChar<Char, Offset> {
-  #[inline]
+  #[inline(always)]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{}", self.char)
   }

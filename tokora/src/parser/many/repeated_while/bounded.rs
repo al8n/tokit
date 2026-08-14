@@ -17,7 +17,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Container: Default + crate::container::Container<O>,
 {
-  #[inline]
+  #[inline(always)]
   fn parse_input(
     &mut self,
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
@@ -47,7 +47,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Container: Default + crate::container::Container<O>,
 {
-  #[inline]
+  #[inline(always)]
   fn parse_input(
     &mut self,
     inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,

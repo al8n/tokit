@@ -158,13 +158,13 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl>
   RepeatedWhile<F, Condition, O, W, L, Ctx, Lang, Cmpl>
 {
   /// Creates a new `RepeatedWhile` parser.
-  #[inline]
+  #[inline(always)]
   pub(crate) const fn new(f: F, condition: Condition) -> Self {
     Self::new_in(f, condition)
   }
 
   /// Creates a new `RepeatedWhile` parser with the given container.
-  #[inline]
+  #[inline(always)]
   const fn new_in(f: F, condition: Condition) -> Self {
     Self {
       f,
@@ -189,7 +189,7 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl>
   RepeatedWhile<F, Condition, O, W, L, Ctx, Lang, Cmpl>
 {
   /// Sets the minimum number of elements to parse.
-  #[inline]
+  #[inline(always)]
   pub fn at_least(
     self,
     n: usize,
@@ -198,13 +198,13 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl>
   }
 
   /// Sets the maximum number of elements to parse.
-  #[inline]
+  #[inline(always)]
   pub fn at_most(self, n: usize) -> AtMost<RepeatedWhile<F, Condition, O, W, L, Ctx, Lang, Cmpl>> {
     self.apply(Maximum::new(n))
   }
 
   /// Sets both the minimum and maximum number of elements to parse.
-  #[inline]
+  #[inline(always)]
   pub fn bounded(
     self,
     min: usize,
@@ -219,7 +219,7 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl> Apply<AtLeast<Self>>
 {
   type Options = Minimum;
 
-  #[inline]
+  #[inline(always)]
   fn apply(self, options: Self::Options) -> AtLeast<Self> {
     AtLeast::new(self, options.get())
   }
@@ -230,7 +230,7 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl> Apply<AtMost<Self>>
 {
   type Options = Maximum;
 
-  #[inline]
+  #[inline(always)]
   fn apply(self, options: Self::Options) -> AtMost<Self> {
     AtMost::new(self, options.get())
   }
@@ -241,7 +241,7 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl> Apply<Bounded<Self>>
 {
   type Options = With<Maximum, Minimum>;
 
-  #[inline]
+  #[inline(always)]
   fn apply(self, options: Self::Options) -> Bounded<Self> {
     Bounded::new(self, options.primary.get(), options.secondary.get())
   }
@@ -253,7 +253,7 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl>
 {
   type Options = Minimum;
 
-  #[inline]
+  #[inline(always)]
   fn apply(
     self,
     options: Self::Options,
@@ -268,7 +268,7 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl>
 {
   type Options = Maximum;
 
-  #[inline]
+  #[inline(always)]
   fn apply(
     self,
     options: Self::Options,

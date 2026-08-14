@@ -89,7 +89,7 @@ use super::*;
 /// ```
 pub trait LitToken<'a>: Token<'a> {
   /// Returns `true` if the token is any literal (number, string, boolean, etc.).
-  #[inline]
+  #[inline(always)]
   fn is_literal(&self) -> bool {
     self.is_numeric_literal()
       || self.is_string_literal()
@@ -102,13 +102,13 @@ pub trait LitToken<'a>: Token<'a> {
   }
 
   /// Returns `true` when the token is any numeric literal.
-  #[inline]
+  #[inline(always)]
   fn is_numeric_literal(&self) -> bool {
     self.is_integer_literal() || self.is_float_literal() || self.is_hex_float_literal()
   }
 
   /// Returns `true` when the token is an integer literal (e.g., binary, decimal, hex, octal).
-  #[inline]
+  #[inline(always)]
   fn is_integer_literal(&self) -> bool {
     self.is_binary_literal()
       || self.is_decimal_literal()
@@ -117,37 +117,37 @@ pub trait LitToken<'a>: Token<'a> {
   }
 
   /// Returns `true` when the token is a floating-point literal.
-  #[inline]
+  #[inline(always)]
   fn is_float_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a base-10 integer literal.
-  #[inline]
+  #[inline(always)]
   fn is_decimal_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a hexadecimal integer literal (e.g., `0xFF`).
-  #[inline]
+  #[inline(always)]
   fn is_hexadecimal_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is an octal integer literal (e.g., `0o77`).
-  #[inline]
+  #[inline(always)]
   fn is_octal_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a binary integer literal (e.g., `0b1010`).
-  #[inline]
+  #[inline(always)]
   fn is_binary_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a hexadecimal floating-point literal (e.g., `0x1.fp3`).
-  #[inline]
+  #[inline(always)]
   fn is_hex_float_literal(&self) -> bool {
     false
   }
@@ -163,67 +163,67 @@ pub trait LitToken<'a>: Token<'a> {
   /// separately by [`is_literal`](Self::is_literal). The split matters to consumers that
   /// dispatch on escape processing: a plain string is the *escape-processed* quoted form,
   /// while a raw string is taken verbatim and a byte string is not text at all.
-  #[inline]
+  #[inline(always)]
   fn is_string_literal(&self) -> bool {
     self.is_inline_string_literal() || self.is_multiline_string_literal()
   }
 
   /// Returns `true` when the token is a single-line/inline string literal.
-  #[inline]
+  #[inline(always)]
   fn is_inline_string_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a multi-line string literal.
-  #[inline]
+  #[inline(always)]
   fn is_multiline_string_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a raw string literal.
-  #[inline]
+  #[inline(always)]
   fn is_raw_string_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a character literal (e.g., `'a'`).
-  #[inline]
+  #[inline(always)]
   fn is_char_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a byte literal (e.g., `b'a'`).
-  #[inline]
+  #[inline(always)]
   fn is_byte_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a byte-string literal (e.g., `b"..."`).
-  #[inline]
+  #[inline(always)]
   fn is_byte_string_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a boolean literal (`true`/`false`).
-  #[inline]
+  #[inline(always)]
   fn is_boolean_literal(&self) -> bool {
     self.is_true_literal() || self.is_false_literal()
   }
 
   /// Returns `true` when the token is the `true` literal.
-  #[inline]
+  #[inline(always)]
   fn is_true_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is the `false` literal.
-  #[inline]
+  #[inline(always)]
   fn is_false_literal(&self) -> bool {
     false
   }
 
   /// Returns `true` when the token is a null/nil literal.
-  #[inline]
+  #[inline(always)]
   fn is_null_literal(&self) -> bool {
     false
   }
@@ -233,102 +233,102 @@ impl<'a, T> LitToken<'a> for &'a T
 where
   T: LitToken<'a>,
 {
-  #[inline]
+  #[inline(always)]
   fn is_literal(&self) -> bool {
     (**self).is_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_numeric_literal(&self) -> bool {
     (**self).is_numeric_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_integer_literal(&self) -> bool {
     (**self).is_integer_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_float_literal(&self) -> bool {
     (**self).is_float_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_decimal_literal(&self) -> bool {
     (**self).is_decimal_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_hexadecimal_literal(&self) -> bool {
     (**self).is_hexadecimal_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_octal_literal(&self) -> bool {
     (**self).is_octal_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_binary_literal(&self) -> bool {
     (**self).is_binary_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_hex_float_literal(&self) -> bool {
     (**self).is_hex_float_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_string_literal(&self) -> bool {
     (**self).is_string_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_inline_string_literal(&self) -> bool {
     (**self).is_inline_string_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_multiline_string_literal(&self) -> bool {
     (**self).is_multiline_string_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_raw_string_literal(&self) -> bool {
     (**self).is_raw_string_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_char_literal(&self) -> bool {
     (**self).is_char_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_byte_literal(&self) -> bool {
     (**self).is_byte_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_byte_string_literal(&self) -> bool {
     (**self).is_byte_string_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_boolean_literal(&self) -> bool {
     (**self).is_boolean_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_true_literal(&self) -> bool {
     (**self).is_true_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_false_literal(&self) -> bool {
     (**self).is_false_literal()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_null_literal(&self) -> bool {
     (**self).is_null_literal()
   }

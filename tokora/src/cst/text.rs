@@ -33,14 +33,14 @@ pub trait CstText {
 }
 
 impl CstText for str {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     Ok(self)
   }
 }
 
 impl CstText for [u8] {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     core::str::from_utf8(self)
   }
@@ -53,7 +53,7 @@ impl<T> CstText for &T
 where
   T: CstText + ?Sized,
 {
-  #[inline]
+  #[inline(always)]
   fn cst_text(&self) -> Result<&str, Utf8Error> {
     T::cst_text(*self)
   }

@@ -19,7 +19,7 @@ pub trait Span {
     Self: Sized;
 
   /// Returns the start offset of the span.
-  #[inline]
+  #[inline(always)]
   fn start(&self) -> Self::Offset {
     self.start_ref().clone()
   }
@@ -36,7 +36,7 @@ pub trait Span {
     Self: Sized;
 
   /// Returns the end offset of the span.
-  #[inline]
+  #[inline(always)]
   fn end(&self) -> Self::Offset {
     self.end_ref().clone()
   }
@@ -92,42 +92,42 @@ pub trait Span {
 impl Span for core::ops::Range<usize> {
   type Offset = usize;
 
-  #[inline]
+  #[inline(always)]
   fn new(start: Self::Offset, end: Self::Offset) -> Self {
     start..end
   }
 
-  #[inline]
+  #[inline(always)]
   fn into_range(self) -> core::ops::Range<Self::Offset> {
     self.start..self.end
   }
 
-  #[inline]
+  #[inline(always)]
   fn start_ref(&self) -> &Self::Offset {
     &self.start
   }
 
-  #[inline]
+  #[inline(always)]
   fn start_mut(&mut self) -> &mut Self::Offset {
     &mut self.start
   }
 
-  #[inline]
+  #[inline(always)]
   fn into_start(self) -> Self::Offset {
     self.start
   }
 
-  #[inline]
+  #[inline(always)]
   fn end_ref(&self) -> &Self::Offset {
     &self.end
   }
 
-  #[inline]
+  #[inline(always)]
   fn end_mut(&mut self) -> &mut Self::Offset {
     &mut self.end
   }
 
-  #[inline]
+  #[inline(always)]
   fn into_end(self) -> Self::Offset {
     self.end
   }
@@ -140,7 +140,7 @@ impl Span for core::ops::Range<usize> {
   /// `Range<usize>` is the documented-**lenient** constructor, so `10..5` is a value this trait
   /// says you may create. Refusing to relocate it would make a documented-legal value
   /// unusable.
-  #[inline]
+  #[inline(always)]
   fn bump(&mut self, n: &Self::Offset) {
     self.start = self.start.checked_add(*n).expect(OVERFLOW_MSG);
     self.end = self.end.checked_add(*n).expect(OVERFLOW_MSG);
@@ -158,42 +158,42 @@ where
 {
   type Offset = O;
 
-  #[inline]
+  #[inline(always)]
   fn new(start: Self::Offset, end: Self::Offset) -> Self {
     SimpleSpan::new(start, end)
   }
 
-  #[inline]
+  #[inline(always)]
   fn into_range(self) -> core::ops::Range<Self::Offset> {
     self.start..self.end
   }
 
-  #[inline]
+  #[inline(always)]
   fn start_ref(&self) -> &Self::Offset {
     self.start_ref()
   }
 
-  #[inline]
+  #[inline(always)]
   fn start_mut(&mut self) -> &mut Self::Offset {
     self.start_mut()
   }
 
-  #[inline]
+  #[inline(always)]
   fn into_start(self) -> Self::Offset {
     self.start
   }
 
-  #[inline]
+  #[inline(always)]
   fn end_ref(&self) -> &Self::Offset {
     self.end_ref()
   }
 
-  #[inline]
+  #[inline(always)]
   fn end_mut(&mut self) -> &mut Self::Offset {
     self.end_mut()
   }
 
-  #[inline]
+  #[inline(always)]
   fn into_end(self) -> Self::Offset {
     self.end
   }
@@ -219,7 +219,7 @@ where
   /// release**, where this assert then catches every wrap except a start that wraps under and
   /// lands at or below `end`. Closing that needs an arithmetic bound on
   /// [`Span::Offset`], which core cannot express.
-  #[inline]
+  #[inline(always)]
   fn bump(&mut self, n: &Self::Offset) {
     self.bump(n);
     assert!(
@@ -410,7 +410,7 @@ impl<O> core::fmt::Display for SimpleSpan<O>
 where
   O: core::fmt::Display,
 {
-  #[inline]
+  #[inline(always)]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "{}..{}", self.start, self.end)
   }
@@ -421,7 +421,7 @@ where
   O: Clone,
 {
   /// Clone the span into owned offsets.
-  #[inline]
+  #[inline(always)]
   pub fn cloned(self) -> SimpleSpan<O> {
     SimpleSpan {
       start: self.start.clone(),
@@ -436,7 +436,7 @@ impl SimpleSpan {
   /// ## Panics
   ///
   /// Panics if `end < start`.
-  #[inline]
+  #[inline(always)]
   pub const fn const_new(start: usize, end: usize) -> Self {
     assert!(end >= start, "end must be greater than or equal to start");
     Self { start, end }
@@ -445,7 +445,7 @@ impl SimpleSpan {
   /// Try to create a new span.
   ///
   /// Returns `None` if `end < start`.
-  #[inline]
+  #[inline(always)]
   pub const fn try_const_new(start: usize, end: usize) -> Option<Self> {
     if end >= start {
       Some(Self { start, end })
@@ -474,7 +474,7 @@ impl SimpleSpan {
   /// span.bump_start_const(3);
   /// assert_eq!(span, SimpleSpan::new(8, 15));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn bump_start_const(&mut self, n: usize) -> &mut Self {
     self.start = match self.start.checked_add(n) {
       Some(v) => v,
@@ -506,7 +506,7 @@ impl SimpleSpan {
   /// span.bump_end_const(5);
   /// assert_eq!(span, SimpleSpan::new(5, 20));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn bump_end_const(&mut self, n: usize) -> &mut Self {
     self.end = match self.end.checked_add(n) {
       Some(v) => v,
@@ -538,7 +538,7 @@ impl SimpleSpan {
   /// span.bump_const(10);
   /// assert_eq!(span, SimpleSpan::new(15, 25));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn bump_const(&mut self, n: usize) -> &mut Self {
     self.start = match self.start.checked_add(n) {
       Some(v) => v,
@@ -573,7 +573,7 @@ impl SimpleSpan {
   /// span.set_start_const(10);
   /// assert_eq!(span, SimpleSpan::new(10, 15));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn set_start_const(&mut self, start: usize) -> &mut Self {
     self.start = start;
     assert!(
@@ -601,7 +601,7 @@ impl SimpleSpan {
   /// span.set_end_const(20);
   /// assert_eq!(span, SimpleSpan::new(5, 20));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn set_end_const(&mut self, end: usize) -> &mut Self {
     self.end = end;
     assert!(
@@ -626,7 +626,7 @@ impl SimpleSpan {
   /// let span = SimpleSpan::new(5, 15).with_start_const(10);
   /// assert_eq!(span, SimpleSpan::new(10, 15));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn with_start_const(mut self, start: usize) -> Self {
     self.start = start;
     assert!(
@@ -651,7 +651,7 @@ impl SimpleSpan {
   /// let span = SimpleSpan::new(5, 15).with_end_const(20);
   /// assert_eq!(span, SimpleSpan::new(5, 20));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn with_end_const(mut self, end: usize) -> Self {
     self.end = end;
     assert!(
@@ -675,7 +675,7 @@ impl<O> SimpleSpan<O> {
   /// assert_eq!(**span_ref.start_ref(), 5);
   /// assert_eq!(**span_ref.end_ref(), 15);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn as_ref(&self) -> SimpleSpan<&O> {
     SimpleSpan {
       start: &self.start,
@@ -696,7 +696,7 @@ impl<O> SimpleSpan<O> {
   /// **span_mut.end_mut() = 20;
   /// assert_eq!(span, SimpleSpan::new(10, 20));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn as_mut(&mut self) -> SimpleSpan<&mut O> {
     SimpleSpan {
       start: &mut self.start,
@@ -709,7 +709,7 @@ impl<O> SimpleSpan<O> {
   /// ## Panics
   ///
   /// Panics if `end < start`.
-  #[inline]
+  #[inline(always)]
   pub fn new(start: O, end: O) -> Self
   where
     O: Ord,
@@ -721,7 +721,7 @@ impl<O> SimpleSpan<O> {
   /// Try to create a new span.
   ///
   /// Returns `None` if `end < start`.
-  #[inline]
+  #[inline(always)]
   pub fn try_new(start: O, end: O) -> Option<Self>
   where
     O: Ord,
@@ -764,7 +764,7 @@ impl<O> SimpleSpan<O> {
   /// span.bump_start(3);
   /// assert_eq!(span, SimpleSpan::new(8, 15));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn bump_start(&mut self, n: O) -> &mut Self
   where
     O: AddAssign<O> + Ord,
@@ -808,7 +808,7 @@ impl<O> SimpleSpan<O> {
   /// span.bump_end(5);
   /// assert_eq!(span, SimpleSpan::new(5, 20));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn bump_end(&mut self, n: O) -> &mut Self
   where
     O: AddAssign<O> + Ord,
@@ -849,7 +849,7 @@ impl<O> SimpleSpan<O> {
   /// span.bump(&10);
   /// assert_eq!(span, SimpleSpan::new(15, 25));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn bump(&mut self, n: &O) -> &mut Self
   where
     O: for<'a> AddAssign<&'a O> + Clone,
@@ -874,7 +874,7 @@ impl<O> SimpleSpan<O> {
   /// span.set_start(10);
   /// assert_eq!(span, SimpleSpan::new(10, 15));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn set_start(&mut self, start: O) -> &mut Self
   where
     O: Ord,
@@ -902,7 +902,7 @@ impl<O> SimpleSpan<O> {
   /// span.set_end(20);
   /// assert_eq!(span, SimpleSpan::new(5, 20));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn set_end(&mut self, end: O) -> &mut Self
   where
     O: Ord,
@@ -929,7 +929,7 @@ impl<O> SimpleSpan<O> {
   /// let span = SimpleSpan::new(5, 15).with_start(10);
   /// assert_eq!(span, SimpleSpan::new(10, 15));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn with_start(mut self, start: O) -> Self
   where
     O: Ord,
@@ -956,7 +956,7 @@ impl<O> SimpleSpan<O> {
   /// let span = SimpleSpan::new(5, 15).with_end(20);
   /// assert_eq!(span, SimpleSpan::new(5, 20));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn with_end(mut self, end: O) -> Self
   where
     O: Ord,
@@ -979,7 +979,7 @@ impl<O> SimpleSpan<O> {
   /// let span = SimpleSpan::new(5, 15);
   /// assert_eq!(span.start(), 5);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn start(&self) -> O
   where
     O: Copy,
@@ -998,7 +998,7 @@ impl<O> SimpleSpan<O> {
   ///
   /// assert_eq!(*span.start_ref(), 5);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn start_ref(&self) -> &O {
     &self.start
   }
@@ -1018,7 +1018,7 @@ impl<O> SimpleSpan<O> {
   /// *span.start_mut() = 10;
   /// assert_eq!(span.start(), 10);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn start_mut(&mut self) -> &mut O {
     &mut self.start
   }
@@ -1033,7 +1033,7 @@ impl<O> SimpleSpan<O> {
   /// let span = SimpleSpan::new(5, 15);
   /// assert_eq!(span.end(), 15);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn end(&self) -> O
   where
     O: Copy,
@@ -1052,7 +1052,7 @@ impl<O> SimpleSpan<O> {
   ///
   /// assert_eq!(*span.end_ref(), 15);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn end_ref(&self) -> &O {
     &self.end
   }
@@ -1072,7 +1072,7 @@ impl<O> SimpleSpan<O> {
   /// *span.end_mut() = 20;
   /// assert_eq!(span.end(), 20);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn end_mut(&mut self) -> &mut O {
     &mut self.end
   }
@@ -1087,7 +1087,7 @@ impl<O> SimpleSpan<O> {
   /// let span = SimpleSpan::new(5, 15);
   /// assert_eq!(span.len(), 10);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn len(&self) -> O
   where
     O: for<'a> core::ops::Sub<&'a O, Output = O> + Clone,
@@ -1108,7 +1108,7 @@ impl<O> SimpleSpan<O> {
   /// let not_empty = SimpleSpan::new(5, 15);
   /// assert!(!not_empty.is_empty());
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn is_empty(&self) -> bool
   where
     O: PartialEq,
@@ -1126,7 +1126,7 @@ impl<O> SimpleSpan<O> {
   /// let span = SimpleSpan::new(5, 15);
   /// assert_eq!(span.range(), (&5..&15));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn range(&self) -> Range<&O> {
     &self.start..&self.end
   }
@@ -1136,14 +1136,14 @@ impl<O> From<Range<O>> for SimpleSpan<O>
 where
   O: Ord,
 {
-  #[inline]
+  #[inline(always)]
   fn from(range: Range<O>) -> Self {
     Self::new(range.start, range.end)
   }
 }
 
 impl<O> From<SimpleSpan<O>> for Range<O> {
-  #[inline]
+  #[inline(always)]
   fn from(span: SimpleSpan<O>) -> Self {
     span.start..span.end
   }
@@ -1153,14 +1153,14 @@ impl<O> From<(O, O)> for SimpleSpan<O>
 where
   O: Ord,
 {
-  #[inline]
+  #[inline(always)]
   fn from((start, end): (O, O)) -> Self {
     Self::new(start, end)
   }
 }
 
 impl<O> From<SimpleSpan<O>> for (O, O) {
-  #[inline]
+  #[inline(always)]
   fn from(span: SimpleSpan<O>) -> Self {
     (span.start, span.end)
   }
@@ -1321,21 +1321,21 @@ pub struct Spanned<D, S = SimpleSpan> {
 }
 
 impl<D, S> AsRef<S> for Spanned<D, S> {
-  #[inline]
+  #[inline(always)]
   fn as_ref(&self) -> &S {
     self.span_ref()
   }
 }
 
 impl<D, S> AsSpan<S> for Spanned<D, S> {
-  #[inline]
+  #[inline(always)]
   fn as_span(&self) -> &S {
     AsRef::as_ref(self)
   }
 }
 
 impl<D, S> IntoSpan<S> for Spanned<D, S> {
-  #[inline]
+  #[inline(always)]
   fn into_span(self) -> S {
     self.span
   }
@@ -1344,14 +1344,14 @@ impl<D, S> IntoSpan<S> for Spanned<D, S> {
 impl<D, S> core::ops::Deref for Spanned<D, S> {
   type Target = D;
 
-  #[inline]
+  #[inline(always)]
   fn deref(&self) -> &Self::Target {
     &self.data
   }
 }
 
 impl<D, S> core::ops::DerefMut for Spanned<D, S> {
-  #[inline]
+  #[inline(always)]
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.data
   }
@@ -1361,7 +1361,7 @@ impl<D, S> core::fmt::Display for Spanned<D, S>
 where
   D: core::fmt::Display,
 {
-  #[inline]
+  #[inline(always)]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.data.fmt(f)
   }
@@ -1377,7 +1377,7 @@ where
 impl<D, S> IntoComponents for Spanned<D, S> {
   type Components = (S, D);
 
-  #[inline]
+  #[inline(always)]
   fn into_components(self) -> Self::Components {
     (self.span, self.data)
   }
@@ -1385,7 +1385,7 @@ impl<D, S> IntoComponents for Spanned<D, S> {
 
 impl<D, S> Spanned<&D, &S> {
   /// Returns a copied version of the spanned value.
-  #[inline]
+  #[inline(always)]
   pub const fn copied(&self) -> Spanned<D, S>
   where
     D: Copy,
@@ -1398,7 +1398,7 @@ impl<D, S> Spanned<&D, &S> {
   }
 
   /// Returns a cloned version of the spanned value.
-  #[inline]
+  #[inline(always)]
   pub fn cloned(&self) -> Spanned<D, S>
   where
     D: Clone,
@@ -1410,7 +1410,7 @@ impl<D, S> Spanned<&D, &S> {
 
 impl<D, S> Spanned<D, S> {
   /// Create a new spanned value.
-  #[inline]
+  #[inline(always)]
   pub const fn new(span: S, data: D) -> Self {
     Self { span, data }
   }
@@ -1426,7 +1426,7 @@ impl<D, S> Spanned<D, S> {
   /// let spanned = Spanned::new(SimpleSpan::new(5, 10), "data");
   /// assert_eq!(spanned.span(), SimpleSpan::new(5, 10));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -1445,7 +1445,7 @@ impl<D, S> Spanned<D, S> {
   /// let spanned = Spanned::new(SimpleSpan::new(5, 10), "data");
   /// assert_eq!(spanned.span_ref(), &SimpleSpan::new(5, 10));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn span_ref(&self) -> &S {
     &self.span
   }
@@ -1462,7 +1462,7 @@ impl<D, S> Spanned<D, S> {
   /// spanned.span_mut().set_end(15);
   /// assert_eq!(spanned.span().end(), 15);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn span_mut(&mut self) -> &mut S {
     &mut self.span
   }
@@ -1478,7 +1478,7 @@ impl<D, S> Spanned<D, S> {
   /// let spanned = Spanned::new(SimpleSpan::new(5, 10), 42);
   /// assert_eq!(*spanned.data(), 42);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn data(&self) -> &D {
     &self.data
   }
@@ -1495,7 +1495,7 @@ impl<D, S> Spanned<D, S> {
   /// *spanned.data_mut() = 100;
   /// assert_eq!(*spanned.data(), 100);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn data_mut(&mut self) -> &mut D {
     &mut self.data
   }
@@ -1512,7 +1512,7 @@ impl<D, S> Spanned<D, S> {
   /// let borrowed: Spanned<&String, &SimpleSpan> = spanned.as_ref();
   /// assert_eq!(borrowed.data(), &"hello");
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn as_ref(&self) -> Spanned<&D, &S> {
     Spanned {
       span: &self.span,
@@ -1533,7 +1533,7 @@ impl<D, S> Spanned<D, S> {
   /// borrowed.data.push_str(" world");
   /// assert_eq!(spanned.data(), &"hello world");
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn as_mut(&mut self) -> Spanned<&mut D, &mut S> {
     Spanned {
       span: &mut self.span,
@@ -1542,19 +1542,19 @@ impl<D, S> Spanned<D, S> {
   }
 
   /// Consume the spanned value and return the span.
-  #[inline]
+  #[inline(always)]
   pub fn into_span(self) -> S {
     self.span
   }
 
   /// Consume the spanned value and return the data.
-  #[inline]
+  #[inline(always)]
   pub fn into_data(self) -> D {
     self.data
   }
 
   /// Decompose the spanned value into its span and data.
-  #[inline]
+  #[inline(always)]
   pub fn into_components(self) -> (S, D) {
     (self.span, self.data)
   }
@@ -1598,12 +1598,12 @@ impl<D, S> Spanned<D, S> {
 }
 
 impl<D, S> From<Spanned<D, S>> for () {
-  #[inline]
+  #[inline(always)]
   fn from(_: Spanned<D, S>) -> Self {}
 }
 
 impl<D, S> From<Spanned<D, S>> for Ignored<()> {
-  #[inline]
+  #[inline(always)]
   fn from(_: Spanned<D, S>) -> Self {
     Ignored::default()
   }

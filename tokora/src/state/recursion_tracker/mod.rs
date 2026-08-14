@@ -43,7 +43,7 @@ impl RecursionLimitExceeded {
   /// limiter.increase();
   /// assert_eq!(limiter.depth(), 1);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn depth(&self) -> usize {
     self.0.depth()
   }
@@ -58,7 +58,7 @@ impl RecursionLimitExceeded {
   /// let mut limiter = RecursionLimiter::with_limitation(3);
   /// assert_eq!(limiter.limitation(), 3);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn limitation(&self) -> usize {
     self.0.limitation()
   }
@@ -276,7 +276,7 @@ pub struct RecursionLimiter {
 }
 
 impl Default for RecursionLimiter {
-  #[inline]
+  #[inline(always)]
   fn default() -> Self {
     Self::new()
   }
@@ -846,7 +846,7 @@ impl RecursionLimiter {
   /// Defaults to a maximum depth of 500 — this type's own general-purpose ceiling, with no
   /// assumption about what one level costs. tokora's Pratt-parser wiring does not inherit this
   /// default; see the type's `Two Defaults, Two Subjects` docs.
-  #[inline]
+  #[inline(always)]
   pub const fn new() -> Self {
     Self {
       max: 500,
@@ -855,7 +855,7 @@ impl RecursionLimiter {
   }
 
   /// Creates a new recursion tracker with the given maximum depth.
-  #[inline]
+  #[inline(always)]
   pub const fn with_limitation(max: usize) -> Self {
     Self { max, current: 0 }
   }
@@ -881,19 +881,19 @@ impl RecursionLimiter {
   /// }
   /// assert!(limiter.check().is_ok());
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn unlimited() -> Self {
     Self::with_limitation(usize::MAX)
   }
 
   /// Returns the current depth of the recursion.
-  #[inline]
+  #[inline(always)]
   pub const fn depth(&self) -> usize {
     self.current
   }
 
   /// Returns the maximum depth of the recursion.
-  #[inline]
+  #[inline(always)]
   pub const fn limitation(&self) -> usize {
     self.max
   }
@@ -901,31 +901,31 @@ impl RecursionLimiter {
   /// Increase the current depth of the recursion.
   ///
   /// Saturates at `usize::MAX`, mirroring the saturating [`decrease`](Self::decrease).
-  #[inline]
+  #[inline(always)]
   pub const fn increase(&mut self) {
     self.current = self.current.saturating_add(1);
   }
 
   /// Decrease the current depth of the recursion.
-  #[inline]
+  #[inline(always)]
   pub const fn decrease(&mut self) {
     self.current = self.current.saturating_sub(1);
   }
 
   /// Increases the recursion depth.
-  #[inline]
+  #[inline(always)]
   pub const fn increase_recursion(&mut self) {
     self.increase();
   }
 
   /// Decrease the current depth of the recursion.
-  #[inline]
+  #[inline(always)]
   pub const fn decrease_recursion(&mut self) {
     self.decrease();
   }
 
   /// Checks if the recursion limit has been exceeded.
-  #[inline]
+  #[inline(always)]
   pub const fn check(&self) -> Result<(), RecursionLimitExceeded> {
     if self.depth() > self.limitation() {
       Err(RecursionLimitExceeded(*self))
@@ -938,7 +938,7 @@ impl RecursionLimiter {
 impl State for RecursionLimiter {
   type Error = RecursionLimitExceeded;
 
-  #[inline]
+  #[inline(always)]
   fn check(&self) -> Result<(), Self::Error> {
     <Self as RecursionTracker>::check(self)
   }
@@ -959,7 +959,7 @@ pub trait RecursionTracker {
   fn check(&self) -> Result<(), Self::Error>;
 
   /// Increases the recursion depth and checks the limit.
-  #[inline]
+  #[inline(always)]
   fn increase_and_check(&mut self) -> Result<(), Self::Error> {
     self.increase();
     self.check()
@@ -969,17 +969,17 @@ pub trait RecursionTracker {
 impl RecursionTracker for RecursionLimiter {
   type Error = RecursionLimitExceeded;
 
-  #[inline]
+  #[inline(always)]
   fn increase(&mut self) {
     self.current = self.current.saturating_add(1);
   }
 
-  #[inline]
+  #[inline(always)]
   fn decrease(&mut self) {
     self.current = self.current.saturating_sub(1);
   }
 
-  #[inline]
+  #[inline(always)]
   fn check(&self) -> Result<(), Self::Error> {
     if self.depth() > self.limitation() {
       Err(RecursionLimitExceeded(*self))
@@ -1003,22 +1003,22 @@ const _: () = {
       {
         type Error = <T::Extras as RecursionTracker>::Error;
 
-        #[inline]
+        #[inline(always)]
         fn increase(&mut self) {
           self.extras.increase();
         }
 
-        #[inline]
+        #[inline(always)]
         fn decrease(&mut self) {
           self.extras.decrease();
         }
 
-        #[inline]
+        #[inline(always)]
         fn check(&self) -> Result<(), Self::Error> {
           self.extras.check()
         }
 
-        #[inline]
+        #[inline(always)]
         fn increase_and_check(&mut self) -> Result<(), Self::Error> {
           self.extras.increase_and_check()
         }
@@ -1031,22 +1031,22 @@ const _: () = {
       {
         type Error = <<T::Logos as Logos<'a>>::Extras as RecursionTracker>::Error;
 
-        #[inline]
+        #[inline(always)]
         fn increase(&mut self) {
           self.inner_mut().increase();
         }
 
-        #[inline]
+        #[inline(always)]
         fn decrease(&mut self) {
           self.inner_mut().decrease();
         }
 
-        #[inline]
+        #[inline(always)]
         fn check(&self) -> Result<(), Self::Error> {
           self.inner().check()
         }
 
-        #[inline]
+        #[inline(always)]
         fn increase_and_check(&mut self) -> Result<(), Self::Error> {
           self.inner_mut().increase_and_check()
         }

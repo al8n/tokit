@@ -39,7 +39,7 @@ pub trait Container<T> {
   fn len(&self) -> usize;
 
   /// Returns `true` if the container is empty.
-  #[inline]
+  #[inline(always)]
   fn is_empty(&self) -> bool {
     self.len() == 0
   }
@@ -56,27 +56,27 @@ impl<T, U> Container<T> for &mut U
 where
   U: Container<T>,
 {
-  #[inline]
+  #[inline(always)]
   fn max_capacity(&self) -> usize {
     U::max_capacity(self)
   }
 
-  #[inline]
+  #[inline(always)]
   fn push(&mut self, item: T) -> Result<(), T> {
     U::push(self, item)
   }
 
-  #[inline]
+  #[inline(always)]
   fn first(&self) -> Option<&T> {
     U::first(self)
   }
 
-  #[inline]
+  #[inline(always)]
   fn last(&self) -> Option<&T> {
     U::last(self)
   }
 
-  #[inline]
+  #[inline(always)]
   fn len(&self) -> usize {
     U::len(self)
   }
@@ -85,27 +85,27 @@ where
 macro_rules! blackhole {
   ($ty:ty) => {
     impl<T> Container<T> for $ty {
-      #[inline]
+      #[inline(always)]
       fn max_capacity(&self) -> usize {
         usize::MAX
       }
 
-      #[inline]
+      #[inline(always)]
       fn push(&mut self, _: T) -> Result<(), T> {
         Ok(())
       }
 
-      #[inline]
+      #[inline(always)]
       fn first(&self) -> Option<&T> {
         None
       }
 
-      #[inline]
+      #[inline(always)]
       fn last(&self) -> Option<&T> {
         None
       }
 
-      #[inline]
+      #[inline(always)]
       fn len(&self) -> usize {
         0
       }
@@ -118,12 +118,12 @@ blackhole!(core::marker::PhantomData<T>);
 blackhole!(crate::utils::marker::Ignored<T>);
 
 impl<T> Container<T> for Option<T> {
-  #[inline]
+  #[inline(always)]
   fn max_capacity(&self) -> usize {
     1
   }
 
-  #[inline]
+  #[inline(always)]
   fn push(&mut self, item: T) -> Result<(), T> {
     if self.is_none() {
       *self = Some(item);
@@ -133,17 +133,17 @@ impl<T> Container<T> for Option<T> {
     }
   }
 
-  #[inline]
+  #[inline(always)]
   fn first(&self) -> Option<&T> {
     self.as_ref()
   }
 
-  #[inline]
+  #[inline(always)]
   fn last(&self) -> Option<&T> {
     self.as_ref()
   }
 
-  #[inline]
+  #[inline(always)]
   fn len(&self) -> usize {
     if self.is_some() { 1 } else { 0 }
   }
@@ -153,12 +153,12 @@ impl<T, N> Container<T> for GenericArrayDeque<T, N>
 where
   N: ArrayLength,
 {
-  #[inline]
+  #[inline(always)]
   fn max_capacity(&self) -> usize {
     N::to_usize()
   }
 
-  #[inline]
+  #[inline(always)]
   fn push(&mut self, item: T) -> Result<(), T> {
     match GenericArrayDeque::push_back(self, item) {
       None => Ok(()),
@@ -166,17 +166,17 @@ where
     }
   }
 
-  #[inline]
+  #[inline(always)]
   fn first(&self) -> Option<&T> {
     GenericArrayDeque::front(self)
   }
 
-  #[inline]
+  #[inline(always)]
   fn last(&self) -> Option<&T> {
     GenericArrayDeque::back(self)
   }
 
-  #[inline]
+  #[inline(always)]
   fn len(&self) -> usize {
     GenericArrayDeque::len(self)
   }
@@ -188,56 +188,56 @@ const _: () = {
   use std::{collections::VecDeque, vec::Vec};
 
   impl<T> Container<T> for Vec<T> {
-    #[inline]
+    #[inline(always)]
     fn max_capacity(&self) -> usize {
       usize::MAX
     }
 
-    #[inline]
+    #[inline(always)]
     fn push(&mut self, item: T) -> Result<(), T> {
       Vec::push(self, item);
       Ok(())
     }
 
-    #[inline]
+    #[inline(always)]
     fn first(&self) -> Option<&T> {
       self.as_slice().first()
     }
 
-    #[inline]
+    #[inline(always)]
     fn last(&self) -> Option<&T> {
       self.as_slice().last()
     }
 
-    #[inline]
+    #[inline(always)]
     fn len(&self) -> usize {
       Vec::len(self)
     }
   }
 
   impl<T> Container<T> for VecDeque<T> {
-    #[inline]
+    #[inline(always)]
     fn max_capacity(&self) -> usize {
       usize::MAX
     }
 
-    #[inline]
+    #[inline(always)]
     fn push(&mut self, item: T) -> Result<(), T> {
       VecDeque::push_back(self, item);
       Ok(())
     }
 
-    #[inline]
+    #[inline(always)]
     fn first(&self) -> Option<&T> {
       self.front()
     }
 
-    #[inline]
+    #[inline(always)]
     fn last(&self) -> Option<&T> {
       self.back()
     }
 
-    #[inline]
+    #[inline(always)]
     fn len(&self) -> usize {
       VecDeque::len(self)
     }

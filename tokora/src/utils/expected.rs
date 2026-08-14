@@ -77,7 +77,7 @@ impl<'a, T: Clone> Expected<'a, T> {
 }
 
 impl<T: core::fmt::Display + Clone> core::fmt::Display for Expected<'_, T> {
-  #[inline]
+  #[inline(always)]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match self {
       Self::One(expected) => write!(f, "expected '{expected}'"),

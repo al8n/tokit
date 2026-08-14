@@ -127,7 +127,7 @@ pub trait IsAsciiChar {
   fn is_ascii_digit(&self) -> bool;
 
   /// Returns `true` if self is one of the given ASCII characters.
-  #[inline]
+  #[inline(always)]
   fn one_of(&self, choices: &[ascii::AsciiChar]) -> bool {
     choices.iter().any(|&ch| self.is_ascii_char(ch))
   }
@@ -137,17 +137,17 @@ impl<T> IsAsciiChar for &T
 where
   T: IsAsciiChar + ?Sized,
 {
-  #[inline]
+  #[inline(always)]
   fn is_ascii_char(&self, ch: ascii::AsciiChar) -> bool {
     <T as IsAsciiChar>::is_ascii_char(*self, ch)
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_ascii_digit(&self) -> bool {
     <T as IsAsciiChar>::is_ascii_digit(*self)
   }
 
-  #[inline]
+  #[inline(always)]
   fn one_of(&self, choices: &[ascii::AsciiChar]) -> bool {
     <T as IsAsciiChar>::one_of(*self, choices)
   }
@@ -157,24 +157,24 @@ impl<T> IsAsciiChar for &mut T
 where
   T: IsAsciiChar + ?Sized,
 {
-  #[inline]
+  #[inline(always)]
   fn is_ascii_char(&self, ch: ascii::AsciiChar) -> bool {
     <T as IsAsciiChar>::is_ascii_char(*self, ch)
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_ascii_digit(&self) -> bool {
     <T as IsAsciiChar>::is_ascii_digit(*self)
   }
 
-  #[inline]
+  #[inline(always)]
   fn one_of(&self, choices: &[ascii::AsciiChar]) -> bool {
     <T as IsAsciiChar>::one_of(*self, choices)
   }
 }
 
 impl IsAsciiChar for char {
-  #[inline]
+  #[inline(always)]
   fn is_ascii_char(&self, ch: ascii::AsciiChar) -> bool {
     if self.is_ascii() {
       *self as u8 == ch as u8
@@ -183,43 +183,43 @@ impl IsAsciiChar for char {
     }
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_ascii_digit(&self) -> bool {
     char::is_ascii_digit(self)
   }
 }
 
 impl IsAsciiChar for u8 {
-  #[inline]
+  #[inline(always)]
   fn is_ascii_char(&self, ch: ascii::AsciiChar) -> bool {
     *self == ch as u8
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_ascii_digit(&self) -> bool {
     u8::is_ascii_digit(self)
   }
 }
 
 impl IsAsciiChar for str {
-  #[inline]
+  #[inline(always)]
   fn is_ascii_char(&self, ch: ascii::AsciiChar) -> bool {
     self.len() == 1 && self.as_bytes()[0] == ch as u8
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_ascii_digit(&self) -> bool {
     self.len() == 1 && self.as_bytes()[0].is_ascii_digit()
   }
 }
 
 impl IsAsciiChar for [u8] {
-  #[inline]
+  #[inline(always)]
   fn is_ascii_char(&self, ch: ascii::AsciiChar) -> bool {
     self.len() == 1 && self[0] == ch as u8
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_ascii_digit(&self) -> bool {
     self.len() == 1 && self[0].is_ascii_digit()
   }
@@ -371,28 +371,28 @@ mod sealed {
   impl<T: Sealed> Sealed for &T {}
 
   impl CharLen for u8 {
-    #[inline]
+    #[inline(always)]
     fn char_len(&self) -> usize {
       1
     }
   }
 
   impl CharLen for char {
-    #[inline]
+    #[inline(always)]
     fn char_len(&self) -> usize {
       self.len_utf8()
     }
   }
 
   impl<T: CharLen> CharLen for PositionedChar<T> {
-    #[inline]
+    #[inline(always)]
     fn char_len(&self) -> usize {
       self.char_ref().char_len()
     }
   }
 
   impl<T: CharLen> CharLen for &T {
-    #[inline]
+    #[inline(always)]
     fn char_len(&self) -> usize {
       (*self).char_len()
     }

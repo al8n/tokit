@@ -15,7 +15,7 @@ where
   Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + UnexpectedTrailingSeparatorEmitter<'inp, L, Lang>,
   Sep: Punctuator<'inp, L, Lang>,
 {
-  #[inline]
+  #[inline(always)]
   fn handle_start_state(
     &self,
     _: usize,
@@ -29,7 +29,7 @@ where
     Ok(inp.span_since(anchor))
   }
 
-  #[inline]
+  #[inline(always)]
   fn handle_element_state(
     &self,
     _: usize,
@@ -43,7 +43,7 @@ where
     Ok(inp.span_since(anchor))
   }
 
-  #[inline]
+  #[inline(always)]
   fn handle_leading_state(
     &self,
     _: usize,
@@ -59,7 +59,7 @@ where
     Ok(inp.span_since(anchor))
   }
 
-  #[inline]
+  #[inline(always)]
   fn handle_separator_state(
     &self,
     _: usize,
@@ -89,7 +89,7 @@ where
   Ctx: ParseContext<'inp, L, Lang>,
   Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>,
 {
-  #[inline]
+  #[inline(always)]
   fn handle_start_state(
     &self,
     _: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
@@ -111,7 +111,7 @@ where
   Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + UnexpectedLeadingSeparatorEmitter<'inp, L, Lang>,
   Sep: Punctuator<'inp, L, Lang>,
 {
-  #[inline]
+  #[inline(always)]
   fn handle_start_state(
     &self,
     inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
@@ -135,7 +135,7 @@ where
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
 {
-  #[inline]
+  #[inline(always)]
   fn on_element(
     &self,
     _: usize,
@@ -149,7 +149,7 @@ where
     Ok(())
   }
 
-  #[inline]
+  #[inline(always)]
   fn on_stop(
     &self,
     _: usize,

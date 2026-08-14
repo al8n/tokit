@@ -150,7 +150,7 @@ impl<Char, O> SingleCharEscape<Char, O> {
   /// );
   /// assert_eq!(escape.char(), 'r');
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn from_char(span: SimpleSpan<O>, pos: O, ch: Char) -> Self {
     Self::from_positioned_char(span, PositionedChar::with_position(ch, pos))
   }
@@ -168,7 +168,7 @@ impl<Char, O> SingleCharEscape<Char, O> {
   /// );
   /// assert_eq!(escape.char(), 'r');
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn from_positioned_char(
     span: SimpleSpan<O>,
     character: PositionedChar<Char, O>,
@@ -191,7 +191,7 @@ impl<Char, O> SingleCharEscape<Char, O> {
   /// );
   /// assert_eq!(escape.char(), 'n');
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn char(&self) -> Char
   where
     Char: Copy,
@@ -212,13 +212,13 @@ impl<Char, O> SingleCharEscape<Char, O> {
   /// );
   /// assert_eq!(*escape.char_ref(), 't');
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn char_ref(&self) -> &Char {
     self.character.char_ref()
   }
 
   /// Returns a mutable reference to the character after the backslash.
-  #[inline]
+  #[inline(always)]
   pub const fn char_mut(&mut self) -> &mut Char {
     self.character.char_mut()
   }
@@ -236,7 +236,7 @@ impl<Char, O> SingleCharEscape<Char, O> {
   /// );
   /// assert_eq!(escape.position(), 11); // Position of 'n', not '\'
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn position(&self) -> O
   where
     O: Copy,
@@ -258,7 +258,7 @@ impl<Char, O> SingleCharEscape<Char, O> {
   /// );
   /// assert_eq!(escape.position_ref(), &11); // Position of 'n', not '\'
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn position_ref(&self) -> &O {
     self.character.position_ref()
   }
@@ -278,7 +278,7 @@ impl<Char, O> SingleCharEscape<Char, O> {
   /// );
   /// assert_eq!(escape.span(), SimpleSpan::new(4, 6)); // Covers both '\' and 'r'
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn span(&self) -> SimpleSpan<O>
   where
     O: Copy,
@@ -287,13 +287,13 @@ impl<Char, O> SingleCharEscape<Char, O> {
   }
 
   /// Returns a reference to the span.
-  #[inline]
+  #[inline(always)]
   pub const fn span_ref(&self) -> SimpleSpan<&O> {
     self.span.as_ref()
   }
 
   /// Returns a mutable reference to the span.
-  #[inline]
+  #[inline(always)]
   pub const fn span_mut(&mut self) -> SimpleSpan<&mut O> {
     self.span.as_mut()
   }
@@ -399,7 +399,7 @@ impl<S> MultiCharEscape<S> {
   ///     SimpleSpan::new(5, 9)   // "\xFF"
   /// );
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn new(content: S, span: S) -> Self {
     Self { content, span }
   }
@@ -419,7 +419,7 @@ impl<S> MultiCharEscape<S> {
   /// );
   /// assert_eq!(escape.content(), SimpleSpan::new(6, 9));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn content(&self) -> S
   where
     S: Copy,
@@ -428,13 +428,13 @@ impl<S> MultiCharEscape<S> {
   }
 
   /// Returns a reference to the content span.
-  #[inline]
+  #[inline(always)]
   pub const fn content_ref(&self) -> &S {
     &self.content
   }
 
   /// Returns a mutable reference to the content span.
-  #[inline]
+  #[inline(always)]
   pub const fn content_mut(&mut self) -> &mut S {
     &mut self.content
   }
@@ -454,7 +454,7 @@ impl<S> MultiCharEscape<S> {
   /// );
   /// assert_eq!(escape.span(), SimpleSpan::new(5, 9)); // Full `\xFF`
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -463,13 +463,13 @@ impl<S> MultiCharEscape<S> {
   }
 
   /// Returns a reference to the span.
-  #[inline]
+  #[inline(always)]
   pub const fn span_ref(&self) -> &S {
     &self.span
   }
 
   /// Returns a mutable reference to the span.
-  #[inline]
+  #[inline(always)]
   pub const fn span_mut(&mut self) -> &mut S {
     &mut self.span
   }
@@ -589,7 +589,7 @@ impl<Char, O> EscapedLexeme<Char, O> {
   /// let lexeme = Lexeme::from(PositionedChar::with_position('n', 11));
   /// let escape = EscapedLexeme::new(SimpleSpan::new(10, 12), lexeme);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn new(span: SimpleSpan<O>, lexeme: Lexeme<Char, O>) -> Self {
     Self { span, lexeme }
   }
@@ -610,7 +610,7 @@ impl<Char, O> EscapedLexeme<Char, O> {
   ///
   /// assert!(escape.lexeme_ref().is_char());
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn from_positioned_char(span: SimpleSpan<O>, ch: PositionedChar<Char, O>) -> Self {
     Self::new(span, Lexeme::Char(ch))
   }
@@ -632,7 +632,7 @@ impl<Char, O> EscapedLexeme<Char, O> {
   ///
   /// assert!(escape.lexeme_ref().is_char());
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn from_char(span: SimpleSpan<O>, pos: O, ch: Char) -> Self {
     Self::from_positioned_char(span, PositionedChar::with_position(ch, pos))
   }
@@ -653,7 +653,7 @@ impl<Char, O> EscapedLexeme<Char, O> {
   ///
   /// assert!(escape.lexeme_ref().is_range());
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn from_sequence(span: SimpleSpan<O>, content: SimpleSpan<O>) -> Self {
     Self::new(span, Lexeme::Range(content))
   }
@@ -671,7 +671,7 @@ impl<Char, O> EscapedLexeme<Char, O> {
   /// );
   /// assert_eq!(escape.span(), SimpleSpan::new(10, 12));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn span(&self) -> SimpleSpan<O>
   where
     O: Copy,
@@ -680,13 +680,13 @@ impl<Char, O> EscapedLexeme<Char, O> {
   }
 
   /// Returns a reference to the span.
-  #[inline]
+  #[inline(always)]
   pub const fn span_ref(&self) -> SimpleSpan<&O> {
     self.span.as_ref()
   }
 
   /// Returns a mutable reference to the span.
-  #[inline]
+  #[inline(always)]
   pub const fn span_mut(&mut self) -> SimpleSpan<&mut O> {
     self.span.as_mut()
   }
@@ -706,7 +706,7 @@ impl<Char, O> EscapedLexeme<Char, O> {
   /// let lexeme = escape.lexeme();
   /// assert!(lexeme.is_char());
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn lexeme(&self) -> Lexeme<Char, O>
   where
     Char: Copy,
@@ -728,13 +728,13 @@ impl<Char, O> EscapedLexeme<Char, O> {
   /// );
   /// assert!(escape.lexeme_ref().is_char());
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn lexeme_ref(&self) -> &Lexeme<Char, O> {
     &self.lexeme
   }
 
   /// Returns a mutable reference to the lexeme.
-  #[inline]
+  #[inline(always)]
   pub const fn lexeme_mut(&mut self) -> &mut Lexeme<Char, O> {
     &mut self.lexeme
   }
@@ -757,7 +757,7 @@ impl<Char, O> EscapedLexeme<Char, O> {
   /// escape.bump(&5);
   /// assert_eq!(escape.span(), SimpleSpan::new(15, 17));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn bump(&mut self, offset: &O) -> &mut Self
   where
     O: for<'a> AddAssign<&'a O> + Clone,

@@ -52,7 +52,7 @@ impl core::fmt::Debug for KindValidator {
 impl KindValidator {
   /// Wraps a dialect predicate: `true` for every kind the dialect can name, `false`
   /// otherwise.
-  #[inline]
+  #[inline(always)]
   pub const fn new(f: fn(u16) -> bool) -> Self {
     Self(f)
   }
@@ -62,7 +62,7 @@ impl KindValidator {
   ///
   /// Written out rather than defaulted, so a caller who accepts the whole `u16` space has
   /// said so in the source instead of inheriting it by omission.
-  #[inline]
+  #[inline(always)]
   pub const fn accept_all() -> Self {
     Self(|_| true)
   }
@@ -73,7 +73,7 @@ impl KindValidator {
   /// The floor is not the dialect's to lift — the reserved value is what marks an inert
   /// tombstone slot in the event log — so [`accept_all`](Self::accept_all) does not re-admit
   /// it either.
-  #[inline]
+  #[inline(always)]
   pub(crate) fn admits(&self, kind: u16) -> bool {
     kind != TOMBSTONE && (self.0)(kind)
   }
@@ -118,7 +118,7 @@ impl<T> core::fmt::Debug for CstProfile<T> {
 }
 
 impl<T> Clone for CstProfile<T> {
-  #[inline]
+  #[inline(always)]
   fn clone(&self) -> Self {
     *self
   }
@@ -168,25 +168,25 @@ impl<T> CstProfile<T> {
   }
 
   /// The node kind wrapped around a recovery hole's skipped tokens.
-  #[inline]
+  #[inline(always)]
   pub const fn error_kind(&self) -> u16 {
     self.error_kind
   }
 
   /// The token kind tiled over source bytes no committed token covers.
-  #[inline]
+  #[inline(always)]
   pub const fn gap_kind(&self) -> u16 {
     self.gap_kind
   }
 
   /// The dialect's kind predicate.
-  #[inline]
+  #[inline(always)]
   pub const fn validator(&self) -> KindValidator {
     self.validator
   }
 
   /// The dialect's token mapper.
-  #[inline]
+  #[inline(always)]
   pub const fn mapper(&self) -> fn(&T) -> u16 {
     self.mapper
   }

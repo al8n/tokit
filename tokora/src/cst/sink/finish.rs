@@ -367,7 +367,7 @@ fn w_tick() {
 
 /// The release form of [`w_tick`]: nothing.
 #[cfg(not(test))]
-#[inline]
+#[inline(always)]
 const fn w_tick() {}
 
 /// Charges `n` units of [`W`](w) at once: the honest price of one bulk library call whose
@@ -382,7 +382,7 @@ fn w_tick_n(n: u64) {
 
 /// The release form of [`w_tick_n`]: nothing.
 #[cfg(not(test))]
-#[inline]
+#[inline(always)]
 const fn w_tick_n(_n: u64) {}
 
 /// One open node during the replay walk: a direct start, a hoisted retro-wrap (carrying

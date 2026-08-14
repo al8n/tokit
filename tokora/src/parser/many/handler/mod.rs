@@ -47,7 +47,7 @@ pub trait SeparatorHandler<'inp, L> {
   /// Drivers call this, never [`on_separator`](Self::on_separator) directly: the clone the call
   /// needs lives inside the constant-guarded branch, so it folds away entirely for a
   /// non-observing container.
-  #[inline]
+  #[inline(always)]
   fn observe_separator(&mut self, sep: &Spanned<L::Token, L::Span>)
   where
     L: Lexer<'inp>,
@@ -66,7 +66,7 @@ where
   // default and pay the clone on a path whose backing type does not observe separators.
   const OBSERVES_SEPARATORS: bool = T::OBSERVES_SEPARATORS;
 
-  #[inline]
+  #[inline(always)]
   fn on_separator(&mut self, sep: Spanned<L::Token, L::Span>)
   where
     L: Lexer<'inp>,
@@ -80,7 +80,7 @@ macro_rules! blackhole_separator_handler {
     impl<'inp, L> SeparatorHandler<'inp, L> for $ty {
       const OBSERVES_SEPARATORS: bool = false;
 
-      #[inline]
+      #[inline(always)]
       fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
       where
         L: Lexer<'inp>,
@@ -92,7 +92,7 @@ macro_rules! blackhole_separator_handler {
     impl<'inp, L, T> SeparatorHandler<'inp, L> for $ty {
       const OBSERVES_SEPARATORS: bool = false;
 
-      #[inline]
+      #[inline(always)]
       fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
       where
         L: Lexer<'inp>,
@@ -112,7 +112,7 @@ where
 {
   const OBSERVES_SEPARATORS: bool = false;
 
-  #[inline]
+  #[inline(always)]
   fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
   where
     L: Lexer<'inp>,
@@ -159,7 +159,7 @@ const _: () = {
   impl<'inp, L, T> SeparatorHandler<'inp, L> for Vec<T> {
     const OBSERVES_SEPARATORS: bool = false;
 
-    #[inline]
+    #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -170,7 +170,7 @@ const _: () = {
   impl<'inp, L, T> SeparatorHandler<'inp, L> for VecDeque<T> {
     const OBSERVES_SEPARATORS: bool = false;
 
-    #[inline]
+    #[inline(always)]
     fn on_separator(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -261,7 +261,7 @@ impl<'inp, L, T> DelimiterHandler<'inp, L> for &mut T
 where
   T: ?Sized + DelimiterHandler<'inp, L>,
 {
-  #[inline]
+  #[inline(always)]
   fn on_open_delimiter(&mut self, open: Spanned<L::Token, L::Span>)
   where
     L: Lexer<'inp>,
@@ -269,7 +269,7 @@ where
     (**self).on_open_delimiter(open);
   }
 
-  #[inline]
+  #[inline(always)]
   fn on_close_delimiter(&mut self, close: Spanned<L::Token, L::Span>)
   where
     L: Lexer<'inp>,
@@ -281,14 +281,14 @@ where
 macro_rules! blackhole_delimiter_handler {
   ($ty:ty) => {
     impl<'inp, L> DelimiterHandler<'inp, L> for $ty {
-      #[inline]
+      #[inline(always)]
       fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
       where
         L: Lexer<'inp>,
       {
       }
 
-      #[inline]
+      #[inline(always)]
       fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
       where
         L: Lexer<'inp>,
@@ -298,14 +298,14 @@ macro_rules! blackhole_delimiter_handler {
   };
   (@generic $ty:ty) => {
     impl<'inp, L, T> DelimiterHandler<'inp, L> for $ty {
-      #[inline]
+      #[inline(always)]
       fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
       where
         L: Lexer<'inp>,
       {
       }
 
-      #[inline]
+      #[inline(always)]
       fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
       where
         L: Lexer<'inp>,
@@ -323,14 +323,14 @@ impl<'inp, L, T, N> DelimiterHandler<'inp, L> for GenericArrayDeque<T, N>
 where
   N: ArrayLength,
 {
-  #[inline]
+  #[inline(always)]
   fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
   where
     L: Lexer<'inp>,
   {
   }
 
-  #[inline]
+  #[inline(always)]
   fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
   where
     L: Lexer<'inp>,
@@ -344,14 +344,14 @@ const _: () = {
   use std::{collections::vec_deque::VecDeque, vec::Vec};
 
   impl<'inp, L, T> DelimiterHandler<'inp, L> for Vec<T> {
-    #[inline]
+    #[inline(always)]
     fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
     {
     }
 
-    #[inline]
+    #[inline(always)]
     fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
@@ -360,14 +360,14 @@ const _: () = {
   }
 
   impl<'inp, L, T> DelimiterHandler<'inp, L> for VecDeque<T> {
-    #[inline]
+    #[inline(always)]
     fn on_open_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,
     {
     }
 
-    #[inline]
+    #[inline(always)]
     fn on_close_delimiter(&mut self, _: Spanned<L::Token, L::Span>)
     where
       L: Lexer<'inp>,

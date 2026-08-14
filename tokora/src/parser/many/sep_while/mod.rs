@@ -179,7 +179,7 @@ where
   Sep: Clone,
   Condition: Clone,
 {
-  #[inline]
+  #[inline(always)]
   fn clone(&self) -> Self {
     Self {
       f: self.f.clone(),
@@ -199,7 +199,7 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl>
   SeparatedWhile<F, (), Condition, O, W, L, Ctx, Lang, Cmpl>
 {
   /// Creates a new `SeparatedWhile` parser with the given container.
-  #[inline]
+  #[inline(always)]
   pub const fn new<Sep>(
     f: F,
     condition: Condition,
@@ -222,7 +222,7 @@ impl<F, Sep, Condition, O, Window, L, Ctx, Lang: ?Sized, Cmpl>
   SeparatedWhile<F, Sep, Condition, O, Window, L, Ctx, Lang, Cmpl>
 {
   /// Creates a mutable reference version of this `SeparatedWhile` parser.
-  #[inline]
+  #[inline(always)]
   pub const fn as_mut(
     &mut self,
   ) -> SeparatedWhile<&mut F, Sep, &mut Condition, O, Window, L, Ctx, Lang, Cmpl> {
@@ -240,55 +240,55 @@ impl<F, Sep, Condition, O, Window, L, Ctx, Lang: ?Sized, Cmpl>
   }
 
   /// Returns a mutable reference to the inner parser function.
-  #[inline]
+  #[inline(always)]
   pub fn fn_mut(&mut self) -> &mut F {
     &mut self.f
   }
 
   /// Returns mutable references to the inner parser function and condition.
-  #[inline]
+  #[inline(always)]
   pub fn parts_mut(&mut self) -> (&mut F, &mut Condition) {
     (&mut self.f, &mut self.condition)
   }
 
   /// Sets the minimum number of elements to parse.
-  #[inline]
+  #[inline(always)]
   pub const fn at_least(self, minimum: usize) -> AtLeast<Self> {
     AtLeast::new(self, minimum)
   }
 
   /// Sets the maximum number of elements to parse.
-  #[inline]
+  #[inline(always)]
   pub const fn at_most(self, maximum: usize) -> AtMost<Self> {
     AtMost::new(self, maximum)
   }
 
   /// Sets both the minimum and maximum number of elements to parse.
-  #[inline]
+  #[inline(always)]
   pub const fn bounded(self, minimum: usize, maximum: usize) -> Bounded<Self> {
     Bounded::new(self, maximum, minimum)
   }
 
   /// Sets allows trailing separator.
-  #[inline]
+  #[inline(always)]
   pub const fn allow_trailing(self) -> AllowTrailing<Self> {
     AllowTrailing::new(self)
   }
 
   /// Sets requires trailing separator.
-  #[inline]
+  #[inline(always)]
   pub const fn require_trailing(self) -> RequireTrailing<Self> {
     RequireTrailing::new(self)
   }
 
   /// Sets allows leading separator.
-  #[inline]
+  #[inline(always)]
   pub const fn allow_leading(self) -> AllowLeading<Self> {
     AllowLeading::new(self)
   }
 
   /// Sets requires leading separator.
-  #[inline]
+  #[inline(always)]
   pub const fn require_leading(self) -> RequireLeading<Self> {
     RequireLeading::new(self)
   }

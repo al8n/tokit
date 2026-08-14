@@ -114,7 +114,7 @@ where
   Char: super::human_display::DisplayHuman,
   O: core::fmt::Display,
 {
-  #[inline]
+  #[inline(always)]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match self {
       Self::Char(pc) => write!(f, "'{}' at {}", pc.char_ref().display(), pc.position_ref()),
@@ -134,7 +134,7 @@ impl<Char, O> Lexeme<Char, O> {
   /// let char_lexeme = Lexeme::from_char(5, 'x');
   /// assert_eq!(char_lexeme.start(), 5);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn from_char(pos: O, ch: Char) -> Self {
     Self::Char(PositionedChar::with_position(ch, pos))
   }
@@ -151,7 +151,7 @@ impl<Char, O> Lexeme<Char, O> {
   /// assert_eq!(l.end(), 10);
   /// assert!(l.is_range());
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn from_range(range: impl Into<SimpleSpan<O>>) -> Self {
     Self::Range(range.into())
   }
@@ -168,7 +168,7 @@ impl<Char, O> Lexeme<Char, O> {
   /// assert_eq!(l.end(), 10);
   /// assert!(l.is_range());
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn from_range_const(span: SimpleSpan<O>) -> Self {
     Self::Range(span)
   }
@@ -186,7 +186,7 @@ impl<Char, O> Lexeme<Char, O> {
   /// let span_lexeme: Lexeme<char> = Lexeme::from(SimpleSpan::new(10, 15));
   /// assert_eq!(span_lexeme.start(), 10);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn start(&self) -> O
   where
     O: Copy,
@@ -210,7 +210,7 @@ impl<Char, O> Lexeme<Char, O> {
   /// let span_lexeme: Lexeme<char> = Lexeme::from(SimpleSpan::new(10, 15));
   /// assert_eq!(span_lexeme.start(), 10);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn start_ref(&self) -> &O {
     match self {
       Self::Char(pc) => pc.position_ref(),
@@ -231,7 +231,7 @@ impl<Char, O> Lexeme<Char, O> {
   /// let span_lexeme: Lexeme<char> = Lexeme::from(SimpleSpan::new(10, 15));
   /// assert_eq!(span_lexeme.end(), 15);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn end(&self) -> O
   where
     Char: CharLen,
@@ -259,7 +259,7 @@ impl<Char, O> Lexeme<Char, O> {
   ///
   /// assert_eq!(upper.unwrap_char().char(), 'A');
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn map<F, NewChar>(self, f: F) -> Lexeme<NewChar, O>
   where
     F: FnOnce(Char) -> NewChar,
@@ -290,7 +290,7 @@ impl<Char, O> Lexeme<Char, O> {
   /// assert_eq!(span.start(), 10);
   /// assert_eq!(span.end(), 13);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn span_with(&self, len_of: impl FnOnce(&Char) -> usize) -> SimpleSpan<O>
   where
     O: Clone + Ord,
@@ -325,7 +325,7 @@ impl<Char, O> Lexeme<Char, O> {
   /// let span_lexeme: Lexeme<char> = Lexeme::from(SimpleSpan::new(10, 15));
   /// assert_eq!(span_lexeme.span(), SimpleSpan::new(10, 15));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn span(&self) -> SimpleSpan<O>
   where
     Char: CharLen,
@@ -355,7 +355,7 @@ impl<Char, O> Lexeme<Char, O> {
   ///
   /// assert_eq!(lexeme.unwrap_char().position(), 15);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub fn bump(&mut self, n: &O) -> &mut Self
   where
     O: for<'a> AddAssign<&'a O> + Clone,

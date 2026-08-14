@@ -2,28 +2,28 @@
 pub struct Ignored<T: ?Sized>(core::marker::PhantomData<T>);
 
 impl<T> From<T> for Ignored<T> {
-  #[inline]
+  #[inline(always)]
   fn from(_: T) -> Self {
     Self(core::marker::PhantomData)
   }
 }
 
 impl<T: ?Sized> Default for Ignored<T> {
-  #[inline]
+  #[inline(always)]
   fn default() -> Self {
     Self(core::marker::PhantomData)
   }
 }
 
 impl<T: ?Sized> core::fmt::Debug for Ignored<T> {
-  #[inline]
+  #[inline(always)]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(f, "Ignored")
   }
 }
 
 impl<T: ?Sized> Clone for Ignored<T> {
-  #[inline]
+  #[inline(always)]
   fn clone(&self) -> Self {
     *self
   }
@@ -39,7 +39,7 @@ impl PhantomSpan {
   pub const PHANTOM: Self = Self { start: (), end: () };
 
   /// Returns the phantom span.
-  #[inline]
+  #[inline(always)]
   pub const fn phantom() -> Self {
     Self::PHANTOM
   }
@@ -56,7 +56,7 @@ impl PhantomSliced {
   };
 
   /// Returns the phantom sliced value.
-  #[inline]
+  #[inline(always)]
   pub const fn phantom() -> Self {
     Self::PHANTOM
   }
@@ -74,7 +74,7 @@ impl PhantomLocated {
   };
 
   /// Returns the phantom located value.
-  #[inline]
+  #[inline(always)]
   pub const fn phantom() -> Self {
     Self::PHANTOM
   }
@@ -93,7 +93,7 @@ impl PhantomDelimited {
   };
 
   /// Returns the phantom delimited value.
-  #[inline]
+  #[inline(always)]
   pub const fn phantom() -> Self {
     Self::PHANTOM
   }

@@ -283,12 +283,12 @@ impl<'a, T: Token<'a>> Token<'a> for &'a T {
 
   const SURFACES_TRIVIA: bool = T::SURFACES_TRIVIA;
 
-  #[inline]
+  #[inline(always)]
   fn kind(&self) -> Self::Kind {
     (*self).kind()
   }
 
-  #[inline]
+  #[inline(always)]
   fn is_trivia(&self) -> bool {
     (*self).is_trivia()
   }
@@ -362,7 +362,7 @@ pub trait IdentifierToken<'a>: Token<'a> {
 }
 
 impl<'a, T: IdentifierToken<'a>> IdentifierToken<'a> for &'a T {
-  #[inline]
+  #[inline(always)]
   fn is_identifier(&self) -> bool {
     T::is_identifier(self)
   }
@@ -434,7 +434,7 @@ impl<'a, T: IdentifierToken<'a>> IdentifierToken<'a> for &'a T {
 /// ```
 pub trait KeywordToken<'a>: Token<'a> {
   /// Returns `true` when the token is any reserved keyword.
-  #[inline]
+  #[inline(always)]
   fn is_keyword(&self) -> bool {
     self.keyword().is_some()
   }
@@ -444,12 +444,12 @@ pub trait KeywordToken<'a>: Token<'a> {
 }
 
 impl<'a, T: KeywordToken<'a>> KeywordToken<'a> for &'a T {
-  #[inline]
+  #[inline(always)]
   fn is_keyword(&self) -> bool {
     T::is_keyword(self)
   }
 
-  #[inline]
+  #[inline(always)]
   fn keyword(&self) -> Option<&'static str> {
     T::keyword(self)
   }
