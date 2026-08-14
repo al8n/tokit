@@ -1538,14 +1538,35 @@ impl<'a> Lexer<'a> for EndlessErrLexer<'a> {
   fn bump(&mut self, _n: &usize) {}
 }
 
+/// The expected substring is the **per-instance** guard's wording, and that is the whole reason the
+/// guard is still here: this lexer never returns from one `next()`, the aggregate tally would
+/// refuse it too but only after the tier's `O(units²)` allowance, and "one lexer instance was asked
+/// to lex more than N times" names a scan that will not return where the aggregate can only report
+/// that the tier did too much work. If this cell starts reading the aggregate wording, the narrower
+/// guard has stopped earning its place.
 #[test]
-#[should_panic(expected = "lex-budget")]
+#[should_panic(expected = "lex-budget] one lexer instance was asked to lex more than")]
 fn an_endless_same_span_error_lexer_is_refused_not_hung() {
   // Before the budget moved underneath `next()`, this call did not fail — it HUNG. The first
   // `complete_stream` drain enters `next()`, the scanner accepts an error, skips it, lexes the
   // identical error again, and never returns; the log holds the one report the dedup let through,
   // so the per-`next()` budget it was checked against never grows.
   Harness::<EndlessErrLexer<'_>>::over(["abc"]).run_partial();
+}
+
+/// The same lexer at the **largest budget the knob accepts**, because a ceiling the caller can push
+/// out of reach is a guard the caller can switch off.
+///
+/// `budget_multiple(usize::MAX)` used to saturate the budget to `usize::MAX`, and no counter can
+/// exceed the largest value a `usize` holds — every `spent > limit` derived from it was then false
+/// forever and this call ran until the process was killed. The multiple is clamped, so the ceiling
+/// stays a number the count reaches, and the refusal still arrives.
+#[test]
+#[should_panic(expected = "lex-budget")]
+fn the_largest_accepted_budget_multiple_still_refuses_an_endless_lexer() {
+  Harness::<EndlessErrLexer<'_>>::over(["a"])
+    .budget_multiple(usize::MAX)
+    .run_partial();
 }
 
 // ── ... and why a budget per LEXER INSTANCE is one boundary short ───────────────────
@@ -1601,8 +1622,13 @@ struct StallLexer<'a> {
 
 impl StallLexer<'_> {
   /// The per-instance ceiling, reproduced so the fixture can spend all of it and not one more.
+  ///
+  /// Derived from [`STALL_SRC`] rather than from `self.src`: the ceiling is a property of the
+  /// tier's configured budget over the *whole* input, so every prefix drive of the partial sweep
+  /// gets the same one. Reading `self.src` here would track the old, prefix-scaled ceiling and the
+  /// fixture would stop spending it as the cut moved in.
   fn quota(&self) -> usize {
-    8 * self.src.len() + 64
+    super::instance_ceiling(8 * STALL_SRC.len() + 64)
   }
 }
 
@@ -1693,6 +1719,150 @@ fn a_lexer_that_stalls_just_under_the_per_call_ceiling_is_refused() {
   Harness::<StallLexer<'_>>::over([STALL_SRC]).run_partial();
 }
 
+// ── ... and the other direction: what the narrower guard may never refuse ────────────
+//
+// Every cell above is about a guard that was too LOOSE, and an attacker slipping under it. The two
+// below are the same error read the other way. The per-instance ceiling was
+// `DEFAULT_BUDGET_MULTIPLE * units + BUDGET_FLOOR`, computed from whatever source the instance was
+// handed, which made it wrong twice: it never saw `Harness::budget_multiple`, so a lexer certified
+// under a raised budget met the default anyway; and in the partial tier the "source" is a prefix,
+// so the ceiling shrank with the cut. Both produce a CONFORMING LEXER REJECTED — the one outcome a
+// narrower guard may not cause, because the sharper message it exists for is worthless if it is a
+// lie. The repair is that the ceiling is derived from the tier's configured budget and carried on
+// the tally, so it is the same for every instance and is one the item budget already permits.
+
+/// A lexer that emits `N` errors over the source's first unit and then exhausts — legally.
+///
+/// Every error reports the same nonempty span, which the contract permits (starts must be
+/// *non-decreasing*, not strictly increasing), and the count lives in `State` so the lexer is
+/// resume-faithful: `with_state` restores how many are left and `bump` does not disturb it. Nothing
+/// here is malformed and nothing here spins. Its whole content is *density*.
+struct RepeatErrLexer<'a, const N: usize> {
+  src: &'a str,
+  /// Errors emitted so far — in the state, because that is the only channel a rebuilt lexer has,
+  /// and a fixture whose density is not resume-faithful would fail an earlier check instead.
+  emitted: Emitted,
+}
+
+/// [`RepeatErrLexer`]'s whole state: how many of its `N` errors are already out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Emitted(usize);
+
+impl crate::State for Emitted {
+  type Error = ();
+
+  fn check(&self) -> Result<(), Self::Error> {
+    Ok(())
+  }
+}
+
+impl<const N: usize> RepeatErrLexer<'_, N> {
+  /// The one span every error reports: the source's first unit, or the empty source's `0..0`.
+  fn only_span(&self) -> SimpleSpan {
+    SimpleSpan::new(0, boundary_after(self.src, 0))
+  }
+}
+
+impl<'a, const N: usize> Lexer<'a> for RepeatErrLexer<'a, N> {
+  type State = Emitted;
+  type Source = str;
+  type Token = ETok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      emitted: Emitted(0),
+    }
+  }
+  fn with_state(src: &'a str, state: Emitted) -> Self {
+    Self {
+      src,
+      emitted: state,
+    }
+  }
+  fn check(&self) -> Result<(), BadByte> {
+    Ok(())
+  }
+  fn state(&self) -> &Emitted {
+    &self.emitted
+  }
+  fn state_mut(&mut self) -> &mut Emitted {
+    &mut self.emitted
+  }
+  fn into_state(self) -> Emitted {
+    self.emitted
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    self.only_span()
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[..self.only_span().end]
+  }
+  fn lex(&mut self) -> Option<Result<ETok, BadByte>> {
+    if self.src.is_empty() || self.emitted.0 >= N {
+      return None;
+    }
+    self.emitted.0 += 1;
+    Some(Err(BadByte { reason: "dense" }))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, _n: &usize) {}
+}
+
+/// A raised [`Harness::budget_multiple`] must reach the guard underneath `next()`, or the knob
+/// certifies nothing.
+///
+/// 80 errors over one unit: inside the item budget the caller configured (`128 * 1 + 64 = 192`) and
+/// far outside the fixed `8 * 1 + 64 = 72` the instance ceiling used to carry. One
+/// `InputRef::next` serves all 80 on one lexer, so both driving tiers refused this lexer on attempt
+/// 73 while the tally they are supposedly bounded by had spent 73 of its thousands.
+#[test]
+fn a_dense_lexer_is_certified_under_the_budget_multiple_it_was_given() {
+  Harness::<RepeatErrLexer<'_, 80>>::new("a")
+    .budget_multiple(128)
+    .run();
+  Harness::<RepeatErrLexer<'_, 80>>::new("a")
+    .budget_multiple(128)
+    .run_partial();
+}
+
+/// The boundary the guard has to leave open: a run that produces **exactly** its budget of items
+/// and needs one more attempt to say `None`.
+///
+/// 72 items over one unit is what the default budget allows to the character, and the direct tier
+/// accepts the run — `lex_run` and `check_sticky` both pass. The 73rd attempt is the exhaustion
+/// probe, and the instance ceiling used to be `72`, so the same run was refused as nonterminating
+/// the moment it went through the input layer. A ceiling of "every item the budget allows, plus the
+/// probe that ends it" is the narrowest one that cannot contradict the budget it is derived from,
+/// and this cell sits on it exactly: one item more and the *item* budget refuses first.
+#[test]
+fn a_run_that_spends_its_whole_item_budget_still_reaches_exhaustion() {
+  Harness::<RepeatErrLexer<'_, 72>>::new("a").run();
+  Harness::<RepeatErrLexer<'_, 72>>::new("a").run_partial();
+}
+
+/// The other half of the same error, and the one no budget knob could have worked around: the
+/// ceiling used to be computed from the source the *instance* was handed, and in the partial tier
+/// that is a **prefix**.
+///
+/// 100 errors over 8 units is inside the default budget (`8 * 8 + 64 = 128`), so the complete drive
+/// and the final one accepted it — and then the sweep reached the two-unit prefix, whose ceiling
+/// was `8 * 2 + 64 = 80`, and refused the same lexer for the same behaviour. Where the cut falls is
+/// not supposed to change what conforms: the run's budget is over the whole input, and so is every
+/// ceiling derived from it.
+#[test]
+fn a_prefix_drive_holds_the_same_ceiling_as_the_whole_input() {
+  Harness::<RepeatErrLexer<'_, 100>>::new("abcdefgh").run();
+  Harness::<RepeatErrLexer<'_, 100>>::new("abcdefgh").run_partial();
+}
+
 /// The `non-` in non-rewindable, measured rather than argued.
 ///
 /// tokora #285 is this defect in the shipped `TokenLimiter`: a tally living in a `Checkpoint` field
@@ -1709,9 +1879,11 @@ fn a_lexer_that_stalls_just_under_the_per_call_ceiling_is_refused() {
 #[test]
 fn a_checkpoint_restore_does_not_refund_the_tally() {
   const SRC: &str = "hello world";
-  let ceiling = super::lex_attempt_ceiling(8, 8 * SRC.len() + 64);
+  let budget = 8 * SRC.len() + 64;
+  let ceiling = super::lex_attempt_ceiling(8, budget);
+  let instance = super::instance_ceiling(budget);
 
-  let plain = super::LexTally::new(0, "test", SRC.len(), ceiling);
+  let plain = super::LexTally::new(0, "test", SRC.len(), ceiling, instance);
   super::drive::<TileLexer<'_>, _>(SRC, &plain, |ir| {
     while ir.next().expect("Silent never returns Err").is_some() {}
   });
@@ -1726,7 +1898,7 @@ fn a_checkpoint_restore_does_not_refund_the_tally() {
     SRC.len()
   );
 
-  let replayed = super::LexTally::new(0, "test", SRC.len(), ceiling);
+  let replayed = super::LexTally::new(0, "test", SRC.len(), ceiling, instance);
   super::drive::<TileLexer<'_>, _>(SRC, &replayed, |ir| {
     let ckp = ir.save();
     while ir.next().expect("Silent never returns Err").is_some() {}

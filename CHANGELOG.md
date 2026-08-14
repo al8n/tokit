@@ -580,6 +580,18 @@ and will red until they do.
   non-returning `next()` after `O(units)` attempts rather than the tally's `O(units²)`. A guard may
   be narrower than the bound; it may not *be* the bound while a loop underneath it resets it.
 
+  It also may not *contradict* the bound, which the first version of it did in both directions. It
+  was `8 * units + 64` computed from whichever source the instance had been handed, so it never saw
+  `Harness::budget_multiple` — a lexer certified under a raised budget met the default anyway — and
+  in the partial tier the source is a **prefix**, so the ceiling shrank as the cut moved in while
+  the run it bounded did not. Either way the outcome was a conforming lexer *rejected*, which is
+  the one failure a narrower guard may not produce: the sharper message it exists to give is worth
+  nothing if it is a lie. The ceiling is now derived once from the tier's configured budget — one
+  attempt for every item that budget allows, plus the exhaustion probe — and carried on the tally
+  beside the count, so every instance under one tier holds the same one and it is a number the item
+  budget already permits. A scan produces at most the items left in the run, so a lexer the item
+  budget accepts cannot reach it.
+
   The aggregate ceiling is `drains * 4 * (budget + 1) + 64` and is deliberately loose: a lexer
   evading it needs work that outgrows it, so any constant serves, while a tight ceiling would
   falsely refuse a legitimate lexer, which no constant repairs. Measured across the whole in-tree
