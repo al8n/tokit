@@ -135,19 +135,37 @@ const ATTEMPTS_PER_DRAIN_MULTIPLE: usize = 4;
 ///
 /// # A ceiling nobody can reach is not a ceiling
 ///
-/// Both knobs scale a per-source-unit multiple, and both feed a `spent > limit` comparison. Set
+/// Both knobs scale a per-source-unit multiple, and both feed a `spent >= limit` comparison. Set
 /// one to [`usize::MAX`] and the ceiling it computes is `usize::MAX` too, at which point the
-/// comparison can never hold — a counter cannot exceed the largest value it can hold — and the
-/// guard is *disarmed by its own configuration*: an endless lexer then spins for as long as the
-/// process lives, instead of reaching the `lex-budget` refusal the knob's documentation promises.
-/// Under a release profile the counter also wraps to zero and starts again, so not even arithmetic
-/// stops it.
+/// comparison can never hold — a counter cannot reach a value one greater than the largest it can
+/// hold — and the guard is *disarmed by its own configuration*: an endless lexer then spins for as
+/// long as the process lives, instead of reaching the `lex-budget` refusal the knob's
+/// documentation promises.
 ///
-/// So the multiples are clamped here, and every ceiling derived from one is computed with checked
+/// So the multiples are bounded here, and every ceiling derived from one is computed with checked
 /// arithmetic (see [`Harness::budget`] and `CacheHarness::corpus`) so that the *product* cannot
 /// silently saturate either. What the cap costs is the ability to certify a lexer that legitimately
 /// emits more than 65536 items per source unit — which is not a lexer this kit can tell apart from
 /// a nonterminating one, and saying so is the honest limit.
+///
+/// # A cap is enforced by refusing, not by clamping
+///
+/// Both knobs used to `clamp` to this value, and a clamp *is* a silent lowering of the caller's
+/// budget. The kit then refuses the dense-but-finite lexer that fits the requested budget and not
+/// the clamped one, reporting it as nonterminating — a conforming lexer rejected, from a setting
+/// accepted without a word. Both knobs now panic above this cap and name themselves and this
+/// number, so a caller who needs more is told the kit cannot certify it instead of being handed a
+/// verdict about their lexer. Below `1` they still adjust silently: that direction only widens the
+/// budget, and a wider budget cannot manufacture a failure.
+///
+/// # And a ceiling has to be one the arithmetic survives
+///
+/// The comparison is `>=` and it runs *before* the counter is incremented, on both counters, which
+/// is what makes a `usize::MAX` ceiling merely unreachable rather than destructive. It used to be
+/// `spent += 1; spent > limit`, which at that ceiling overflowed before it compared: debug panicked
+/// with the wrong message and release wrapped the count to zero and ran on. The cap above keeps a
+/// *configured* ceiling in range; this keeps a *derived* one — [`lex_attempt_ceiling`] saturates —
+/// from turning into the same disarmed guard.
 const MAX_BUDGET_MULTIPLE: usize = 1 << 16;
 
 /// A conformance harness that drives a [`Lexer`] implementation `L` against the lexer
@@ -272,13 +290,49 @@ where
   /// `multiple * source_len + 64` items before the kit declares the lexer
   /// non-terminating. The default is `8`.
   ///
-  /// Values below `1` are clamped to `1`, and values above `65536` are clamped to `65536`. The
-  /// upper clamp is not tidiness: `usize::MAX` here makes the budget `usize::MAX` too, no counter
-  /// can exceed the largest value it can hold, and every guard derived from the budget then never
-  /// fires — the run the knob was asked to bound simply never ends.
+  /// Values below `1` are treated as `1`. That *raises* the budget above what was asked for, so it
+  /// cannot turn a conforming lexer into a failure, which is why it stays a silent adjustment.
+  ///
+  /// Values above `65536` **panic**. See below — that direction is not symmetric.
+  ///
+  /// # Why the maximum is a refusal and not a clamp
+  ///
+  /// The cap itself is not tidiness: `usize::MAX` here makes the budget `usize::MAX` too, no
+  /// counter can exceed the largest value it can hold, and every guard derived from the budget
+  /// then never fires — the run the knob was asked to bound simply never ends.
+  ///
+  /// But *clamping* to the cap is the wrong way to enforce it, because a clamp is silent and it
+  /// hands back a **smaller budget than the caller asked for**. The lexer contract permits finite
+  /// density above the cap, so the clamp had a reachable victim: on a one-unit source
+  /// `budget_multiple(65_601)` should allow 65,665 items, the clamp allowed 65,600, and a legal
+  /// lexer that emits 65,601 errors and then `None` was refused on its exhaustion probe by
+  /// [`run_partial`](Self::run_partial) while [`run`](Self::run) reported it as possibly
+  /// nonterminating. Both are the same outcome — a conforming lexer rejected — reached from a
+  /// setting the builder accepted without a word, which is the failure a test kit can least
+  /// afford: the caller reads it as a verdict on their lexer.
+  ///
+  /// Above the cap this kit genuinely cannot tell a dense lexer from a nonterminating one. The
+  /// honest answer to a caller who needs more is to say that, at the call site, rather than to
+  /// certify a different budget and report the difference as their bug.
+  ///
+  /// # Panics
+  ///
+  /// Panics when `multiple` exceeds `65536`, naming this knob and that maximum. The panic is
+  /// raised by the builder, before any lexing, so it can never be mistaken for a `lex-budget`
+  /// refusal of the lexer under test.
   #[must_use]
   pub fn budget_multiple(mut self, multiple: usize) -> Self {
-    self.budget_multiple = multiple.clamp(1, MAX_BUDGET_MULTIPLE);
+    let cap = MAX_BUDGET_MULTIPLE;
+    assert!(
+      multiple <= cap,
+      "tokora conformance: Harness::budget_multiple is capped at {cap} items per source unit and \
+       was given {multiple}. The request is refused rather than lowered to {cap}: a silent clamp \
+       certifies a budget you did not ask for, and a lexer that legitimately emits more than the \
+       clamped budget allows is then reported as nonterminating — a failure that reads as the \
+       lexer's and is the kit's. Above {cap} per unit this kit cannot tell a dense lexer from an \
+       endless one."
+    );
+    self.budget_multiple = multiple.max(1);
     self
   }
 

@@ -4108,23 +4108,68 @@ fn a_corpus_of_nothing_but_errors_is_refused_not_spun_on() {
   .run();
 }
 
-/// The same lexer at the **largest multiple the knob accepts** — because the knob could switch the
-/// guard off, and the way it did so left no trace.
+// ── The knob's boundary: three inputs, three separate refusals ──────────────────────
+//
+// This was one cell, and the one was vacuous: it passed `usize::MAX` and accepted any panic
+// tagged `lex-budget`, so a clamp to a LOWER multiple than the maximum satisfied it just as well
+// as the maximum did, and so did the release wrapped-to-zero counter. A boundary cell that cannot
+// distinguish the boundary from its neighbours is asserting that some panic happened.
+//
+// The exact maximum, one above it, and `usize::MAX` are three cells now. The maximum is ACCEPTED
+// and its guard fires with the corpus builder's own wording and its own number; the two above it
+// never reach a lexer, because the builder refuses them by name.
+
+/// The exact maximum is **accepted**, and the guard still fires under it.
 ///
-/// `lex_attempts_multiple(usize::MAX)` saturated the ceiling to `usize::MAX`, and `attempts > limit`
-/// is then false for every value an attempt counter can hold: the loop above ran until the process
-/// was killed, reporting nothing on the way. A configured ceiling has to stay a number the count
-/// can pass, which is what the clamp and the checked arithmetic are for.
-///
-/// One source unit, so the accepted maximum is `65536 * 1 + 64` attempts and the cell costs
-/// milliseconds. It is the *setting* that is at its maximum here, not the ceiling.
+/// One source unit, so the accepted ceiling is `65536 * 1 + 64 = 65600` attempts and the cell costs
+/// milliseconds. It is the *setting* that is at its maximum here, not the ceiling — and the ceiling
+/// is in the expectation, because a cap enforced one short of itself would print a smaller one.
 #[test]
-#[should_panic(expected = "lex-budget")]
-fn the_largest_accepted_lex_attempts_multiple_still_refuses_an_endless_lexer() {
+#[should_panic(
+  expected = "lex-budget]: building the corpus asked the lexer to lex more than 65600 times"
+)]
+fn the_exact_maximum_lex_attempts_multiple_is_accepted_and_still_refuses_an_endless_lexer() {
   CacheHarness::<EndlessErrCorpusLexer<'_>, DefaultCache<'_, EndlessErrCorpusLexer<'_>>>::new("a")
     .named("endless-error corpus at the maximum multiple")
-    .lex_attempts_multiple(usize::MAX)
+    .lex_attempts_multiple(super::MAX_BUDGET_MULTIPLE)
     .run();
+}
+
+/// One above the maximum is **refused at the knob**, not lowered to it.
+///
+/// No `run()`: the panic must come from the builder, so a return to clamping fails this with "did
+/// not panic" instead of being satisfied by whatever the clamped run does next. The expectation
+/// carries the knob's name, the supported maximum and the rejected value — none of which the
+/// corpus builder's `lex-budget` message contains.
+#[test]
+#[should_panic(
+  expected = "CacheHarness::lex_attempts_multiple is capped at 65536 attempts per source unit and was given 65537"
+)]
+fn one_above_the_maximum_lex_attempts_multiple_is_refused_at_the_knob() {
+  let _ =
+    CacheHarness::<EndlessErrCorpusLexer<'_>, DefaultCache<'_, EndlessErrCorpusLexer<'_>>>::new(
+      "a",
+    )
+    .lex_attempts_multiple(super::MAX_BUDGET_MULTIPLE + 1);
+}
+
+/// `usize::MAX` — the historical disarm value — takes the same refusal.
+///
+/// Separate from the cell above because this is the value that used to be *accepted*: silently
+/// clamped, run, and then refused with a `lex-budget` tag the caller reads as a verdict on their
+/// lexer. The rejected value is left out of the expectation because its rendering is target-width
+/// dependent; the knob's name and the maximum are in it, and no clamp and no `lex-budget` refusal
+/// can produce those.
+#[test]
+#[should_panic(
+  expected = "CacheHarness::lex_attempts_multiple is capped at 65536 attempts per source unit and was given "
+)]
+fn the_largest_usize_lex_attempts_multiple_is_refused_at_the_knob() {
+  let _ =
+    CacheHarness::<EndlessErrCorpusLexer<'_>, DefaultCache<'_, EndlessErrCorpusLexer<'_>>>::new(
+      "a",
+    )
+    .lex_attempts_multiple(usize::MAX);
 }
 
 // ── Dense but finite: what the ceiling must not conflate with nontermination ─────────

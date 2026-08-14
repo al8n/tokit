@@ -1554,19 +1554,63 @@ fn an_endless_same_span_error_lexer_is_refused_not_hung() {
   Harness::<EndlessErrLexer<'_>>::over(["abc"]).run_partial();
 }
 
-/// The same lexer at the **largest budget the knob accepts**, because a ceiling the caller can push
-/// out of reach is a guard the caller can switch off.
+// ── The knob's boundary: three inputs, three separate refusals ──────────────────────
+//
+// These three cells used to be one, and the one was vacuous. It passed `usize::MAX` and accepted
+// any panic tagged `lex-budget`, so every wrong behaviour on the way satisfied it: a clamp to a
+// LOWER multiple than the maximum satisfied it, and so did the release wrapped-to-zero counter,
+// which reached the per-instance refusal with the right tag for the wrong reason. A boundary test
+// that cannot tell the boundary from anything near it is testing that a panic happened.
+//
+// So the exact maximum, one above it, and `usize::MAX` are three cells, and each asserts the
+// specific message its own input should produce: the maximum is ACCEPTED and its guard fires with
+// the per-instance wording, and the two above it never reach a lexer at all — the builder refuses
+// them by name, which no `lex-budget` panic can be mistaken for.
+
+/// The exact maximum is **accepted**, and the guard still fires under it.
 ///
-/// `budget_multiple(usize::MAX)` used to saturate the budget to `usize::MAX`, and no counter can
-/// exceed the largest value a `usize` holds — every `spent > limit` derived from it was then false
-/// forever and this call ran until the process was killed. The multiple is clamped, so the ceiling
-/// stays a number the count reaches, and the refusal still arrives.
+/// This is the half a cap can get wrong in the permissive direction: a cap enforced one short of
+/// itself is a knob whose documented maximum is a lie. `budget_multiple(65536)` over one unit gives
+/// a budget of `65536 * 1 + 64 = 65600` items and a per-instance ceiling of `65601`, and this
+/// lexer never returns from one `next()`, so the per-instance guard is the one that answers — the
+/// exact number is in the expectation, because a ceiling derived from a clamped-down multiple
+/// would print a smaller one.
 #[test]
-#[should_panic(expected = "lex-budget")]
-fn the_largest_accepted_budget_multiple_still_refuses_an_endless_lexer() {
+#[should_panic(expected = "lex-budget] one lexer instance was asked to lex more than 65601 times")]
+fn the_exact_maximum_budget_multiple_is_accepted_and_still_refuses_an_endless_lexer() {
   Harness::<EndlessErrLexer<'_>>::over(["a"])
-    .budget_multiple(usize::MAX)
+    .budget_multiple(super::MAX_BUDGET_MULTIPLE)
     .run_partial();
+}
+
+/// One above the maximum is **refused at the knob**, not lowered to it.
+///
+/// The panic has to come from the builder, so the cell never calls `run_partial`: if the cap ever
+/// goes back to clamping, this fails with "did not panic" rather than being satisfied by whatever
+/// the clamped run does next. The expectation carries the knob's name, the supported maximum and
+/// the rejected value, none of which a `lex-budget` message contains.
+#[test]
+#[should_panic(
+  expected = "Harness::budget_multiple is capped at 65536 items per source unit and was given 65537"
+)]
+fn one_above_the_maximum_budget_multiple_is_refused_at_the_knob() {
+  let _ =
+    Harness::<EndlessErrLexer<'_>>::over(["a"]).budget_multiple(super::MAX_BUDGET_MULTIPLE + 1);
+}
+
+/// `usize::MAX` — the historical disarm value — takes the same refusal, and that is the point.
+///
+/// It is a separate cell from the one above because it is the value that used to be *accepted*:
+/// clamped to the cap, run, and then refused with a `lex-budget` tag that read as a verdict on the
+/// lexer. The rejected value is not in the expectation because its rendering is target-width
+/// dependent; the knob's name and the maximum are, and neither a clamp (which panics not at all
+/// here) nor any `lex-budget` refusal can produce them.
+#[test]
+#[should_panic(
+  expected = "Harness::budget_multiple is capped at 65536 items per source unit and was given "
+)]
+fn the_largest_usize_budget_multiple_is_refused_at_the_knob() {
+  let _ = Harness::<EndlessErrLexer<'_>>::over(["a"]).budget_multiple(usize::MAX);
 }
 
 // ── ... and why a budget per LEXER INSTANCE is one boundary short ───────────────────
