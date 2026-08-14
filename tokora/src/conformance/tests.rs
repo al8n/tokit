@@ -1938,7 +1938,7 @@ fn a_checkpoint_restore_does_not_refund_the_tally() {
   // that shrinks BOTH sides — a reset on every rebuild rather than only on a rollback — satisfies
   // the ratio below on two meaningless numbers.
   assert!(
-    once >= SRC.len(),
+    once >= SRC.len() as u128,
     "a straight drain of {} character(s) charged only {once} attempt(s)",
     SRC.len()
   );
@@ -1963,26 +1963,89 @@ fn a_checkpoint_restore_does_not_refund_the_tally() {
 // ── The counters at their own ceilings: `>=` before the increment, not after ─────────
 //
 // `MAX_BUDGET_MULTIPLE` keeps a CONFIGURED ceiling inside the range a counter can pass. It says
-// nothing about a DERIVED one, and `lex_attempt_ceiling` saturates: at `usize::MAX` the old
-// `spent += 1; if spent > limit` never reached its comparison, because the increment overflowed
-// first. Debug panicked with the wrong message; release wrapped the tally to zero and handed the
-// run its whole allowance again, as often as the work asked, printing nothing.
+// nothing about a DERIVED one, and while the tally counted in `usize` the derived ceiling
+// saturated: at `usize::MAX` the old `spent += 1; if spent > limit` never reached its comparison,
+// because the increment overflowed first. Debug panicked with the wrong message; release wrapped
+// the tally to zero and handed the run its whole allowance again, as often as the work asked,
+// printing nothing.
 //
-// The two cells below are that state reached directly, because reaching it by counting means
-// counting to `usize::MAX`. Both fail under the old order in BOTH profiles — release by not
+// The cells below are that state reached directly, because reaching it by counting means counting
+// to the counter's widest value. They fail under the old order in BOTH profiles — release by not
 // panicking at all, debug by panicking with "attempt to add with overflow" instead of the message
 // the expectation names — and the release arm is the one that matters, since that is where the
 // wrap silently continued the run.
+//
+// The aggregate counter is `u128` now, so its widest value is `u128::MAX`; the per-instance
+// counter is still `usize`, because `instance_ceiling(budget)` is exact over a
+// `representable_budget` result and grows only linearly in the source. Each cell sits on the
+// widest value of the counter it is about.
 
-/// The aggregate tally at a saturated ceiling: already at `usize::MAX`, with `usize::MAX` allowed.
+/// The aggregate tally standing on the widest count it can hold, with that value as its ceiling.
 ///
 /// The seeded constructor is `#[cfg(test)]` and mints a *new* count, so it cannot return capacity
 /// to a tally a run is holding — the module wall the invariant rests on is untouched.
+///
+/// The ceiling here is `Derived`, so the wording is the lexer's: this cell is about the
+/// *arithmetic* being total at the top of the counter's range, not about whose fault the refusal
+/// is. The cell below it is the other half.
 #[test]
 #[should_panic(expected = "lex-budget] the lexer was asked to lex more than")]
-fn a_saturated_aggregate_ceiling_refuses_rather_than_wrapping_the_tally() {
-  let tally = super::LexTally::preloaded(0, "saturated", 1, usize::MAX, usize::MAX, usize::MAX);
+fn a_ceiling_at_the_counters_widest_value_refuses_rather_than_wrapping_the_tally() {
+  let tally = super::LexTally::preloaded(
+    0,
+    "saturated",
+    1,
+    u128::MAX,
+    super::AttemptCeiling::Derived(u128::MAX),
+    usize::MAX,
+  );
   tally.spend();
+}
+
+/// The kit's own limit is reported as the kit's own limit.
+///
+/// A `Capacity` ceiling means the derivation did not fit in `u128` and the tally counted as far as
+/// it could. Nothing about the lexer was decided, so the refusal may not carry the `lex-budget`
+/// tag or the "the lexer was asked to lex more than" wording — a caller reads both as a verdict on
+/// their code, and the truth is that the kit ran out of counter. The expectation names the tag,
+/// the word INCONCLUSIVE and the explicit denial, because a message that merely *omits* the
+/// accusation is one round of editing away from carrying it again.
+#[test]
+#[should_panic(
+  expected = "kit-capacity] INCONCLUSIVE — this is a limit of the conformance kit \
+                           and NOT a verdict on the lexer"
+)]
+fn an_exhausted_kit_capacity_is_reported_as_inconclusive_and_not_as_the_lexers_fault() {
+  let tally = super::LexTally::preloaded(
+    0,
+    "capacity",
+    1,
+    u128::MAX,
+    super::AttemptCeiling::Capacity,
+    usize::MAX,
+  );
+  tally.spend();
+}
+
+/// And the two verdicts are told apart by what the tally was *built* with, not by the count.
+///
+/// Both cells above stand on `u128::MAX`; only the ceiling's kind differs. This one drives the
+/// same distinction from the other end — a `Capacity` tally with room to spare charges normally,
+/// so the kit-capacity message is reached by exhausting the counter and by nothing else.
+#[test]
+fn a_capacity_ceiling_still_charges_normally_below_it() {
+  let tally = super::LexTally::preloaded(0, "capacity", 1, 7, super::AttemptCeiling::Capacity, 9);
+  tally.spend();
+  assert_eq!(
+    tally.spent(),
+    8,
+    "a capacity-bounded tally must charge like any other until the counter is actually exhausted"
+  );
+  assert_eq!(
+    tally.limit(),
+    u128::MAX,
+    "a capacity ceiling counts as far as the counter goes and no further"
+  );
 }
 
 /// The per-instance counter at the ceiling its own derivation can hand it.
@@ -1991,10 +2054,21 @@ fn a_saturated_aggregate_ceiling_refuses_rather_than_wrapping_the_tally() {
 /// `usize::MAX - 1`, so `per_instance` can be `usize::MAX` — the identical defect one counter over.
 /// The tally is given room to spare so the aggregate does not answer first: the subject here is
 /// `Budgeted::spent_here`, and the expectation is the per-instance wording for that reason.
+///
+/// This counter stays `usize` where the aggregate widened. That is a difference in what the two
+/// ceilings are, not an oversight: `instance_ceiling` is exact over a budget the kit has already
+/// refused to compute unrepresentably, and it grows linearly in the source where the aggregate
+/// grows quadratically, so it never becomes a bound the host's width decides.
 #[test]
 #[should_panic(expected = "lex-budget] one lexer instance was asked to lex more than")]
 fn a_saturated_instance_ceiling_refuses_rather_than_wrapping_the_instance_counter() {
-  let tally = super::LexTally::new(0, "saturated", 1, usize::MAX, usize::MAX);
+  let tally = super::LexTally::new(
+    0,
+    "saturated",
+    1,
+    super::AttemptCeiling::Derived(u128::MAX),
+    usize::MAX,
+  );
   let mut lexer = super::Budgeted::wrap(
     TileLexer::new("a"),
     super::Tallied {
@@ -2008,36 +2082,49 @@ fn a_saturated_instance_ceiling_refuses_rather_than_wrapping_the_instance_counte
 
 /// The step *before* both cells above, and the other half of the bracket they leave open.
 ///
-/// The two refusals show a `usize::MAX` limit is enforced once the count is standing on it. On
-/// their own they do not say the count *gets* there, and that is the claim the record used to have
-/// backwards: it called a saturated ceiling a guard that could never fire, on the reasoning that no
-/// counter reaches one past the largest value it holds. With `>=` asked before the increment there
-/// is no "one past" to reach — the last allowed attempt charges from `usize::MAX - 1`, where
-/// `spent < limit` still holds, so the `+ 1` is in range and lands exactly on the ceiling.
+/// The refusals show a ceiling at the counter's widest value is enforced once the count is
+/// standing on it. On their own they do not say the count *gets* there, and that is the claim the
+/// record used to have backwards: it called such a ceiling a guard that could never fire, on the
+/// reasoning that no counter reaches one past the largest value it holds. With `>=` asked before
+/// the increment there is no "one past" to reach — the last allowed attempt charges from
+/// `MAX - 1`, where `spent < limit` still holds, so the `+ 1` is in range and lands exactly on the
+/// ceiling.
 ///
-/// Together the three cells bracket the boundary: `usize::MAX - 1` charges and does not refuse,
-/// `usize::MAX` refuses. So a saturated ceiling is enforced after exactly `usize::MAX` attempts —
-/// a hard cap, not an absent guard. Under the old `spent += 1; spent > limit` the boundary sat one
+/// Together the cells bracket the boundary: `MAX - 1` charges and does not refuse, `MAX` refuses.
+/// So a ceiling at the top of the counter's range is enforced after exactly `MAX` attempts — a
+/// hard cap, not an absent guard. Under the old `spent += 1; spent > limit` the boundary sat one
 /// attempt further out and it was the *overflow* rather than the check that ended the run, which is
-/// what the two cells above pin.
+/// what the cells above pin.
 ///
-/// Both counters are here because both take the same order and both can be handed `usize::MAX` —
-/// the tally by [`lex_attempt_ceiling`](super::lex_attempt_ceiling) saturating, the instance
-/// counter by `instance_ceiling` over a budget of `usize::MAX - 1`.
+/// Both counters are here because both take the same order, each at the top of its own width:
+/// `u128::MAX` for the tally, `usize::MAX` for the instance counter, which `instance_ceiling` can
+/// still hand it over a budget of `usize::MAX - 1`.
 #[test]
 fn the_last_attempt_below_a_saturated_ceiling_lands_on_it_without_overflowing() {
-  let saturated =
-    super::LexTally::preloaded(0, "saturated", 1, usize::MAX - 1, usize::MAX, usize::MAX);
+  let saturated = super::LexTally::preloaded(
+    0,
+    "saturated",
+    1,
+    u128::MAX - 1,
+    super::AttemptCeiling::Derived(u128::MAX),
+    usize::MAX,
+  );
   saturated.spend();
   assert_eq!(
     saturated.spent(),
-    usize::MAX,
+    u128::MAX,
     "the last attempt a saturated aggregate ceiling allows must land on the ceiling"
   );
 
   // The same step through `Budgeted::spend`, which charges the tally first. That tally is a fresh
   // one with room to spare, so the aggregate does not answer before the instance counter moves.
-  let roomy = super::LexTally::new(0, "saturated", 1, usize::MAX, usize::MAX);
+  let roomy = super::LexTally::new(
+    0,
+    "saturated",
+    1,
+    super::AttemptCeiling::Derived(u128::MAX),
+    usize::MAX,
+  );
   let mut lexer = super::Budgeted::wrap(
     TileLexer::new("a"),
     super::Tallied {
@@ -2059,23 +2146,27 @@ fn the_last_attempt_below_a_saturated_ceiling_lands_on_it_without_overflowing() 
   );
 }
 
-/// The 32-bit reachability behind both cells above, since a 64-bit host cannot show it.
+/// The aggregate ceiling is the **same number at every target width**, which is the whole point of
+/// counting in `u128`.
 ///
-/// `lex_attempt_ceiling(units + 3, budget)` saturates a 32-bit `usize` at 11,580 units at the
-/// default multiple and at 127 units at the maximum — sources anyone hands a test kit.
+/// It did not used to be. Computed in `usize` the formula saturated, and on a 32-bit target it
+/// saturated at 11,580 units at the default multiple and at 127 at the maximum — sources anyone
+/// hands a test kit. The tally then stopped being a bound derived from the source and became a
+/// flat `usize::MAX` cap, flat while the formula kept growing quadratically. Two lexers with
+/// identical behaviour over an identical source got opposite verdicts because one host was
+/// narrower than the other.
 ///
-/// The `model` is `u128` and therefore *unsaturated*; the implementation computes in `usize` and
-/// saturates, so the two agree only where the product fits, and comparing them raw is a cell that
-/// passes at 64 bits and fails at exactly the width it was written for. What is compared is the
-/// model **clamped to this host's `usize`**, which is one assertion that means the right thing at
-/// both: at 64 bits it pins the formula against the real function, and at 32 it pins the
-/// saturation.
+/// The `model` is the formula written out independently, so a change to either it or
+/// `lex_attempt_ceiling` reds this cell rather than leaving a private model describing an
+/// implementation that moved. The equality is now **exact and unclamped**: no `min(host_max)`,
+/// because there is no host whose width the answer depends on. That is the regression pin — the
+/// clamp is what a re-narrowed ceiling would need back.
 ///
-/// The threshold assertions are over the model alone, so they say the same thing at every width
-/// and a change to either formula reds this cell rather than leaving a private model describing an
-/// implementation that moved.
+/// `over_u32` is retained as a property of the *formula*: it is what makes 11,580 and 127
+/// thresholds rather than an assertion that big numbers are big, and it is what says the four
+/// bracketing cells still straddle the width that used to decide the verdict.
 #[test]
-fn the_aggregate_ceiling_saturates_a_32_bit_usize_at_ordinary_source_sizes() {
+fn the_aggregate_ceiling_is_the_same_number_at_every_target_width() {
   fn model(multiple: u128, units: u128) -> u128 {
     let budget = multiple * units + super::BUDGET_FLOOR as u128;
     (units + 3) * super::ATTEMPTS_PER_DRAIN_MULTIPLE as u128 * (budget + 1)
@@ -2083,61 +2174,93 @@ fn the_aggregate_ceiling_saturates_a_32_bit_usize_at_ordinary_source_sizes() {
   }
 
   const U32_MAX: u128 = u32::MAX as u128;
-  let host_max = usize::MAX as u128;
   let default = super::DEFAULT_BUDGET_MULTIPLE;
   let max = super::MAX_BUDGET_MULTIPLE;
 
-  // `over_u32` is a property of the formula, not of the host running it: it is what makes 11,580
-  // and 127 thresholds rather than an assertion that big numbers are big.
+  // The last row is the finding's own source: 100 KB at the default multiple, where the flat cap
+  // fell about 75x short of what the formula asks for.
   for &(multiple, units, over_u32) in &[
     (default, 11_579, false),
     (default, 11_580, true),
     (max, 126, false),
     (max, 127, true),
+    (default, 100_000, true),
   ] {
-    let unsaturated = model(multiple as u128, units as u128);
+    let exact = model(multiple as u128, units as u128);
     assert_eq!(
-      unsaturated > U32_MAX,
+      exact > U32_MAX,
       over_u32,
-      "the 32-bit saturation threshold moved: at multiple {multiple} over {units} units the \
-       unsaturated aggregate ceiling is {unsaturated}, against a u32::MAX of {U32_MAX}"
+      "the 32-bit threshold moved: at multiple {multiple} over {units} units the aggregate \
+       ceiling is {exact}, against a u32::MAX of {U32_MAX}"
     );
 
-    // Every budget here is small — 92,704 at the largest — so it is representable at 32 bits as
-    // well as at 64, and the ceiling *derived* from it is the only thing that saturates.
+    // Every budget here is small — 800,064 at the largest — so it is representable at 32 bits as
+    // well as at 64. Only the ceiling derived from it ever outgrew a `usize`.
     let budget = super::representable_budget(multiple, units)
       .expect("every one of these budgets is far below usize::MAX at 32 bits and at 64");
-    let host = super::lex_attempt_ceiling(units.saturating_add(3), budget);
+    let ceiling = super::lex_attempt_ceiling(units.saturating_add(3), budget);
 
-    assert_eq!(
-      host as u128,
-      unsaturated.min(host_max),
-      "the u128 model of the aggregate ceiling, clamped to this host's usize, disagrees with \
-       lex_attempt_ceiling at multiple {multiple}, {units} units"
+    assert!(
+      matches!(ceiling, super::AttemptCeiling::Derived(_)),
+      "the aggregate ceiling at multiple {multiple} over {units} units came back as the kit's \
+       counting capacity rather than the derived number {exact}; u128 has room for this by a \
+       margin of about 2^70"
     );
-
-    // Saturation asserted, not left to the equality above to carry. On a 32-bit host `host_max`
-    // *is* `U32_MAX`, so this arm is exactly `over_u32`: the two above-threshold cells come back
-    // at `usize::MAX` and the two below it do not. On a 64-bit host every cell takes the other
-    // arm, which is the direction that keeps `lex_attempt_ceiling`'s "64 bits needs about 2²³
-    // units" record honest.
-    if unsaturated > host_max {
-      assert_eq!(
-        host,
-        usize::MAX,
-        "lex_attempt_ceiling did not saturate at multiple {multiple} over {units} units on a \
-         {}-bit usize, where the unsaturated ceiling is {unsaturated}",
-        usize::BITS
-      );
-    } else {
-      assert!(
-        host < usize::MAX,
-        "lex_attempt_ceiling saturated at multiple {multiple} over {units} units on a {}-bit \
-         usize, where the unsaturated ceiling {unsaturated} still fits",
-        usize::BITS
-      );
-    }
+    assert_eq!(
+      ceiling.limit(),
+      exact,
+      "lex_attempt_ceiling disagrees with the formula at multiple {multiple} over {units} units \
+       on a {}-bit host. If this reads {} the ceiling has been re-narrowed to the host's usize, \
+       which is the defect the u128 count exists to remove",
+      usize::BITS,
+      usize::MAX
+    );
   }
+}
+
+/// Why the width mattered: an **ordinary** lexer over an **ordinary** source outran a 32-bit
+/// counter, and no knob could raise it past one.
+///
+/// This is not a dense-lexer corner. `check_partial` drives every split point of the source, so a
+/// conforming `SpanEnd` lexer emitting one item per byte is asked to lex about `k + 1` times for
+/// the prefix of length `k` — the items, plus the probe that ends the drain. Summed over every
+/// split of a 100 KB source that is about five billion attempts *before* the complete drain and
+/// the final partial drain are counted, and `usize::MAX` at 32 bits is 4,294,967,295.
+///
+/// So such a lexer passed at 64 bits and took an ordinary `lex-budget` refusal at 32 — the kit
+/// reporting its own arithmetic as the lexer's fault. `budget_multiple` could not help: the cap is
+/// `usize::MAX` whatever the multiple, so every permitted setting collapsed to the same number.
+///
+/// The demand is computed rather than driven, because driving it means five billion `lex` calls.
+/// What the cell pins is the *relation* — the demand exceeds a 32-bit counter, the derived ceiling
+/// exceeds the demand, and the ceiling is available at every width.
+#[test]
+fn a_conforming_per_byte_lexer_over_100kb_outruns_a_32_bit_counter() {
+  const UNITS: usize = 100_000;
+  const U32_MAX: u128 = u32::MAX as u128;
+
+  // Prefix `k` costs `k` items plus one exhaustion probe, over `k = 0..=UNITS`.
+  let prefix_demand: u128 = (UNITS as u128 + 1) * (UNITS as u128 + 2) / 2;
+  assert!(
+    prefix_demand > U32_MAX,
+    "the reachability this cell is about has gone: a per-byte lexer over {UNITS} units demands \
+     {prefix_demand} prefix attempts, which no longer exceeds the {U32_MAX} a 32-bit usize holds"
+  );
+
+  let budget = super::representable_budget(super::DEFAULT_BUDGET_MULTIPLE, UNITS)
+    .expect("8 * 100_000 + 64 is representable at every width");
+  let ceiling = super::lex_attempt_ceiling(UNITS.saturating_add(3), budget);
+  assert!(
+    ceiling.limit() > prefix_demand,
+    "the aggregate ceiling {} does not admit the {prefix_demand} attempts a conforming per-byte \
+     lexer spends on the prefix sweep alone",
+    ceiling.limit()
+  );
+  assert!(
+    matches!(ceiling, super::AttemptCeiling::Derived(_)),
+    "the ceiling for an ordinary 100 KB source must be the derived number, never the kit's \
+     counting capacity"
+  );
 }
 
 // ── Positive: the crate's real logos adapter (LogosLexer) ───────────────────────────
