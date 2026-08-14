@@ -166,7 +166,61 @@ and will red until they do.
   because it scales a different quantity than `Harness::budget_multiple` does: attempts the corpus
   builder may make, not items a run may produce. `0` is treated as `1`, as on the lexer harness.
 
+- **`input::TokenBudget` — a durable, driver-enforced ceiling on the items a lexer may produce**
+  (#285), configured through `InputContext::with_token_budget` and
+  `ParserContext::with_token_budget`, read back through `InputRef::token_budget`. **Default
+  unlimited**, so nothing changes for a parse that does not ask for one.
+
+  The counter this crate already shipped, `TokenLimiter`, lives inside `L::State` — which is a
+  `Checkpoint` field. A rollback therefore reinstalls the saved tally and gives the count back, and
+  the two public state-surgery doors (`InputRef::set_state` and `InputRef::state_mut`, documented
+  as the limit-recovery path) replace it outright. That is the *correct* semantics for a bound on
+  tokens in the committed stream, and the whole terminal-trip pipeline is built on it, so it is
+  unchanged. It is the wrong semantics for a bound on work performed: an attempt that lexed a
+  thousand items and then declined performed a thousand items of scanning, and a counter that
+  forgets them bounds nothing against a grammar an adversary can make speculate. The new cell lives
+  on the `Input`, beside `recursion`, outside the rollback set, with **no mutator** — there is no
+  `Input::token_budget_mut` and no `InputRef::token_budget_mut`, the same absence `recursion` and
+  `emitter` rely on.
+
+  **The unit is the item produced, not the item accepted**, and the difference is the reason the
+  ceiling exists. A plain lexer error leaves `Lexer::check` `Ok`, so the scanner reports it and goes
+  on looking for the next valid token: one valid token followed by *N* bytes of garbage is **one
+  accepted token** while *N* scans run and *N* diagnostics accumulate durably in the emitter's log.
+  Measured over *N* in {64, 128, 512, 2048}, the accept count stayed `1` while scans ran
+  {66, 130, 514, 2050} and diagnostics {64, 128, 512, 2048} — so a ceiling denominated in accepts
+  is satisfied by all four. The charge is taken at the single classification chokepoint both lexing
+  drivers pass every produced item through, which makes "every item was charged" a property of the
+  module rather than a rule each driver remembers. Trivia is charged; a peek-fill is charged at
+  production, not at consumption; a cached token replayed after a rollback is not charged again,
+  because nothing lexes.
+
+  **Exhaustion is terminal**, and it had to be: a `PartialSession` rebuilds a fresh `Input` — and
+  therefore a fresh budget — for every redrive, so a refusal read as an ordinary failure would
+  re-drive forever. The refusal latches the poison boundary and counts a scanner trip through the
+  same writer a lexer-side limit trip goes through, so `next` folds it into `Ok(None)`,
+  `next_or_stop` and the `*_or_stop` family surface the end-of-input error already marked terminal,
+  the recovery gates re-raise, and a session latches. What it cannot do is *report* itself: a
+  diagnostic would have to be built as the emitter's own error type, which no consume path is
+  bounded to construct, so the refused item is refused silently — including a lexer error on
+  exactly that item, whose emission the budget declined to authorize.
+
+  What it does **not** bound is stated at the type: not distinct document tokens (a region the
+  cache could not retain across a rollback is re-lexed, and re-lexing charges again — the direction
+  the input module's own docs already warn about, "counts replay as input and trips on valid
+  documents"), not the cost of an item, and not a session. Calibrate against produce-events.
+
 ### Changed (breaking)
+
+- **`InputContext::into_components` returns a four-tuple** (#285): `(emitter, cache, recursion,
+  token_budget)`. It is destructuring rather than four getters *precisely* so that adding a
+  component breaks every rebuild of a context, and this is the first time that has fired. A rebuild
+  goes through `InputContext::new`, which re-seeds the defaults, so a component a rebuild forgets to
+  re-apply is silently replaced by its default — for the token budget that means an untrusted parse
+  running unbounded while the caller's code still reads as if it had asked for a ceiling, and an
+  unbounded budget never refuses, so there is no diagnostic anywhere. Migration is one binding:
+  `let (e, c, r) = …` becomes `let (e, c, r, b) = …`, and a caller that rebuilds a context must
+  thread `b` back through `with_token_budget`.
 
 - **`Emitter::checkpoint` takes `&mut self`** (#257). Capturing a mark is a capability, not an
   observation — for a recording emitter it registers per-mark state a later `rewind` or `release`

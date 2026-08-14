@@ -124,6 +124,11 @@ where
   /// for why it is outside the rollback set. Read through [`recursion`](Self::recursion); its
   /// only writer is the [`Descent`] guard [`descend`](Self::descend) hands out.
   pub(super) recursion: &'closure mut crate::state::recursion_tracker::RecursionLimiter,
+  /// The **token budget**, borrowed from the owning [`Input`](super::Input) — see that field for
+  /// why a rollback does not refund it. Read through [`token_budget`](Self::token_budget); its
+  /// only writer is [`classify`](Self::classify), which charges one item per item the lexer
+  /// produces and refuses when the ceiling is met. There is no `token_budget_mut`.
+  pub(super) token_budget: &'closure mut super::TokenBudget,
   /// The **resource-trip counter**, borrowed from the owning [`Input`](super::Input) — see that
   /// field for what is recorded, why it is the *fact* of a trip rather than the depth, and why it
   /// counts rather than latching a `bool`.
@@ -952,6 +957,22 @@ where
     *self.scanner_trips != since
   }
 
+  /// The **token budget** this parse's lexer produces items against: the ceiling, and what has
+  /// been charged toward it.
+  ///
+  /// Read-only, deliberately. There is no `token_budget_mut` — the cell has exactly one writer,
+  /// the crate-internal classification chokepoint, which is on the driver's side of the seam, so a
+  /// budget cannot be lowered, refunded or re-seeded by grammar code. The same absence
+  /// [`recursion`](Self::recursion) relies on.
+  ///
+  /// Configure it with
+  /// [`InputContext::with_token_budget`](crate::input::InputContext::with_token_budget) or
+  /// [`ParserContext::with_token_budget`](crate::ParserContext::with_token_budget).
+  #[inline(always)]
+  pub const fn token_budget(&self) -> &super::TokenBudget {
+    self.token_budget
+  }
+
   /// Lexes the next token unless doing so would cross the poison boundary.
   ///
   /// Once the position the next token would be lexed at (`lex_at`, threaded by the
@@ -1003,43 +1024,58 @@ where
   ///
   /// # The one writer of the scanner-trip counter
   ///
-  /// It is also where [`Input::scanner_trips`](super::Input) is counted up, and being the sole
-  /// terminal probe is exactly why the count lives here rather than in a driver's `Verdict::Trip`
-  /// arm. [`classify`](Self::classify) is reached by **both** lexing drivers — the scanner
-  /// ([`scan_with`](Self::scan_with)) and the peek fill — so counting here makes "every scanner
+  /// The count is taken in [`latch_scanner_trip`](Self::latch_scanner_trip), the sole writer of
+  /// [`Input::scanner_trips`](super::Input), which this predicate and the token-budget refusal are
+  /// the only two callers of — and both of them run inside [`classify`](Self::classify). Being
+  /// reached only from that one chokepoint is exactly why the count lives there rather than in a
+  /// driver's `Verdict::Trip` arm. `classify` is reached by **both** lexing drivers — the scanner
+  /// ([`scan_with`](Self::scan_with)) and the peek fill — so counting there makes "every scanner
   /// trip is counted" a property of the module. Counting in `scan_with`'s trip arm instead would
   /// miss every trip a **lookahead** takes, and a lookahead that trips latches the boundary and
   /// still returns `Ok` with a short window, so those are precisely the trips an attempt can be
   /// judged over.
+  #[inline(always)]
+  fn latch_if_limit_tripped(&mut self, lexer: &L, boundary: L::Offset) -> bool {
+    if lexer.check().is_err() {
+      self.latch_scanner_trip(boundary);
+      true
+    } else {
+      false
+    }
+  }
+
+  /// Records a **terminal scanner stop** at `boundary`: counts it on the session and latches the
+  /// durable frontier.
   ///
-  /// The bump runs **before** the boundary write and before the caller offers the diagnostic to
-  /// the emitter — the same ordering [`raise_level`](Self::raise_level) uses for the descent
-  /// counter, and for the same reason: a rejecting emitter reports the trip by *returning* `Err`,
-  /// so a count taken after the emit would be skipped by the very path the counter exists for.
+  /// Two conditions reach it, both from [`classify`](Self::classify) and both terminal — the
+  /// lexer's own limit trip ([`latch_if_limit_tripped`](Self::latch_if_limit_tripped)) and the
+  /// input-layer [`TokenBudget`](crate::input::TokenBudget)'s refusal. They differ in what they
+  /// know about the item and in whether a diagnostic follows; they do not differ in what the stop
+  /// *is*, so the recording lives in one place and neither caller can record half of it.
+  ///
+  /// The bump runs **before** the boundary write and before any caller offers a diagnostic to the
+  /// emitter — the same ordering [`raise_level`](Self::raise_level) uses for the descent counter,
+  /// and for the same reason: a rejecting emitter reports the trip by *returning* `Err`, so a
+  /// count taken after the emit would be skipped by the very path the counter exists for.
   /// `wrapping_add`, again for the sibling's reason: the reading is an inequality against a
   /// per-attempt baseline, and wrapping is the one overflow behaviour under which consecutive
   /// values always differ.
   #[inline(always)]
-  fn latch_if_limit_tripped(&mut self, lexer: &L, boundary: L::Offset) -> bool {
-    if lexer.check().is_err() {
-      // COUNT, then record where. The count is the fact ("a scanner budget was spent inside this
-      // attempt"); the boundary is the position, and it is a lineage memo a rollback puts back.
-      // Counting every detected trip — including one that does not lower an already-latched
-      // boundary — is deliberate: the reading is per attempt, and a second trip inside a later
-      // attempt must not compare equal to that attempt's baseline just because the position it
-      // latched is one an earlier trip had already reached.
-      *self.scanner_trips = self.scanner_trips.wrapping_add(1);
-      // A trip can only maintain or increase poison: clamp to the more-poisoned
-      // (smaller) of any existing frontier and this one. In practice a live scan
-      // never reaches a trip past an already-latched boundary (it stops at the
-      // boundary first), so this only ever records the frontier or lowers it.
-      match self.poison_boundary.as_ref() {
-        Some(existing) if *existing <= boundary => {}
-        _ => *self.poison_boundary = Some(boundary),
-      }
-      true
-    } else {
-      false
+  fn latch_scanner_trip(&mut self, boundary: L::Offset) {
+    // COUNT, then record where. The count is the fact ("a scanner budget was spent inside this
+    // attempt"); the boundary is the position, and it is a lineage memo a rollback puts back.
+    // Counting every detected trip — including one that does not lower an already-latched
+    // boundary — is deliberate: the reading is per attempt, and a second trip inside a later
+    // attempt must not compare equal to that attempt's baseline just because the position it
+    // latched is one an earlier trip had already reached.
+    *self.scanner_trips = self.scanner_trips.wrapping_add(1);
+    // A trip can only maintain or increase poison: clamp to the more-poisoned
+    // (smaller) of any existing frontier and this one. In practice a live scan
+    // never reaches a trip past an already-latched boundary (it stops at the
+    // boundary first), so this only ever records the frontier or lowers it.
+    match self.poison_boundary.as_ref() {
+      Some(existing) if *existing <= boundary => {}
+      _ => *self.poison_boundary = Some(boundary),
     }
   }
 
@@ -3411,6 +3447,28 @@ where
   /// `false` constant for [`Complete`](crate::input::Complete), so the holdback — and the whole
   /// incomplete arm of the ranking — is eliminated at monomorphization, leaving the terminal probe
   /// exactly where it has always been.
+  ///
+  /// # The token budget is charged here, and this is why here
+  ///
+  /// One charge per item, taken **before** the ranking runs. The site is forced: this is the only
+  /// point both lexing drivers pass every produced item through, so it is the only site at which
+  /// "every item the lexer produced was charged" is a property of the module rather than a rule
+  /// each driver remembers. The unit is the *item*, not the accepted token, and that is the whole
+  /// of what the input-layer budget buys over a per-accept ceiling — see
+  /// [`TokenBudget`](crate::input::TokenBudget) for the flood a per-accept unit cannot see.
+  ///
+  /// The **refusal outranks everything**, including the trip probe below it, and that ordering is
+  /// deliberate rather than incidental. Running the probe, the emit and the dedup for an item the
+  /// budget has already declined to authorize would be spending exactly the work the ceiling
+  /// exists to refuse. What it costs is one diagnostic: an item that is *both* the budget's
+  /// refusal point and a lexer limit trip is reported as neither, only as the terminal stop both
+  /// of them are. Terminality itself is not lost — the refusal records the same scanner trip and
+  /// latches the same boundary through the same
+  /// [`latch_scanner_trip`](Self::latch_scanner_trip).
+  ///
+  /// An **unlimited** budget — the default, and every parse that does not opt in — makes the
+  /// charge one predictable-branch increment on a `usize` already in the handle's cache line, and
+  /// never refuses.
   #[inline(always)]
   fn classify<Fr>(
     &mut self,
@@ -3421,6 +3479,13 @@ where
   where
     Fr: Frontier<'inp, L>,
   {
+    // BUDGET FIRST. See the section above: a refusal is terminal, and terminal outranks both the
+    // frontier holdback and the lexer's own trip.
+    if !self.token_budget.charge() {
+      let boundary = frontier.boundary(self.offset());
+      self.latch_scanner_trip(boundary);
+      return Verdict::Exhausted;
+    }
     let (span, lexed) = item.into_components();
     match lexed {
       Lexed::Error(err) => {
@@ -3459,8 +3524,8 @@ where
   ///
   /// Returns to the caller only on an event it must decide: a valid
   /// [`Scan::Token`] (the caller applies its per-path policy and either commits
-  /// or keeps scanning), a [`Scan::Tripped`] limit trip (already latched and
-  /// emitted), or [`Scan::Eof`]. `frontier` chooses where a trip latches —
+  /// or keeps scanning), a [`Scan::Tripped`] limit trip (already latched, and
+  /// emitted where there was anything to emit), or [`Scan::Eof`]. `frontier` chooses where a trip latches —
   /// [`AtCursor`] for scans that commit no progress first, [`AtFrontier`] for
   /// scans that consume tokens as they go — and advances over each error the
   /// loop skips on the way to the next event.
@@ -3535,6 +3600,10 @@ where
             }
             Err(e) => break 'scan Err(self.settle_fatal(lexer, e)),
           },
+          // The token budget refused the item. `classify` has already counted the scanner trip and
+          // latched the boundary, so this takes the identical exit a `Trip` whose diagnostic the
+          // emitter accepted takes — there is simply no diagnostic to offer first.
+          Verdict::Exhausted => break 'scan Ok(Scan::Tripped),
           // The holdback, reached only by a non-terminal item (see `classify`).
           Verdict::Withheld(at) => break 'scan Err(Cmpl::surface_incomplete(at)),
         }
@@ -3593,8 +3662,13 @@ where
   /// A valid token; the caller applies its per-path policy (commit, put back,
   /// consume-and-report, …) and either stops or keeps scanning.
   Token(Spanned<L::Token, L::Span>),
-  /// A limit trip: the durable frontier is already latched and the diagnostic
-  /// emitted. The caller yields its poisoned outcome.
+  /// A **terminal scanner stop**: the durable frontier is already latched and the scanner trip
+  /// already counted. The caller yields its poisoned outcome.
+  ///
+  /// Two conditions produce it and they are indistinguishable here on purpose, because a caller
+  /// has nothing to do differently: a lexer resource-limit trip, whose diagnostic the driver has
+  /// already emitted, and an input-layer [`TokenBudget`](crate::input::TokenBudget) refusal, which
+  /// has no diagnostic to emit (see [`Verdict::Exhausted`]).
   Tripped,
   /// The input is exhausted (or the boundary was already reached). The caller
   /// yields its end-of-input outcome.
@@ -3632,6 +3706,17 @@ where
   /// Built only under `Cmpl::PARTIAL`, so a [`Complete`](crate::input::Complete) input never
   /// constructs it and the arm compiles away.
   Withheld(L::Offset),
+  /// **Terminal.** The input-layer [`TokenBudget`](crate::input::TokenBudget) refused this item:
+  /// the poison boundary is *already latched* and the scanner trip *already counted*, by the same
+  /// writer a limit trip goes through, so the stop cannot be lost by any exit path.
+  ///
+  /// It carries nothing, and the difference from [`Trip`](Self::Trip) is exactly that: a trip is a
+  /// verdict *about an item*, whose diagnostic the driver still has to emit, while this is a
+  /// refusal to spend anything on the item at all. There is no diagnostic — a lexer error's value
+  /// belongs to the lexer, and the refusal has no channel of its own that does not put a `From`
+  /// bound on every consume path. Drivers therefore take the same exit a `Trip` takes **after**
+  /// its emit succeeded.
+  Exhausted,
 }
 
 /// Where a scan latches the poison boundary on a limit trip: the **durable frontier**, the offset

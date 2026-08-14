@@ -463,6 +463,13 @@ where
             tripped = true;
             break;
           }
+          // The token budget refused the item. `classify` has already latched the boundary and
+          // counted the trip, so this is the `Trip` arm minus the emit — there is no diagnostic,
+          // and the truncation below is the same durability rule either way.
+          Verdict::Exhausted => {
+            tripped = true;
+            break;
+          }
           Verdict::Error(err) => {
             // Emit immediately regardless of cache fullness so an error in the
             // overflow region is never silently dropped. The dedup mark keeps a

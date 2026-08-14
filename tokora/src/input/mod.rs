@@ -249,6 +249,7 @@ pub use input_ref::{
 };
 pub(crate) use lineage::Lineage;
 pub use session::{Budget, PartialSession, RedriveFromBase, ReplayMode, SessionRefusal};
+pub use token_budget::TokenBudget;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use input_ref::{SavepointId, SessionPointId, StackedTransaction};
@@ -259,6 +260,7 @@ mod cursor;
 mod input_ref;
 mod lineage;
 mod session;
+mod token_budget;
 
 /// Storage for [`Input`]'s live-checkpoint lineage stack: inline for 8 ids so the common
 /// many-small-parses workload backtracks with no per-parse heap allocation (live-checkpoint
@@ -341,6 +343,7 @@ pub struct InputContext<E, C> {
   emitter: E,
   cache: C,
   recursion: RecursionLimiter,
+  token_budget: TokenBudget,
 }
 
 impl<E, C> InputContext<E, C> {
@@ -352,12 +355,19 @@ impl<E, C> InputContext<E, C> {
   /// changed with [`with_recursion_limiter`](Self::with_recursion_limiter). That constant is 16
   /// in every build — no feature moves it, deliberately, because this cell is what unsegmented
   /// hand-written descent reads — so it is named here rather than written out.
+  ///
+  /// The token budget defaults to [`TokenBudget::unlimited`], protection **off**, and is changed
+  /// with [`with_token_budget`](Self::with_token_budget). The two defaults differ on purpose: a
+  /// depth ceiling protects the native stack, which every build shares, so a number can be picked
+  /// for everyone; an item ceiling is a property of the grammar and the document, and any number
+  /// picked here would be wrong for every consumer at once.
   #[inline(always)]
   pub const fn new(emitter: E, cache: C) -> Self {
     Self {
       emitter,
       cache,
       recursion: RecursionLimiter::with_limitation(RecursionLimiter::PARSE_DEFAULT_DEPTH),
+      token_budget: TokenBudget::unlimited(),
     }
   }
 
@@ -379,10 +389,33 @@ impl<E, C> InputContext<E, C> {
     self
   }
 
-  /// Decomposes this context into its emitter, cache, and recursion-budget components.
+  /// Sets the **token budget** this parse's lexer produces items against.
+  ///
+  /// Per *input session*, not per parser or per lexer: one ceiling on how many items — tokens
+  /// **and** lexer errors — the driver will let the lexer hand back for this input. Exceeding it
+  /// stops the scan terminally, exactly as a lexer-side resource-limit trip does.
+  ///
+  /// The default is [`TokenBudget::unlimited`], so this is opt-in and no existing parse changes
+  /// behaviour. Read [`TokenBudget`] before choosing a number: it counts **items produced**, which
+  /// is not the same as tokens in the document, and a speculating grammar re-lexes.
   #[inline(always)]
-  pub fn into_components(self) -> (E, C, RecursionLimiter) {
-    (self.emitter, self.cache, self.recursion)
+  pub const fn with_token_budget(mut self, token_budget: TokenBudget) -> Self {
+    self.token_budget = token_budget;
+    self
+  }
+
+  /// Decomposes this context into its emitter, cache, recursion-budget and token-budget
+  /// components.
+  ///
+  /// **Destructuring, not four getters, and that is the point.** Every rebuild of a context — the
+  /// lossless driver wraps the caller's emitter in a CST `Sink` and reassembles one — has to carry
+  /// every configured cell across, and [`new`](Self::new) re-seeds the defaults. A getter lets a
+  /// rebuild forget a cell and silently hand back the default; a tuple makes the same omission a
+  /// compile error the day a component is added. It has now caught two: the recursion limiter, and
+  /// the token budget.
+  #[inline(always)]
+  pub fn into_components(self) -> (E, C, RecursionLimiter, TokenBudget) {
+    (self.emitter, self.cache, self.recursion, self.token_budget)
   }
 }
 
@@ -676,6 +709,38 @@ where
   /// captures it. See [`RecursionLimiter`] for the lexer-side tracker, which is a different cell
   /// with a different subject.
   recursion: RecursionLimiter,
+  /// The **token budget** this parse's lexer produces items against: how many items — tokens and
+  /// lexer errors alike — the driver will authorize, and how many it has already charged.
+  /// Configured at [`with_state_and_context`](Self::with_state_and_context) from
+  /// [`InputContext::with_token_budget`] and defaulting to [`TokenBudget::unlimited`].
+  ///
+  /// Its one writer is `InputRef::classify`, the single classification chokepoint both lexing
+  /// drivers reach, which charges one item and refuses when the ceiling is met. There is no
+  /// `token_budget_mut` on either this type or [`InputRef`], so grammar code has no route to lower
+  /// it — the same absence [`recursion`](Self::recursion) and [`emitter`](Self::emitter) rely on.
+  ///
+  /// # Deliberately outside the rollback set
+  ///
+  /// A [`Checkpoint`] does **not** carry it, and unlike [`finality`](Self::finality) and
+  /// [`recursion`](Self::recursion) — whose arguments are that the cell *cannot be observed to
+  /// change* across a save/restore pair — this one is outside because a budget that a rollback
+  /// refunds **is not a budget**. Work performed stays performed: an attempt that lexed a thousand
+  /// items and then declined spent a thousand items of real scanning, and returning the count to
+  /// its pre-attempt value would hand an adversary who forces speculation an unbounded supply of
+  /// free work. That is the same shape [`resource_trips`](field@Self::resource_trips) and
+  /// [`scanner_trips`](field@Self::scanner_trips) are monotone for, one field down, and it is
+  /// exactly what the refundable lexer-side [`TokenLimiter`](crate::state::token_tracker::TokenLimiter)
+  /// in `L::State` cannot do: a `Checkpoint` carries the state, so a restore puts the tally back.
+  ///
+  /// What that costs is stated rather than hidden: a re-lex after a rollback is charged again, so
+  /// the ceiling bounds produce-events and not distinct document tokens. See [`TokenBudget`].
+  ///
+  /// # Per input session, like every other budget cell here
+  ///
+  /// A [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and therefore
+  /// a fresh budget. What survives a redrive is the session's own terminal latch, which this
+  /// budget's refusal feeds by being terminal.
+  token_budget: TokenBudget,
   /// **Where resource terminality is stored**: how many times a resource budget has been exceeded
   /// in this input session. Nonzero once any trip has happened, and monotone — it only ever counts
   /// up.
@@ -954,7 +1019,7 @@ where
     state: L::State,
     context: InputContext<Ctx::Emitter, Ctx::Cache>,
   ) -> Self {
-    let (emitter, cache, recursion) = context.into_components();
+    let (emitter, cache, recursion, token_budget) = context.into_components();
     // The source-identity handshake. See `Emitter::bound_source`.
     //
     // `bound_source()` is `None` for every emitter that binds no source — 30 of the 31 core
@@ -1005,6 +1070,11 @@ where
       // deliberately walking one deeper first — and a deliberately-deep one is a caller stating
       // that this parse continues someone else's descent, which is exactly what the cell means.
       recursion,
+      // The caller's item ceiling, moved in as given — including its spend, which every
+      // constructor starts at zero. Unlike the recursion cell there is no legitimate reading of a
+      // pre-spent budget arriving here (nothing continues someone else's scan), but nothing in
+      // the type can arrive pre-spent either: `spent` is private and only `charge` raises it.
+      token_budget,
       // Untripped. The caller's budget can arrive pre-raised; the trip count cannot, because it
       // is a fact about THIS session and there is no constructor that carries one in. Starting at
       // zero is also what makes an attempt baseline taken before the first descent mean "no trip
@@ -1159,6 +1229,10 @@ where
       // The recursion budget, borrowed like the ground-truth cells above rather than snapshotted
       // like `finality`: a handle's frames raise and lower it, and the value must outlive them.
       recursion: &mut self.recursion,
+      // The token budget, borrowed rather than snapshotted for the same reason as the recursion
+      // cell: the scan charges it through this handle, and the spend must outlive the handle that
+      // made it — that outliving is exactly what makes it a budget rather than a per-handle tally.
+      token_budget: &mut self.token_budget,
       // The resource-trip counter, borrowed for the same reason: a trip raised through this handle
       // is a fact about the session, so it has to outlive the handle that raised it.
       resource_trips: &mut self.resource_trips,

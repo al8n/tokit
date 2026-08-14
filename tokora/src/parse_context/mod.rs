@@ -10,7 +10,7 @@ use crate::{
   Cache, Emitter, Lexer,
   cache::DefaultCache,
   emitter::{ComposableEmitter, Fatal, FromTokenErrors, PolicyComposableEmitter},
-  input::InputContext,
+  input::{InputContext, TokenBudget},
   lexer::SliceOf,
   state::recursion_tracker::RecursionLimiter,
 };
@@ -87,6 +87,10 @@ where
   /// [`RecursionLimiter::PARSE_DEFAULT_DEPTH`] unless
   /// [`with_recursion_limiter`](Self::with_recursion_limiter) says otherwise.
   recursion: RecursionLimiter,
+  /// The token budget handed to the [`Input`](crate::input::Input) at
+  /// [`provide`](ParseContext::provide) — [`TokenBudget::unlimited`] unless
+  /// [`with_token_budget`](Self::with_token_budget) says otherwise.
+  token_budget: TokenBudget,
   _marker: PhantomData<&'inp L>,
   _lang: PhantomData<Lang>,
 }
@@ -121,6 +125,7 @@ where
       emitter,
       cache: opts,
       recursion: RecursionLimiter::with_limitation(RecursionLimiter::PARSE_DEFAULT_DEPTH),
+      token_budget: TokenBudget::unlimited(),
       _marker: PhantomData,
       _lang: PhantomData,
     }
@@ -144,6 +149,24 @@ where
   #[inline(always)]
   pub const fn with_recursion_limiter(mut self, recursion: RecursionLimiter) -> Self {
     self.recursion = recursion;
+    self
+  }
+
+  /// Sets the **token budget** every parse driven from this context produces items against.
+  ///
+  /// Threaded straight to [`InputContext::with_token_budget`](crate::input::InputContext::with_token_budget)
+  /// by [`provide`](ParseContext::provide); see it, and [`TokenBudget`], for what the ceiling
+  /// counts. The default is [`TokenBudget::unlimited`] — protection **off**, unlike the recursion
+  /// budget beside it — so nothing changes for a parse that does not ask.
+  ///
+  /// ```rust,ignore
+  /// // Untrusted input: refuse past a million lexed items, tokens and errors alike.
+  /// let ctx = ParserContext::of(Fatal::of())
+  ///   .with_token_budget(TokenBudget::with_limitation(1_000_000));
+  /// ```
+  #[inline(always)]
+  pub const fn with_token_budget(mut self, token_budget: TokenBudget) -> Self {
+    self.token_budget = token_budget;
     self
   }
 
@@ -179,6 +202,7 @@ where
       None => InputContext::new(self.emitter, C::new()),
     }
     .with_recursion_limiter(self.recursion)
+    .with_token_budget(self.token_budget)
   }
 }
 

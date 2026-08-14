@@ -75,12 +75,28 @@ impl TokenLimitExceeded {
   }
 }
 
-/// A token counter that prevents DoS attacks by limiting total token count.
+/// A token counter that bounds how many tokens a lexer may produce against one installed state.
 ///
-/// `TokenLimiter` helps protect parsers against denial-of-service attacks by tracking
-/// the total number of tokens processed and enforcing a maximum token count. This is
-/// essential for preventing attackers from exhausting system resources with extremely
-/// large or deeply nested inputs.
+/// **What the tally is: the installed baseline plus since-install production, and the limit bounds
+/// the sum.** It is *not* a total over a parse, and the difference is not pedantic — the counter
+/// lives inside the lexer's [`State`], which is a value the input layer installs, saves and
+/// reinstalls:
+///
+/// - a **rollback** reinstalls the state a checkpoint saved, so the baseline becomes that saved
+///   count and everything spent after it is given back;
+/// - [`InputRef::set_state`](crate::InputRef::set_state) — the documented limit-recovery path —
+///   installs whatever state the caller hands it, so the baseline becomes that state's count,
+///   which may be zero, or may be another lexer's production;
+/// - a **refill** in a partial parse re-drives from a state the caller seeded, so the baseline is
+///   whatever the caller seeded and the production is the whole re-lex.
+///
+/// That scoping is the right semantics for a bound on tokens in the **committed** stream — an
+/// abandoned speculation's tokens are not in it, so a refund is the correct answer, and the
+/// crate's whole terminal-trip pipeline is built on a lexer-side counter behaving this way. It is
+/// the wrong semantics for a bound on *work performed*, because work an attempt performed and then
+/// rolled back was still performed. For that, use
+/// [`TokenBudget`](crate::input::TokenBudget), which lives on the input rather than in the state,
+/// counts errors as well as tokens, and no rollback reaches.
 ///
 /// # Default Limit
 ///
@@ -230,7 +246,9 @@ impl TokenLimiter {
     Self { max, current: 0 }
   }
 
-  /// Returns the current number of tokens tracked.
+  /// Returns the current tally: the count the installed state carried, plus what has been
+  /// [`increase`](Self::increase)d since — see the [type's own note](Self) for why that is not the
+  /// same as a total over the parse.
   ///
   /// # Example
   ///

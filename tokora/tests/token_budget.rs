@@ -1,0 +1,613 @@
+#![cfg(all(feature = "std", feature = "combinators"))]
+
+//! The **input-layer token budget** — the durable, driver-enforced bound on items the lexer
+//! produces — exercised through the public API only.
+//!
+//! Three things are pinned here, and each is a property the lexer-side
+//! [`TokenLimiter`](tokora::state::token_tracker::TokenLimiter) cannot deliver:
+//!
+//! 1. **the hostile shape** — one valid token followed by *N* bytes of plain lexer errors is *one
+//!    accepted item*, under any bound denominated in accepts, while *N* scans run and *N*
+//!    diagnostics land durably in the emitter's log. Section 1 measures that flood with the budget
+//!    unbounded — which is the shape as it stands with no budget at all — and then charges it;
+//! 2. **durability under rollback** — the same harness carries a by-value `TokenLimiter` in the
+//!    lexer's `State`, and a declined `attempt` refunds it to zero while the input-layer budget
+//!    keeps every item it charged;
+//! 3. **terminality** — exhaustion latches the poison boundary, so a committed consume reports it
+//!    terminal and a [`PartialSession`](tokora::input::PartialSession) latches instead of
+//!    re-driving forever against a fresh per-`Input` budget.
+
+use core::cell::Cell;
+
+use tokora::{
+  InputRef, Lexer, Parse, Parser, ParserContext, Partial, ScanLookahead, SimpleSpan, Token,
+  cache::DefaultCache,
+  emitter::Verbose,
+  error::{Incomplete, MaybeIncomplete, MaybeTerminal, UnexpectedEot, token::UnexpectedToken},
+  input::{Budget, PartialSession, RedriveFromBase, SessionRefusal, TokenBudget},
+  state::token_tracker::{TokenLimitExceeded, TokenLimiter},
+};
+
+// ── The instrument: every `lex()` call this process makes ─────────────────────────────────────
+
+thread_local! {
+  /// One increment per [`Lexer::lex`] call. The **work** figure the accept count is blind to.
+  static SCANS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn reset_scans() {
+  SCANS.with(|c| c.set(0));
+}
+
+fn scans() -> usize {
+  SCANS.with(Cell::get)
+}
+
+// ── Vocabulary ────────────────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct WordKind;
+
+impl core::fmt::Display for WordKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("word")
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Word;
+
+/// A plain lexer error and a limit trip, kept apart: the hostile shape needs a byte that lexes as
+/// an error **without** failing `Lexer::check`, which is precisely the case the crate's terminal
+/// predicate documents as "the caller keeps scanning for the next valid token".
+#[derive(Clone, Debug, PartialEq)]
+enum LexErr {
+  /// A byte in no token's language. `check()` stays `Ok`, so the scan goes on.
+  Bad,
+  /// The lexer-side `TokenLimiter` tripped — the refundable counter, kept for the contrast
+  /// section 2 measures.
+  Limit(TokenLimitExceeded),
+}
+
+impl Token<'_> for Word {
+  type Kind = WordKind;
+  type Error = LexErr;
+
+  const SCAN_LOOKAHEAD: ScanLookahead = ScanLookahead::WithinSpan;
+
+  fn kind(&self) -> WordKind {
+    WordKind
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// One item per byte: `a` is a token, everything else is a one-byte plain lexer error.
+struct FloodLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: TokenLimiter,
+}
+
+impl<'a> Lexer<'a> for FloodLexer<'a> {
+  type State = TokenLimiter;
+  type Source = str;
+  type Token = Word;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self::with_state(src, TokenLimiter::new())
+  }
+
+  fn with_state(src: &'a str, state: TokenLimiter) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+
+  fn check(&self) -> Result<(), LexErr> {
+    self.state.check().map_err(LexErr::Limit)
+  }
+
+  fn state(&self) -> &TokenLimiter {
+    &self.state
+  }
+
+  fn state_mut(&mut self) -> &mut TokenLimiter {
+    &mut self.state
+  }
+
+  fn into_state(self) -> TokenLimiter {
+    self.state
+  }
+
+  fn source(&self) -> &'a str {
+    self.src
+  }
+
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+
+  fn lex(&mut self) -> Option<Result<Word, LexErr>> {
+    SCANS.with(|c| c.set(c.get() + 1));
+    let b = self.src.as_bytes();
+    self.start = self.end;
+    if self.start >= b.len() {
+      self.end = self.start;
+      return None;
+    }
+    self.end = self.start + 1;
+    if b[self.start] == b'a' {
+      // Charged on the lexer side, exactly as smear's handlers do: this is the counter a
+      // rollback refunds.
+      self.state.increase();
+      Some(Ok(Word))
+    } else {
+      Some(Err(LexErr::Bad))
+    }
+  }
+
+  fn read_frontier(&self) -> tokora::ReadFrontier<usize> {
+    tokora::ReadFrontier::SpanEnd
+  }
+
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+    self.start = self.end;
+  }
+}
+
+// ── Error type ────────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+enum Err_ {
+  Lex(LexErr),
+  Unexpected,
+  /// End of input, carrying whether the crate marked it terminal.
+  Eot(bool),
+  Incomplete,
+  Refused(SessionRefusal),
+}
+
+impl From<LexErr> for Err_ {
+  fn from(e: LexErr) -> Self {
+    Err_::Lex(e)
+  }
+}
+
+impl<'a, T, K: Clone, S, Lg: ?Sized> From<UnexpectedToken<'a, T, K, S, Lg>> for Err_ {
+  fn from(_: UnexpectedToken<'a, T, K, S, Lg>) -> Self {
+    Err_::Unexpected
+  }
+}
+
+impl From<UnexpectedEot<usize>> for Err_ {
+  fn from(e: UnexpectedEot<usize>) -> Self {
+    Err_::Eot(e.is_terminal())
+  }
+}
+
+impl From<Incomplete<usize>> for Err_ {
+  fn from(_: Incomplete<usize>) -> Self {
+    Err_::Incomplete
+  }
+}
+
+impl From<SessionRefusal> for Err_ {
+  fn from(r: SessionRefusal) -> Self {
+    Err_::Refused(r)
+  }
+}
+
+impl MaybeIncomplete for Err_ {
+  fn is_incomplete(&self) -> bool {
+    matches!(self, Err_::Incomplete)
+  }
+}
+
+impl MaybeTerminal for Err_ {
+  fn is_terminal(&self) -> bool {
+    match self {
+      Err_::Eot(terminal) => *terminal,
+      Err_::Refused(_) => true,
+      Err_::Lex(LexErr::Limit(_)) => true,
+      _ => false,
+    }
+  }
+}
+
+type Lex<'a> = FloodLexer<'a>;
+type Cache<'a> = DefaultCache<'a, Lex<'a>>;
+type Ctx<'a> = ParserContext<'a, Lex<'a>, Verbose<Err_>, Cache<'a>>;
+
+/// `"a"` then `n` bytes of garbage: one valid token, then a flood of plain lexer errors.
+fn hostile(n: usize) -> String {
+  let mut s = String::with_capacity(n + 1);
+  s.push('a');
+  for _ in 0..n {
+    s.push('!');
+  }
+  s
+}
+
+/// What one drain of the flood costs.
+#[derive(Debug, PartialEq, Eq)]
+struct Cost {
+  /// Items the **grammar** accepted — the unit a per-accept bound would count.
+  accepted: usize,
+  /// [`Lexer::lex`] calls — the work.
+  scans: usize,
+  /// Diagnostics durably retained by the emitter — the memory.
+  diagnostics: usize,
+  /// What the input-layer budget charged.
+  charged: usize,
+}
+
+/// Drains to exhaustion with [`InputRef::next`], reporting every figure the emitter and the input
+/// can still answer for while the parse is alive.
+fn drain<'inp>(
+  inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>,
+) -> Result<(usize, usize, usize), Err_> {
+  let mut accepted = 0usize;
+  while inp.next()?.is_some() {
+    accepted += 1;
+  }
+  Ok((
+    accepted,
+    inp.emitter_ref().diagnostics().len(),
+    inp.token_budget().spent(),
+  ))
+}
+
+fn drain_under(src: &str, budget: TokenBudget) -> Cost {
+  reset_scans();
+  let (accepted, diagnostics, charged) =
+    Parser::with_context(Ctx::new(Verbose::new()).with_token_budget(budget))
+      .apply(drain)
+      .parse_with_state(src, TokenLimiter::new())
+      .expect("a collecting emitter never makes the flood fatal");
+
+  Cost {
+    accepted,
+    scans: scans(),
+    diagnostics,
+    charged,
+  }
+}
+
+const N: usize = 512;
+
+// ── 1. The hostile shape ──────────────────────────────────────────────────────────────────────
+
+/// **The pre-state, reproduced.** With the budget unbounded — the behaviour of every build before
+/// this feature, and of every consumer that does not opt in — one accepted item costs `N` scans
+/// and `N` durably-retained diagnostics.
+///
+/// This is the measurement the unit "one charge per accepted item" was rejected on: the accept
+/// count is `1` and does not move with `N`, so a ceiling denominated in accepts sees none of it.
+/// Measured at `a9ed3de` over `N` in {64, 128, 512, 2048}: `accepted` stayed `1` while `scans` ran
+/// {66, 130, 514, 2050} and `diagnostics` {64, 128, 512, 2048}.
+#[test]
+fn an_error_flood_is_one_accept_and_o_n_work_when_the_budget_is_unbounded() {
+  let cost = drain_under(&hostile(N), TokenBudget::unlimited());
+
+  assert_eq!(
+    cost,
+    Cost {
+      // One accept, whatever N is. A per-accept ceiling of 2 would have been satisfied.
+      accepted: 1,
+      // One scan per byte, plus the exhausting call that returns `None`.
+      scans: N + 2,
+      // One diagnostic per garbage byte, every one of them retained.
+      diagnostics: N,
+      // The figure the accept count is blind to: N+1 items produced, the token and every error.
+      // Unbounded, so nothing is refused — what changed is that the flood is now *counted*.
+      charged: N + 1,
+    }
+  );
+}
+
+/// The same input under a **bounded** budget: the flood is cut at the ceiling. `charged` is the
+/// figure that moved with `N` above and does not move now, which is the whole of the fix.
+#[test]
+fn a_bounded_budget_charges_the_error_flood_and_stops_it() {
+  const B: usize = 8;
+  let cost = drain_under(&hostile(N), TokenBudget::with_limitation(B));
+
+  assert_eq!(cost.charged, B, "exactly the ceiling, not N + 1");
+  assert_eq!(
+    cost.scans,
+    B + 1,
+    "B items lexed, plus the one whose classification refused"
+  );
+  assert_eq!(
+    cost.diagnostics,
+    B - 1,
+    "the token, then B-1 errors: nothing past the ceiling reaches the log"
+  );
+  assert_eq!(cost.accepted, 1, "the one valid token still came through");
+}
+
+/// The ceiling holds independently of `N`: quadrupling the flood changes nothing it bounds.
+///
+/// This is the falsifier for the pre-state. Run the same comparison against the accept count and
+/// it passes vacuously — `1 == 1` for every `N` — which is exactly why the accept count was the
+/// wrong unit.
+#[test]
+fn the_ceiling_does_not_move_with_the_size_of_the_flood() {
+  const B: usize = 8;
+  let small = drain_under(&hostile(N), TokenBudget::with_limitation(B));
+  let large = drain_under(&hostile(N * 4), TokenBudget::with_limitation(B));
+  assert_eq!(small, large);
+}
+
+/// **Trivia is charged**, in the only sense this harness can state it: the budget's unit is the
+/// item the lexer produced, not the item the grammar kept. Here every byte is an item and only the
+/// `a`s are ever accepted, so a source of `N` garbage bytes with no accepted token at all still
+/// costs `N`.
+#[test]
+fn an_item_the_grammar_never_keeps_is_still_charged() {
+  reset_scans();
+  let cost = drain_under("!!!!", TokenBudget::unlimited());
+  assert_eq!(cost.accepted, 0, "nothing was kept");
+  assert_eq!(cost.charged, 4, "and all four items were charged");
+}
+
+/// A **peek-fill is charged at production, not at consumption**: a peek that fills the cache and
+/// is then abandoned has already spent, because the lexing already happened.
+#[test]
+fn a_peek_fill_is_charged_at_production_even_when_nothing_consumes_it() {
+  fn peek_only<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<usize, Err_> {
+    // One peek, filling the cache; nothing is consumed afterwards.
+    let _ = inp.peek_one()?;
+    Ok(inp.token_budget().spent())
+  }
+
+  let spent = Parser::with_context(Ctx::new(Verbose::new()))
+    .apply(peek_only)
+    .parse_with_state("aaaa", TokenLimiter::new())
+    .expect("no error on this path");
+
+  assert_eq!(spent, 1, "the filled token is charged at production");
+}
+
+/// **Cache replay is not charged**, and this is the fourth sub-decision measured: consuming a token
+/// the cache already holds does no lexing, so it reaches no classification and costs nothing. The
+/// budget prices lexing, not consumption.
+#[test]
+fn consuming_a_cached_token_does_not_charge_it_twice() {
+  fn peek_then_take<'inp>(
+    inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>,
+  ) -> Result<(usize, usize), Err_> {
+    let _ = inp.peek_one()?;
+    let after_peek = inp.token_budget().spent();
+    // Served from the cache: no `lex`, no classification, no charge.
+    assert!(inp.next()?.is_some());
+    Ok((after_peek, inp.token_budget().spent()))
+  }
+
+  let (after_peek, after_take) = Parser::with_context(Ctx::new(Verbose::new()))
+    .apply(peek_then_take)
+    .parse_with_state("aaaa", TokenLimiter::new())
+    .expect("no error on this path");
+
+  assert_eq!(after_peek, 1);
+  assert_eq!(after_take, 1, "the consume re-charged nothing");
+}
+
+/// The peek fill has its own arm for the refusal, and it must produce a **short window** rather
+/// than a full one: a lookahead the budget refused to fund cannot report tokens it never lexed.
+#[test]
+fn a_peek_fill_that_the_budget_refuses_returns_a_short_window() {
+  fn peek_then_consume<'inp>(
+    inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>,
+  ) -> Result<(bool, usize), Err_> {
+    // Nothing is authorized, so the fill produces one item, has it refused, and stops empty.
+    let empty = inp.peek_one()?.is_none();
+    let spent = inp.token_budget().spent();
+    // And the refusal latched: the committed consume reports it terminal rather than as the end
+    // of a four-byte source that plainly has not ended.
+    match inp.next_or_stop() {
+      Err(e) => {
+        assert_eq!(e, Err_::Eot(true));
+        Ok((empty, spent))
+      }
+      Ok(_) => panic!("a refused peek must leave a terminal stop behind it"),
+    }
+  }
+
+  let (empty, spent) = Parser::with_context(
+    Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(0)),
+  )
+  .apply(peek_then_consume)
+  .parse_with_state("aaaa", TokenLimiter::new())
+  .expect("no error on this path");
+
+  assert!(empty, "the window is short — empty, here");
+  assert_eq!(spent, 0, "a refusal is not a charge");
+}
+
+// ── 2. Durability: the rollback plant ─────────────────────────────────────────────────────────
+
+/// **Plant.** Spend inside an `attempt`, decline it, and compare the two counters that counted the
+/// same items.
+///
+/// The lexer-side `TokenLimiter` lives in `L::State`, which is a `Checkpoint` field, so the restore
+/// puts the saved count back: `0 → 4 → 0`. The input-layer budget is not a `Checkpoint` field, so
+/// it does not move back. That contrast is what makes one of them a budget.
+///
+/// Falsifying output: `after == before` on the budget row. Put the budget inside `Checkpoint` — or
+/// on the lexer's `State` — and that is what this prints.
+#[test]
+fn a_declined_attempt_refunds_the_lexer_tally_and_not_the_input_budget() {
+  type Row = (usize, usize, usize);
+
+  fn probe<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<(Row, Row), Err_> {
+    let tally_before = inp.state().tokens();
+    let budget_before = inp.token_budget().spent();
+
+    let inside = Cell::new((0usize, 0usize));
+    let kept: Option<()> = inp.attempt(|txn| {
+      while txn.next().ok().flatten().is_some() {}
+      inside.set((txn.state().tokens(), txn.token_budget().spent()));
+      // Decline: everything this attempt did is rolled back.
+      None
+    });
+    assert!(kept.is_none(), "the attempt declined");
+
+    let (tally_inside, budget_inside) = inside.get();
+    Ok((
+      (tally_before, tally_inside, inp.state().tokens()),
+      (budget_before, budget_inside, inp.token_budget().spent()),
+    ))
+  }
+
+  let (tally, budget) = Parser::with_context(Ctx::new(Verbose::new()))
+    .apply(probe)
+    .parse_with_state("aaaa", TokenLimiter::new())
+    .expect("no error on this path");
+
+  // The refundable counter: spent, then given back by the restore that reinstalled the state.
+  assert_eq!(tally, (0, 4, 0), "the lexer-side tally is refunded");
+  // The durable one: spent, and kept.
+  assert_eq!(budget, (0, 4, 4), "the input-layer budget is not");
+}
+
+/// The same contrast one level up: a declined attempt does not buy back headroom, so a budget of
+/// `B` still refuses after `B` items even when every one of them was rolled back.
+#[test]
+fn a_rolled_back_attempt_still_spends_the_ceiling() {
+  fn probe<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<usize, Err_> {
+    let kept: Option<()> = inp.attempt(|txn| {
+      while txn.next().ok().flatten().is_some() {}
+      None
+    });
+    assert!(kept.is_none());
+    // The cursor is back at zero and the source is untouched, so a lexer-side tally would let
+    // this drain run again in full. Count what it actually yields.
+    let mut again = 0usize;
+    while inp.next()?.is_some() {
+      again += 1;
+    }
+    Ok(again)
+  }
+
+  let again = Parser::with_context(
+    Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(4)),
+  )
+  .apply(probe)
+  .parse_with_state("aaaaaaaa", TokenLimiter::new())
+  .expect("no error on this path");
+
+  assert_eq!(
+    again, 0,
+    "the four items the declined attempt lexed were already paid for"
+  );
+}
+
+// ── 3. Terminality ────────────────────────────────────────────────────────────────────────────
+
+/// Exhaustion is a **terminal** stop, not a quiet end of input: a committed consume
+/// ([`InputRef::next_or_stop`]) surfaces the end-of-input error already marked terminal, exactly
+/// as it does for a lexer resource-limit trip.
+#[test]
+fn exhaustion_reports_itself_terminal_to_a_committed_consume() {
+  fn drive<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<usize, Err_> {
+    let mut n = 0usize;
+    while inp.next_or_stop()?.is_some() {
+      n += 1;
+    }
+    Ok(n)
+  }
+
+  let outcome = Parser::with_context(
+    Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(2)),
+  )
+  .apply(drive)
+  .parse_with_state("aaaaaaaa", TokenLimiter::new());
+
+  let err = outcome.expect_err("the budget refused before the source ran out");
+  assert_eq!(err, Err_::Eot(true), "marked terminal");
+  assert!(err.is_terminal());
+}
+
+/// The contrast that makes the assertion above mean something: the *same* consume over a source
+/// that genuinely runs out reports a **non**-terminal end of input.
+#[test]
+fn a_genuine_end_of_input_is_not_reported_terminal() {
+  fn drive<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<usize, Err_> {
+    let mut n = 0usize;
+    while inp.next_or_stop()?.is_some() {
+      n += 1;
+    }
+    // Exhausted with room to spare: ask once more, and build the plain end-of-input the grammar
+    // would build.
+    Ok(n)
+  }
+
+  let n = Parser::with_context(
+    Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(64)),
+  )
+  .apply(drive)
+  .parse_with_state("aaaa", TokenLimiter::new())
+  .expect("a genuine end of input is `Ok(None)`, not an error");
+  assert_eq!(n, 4);
+}
+
+/// **Plant.** A [`PartialSession`] rebuilds a fresh `Input` — and therefore a fresh budget — for
+/// every redrive, so the budget alone cannot bound a session. What stops the redrive is the
+/// session's terminal latch, and the latch is fed by the terminality the test above pins.
+///
+/// Falsifying output: the second attempt returns `Ok`/`Eot(false)` rather than
+/// `TerminalLatched` — which is what a non-terminal exhaustion produces, forever, one redrive
+/// after another.
+#[test]
+fn a_session_redrive_cannot_reset_the_refusal() {
+  fn drive<'inp>(
+    inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>, (), Partial>,
+  ) -> Result<usize, Err_> {
+    let mut n = 0usize;
+    while inp.next_or_stop()?.is_some() {
+      n += 1;
+    }
+    Ok(n)
+  }
+
+  let mut session = PartialSession::new(TokenLimiter::new(), Budget::Unbounded, RedriveFromBase);
+  let budgeted = || Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(2));
+
+  let first = session.parse(budgeted(), "aaaaaaaa", true, drive);
+  assert_eq!(
+    first,
+    Err(Err_::Eot(true)),
+    "the first attempt refuses, terminally"
+  );
+  assert!(session.is_latched(), "and the session latched on it");
+  let spent_after_first = session.spent();
+
+  // The redrive would get a fresh `Input` and a fresh budget — and never runs, because the latch
+  // is consulted before any work.
+  let second = session.parse(budgeted(), "aaaaaaaa", true, drive);
+  assert_eq!(
+    second,
+    Err(Err_::Refused(SessionRefusal::TerminalLatched)),
+    "still refused"
+  );
+  assert_eq!(
+    session.spent(),
+    spent_after_first,
+    "and refused before any work: a refused attempt spends no bytes"
+  );
+}

@@ -1268,12 +1268,14 @@ where
 /// driver turns an `InputContext<E, C>` into the `InputContext<Sink<'inp, L, E>, C>` an [`Input`]
 /// is built from.
 ///
-/// **The budget is carried across explicitly**, and that line is the whole reason this is a
+/// **Both budgets are carried across explicitly**, and those lines are the whole reason this is a
 /// function rather than two inlined expressions: [`InputContext::new`] re-seeds
-/// `PARSE_DEFAULT_DEPTH`, so a rebuild that forgot to re-apply the caller's limiter would silently
-/// hand back the default — the exact failure the configured door exists to remove, and one that no
-/// type error and no defaulted call site could see. `into_components` is destructuring rather than
-/// a getter precisely so that adding a fourth component to `InputContext` breaks this line.
+/// `PARSE_DEFAULT_DEPTH` and an unlimited token ceiling, so a rebuild that forgot to re-apply the
+/// caller's limiter would silently hand back the default — the exact failure the configured door
+/// exists to remove, and one that no type error and no defaulted call site could see.
+/// `into_components` is destructuring rather than a getter precisely so that adding a component to
+/// `InputContext` breaks this line. It has now done so once: the token budget is here because the
+/// tuple grew and the build stopped.
 #[inline]
 fn sink_context<'inp, L, Lang, E, C>(
   src: &'inp L::Source,
@@ -1285,8 +1287,10 @@ where
   Lang: ?Sized,
   E: Emitter<'inp, L, Lang> + ValueKeyedEmitter,
 {
-  let (inner, cache, recursion) = context.into_components();
-  InputContext::new(Sink::new(src, inner, profile), cache).with_recursion_limiter(recursion)
+  let (inner, cache, recursion, token_budget) = context.into_components();
+  InputContext::new(Sink::new(src, inner, profile), cache)
+    .with_recursion_limiter(recursion)
+    .with_token_budget(token_budget)
 }
 
 /// The [`Partial`] sibling of [`parse_lossless`]: the same pinned sink, driven in Sans-I/O

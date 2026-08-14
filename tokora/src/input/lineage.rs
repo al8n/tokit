@@ -125,6 +125,7 @@
 //! | [`savepoint_seq`](Lineage) | `Lineage` | monotone id source | **nothing** — same |
 //! | `finality` (`is_final`) | `Input` (snapshot on `InputRef`) | **world fact** | **nothing** — and it cannot change while a handle lives |
 //! | `recursion` (the descent budget) | `Input` (borrowed through `InputRef`) | **control-stack fact** | **nothing** — a checkpoint does not carry it; the `Descent` guard's drop balances it with the frame it counts |
+//! | `token_budget` (the item ceiling) | `Input` (borrowed through `InputRef`) | **monotone session fact** | **nothing** — and here the reason is not that the cell cannot be observed to change, as it is for the two rows around it, but that a budget a rollback refunds is not a budget. An attempt that lexed a thousand items and declined performed a thousand items of scanning; giving the count back would hand an adversary who forces speculation free work without limit. Charged one per produced item at the single classification chokepoint, whose refusal records the stop through `InputRef::latch_scanner_trip`; no lowering writer exists, and there is no `token_budget_mut`. What it costs is that a re-lex is charged again, so the ceiling bounds produce-events rather than distinct document tokens |
 //! | `resource_trips` (how many budget trips) | `Input` (borrowed through `InputRef`) | **monotone session fact** | **nothing** — it only counts up, and there is no writer that lowers it. A rollback rewinds *input progress*; it cannot un-exceed a budget, so restoring this cell would erase a stop that has already been decided. Sites that need a *per-attempt* answer snapshot it and compare rather than reading it absolutely |
 //! | `scanner_trips` (how many scanner trips) | `Input` (borrowed through `InputRef`) | **monotone session fact** | **nothing** — the same class and the same argument as the cell above, for the other budget. It is the row that makes the `poison_boundary` row *safe*: a trip's **position** is a lineage memo and comes back with a restore, so no comparison of that memo can witness a trip across a rollback — at one level or at ten. The *fact* of the trip is recorded here instead, where nothing reaches it, which is why the recovery gate judges a scanner stop on this and reads the boundary only as the narrower standing-stop reading |
 //! | `witness` (input identity) | `Input` | witness | nothing (identity is fixed for the input's life) |
@@ -190,6 +191,16 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     //   guard's destructor, which pops with the frame in `std` and `no_std` alike — the one
     //   witness whose behaviour does not fork on the unwind edge. Not in `Checkpoint`.
     recursion: _,
+    // — MONOTONE SESSION FACT: restore does NOT touch it, and must not — but for a reason the two
+    //   neighbouring cells do not share. `finality` and `recursion` are outside the rollback set
+    //   because nothing observable changes across a save/restore pair; this one is outside because
+    //   a refunded budget is not a budget. The scanning an abandoned attempt performed was still
+    //   performed, and a ceiling that forgets it bounds nothing against a grammar an adversary can
+    //   make speculate. That is exactly what the refundable lexer-side `TokenLimiter` inside
+    //   `state` cannot do, since a `Checkpoint` carries the state. Charged by
+    //   `InputRef::classify`, one per item the lexer produces; no lowering writer, no
+    //   `token_budget_mut`, not in `Checkpoint`.
+    token_budget: _,
     // — MONOTONE SESSION FACT: restore does NOT touch it, and must not. It is the sibling of the
     //   cell above and the opposite kind of fact from it: the *depth* is restored by the unwind
     //   because frames genuinely came back, while *that the budget was exceeded* is a thing that
@@ -203,7 +214,8 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     //   is the point of having both: the memo says WHERE the stream stops and has to come back
     //   with a restore for the scanner to keep working; this says THAT a stop happened and must
     //   not, because an event a rollback can erase is an event no gate outside that rollback can
-    //   see. Counted up by `latch_if_limit_tripped`; no lowering writer exists. Not in
+    //   see. Counted up by `latch_scanner_trip` — reached from the lexer's own limit probe and
+    //   from the token budget's refusal, both inside `classify`; no lowering writer exists. Not in
     //   `Checkpoint`, and not in `ThroughEntry` either — the sync family's own positional rewind
     //   restores the boundary and deliberately leaves this alone.
     scanner_trips: _,
@@ -255,10 +267,13 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     // — CONTROL-STACK FACT (borrowed): raised by `descend`, lowered by the `Descent` guard's
     //   drop, never restored. Same class as the `Input` field above it.
     recursion: _,
+    // — MONOTONE SESSION FACT (borrowed): charged one per produced item by `classify`, never
+    //   lowered and never restored. Same class as the `Input` field above it.
+    token_budget: _,
     // — MONOTONE SESSION FACT (borrowed): counted up by `raise_level`'s trip arm, never lowered
     //   and never restored. Same class as the `Input` field above it.
     resource_trips: _,
-    // — MONOTONE SESSION FACT (borrowed): counted up by `latch_if_limit_tripped`, never lowered
+    // — MONOTONE SESSION FACT (borrowed): counted up by `latch_scanner_trip`, never lowered
     //   and never restored. Same class as the `Input` field above it.
     scanner_trips: _,
     // — WORLD FACT, as a read-only `Copy` snapshot: no mutator, and the handle's borrow of the
