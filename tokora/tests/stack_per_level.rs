@@ -833,15 +833,21 @@ mod refusals {
       FrameReuseArm::Declared => assert!(declared, "{arm:?} on a build nothing declares"),
       FrameReuseArm::Native => assert!(!declared, "{arm:?} on a build something declares"),
     }
-    assert_eq!(
-      arm.as_str(),
-      match arm {
-        FrameReuseArm::Relocating => "relocating",
-        FrameReuseArm::Declared => "declared",
-        FrameReuseArm::Native => "native",
-      },
-      "ci/sanitizer.sh and ci/stack_probe.sh match on these names"
-    );
+    // Every row, not the one this host is in. Asking only about `arm` pins whichever name the
+    // machine running the test happens to reach and leaves the other two free to be retargeted —
+    // and the two the CI gates match on are exactly the two an ordinary host never reaches.
+    let names: [(FrameReuseArm, &str); 3] = [
+      (FrameReuseArm::Relocating, "relocating"),
+      (FrameReuseArm::Declared, "declared"),
+      (FrameReuseArm::Native, "native"),
+    ];
+    for (each, name) in names {
+      assert_eq!(
+        each.as_str(),
+        name,
+        "ci/sanitizer.sh and ci/stack_probe.sh match on these names"
+      );
+    }
   }
 
   /// [`asan_fake_stack_enabled_from`] against the strings it has to read, including the one
