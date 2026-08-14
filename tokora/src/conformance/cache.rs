@@ -743,32 +743,42 @@ where
   ///
   /// It is computed with checked arithmetic, and the multiple it scales is refused above
   /// [`MAX_BUDGET_MULTIPLE`](super::MAX_BUDGET_MULTIPLE), because the *configured* ceiling used to
-  /// be able to disarm this loop outright. `lex_attempts_multiple(usize::MAX)` saturated to a
-  /// limit of `usize::MAX`, `attempts >= limit` is then false for every value a `usize` holds, and
-  /// the endless-error lexer this guard exists to refuse ran forever — with the counter wrapping
-  /// through zero under a release profile, so the arithmetic did not stop it either. A guard whose
-  /// own knob can switch it off is not a guard, and the failure is silent: the run does not report
-  /// anything, it simply never ends.
+  /// be able to switch this loop off outright. `lex_attempts_multiple(usize::MAX)` saturated to a
+  /// limit of `usize::MAX`, and under the **`attempts > limit`** order of the day no `usize` could
+  /// satisfy that comparison: the endless-error lexer this guard exists to refuse ran forever,
+  /// with the counter wrapping through zero under a release profile, so the arithmetic did not
+  /// stop it either. A guard whose own knob can switch it off is not a guard, and the failure is
+  /// silent: the run does not report anything, it simply never ends.
+  ///
+  /// The comparison is now `attempts >= limit`, asked **before** the increment, and a `usize` does
+  /// reach `usize::MAX` — so such a ceiling is enforced, after `usize::MAX` attempts, without the
+  /// counter wrapping. That is still not a refusal anybody is present for, which is why the cap
+  /// stays; but the cap is what keeps the guard *useful*, not what keeps it alive. Nothing in this
+  /// loop wraps at any setting the builder accepts, and nothing wraps at the ones it does not.
   ///
   /// # Panics
   ///
   /// Panics — tagged `lex-budget` — when the ceiling is spent. The alternative is not a shorter
   /// corpus; it is a kit that never returns.
   ///
-  /// Panics, separately, when `lex_multiple * units + BUDGET_FLOOR` does not fit in a `usize`.
-  /// With the multiple capped that needs a source of more than `usize::MAX / 65536` units, so
-  /// what it refuses is not a corpus anyone can build — it is the one remaining way to reach an
-  /// unrepresentable ceiling, and an unrepresentable ceiling is the disarmed guard above. The
-  /// message names the knob to lower rather than reporting a number nobody configured.
+  /// Panics, separately and tagged `kit-capacity`, when `lex_multiple * units + BUDGET_FLOOR` does
+  /// not fit in a `usize`. With the multiple capped that needs a source of more than
+  /// `usize::MAX / 65536` units, so what it refuses is not a corpus anyone can build. The tag
+  /// differs because the outcome does: no lexing has happened, so nothing has been learned about
+  /// the lexer, and a `lex-budget` tag on a failure of the kit's own arithmetic reads as a verdict
+  /// on the caller's code. The message names the knob to lower rather than reporting a number
+  /// nobody configured.
   fn corpus(&self, want: usize) -> Vec<CachedTokenOf<'inp, L>> {
     let name = self.label();
     let units = self.source.slice(..).map(|s| s.len()).unwrap_or(0);
     let limit = super::representable_budget(self.lex_multiple, units).unwrap_or_else(|| {
       panic!(
-        "tokora cache conformance [{name} lex-budget]: the corpus builder's ceiling for a source \
-         of {units} units at a multiple of {} does not fit in a usize. Lower the multiple with \
-         CacheHarness::lex_attempts_multiple — a ceiling no attempt count can reach is a guard \
-         that never fires.",
+        "tokora cache conformance [{name} kit-capacity]: INCONCLUSIVE — the corpus builder's \
+         ceiling for a source of {units} units at a multiple of {} does not fit in a usize. This \
+         is a limit of the kit's arithmetic and NOT a verdict on the lexer, which has not been \
+         asked to lex once. Lower the multiple with CacheHarness::lex_attempts_multiple: an \
+         unrepresentable ceiling has to be replaced by some other number, and usize::MAX is one no \
+         run reaches while anybody is waiting for it.",
         self.lex_multiple
       )
     });

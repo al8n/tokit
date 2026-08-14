@@ -304,9 +304,25 @@ where
   ///
   /// # Why the maximum is a refusal and not a clamp
   ///
-  /// The cap itself is not tidiness: `usize::MAX` here makes the budget `usize::MAX` too, no
-  /// counter can exceed the largest value it can hold, and every guard derived from the budget
-  /// then never fires — the run the knob was asked to bound simply never ends.
+  /// The cap itself is not tidiness, and what an uncapped `usize::MAX` would do is **three
+  /// separate failures** rather than the single "the guards stop working" this paragraph used to
+  /// claim. A budget of `usize::MAX` feeds three different guards and breaks each one differently:
+  ///
+  /// - **The item guards go out of reach, and only those.** `out.len() > budget` cannot hold when
+  ///   `budget` is `usize::MAX`, because no `Vec` holds that many items. This is the one guard the
+  ///   old wording described correctly.
+  /// - **[`instance_ceiling`] *overflows*.** It is `budget + 1`, so at `usize::MAX` it wraps to
+  ///   `0` in release and panics with an arithmetic message in debug. A per-instance ceiling of
+  ///   zero is not an inert guard — it refuses every lexer on its **first** attempt. The failure
+  ///   is the opposite of the one the old wording named.
+  /// - **The aggregate tally still fires.** [`LexTally::spend`](tally::LexTally::spend) compares
+  ///   `spent >= limit` before it increments and counts in `u128`, over a ceiling
+  ///   ([`lex_attempt_ceiling`]) that is derived from the budget rather than equal to it. So it is
+  ///   enforced — just at a number no run reaches while anybody is waiting, which is a *useless*
+  ///   ceiling and not an absent one.
+  ///
+  /// None of the three is the reason the cap is a **refusal**. That reason is below, and it is a
+  /// different problem again: it is about what a clamp does to a caller the kit accepts.
   ///
   /// But *clamping* to the cap is the wrong way to enforce it, because a clamp is silent and it
   /// hands back a **smaller budget than the caller asked for**. The lexer contract permits finite
@@ -405,9 +421,11 @@ where
     representable_budget(self.budget_multiple, units).unwrap_or_else(|| {
       panic!(
         "tokora conformance: the anti-hang budget for a source of {units} units at a multiple of \
-         {} does not fit in a usize. Lower the multiple with Harness::budget_multiple — a ceiling \
-         that cannot be represented is a ceiling no counter can reach, which is a budget that \
-         never fires.",
+         {} does not fit in a usize. This is a limit of the kit's arithmetic and not a verdict on \
+         the lexer, which has not been run. Lower the multiple with Harness::budget_multiple: an \
+         unrepresentable budget has to be replaced by some other number, and every replacement is \
+         wrong — usize::MAX overflows the per-instance ceiling derived from it and puts the item \
+         guards past any Vec length, and anything smaller certifies a budget you did not ask for.",
         self.budget_multiple
       )
     })
@@ -937,9 +955,13 @@ impl<L, S> Budgeted<L, S> {
   /// `LexTally::spend` does: the ceiling it compares against is
   /// [`instance_ceiling(budget)`](instance_ceiling), which is `budget + 1`, and
   /// [`representable_budget`] is permitted to return `usize::MAX - 1` — so `per_instance` can be
-  /// [`usize::MAX`], a value `spent_here` can never exceed and `spent_here += 1` wraps at. The
-  /// tally is still charged first, so the aggregate bound sees every attempt this guard is about
-  /// to refuse.
+  /// [`usize::MAX`], a value `spent_here` cannot exceed.
+  ///
+  /// Under an increment-first order that is where `spent_here += 1` would overflow. Checking first
+  /// is what removes it rather than making it unlikely: the increment runs only when
+  /// `spent_here < per_instance`, so the count lands exactly on the ceiling and the next attempt
+  /// takes the refusal. The tally is charged before either, so the aggregate bound sees every
+  /// attempt this guard is about to refuse.
   fn spend(&mut self) {
     self.state.tally.spend();
     if self.spent_here >= self.state.tally.per_instance() {
