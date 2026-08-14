@@ -330,6 +330,11 @@ pub enum ReadFrontier<O> {
   /// Deciding this item probed the input at most as far as this offset, **inclusive**. A probe
   /// answered by end of input counts at the offset probed, so a decision that observed "no byte
   /// at `k`" reports at least `k`.
+  ///
+  /// Computing it from a lookahead count needs the half-open span kept in view: `span.end` is
+  /// the first offset the item does **not** cover, so successfully reading `n` bytes from there
+  /// reaches `span.end + n - 1`. `span.end + n` is right only when the scan also reached for the
+  /// byte at that offset and found none.
   ReadTo(O),
   /// The lexer cannot bound what it probed. Treated as end of input, so the item is always
   /// withheld under a non-final partial input.
@@ -712,9 +717,13 @@ pub trait Lexer<'inp>: 'inp {
   ///   [`span`](Self::span) and [`slice`](Self::slice) answer about;
   /// - **repeated calls must agree.** It is a pure read of recorded fact: it must **not advance
   ///   the lexer and must not probe new input**;
-  /// - `frontier >= span().end` is the intended relation, but the driver does **not** trust it —
-  ///   it floors what it reads at the item's span end, so under-reporting can only cost precision,
-  ///   never soundness (see below);
+  /// - `frontier >= span().end` is the relation the driver **enforces**, by flooring what it
+  ///   reads at the item's span end. It is not a relation every honest lexer satisfies: a span is
+  ///   half-open, so an item decided purely from its own bytes — a fixed token with no rule
+  ///   continuing past it, needing no terminator probe — truthfully reports `span().end - 1`, the
+  ///   offset of its own last byte. A maximal-munch scan that does consult the terminator reports
+  ///   `span().end`, which is exactly [`SpanEnd`](ReadFrontier::SpanEnd). Either way the floor
+  ///   means under-reporting can only cost precision, never soundness (see below);
   /// - its value **outside the after-an-item window** — freshly constructed, after
   ///   [`bump`](Self::bump), after exhaustion — is unspecified but must not panic. The driver
   ///   commits to never reading it there;

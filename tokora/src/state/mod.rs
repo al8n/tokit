@@ -42,10 +42,12 @@ pub mod tracker;
 /// ```
 /// use tokora::Probe;
 ///
-/// // A callback that matched `[ \t]+` at 3..5 and peeked two bytes further.
-/// let probe = Probe::new(3, 7);
+/// // A callback that matched `[ \t]+` at 3..5 and then inspected the two bytes at 5 and 6.
+/// // `span.end` is 5 — the first offset OUTSIDE the match — so two bytes from there reach 6,
+/// // not 7. The value is the highest offset touched, inclusive.
+/// let probe = Probe::new(3, 6);
 /// assert_eq!(probe.scanned_from(), 3);
-/// assert_eq!(probe.probed_to(), 7);
+/// assert_eq!(probe.probed_to(), 6);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Probe {
@@ -58,8 +60,32 @@ impl Probe {
   /// **inclusive**, both absolute offsets in the source.
   ///
   /// A probe answered by end of input counts at the offset probed — the same probe-inclusive
-  /// convention [`ReadFrontier`](crate::ReadFrontier) documents — so a callback that peeked `n`
-  /// bytes past its match records `lexer.span().end + n`, not `n`.
+  /// convention [`ReadFrontier`](crate::ReadFrontier) documents.
+  ///
+  /// # The arithmetic: `- 1`, because `span.end` is already outside the match
+  ///
+  /// A span is half-open, so `lexer.span().end` is the **first offset the match does not
+  /// cover** — the offset lookahead starts at, not the last one the match touched. A callback
+  /// that successfully inspects `n` bytes from there touches
+  /// `span().end ..= span().end + n - 1`, so for `n > 0` it records
+  ///
+  /// ```text
+  /// lexer.span().end + n - 1
+  /// ```
+  ///
+  /// and `span().end + n` **only** when the scan also reached for the byte at that offset and
+  /// found end of input — because an attempted-and-absent byte counts at the offset it was
+  /// wanted. `n == 0` — no lookahead at all beyond the match — records nothing above
+  /// `span().end - 1`; a scan that consulted the terminator byte at `span().end` records
+  /// `span().end`, which is [`SpanEnd`](crate::ReadFrontier::SpanEnd)'s one-boundary-byte
+  /// allowance spelled as an offset.
+  ///
+  /// Getting this wrong by one is not cosmetic in the safe direction only. Following
+  /// `span().end + n` makes a callback that read the **real** last byte of the buffer report the
+  /// offset one past it — end of input's offset — so the driver's `frontier >= len` predicate
+  /// withholds an item that was append-stable, and under a
+  /// [`Budget`](crate::input::Budget) the re-driven attempts that withholding costs can exhaust
+  /// the session.
   #[inline(always)]
   pub const fn new(scanned_from: usize, probed_to: usize) -> Self {
     Self {
@@ -144,8 +170,10 @@ pub trait State: core::fmt::Debug + Clone {
   /// an upper bound on everything deciding the item read — and `run_partial` still falsifies a
   /// value that is not.
   ///
-  /// Offsets are **absolute** in the source, so a callback records
-  /// `lexer.span().end + bytes_peeked`, not the peek length.
+  /// Offsets are **absolute** in the source and the value is the highest offset touched,
+  /// **inclusive** — so a callback that inspected `n` bytes past its match records
+  /// `lexer.span().end + n - 1`, not the peek length and not `span().end + n`. See
+  /// [`Probe::new`] for the whole rule, including the one case where `+ n` is the right answer.
   ///
   /// # The default, and determinism
   ///

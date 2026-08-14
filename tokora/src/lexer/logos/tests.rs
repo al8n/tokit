@@ -672,9 +672,14 @@ impl crate::State for PeekRecorder {
 
 /// The recorder body both callbacks below share: absolute offsets, keyed by the current match's
 /// start, which is what `lex.span()` reports inside a callback.
-fn record(lex: &mut logos::Lexer<'_, TriviaTok>, peek: usize) {
+///
+/// `beyond` counts offsets **past the terminator**, not bytes of lookahead. `span.end` is the
+/// first offset outside the half-open match, so `beyond == 0` records `span.end` — the
+/// one-boundary-byte probe a maximal-munch scan makes — and `beyond == 1` records one offset
+/// further. Reading it as a byte count is the off-by-one `Probe::new` now spells out.
+fn record(lex: &mut logos::Lexer<'_, TriviaTok>, beyond: usize) {
   let span = lex.span();
-  lex.extras.probe = Some((span.start, span.end + peek));
+  lex.extras.probe = Some((span.start, span.end + beyond));
 }
 
 #[derive(Debug, Clone, PartialEq, logos::Logos)]
