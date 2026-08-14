@@ -105,7 +105,7 @@ impl Token<'_> for BenchTok {
   type Kind = BenchKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   fn kind(&self) -> BenchKind {
     match self {

@@ -389,7 +389,7 @@ mod tests {
     type Kind = RtKind;
     type Error = RtErr;
 
-    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+    const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
     fn kind(&self) -> RtKind {
       match self {

@@ -113,7 +113,7 @@ impl TokenT<'_> for TToken {
   type Kind = TTokenKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TTokenKind {
     TTokenKind::from(self)

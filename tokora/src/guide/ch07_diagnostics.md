@@ -102,7 +102,7 @@ or anything else.
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,

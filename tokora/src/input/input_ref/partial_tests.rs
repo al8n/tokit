@@ -6,7 +6,7 @@
 //! `is_final == true` behaves exactly like a complete parse, and a token or error *clear of the
 //! frontier* is yielded / emitted normally even while partial.
 //!
-//! Most fixtures here declare `ReadFrontierClass::SpanEnd`, for which the reported frontier and the
+//! Most fixtures here declare `ScanLookahead::WithinSpan`, for which the reported frontier and the
 //! item's span end coincide — so a comment below saying an item "touches the buffer end" is
 //! describing that fixture, not the rule. The rule is the reported frontier, and the cases from
 //! `an_honest_lookahead_lexer_is_withheld_where_the_span_proxy_committed_it` onwards are where the
@@ -123,11 +123,11 @@ impl Token<'_> for PTok {
 
   // `[a-z]+` and `[0-9]+` are over disjoint character classes and neither is a prefix of the
   // other, so the DFA never probes into a longer candidate and backtracks: an item is decided
-  // from its own bytes plus the terminator at its span end, which is exactly `SpanEnd`. That
+  // from its own bytes plus the terminator at its span end, which is exactly `WithinSpan`. That
   // makes this fixture's holdback behaviour identical to the pre-0.10.0 span rule, which is
   // what the rule-1/2/3 tests below are pinning — they are about the holdback machinery, not
   // about which class a vocabulary picks.
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::WithinSpan;
 
   fn kind(&self) -> PKind {
     match self {
@@ -810,10 +810,10 @@ impl Token<'_> for LTok {
   type Error = PErr;
 
   // One pattern, `[a-z]+`, so there is no longer candidate for the DFA to probe into and
-  // backtrack from; the callback only bumps a tally and reads nothing ahead. `SpanEnd` is the
+  // backtrack from; the callback only bumps a tally and reads nothing ahead. `WithinSpan` is the
   // honest answer, and it keeps these terminal-beats-incomplete tests exercising the ranking
   // rather than the cost of a coarse class.
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::WithinSpan;
 
   fn kind(&self) -> PKind {
     PKind::Word
@@ -3072,7 +3072,7 @@ impl Token<'_> for DTok {
   type Kind = DKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> DKind {
     self.0
@@ -3376,16 +3376,16 @@ fn run_partial_falsifies_the_span_end_claim_and_passes_the_honest_twin() {
   crate::conformance::Harness::<HonestDuration<'_>>::new("5m5s").run_partial();
 }
 
-// ── The migration witness: what `Unbounded` costs a vocabulary that could claim SpanEnd ──
+// ── The migration witness: what `Unbounded` costs a vocabulary that could claim WithinSpan ──
 //
-// `Token::READ_FRONTIER_CLASS` answers for a logos-backed vocabulary, and the class it
+// `Token::SCAN_LOOKAHEAD` answers for a logos-backed vocabulary, and the class it
 // answers with decides whether a partial parse makes progress at all. This section is the
 // witness for the migration: the same vocabulary, the same two-byte buffer, the same
 // budget — and three outcomes, selected by nothing but the class.
 //
 // The fixture is deliberately the *easiest possible* vocabulary to classify: two fixed
 // one-byte tokens over disjoint bytes. There is no prefix relation for the DFA to probe
-// into, no callback, no lookahead of any kind. `SpanEnd` is not merely defensible here, it
+// into, no callback, no lookahead of any kind. `WithinSpan` is not merely defensible here, it
 // is the only honest answer — which is what makes the cost measured below a property of the
 // *declaration* and not of the grammar.
 //
@@ -3431,8 +3431,8 @@ impl Token<'_> for MTok {
   type Error = ();
 
   // What a vocabulary used to get by saying nothing. Every assertion below is about the cost
-  // of this line reading `Unbounded` where `SpanEnd` is the truth.
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  // of this line reading `Unbounded` where `WithinSpan` is the truth.
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> MKind {
     match self {
@@ -3469,7 +3469,7 @@ impl Token<'_> for STok {
   type Kind = MKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::WithinSpan;
 
   fn kind(&self) -> MKind {
     match self {
@@ -3583,7 +3583,7 @@ fn a_declared_span_end_vocabulary_yields_the_first_token_on_the_first_attempt() 
 
 /// The witness. The identical vocabulary answering `Unbounded` — which is what every
 /// vocabulary answered before the const lost its default — is seal-only, and a budget
-/// calibrated for the `SpanEnd` behaviour turns that into a **terminal refusal**: the caller
+/// calibrated for the `WithinSpan` behaviour turns that into a **terminal refusal**: the caller
 /// never receives the token, and no amount of further input can change that.
 ///
 /// Read the two spends: the first attempt is admitted at `0 + 2 = 2`, which is exactly the cap,
@@ -3726,7 +3726,7 @@ impl Token<'_> for PeekTok {
 
   // Irrelevant here by construction: `A`'s own scan records a value, and a recorded value
   // answers outright. The class is what the un-recording `B` falls back to.
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> MKind {
     match self {

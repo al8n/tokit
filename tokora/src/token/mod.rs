@@ -80,7 +80,7 @@ mod pratt;
 ///     type Char = char;
 ///     type Kind = TokenKind;
 ///     type Logos = MyTokens;
-///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+///     const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 ///
 ///     fn kind(&self) -> Self::Kind {
 ///         self.kind
@@ -113,7 +113,7 @@ mod pratt;
 ///     type Char = char;
 ///     type Kind = TokenKind;
 ///     type Logos = MyTokens;
-///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+///     const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 ///
 ///     fn kind(&self) -> Self::Kind {
 ///         self.kind
@@ -146,7 +146,7 @@ mod pratt;
 ///     type Char = u8;  // Using u8 for byte-based lexing
 ///     type Kind = ByteTokenKind;
 ///     type Logos = ByteTokens;
-///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+///     const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 ///
 ///     fn kind(&self) -> Self::Kind {
 ///         self.kind
@@ -223,7 +223,7 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// # There is NO default, and that is deliberate
   ///
   /// This const has to be written down. It carried a
-  /// [`Unbounded`](crate::ReadFrontierClass::Unbounded) default when the frontier channel was
+  /// [`Unbounded`](crate::ScanLookahead::Unbounded) default when the frontier channel was
   /// introduced, on the reasoning that a vocabulary which has not thought about the question
   /// should not be assumed safe — and the *value* is right, but a default is the wrong way to
   /// deliver it, because it also means a vocabulary that has not thought about the question is
@@ -258,7 +258,7 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// #[derive(Clone, Debug)]
   /// struct Tok;
   ///
-  /// // Omitting READ_FRONTIER_CLASS does not compile: E0046, not a silent `Unbounded`.
+  /// // Omitting SCAN_LOOKAHEAD does not compile: E0046, not a silent `Unbounded`.
   /// // (Do not "fix" this cell by adding the const — the omission IS the assertion.)
   /// impl Token<'_> for Tok {
   ///   type Kind = Kind;
@@ -277,21 +277,21 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// fails *open at run time*: the parse compiles, drives, and silently changes what it yields.
   /// A default is only safe when the thing it guards refuses to proceed without a real answer.
   ///
-  /// # Choosing a value: `SpanEnd` is a claim about the DFA
+  /// # Choosing a value: `WithinSpan` is a claim about the DFA
   ///
-  /// [`SpanEnd`](crate::ReadFrontierClass::SpanEnd) promises that deciding an item never probes
+  /// [`WithinSpan`](crate::ScanLookahead::WithinSpan) promises that deciding an item never probes
   /// beyond that item's own span end. For a `logos` vocabulary that is **false whenever one
   /// pattern is a proper prefix of another** — `[0-9]+` beside `[0-9]+\.[0-9]+`, an integer beside
   /// a float or an exponent literal — because the engine probes into the longer pattern and then
   /// backtracks to the accepting prefix. It is a claim about the generated DFA, not only about
   /// callbacks.
   ///
-  /// ## What a false `SpanEnd` costs, and why nothing at run time refuses it
+  /// ## What a false `WithinSpan` costs, and why nothing at run time refuses it
   ///
   /// Requiring the const catches **omission**. A *mistaken value* is ordinary safe code with no
   /// fail-closed guard, so it is worth being exact about what it buys and what stops it.
   ///
-  /// The cost, on the two-rule vocabulary above declared `SpanEnd` and driven
+  /// The cost, on the two-rule vocabulary above declared `WithinSpan` and driven
   /// [`Partial`](crate::input::Partial) non-final over the buffer `"1."`: `logos` probes into the
   /// float arm, finds no byte at offset 2, backtracks to the accepting prefix and emits
   /// `Int@0..1`. The adapter answers `SpanEnd`, the driver's effective frontier is
@@ -323,20 +323,20 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// 2, so the run panics, tagged `partial-equivalence`, naming the split. The crate pins this on
   /// a fixture that lies on purpose —
   /// `conformance::tests::prefix_backtracking::a_span_end_claim_over_a_float_vocabulary_is_falsified`,
-  /// `LyingNum`'s `SpanEnd` over a float vocabulary — with an exponent twin beside it and a passing
+  /// `LyingNum`'s `WithinSpan` over a float vocabulary — with an exponent twin beside it and a passing
   /// control at `Unbounded`.
   ///
   /// **That tier audits a corpus, not a vocabulary**, and the difference is the obligation this
   /// claim really carries. It can only observe a divergence some source in the corpus produces:
   /// over `["1.5"]` the lie is caught at split 2, and over `["1."]` **alone the same lie passes**,
   /// because the complete parse of `"1."` also begins `Int@0..1` and the prefix drain is a faithful
-  /// prefix of it. So writing `SpanEnd` obliges you to more than running the kit: for every pair of
+  /// prefix of it. So writing `WithinSpan` obliges you to more than running the kit: for every pair of
   /// rules where one pattern is a proper prefix of another, the corpus needs a source on which the
   /// **longer** rule wins. That is the source a truncation has something to diverge from. If you
   /// cannot enumerate those pairs for your vocabulary, you have not audited the DFA, and
-  /// [`Unbounded`](crate::ReadFrontierClass::Unbounded) is the value that is true anyway.
+  /// [`Unbounded`](crate::ScanLookahead::Unbounded) is the value that is true anyway.
   ///
-  /// [`Unbounded`](crate::ReadFrontierClass::Unbounded) is the answer that is always sound and is
+  /// [`Unbounded`](crate::ScanLookahead::Unbounded) is the answer that is always sound and is
   /// never precise. It remains the right value for a vocabulary whose DFA you have not audited —
   /// write it, and read
   /// [`Lexer::read_frontier`](crate::Lexer::read_frontier) for what it costs.
@@ -347,8 +347,8 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// will only ever be driven [`Complete`](crate::input::Complete): the trait cannot see which
   /// case it is in, and a vocabulary that later meets an adapter should already have an answer on
   /// file rather than acquire one by omission. Write
-  /// [`Unbounded`](crate::ReadFrontierClass::Unbounded); it is inert.
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass;
+  /// [`Unbounded`](crate::ScanLookahead::Unbounded); it is inert.
+  const SCAN_LOOKAHEAD: crate::ScanLookahead;
 
   /// Returns the kind (category) of this token.
   ///
@@ -410,7 +410,7 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// impl Token<'_> for MyToken {
   ///     type Kind = TokenKind;
   ///     type Error = ();
-  ///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  ///     const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
   ///
   ///     fn kind(&self) -> Self::Kind {
   ///         self.kind
@@ -432,7 +432,7 @@ impl<'a, T: Token<'a>> Token<'a> for &'a T {
   type Error = T::Error;
 
   const SURFACES_TRIVIA: bool = T::SURFACES_TRIVIA;
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = T::READ_FRONTIER_CLASS;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = T::SCAN_LOOKAHEAD;
 
   #[inline(always)]
   fn kind(&self) -> Self::Kind {
@@ -484,7 +484,7 @@ impl<'a, T: Token<'a>> Token<'a> for &'a T {
 /// impl<'a> Token<'a> for MyToken<'a> {
 ///     type Kind = MyTokenKind;
 ///     type Error = ();
-///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+///     const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 ///
 ///     fn kind(&self) -> Self::Kind {
 ///         match self {
@@ -556,7 +556,7 @@ impl<'a, T: IdentifierToken<'a>> IdentifierToken<'a> for &'a T {
 /// impl<'a> Token<'a> for MyToken<'a> {
 ///     type Kind = MyTokenKind;
 ///     type Error = ();
-///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+///     const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 ///
 ///     fn kind(&self) -> Self::Kind {
 ///         match self {

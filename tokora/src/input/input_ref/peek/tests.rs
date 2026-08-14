@@ -37,7 +37,7 @@ impl crate::Token<'_> for Tok {
   type Kind = TokKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> TokKind {
     match self {
       Tok::Word => TokKind::Word,
@@ -593,7 +593,7 @@ impl crate::Token<'_> for DropTok {
   type Kind = DropKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> DropKind {
     DropKind::Num
@@ -847,7 +847,7 @@ impl crate::Token<'_> for TripTok {
   type Kind = TripKind;
   type Error = TripErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TripKind {
     TripKind::Num
@@ -1700,7 +1700,7 @@ impl crate::Token<'_> for BigTok {
   type Kind = BigKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> BigKind {
     BigKind::Num

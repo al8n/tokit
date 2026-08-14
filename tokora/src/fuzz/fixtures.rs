@@ -97,7 +97,7 @@ impl Token<'_> for FuzzTok {
   type Kind = FuzzKind;
   type Error = FuzzTokError;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   // honest: byte-per-token, never skips a byte
   const SURFACES_TRIVIA: bool = true;

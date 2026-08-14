@@ -94,7 +94,7 @@ impl TokenT<'_> for Token {
   type Kind = Token;
   type Error = LexError;
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   const SURFACES_TRIVIA: bool = true;
 

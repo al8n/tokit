@@ -138,7 +138,7 @@ drives two of the paths:
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -412,7 +412,7 @@ The example runs **one** generic parser under two emitters — fail-fast, then c
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,

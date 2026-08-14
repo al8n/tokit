@@ -54,7 +54,7 @@
 //! are unfaithful under truncation (item identity depending on input beyond `(state, offset)`),
 //! and it is what falsifies a wrong
 //! [`read_frontier`](crate::Lexer::read_frontier) — including a wrong
-//! [`READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS) claim behind the logos
+//! [`SCAN_LOOKAHEAD`](crate::Token::SCAN_LOOKAHEAD) claim behind the logos
 //! adapter.
 //!
 //! Both tiers that drive an `Input` are bounded by a single non-rewindable counter per input,
@@ -204,7 +204,7 @@ const MAX_BUDGET_MULTIPLE: usize = 1 << 16;
 /// impl Token<'_> for CharTok {
 ///   type Kind = CharKind;
 ///   type Error = Infallible;
-///   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+///   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 ///   fn kind(&self) -> CharKind { CharKind }
 ///   fn is_trivia(&self) -> bool { false }
 /// }

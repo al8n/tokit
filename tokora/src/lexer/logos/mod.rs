@@ -8,7 +8,7 @@ macro_rules! bail {
 
     use crate::state::Probe;
 
-    use super::super::{IntoLexer, Lexer, ReadFrontier, ReadFrontierClass, Source, State, Token};
+    use super::super::{IntoLexer, Lexer, ReadFrontier, ScanLookahead, Source, State, Token};
 
     /// A trait for token types that can be created from `logos::Logos` types.
     pub trait FromLogos<'inp>: Token<'inp> {
@@ -267,7 +267,7 @@ macro_rules! bail {
       /// [`ReadTo`](crate::ReadFrontier::ReadTo) either. Both answers have to come from the
       /// dialect, and the blanket impl means neither can be an impl the dialect writes:
       ///
-      /// - the **class claim**, [`Token::READ_FRONTIER_CLASS`], a const on the vocabulary — the
+      /// - the **class claim**, [`Token::SCAN_LOOKAHEAD`], a const on the vocabulary — the
       ///   same delegation shape as [`Token::SURFACES_TRIVIA`]. It answers for an item whose scan
       ///   recorded nothing, and — unlike that one — it has **no default**, so a vocabulary
       ///   reaching this adapter has stated a class rather than inherited one;
@@ -320,10 +320,10 @@ macro_rules! bail {
         {
           return ReadFrontier::ReadTo(probe.probed_to());
         }
-        match <T as Token<'inp>>::READ_FRONTIER_CLASS {
-          ReadFrontierClass::SpanEnd => ReadFrontier::SpanEnd,
+        match <T as Token<'inp>>::SCAN_LOOKAHEAD {
+          ScanLookahead::WithinSpan => ReadFrontier::SpanEnd,
           // Every other class, including any this build does not know, is the conservative
-          // answer. `ReadFrontierClass` is `#[non_exhaustive]`, and a variant added later can
+          // answer. `ScanLookahead` is `#[non_exhaustive]`, and a variant added later can
           // only ever describe a frontier `Unbounded` already covers.
           _ => ReadFrontier::Unbounded,
         }

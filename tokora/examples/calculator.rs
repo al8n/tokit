@@ -119,7 +119,7 @@ impl TokenT<'_> for Token {
   type Kind = TokenKind;
   type Error = LexError;
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TokenKind {
     TokenKind::from(self)

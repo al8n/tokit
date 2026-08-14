@@ -47,8 +47,8 @@ truncation is exactly what a stream does to you.
 
 It asks for a prefix rather than equality because withholding *more* is always sound, and a lexer
 that reports a read frontier past its own spans does exactly that. Calc's lexer is logos-backed
-and declares [`READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS) as
-[`Unbounded`](crate::ReadFrontierClass::Unbounded) — the const has no default, so that is a
+and declares [`SCAN_LOOKAHEAD`](crate::Token::SCAN_LOOKAHEAD) as
+[`Unbounded`](crate::ScanLookahead::Unbounded) — the const has no default, so that is a
 written choice — and this run therefore withholds every item until the input is final. The
 run still passes, and it still catches an item that *changes* — a token whose kind, span or
 **value** moved, a token that became an error, an error whose payload moved. See
@@ -109,7 +109,7 @@ that drifts. Calc's `Tok` and `LexError` already derive it; a vocabulary that ca
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,

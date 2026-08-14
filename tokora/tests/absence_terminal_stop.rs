@@ -139,7 +139,7 @@ impl TokenTrait<'_> for Tok {
   type Kind = Kind;
   type Error = CErr;
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   fn kind(&self) -> Kind {
     match self {

@@ -207,7 +207,7 @@ impl Token<'_> for LimTok {
   type Kind = LimKind;
   type Error = TsErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> LimKind {
     match self {

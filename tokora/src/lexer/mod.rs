@@ -347,7 +347,7 @@ pub enum ReadFrontier<O> {
 /// The bundled logos adapter is the case this exists for: `logos` exposes `span`, `slice` and
 /// `remainder`, but not its DFA's probe frontier, so `LogosLexer` cannot answer
 /// [`ReadFrontier::SpanEnd`] unconditionally nor compute a [`ReadFrontier::ReadTo`] itself. It
-/// asks the vocabulary instead, through [`Token::READ_FRONTIER_CLASS`] — the same const-delegation
+/// asks the vocabulary instead, through [`Token::SCAN_LOOKAHEAD`] — the same const-delegation
 /// shape as [`Token::SURFACES_TRIVIA`].
 ///
 /// The claim answers for **an item whose scan recorded no frontier in the lexer state** — and for
@@ -356,7 +356,7 @@ pub enum ReadFrontier<O> {
 /// (see [`State::take_probe`] and [`Probe`](crate::Probe)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum ReadFrontierClass {
+pub enum ScanLookahead {
   /// Items this vocabulary produces are decided without probing beyond their own span end —
   /// [`ReadFrontier::SpanEnd`].
   ///
@@ -364,11 +364,11 @@ pub enum ReadFrontierClass {
   /// is false for most real vocabularies: see [`Lexer::read_frontier`] for why a prefix-accepting
   /// longer pattern (a float or exponent literal beside an integer) makes the engine probe past
   /// the span it goes on to emit.
-  SpanEnd,
+  WithinSpan,
   /// The vocabulary refuses to bound what deciding an item probed — [`ReadFrontier::Unbounded`].
   ///
   /// The answer that is always sound and never precise, and the right one for a vocabulary whose
-  /// DFA has not been audited. It is **not** a default: [`Token::READ_FRONTIER_CLASS`] has none,
+  /// DFA has not been audited. It is **not** a default: [`Token::SCAN_LOOKAHEAD`] has none,
   /// so this is a value someone wrote. Read [`Lexer::read_frontier`] before writing it — under a
   /// non-final partial input it withholds every item until the stream is sealed.
   Unbounded,
@@ -860,7 +860,7 @@ const _: () = {
     type Kind = Self;
     type Error = ();
 
-    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+    const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
     #[inline(always)]
     fn kind(&self) -> Self::Kind {

@@ -1693,7 +1693,7 @@ impl Token<'_> for LedgerTok {
   type Kind = LedgerKind;
   type Error = LedgerErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> LedgerKind {
     match self {

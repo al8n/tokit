@@ -421,7 +421,7 @@ const NO_NOTE: &str = "";
 /// # }
 /// # impl tokora::Token<'_> for MyTok {
 /// #   type Kind = MyKind; type Error = ();
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> MyKind { MyKind }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }

@@ -167,7 +167,7 @@ pub enum SessionRefusal {
 /// # impl Token<'_> for Word {
 /// #   type Kind = WordKind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> WordKind { WordKind }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }

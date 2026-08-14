@@ -426,13 +426,13 @@ and will red until they do.
   cannot answer from anything it can see, and its blanket impl means the answer cannot come from
   an impl the dialect writes. It therefore delegates through **two** channels, both landing now:
 
-  - `Token::READ_FRONTIER_CLASS`, a **required** const on the vocabulary, with no default. It
-    answers for an item whose scan recorded nothing. Declaring `SpanEnd` is a claim about the
+  - `Token::SCAN_LOOKAHEAD`, a **required** const on the vocabulary, with no default. It
+    answers for an item whose scan recorded nothing. Declaring `WithinSpan` is a claim about the
     generated DFA, and `run_partial` is what falsifies a wrong one; `Unbounded` is the answer
     that is always sound and never precise.
 
     **Every `Token` impl must add this line, and that is the point.** The const shipped in a
-    first cut with a `ReadFrontierClass::Unbounded` default on the reasoning that an unaudited
+    first cut with a `ScanLookahead::Unbounded` default on the reasoning that an unaudited
     vocabulary must not be assumed safe — right value, wrong delivery, because a default also
     means the vocabulary is never asked. Every existing logos-backed impl kept compiling and
     silently became seal-only, and that is not a loss of precision: for a fixed one-byte token
@@ -464,7 +464,7 @@ and will red until they do.
     Non-final `"1."` with a state claiming a scan from 0 probed to 1: `read_frontier` answered
     `ReadTo(1)`, the driver's floor left it at `max(1, 1) = 1`, and `1 < 2` **committed**
     `Int@0..1` out of a buffer still being read; append `5` and the same bytes are one
-    `Float@0..3`. That is the defect `READ_FRONTIER_CLASS`'s removed default had — a default
+    `Float@0..3`. That is the defect `SCAN_LOOKAHEAD`'s removed default had — a default
     that fails *open* — one level down, and the same repair does not apply: making the reset
     required would break every `State` impl including the ones that record nothing. Collapsing
     the pair does apply. Reading consumes, so there is no sibling to inherit or forget, and a
@@ -494,7 +494,7 @@ and will red until they do.
   which is `lexer.span().start` inside the callback) beside `Probe::probed_to`, and the adapter
   accepts it **iff that start equals the returned item's span start** — on the error arm exactly
   as on the token arm, since a callback may mutate `extras` and the item still arrive as an
-  `Err`. Anything else falls back to `READ_FRONTIER_CLASS`, which the vocabulary had to write
+  `Err`. Anything else falls back to `SCAN_LOOKAHEAD`, which the vocabulary had to write
   down. The check lives in the adapter rather than in a rule recorders must follow,
   because a recorder can only state a fact about the scan it is running in. The pre-scan take is
   kept beside it and is not redundant: an equal start is *evidence* of provenance, and a lexer
@@ -668,7 +668,7 @@ and will red until they do.
   75× short at 100,000 units.
 
   That cap was reachable by an **ordinary lexer over an ordinary source**, which is what made it a
-  defect and not a recorded cost. A conforming `SpanEnd` lexer emitting one item per byte spends
+  defect and not a recorded cost. A conforming `WithinSpan` lexer emitting one item per byte spends
   about one attempt per item, and the partial sweep drives it over every split of the source: over
   100 KB that is on the order of five billion prefix attempts, already past `usize::MAX` at 32 bits
   before the two full-input drains are counted. Such a lexer passed at 64 bits and took an ordinary

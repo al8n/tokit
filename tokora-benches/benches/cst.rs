@@ -61,7 +61,7 @@ impl Token<'_> for BTok {
   type Kind = u8;
   type Error = BErr;
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   // Honest: one byte per token, never skipped.
   const SURFACES_TRIVIA: bool = true;

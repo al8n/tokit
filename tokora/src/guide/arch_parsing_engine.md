@@ -290,7 +290,7 @@ single-character tokens (digits and `+`), so nothing but core tokora types is in
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::Plus => Kind::Plus } }
 #   fn is_trivia(&self) -> bool { false }
 # }

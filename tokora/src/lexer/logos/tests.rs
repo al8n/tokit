@@ -44,7 +44,7 @@ impl TokenTrait<'_> for TestTok {
   type Kind = TestKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TestKind {
     match self {
@@ -224,7 +224,7 @@ impl TokenTrait<'_> for LimitedTok {
   type Kind = LimitedKind;
   type Error = LimitErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> LimitedKind {
     LimitedKind::Num
@@ -404,7 +404,7 @@ impl TokenTrait<'_> for TripTok {
   type Kind = TripKind;
   type Error = TripErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TripKind {
     match self {
@@ -744,7 +744,7 @@ impl TokenTrait<'_> for TriviaTok {
   // `Unbounded` deliberately: it is the answer an item whose own scan recorded nothing must
   // fall back to, and every reject-path cell below reads it. There is no default to fall into
   // any more, so this line is the claim rather than the absence of one.
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TriviaKind {
     match self {

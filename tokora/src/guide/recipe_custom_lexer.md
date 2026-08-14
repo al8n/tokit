@@ -89,7 +89,7 @@ impl core::fmt::Display for TokKind {
 impl Token<'_> for Tok {
   type Kind = TokKind;
   type Error = LexError;
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   // This lexer *skips* whitespace and comments, so no surviving token is ever trivia and
   // `SURFACES_TRIVIA` keeps its default `false`. Step 5 covers when to flip both.
@@ -171,7 +171,7 @@ runs dry itself:
 # impl Token<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self { Tok::Int(_) => TokKind::Int, Tok::Bool(_) => TokKind::Bool, Tok::Ident => TokKind::Ident, Tok::Eq => TokKind::Eq }
 #   }
@@ -307,7 +307,7 @@ opt-in and one parse of each kind:
 # impl Token<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self { Tok::Int(_) => TokKind::Int, Tok::Bool(_) => TokKind::Bool, Tok::Ident => TokKind::Ident, Tok::Eq => TokKind::Eq }
 #   }
@@ -515,7 +515,7 @@ impl core::fmt::Display for LosslessKind {
 impl Token<'_> for Lossless {
   type Kind = LosslessKind;
   type Error = LexError;
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   // The totality promise the lossless CST sink checks at compile time.
   const SURFACES_TRIVIA: bool = true;

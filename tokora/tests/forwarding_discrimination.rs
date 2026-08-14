@@ -1722,7 +1722,7 @@ impl TokenTrait<'_> for ProbeToken {
   type Kind = NumKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   fn kind(&self) -> NumKind {
     NumKind

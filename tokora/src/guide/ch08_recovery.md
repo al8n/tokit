@@ -92,7 +92,7 @@ nothing at all and rewinds without a trace: **no diagnostic for a failed hole**.
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,
@@ -349,7 +349,7 @@ about to retry.
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,

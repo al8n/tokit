@@ -271,7 +271,7 @@ mod tests {
     type Kind = Kind;
     type Error = Err;
 
-    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+    const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
     fn kind(&self) -> Kind {
       Kind::Num
     }
