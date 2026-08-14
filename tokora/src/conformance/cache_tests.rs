@@ -116,7 +116,7 @@ impl<'a> Token<'a> for CTok<'a> {
   type Kind = CKind;
   type Error = CErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> CKind {
     match self {

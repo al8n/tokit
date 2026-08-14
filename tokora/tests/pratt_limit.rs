@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 
 //! The two pratt contracts that are not about precedence:
 //!
@@ -1790,7 +1786,7 @@ impl TokenT<'_> for TriviaToken {
   type Kind = TriviaKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TriviaKind {
     TriviaKind::from(self)

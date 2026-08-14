@@ -271,7 +271,7 @@ impl Token<'_> for DecimalToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -306,7 +306,7 @@ impl Token<'_> for HexToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -341,7 +341,7 @@ impl Token<'_> for OctalToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -374,7 +374,7 @@ impl Token<'_> for BinaryToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -407,7 +407,7 @@ impl Token<'_> for FloatToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -442,7 +442,7 @@ impl Token<'_> for HexFloatToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -476,7 +476,7 @@ impl Token<'_> for InlineStringToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -510,7 +510,7 @@ impl Token<'_> for MultilineStringToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -544,7 +544,7 @@ impl Token<'_> for RawStringToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -578,7 +578,7 @@ impl Token<'_> for CharToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -611,7 +611,7 @@ impl Token<'_> for ByteToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -644,7 +644,7 @@ impl Token<'_> for ByteStringToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -677,7 +677,7 @@ impl Token<'_> for TrueToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -711,7 +711,7 @@ impl Token<'_> for FalseToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -745,7 +745,7 @@ impl Token<'_> for NullToken {
   type Kind = DummyKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }

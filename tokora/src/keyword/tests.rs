@@ -49,7 +49,7 @@ impl TokenTrait<'_> for Token {
   type Kind = TokenKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TokenKind {
     match self {

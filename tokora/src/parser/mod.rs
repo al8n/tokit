@@ -694,7 +694,7 @@ where
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] struct Kind;
 /// # impl fmt::Display for Kind { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("digit") } }
 /// # #[derive(Debug, Clone, Copy, PartialEq)] struct Digit(u32);
-/// # impl Token<'_> for Digit { type Kind = Kind; type Error = Infallible; const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded; fn kind(&self) -> Kind { Kind } fn is_trivia(&self) -> bool { false } }
+/// # impl Token<'_> for Digit { type Kind = Kind; type Error = Infallible; const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded; fn kind(&self) -> Kind { Kind } fn is_trivia(&self) -> bool { false } }
 /// # /// The byte view a `Mini` lexer needs of whatever it is reading.
 /// # trait Bytes: Source<usize> { fn byte(&self, at: usize) -> Option<u8>; }
 /// # impl Bytes for str { fn byte(&self, at: usize) -> Option<u8> { self.as_bytes().get(at).copied() } }
@@ -769,7 +769,7 @@ where
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] struct Kind;
 /// # impl fmt::Display for Kind { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("digit") } }
 /// # #[derive(Debug, Clone, Copy, PartialEq)] struct Digit(u32);
-/// # impl Token<'_> for Digit { type Kind = Kind; type Error = Infallible; const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded; fn kind(&self) -> Kind { Kind } fn is_trivia(&self) -> bool { false } }
+/// # impl Token<'_> for Digit { type Kind = Kind; type Error = Infallible; const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded; fn kind(&self) -> Kind { Kind } fn is_trivia(&self) -> bool { false } }
 /// # trait Bytes: Source<usize> { fn byte(&self, at: usize) -> Option<u8>; }
 /// # impl Bytes for str { fn byte(&self, at: usize) -> Option<u8> { self.as_bytes().get(at).copied() } }
 /// # impl Bytes for [u8] { fn byte(&self, at: usize) -> Option<u8> { self.get(at).copied() } }
@@ -898,18 +898,8 @@ pub enum Action {
 #[cfg(test)]
 mod tests;
 
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std",
-  feature = "combinators"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std", feature = "combinators"))]
 mod terminal_stop_tests;
 
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std",
-  feature = "combinators"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std", feature = "combinators"))]
 mod select_tests;

@@ -594,11 +594,7 @@ where
 // The no-growth regression needs a lexer that actually runs (so `save`/`next` push and
 // commit real checkpoints), which pins it to `logos` + `std` — the same set the
 // `live_checkpoints_len` accessor is gated to.
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 mod tests {
   use super::*;
   use crate::{
@@ -651,7 +647,7 @@ mod tests {
     type Kind = NumKind;
     type Error = LexErr;
 
-    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+    const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
     fn kind(&self) -> NumKind {
       NumKind

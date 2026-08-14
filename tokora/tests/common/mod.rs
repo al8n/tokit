@@ -1,7 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "logos_0_16"))]
 
 /// Whether this process's local addresses may be read as native stack offsets. Shared because the
 /// two probes that difference addresses had a copy each, and both copies had the same defect.
@@ -163,7 +160,7 @@ impl TokenT<'_> for Token {
   type Kind = TokenKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TokenKind {
     TokenKind::from(self)

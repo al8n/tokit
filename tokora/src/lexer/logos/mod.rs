@@ -8,7 +8,7 @@ macro_rules! bail {
 
     use crate::state::Probe;
 
-    use super::super::{IntoLexer, Lexer, ReadFrontier, ReadFrontierClass, Source, State, Token};
+    use super::super::{IntoLexer, Lexer, ReadFrontier, ScanLookahead, Source, State, Token};
 
     /// A trait for token types that can be created from `logos::Logos` types.
     pub trait FromLogos<'inp>: Token<'inp> {
@@ -267,7 +267,7 @@ macro_rules! bail {
       /// [`ReadTo`](crate::ReadFrontier::ReadTo) either. Both answers have to come from the
       /// dialect, and the blanket impl means neither can be an impl the dialect writes:
       ///
-      /// - the **class claim**, [`Token::READ_FRONTIER_CLASS`], a const on the vocabulary — the
+      /// - the **class claim**, [`Token::SCAN_LOOKAHEAD`], a const on the vocabulary — the
       ///   same delegation shape as [`Token::SURFACES_TRIVIA`]. It answers for an item whose scan
       ///   recorded nothing, and — unlike that one — it has **no default**, so a vocabulary
       ///   reaching this adapter has stated a class rather than inherited one;
@@ -320,10 +320,10 @@ macro_rules! bail {
         {
           return ReadFrontier::ReadTo(probe.probed_to());
         }
-        match <T as Token<'inp>>::READ_FRONTIER_CLASS {
-          ReadFrontierClass::SpanEnd => ReadFrontier::SpanEnd,
+        match <T as Token<'inp>>::SCAN_LOOKAHEAD {
+          ScanLookahead::WithinSpan => ReadFrontier::SpanEnd,
           // Every other class, including any this build does not know, is the conservative
-          // answer. `ReadFrontierClass` is `#[non_exhaustive]`, and a variant added later can
+          // answer. `ScanLookahead` is `#[non_exhaustive]`, and a variant added later can
           // only ever describe a frontier `Unbounded` already covers.
           _ => ReadFrontier::Unbounded,
         }
@@ -340,15 +340,6 @@ macro_rules! bail {
 #[cfg(feature = "logos_0_16")]
 pub use self::logos_0_16::{FromLogos, LogosLexer};
 
-#[cfg(all(feature = "logos_0_15", not(feature = "logos_0_16")))]
-pub use self::logos_0_15::{FromLogos, LogosLexer};
-
-#[cfg(all(
-  feature = "logos_0_14",
-  not(any(feature = "logos_0_15", feature = "logos_0_16"))
-))]
-pub use self::logos_0_14::{FromLogos, LogosLexer};
-
 /// A module containing integrations with the `logos` lexer library version 0.16.
 #[cfg(feature = "logos_0_16")]
 #[cfg_attr(docsrs, doc(cfg(feature = "logos_0_16")))]
@@ -356,22 +347,8 @@ pub mod logos_0_16 {
   bail!(logos_0_16);
 }
 
-/// A module containing integrations with the `logos` lexer library version 0.15.
-#[cfg(feature = "logos_0_15")]
-#[cfg_attr(docsrs, doc(cfg(feature = "logos_0_15")))]
-pub mod logos_0_15 {
-  bail!(logos_0_15);
-}
-
-/// A module containing integrations with the `logos` lexer library version 0.14.
-#[cfg(feature = "logos_0_14")]
-#[cfg_attr(docsrs, doc(cfg(feature = "logos_0_14")))]
-pub mod logos_0_14 {
-  bail!(logos_0_14);
-}
-
 #[cfg(test)]
 #[allow(warnings)]
 #[cfg(any(feature = "std", feature = "alloc"))]
-#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+#[cfg(feature = "logos_0_16")]
 mod tests;

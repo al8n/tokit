@@ -73,7 +73,7 @@ impl Token<'_> for Tok {
   type Kind = TokKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TokKind {
     TokKind::Num

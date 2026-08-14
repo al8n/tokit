@@ -197,7 +197,7 @@ impl Token<'_> for SelTok {
   type Kind = SelKind;
   type Error = SelErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> SelKind {
     match self {
@@ -397,7 +397,7 @@ fn try_dispatch_take_declines_genuine_eof_but_errs_on_a_terminal_stop() {
 // under 0.10.0 the way to reach it with this fixture is to produce no item at all: `SelTok`
 // has `[0-9]+` beside `[0-9]+\.[0-9]+`, so the logos DFA probes into the float arm and
 // backtracks, the vocabulary cannot honestly claim
-// `ReadFrontierClass::SpanEnd`, so it declares `Unbounded` and the holdback (rule 1)
+// `ScanLookahead::WithinSpan`, so it declares `Unbounded` and the holdback (rule 1)
 // withholds every item while the stream is open. Consuming a token first would therefore
 // stop at rule 1 and quietly relocate what these two cells prove. See
 // `partial_tests::unbounded_reporter_withholds_every_item_until_sealed` for the cell that

@@ -106,7 +106,7 @@ unified kind space maps it like this:
 # impl TokenT<'_> for Tok {
 #   type Kind = Tok;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Tok { *self }
 #   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }
@@ -241,7 +241,7 @@ structure*. Helpers that merely consume keep the plain emitter bound.
 # impl TokenT<'_> for Tok {
 #   type Kind = Tok;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Tok { *self }
 #   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }
@@ -587,7 +587,7 @@ the mark, including tokens committed before the wrap was conceivable.
 # impl TokenT<'_> for Tok {
 #   type Kind = Tok;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Tok { *self }
 #   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }
@@ -881,7 +881,7 @@ formatting data *without* a tree in the dependency closure; under a sink they ar
 # impl TokenT<'_> for Tok {
 #   type Kind = Tok;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Tok { *self }
 #   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }
@@ -1179,7 +1179,7 @@ nothing.
 # impl TokenT<'_> for Tok {
 #   type Kind = Tok;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Tok { *self }
 #   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }
@@ -1412,7 +1412,7 @@ branch is abandoned, its events are truncated as if they never happened.
 # impl TokenT<'_> for Tok {
 #   type Kind = Tok;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Tok { *self }
 #   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }
@@ -1695,7 +1695,7 @@ scan — no sync point found — rewinds its speculative events entirely.)
 # impl TokenT<'_> for Tok {
 #   type Kind = Tok;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Tok { *self }
 #   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }
@@ -2030,7 +2030,7 @@ the wall that keeps a hand-rolled mistake loud:
 # impl TokenT<'_> for Tok {
 #   type Kind = Tok;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Tok { *self }
 #   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }
@@ -2232,7 +2232,7 @@ Reading this chapter's tree wants the second position:
 # impl TokenT<'_> for Tok {
 #   type Kind = Tok;
 #   type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Tok { *self }
 #   fn is_trivia(&self) -> bool { matches!(self, Tok::Whitespace | Tok::Comment | Tok::Comma) }

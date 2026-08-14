@@ -425,7 +425,7 @@ re-encoding each result as a `Digit` token.
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Plus => Kind::Plus,
 #     Tok::Minus => Kind::Minus, Tok::Star => Kind::Star, Tok::Caret => Kind::Caret,
@@ -625,7 +625,7 @@ grammar. The last stanza adds
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Plus => Kind::Plus,
 #     Tok::Minus => Kind::Minus, Tok::Star => Kind::Star, Tok::Caret => Kind::Caret,

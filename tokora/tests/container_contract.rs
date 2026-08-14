@@ -2,7 +2,7 @@
   feature = "std",
   feature = "combinators",
   feature = "tinyvec_1",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+  feature = "logos_0_16"
 ))]
 
 //! What the repetition drivers may assume about a `Container`, and what they may not.

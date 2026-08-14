@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 
 //! Tests for fold, try_fold, fold_while, try_fold_while, rfold, rfold_while combinators.
 

@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 
 //! Tests that the shipped emitters implement `Missing{Leading,Trailing}SeparatorEmitter`,
 //! making the `require_*` separator families usable without a hand-rolled emitter.

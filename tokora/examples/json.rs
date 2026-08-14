@@ -376,7 +376,7 @@ impl<'inp> TokenT<'inp> for Token<'inp> {
 
   type Error = JsonLexerError;
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   #[inline]
   fn kind(&self) -> Self::Kind {

@@ -513,7 +513,7 @@ as a token, so `SURFACES_TRIVIA` is honestly `true` — and nothing but core tok
 # impl TokenT<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   // The lexer surfaces every byte — the compile-time wall on `Sink::new` requires it.
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Kind { match self { Tok::Num => Kind::Num, Tok::Plus => Kind::Plus } }

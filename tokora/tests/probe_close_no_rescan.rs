@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 #![allow(clippy::type_complexity)]
 
 //! Regression: the delimited many-builders commit the closing delimiter **without
@@ -148,7 +144,7 @@ impl TokenTrait<'_> for PcTok {
   type Kind = PcKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   fn kind(&self) -> PcKind {
     match self {

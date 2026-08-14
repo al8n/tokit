@@ -50,7 +50,7 @@ use crate::{
 )]
 ///
 /// ```
-/// # #[cfg(all(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"), feature = "std"))]
+/// # #[cfg(all(feature = "logos_0_16", feature = "std"))]
 /// # fn demo<P>(inner: P) -> tokora::Labelled<P> {
 /// // Diagnostics emitted inside `inner` are stamped "while parsing a list".
 /// tokora::labelled("while parsing a list", inner)
@@ -149,12 +149,7 @@ where
   }
 }
 
-#[cfg(all(
-  test,
-  feature = "trace",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(test, feature = "trace", feature = "logos_0_16", feature = "std"))]
 mod trace_tests {
   use crate::{
     InputRef, ParseInput, Token, cache::DefaultCache, emitter::Silent,
@@ -197,7 +192,7 @@ mod trace_tests {
     type Kind = Kind;
     type Error = Err;
 
-    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+    const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
     fn kind(&self) -> Kind {
       Kind::Num
     }
@@ -242,11 +237,7 @@ mod trace_tests {
 // is already bracketed (`res` is produced, then `exit_label` runs); the unguarded path is
 // exactly panic unwind, where the pop is skipped and the label stack — plain emitter state
 // that survives `catch_unwind` — keeps the stale context for the emitter's whole life.
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 mod unwind_tests {
   use crate::{
     InputRef, ParseInput, Token,
@@ -294,7 +285,7 @@ mod unwind_tests {
     type Kind = Kind;
     type Error = Err;
 
-    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+    const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
     fn kind(&self) -> Kind {
       Kind::Num
     }

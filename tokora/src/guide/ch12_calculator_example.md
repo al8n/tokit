@@ -81,7 +81,7 @@ impl From<&Token> for TokenKind {
 impl TokenT<'_> for Token {
   type Kind = TokenKind;
   type Error = LexError;
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
   fn kind(&self) -> TokenKind { TokenKind::from(self) }
   fn is_trivia(&self) -> bool { false }
 }
@@ -184,7 +184,7 @@ the one [`Right`](crate::parser::PrattInfix)-associative row; `(`/`)` share `PRE
 # }
 # impl TokenT<'_> for Token {
 #   type Kind = TokenKind; type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> TokenKind { TokenKind::from(self) }
 #   fn is_trivia(&self) -> bool { false }
 # }
@@ -273,7 +273,7 @@ can even be exercised directly with `E = ()`:
 # }
 # impl TokenT<'_> for Token {
 #   type Kind = TokenKind; type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> TokenKind { TokenKind::from(self) }
 #   fn is_trivia(&self) -> bool { false }
 # }
@@ -401,7 +401,7 @@ assertions below are the maintained evaluator's behavior contract, now executabl
 # }
 # impl TokenT<'_> for Token {
 #   type Kind = TokenKind; type Error = LexError;
-#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+#   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 #   fn kind(&self) -> TokenKind { TokenKind::from(self) }
 #   fn is_trivia(&self) -> bool { false }
 # }

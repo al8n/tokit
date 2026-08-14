@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 
 //! The inference-pin battery (T1–T12, at crate level).
 //!

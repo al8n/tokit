@@ -1,7 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "logos_0_16"))]
 
 //! Tests for `InputRef` methods: `sync_through`, `sync_to`, `fold`, `foldn`,
 //! `foldr_within`, `foldrn`, `try_expect_map`, and `try_expect_and_then`.

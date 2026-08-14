@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 #![allow(warnings)]
 
 //! Integration tests for:
@@ -46,13 +42,10 @@ pub enum TToken {
   Semi,
   #[regex(r"[ \t\r\n]+")]
   Ws,
-  // `allow_greedy` is a 0.16-only nested attribute (0.14/0.15 reject it as unknown), so the
-  // pattern is split per version rather than dropped. The two arms are equivalent for this
-  // fixture: `//[^\n]*` is already maximal-munch to end of line, and `allow_greedy` only
-  // silences 0.16's "this regex could match greedily" analysis. No fixture here observes a
-  // difference — the comment token is always terminated by the newline or end of input.
-  #[cfg_attr(feature = "logos_0_16", regex(r"//[^\n]*", allow_greedy = true))]
-  #[cfg_attr(not(feature = "logos_0_16"), regex(r"//[^\n]*"))]
+  // `allow_greedy` only silences 0.16's "this regex could match greedily" analysis; no fixture
+  // here observes a difference — the comment token is always terminated by the newline or end
+  // of input.
+  #[regex(r"//[^\n]*", allow_greedy = true)]
   Comment,
 }
 
@@ -113,7 +106,7 @@ impl TokenT<'_> for TToken {
   type Kind = TTokenKind;
   type Error = ();
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   fn kind(&self) -> TTokenKind {
     TTokenKind::from(self)

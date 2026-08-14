@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 
 //! Tests exercising the **mut-ref** (`Collect<&mut DelimitedBy<...>, &mut Container>`)
 //! code path (Impl #3) for every separator-policy x count-modifier combination

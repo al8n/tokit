@@ -404,7 +404,7 @@ const NO_NOTE: &str = "";
 /// # Example
 ///
 /// ```
-/// # #[cfg(all(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"), feature = "std"))]
+/// # #[cfg(all(feature = "logos_0_16", feature = "std"))]
 /// # fn demo() {
 /// use tokora::cache::DefaultCache;
 /// use tokora::conformance::cache::CacheHarness;
@@ -421,7 +421,7 @@ const NO_NOTE: &str = "";
 /// # }
 /// # impl tokora::Token<'_> for MyTok {
 /// #   type Kind = MyKind; type Error = ();
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> MyKind { MyKind }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }

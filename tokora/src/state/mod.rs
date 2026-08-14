@@ -32,7 +32,7 @@ pub mod tracker;
 /// and `logos` resets `token_start` before each rescan, so `lexer.span().start` is always the
 /// scan that is running right now. After `next()` returns, the adapter has the returned item's
 /// span. It accepts the value **iff the two starts are equal** and otherwise answers from
-/// [`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS), which is conservative by
+/// [`Token::SCAN_LOOKAHEAD`](crate::Token::SCAN_LOOKAHEAD), which is conservative by
 /// construction.
 ///
 /// That check lives in the adapter, not in an obligation on recorders: a recorder states a fact
@@ -131,7 +131,7 @@ pub trait State: core::fmt::Debug + Clone {
   /// `logos` callback can write to, and a callback that peeks with `lexer.remainder()` knows
   /// exactly how far it looked. Recording it is what lets `LogosLexer::read_frontier` answer with
   /// an offset instead of falling back to the vocabulary's coarse
-  /// [`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS).
+  /// [`Token::SCAN_LOOKAHEAD`](crate::Token::SCAN_LOOKAHEAD).
   ///
   /// Offsets are `usize` because that is the offset type of every source the logos adapter can
   /// carry. A hand-written lexer implements
@@ -144,7 +144,7 @@ pub trait State: core::fmt::Debug + Clone {
   /// override the reader, inherit the empty reset, and the state hands out a value nothing ever
   /// removes. That is not a coarser answer but a wrong one, because a recorded value **answers
   /// the frontier contract outright**: a value predating the lexer entirely wins over the
-  /// vocabulary's honest [`Unbounded`](crate::ReadFrontierClass::Unbounded), and the driver's
+  /// vocabulary's honest [`Unbounded`](crate::ScanLookahead::Unbounded), and the driver's
   /// `max(span.end, reported)` floor can leave it below a growing buffer's length, releasing an
   /// item whose scan really did reach the buffer end.
   ///

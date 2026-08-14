@@ -110,7 +110,7 @@ impl TokenT<'_> for Token {
   type Kind = Token;
   type Error = LexError;
 
-  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 
   // The sink refuses a trivia-skipping lexer at compile time; this is the opt-in.
   const SURFACES_TRIVIA: bool = true;

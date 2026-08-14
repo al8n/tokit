@@ -426,13 +426,13 @@ and will red until they do.
   cannot answer from anything it can see, and its blanket impl means the answer cannot come from
   an impl the dialect writes. It therefore delegates through **two** channels, both landing now:
 
-  - `Token::READ_FRONTIER_CLASS`, a **required** const on the vocabulary, with no default. It
-    answers for an item whose scan recorded nothing. Declaring `SpanEnd` is a claim about the
+  - `Token::SCAN_LOOKAHEAD`, a **required** const on the vocabulary, with no default. It
+    answers for an item whose scan recorded nothing. Declaring `WithinSpan` is a claim about the
     generated DFA, and `run_partial` is what falsifies a wrong one; `Unbounded` is the answer
     that is always sound and never precise.
 
     **Every `Token` impl must add this line, and that is the point.** The const shipped in a
-    first cut with a `ReadFrontierClass::Unbounded` default on the reasoning that an unaudited
+    first cut with a `ScanLookahead::Unbounded` default on the reasoning that an unaudited
     vocabulary must not be assumed safe — right value, wrong delivery, because a default also
     means the vocabulary is never asked. Every existing logos-backed impl kept compiling and
     silently became seal-only, and that is not a loss of precision: for a fixed one-byte token
@@ -464,7 +464,7 @@ and will red until they do.
     Non-final `"1."` with a state claiming a scan from 0 probed to 1: `read_frontier` answered
     `ReadTo(1)`, the driver's floor left it at `max(1, 1) = 1`, and `1 < 2` **committed**
     `Int@0..1` out of a buffer still being read; append `5` and the same bytes are one
-    `Float@0..3`. That is the defect `READ_FRONTIER_CLASS`'s removed default had — a default
+    `Float@0..3`. That is the defect `SCAN_LOOKAHEAD`'s removed default had — a default
     that fails *open* — one level down, and the same repair does not apply: making the reset
     required would break every `State` impl including the ones that record nothing. Collapsing
     the pair does apply. Reading consumes, so there is no sibling to inherit or forget, and a
@@ -494,7 +494,7 @@ and will red until they do.
   which is `lexer.span().start` inside the callback) beside `Probe::probed_to`, and the adapter
   accepts it **iff that start equals the returned item's span start** — on the error arm exactly
   as on the token arm, since a callback may mutate `extras` and the item still arrive as an
-  `Err`. Anything else falls back to `READ_FRONTIER_CLASS`, which the vocabulary had to write
+  `Err`. Anything else falls back to `SCAN_LOOKAHEAD`, which the vocabulary had to write
   down. The check lives in the adapter rather than in a rule recorders must follow,
   because a recorder can only state a fact about the scan it is running in. The pre-scan take is
   kept beside it and is not redundant: an equal start is *evidence* of provenance, and a lexer
@@ -550,6 +550,35 @@ and will red until they do.
   The kind is still compared beside the token. Redundant for any `PartialEq` that agrees with
   `Token::kind`, and kept because the two are independent caller code: a `PartialEq` coarser than
   the classification the parser sees would otherwise pass silently.
+
+- **Only Logos 0.16 is supported now; the `logos_0_14` and `logos_0_15` features, and the
+  `logos@0.14`/`logos@0.15` optional dependencies behind them, are removed.** The crate carried
+  three simultaneous Logos majors behind a newest-wins precedence chain — `tokora::logos`, the
+  `LogosLexer` adapter re-export, and each macro-generated per-version `RecursionTracker` /
+  `TokenTracker` / `Tracker` impl all picked 0.16, else 0.15, else 0.14 — and the CI job whose
+  only purpose was running tests against 0.14 and 0.15 (`logos parity (0.14, 0.15)`; the
+  `--each-feature` matrix only ever clippy-checked them). Both are retired with the versions
+  themselves. `logos = ["logos_0_16"]` is unchanged: `--features logos` means what it always
+  meant.
+
+  The removal is mechanical everywhere the precedence chain existed only to pick the newest of
+  three arms — the 0.16 arm is what survives, unconditionally. Every crate-level and item-level
+  `#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]` gate —
+  142 occurrences of the same disjunction across the library and the integration test suite —
+  simplifies to `#[cfg(feature = "logos_0_16")]` for the same reason: `any` over one surviving
+  alternative is that alternative. The guide and the README carry the same fact in prose, not in
+  a `cfg`, and are corrected the same way. `ci/feature_cfg_coverage.py`'s derived leg count drops
+  with it (28 multi-feature predicates over 322 sites, 49 covering legs, before; 25 over 308, 47
+  legs, after) — a shrink in what the source actually asks for, not a loosened gate.
+
+  BREAKING CHANGE: `logos_0_14` and `logos_0_15` no longer exist as Cargo features, and the
+  `logos@0.14`/`logos@0.15` optional dependencies are gone from the manifest. A consumer building
+  with `--features logos_0_14` or `--features logos_0_15` — naming a version directly rather than
+  through the `logos` alias — fails to resolve the manifest rather than silently falling back.
+  `tokora::logos` and the `LogosLexer` adapter now resolve to 0.16 unconditionally; a consumer
+  who was pinned to 0.15 or 0.14 (whether through the version-specific feature or through a
+  `Cargo.lock` that never re-resolved) must move to `logos_0_16` — via the `logos` alias or
+  directly — to keep building.
 
 ### Fixed
 
@@ -668,7 +697,7 @@ and will red until they do.
   75× short at 100,000 units.
 
   That cap was reachable by an **ordinary lexer over an ordinary source**, which is what made it a
-  defect and not a recorded cost. A conforming `SpanEnd` lexer emitting one item per byte spends
+  defect and not a recorded cost. A conforming `WithinSpan` lexer emitting one item per byte spends
   about one attempt per item, and the partial sweep drives it over every split of the source: over
   100 KB that is on the order of five billion prefix attempts, already past `usize::MAX` at 32 bits
   before the two full-input drains are counted. Such a lexer passed at 64 bits and took an ordinary

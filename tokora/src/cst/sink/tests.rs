@@ -32,7 +32,7 @@ impl Token<'_> for MiniTok {
   type Kind = u8;
   type Error = MiniErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   // honest: byte-per-token, never skips a byte
   const SURFACES_TRIVIA: bool = true;
@@ -5160,10 +5160,7 @@ fn release_of_a_non_innermost_mark_is_lawful_and_silent() {
 /// **emitter** is transactional. It is asserted here too.
 ///
 /// Gated to the same feature set as `live_checkpoints_len`, the lineage observable.
-#[cfg(all(
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(feature = "logos_0_16", feature = "std"))]
 #[test]
 fn restore_unchecked_is_not_transactional_across_the_settle_wall() {
   let mut input = Input::<MiniLexer<'_>, JournalingCtx<'_>>::with_state_and_context(
@@ -6394,7 +6391,7 @@ impl Token<'_> for OwnedTok {
   type Kind = u8;
   type Error = MiniErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   const SURFACES_TRIVIA: bool = true;
 

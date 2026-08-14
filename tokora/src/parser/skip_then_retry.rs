@@ -277,11 +277,7 @@ where
 
 // Recovery behavior needs a lexer that actually runs, which pins the suite to `logos` + `std` —
 // the same gate as the `Recover` tests.
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 mod tests {
   use super::*;
   use crate::{
@@ -389,7 +385,7 @@ mod tests {
     type Kind = RtKind;
     type Error = RtErr;
 
-    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+    const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
     fn kind(&self) -> RtKind {
       match self {

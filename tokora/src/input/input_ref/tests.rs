@@ -125,7 +125,7 @@ impl Token<'_> for ProbeTok {
   type Kind = ProbeKind;
   type Error = ProbeErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> ProbeKind {
     ProbeKind::Num
@@ -1442,7 +1442,7 @@ impl Token<'_> for ByValTok {
   type Kind = ByValKind;
   type Error = ByValErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> ByValKind {
     ByValKind::Num
@@ -3734,7 +3734,7 @@ impl Token<'_> for ZeroWidthTok {
   type Kind = ZeroWidthKind;
   type Error = ZeroWidthErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> ZeroWidthKind {
     ZeroWidthKind
@@ -4371,7 +4371,7 @@ impl Token<'_> for BalTok {
   type Kind = BalKind;
   type Error = ByValErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> BalKind {
     match self {
@@ -6333,7 +6333,7 @@ mod cst_event_oracles {
     type Kind = BalKind;
     type Error = ByValErr;
 
-    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+    const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
     const SURFACES_TRIVIA: bool = true;
 
@@ -6923,7 +6923,7 @@ impl Token<'_> for ScanTok {
   type Kind = ScanKind;
   type Error = ScanErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> ScanKind {
     ScanKind::Word
@@ -7776,7 +7776,7 @@ impl Token<'_> for BombTok {
   type Kind = BombKind;
   type Error = BombErr;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> BombKind {
     BombKind

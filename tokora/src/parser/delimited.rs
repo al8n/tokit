@@ -148,7 +148,7 @@ pub type DelimitedOf<'inp, D, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> Kind { match self {
 /// #     Tok::Digit(_) => Kind::Digit,
 /// #     Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen,
@@ -474,7 +474,7 @@ pub type TryDelimitedOf<'inp, D, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Ident(_) => Kind::Ident, Tok::LAngle => Kind::LAngle, Tok::RAngle => Kind::RAngle } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -615,7 +615,7 @@ pub type ParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -785,7 +785,7 @@ pub type TryParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -918,7 +918,7 @@ pub type BracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LBrace => Kind::LBrace, Tok::RBrace => Kind::RBrace } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -1088,7 +1088,7 @@ pub type TryBracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LBrace => Kind::LBrace, Tok::RBrace => Kind::RBrace } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -1222,7 +1222,7 @@ pub type BracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LBracket => Kind::LBracket, Tok::RBracket => Kind::RBracket } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -1392,7 +1392,7 @@ pub type TryBracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LBracket => Kind::LBracket, Tok::RBracket => Kind::RBracket } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -1527,7 +1527,7 @@ pub type AnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LAngle => Kind::LAngle, Tok::RAngle => Kind::RAngle } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -1697,7 +1697,7 @@ pub type TryAnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
-/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LAngle => Kind::LAngle, Tok::RAngle => Kind::RAngle } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }

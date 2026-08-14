@@ -25,7 +25,7 @@ impl Token<'_> for PTok {
   type Kind = PKind;
   type Error = Infallible;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> PKind {
     PKind
@@ -813,7 +813,7 @@ struct PeekTok(PeekKind);
 impl Token<'_> for PeekTok {
   type Kind = PeekKind;
   type Error = Infallible;
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
   fn kind(&self) -> PeekKind {
     self.0
   }
@@ -938,7 +938,7 @@ impl Token<'_> for ETok {
   type Kind = PKind;
   type Error = BadByte;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> PKind {
     PKind
@@ -1114,7 +1114,7 @@ impl Token<'_> for VTok {
   type Kind = VKind;
   type Error = Infallible;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> VKind {
     VKind
@@ -1251,7 +1251,7 @@ impl Token<'_> for CTok {
   type Kind = PKind;
   type Error = Collide;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> PKind {
     PKind
@@ -1374,7 +1374,7 @@ impl Token<'_> for TTok {
   type Kind = PKind;
   type Error = Ticking;
 
-  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
   fn kind(&self) -> PKind {
     PKind
@@ -2280,7 +2280,7 @@ fn the_widest_possible_derivation_reports_capacity_rather_than_a_silent_maximum(
 /// counter, and no knob could raise it past one.
 ///
 /// This is not a dense-lexer corner. `check_partial` drives every split point of the source, so a
-/// conforming `SpanEnd` lexer emitting one item per byte is asked to lex about `k + 1` times for
+/// conforming `WithinSpan` lexer emitting one item per byte is asked to lex about `k + 1` times for
 /// the prefix of length `k` — the items, plus the probe that ends the drain. Summed over every
 /// split of a 100 KB source that is about five billion attempts *before* the complete drain and
 /// the final partial drain are counted, and `usize::MAX` at 32 bits is 4,294,967,295.
@@ -2323,7 +2323,7 @@ fn a_conforming_per_byte_lexer_over_100kb_outruns_a_32_bit_counter() {
 
 // ── Positive: the crate's real logos adapter (LogosLexer) ───────────────────────────
 
-#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+#[cfg(feature = "logos_0_16")]
 mod logos_adapter {
   use super::Harness;
   use crate::Token;
@@ -2359,11 +2359,11 @@ mod logos_adapter {
     type Error = ();
 
     // `[a-z]+` and `[0-9]+` are over disjoint character classes and neither is a prefix of the
-    // other, so the DFA never probes into a longer candidate and backtracks. `SpanEnd` is
+    // other, so the DFA never probes into a longer candidate and backtracks. `WithinSpan` is
     // honest, and it is what keeps the partial cell below checking real chunked equivalence:
     // at the conservative default this fixture would withhold everything and the check would
     // pass vacuously.
-    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
+    const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::WithinSpan;
 
     fn kind(&self) -> SynKind {
       match self {
@@ -2423,7 +2423,7 @@ mod logos_adapter {
     type Kind = TileKind;
     type Error = ();
 
-    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+    const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
     fn kind(&self) -> TileKind {
       match self {
@@ -2460,7 +2460,7 @@ mod logos_adapter {
 // The extra token is `Int@0..1`. logos probes into the `Float`/`Sci` arm, hits the end of the
 // truncated buffer, and backtracks to the accepting prefix; the span rule then saw end 1 < 2 and
 // committed it. Append the missing byte and the complete parse says `Float@0..3`.
-#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+#[cfg(feature = "logos_0_16")]
 mod prefix_backtracking {
   use super::Harness;
   use crate::Token;
@@ -2491,13 +2491,13 @@ mod prefix_backtracking {
     // No class argued at the call site. The const has no default to fall into, so this arm
     // supplies the conservative value the vocabulary used to inherit — which is what the
     // `DefaultNum` cells below have always been exercising. Written as a separate arm rather
-    // than as `$class = <Self as Token>::READ_FRONTIER_CLASS`, which is a const cycle.
+    // than as `$class = <Self as Token>::SCAN_LOOKAHEAD`, which is a const cycle.
     ($name:ident) => {
-      num_vocabulary!(@body $name, const READ_FRONTIER_CLASS: crate::ReadFrontierClass =
-        crate::ReadFrontierClass::Unbounded;);
+      num_vocabulary!(@body $name, const SCAN_LOOKAHEAD: crate::ScanLookahead =
+        crate::ScanLookahead::Unbounded;);
     };
     ($name:ident, $class:expr) => {
-      num_vocabulary!(@body $name, const READ_FRONTIER_CLASS: crate::ReadFrontierClass = $class;);
+      num_vocabulary!(@body $name, const SCAN_LOOKAHEAD: crate::ScanLookahead = $class;);
     };
     (@body $name:ident, $($class:tt)*) => {
       #[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
@@ -2538,7 +2538,7 @@ mod prefix_backtracking {
   }
 
   // The claim a vocabulary like this must NOT make, and the conservative one beside it.
-  num_vocabulary!(LyingNum, crate::ReadFrontierClass::SpanEnd);
+  num_vocabulary!(LyingNum, crate::ScanLookahead::WithinSpan);
   num_vocabulary!(DefaultNum);
 
   type LyingLexer<'a> = LogosLexer<'a, LyingNum>;
@@ -2547,7 +2547,7 @@ mod prefix_backtracking {
   #[test]
   #[should_panic(expected = "partial-equivalence")]
   fn a_span_end_claim_over_a_float_vocabulary_is_falsified() {
-    // `"1.5"` at split k=2: the prefix `"1."` commits `Int@0..1` under a `SpanEnd` claim, and
+    // `"1.5"` at split k=2: the prefix `"1."` commits `Int@0..1` under a `WithinSpan` claim, and
     // the complete parse has no token ending before 2 at all.
     Harness::<LyingLexer<'_>>::over(["1.5"]).run_partial();
   }
@@ -2568,8 +2568,8 @@ mod prefix_backtracking {
   }
 
   /// The tier audits a **corpus**, not a vocabulary — the limitation
-  /// [`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS) states as an obligation on
-  /// whoever writes `SpanEnd`, executed here so it is not left as prose.
+  /// [`Token::SCAN_LOOKAHEAD`](crate::Token::SCAN_LOOKAHEAD) states as an obligation on
+  /// whoever writes `WithinSpan`, executed here so it is not left as prose.
   ///
   /// Same lying vocabulary, same lie, same *truncation* — and it **passes**, because the corpus
   /// omits the source the truncation would diverge from. `"1."` truncated at k=2 is `"1."` itself,
@@ -2601,7 +2601,7 @@ mod prefix_backtracking {
 // callback did NOT see: the engine probes past its own match before settling, and a recorder
 // that reports only its own bytes under-reports for its own item. That is the burden
 // `State::take_probe` puts on the recorder, and the two cells below are the check on it.
-#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+#[cfg(feature = "logos_0_16")]
 mod recorded_value {
   use super::Harness;
   use crate::lexer::LogosLexer;
@@ -2683,7 +2683,7 @@ mod recorded_value {
         type Kind = NumKind;
         type Error = ();
 
-        const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+        const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
 
         fn kind(&self) -> NumKind {
           match self {
