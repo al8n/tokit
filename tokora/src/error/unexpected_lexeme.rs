@@ -154,14 +154,14 @@ where
 impl<Char, Hint, O> core::ops::Deref for UnexpectedLexeme<Char, Hint, O> {
   type Target = Lexeme<Char, O>;
 
-  #[inline(always)]
+  #[inline]
   fn deref(&self) -> &Self::Target {
     &self.lexeme
   }
 }
 
 impl<Char, Hint, O> core::ops::DerefMut for UnexpectedLexeme<Char, Hint, O> {
-  #[inline(always)]
+  #[inline]
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.lexeme
   }
@@ -179,7 +179,7 @@ impl<Char, O> UnexpectedLexeme<Char, LineTerminator, O> {
   ///
   /// assert_eq!(*error.hint(), LineTerminator::NewLine);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new_line(pos: O, ch: Char) -> Self {
     Self::from_char(pos, ch, LineTerminator::NewLine)
   }
@@ -195,7 +195,7 @@ impl<Char, O> UnexpectedLexeme<Char, LineTerminator, O> {
   ///
   /// assert_eq!(*error.hint(), LineTerminator::CarriageReturn);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn carriage_return(pos: O, ch: Char) -> Self {
     Self::from_char(pos, ch, LineTerminator::CarriageReturn)
   }
@@ -211,7 +211,7 @@ impl<Char, O> UnexpectedLexeme<Char, LineTerminator, O> {
   ///
   /// assert_eq!(*error.hint(), LineTerminator::CarriageReturnNewLine);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn carriage_return_new_line(span: SimpleSpan<O>) -> Self {
     Self::from_range_const(span, LineTerminator::CarriageReturnNewLine)
   }
@@ -230,7 +230,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   ///
   /// assert_eq!(*error.hint(), "identifier");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(lexeme: Lexeme<Char, O>, hint: Hint) -> Self {
     Self { lexeme, hint }
   }
@@ -251,7 +251,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// assert!(error.is_char());
   /// assert_eq!(error.unwrap_char().position(), 42);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn from_char(pos: O, ch: Char, hint: Hint) -> Self {
     Self::from_positioned_char(PositionedChar::with_position(ch, pos), hint)
   }
@@ -271,7 +271,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// assert!(error.is_char());
   /// assert_eq!(error.unwrap_char().position(), 42);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn from_positioned_char(pc: PositionedChar<Char, O>, hint: Hint) -> Self {
     Self::new(Lexeme::Char(pc), hint)
   }
@@ -292,7 +292,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   ///
   /// assert!(error.is_range());
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn from_range_const(span: SimpleSpan<O>, hint: Hint) -> Self {
     Self::new(Lexeme::Range(span), hint)
   }
@@ -309,7 +309,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// assert!(error.is_range());
   /// assert_eq!(error.unwrap_range().start(), 10);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn from_range(span: impl Into<SimpleSpan<O>>, hint: Hint) -> Self {
     Self::new(Lexeme::Range(span.into()), hint)
   }
@@ -328,7 +328,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   ///
   /// assert!(error.lexeme().is_char());
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn lexeme(&self) -> &Lexeme<Char, O> {
     &self.lexeme
   }
@@ -347,7 +347,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   ///
   /// assert_eq!(*error.hint(), "expected digit");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn hint(&self) -> &Hint {
     &self.hint
   }
@@ -367,7 +367,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// error.lexeme_mut().bump(&10);
   /// assert_eq!(error.unwrap_char().position(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn lexeme_mut(&mut self) -> &mut Lexeme<Char, O> {
     &mut self.lexeme
   }
@@ -387,7 +387,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// error.hint_mut().push_str(" or letter");
   /// assert_eq!(error.hint(), "digit or letter");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn hint_mut(&mut self) -> &mut Hint {
     &mut self.hint
   }
@@ -408,7 +408,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// assert!(lexeme.is_char());
   /// assert_eq!(hint, "identifier");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (Lexeme<Char, O>, Hint) {
     (self.lexeme, self.hint)
   }
@@ -428,7 +428,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// let lexeme = error.into_lexeme();
   /// assert!(lexeme.is_char());
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_lexeme(self) -> Lexeme<Char, O> {
     self.lexeme
   }
@@ -448,7 +448,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// let hint = error.into_hint();
   /// assert_eq!(hint, "identifier");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_hint(self) -> Hint {
     self.hint
   }
@@ -471,7 +471,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// assert_eq!(span.start(), 5);
   /// assert_eq!(span.end(), 8); // '€' is 3 bytes
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn span_with(&self, len_of: impl FnOnce(&Char) -> usize) -> SimpleSpan<O>
   where
     O: Clone + Ord,
@@ -496,7 +496,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   ///
   /// assert_eq!(error.span(), SimpleSpan::new(10, 11));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn span(&self) -> SimpleSpan<O>
   where
     Char: CharLen,
@@ -522,7 +522,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// assert_eq!(upper.unwrap_char().char(), 'A');
   /// assert_eq!(*upper.hint(), "digit");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn map_char<F, NewChar>(self, f: F) -> UnexpectedLexeme<NewChar, Hint, O>
   where
     F: FnMut(Char) -> NewChar,
@@ -548,7 +548,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// let detailed = error.map_hint(|h| format!("expected {}", h));
   /// assert_eq!(detailed.hint(), "expected digit");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn map_hint<F, NewHint>(self, f: F) -> UnexpectedLexeme<Char, NewHint, O>
   where
     F: FnOnce(Hint) -> NewHint,
@@ -579,7 +579,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// assert_eq!(transformed.unwrap_char().char(), 'A');
   /// assert_eq!(transformed.hint(), "expected number");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn map<F, NewChar, G, NewHint>(self, f: F, g: G) -> UnexpectedLexeme<NewChar, NewHint, O>
   where
     F: FnMut(Char) -> NewChar,
@@ -608,7 +608,7 @@ impl<Char, Hint, O> UnexpectedLexeme<Char, Hint, O> {
   /// error.bump(&10);
   /// assert_eq!(error.unwrap_char().position(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, n: &O) -> &mut Self
   where
     O: for<'a> AddAssign<&'a O> + Clone,

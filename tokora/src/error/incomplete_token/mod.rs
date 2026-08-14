@@ -45,25 +45,25 @@ impl<Knowledge> core::error::Error for IncompleteToken<Knowledge> where
 }
 
 impl<Knowledge, S> IncompleteToken<Knowledge, S> {
-  #[inline(always)]
+  #[inline]
   const fn new_in(span: S, knowledge: Option<Knowledge>) -> Self {
     Self { span, knowledge }
   }
 
   /// Create a new `IncompleteToken` without any knowledge.
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: S) -> Self {
     Self::new_in(span, None)
   }
 
   /// Create a new `IncompleteToken` with knowledge.
-  #[inline(always)]
+  #[inline]
   pub const fn with_knowledge(span: S, knowledge: Knowledge) -> Self {
     Self::new_in(span, Some(knowledge))
   }
 
   /// Get the span of the incomplete token.
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -72,13 +72,13 @@ impl<Knowledge, S> IncompleteToken<Knowledge, S> {
   }
 
   /// Get the knowledge for the incomplete token, if any.
-  #[inline(always)]
+  #[inline]
   pub const fn knowledge(&self) -> Option<&Knowledge> {
     self.knowledge.as_ref()
   }
 
   /// Decompose the `IncompleteToken` into its components.
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (S, Option<Knowledge>) {
     (self.span, self.knowledge)
   }
@@ -87,7 +87,7 @@ impl<Knowledge, S> IncompleteToken<Knowledge, S> {
   ///
   /// This is useful when adjusting error positions after processing or
   /// when combining spans from different contexts.
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &S::Offset)
   where
     S: Span,

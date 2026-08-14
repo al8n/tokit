@@ -38,7 +38,7 @@ pub enum SeparatorPosition {
 impl SeparatorPosition {
   /// Returns the static, lowercase string name of this position
   /// (`"element"`, `"leading"`, or `"trailing"`).
-  #[inline(always)]
+  #[inline]
   pub const fn as_str(&self) -> &'static str {
     match self {
       Self::Element => "element",
@@ -73,7 +73,7 @@ pub struct SeparatedError<'a, T, Kind: Clone, S = SimpleSpan, Lang: ?Sized = ()>
 
 impl<'a, T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'a, T, Kind, S, Lang> {
   /// Creates a new `SeparatedError` at `position` wrapping `inner`.
-  #[inline(always)]
+  #[inline]
   pub const fn new(
     position: SeparatorPosition,
     inner: UnexpectedToken<'a, T, Kind, S, Lang>,
@@ -86,19 +86,19 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'a, T, Kind, S, Lang> {
   }
 
   /// Creates a `SeparatedError` at the [`Leading`](SeparatorPosition::Leading) position.
-  #[inline(always)]
+  #[inline]
   pub const fn leading(inner: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
     Self::new(SeparatorPosition::Leading, inner)
   }
 
   /// Creates a `SeparatedError` at the [`Trailing`](SeparatorPosition::Trailing) position.
-  #[inline(always)]
+  #[inline]
   pub const fn trailing(inner: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
     Self::new(SeparatorPosition::Trailing, inner)
   }
 
   /// Creates a `SeparatedError` at the [`Element`](SeparatorPosition::Element) position.
-  #[inline(always)]
+  #[inline]
   pub const fn element(inner: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
     Self::new(SeparatorPosition::Element, inner)
   }
@@ -106,7 +106,7 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'a, T, Kind, S, Lang> {
   /// Stamps the human-readable separator name the driver supplied (`Sep::name()`), so a
   /// downstream `From<SeparatedError<..>>` impl — and the default diagnostics — can say
   /// *which* separator was involved.
-  #[inline(always)]
+  #[inline]
   pub fn with_name(self, name: CowStr) -> Self {
     Self {
       position: self.position,
@@ -116,25 +116,25 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'a, T, Kind, S, Lang> {
   }
 
   /// Returns the position at which this separator error occurred.
-  #[inline(always)]
+  #[inline]
   pub const fn position(&self) -> SeparatorPosition {
     self.position
   }
 
   /// Returns the stamped separator name, if any — see [`with_name`](Self::with_name).
-  #[inline(always)]
+  #[inline]
   pub const fn name(&self) -> Option<&CowStr> {
     self.name.as_ref()
   }
 
   /// Returns a reference to the wrapped [`UnexpectedToken`].
-  #[inline(always)]
+  #[inline]
   pub const fn inner_ref(&self) -> &UnexpectedToken<'a, T, Kind, S, Lang> {
     &self.inner
   }
 
   /// Returns a mutable reference to the wrapped [`UnexpectedToken`].
-  #[inline(always)]
+  #[inline]
   pub const fn inner_mut(&mut self) -> &mut UnexpectedToken<'a, T, Kind, S, Lang> {
     &mut self.inner
   }
@@ -143,7 +143,7 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'a, T, Kind, S, Lang> {
   /// [`position`](Self::position) and the stamped [`name`](Self::name) — this is the "I only
   /// want the token" seam. Use [`into_components`](Self::into_components) to take the error
   /// apart without losing what makes it a *separator* error.
-  #[inline(always)]
+  #[inline]
   pub fn into_inner(self) -> UnexpectedToken<'a, T, Kind, S, Lang> {
     self.inner
   }
@@ -154,7 +154,7 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'a, T, Kind, S, Lang> {
   /// The name is returned rather than dropped on purpose: this is the destructuring seam of
   /// the very type that exists to carry the separator's identity, and a tuple that quietly
   /// omitted it would recreate the loss the name channel was added to close.
-  #[inline(always)]
+  #[inline]
   pub fn into_components(
     self,
   ) -> (
@@ -168,7 +168,7 @@ impl<'a, T, Kind: Clone, S, Lang: ?Sized> SeparatedError<'a, T, Kind, S, Lang> {
 
 // Allow unit to be used as an error sink for tests and no-op emitters.
 impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, Kind, S, Lang>> for () {
-  #[inline(always)]
+  #[inline]
   fn from(_: SeparatedError<'a, T, Kind, S, Lang>) -> Self {}
 }
 
@@ -195,7 +195,7 @@ where
   /// Note the single "expected". This renderer is **born** under the composition rule the two
   /// older carriers were repaired to: [`Expected`](crate::utils::Expected)'s `Display` opens
   /// with the word in every variant, so a composing site never writes it itself.
-  #[inline(always)]
+  #[inline]
   pub fn display_fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
   where
     T: core::fmt::Display,
@@ -219,7 +219,7 @@ where
   Kind: core::fmt::Display,
   S: crate::span::Span,
 {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.display_fmt(f)
   }

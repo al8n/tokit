@@ -423,7 +423,7 @@ pub trait Punctuator<'inp, L, Lang: ?Sized = ()> {
     L: Lexer<'inp>;
 
   /// Evaluates whether the given token kind matches the punctuator's kind.
-  #[inline(always)]
+  #[inline]
   fn eval(knd: &<L::Token as Token<'inp>>::Kind) -> bool
   where
     L: Lexer<'inp>,
@@ -432,7 +432,7 @@ pub trait Punctuator<'inp, L, Lang: ?Sized = ()> {
   }
 
   /// Creates an `UnexpectedToken` error for the punctuator.
-  #[inline(always)]
+  #[inline]
   fn unexpected_token(
     tok: Spanned<L::Token, L::Span>,
   ) -> UnexpectedToken<'inp, L::Token, <L::Token as Token<'inp>>::Kind, L::Span, Lang>

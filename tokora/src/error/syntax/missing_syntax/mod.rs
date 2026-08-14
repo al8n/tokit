@@ -52,20 +52,20 @@ impl<O> MissingSyntax<O> {
   ///
   /// This error indicates that a missing token was encountered,
   /// without specifying what token was found or expected.
-  #[inline(always)]
+  #[inline]
   pub const fn new(offset: O) -> Self {
     Self::of(offset)
   }
 
   /// Sets a custom message for the error.
-  #[inline(always)]
+  #[inline]
   pub const fn with_message(offset: O, message: CowStr) -> Self {
     Self::with_message_of(offset, message)
   }
 }
 
 impl<O, Lang: ?Sized> MissingSyntax<O, Lang> {
-  #[inline(always)]
+  #[inline]
   pub(super) const fn new_in(offset: O, message: Option<CowStr>) -> Self {
     Self {
       offset,
@@ -75,13 +75,13 @@ impl<O, Lang: ?Sized> MissingSyntax<O, Lang> {
   }
 
   /// Creates a new missing token error for the given language.
-  #[inline(always)]
+  #[inline]
   pub const fn of(offset: O) -> Self {
     Self::new_in(offset, None)
   }
 
   /// Sets a custom message for the error.
-  #[inline(always)]
+  #[inline]
   pub const fn with_message_of(offset: O, msg: CowStr) -> Self {
     Self::new_in(offset, Some(msg))
   }
@@ -96,7 +96,7 @@ impl<O, Lang: ?Sized> MissingSyntax<O, Lang> {
   /// let error = MissingSyntax::new(10);
   /// assert_eq!(error.offset(), 10);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn offset(&self) -> O
   where
     O: Copy,
@@ -114,7 +114,7 @@ impl<O, Lang: ?Sized> MissingSyntax<O, Lang> {
   /// let error = MissingSyntax::new(10);
   /// assert_eq!(error.offset_ref(), &10);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn offset_ref(&self) -> &O {
     &self.offset
   }
@@ -130,19 +130,19 @@ impl<O, Lang: ?Sized> MissingSyntax<O, Lang> {
   /// *error.offset_mut() = 12;
   /// assert_eq!(error.offset(), 12);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn offset_mut(&mut self) -> &mut O {
     &mut self.offset
   }
 
   /// Returns the custom message associated with the error, if any.
-  #[inline(always)]
+  #[inline]
   pub const fn message(&self) -> Option<&CowStr> {
     self.msg.as_ref()
   }
 
   /// Returns the custom message associated with the error, if any.
-  #[inline(always)]
+  #[inline]
   pub fn message_mut(&mut self) -> Option<&mut CowStr> {
     self.msg.as_mut()
   }
@@ -161,7 +161,7 @@ impl<O, Lang: ?Sized> MissingSyntax<O, Lang> {
   /// error.bump(&5);
   /// assert_eq!(error.offset(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &O) -> &mut Self
   where
     O: for<'b> AddAssign<&'b O>,
@@ -185,14 +185,14 @@ impl<O, Lang: ?Sized> MissingSyntax<O, Lang> {
   /// assert_eq!(offset, 10);
   /// assert_eq!(msg, None);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (O, Option<CowStr>) {
     (self.offset, self.msg)
   }
 }
 
 impl<O, Lang> From<MissingSyntax<O, Lang>> for () {
-  #[inline(always)]
+  #[inline]
   fn from(_: MissingSyntax<O, Lang>) -> Self {}
 }
 
@@ -200,7 +200,7 @@ impl<O, Lang: ?Sized> core::fmt::Debug for MissingSyntax<O, Lang>
 where
   O: core::fmt::Debug,
 {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     f.debug_struct("MissingSyntax")
       .field("offset", &self.offset)
@@ -213,7 +213,7 @@ impl<O, Lang: ?Sized> core::fmt::Display for MissingSyntax<O, Lang>
 where
   O: core::fmt::Display,
 {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match &self.msg {
       Some(msg) => write!(f, "missing syntax at offset {}: {}", self.offset, msg),

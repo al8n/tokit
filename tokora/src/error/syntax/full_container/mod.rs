@@ -18,7 +18,7 @@ pub struct FullContainer<S = SimpleSpan, Lang: ?Sized = ()> {
 
 impl<S> FullContainer<S> {
   /// Creates a new `FullContainer` error.
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: S, nums: usize, maximum: usize) -> Self {
     Self::of(span, nums, maximum)
   }
@@ -26,7 +26,7 @@ impl<S> FullContainer<S> {
 
 impl<S, Lang: ?Sized> FullContainer<S, Lang> {
   /// Creates a new `FullContainer` error for the given language.
-  #[inline(always)]
+  #[inline]
   pub const fn of(span: S, nums: usize, maximum: usize) -> Self {
     Self::new_in(span, nums, maximum)
   }
@@ -43,7 +43,7 @@ impl<S, Lang: ?Sized> FullContainer<S, Lang> {
   }
 
   /// Returns the span associated with this error.
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> &S {
     &self.span
   }
@@ -76,13 +76,13 @@ impl<S, Lang: ?Sized> FullContainer<S, Lang> {
   /// reporting policy: nothing here predicts what a later push does.
   ///
   /// [`Container`]: crate::container::Container
-  #[inline(always)]
+  #[inline]
   pub const fn nums(&self) -> usize {
     self.nums
   }
 
   /// Bumps the span by the given offset.
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, by: &S::Offset) -> &mut Self
   where
     S: Span,
@@ -99,14 +99,14 @@ impl<S, Lang: ?Sized> FullContainer<S, Lang> {
   /// construct never parsed count against it. It stays in the payload because it is the only
   /// thing the destination told the driver besides "no", and because it is the number a caller
   /// sizing a destination acts on. Read it beside [`nums()`](Self::nums), never against it.
-  #[inline(always)]
+  #[inline]
   pub const fn capacity(&self) -> usize {
     self.limit
   }
 }
 
 impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for () {
-  #[inline(always)]
+  #[inline]
   fn from(_: FullContainer<S, Lang>) -> Self {}
 }
 
@@ -122,7 +122,7 @@ impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for () {
 /// A refusal at the Nth element of a construct, beside a destination capacity of M, is what is
 /// actually known — less than the old sentence claimed, and true.
 impl<S, Lang: ?Sized> core::fmt::Display for FullContainer<S, Lang> {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     write!(
       f,

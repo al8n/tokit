@@ -382,7 +382,7 @@ where
   /// // Parser found "123abc" where an identifier was expected
   /// let bad_ident = Keyword::<String, SimpleSpan, YulLang>::error(span);
   /// ```
-  #[inline(always)]
+  #[inline]
   fn error(span: Span) -> Self {
     Self::new(span.clone(), S::error(span))
   }
@@ -404,7 +404,7 @@ where
   /// // Found:   let = 5;
   /// let missing_ident = Keyword::<String, SimpleSpan, YulLang>::missing(span);
   /// ```
-  #[inline(always)]
+  #[inline]
   fn missing(span: Span) -> Self {
     Self::new(span.clone(), S::missing(span))
   }

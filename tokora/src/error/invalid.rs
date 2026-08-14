@@ -235,7 +235,7 @@ impl<S> Invalid<BooleanLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(10, 14));
   /// assert_eq!(error.knowledge(), Some(&BooleanLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn boolean(span: S) -> Self {
     Self::with_knowledge(span, BooleanLiteral(()))
   }
@@ -253,7 +253,7 @@ impl<S> Invalid<NullLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(20, 24));
   /// assert_eq!(error.knowledge(), Some(&NullLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn null(span: S) -> Self {
     Self::with_knowledge(span, NullLiteral(()))
   }
@@ -271,7 +271,7 @@ impl<S> Invalid<EnumLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(30, 40));
   /// assert_eq!(error.knowledge(), Some(&EnumLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn enumeration(span: S) -> Self {
     Self::with_knowledge(span, EnumLiteral(()))
   }
@@ -289,7 +289,7 @@ impl<S> Invalid<EnumValueLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(45, 49));
   /// assert_eq!(error.knowledge(), Some(&EnumValueLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn enum_value(span: S) -> Self {
     Self::with_knowledge(span, EnumValueLiteral(()))
   }
@@ -307,7 +307,7 @@ impl<S> Invalid<DecimalLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(150, 160));
   /// assert_eq!(error.knowledge(), Some(&DecimalLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn decimal(span: S) -> Self {
     Self::with_knowledge(span, DecimalLiteral(()))
   }
@@ -325,7 +325,7 @@ impl<S> Invalid<OctalLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(50, 60));
   /// assert_eq!(error.knowledge(), Some(&OctalLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn octal(span: S) -> Self {
     Self::with_knowledge(span, OctalLiteral(()))
   }
@@ -343,7 +343,7 @@ impl<S> Invalid<StringLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(70, 80));
   /// assert_eq!(error.knowledge(), Some(&StringLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn string(span: S) -> Self {
     Self::with_knowledge(span, StringLiteral(()))
   }
@@ -361,7 +361,7 @@ impl<S> Invalid<HexLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(90, 100));
   /// assert_eq!(error.knowledge(), Some(&HexLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn hex(span: S) -> Self {
     Self::with_knowledge(span, HexLiteral(()))
   }
@@ -379,7 +379,7 @@ impl<S> Invalid<IntLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(105, 110));
   /// assert_eq!(error.knowledge(), Some(&IntLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn int(span: S) -> Self {
     Self::with_knowledge(span, IntLiteral(()))
   }
@@ -397,7 +397,7 @@ impl<S> Invalid<BinaryLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(115, 120));
   /// assert_eq!(error.knowledge(), Some(&BinaryLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn binary(span: S) -> Self {
     Self::with_knowledge(span, BinaryLiteral(()))
   }
@@ -415,7 +415,7 @@ impl<S> Invalid<FloatLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(125, 130));
   /// assert_eq!(error.knowledge(), Some(&FloatLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn float(span: S) -> Self {
     Self::with_knowledge(span, FloatLiteral(()))
   }
@@ -433,7 +433,7 @@ impl<S> Invalid<HexFloatLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(135, 140));
   /// assert_eq!(error.knowledge(), Some(&HexFloatLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn hex_float(span: S) -> Self {
     Self::with_knowledge(span, HexFloatLiteral(()))
   }
@@ -456,7 +456,7 @@ impl<Knowledge, S> Invalid<Knowledge, S> {
   /// assert_eq!(error.knowledge(), None);
   /// assert_eq!(error.to_string(), "invalid at 10..13");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: S) -> Self {
     Self {
       span,
@@ -481,7 +481,7 @@ impl<Knowledge, S> Invalid<Knowledge, S> {
   /// assert_eq!(error.knowledge(), Some(&IntLiteral::default()));
   /// assert_eq!(error.to_string(), "invalid at 5..8, did you mean int literal?");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn with_knowledge(span: S, knowledge: Knowledge) -> Self {
     Self {
       span,
@@ -501,7 +501,7 @@ impl<Knowledge, S> Invalid<Knowledge, S> {
   /// let error: Invalid<()> = Invalid::new(SimpleSpan::new(10, 15));
   /// assert_eq!(error.span(), SimpleSpan::new(10, 15));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -519,7 +519,7 @@ impl<Knowledge, S> Invalid<Knowledge, S> {
   /// let error: Invalid<()> = Invalid::new(SimpleSpan::new(10, 15));
   /// assert_eq!(error.span_ref(), &SimpleSpan::new(10, 15));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &S {
     &self.span
   }
@@ -535,7 +535,7 @@ impl<Knowledge, S> Invalid<Knowledge, S> {
   /// *error.span_mut() = SimpleSpan::new(20, 25);
   /// assert_eq!(error.span(), SimpleSpan::new(20, 25));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> &mut S {
     &mut self.span
   }
@@ -556,7 +556,7 @@ impl<Knowledge, S> Invalid<Knowledge, S> {
   /// let error_no_context: Invalid<()> = Invalid::new(SimpleSpan::new(10, 15));
   /// assert_eq!(error_no_context.knowledge(), None);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn knowledge(&self) -> Option<&Knowledge> {
     self.knowledge.as_ref()
   }
@@ -576,7 +576,7 @@ impl<Knowledge, S> Invalid<Knowledge, S> {
   /// assert_eq!(span, SimpleSpan::new(10, 15));
   /// assert_eq!(knowledge, Some(IntLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (S, Option<Knowledge>) {
     (self.span, self.knowledge)
   }
@@ -606,7 +606,7 @@ impl<Knowledge, S> Invalid<Knowledge, S> {
   /// error.bump(&100).bump(&50);
   /// assert_eq!(error.span(), SimpleSpan::new(155, 160));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &S::Offset) -> &mut Self
   where
     S: Span,

@@ -405,7 +405,7 @@ where
   /// // Parser found "123abc" where an identifier was expected
   /// let bad_ident = Ident::<String, SimpleSpan, YulLang>::error(span);
   /// ```
-  #[inline(always)]
+  #[inline]
   fn error(span: Span) -> Self {
     Self::with_status(span.clone(), S::error(span), Status::Error)
   }
@@ -427,7 +427,7 @@ where
   /// // Found:   let = 5;
   /// let missing_ident = Ident::<String, SimpleSpan, YulLang>::missing(span);
   /// ```
-  #[inline(always)]
+  #[inline]
   fn missing(span: Span) -> Self {
     Self::with_status(span.clone(), S::missing(span), Status::Missing)
   }

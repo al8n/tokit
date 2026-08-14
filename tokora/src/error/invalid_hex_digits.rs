@@ -108,7 +108,7 @@ impl<Char, const N: usize, O> From<PositionedChar<Char, O>> for InvalidHexDigits
 where
   Const<N>: IntoArrayLength,
 {
-  #[inline(always)]
+  #[inline]
   fn from(c: PositionedChar<Char, O>) -> Self {
     Self::from_positioned_char(c)
   }
@@ -118,7 +118,7 @@ impl<Char, const N: usize, O> From<[PositionedChar<Char, O>; 1]> for InvalidHexD
 where
   Const<N>: IntoArrayLength,
 {
-  #[inline(always)]
+  #[inline]
   fn from(c: [PositionedChar<Char, O>; 1]) -> Self {
     let [c] = c;
     Self::from_positioned_char(c)
@@ -142,7 +142,7 @@ where
   ///
   /// let digits: InvalidHexDigits<char, 2> = InvalidHexDigits::from_positioned_char(PositionedChar::with_position('Z', 12));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn from_positioned_char(ch: PositionedChar<Char, O>) -> Self {
     assert!(N > 0, "InvalidHexDigits capacity must be > 0");
 
@@ -164,7 +164,7 @@ where
   ///
   /// let digits: InvalidHexDigits<char, 2> = InvalidHexDigits::from_char(12, 'Z');
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn from_char(pos: O, ch: Char) -> Self {
     Self::from_positioned_char(PositionedChar::with_position(ch, pos))
   }
@@ -205,7 +205,7 @@ where
   ///     InvalidHexDigits::try_from_iter(chars).unwrap();
   /// assert_eq!(digits.len(), 2);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn try_from_iter<I>(iter: I) -> Option<Self>
   where
     I: IntoIterator<Item = PositionedChar<Char, O>>,
@@ -227,7 +227,7 @@ where
   /// assert!(digits.push(PositionedChar::with_position('H', 11)));
   /// assert!(!digits.push(PositionedChar::with_position('I', 12))); // Full!
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn push(&mut self, ch: PositionedChar<Char, O>) -> bool {
     self.0.push_back(ch).is_none()
   }
@@ -246,7 +246,7 @@ where
   /// assert!(digits.push_char(11, 'H'));
   /// assert!(!digits.push_char(12, 'I')); // Full!
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn push_char(&mut self, pos: O, ch: Char) -> bool {
     self.push(PositionedChar::with_position(ch, pos))
   }
@@ -266,7 +266,7 @@ where
   /// );
   /// assert_eq!(digits.len(), 1);
   /// ```
-  #[inline(always)]
+  #[inline]
   #[allow(clippy::len_without_is_empty)]
   pub const fn len(&self) -> usize {
     self.0.len()
@@ -285,7 +285,7 @@ where
   /// digits.push(PositionedChar::with_position('H', 11));
   /// assert!(digits.is_full());
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn is_full(&self) -> bool {
     self.0.is_full()
   }
@@ -307,7 +307,7 @@ where
   /// digits.bump(&5);
   /// assert_eq!(digits[0].position(), 15);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, n: &O) -> &mut Self
   where
     O: for<'a> AddAssign<&'a O>,
@@ -326,7 +326,7 @@ impl<Char, const N: usize, O> AsRef<[PositionedChar<Char, O>]> for InvalidHexDig
 where
   Const<N>: IntoArrayLength,
 {
-  #[inline(always)]
+  #[inline]
   fn as_ref(&self) -> &[PositionedChar<Char, O>] {
     self
   }
@@ -336,7 +336,7 @@ impl<Char, const N: usize, O> AsMut<[PositionedChar<Char, O>]> for InvalidHexDig
 where
   Const<N>: IntoArrayLength,
 {
-  #[inline(always)]
+  #[inline]
   fn as_mut(&mut self) -> &mut [PositionedChar<Char, O>] {
     self
   }
@@ -348,7 +348,7 @@ where
 {
   type Target = [PositionedChar<Char, O>];
 
-  #[inline(always)]
+  #[inline]
   fn deref(&self) -> &Self::Target {
     self.0.as_slices().0
   }
@@ -358,7 +358,7 @@ impl<Char, const N: usize, O> core::ops::DerefMut for InvalidHexDigits<Char, N, 
 where
   Const<N>: IntoArrayLength,
 {
-  #[inline(always)]
+  #[inline]
   fn deref_mut(&mut self) -> &mut Self::Target {
     self.0.as_mut_slices().0
   }

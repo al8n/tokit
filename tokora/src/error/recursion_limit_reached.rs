@@ -182,7 +182,7 @@ pub struct RecursionLimitReached<O = usize, Lang: ?Sized = ()> {
 
 impl<O, Lang: ?Sized> RecursionLimitReached<O, Lang> {
   /// Creates the trip error at `at` from the tracker's own report.
-  #[inline(always)]
+  #[inline]
   pub const fn of(at: O, exceeded: RecursionLimitExceeded) -> Self {
     Self {
       at,
@@ -192,7 +192,7 @@ impl<O, Lang: ?Sized> RecursionLimitReached<O, Lang> {
   }
 
   /// Returns the offset the trip was raised at — committed consumption at frame entry.
-  #[inline(always)]
+  #[inline]
   pub const fn offset(&self) -> O
   where
     O: Copy,
@@ -201,32 +201,32 @@ impl<O, Lang: ?Sized> RecursionLimitReached<O, Lang> {
   }
 
   /// Returns a reference to the offset the trip was raised at.
-  #[inline(always)]
+  #[inline]
   pub const fn offset_ref(&self) -> &O {
     &self.at
   }
 
   /// Returns the tracker's report: the depth reached and the limitation it exceeded.
-  #[inline(always)]
+  #[inline]
   pub const fn exceeded(&self) -> RecursionLimitExceeded {
     self.exceeded
   }
 
   /// Returns the recursion depth that tripped the limit.
-  #[inline(always)]
+  #[inline]
   pub const fn depth(&self) -> usize {
     self.exceeded.depth()
   }
 
   /// Returns the configured maximum depth.
-  #[inline(always)]
+  #[inline]
   pub const fn limitation(&self) -> usize {
     self.exceeded.limitation()
   }
 
   /// Rewrites the offset — the shape a nested parse uses to lift an inner offset into its
   /// enclosing document's coordinates.
-  #[inline(always)]
+  #[inline]
   pub fn map_offset<U, F>(self, f: F) -> RecursionLimitReached<U, Lang>
   where
     F: FnOnce(O) -> U,
@@ -242,7 +242,7 @@ impl<O, Lang: ?Sized> RecursionLimitReached<O, Lang> {
 /// **Always** terminal: no amount of input clears a depth budget, so recovery must re-raise
 /// rather than spend it.
 impl<O, Lang: ?Sized> crate::error::MaybeTerminal for RecursionLimitReached<O, Lang> {
-  #[inline(always)]
+  #[inline]
   fn is_terminal(&self) -> bool {
     true
   }
@@ -259,6 +259,6 @@ impl<O, Lang: ?Sized> crate::error::MaybeTerminal for RecursionLimitReached<O, L
 /// [the type's own section](RecursionLimitReached#the-stop-does-not-travel-in-the-payload-so-a-discarding-sink-cannot-drop-it)
 /// for the measurements and for what a grammar that needs the *details* should do instead.
 impl<O, Lang: ?Sized> From<RecursionLimitReached<O, Lang>> for () {
-  #[inline(always)]
+  #[inline]
   fn from(_: RecursionLimitReached<O, Lang>) -> Self {}
 }

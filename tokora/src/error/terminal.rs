@@ -287,7 +287,7 @@
 /// ```
 pub trait MaybeTerminal {
   /// Returns `true` iff this error value represents a terminal stop. Defaults to `false`.
-  #[inline(always)]
+  #[inline]
   fn is_terminal(&self) -> bool {
     false
   }

@@ -61,7 +61,7 @@ impl<T, S, Lang> Missing<T, S, Lang> {
   ///
   /// Use this when the parser reached the end of a construct without finding the required
   /// syntax (e.g., missing trailing expression before `}` or end-of-input).
-  #[inline(always)]
+  #[inline]
   pub fn new(before: S) -> Self {
     Self {
       before,
@@ -80,7 +80,7 @@ impl<T, S, Lang> Missing<T, S, Lang> {
   ///
   /// # Panics
   /// - If before and after are overlapping in a way that makes it impossible to determine a gap.
-  #[inline(always)]
+  #[inline]
   pub fn between(before: S, after: S) -> Self
   where
     S: Span + Clone,
@@ -103,20 +103,20 @@ impl<T, S, Lang> Missing<T, S, Lang> {
   }
 
   /// Updates the trailing anchor, returning `self` for chaining.
-  #[inline(always)]
+  #[inline]
   pub fn with_after(mut self, after: S) -> Self {
     self.after = Some(after);
     self
   }
 
   /// Sets/overwrites the trailing anchor in-place.
-  #[inline(always)]
+  #[inline]
   pub fn set_after(&mut self, after: S) {
     self.after = Some(after);
   }
 
   /// Returns the span immediately preceding the missing syntax.
-  #[inline(always)]
+  #[inline]
   pub const fn before(&self) -> S
   where
     S: Copy,
@@ -125,7 +125,7 @@ impl<T, S, Lang> Missing<T, S, Lang> {
   }
 
   /// Returns the optional span immediately following the missing syntax.
-  #[inline(always)]
+  #[inline]
   pub const fn after(&self) -> Option<S>
   where
     S: Copy,
@@ -134,7 +134,7 @@ impl<T, S, Lang> Missing<T, S, Lang> {
   }
 
   /// Returns the span representing the gap where the syntax should have existed.
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -146,7 +146,7 @@ impl<T, S, Lang> Missing<T, S, Lang> {
   }
 
   /// Returns the span representing the gap where the syntax should have existed.
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &S {
     match self.span.as_ref() {
       Some(span) => span,
@@ -155,7 +155,7 @@ impl<T, S, Lang> Missing<T, S, Lang> {
   }
 
   /// Bumps the spans of the missing node by the specified offset.
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &S::Offset) -> &mut Self
   where
     S: Span,
@@ -170,7 +170,7 @@ impl<T, S, Lang> Missing<T, S, Lang> {
   }
 
   /// Returns the syntax kind of the missing node.
-  #[inline(always)]
+  #[inline]
   pub const fn kind(&self) -> <Lang as Language>::SyntaxKind
   where
     T: Syntax<Lang = Lang>,

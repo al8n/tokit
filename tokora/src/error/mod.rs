@@ -346,24 +346,24 @@ pub trait ErrorNode<S = SimpleSpan> {
 }
 
 impl ErrorNode for &str {
-  #[inline(always)]
+  #[inline]
   fn error(_span: SimpleSpan) -> Self {
     "<error>"
   }
 
-  #[inline(always)]
+  #[inline]
   fn missing(_span: SimpleSpan) -> Self {
     "<missing>"
   }
 }
 
 impl ErrorNode for &[u8] {
-  #[inline(always)]
+  #[inline]
   fn error(_span: SimpleSpan) -> Self {
     b"<error>"
   }
 
-  #[inline(always)]
+  #[inline]
   fn missing(_span: SimpleSpan) -> Self {
     b"<missing>"
   }
@@ -372,12 +372,12 @@ impl ErrorNode for &[u8] {
 #[cfg(feature = "bytes_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "bytes_1")))]
 impl ErrorNode for bytes_1::Bytes {
-  #[inline(always)]
+  #[inline]
   fn error(_span: SimpleSpan) -> Self {
     bytes_1::Bytes::from_static(b"<error>")
   }
 
-  #[inline(always)]
+  #[inline]
   fn missing(_span: SimpleSpan) -> Self {
     bytes_1::Bytes::from_static(b"<missing>")
   }
@@ -389,24 +389,24 @@ const _: () = {
   use hipstr_0_8::{HipByt, HipStr};
 
   impl ErrorNode for HipStr<'_> {
-    #[inline(always)]
+    #[inline]
     fn error(_span: SimpleSpan) -> Self {
       HipStr::borrowed("<error>")
     }
 
-    #[inline(always)]
+    #[inline]
     fn missing(_span: SimpleSpan) -> Self {
       HipStr::borrowed("<missing>")
     }
   }
 
   impl ErrorNode for HipByt<'_> {
-    #[inline(always)]
+    #[inline]
     fn error(_span: SimpleSpan) -> Self {
       HipByt::borrowed(b"<error>")
     }
 
-    #[inline(always)]
+    #[inline]
     fn missing(_span: SimpleSpan) -> Self {
       HipByt::borrowed(b"<missing>")
     }
@@ -427,7 +427,7 @@ pub trait ErrorContainer<E> {
   fn new() -> Self;
 
   /// Create a new container with a specified capacity.
-  #[inline(always)]
+  #[inline]
   fn with_capacity(_: usize) -> Self
   where
     Self: Sized,
@@ -439,7 +439,7 @@ pub trait ErrorContainer<E> {
   fn push(&mut self, error: E);
 
   /// Attempts to push an error, returning it back if the container is full.
-  #[inline(always)]
+  #[inline]
   fn try_push(&mut self, error: E) -> Result<(), E>
   where
     Self: Sized,
@@ -503,13 +503,13 @@ pub trait ErrorContainer<E> {
   /// override it wherever the container has a cheaper way. It exists because
   /// [`Errors`] is the only door onto its container and therefore has to serve the
   /// removals that door used to reach through `DerefMut`.
-  #[inline(always)]
+  #[inline]
   fn clear(&mut self) {
     while self.pop().is_some() {}
   }
 
   /// Returns `true` if the collection is empty.
-  #[inline(always)]
+  #[inline]
   fn is_empty(&self) -> bool {
     self.len() == 0
   }
@@ -524,7 +524,7 @@ pub trait ErrorContainer<E> {
   fn into_iter(self) -> Self::IntoIter;
 
   /// Returns the remaining capacity if the container has a fixed upper bound.
-  #[inline(always)]
+  #[inline]
   fn remaining_capacity(&self) -> Option<usize> {
     None
   }
@@ -537,17 +537,17 @@ impl<E> ErrorContainer<E> for Option<E> {
   where
     E: 'a;
 
-  #[inline(always)]
+  #[inline]
   fn new() -> Self {
     None
   }
 
-  #[inline(always)]
+  #[inline]
   fn push(&mut self, error: E) {
     self.get_or_insert(error);
   }
 
-  #[inline(always)]
+  #[inline]
   fn try_push(&mut self, error: E) -> Result<(), E> {
     if self.is_some() {
       Err(error)
@@ -557,32 +557,32 @@ impl<E> ErrorContainer<E> for Option<E> {
     }
   }
 
-  #[inline(always)]
+  #[inline]
   fn pop(&mut self) -> Option<E> {
     self.take()
   }
 
-  #[inline(always)]
+  #[inline]
   fn clear(&mut self) {
     *self = None;
   }
 
-  #[inline(always)]
+  #[inline]
   fn len(&self) -> usize {
     if self.is_some() { 1 } else { 0 }
   }
 
-  #[inline(always)]
+  #[inline]
   fn iter(&self) -> Self::Iter<'_> {
     Self::iter(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn into_iter(self) -> Self::IntoIter {
     <Self as IntoIterator>::into_iter(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn remaining_capacity(&self) -> Option<usize> {
     Some(if self.is_some() { 0 } else { 1 })
   }
@@ -597,17 +597,17 @@ impl<E, N: ArrayLength> ErrorContainer<E> for GenericArrayDeque<E, N> {
     Self: 'a,
     E: 'a;
 
-  #[inline(always)]
+  #[inline]
   fn new() -> Self {
     Self::new()
   }
 
-  #[inline(always)]
+  #[inline]
   fn push(&mut self, error: E) {
     self.push_back(error);
   }
 
-  #[inline(always)]
+  #[inline]
   fn try_push(&mut self, error: E) -> Result<(), E> {
     match self.push_back(error) {
       None => Ok(()),
@@ -615,32 +615,32 @@ impl<E, N: ArrayLength> ErrorContainer<E> for GenericArrayDeque<E, N> {
     }
   }
 
-  #[inline(always)]
+  #[inline]
   fn pop(&mut self) -> Option<E> {
     self.pop_front()
   }
 
-  #[inline(always)]
+  #[inline]
   fn clear(&mut self) {
     self.clear();
   }
 
-  #[inline(always)]
+  #[inline]
   fn len(&self) -> usize {
     self.len()
   }
 
-  #[inline(always)]
+  #[inline]
   fn iter(&self) -> Self::Iter<'_> {
     Self::iter(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn into_iter(self) -> Self::IntoIter {
     IntoIterator::into_iter(self)
   }
 
-  #[inline(always)]
+  #[inline]
   fn remaining_capacity(&self) -> Option<usize> {
     Some(self.remaining_capacity())
   }
@@ -660,17 +660,17 @@ const _: () = {
     where
       E: 'a;
 
-    #[inline(always)]
+    #[inline]
     fn new() -> Self {
       Self::new()
     }
 
-    #[inline(always)]
+    #[inline]
     fn with_capacity(capacity: usize) -> Self {
       Self::with_capacity(capacity)
     }
 
-    #[inline(always)]
+    #[inline]
     fn push(&mut self, error: E) {
       self.push(error);
     }
@@ -679,7 +679,7 @@ const _: () = {
     /// can report — so it never declines an error and the flag is unconditionally `false`. That
     /// is what makes delegating to its own `FromIterator` sound; the bulk fill std may perform
     /// underneath is the payoff, not the justification.
-    #[inline(always)]
+    #[inline]
     fn from_errors<I>(errors: I) -> (Self, bool)
     where
       I: IntoIterator<Item = E>,
@@ -687,7 +687,7 @@ const _: () = {
       (errors.into_iter().collect(), false)
     }
 
-    #[inline(always)]
+    #[inline]
     fn pop(&mut self) -> Option<E> {
       if self.is_empty() {
         None
@@ -696,22 +696,22 @@ const _: () = {
       }
     }
 
-    #[inline(always)]
+    #[inline]
     fn clear(&mut self) {
       self.clear();
     }
 
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
       self.len()
     }
 
-    #[inline(always)]
+    #[inline]
     fn iter(&self) -> Self::Iter<'_> {
       self.as_slice().iter()
     }
 
-    #[inline(always)]
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
       <Self as IntoIterator>::into_iter(self)
     }
@@ -725,23 +725,23 @@ const _: () = {
       E: 'a,
       Self: 'a;
 
-    #[inline(always)]
+    #[inline]
     fn new() -> Self {
       Self::new()
     }
 
-    #[inline(always)]
+    #[inline]
     fn with_capacity(capacity: usize) -> Self {
       Self::with_capacity(capacity)
     }
 
-    #[inline(always)]
+    #[inline]
     fn push(&mut self, error: E) {
       self.push_back(error);
     }
 
     /// Unbounded for the same reason [`Vec`] is, and sound for the same one.
-    #[inline(always)]
+    #[inline]
     fn from_errors<I>(errors: I) -> (Self, bool)
     where
       I: IntoIterator<Item = E>,
@@ -749,27 +749,27 @@ const _: () = {
       (errors.into_iter().collect(), false)
     }
 
-    #[inline(always)]
+    #[inline]
     fn pop(&mut self) -> Option<E> {
       self.pop_front()
     }
 
-    #[inline(always)]
+    #[inline]
     fn clear(&mut self) {
       self.clear();
     }
 
-    #[inline(always)]
+    #[inline]
     fn len(&self) -> usize {
       self.len()
     }
 
-    #[inline(always)]
+    #[inline]
     fn iter(&self) -> Self::Iter<'_> {
       self.iter()
     }
 
-    #[inline(always)]
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
       <Self as IntoIterator>::into_iter(self)
     }

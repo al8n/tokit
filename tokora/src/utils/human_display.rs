@@ -114,21 +114,21 @@ pub trait DisplayHuman {
   /// let bytes = b"hello";
   /// println!("{}", bytes.display()); // Prints: hello
   /// ```
-  #[inline(always)]
+  #[inline]
   fn display(&self) -> HumanDisplay<'_, Self> {
     HumanDisplay(self)
   }
 }
 
 impl<T: DisplayHuman + ?Sized> DisplayHuman for &T {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     (*self).fmt(f)
   }
 }
 
 impl DisplayHuman for () {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     Ok(())
   }
@@ -148,7 +148,7 @@ impl DisplayHuman for u8 {
   /// assert_eq!(format!("{}", ascii.display()), "A");
   /// assert_eq!(format!("{}", non_ascii.display()), "200");
   /// ```
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     if self.is_ascii() {
       write!(f, "{}", *self as char)
@@ -162,7 +162,7 @@ macro_rules! impl_display_human_for_primitive {
   ($($ty:ty),+) => {
     $(
       impl DisplayHuman for $ty {
-        #[inline(always)]
+        #[inline]
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
           fmt::Display::fmt(self, f)
         }
@@ -186,7 +186,7 @@ impl<T: DisplayHuman> DisplayHuman for PositionedChar<T> {
   /// let pc = PositionedChar::with_position('x', 100);
   /// assert_eq!(format!("{}", pc.display()), "x");
   /// ```
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.char_ref().fmt(f)
   }
@@ -194,7 +194,7 @@ impl<T: DisplayHuman> DisplayHuman for PositionedChar<T> {
 
 impl DisplayHuman for [u8] {
   #[cfg(not(feature = "bstr_1"))]
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match core::str::from_utf8(self) {
       Ok(s) => s.fmt(f),
@@ -203,7 +203,7 @@ impl DisplayHuman for [u8] {
   }
 
   #[cfg(feature = "bstr_1")]
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     bstr_1::BStr::new(self).fmt(f)
   }
@@ -220,7 +220,7 @@ impl DisplayHuman for [char] {
   /// let chars = ['h', 'e', 'l', 'l', 'o'];
   /// assert_eq!(format!("{}", chars.display()), "hello");
   /// ```
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     for c in self {
       c.fmt(f)?;
@@ -230,14 +230,14 @@ impl DisplayHuman for [char] {
 }
 
 impl<const N: usize> DisplayHuman for [u8; N] {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.as_slice().fmt(f)
   }
 }
 
 impl<const N: usize> DisplayHuman for [char; N] {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.as_slice().fmt(f)
   }
@@ -246,7 +246,7 @@ impl<const N: usize> DisplayHuman for [char; N] {
 #[cfg(feature = "bytes_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "bytes_1")))]
 impl DisplayHuman for bytes_1::Bytes {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.as_ref().fmt(f)
   }
@@ -255,7 +255,7 @@ impl DisplayHuman for bytes_1::Bytes {
 #[cfg(feature = "bstr_1")]
 #[cfg_attr(docsrs, doc(cfg(feature = "bstr_1")))]
 impl DisplayHuman for bstr_1::BStr {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     fmt::Display::fmt(self, f)
   }
@@ -267,16 +267,14 @@ const _: () = {
   use hipstr_0_8::{HipByt, HipStr};
 
   impl DisplayHuman for HipStr<'_> {
-    #[cfg_attr(test, inline)]
-    #[cfg_attr(not(test), inline(always))]
+    #[inline]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
       fmt::Display::fmt(self, f)
     }
   }
 
   impl DisplayHuman for HipByt<'_> {
-    #[cfg_attr(test, inline)]
-    #[cfg_attr(not(test), inline(always))]
+    #[inline]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
       DisplayHuman::fmt(self.as_ref(), f)
     }
@@ -302,7 +300,7 @@ const _: () = {
 pub struct HumanDisplay<'a, T: ?Sized>(&'a T);
 
 impl<T: DisplayHuman + ?Sized> core::fmt::Display for HumanDisplay<'_, T> {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.0.fmt(f)
   }

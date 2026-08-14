@@ -240,7 +240,7 @@ impl<S> Malformed<BooleanLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(10, 14));
   /// assert_eq!(error.knowledge(), Some(&BooleanLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn boolean(span: S) -> Self {
     Self::with_knowledge(span, BooleanLiteral(()))
   }
@@ -258,7 +258,7 @@ impl<S> Malformed<NullLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(20, 24));
   /// assert_eq!(error.knowledge(), Some(&NullLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn null(span: S) -> Self {
     Self::with_knowledge(span, NullLiteral(()))
   }
@@ -276,7 +276,7 @@ impl<S> Malformed<EnumLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(30, 40));
   /// assert_eq!(error.knowledge(), Some(&EnumLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn enumeration(span: S) -> Self {
     Self::with_knowledge(span, EnumLiteral(()))
   }
@@ -294,7 +294,7 @@ impl<S> Malformed<EnumValueLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(45, 49));
   /// assert_eq!(error.knowledge(), Some(&EnumValueLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn enum_value(span: S) -> Self {
     Self::with_knowledge(span, EnumValueLiteral(()))
   }
@@ -312,7 +312,7 @@ impl<S> Malformed<DecimalLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(150, 160));
   /// assert_eq!(error.knowledge(), Some(&DecimalLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn decimal(span: S) -> Self {
     Self::with_knowledge(span, DecimalLiteral(()))
   }
@@ -330,7 +330,7 @@ impl<S> Malformed<OctalLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(50, 60));
   /// assert_eq!(error.knowledge(), Some(&OctalLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn octal(span: S) -> Self {
     Self::with_knowledge(span, OctalLiteral(()))
   }
@@ -348,7 +348,7 @@ impl<S> Malformed<StringLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(70, 80));
   /// assert_eq!(error.knowledge(), Some(&StringLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn string(span: S) -> Self {
     Self::with_knowledge(span, StringLiteral(()))
   }
@@ -366,7 +366,7 @@ impl<S> Malformed<HexLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(90, 100));
   /// assert_eq!(error.knowledge(), Some(&HexLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn hex(span: S) -> Self {
     Self::with_knowledge(span, HexLiteral(()))
   }
@@ -384,7 +384,7 @@ impl<S> Malformed<IntLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(105, 110));
   /// assert_eq!(error.knowledge(), Some(&IntLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn int(span: S) -> Self {
     Self::with_knowledge(span, IntLiteral(()))
   }
@@ -402,7 +402,7 @@ impl<S> Malformed<BinaryLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(115, 120));
   /// assert_eq!(error.knowledge(), Some(&BinaryLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn binary(span: S) -> Self {
     Self::with_knowledge(span, BinaryLiteral(()))
   }
@@ -420,7 +420,7 @@ impl<S> Malformed<FloatLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(125, 130));
   /// assert_eq!(error.knowledge(), Some(&FloatLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn float(span: S) -> Self {
     Self::with_knowledge(span, FloatLiteral(()))
   }
@@ -438,7 +438,7 @@ impl<S> Malformed<HexFloatLiteral, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(135, 140));
   /// assert_eq!(error.knowledge(), Some(&HexFloatLiteral::default()));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn hex_float(span: S) -> Self {
     Self::with_knowledge(span, HexFloatLiteral(()))
   }
@@ -456,7 +456,7 @@ impl<Knowledge, S> Malformed<Knowledge, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(10, 15));
   /// assert_eq!(error.knowledge(), None);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: S) -> Self {
     Self {
       span,
@@ -474,7 +474,7 @@ impl<Knowledge, S> Malformed<Knowledge, S> {
   /// let error = Malformed::with_knowledge(SimpleSpan::new(5, 10), IntLiteral::default());
   /// assert_eq!(error.knowledge().is_some(), true);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn with_knowledge(span: S, knowledge: Knowledge) -> Self {
     Self {
       span,
@@ -492,7 +492,7 @@ impl<Knowledge, S> Malformed<Knowledge, S> {
   /// let error: Malformed<()> = Malformed::new(SimpleSpan::new(20, 25));
   /// assert_eq!(error.span(), SimpleSpan::new(20, 25));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -501,13 +501,13 @@ impl<Knowledge, S> Malformed<Knowledge, S> {
   }
 
   /// Returns a reference to the span of the malformed construct.
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &S {
     &self.span
   }
 
   /// Returns a mutable reference to the span of the malformed construct.
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> &mut S {
     &mut self.span
   }
@@ -522,7 +522,7 @@ impl<Knowledge, S> Malformed<Knowledge, S> {
   /// let error = Malformed::float(SimpleSpan::new(10, 15));
   /// assert!(error.knowledge().is_some());
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn knowledge(&self) -> Option<&Knowledge> {
     self.knowledge.as_ref()
   }
@@ -539,7 +539,7 @@ impl<Knowledge, S> Malformed<Knowledge, S> {
   /// assert_eq!(span, SimpleSpan::new(15, 20));
   /// assert_eq!(knowledge, None);
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (S, Option<Knowledge>) {
     (self.span, self.knowledge)
   }
@@ -559,7 +559,7 @@ impl<Knowledge, S> Malformed<Knowledge, S> {
   /// error.bump(&100);
   /// assert_eq!(error.span(), SimpleSpan::new(110, 115));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &S::Offset) -> &mut Self
   where
     S: Span,

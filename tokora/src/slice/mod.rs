@@ -164,7 +164,7 @@ impl Slice<'_> for str {
     self.char_indices()
   }
 
-  #[inline(always)]
+  #[inline]
   fn len(&self) -> usize {
     <str>::len(self)
   }
@@ -434,7 +434,7 @@ impl<D, Src> core::fmt::Display for Sliced<D, Src>
 where
   D: core::fmt::Display,
 {
-  #[inline(always)]
+  #[inline]
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.data.fmt(f)
   }

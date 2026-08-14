@@ -183,7 +183,7 @@ impl<Knowledge, S> Unterminated<Knowledge, S> {
   /// assert_eq!(error.span(), SimpleSpan::new(5, 7));
   /// assert_eq!(error.knowledge(), "spread operator");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn new(span: S, knowledge: Knowledge) -> Self {
     Self { span, knowledge }
   }
@@ -200,7 +200,7 @@ impl<Knowledge, S> Unterminated<Knowledge, S> {
   /// let error = Unterminated::new(SimpleSpan::new(10, 11), "logical AND");
   /// assert_eq!(error.span(), SimpleSpan::new(10, 11));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn span(&self) -> S
   where
     S: Copy,
@@ -209,13 +209,13 @@ impl<Knowledge, S> Unterminated<Knowledge, S> {
   }
 
   /// Returns a reference to the span of the incomplete sequence.
-  #[inline(always)]
+  #[inline]
   pub const fn span_ref(&self) -> &S {
     &self.span
   }
 
   /// Returns a mutable reference to the span of the incomplete sequence.
-  #[inline(always)]
+  #[inline]
   pub const fn span_mut(&mut self) -> &mut S {
     &mut self.span
   }
@@ -230,7 +230,7 @@ impl<Knowledge, S> Unterminated<Knowledge, S> {
   /// let error = Unterminated::new(SimpleSpan::new(5, 7), "spread operator");
   /// assert_eq!(error.knowledge_ref(), &"spread operator");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn knowledge_ref(&self) -> &Knowledge {
     &self.knowledge
   }
@@ -247,7 +247,7 @@ impl<Knowledge, S> Unterminated<Knowledge, S> {
   /// let error = Unterminated::new(SimpleSpan::new(5, 7), "spread operator");
   /// assert_eq!(error.knowledge(), "spread operator");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub const fn knowledge(&self) -> Knowledge
   where
     Knowledge: Copy,
@@ -270,7 +270,7 @@ impl<Knowledge, S> Unterminated<Knowledge, S> {
   /// error.bump(&100);
   /// assert_eq!(error.span(), SimpleSpan::new(105, 107));
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn bump(&mut self, offset: &S::Offset) -> &mut Self
   where
     S: Span,
@@ -291,7 +291,7 @@ impl<Knowledge, S> Unterminated<Knowledge, S> {
   /// assert_eq!(span, SimpleSpan::new(10, 12));
   /// assert_eq!(knowledge, "escape sequence");
   /// ```
-  #[inline(always)]
+  #[inline]
   pub fn into_components(self) -> (S, Knowledge) {
     (self.span, self.knowledge)
   }
