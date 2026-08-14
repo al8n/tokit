@@ -161,14 +161,14 @@ pub struct Keyword<S: ?Sized, Span = SimpleSpan, Lang: ?Sized = ()> {
 }
 
 impl<S, Span, Lang: ?Sized> From<Keyword<S, Span, Lang>> for super::Ident<S, Span, Lang> {
-  #[inline]
+  #[inline(always)]
   fn from(keyword: Keyword<S, Span, Lang>) -> Self {
     Self::new(keyword.span, keyword.ident)
   }
 }
 
 impl<S: ?Sized, Span, Lang: ?Sized> AsSpan<Span> for Keyword<S, Span, Lang> {
-  #[inline]
+  #[inline(always)]
   fn as_span(&self) -> &Span {
     self.span_ref()
   }
@@ -177,7 +177,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> AsSpan<Span> for Keyword<S, Span, Lang> {
 impl<S, Span, Lang: ?Sized> IntoComponents for Keyword<S, Span, Lang> {
   type Components = (Span, S);
 
-  #[inline]
+  #[inline(always)]
   fn into_components(self) -> Self::Components {
     (self.span, self.ident)
   }
@@ -204,7 +204,7 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   /// assert_eq!(ident.span(), span);
   /// assert_eq!(ident.source_ref(), &"count");
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn new(span: Span, source: S) -> Self {
     Self {
       span,
@@ -227,7 +227,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   ///
   /// assert_eq!(ident.span(), SimpleSpan::new(5, 10));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn span(&self) -> Span
   where
     Span: Copy,
@@ -250,7 +250,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   /// let span_ref = ident.span_ref();
   /// assert_eq!(*span_ref, SimpleSpan::new(0, 3));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn span_ref(&self) -> &Span {
     &self.span
   }
@@ -271,7 +271,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   /// *ident.span_mut() = SimpleSpan::new(10, 13);
   /// assert_eq!(ident.span(), SimpleSpan::new(10, 13));
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn span_mut(&mut self) -> &mut Span {
     &mut self.span
   }
@@ -292,7 +292,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   /// *ident.source_mut() = "bar".to_string();
   /// assert_eq!(ident.source_ref(), "bar");
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn source_mut(&mut self) -> &mut S {
     &mut self.ident
   }
@@ -313,7 +313,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   /// assert_eq!(ident.source_ref(), &"variable");
   /// assert_eq!(ident.source_ref().len(), 8);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn source_ref(&self) -> &S {
     &self.ident
   }
@@ -342,7 +342,7 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   /// // ident is still usable
   /// assert_eq!(ident.source_ref(), &"id");
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn source(&self) -> S
   where
     S: Copy,
@@ -351,7 +351,7 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   }
 
   /// Consumes the identifier and returns the span and source string.
-  #[inline]
+  #[inline(always)]
   pub fn into_components(self) -> (Span, S) {
     (self.span, self.ident)
   }

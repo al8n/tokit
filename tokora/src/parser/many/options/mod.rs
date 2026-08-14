@@ -25,13 +25,13 @@ impl Maximum {
   pub const MAX: Self = Self::new(usize::MAX);
 
   /// Creates a new `Maximum`.
-  #[inline]
+  #[inline(always)]
   pub const fn new(n: usize) -> Self {
     Self(n)
   }
 
   /// Returns the maximum number of elements allowed.
-  #[inline]
+  #[inline(always)]
   pub const fn get(&self) -> usize {
     self.0
   }
@@ -46,13 +46,13 @@ impl Minimum {
   pub const MIN: Self = Self::new(0);
 
   /// Creates a new `Minimum`.
-  #[inline]
+  #[inline(always)]
   pub const fn new(n: usize) -> Self {
     Self(n)
   }
 
   /// Returns the minimum number of elements required.
-  #[inline]
+  #[inline(always)]
   pub const fn get(&self) -> usize {
     self.0
   }

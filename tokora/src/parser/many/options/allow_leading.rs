@@ -8,13 +8,13 @@ pub struct AllowLeading<P> {
 
 impl<P> AllowLeading<P> {
   /// Creates a new `AllowLeading` parser that allows leading separators.
-  #[inline]
+  #[inline(always)]
   pub const fn new(parser: P) -> Self {
     Self { parser }
   }
 
   /// Sets the parser to allow trailing separators.
-  #[inline]
+  #[inline(always)]
   pub fn allow_trailing(self) -> AllowLeading<AllowTrailing<P>> {
     AllowLeading {
       parser: AllowTrailing {
@@ -24,7 +24,7 @@ impl<P> AllowLeading<P> {
   }
 
   /// Sets the parser to allow trailing separators.
-  #[inline]
+  #[inline(always)]
   pub fn require_trailing(self) -> AllowLeading<RequireTrailing<P>> {
     AllowLeading {
       parser: RequireTrailing {
@@ -34,7 +34,7 @@ impl<P> AllowLeading<P> {
   }
 
   /// Sets the maximum number of elements to parse.
-  #[inline]
+  #[inline(always)]
   pub fn at_most(self, maximum: usize) -> AllowLeading<AtMost<P>> {
     AllowLeading {
       parser: AtMost::new(self.parser, maximum),
@@ -42,7 +42,7 @@ impl<P> AllowLeading<P> {
   }
 
   /// Sets the minimum number of elements to parse.
-  #[inline]
+  #[inline(always)]
   pub fn at_least(self, minimum: usize) -> AllowLeading<AtLeast<P>> {
     AllowLeading {
       parser: AtLeast::new(self.parser, minimum),
@@ -50,7 +50,7 @@ impl<P> AllowLeading<P> {
   }
 
   /// Sets both the minimum and maximum number of elements to parse.
-  #[inline]
+  #[inline(always)]
   pub fn bounded(self, minimum: usize, maximum: usize) -> AllowLeading<Bounded<P>> {
     AllowLeading {
       parser: Bounded::new(self.parser, maximum, minimum),
@@ -58,7 +58,7 @@ impl<P> AllowLeading<P> {
   }
 
   /// Returns a mutable reference to the inner parser.
-  #[inline]
+  #[inline(always)]
   pub const fn parser_mut(&mut self) -> &mut P {
     &mut self.parser
   }
@@ -66,7 +66,7 @@ impl<P> AllowLeading<P> {
   define_many_delimited_methods!();
 
   /// Returns a mutable reference to the `AllowLeading` parser wrapping the inner parser.
-  #[inline]
+  #[inline(always)]
   pub const fn as_mut(&mut self) -> AllowLeading<&mut P> {
     AllowLeading {
       parser: &mut self.parser,
@@ -74,7 +74,7 @@ impl<P> AllowLeading<P> {
   }
 
   /// Maps the inner parser to a new parser using the given function.
-  #[inline]
+  #[inline(always)]
   pub fn map_parser_mut<'a, F, NP>(&'a mut self, f: F) -> AllowLeading<NP>
   where
     F: FnOnce(&'a mut P) -> NP,

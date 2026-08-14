@@ -55,7 +55,7 @@ pub trait Slice<'source>: PartialEq + Eq + core::fmt::Debug + 'source {
   fn len(&self) -> usize;
 
   /// Returns `true` if the slice is empty.
-  #[inline]
+  #[inline(always)]
   fn is_empty(&self) -> bool {
     self.len() == 0
   }
@@ -78,7 +78,7 @@ where
   where
     Self: 'a;
 
-  #[inline]
+  #[inline(always)]
   fn iter<'a>(&'a self) -> Self::Iter<'a>
   where
     Self: 'a,
@@ -86,7 +86,7 @@ where
     <T as Slice<'source>>::iter(*self)
   }
 
-  #[inline]
+  #[inline(always)]
   fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
   where
     Self: 'a,
@@ -94,7 +94,7 @@ where
     <T as Slice<'source>>::positioned_iter(*self)
   }
 
-  #[inline]
+  #[inline(always)]
   fn len(&self) -> usize {
     <T as Slice<'source>>::len(*self)
   }
@@ -408,7 +408,7 @@ pub struct Sliced<D, Src = ()> {
 }
 
 impl<D, Src> AsRef<Src> for Sliced<D, Src> {
-  #[inline]
+  #[inline(always)]
   fn as_ref(&self) -> &Src {
     self.slice_ref()
   }
@@ -417,14 +417,14 @@ impl<D, Src> AsRef<Src> for Sliced<D, Src> {
 impl<D, Src> core::ops::Deref for Sliced<D, Src> {
   type Target = D;
 
-  #[inline]
+  #[inline(always)]
   fn deref(&self) -> &Self::Target {
     &self.data
   }
 }
 
 impl<D, Src> core::ops::DerefMut for Sliced<D, Src> {
-  #[inline]
+  #[inline(always)]
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.data
   }
@@ -450,7 +450,7 @@ where
 impl<D, Src> IntoComponents for Sliced<D, Src> {
   type Components = (Src, D);
 
-  #[inline]
+  #[inline(always)]
   fn into_components(self) -> Self::Components {
     (self.slice, self.data)
   }
@@ -458,7 +458,7 @@ impl<D, Src> IntoComponents for Sliced<D, Src> {
 
 impl<D, Src> Sliced<D, Src> {
   /// Create a new sliced value.
-  #[inline]
+  #[inline(always)]
   pub const fn new(slice: Src, data: D) -> Self {
     Self { slice, data }
   }
@@ -473,7 +473,7 @@ impl<D, Src> Sliced<D, Src> {
   /// let sliced = Sliced::new("file.rs", "data");
   /// assert_eq!(sliced.slice(), "file.rs");
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn slice(&self) -> Src
   where
     Src: Copy,
@@ -491,7 +491,7 @@ impl<D, Src> Sliced<D, Src> {
   /// let sliced = Sliced::new("config.toml", "data");
   /// assert_eq!(sliced.slice_ref(), &"config.toml");
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn slice_ref(&self) -> &Src {
     &self.slice
   }
@@ -507,7 +507,7 @@ impl<D, Src> Sliced<D, Src> {
   /// *sliced.slice_mut() = "new.txt";
   /// assert_eq!(sliced.slice(), "new.txt");
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn slice_mut(&mut self) -> &mut Src {
     &mut self.slice
   }
@@ -522,7 +522,7 @@ impl<D, Src> Sliced<D, Src> {
   /// let sliced = Sliced::new("file.txt", 42);
   /// assert_eq!(*sliced.data(), 42);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn data(&self) -> &D {
     &self.data
   }
@@ -538,7 +538,7 @@ impl<D, Src> Sliced<D, Src> {
   /// *sliced.data_mut() = 100;
   /// assert_eq!(*sliced.data(), 100);
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn data_mut(&mut self) -> &mut D {
     &mut self.data
   }
@@ -554,7 +554,7 @@ impl<D, Src> Sliced<D, Src> {
   /// let borrowed: Sliced<&String, &String> = sliced.as_ref();
   /// assert_eq!(borrowed.data(), &"hello");
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn as_ref(&self) -> Sliced<&D, &Src> {
     Sliced {
       slice: &self.slice,
@@ -574,7 +574,7 @@ impl<D, Src> Sliced<D, Src> {
   /// borrowed.data_mut().push_str(" world");
   /// assert_eq!(sliced.data(), &"hello world");
   /// ```
-  #[inline]
+  #[inline(always)]
   pub const fn as_mut(&mut self) -> Sliced<&mut D, &mut Src> {
     Sliced {
       slice: &mut self.slice,
@@ -583,19 +583,19 @@ impl<D, Src> Sliced<D, Src> {
   }
 
   /// Consume the sliced value and return the slice.
-  #[inline]
+  #[inline(always)]
   pub fn into_slice(self) -> Src {
     self.slice
   }
 
   /// Consume the sliced value and return the data.
-  #[inline]
+  #[inline(always)]
   pub fn into_data(self) -> D {
     self.data
   }
 
   /// Decompose the sliced value into its slice and data.
-  #[inline]
+  #[inline(always)]
   pub fn into_components(self) -> (Src, D) {
     (self.slice, self.data)
   }

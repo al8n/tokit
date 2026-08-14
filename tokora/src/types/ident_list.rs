@@ -34,7 +34,7 @@ pub struct IdentList<S, Span, Container, Lang: ?Sized = ()> {
 }
 
 impl<S, Span, Container, Lang: ?Sized> AsSpan<Span> for IdentList<S, Span, Container, Lang> {
-  #[inline]
+  #[inline(always)]
   fn as_span(&self) -> &Span {
     self.span_ref()
   }
@@ -71,7 +71,7 @@ impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
 
 impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
   /// Create a new path.
-  #[inline]
+  #[inline(always)]
   pub const fn new(span: Span, identifiers: Container) -> Self {
     Self {
       span,
@@ -82,7 +82,7 @@ impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
   }
 
   /// Get the span of the path.
-  #[inline]
+  #[inline(always)]
   pub const fn span(&self) -> Span
   where
     Span: Copy,
@@ -91,13 +91,13 @@ impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
   }
 
   /// Get the reference to the span of the path.
-  #[inline]
+  #[inline(always)]
   pub const fn span_ref(&self) -> &Span {
     &self.span
   }
 
   /// Get the mutable reference to the span of the path.
-  #[inline]
+  #[inline(always)]
   pub const fn span_mut(&mut self) -> &mut Span {
     &mut self.span
   }
@@ -117,13 +117,13 @@ impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
   }
 
   /// Get the identifiers of the path.
-  #[inline]
+  #[inline(always)]
   pub const fn identifiers(&self) -> &Container {
     &self.identifiers
   }
 
   /// Returns the slice of the path identifiers.
-  #[inline]
+  #[inline(always)]
   pub fn identifiers_slice(&self) -> &[Ident<S, Span, Lang>]
   where
     Container: AsRef<[Ident<S, Span, Lang>]>,
@@ -132,7 +132,7 @@ impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
   }
 
   /// Returns `true` if the path has no identifiers.
-  #[inline]
+  #[inline(always)]
   pub fn is_empty(&self) -> bool
   where
     Container: AsRef<[Ident<S, Span, Lang>]>,
