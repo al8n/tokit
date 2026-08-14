@@ -283,7 +283,57 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// pattern is a proper prefix of another** — `[0-9]+` beside `[0-9]+\.[0-9]+`, an integer beside
   /// a float or an exponent literal — because the engine probes into the longer pattern and then
   /// backtracks to the accepting prefix. It is a claim about the generated DFA, not only about
-  /// callbacks, and the `conformance` kit's `run_partial` check is what falsifies a wrong one.
+  /// callbacks.
+  ///
+  /// ## What a false `SpanEnd` costs, and why nothing at run time refuses it
+  ///
+  /// Requiring the const catches **omission**. A *mistaken value* is ordinary safe code with no
+  /// fail-closed guard, so it is worth being exact about what it buys and what stops it.
+  ///
+  /// The cost, on the two-rule vocabulary above declared `SpanEnd` and driven
+  /// [`Partial`](crate::input::Partial) non-final over the buffer `"1."`: `logos` probes into the
+  /// float arm, finds no byte at offset 2, backtracks to the accepting prefix and emits
+  /// `Int@0..1`. The adapter answers `SpanEnd`, the driver's effective frontier is
+  /// `max(1, 1) = 1`, and `1 < 2` **commits** it. Append `"5"`: the complete parse of `"1.5"` is
+  /// `Float@0..3`. The chunked parse and the single-shot parse now disagree — silently, with no
+  /// panic, no diagnostic and no [`Incomplete`](crate::error::Incomplete), which is the
+  /// unspecified-but-bounded posture the rest of this trait's contracts carry.
+  ///
+  /// **The adapter cannot check the claim, and the missing frontier is only half the reason.**
+  /// `logos` does not expose one: `span`, `slice`, `remainder`, `source` and `bump` are the whole
+  /// public `Lexer` surface on 0.14, 0.15 and 0.16 alike, `token_start`/`token_end` are private,
+  /// and the DFA's read path (`logos::internal::LexerInternal`) is `#[doc(hidden)]`, documented as
+  /// not for use outside the derive's output, takes `&self` and records nothing — reached through
+  /// `Logos::lex(&mut Lexer<'source, Self>)`, a **concrete** lexer for which no adapter can
+  /// substitute an instrumented one. But a complete read log would not settle it either. The
+  /// question is not *which offsets were read*; it is *would a byte appended at the buffer end
+  /// change this item* — and the falsifying input is *longer than the buffer*, which at the moment
+  /// [`read_frontier`](crate::Lexer::read_frontier) is asked is where the stream ends. The one
+  /// self-check available from the bytes in hand — re-lex `source[..span.end]` and see whether the
+  /// rest mattered — returns the same `Int@0..1` and **certifies the lie**. No run-time guard can
+  /// exist here, because the evidence does not.
+  ///
+  /// ## Discharging the claim: the partial tier is the auditor
+  ///
+  /// It is discharged by test, against a corpus that *does* contain the longer input. The
+  /// `conformance` kit's `run_partial` check drives every split point of every source and requires
+  /// each non-final prefix drain to be a **prefix of** the complete items ending before the cut.
+  /// The committed `Int@0..1` is an item the complete parse of `"1.5"` does not have before offset
+  /// 2, so the run panics, tagged `partial-equivalence`, naming the split. The crate pins this on
+  /// a fixture that lies on purpose —
+  /// `conformance::tests::prefix_backtracking::a_span_end_claim_over_a_float_vocabulary_is_falsified`,
+  /// `LyingNum`'s `SpanEnd` over a float vocabulary — with an exponent twin beside it and a passing
+  /// control at `Unbounded`.
+  ///
+  /// **That tier audits a corpus, not a vocabulary**, and the difference is the obligation this
+  /// claim really carries. It can only observe a divergence some source in the corpus produces:
+  /// over `["1.5"]` the lie is caught at split 2, and over `["1."]` **alone the same lie passes**,
+  /// because the complete parse of `"1."` also begins `Int@0..1` and the prefix drain is a faithful
+  /// prefix of it. So writing `SpanEnd` obliges you to more than running the kit: for every pair of
+  /// rules where one pattern is a proper prefix of another, the corpus needs a source on which the
+  /// **longer** rule wins. That is the source a truncation has something to diverge from. If you
+  /// cannot enumerate those pairs for your vocabulary, you have not audited the DFA, and
+  /// [`Unbounded`](crate::ReadFrontierClass::Unbounded) is the value that is true anyway.
   ///
   /// [`Unbounded`](crate::ReadFrontierClass::Unbounded) is the answer that is always sound and is
   /// never precise. It remains the right value for a vocabulary whose DFA you have not audited —
