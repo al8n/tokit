@@ -3,6 +3,10 @@
   any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
 ))]
 
+/// Whether this process's local addresses may be read as native stack offsets. Shared because the
+/// two probes that difference addresses had a copy each, and both copies had the same defect.
+pub mod native_stack;
+
 /// Shared test infrastructure: lexer, token types, and trait impls.
 ///
 /// All integration tests import this module via `mod common;`.

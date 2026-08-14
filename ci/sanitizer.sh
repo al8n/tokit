@@ -35,23 +35,37 @@ SANITIZERS="${2:-address thread}"
 
 export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
 
-# ## Telling the tests they are instrumented
+# ## Telling the tests they are instrumented — no longer this variable's job alone
 #
-# One test — `pratt_limit_unit_sink`'s unwind cell — corroborates the library's recursion-depth
-# accounting against the *machine*, by comparing the addresses of two stack locals. That
-# comparison is only a measurement while the addresses are native stack offsets, and under a
-# sanitizer they are not: ASan can relocate a frame's locals onto a heap-allocated fake stack, so
-# the recoverer measured DEEPER than the descent it had already unwound past. Inverted operands,
-# not a tight margin — no threshold rescues it.
+# Two tests compare the addresses of stack locals: `pratt_limit_unit_sink`'s unwind cell, which
+# corroborates the library's recursion-depth accounting against the *machine*, and
+# `stack_per_level`, which reports bytes of stack per nesting level. Both readings hold only while
+# the addresses are native stack offsets, and under a sanitizer they are not — ASan can relocate a
+# frame's locals onto a heap-allocated fake stack, so the recoverer measures DEEPER than the
+# descent it had already unwound past. Inverted operands, not a tight margin; no threshold rescues
+# it.
 #
-# There is no stable `cfg` for "am I instrumented": `cfg(sanitize = "address")` needs
-# `feature(cfg_sanitize)`, and an integration test compiled on stable cannot carry a feature gate.
-# So the leg announces itself in the environment and the test reads it at run time. Exported
-# INSIDE the loop, and with `${san}` rather than a constant, so it covers every sanitizer this
-# script runs and names which one in the skip line the test prints.
+# This export used to be the ONLY signal, and that was wrong in the direction that matters:
+# nothing but this script sets it, so `RUSTFLAGS=-Zsanitizer=address cargo test` — the way anyone
+# would actually reach for a sanitizer — left it unset and both tests took the native-stack path
+# inside a genuinely instrumented process. Watched: `stack_per_level` printed
+# `combinator 4096 B, separated 6144 B` (ASan fake-stack size classes) as frame sizes, and
+# `pratt_limit_unit_sink` FAILED on the inverted operands.
 #
-# It gates exactly one assertion. The depth-cell assertions stay live under every sanitizer, and
-# the skipped one is announced loudly on stderr rather than quietly passing.
+# `tokora/build.rs` now asks the compiler — `rustc --print cfg` with this build's rustflags — and
+# records `sanitize=`, which is the fact `cfg(sanitize = "address")` would give if a
+# stable-compiled integration test could carry `feature(cfg_sanitize)`. On top of that,
+# `tests/common/native_stack.rs` observes directly whether sequential calls reuse a frame, and
+# refuses to print a figure at all unless `TOKORA_STACK_PROBE=native` affirms an uninstrumented
+# build.
+#
+# So this stays as one signal among several — the one that survives a route `build.rs` cannot see,
+# such as a flag injected by a `RUSTC_WRAPPER`. Exported INSIDE the loop, and with `${san}` rather
+# than a constant, so it covers every sanitizer this script runs and names which one in the skip
+# line the test prints.
+#
+# It gates the two address comparisons and nothing else. The depth-cell assertions stay live under
+# every sanitizer, and a skipped one is announced loudly on stderr rather than quietly passing.
 for san in $SANITIZERS; do
   echo "=== sanitizer: ${san} on ${TARGET} ==="
   export TOKORA_SANITIZER="${san}"

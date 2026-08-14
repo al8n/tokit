@@ -36,7 +36,14 @@
 //! rather than reports whenever the address sequence is not a native frame chain. A measurement
 //! harness that cannot fail is not a measurement; the first version of this file differenced
 //! with `saturating_sub`, which turns every layout it does not model into a printed `0 B`.
-//! Run with `--nocapture` to see the numbers.
+//!
+//! **The figures are opt-in.** `TOKORA_STACK_PROBE=native cargo test … -- --nocapture` prints
+//! them; without that variable the parse is still checked and no number is produced. Nothing a
+//! stable-compiled integration test can read proves the absence of instrumentation, and this file
+//! previously treated that absence of proof as proof of absence: under
+//! `RUSTFLAGS=-Zsanitizer=address` with `detect_stack_use_after_return=1` it printed
+//! `combinator 4096 B, separated 6144 B, hand-written 256 B` — ASan fake-stack size classes,
+//! reported as bytes of stack per nesting level.
 
 mod common;
 
@@ -79,60 +86,23 @@ fn take_marks() -> Vec<usize> {
   MARKS.with(|m| core::mem::take(&mut *m.borrow_mut()))
 }
 
-/// This build's reason that the address of a local is **not** a position on a native stack, if
-/// it has one.
+/// This build's reason that the address of a local is **not** a position on a native stack, if it
+/// has one — see [`common::native_stack`], which both address-differencing probes now share.
 ///
-/// Two instrumentations break the reading, and neither can be tuned around:
-///
-/// * **Miri** interprets the program, so a frame's locals are a virtual allocation rather than
-///   an offset into any real stack. `cfg!(miri)` is set for the interpreted build and is the
-///   stable spelling.
-/// * **A sanitizer** may relocate a frame's locals onto a heap-allocated *fake stack* — ASan's
-///   `detect_stack_use_after_return` machinery. There is no stable `cfg` to test:
-///   `cfg(sanitize = "address")` needs `feature(cfg_sanitize)`, which a stable-compiled
-///   integration test cannot carry. So the leg announces itself instead — `ci/sanitizer.sh`
-///   exports `TOKORA_SANITIZER` for every sanitizer it runs and its command is
-///   `cargo test --tests --all-features`, which SELECTS this file. Read at run time rather than
-///   through `option_env!`, so a cached build cannot carry a stale answer either way.
-///   `tests/pratt_limit_unit_sink.rs` gates its own address witness on the same variable.
-///
-/// This matters more here than a `cfg` would suggest. [`per_level`]'s own checks cannot tell a
-/// fake stack from a real one: allocations handed out monotonically with a constant stride pass
-/// the ordering check and the nonzero check, and the harness would then print allocation
-/// spacing as bytes per nesting level. A probe that prints a plausible number in an environment
-/// it cannot measure is the defect this probe was added to remove, one level up.
-///
-/// The argument is the environment's value rather than a read inside the body, so the refusal
-/// path has a positive control that does not have to mutate the process environment.
-fn frames_are_relocated(sanitizer: Option<&str>) -> Option<String> {
-  if cfg!(miri) {
-    return Some(String::from(
-      "miri: frame locals are separate virtual allocations, not offsets into a contiguous \
-       native stack, so their differences are allocation spacing",
-    ));
-  }
-  match sanitizer {
-    Some(san) if !san.is_empty() => Some(format!(
-      "TOKORA_SANITIZER={san}: a sanitizer-instrumented build may relocate a frame's locals onto \
-       a heap-backed fake stack, so the address of a local is not where its frame sits"
-    )),
-    _ => None,
-  }
-}
-
-/// [`frames_are_relocated`] against the real environment.
+/// The reading needs a native stack, and this file cannot tell a fake one from a real one on its
+/// own: allocations handed out monotonically with a constant stride pass [`per_level`]'s ordering
+/// check and its nonzero check alike, and the harness would then print allocation spacing as bytes
+/// per nesting level. So the question is settled before the samples are read, and settled by the
+/// **absence of a positive statement** rather than the absence of a signal: what this file used to
+/// do was read `TOKORA_SANITIZER`, which nothing but `ci/sanitizer.sh` exports, so a direct
+/// `RUSTFLAGS=-Zsanitizer=address cargo test` printed a fake stack's spacing as a frame size.
 fn relocation_reason() -> Option<String> {
-  frames_are_relocated(std::env::var("TOKORA_SANITIZER").ok().as_deref())
+  common::native_stack::measurement_refusal_here()
 }
 
 /// Says — on the process's **real** stderr — that no figure was produced and why.
-///
-/// Not `eprintln!`: libtest captures a passing test's output, so the one run where the
-/// measurement is skipped would be the one run where nobody can see that it was.
 fn announce_skipped(why: &str) {
-  use std::io::Write as _;
-  let mut err = std::io::stderr().lock();
-  let _ = writeln!(err, "stack_per_level: NO MEASUREMENT TAKEN — {why}");
+  common::native_stack::announce_skipped("stack_per_level", why);
 }
 
 /// The per-level cost, taken as the median of the consecutive differences so that one
@@ -144,9 +114,9 @@ fn announce_skipped(why: &str) {
 /// nothing in the type system says the samples came from one. Each way they might not be is
 /// rejected rather than reported, and the order of the checks is load-bearing:
 ///
-/// - **The environment relocates frames.** [`frames_are_relocated`] first, before anything is
-///   read out of the samples, because a fake stack can produce samples that pass every check
-///   below.
+/// - **The build relocates frames, or cannot be shown not to.** [`relocation_reason`] first,
+///   before anything is read out of the samples, because a fake stack can produce samples that
+///   pass every check below.
 /// - **A delta is zero.** Every level here is a real recursive call, so a zero means the
 ///   samples are not measuring what the caller thinks. This is checked BEFORE direction: under
 ///   the strict `>` / `<` this file used to carry, a repeated address failed the ordering check
@@ -575,7 +545,10 @@ fn per_nesting_level_stack_cost() {
 /// `saturating_sub` and printed `0 B` for every layout it did not model, and the fix that
 /// replaced it carried two assertions that no input could reach.
 mod refusals {
-  use super::{frames_are_relocated, per_level_with};
+  use super::common::native_stack::{
+    ANNOUNCE, OPT_IN, StackEvidence, frames_reused, instrumentation_refusal, measurement_refusal,
+  };
+  use super::per_level_with;
 
   /// Innermost frame at the lowest address — the common layout.
   #[test]
@@ -628,21 +601,136 @@ mod refusals {
   fn refuses_relocated_frames() {
     // Samples that would otherwise pass every check — a fake stack can look exactly like this.
     per_level_with(
-      frames_are_relocated(Some("address")),
+      measurement_refusal(StackEvidence {
+        compiler_sanitizers: Some("address"),
+        ..StackEvidence::native()
+      }),
       &[9000, 8000, 7000, 6000],
     );
   }
 
+  /// Each detector, one at a time, against an otherwise all-clear build.
+  ///
+  /// `StackEvidence::native()` is the all-clear, so every case below differs from a measurable
+  /// build in exactly one field and the assertion names which one.
   #[test]
-  fn sanitizer_variable_is_read_as_presence() {
-    assert!(frames_are_relocated(Some("address")).is_some());
-    assert!(frames_are_relocated(Some("thread")).is_some());
-    // Unset and set-but-empty are the same thing, and neither is a sanitizer. Under Miri the
-    // detector fires on `cfg!(miri)` regardless, so it is the one build where these hold the
-    // other way.
-    if !cfg!(miri) {
-      assert!(frames_are_relocated(None).is_none());
-      assert!(frames_are_relocated(Some("")).is_none());
+  fn every_detector_refuses_on_its_own() {
+    let cases: [(&str, StackEvidence<'_>); 5] = [
+      (
+        "miri",
+        StackEvidence {
+          miri: true,
+          ..StackEvidence::native()
+        },
+      ),
+      (
+        "the compiler reports sanitize=address",
+        StackEvidence {
+          compiler_sanitizers: Some("address"),
+          ..StackEvidence::native()
+        },
+      ),
+      (
+        "the compiler would not report a cfg list",
+        StackEvidence {
+          build_flags_opaque: true,
+          ..StackEvidence::native()
+        },
+      ),
+      (
+        "TOKORA_SANITIZER=thread",
+        StackEvidence {
+          announced_sanitizer: Some("thread"),
+          ..StackEvidence::native()
+        },
+      ),
+      (
+        "frames are not reused",
+        StackEvidence {
+          frames_reused: false,
+          ..StackEvidence::native()
+        },
+      ),
+    ];
+    for (what, e) in cases {
+      assert!(
+        instrumentation_refusal(e).is_some(),
+        "{what} did not refuse an assertion"
+      );
+      assert!(
+        measurement_refusal(e).is_some(),
+        "{what} did not refuse a measurement"
+      );
     }
+    assert!(instrumentation_refusal(StackEvidence::native()).is_none());
+    assert!(measurement_refusal(StackEvidence::native()).is_none());
+  }
+
+  /// **The fix, as a control.** An unset affirmation refuses even when nothing was detected — the
+  /// case a direct `RUSTFLAGS=-Zsanitizer=address cargo test` used to take straight to a printed
+  /// number, because the only signal the probe read was one the compiler never sets.
+  #[test]
+  fn an_unaffirmed_build_takes_no_measurement() {
+    let unaffirmed = StackEvidence {
+      affirmed_native: false,
+      ..StackEvidence::native()
+    };
+    let why = measurement_refusal(unaffirmed).expect("an unaffirmed build must not be measured");
+    assert!(
+      why.contains(OPT_IN),
+      "the refusal must name {OPT_IN}: {why}"
+    );
+    // …and it refuses ONLY a measurement. An assertion that would fail loudly under a sanitizer
+    // must not be skipped merely because nobody set a variable.
+    assert!(instrumentation_refusal(unaffirmed).is_none());
+  }
+
+  /// The affirmation is not an override: a detected sanitizer still refuses, and the refusal names
+  /// the sanitizer rather than the missing variable.
+  #[test]
+  fn affirming_a_native_build_cannot_overrule_a_detected_sanitizer() {
+    let e = StackEvidence {
+      compiler_sanitizers: Some("address"),
+      affirmed_native: true,
+      ..StackEvidence::native()
+    };
+    let why = measurement_refusal(e).expect("an affirmed sanitizer build must not be measured");
+    assert!(why.contains("sanitize=address"), "{why}");
+    assert!(!why.contains(OPT_IN), "{why}");
+  }
+
+  /// Empty is not a sanitizer, and neither is unset: `ci/sanitizer.sh` exports a name for every
+  /// leg it runs, so an empty value is a variable someone cleared rather than a leg.
+  #[test]
+  fn an_empty_announcement_is_not_a_sanitizer() {
+    for value in [None, Some("")] {
+      let e = StackEvidence {
+        announced_sanitizer: value,
+        ..StackEvidence::native()
+      };
+      assert!(
+        instrumentation_refusal(e).is_none(),
+        "{value:?} was read as a sanitizer"
+      );
+    }
+  }
+
+  /// The one detector that observes rather than asks, run against this process.
+  ///
+  /// Under an uninstrumented build it must say frames ARE reused — otherwise the detector would
+  /// refuse every native run, which is a refusal nobody would keep. Under Miri, and under a
+  /// sanitizer with `detect_stack_use_after_return=1`, it says the opposite, and that is the
+  /// point: it is the leg that fires when instrumentation arrives by a route `build.rs` cannot
+  /// see.
+  #[test]
+  fn the_frame_reuse_detector_agrees_with_this_build() {
+    let instrumented = cfg!(miri)
+      || option_env!("TOKORA_BUILD_SANITIZERS").is_some()
+      || std::env::var(ANNOUNCE).is_ok_and(|v| !v.is_empty());
+    assert_eq!(
+      frames_reused(),
+      !instrumented,
+      "frames_reused() disagrees with what this build is (instrumented: {instrumented})"
+    );
   }
 }

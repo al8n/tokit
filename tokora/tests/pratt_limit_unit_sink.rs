@@ -405,36 +405,22 @@ fn distance_from_base() -> usize {
 }
 
 /// This build's reason that a raw address distance is **not** a measure of frame liveness, if it
-/// has one.
+/// has one — from `common::native_stack`, which `tests/stack_per_level.rs` shares.
 ///
 /// [`stack_mark`] reads the address of a local, and the cell below compares two of them. That
-/// comparison means something only while the addresses are native stack offsets. Two
-/// instrumentations break that, in different ways, and neither can be tuned around:
+/// comparison means something only while the addresses are native stack offsets — the same
+/// precondition the per-level probe needs, and which it decided with its own copy of this
+/// function. Both copies decided it from `TOKORA_SANITIZER`, a variable nothing but
+/// `ci/sanitizer.sh` exports, so a direct `RUSTFLAGS=-Zsanitizer=address cargo test` left it unset
+/// and both took the native-stack path inside a genuinely instrumented process. One copy now, and
+/// the compiler rather than a convention answers the question.
 ///
-/// * **miri** interprets the program. Its addresses are virtual allocation addresses handed out by
-///   the interpreter, not offsets into any real stack. `cfg!(miri)` is set for the interpreted
-///   build and is the stable spelling.
-/// * **A sanitizer** may relocate a frame's locals onto a heap-allocated *fake stack* — ASan's
-///   `detect_stack_use_after_return` machinery — so the address of a local is not where the frame
-///   physically sits. There is no stable `cfg` to test: `cfg(sanitize = "address")` requires
-///   `feature(cfg_sanitize)`, which a stable-compiled integration test cannot carry. So the leg
-///   announces itself instead — `ci/sanitizer.sh` exports `TOKORA_SANITIZER` for **every**
-///   sanitizer it runs, and this reads it at run time rather than through `option_env!`, so a
-///   cached build cannot carry a stale answer into an uninstrumented run or the reverse.
+/// **The detections only, not the affirmation.** The witness below is an assertion that fails
+/// loudly under a fake stack, not a figure that prints quietly, so making it wait for an operator
+/// to affirm a native build would skip a live assertion in every ordinary run — silent damage in
+/// the other direction. It is skipped on a positive finding and on nothing else.
 fn frames_are_relocated() -> Option<String> {
-  if cfg!(miri) {
-    return Some(String::from(
-      "miri: the interpreter hands out virtual allocation addresses, so the distance between two \
-       of them is not a native stack depth",
-    ));
-  }
-  match std::env::var("TOKORA_SANITIZER") {
-    Ok(san) if !san.is_empty() => Some(std::format!(
-      "TOKORA_SANITIZER={san}: a sanitizer-instrumented build may relocate a frame's locals onto a \
-       fake stack, so the address of a local is not where its frame sits"
-    )),
-    _ => None,
-  }
+  common::native_stack::instrumentation_refusal_here()
 }
 
 /// Says — on the process's **real** stderr — that the address-distance witness did not run.
