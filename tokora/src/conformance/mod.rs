@@ -118,6 +118,8 @@ use crate::{
 const DEFAULT_BUDGET_MULTIPLE: usize = 8;
 /// Floor added to the budget so a short source still has generous headroom.
 const BUDGET_FLOOR: usize = 64;
+/// Full re-lexing passes of a source one drain of it may cost. See [`lex_attempt_ceiling`].
+const ATTEMPTS_PER_DRAIN_MULTIPLE: usize = 4;
 
 /// A conformance harness that drives a [`Lexer`] implementation `L` against the lexer
 /// contract.
@@ -388,97 +390,307 @@ where
   }
 }
 
-/// A [`Lexer`] wrapper that bounds **lex attempts** rather than items — the anti-hang guard the
-/// kit's item budgets structurally cannot be.
+/// The **one** bound on raw lexing the kit has, and the invariant that says why it sits here.
 ///
-/// # `next()` is a loop, so a budget at its boundary does not bound it
+/// The counter lives in this private submodule so that its field is unreachable from the rest of
+/// the kit; [`LexTally`](tally::LexTally) is the type, re-exported below.
 ///
-/// [`InputRef::next`](crate::InputRef::next) keeps lexing after every lexer error it accepts, until
-/// it finds a token or reaches end of input. A budget checked once per `next()` call therefore
-/// bounds the items a drain *yields* and says nothing about how often the lexer is asked to lex —
-/// and the two come apart on exactly the malformed lexer this kit exists to reject. The input
-/// layer's lexer-error dedup keys on the span end, so a lexer returning the same nonempty error
-/// forever is reported **once** and silently skipped after that: the item log stops growing while
-/// the call never returns. The drain hangs instead of refusing, which is the one failure mode a
-/// conformance kit may not have.
+/// > **Every [`Lexer::lex`] attempt the kit causes through the input layer, anywhere beneath one
+/// > tier's work on one input, is charged to one `LexTally`. The tally is non-rewindable: its only
+/// > mutator increments it, and no lexer construction, state clone, cache entry or checkpoint
+/// > restore returns capacity to it. Every narrower budget — items per drain, attempts per lexer
+/// > instance — exists for a sharper message and is not the bound.**
 ///
-/// So the guard sits at the one place underneath `next()` that the kit still owns: the
-/// [`lex`](Lexer::lex) call. Every attempt is counted, whether it produced a token the drain saw,
-/// an error the scanner consumed internally, or nothing at all.
+/// # A budget bounds only the loops that increment it
 ///
-/// # Why the ceiling is per lexer instance, and read off the source
+/// That sentence is the whole rule, and this counter is where four rounds of getting it wrong
+/// ended up. The kit lexes in two shapes:
 ///
-/// The input layer builds a fresh lexer for each operation ([`with_state`](Lexer::with_state) plus
-/// [`bump`](Lexer::bump)) and runs one call's whole internal loop on that one instance — so a
-/// counter living on the instance is a counter *inside* `next()`, which is the property that
-/// matters. The loops above it are bounded independently: every iteration of a drain either
-/// appends an item to the log, where the item budget sees it, or leaves the loop.
+/// - **directly**, in [`lex_run`], [`check_sticky`], [`check_span_after_exhaustion`],
+///   [`check_resume`] and [`CacheHarness::corpus`](cache::CacheHarness) — there the counter and the
+///   `lex()` call are in the *same loop body*, so the counter is the loop's own trip count and
+///   bounds it by construction. Those need nothing from here.
+/// - **through the input layer**, where the nesting is `Harness` → prefix or schedule → drain loop
+///   → [`InputRef::next`](crate::InputRef::next) / [`peek`](crate::InputRef::peek) → the scanner's
+///   `while let Some(item)` loop → `lex()`. The kit owns the outermost loops and the innermost
+///   call and **none of the ones in between**. Every guard placed on one of those boundaries was
+///   escaped by a loop underneath it:
 ///
-/// The ceiling is `DEFAULT_BUDGET_MULTIPLE * units + BUDGET_FLOOR` read off the source, **not**
-/// [`budget_multiple`](Harness::budget_multiple), because it answers a different question.
-/// `budget_multiple` bounds how many *items* a run may produce, and a caller whose corpus warrants
-/// it raises that. This bounds how many times *one lexer* may be asked to lex, and the contract
-/// already fixes that: spans are monotone and nonempty (trait-tier check 3), so a conforming
-/// instance yields at most one item per source unit and then exhausts. Eight times that plus a
-/// floor is out of reach of any lexer the kit would otherwise pass — and
-/// [`with_state`](Lexer::with_state) is handed only a source and a state, so there is no channel
-/// for a knob here in any case.
+///   | guard at | escaped by |
+///   |---|---|
+///   | one clear per `lex` | `logos` resolving `Skip` with several scans inside one `lex` |
+///   | items per `next()` | the scanner looping over the lexer errors it accepts, which the span-end dedup keeps out of the log |
+///   | attempts per lexer instance | the layer building a **fresh lexer for every `next()`**, so the counter restarts on every call |
+///
+///   The third is the trap this type exists to close: a per-instance counter *looks* like it is
+///   "inside `next()`", and it is — but a fresh instance per call makes it a per-call counter, and
+///   a lexer that spends `limit - 1` attempts before each token walks a `run_partial` corpus in
+///   Θ(n³) raw lex work with the item budget flat (the dedup hides the repeats) and the instance
+///   budget reset (a new lexer holds it).
+///
+/// # Why this boundary is the last one
+///
+/// Not because it is wider than the last one, but because **there is no loop left above it that
+/// lexer behaviour can drive.** The tally is created once per input by the tier entry
+/// ([`check_partial`], [`check_integration`]); the only loop above that is
+/// `for (idx, src) in self.inputs`, whose trip count is the caller's own input list — data, not
+/// behaviour. Everything below it — prefixes, schedules, drains, `next`/`peek` calls, lexer
+/// instances, scanner iterations — charges the same counter.
+///
+/// # Why it cannot be refunded
+///
+/// The count lives in a `Cell` behind an [`Rc`] and the handle rides in the lexer's `State`
+/// ([`Tallied`]), which is the one channel [`Lexer::with_state`] has. Everything the input layer
+/// does to a state — clone it into a [`CachedToken`](crate::cache::CachedToken), stash it in a
+/// checkpoint, restore an older one, hand it to a rebuilt lexer — copies the **handle**, and every
+/// handle addresses the one cell. So a rollback rewinds the lexer and cannot rewind the tally:
+/// what it restores is a pointer, not the count.
+///
+/// That is the difference from a tally kept *as a field* of the thing being rolled back, which is
+/// refunded by the rollback and is therefore not a budget at all.
+///
+/// # Monotone by construction, not by convention
+///
+/// The count is a private field of a type in a **private submodule**, so "nothing writes it but
+/// [`spend`](LexTally::spend)" is enforced by the compiler rather than asserted in this comment:
+/// outside `tally`, the only reachable operations are constructing one, charging one attempt, and
+/// reading the total. There is no reset and no setter to reach.
+///
+/// Nor is there a constructor reachable from a lexer: [`Lexer::new`] is handed only a source, so
+/// [`Budgeted::new`] cannot obtain a tally — it builds an already-spent one, so a drive the kit did
+/// not seed refuses on its first attempt instead of running unbounded.
+mod tally {
+  use core::cell::Cell;
+
+  use super::Rc;
+
+  /// See the module-level block above this `mod` for the invariant this type carries.
+  pub(super) struct LexTally {
+    /// Attempts charged so far. Unreachable outside this module, which is what makes
+    /// [`spend`](Self::spend) the only writer.
+    spent: Cell<usize>,
+    /// The ceiling, fixed at construction.
+    limit: usize,
+    /// Source units, so the refusal can say what the ceiling was derived from.
+    units: usize,
+    /// The input index, so the refusal reads like every other message the kit prints.
+    idx: usize,
+    /// Which tier's work this tally covers.
+    tier: &'static str,
+  }
+
+  impl LexTally {
+    /// A tally for one tier's work on one input.
+    pub(super) fn new(idx: usize, tier: &'static str, units: usize, limit: usize) -> Rc<Self> {
+      Rc::new(Self {
+        spent: Cell::new(0),
+        limit,
+        units,
+        idx,
+        tier,
+      })
+    }
+
+    /// Attempts charged so far. Read-only: there is no counterpart that writes it.
+    pub(super) fn spent(&self) -> usize {
+      self.spent.get()
+    }
+
+    /// The ceiling this tally was built with.
+    pub(super) fn limit(&self) -> usize {
+      self.limit
+    }
+
+    /// Charges one [`Lexer::lex`](crate::Lexer::lex) attempt. The only mutator, and it only
+    /// increments.
+    ///
+    /// # Panics
+    ///
+    /// Panics — tagged `lex-budget` — on the attempt that would exceed the ceiling. That is the
+    /// intended failure mode: the alternative is not a passing run, it is a run that does not
+    /// end, or ends after cubic work.
+    pub(super) fn spend(&self) {
+      let spent = self.spent.get() + 1;
+      self.spent.set(spent);
+      if spent > self.limit {
+        let (idx, tier, limit, units) = (self.idx, self.tier, self.limit, self.units);
+        panic!(
+          "tokora conformance [input #{idx} {tier} lex-budget] the lexer was asked to lex more \
+           than {limit} times over a source of {units} units. This counts every raw Lexer::lex \
+           attempt the whole tier made, across every lexer instance the input layer built, in \
+           every prefix, schedule and checkpoint lineage — because each of those is a loop the \
+           kit does not own, and a per-call or per-instance ceiling resets inside them. The lexer \
+           errors one InputRef::next consumes internally are counted too: the span-end dedup keeps \
+           repeats out of the item log, so the item budget never sees them. Spans must be monotone \
+           and nonempty and the lexer must exhaust."
+        );
+      }
+    }
+
+    /// The refusal for [`Budgeted`](super::Budgeted)'s per-instance early guard, built here so
+    /// every `lex-budget` message and every field it reads stays beside the counter.
+    pub(super) fn refuse_instance(&self, ceiling: usize) -> ! {
+      let (idx, tier, units) = (self.idx, self.tier, self.units);
+      panic!(
+        "tokora conformance [input #{idx} {tier} lex-budget] one lexer instance was asked to lex \
+         more than {ceiling} times over a source of {units} units without yielding a token or \
+         exhausting. This is the early-refusal guard and not the bound — the bound is the tier's \
+         whole-run tally, which every one of these attempts was charged to first. Spans must be \
+         monotone and nonempty and the lexer must exhaust."
+      );
+    }
+  }
+}
+
+use tally::LexTally;
+
+/// A lexer state carrying the run's [`LexTally`] handle beside the wrapped lexer's own state.
+///
+/// This is how the counter reaches a lexer the kit never constructs: the input layer rebuilds the
+/// lexer from `(source, state)` on every operation, so the state is the only channel that survives
+/// a rebuild — and, because the handle is an [`Rc`], the only one a checkpoint restore cannot
+/// rewind. See [`LexTally`].
+struct Tallied<S> {
+  /// The wrapped lexer's own state, mirrored — see [`Budgeted`].
+  inner: S,
+  /// The shared, non-rewindable counter. Cloning this state shares it; nothing copies the count.
+  tally: Rc<LexTally>,
+}
+
+impl<S> Clone for Tallied<S>
+where
+  S: Clone,
+{
+  fn clone(&self) -> Self {
+    Self {
+      inner: self.inner.clone(),
+      tally: Rc::clone(&self.tally),
+    }
+  }
+}
+
+impl<S> core::fmt::Debug for Tallied<S>
+where
+  S: core::fmt::Debug,
+{
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.debug_struct("Tallied")
+      .field("inner", &self.inner)
+      .field("spent", &self.tally.spent())
+      .field("limit", &self.tally.limit())
+      .finish()
+  }
+}
+
+impl<S> crate::State for Tallied<S>
+where
+  S: crate::State,
+{
+  type Error = S::Error;
+
+  fn check(&self) -> Result<(), Self::Error> {
+    self.inner.check()
+  }
+
+  fn probe(&self) -> Option<crate::state::Probe> {
+    self.inner.probe()
+  }
+
+  fn clear_probe(&mut self) {
+    self.inner.clear_probe();
+  }
+}
+
+/// `L` under the kit's attempt tally — the lexer every [`Input`] in this module actually runs.
+type Bud<'inp, L> = Budgeted<L, <L as Lexer<'inp>>::State>;
+
+/// A [`Lexer`] wrapper that charges every [`lex`](Lexer::lex) attempt to a shared [`LexTally`].
 ///
 /// Every observable delegates, `read_frontier` included, so the wrapped lexer is the lexer under
 /// test: the wrapper adds a counter and nothing else.
-struct Budgeted<L> {
+///
+/// # The instance ceiling is an optimisation, not the bound
+///
+/// [`spend`](Self::spend) also refuses once *one instance* has made
+/// `DEFAULT_BUDGET_MULTIPLE * units + BUDGET_FLOOR` attempts. That is here so a lexer that never
+/// returns from a single `next()` is refused after `O(units)` attempts instead of the tally's
+/// `O(units²)`, and it is **not** what bounds the run — [`LexTally`] is. A guard is allowed to be
+/// narrower than the bound; it is not allowed to *be* the bound while a loop underneath it resets
+/// it, which is exactly what this ceiling used to do.
+///
+/// # Why the state is mirrored, and why the mirror is read-only until someone writes it
+///
+/// `Self::State` has to be [`Tallied<L::State>`](Tallied) — that is the channel — and
+/// [`Lexer::state`] must hand out a `&Tallied<L::State>`, which cannot be synthesised from the
+/// inner lexer's `&L::State`. So this holds the composite: the inner lexer stays the authority and
+/// the mirror is refreshed from it after every call that can change it (`lex`, `bump`).
+///
+/// The reverse direction — writing the mirror back into the inner lexer — happens **only if
+/// someone actually mutated through [`Lexer::state_mut`]**, tracked by `written`. That condition is
+/// not an optimisation: writing back unconditionally would call `L::state_mut` on every `lex`, and
+/// a lexer whose `State` is `()` is entitled to leave that method `unreachable!()` — an in-tree
+/// fixture does. A wrapper that only exists to count must not make a call the unwrapped kit never
+/// made.
+///
+/// Nothing in the kit or the input layer writes through a lexer's `state_mut` today —
+/// `InputRef::state_mut` re-keys the *input's* stored state and never reaches the lexer's — so the
+/// flag stays false and the two copies stay equal because only one of them is ever written.
+struct Budgeted<L, S> {
   inner: L,
-  /// Attempts this instance has already spent.
-  spent: usize,
-  /// Source units, kept only so the refusal can say what the ceiling was derived from.
-  units: usize,
-  /// The ceiling — see the type docs for why it is derived rather than configured.
-  limit: usize,
+  /// The authoritative state: the tally handle, plus a mirror of the inner lexer's own state.
+  state: Tallied<S>,
+  /// Attempts *this instance* has made, and the ceiling it fast-fails at. Not the bound.
+  spent_here: usize,
+  instance_ceiling: usize,
+  /// Whether [`Lexer::state_mut`] handed out the mirror, so the inner lexer needs it written back.
+  written: bool,
 }
 
-impl<L> Budgeted<L> {
-  /// Wraps `inner`, deriving this instance's ceiling from the source it lexes.
-  fn wrap<'inp>(inner: L, src: &'inp L::Source) -> Self
+impl<L, S> Budgeted<L, S> {
+  /// Charges one attempt to the shared tally, then to this instance's fast-fail ceiling.
+  fn spend(&mut self) {
+    self.state.tally.spend();
+    self.spent_here += 1;
+    if self.spent_here > self.instance_ceiling {
+      self.state.tally.refuse_instance(self.instance_ceiling);
+    }
+  }
+
+  /// Carries a mutation made through [`Lexer::state_mut`] into the inner lexer, and **only** then:
+  /// see the type docs for why an unconditional write-back is not allowed.
+  fn write_back<'inp>(&mut self)
+  where
+    L: Lexer<'inp, State = S>,
+    S: Clone,
+  {
+    if core::mem::take(&mut self.written) {
+      *self.inner.state_mut() = self.state.inner.clone();
+    }
+  }
+
+  /// Wraps `inner` around the state that carries the tally.
+  fn wrap<'inp>(inner: L, src: &'inp L::Source, state: Tallied<S>) -> Self
   where
     L: Lexer<'inp>,
   {
     let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
     Self {
       inner,
-      spent: 0,
-      units,
-      limit: DEFAULT_BUDGET_MULTIPLE
+      state,
+      spent_here: 0,
+      instance_ceiling: DEFAULT_BUDGET_MULTIPLE
         .saturating_mul(units)
         .saturating_add(BUDGET_FLOOR),
-    }
-  }
-
-  /// Charges one [`lex`](Lexer::lex) attempt, refusing once the ceiling is spent.
-  ///
-  /// # Panics
-  ///
-  /// Panics — tagged `lex-budget` — on the attempt that would exceed the ceiling. That is the
-  /// intended failure mode: the alternative is not a passing run, it is a run that never ends.
-  fn spend(&mut self) {
-    self.spent += 1;
-    if self.spent > self.limit {
-      panic!(
-        "tokora conformance [lex-budget] one lexer was asked to lex more than {} times over a \
-         source of {} units without yielding a token or exhausting. Every raw Lexer::lex attempt \
-         is counted here, the lexer errors a single InputRef::next consumes internally included — \
-         because that call is a loop, and a lexer that keeps returning the same error never leaves \
-         it. Spans must be monotone and nonempty and the lexer must exhaust.",
-        self.limit, self.units
-      );
+      written: false,
     }
   }
 }
 
-impl<'inp, L> Lexer<'inp> for Budgeted<L>
+impl<'inp, L> Lexer<'inp> for Budgeted<L, L::State>
 where
   L: Lexer<'inp>,
 {
-  type State = L::State;
+  type State = Tallied<L::State>;
   type Source = L::Source;
   type Token = L::Token;
   type Span = L::Span;
@@ -486,12 +698,24 @@ where
 
   const SURFACES_TRIVIA: bool = L::SURFACES_TRIVIA;
 
+  /// The one constructor with no channel for the shared tally, so it mints **no capacity**: the
+  /// tally it builds is already spent and the first attempt refuses. The kit never takes this
+  /// path — every drive is seeded through [`Input::with_state_and_context`] with a state the tier
+  /// built — and a drive that did would be a drive with no bound, which is the defect this whole
+  /// type exists to make impossible.
   fn new(src: &'inp Self::Source) -> Self {
-    Self::wrap(L::new(src), src)
+    let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
+    let inner = L::new(src);
+    let state = Tallied {
+      inner: inner.state().clone(),
+      tally: LexTally::new(usize::MAX, "unseeded", units, 0),
+    };
+    Self::wrap(inner, src, state)
   }
 
   fn with_state(src: &'inp Self::Source, state: Self::State) -> Self {
-    Self::wrap(L::with_state(src, state), src)
+    let inner = L::with_state(src, state.inner.clone());
+    Self::wrap(inner, src, state)
   }
 
   fn check(&self) -> Result<(), <Self::Token as Token<'inp>>::Error> {
@@ -499,15 +723,32 @@ where
   }
 
   fn state(&self) -> &Self::State {
-    self.inner.state()
+    &self.state
   }
 
   fn state_mut(&mut self) -> &mut Self::State {
-    self.inner.state_mut()
+    self.written = true;
+    &mut self.state
   }
 
   fn into_state(self) -> Self::State {
-    self.inner.into_state()
+    let Self {
+      mut inner,
+      state,
+      written,
+      ..
+    } = self;
+    let Tallied {
+      inner: mirrored,
+      tally,
+    } = state;
+    if written {
+      *inner.state_mut() = mirrored;
+    }
+    Tallied {
+      inner: inner.into_state(),
+      tally,
+    }
   }
 
   fn source(&self) -> &'inp Self::Source {
@@ -524,7 +765,10 @@ where
 
   fn lex(&mut self) -> Option<Result<Self::Token, <Self::Token as Token<'inp>>::Error>> {
     self.spend();
-    self.inner.lex()
+    self.write_back();
+    let out = self.inner.lex();
+    self.state.inner = self.inner.state().clone();
+    out
   }
 
   fn read_frontier(&self) -> ReadFrontier<Self::Offset> {
@@ -532,8 +776,30 @@ where
   }
 
   fn bump(&mut self, n: &Self::Offset) {
+    self.write_back();
     self.inner.bump(n);
+    self.state.inner = self.inner.state().clone();
   }
+}
+
+/// The aggregate ceiling for a tier that performs `drains` full drains of a source whose item
+/// budget is `budget`.
+///
+/// Derived, not guessed, and deliberately loose. One drain yields at most `budget` items before
+/// its own item guard fires, and a conforming lexer spends about one attempt per item plus one
+/// exhaustion probe — so `budget + 1` is a full pass. [`ATTEMPTS_PER_DRAIN_MULTIPLE`] passes per
+/// drain is the slack for everything the layer legitimately re-lexes: a peek window refilled
+/// behind a restore, a region re-scanned after a checkpoint, a partial-mode holdback re-read once
+/// the buffer grows.
+///
+/// Loose is the right direction here. The failure this bounds is *asymptotic* — a lexer evading it
+/// needs work that grows faster than the ceiling, so any constant works — while the failure a
+/// tight ceiling would cause is a **false refusal** of a legitimate lexer, which no constant fixes.
+fn lex_attempt_ceiling(drains: usize, budget: usize) -> usize {
+  drains
+    .saturating_mul(ATTEMPTS_PER_DRAIN_MULTIPLE)
+    .saturating_mul(budget.saturating_add(1))
+    .saturating_add(BUDGET_FLOOR)
 }
 
 /// The emitter error the partial check surfaces: the input layer builds it from the frontier
@@ -754,30 +1020,51 @@ where
 /// The partial-check context: a [`PartialRecorder`] over [`PartialProbe`] and the default cache.
 type PartialConfCtx<'inp, L> = (PartialRecorder<'inp, L>, DefaultCache<'inp, L>);
 
+/// Seeds the state every drive in this module starts from: the caller's lexer state under the
+/// tier's shared [`LexTally`].
+///
+/// This is the *only* way an `Input` in this module is constructed, and it is why no drive site can
+/// forget the tally: [`Lexer::new`] on [`Budgeted`] mints no capacity, so a drive that skipped this
+/// would refuse on its first attempt rather than run unbounded.
+fn seeded<'inp, L>(src: &'inp L::Source, tally: &Rc<LexTally>) -> Tallied<L::State>
+where
+  L: Lexer<'inp>,
+{
+  Tallied {
+    inner: L::new(src).into_state(),
+    tally: Rc::clone(tally),
+  }
+}
+
 /// Drives a partial input over `src` at `is_final`, returning the committed **item** stream —
 /// tokens and lexer errors interleaved in production order — and whether the drain terminated
 /// incomplete (rather than at genuine end of input).
 fn partial_stream<'inp, L>(
   src: &'inp L::Source,
+  tally: &Rc<LexTally>,
   is_final: bool,
   budget: usize,
   idx: usize,
-) -> (Vec<PartialItem<'inp, L>>, bool)
+) -> (Vec<PartialItem<'inp, Bud<'inp, L>>>, bool)
 where
   L: Lexer<'inp>,
   L::State: Clone,
 {
-  let log: PartialLog<'inp, L> = Rc::new(RefCell::new(Vec::new()));
+  let log: PartialLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
   let context = crate::input::InputContext::new(
     PartialRecorder {
       log: Rc::clone(&log),
     },
-    DefaultCache::<'inp, L>::default(),
+    DefaultCache::<'inp, Bud<'inp, L>>::default(),
   );
-  let state = L::new(src).into_state();
-  let mut input = Input::<'inp, L, PartialConfCtx<'inp, L>, (), Partial>::with_state_and_context(
-    src, state, context,
-  );
+  let state = seeded::<L>(src, tally);
+  let mut input = Input::<
+    'inp,
+    Bud<'inp, L>,
+    PartialConfCtx<'inp, Bud<'inp, L>>,
+    (),
+    Partial,
+  >::with_state_and_context(src, state, context);
   // The driver states the world fact before any handle exists — the only place it can.
   if is_final {
     input.seal();
@@ -806,24 +1093,29 @@ where
 /// partial run is checked against.
 fn complete_stream<'inp, L>(
   src: &'inp L::Source,
+  tally: &Rc<LexTally>,
   budget: usize,
   idx: usize,
-) -> Vec<PartialItem<'inp, L>>
+) -> Vec<PartialItem<'inp, Bud<'inp, L>>>
 where
   L: Lexer<'inp>,
   L::State: Clone,
 {
-  let log: PartialLog<'inp, L> = Rc::new(RefCell::new(Vec::new()));
+  let log: PartialLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
   let context = crate::input::InputContext::new(
     PartialRecorder {
       log: Rc::clone(&log),
     },
-    DefaultCache::<'inp, L>::default(),
+    DefaultCache::<'inp, Bud<'inp, L>>::default(),
   );
-  let state = L::new(src).into_state();
-  let mut input = Input::<'inp, L, PartialConfCtx<'inp, L>, (), Complete>::with_state_and_context(
-    src, state, context,
-  );
+  let state = seeded::<L>(src, tally);
+  let mut input = Input::<
+    'inp,
+    Bud<'inp, L>,
+    PartialConfCtx<'inp, Bud<'inp, L>>,
+    (),
+    Complete,
+  >::with_state_and_context(src, state, context);
   let mut ir = input.as_ref();
   loop {
     if log.borrow().len() > budget {
@@ -855,20 +1147,31 @@ where
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
-  // Every drain below runs the lexer under `Budgeted`, which counts raw `L::lex` attempts. The
-  // `log.len()` budgets these functions also carry are per-`next()` and therefore cannot see a
-  // lexer that never returns from one call; see `Budgeted` for why that is not a fixable property
-  // of a guard at this level.
-  let complete = complete_stream::<Budgeted<L>>(src, budget, idx);
+  // ONE tally for the whole tier's work on this input, and it is the bound. The `log.len()`
+  // budgets these drains also carry are per-`next()`; the instance ceiling inside `Budgeted` is
+  // per lexer; both are loops the layer restarts underneath. This counter is restarted by nothing
+  // — see `LexTally`, which also says why nothing above it can loop.
+  //
+  // The drain count it is sized for: one complete drain, one final partial drain, and one per
+  // split point of the source, which is at most `len + 1`.
+  let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
+  let tally = LexTally::new(
+    idx,
+    "partial-equivalence",
+    units,
+    lex_attempt_ceiling(units.saturating_add(3), budget),
+  );
+
+  let complete = complete_stream::<L>(src, &tally, budget, idx);
 
   // The "complete over the full input" leg: a final partial drain reproduces the complete parse.
-  let (final_items, final_incomplete) = partial_stream::<Budgeted<L>>(src, true, budget, idx);
+  let (final_items, final_incomplete) = partial_stream::<L>(src, &tally, true, budget, idx);
   if final_incomplete {
     panic!(
       "tokora conformance [input #{idx} partial-equivalence] a FINAL partial drain surfaced Incomplete; a final input must reach genuine end of input like a complete parse"
     );
   }
-  assert_partial_stream_eq::<Budgeted<L>>(idx, usize::MAX, &complete, &final_items);
+  assert_partial_stream_eq::<Bud<'inp, L>>(idx, usize::MAX, &complete, &final_items);
 
   let len = src.len();
   for k in 0..=len {
@@ -876,7 +1179,7 @@ where
       continue;
     }
     let prefix: &L::Source = &src[..k];
-    let (prefix_items, incomplete) = partial_stream::<Budgeted<L>>(prefix, false, budget, idx);
+    let (prefix_items, incomplete) = partial_stream::<L>(prefix, &tally, false, budget, idx);
 
     // A non-final prefix yields a PREFIX of the complete ITEMS strictly before the cut. Equality
     // is not the property, and since 0.10.0 it is not even attainable: the holdback keys on the
@@ -898,7 +1201,7 @@ where
       .filter(|item| *item.end() < k)
       .cloned()
       .collect();
-    assert_partial_prefix_of::<Budgeted<L>>(idx, k, &expected, &prefix_items);
+    assert_partial_prefix_of::<Bud<'inp, L>>(idx, k, &expected, &prefix_items);
 
     if !incomplete {
       panic!(
@@ -1350,18 +1653,21 @@ type ConfCtx<'inp, L> = (
 /// Builds a fresh `Input` session over `src` and hands its [`InputRef`] to `f`.
 fn drive<'inp, L, R>(
   src: &'inp L::Source,
-  f: impl FnOnce(&mut InputRef<'inp, '_, L, ConfCtx<'inp, L>, ()>) -> R,
+  tally: &Rc<LexTally>,
+  f: impl FnOnce(&mut InputRef<'inp, '_, Bud<'inp, L>, ConfCtx<'inp, Bud<'inp, L>>, ()>) -> R,
 ) -> R
 where
   L: Lexer<'inp>,
 {
   let context = crate::input::InputContext::new(
     Silent::<<L::Token as Token<'inp>>::Error>::new(),
-    DefaultCache::<'inp, L>::default(),
+    DefaultCache::<'inp, Bud<'inp, L>>::default(),
   );
-  let state = L::new(src).into_state();
+  let state = seeded::<L>(src, tally);
   let mut input =
-    Input::<'inp, L, ConfCtx<'inp, L>, ()>::with_state_and_context(src, state, context);
+    Input::<'inp, Bud<'inp, L>, ConfCtx<'inp, Bud<'inp, L>>, ()>::with_state_and_context(
+      src, state, context,
+    );
   let mut input_ref = input.as_ref();
   f(&mut input_ref)
 }
@@ -1405,18 +1711,23 @@ fn check_integration<'inp, L>(
 {
   use generic_arraydeque::typenum::U3;
 
-  // Every schedule below drives the lexer under `Budgeted`, for the reason the partial tier does:
-  // each `out.len() > budget` guard here, and each fixed `for _ in 0..n` prefix consume, is keyed
-  // on `next()` — and `next()` is a loop that can spin inside one call without ever appending to
-  // the vector the guard measures. That the trait-tier checks above happen to reject such a lexer
-  // before this tier is reached is an argument about check ORDER, not a bound; the lex budget is
-  // the bound.
+  // ONE tally for all five schedules on this input, and it is the bound. Each `out.len() > budget`
+  // guard here, and each fixed `for _ in 0..n` prefix consume, is keyed on `next()` — a loop that
+  // can spin inside one call without ever appending to the vector the guard measures — and the
+  // instance ceiling inside `Budgeted` restarts on the fresh lexer every `next()` builds. That the
+  // trait-tier checks above happen to reject such a lexer before this tier is reached is an
+  // argument about check ORDER, not a bound. See `LexTally`.
   //
-  // Wrapping is invisible to the comparison: `Budgeted<L>` carries L's `Token` and `Span`, so the
+  // Sized for five schedules; the per-drain multiple carries the re-lexing their restores and peek
+  // refills cost.
+  //
+  // Wrapping is invisible to the comparison: `Bud<'inp, L>` carries L's `Token` and `Span`, so the
   // streams collected here are the same type as `raw_tokens` below.
+  let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
+  let tally = LexTally::new(idx, "integration", units, lex_attempt_ceiling(5, budget));
 
   // The straight-lex reference: `next()` to exhaustion, no backtracking.
-  let straight = drive::<Budgeted<L>, _>(src, |ir| drain_all::<Budgeted<L>>(ir, budget));
+  let straight = drive::<L, _>(src, &tally, |ir| drain_all::<Bud<'inp, L>>(ir, budget));
 
   // Cross-check: the input layer's `next()` stream must equal the raw-lex tokens
   // (errors are skipped by `next()`, so filter the reference to its Ok items).
@@ -1428,7 +1739,7 @@ fn check_integration<'inp, L>(
 
   // peek-heavy: fill the cache before every consume; the drain path re-serves cached
   // tokens and re-lexes past the window.
-  let peek_heavy = drive::<Budgeted<L>, _>(src, |ir| {
+  let peek_heavy = drive::<L, _>(src, &tally, |ir| {
     let mut out = Vec::new();
     loop {
       if out.len() > budget {
@@ -1454,7 +1765,7 @@ fn check_integration<'inp, L>(
 
   // save-early-restore-late: save at 0, consume a prefix, abandon it, then drain the
   // whole stream — which must re-lex the rewound prefix identically.
-  let save_early = drive::<Budgeted<L>, _>(src, |ir| {
+  let save_early = drive::<L, _>(src, &tally, |ir| {
     let ckp = ir.save();
     for _ in 0..3 {
       if ir
@@ -1466,14 +1777,14 @@ fn check_integration<'inp, L>(
       }
     }
     ir.restore(ckp);
-    drain_all::<Budgeted<L>>(ir, budget)
+    drain_all::<Bud<'inp, L>>(ir, budget)
   });
   assert_stream_eq::<L>(idx, "save-early-restore-late", &straight, &save_early);
 
   // drain-then-restore-across-cache: fill the cache, drain it and lex past it, then
   // restore to a save that predates the cache — the post-save cache is dropped and the
   // region re-lexes on demand.
-  let across_cache = drive::<Budgeted<L>, _>(src, |ir| {
+  let across_cache = drive::<L, _>(src, &tally, |ir| {
     let ckp = ir.save();
     let _ = ir
       .peek::<U3>()
@@ -1488,7 +1799,7 @@ fn check_integration<'inp, L>(
       }
     }
     ir.restore(ckp);
-    drain_all::<Budgeted<L>>(ir, budget)
+    drain_all::<Bud<'inp, L>>(ir, budget)
   });
   assert_stream_eq::<L>(
     idx,
@@ -1499,7 +1810,7 @@ fn check_integration<'inp, L>(
 
   // nested-savepoints: outer save, consume, inner save, consume, restore inner (LIFO),
   // consume, restore outer, drain. Exercises nested last-in-first-out restores.
-  let nested = drive::<Budgeted<L>, _>(src, |ir| {
+  let nested = drive::<L, _>(src, &tally, |ir| {
     let outer = ir.save();
     let _ = ir
       .next()
@@ -1513,7 +1824,7 @@ fn check_integration<'inp, L>(
       .next()
       .expect("the conformance kit's Silent emitter never returns Err");
     ir.restore(outer);
-    drain_all::<Budgeted<L>>(ir, budget)
+    drain_all::<Bud<'inp, L>>(ir, budget)
   });
   assert_stream_eq::<L>(idx, "nested-savepoints", &straight, &nested);
 }

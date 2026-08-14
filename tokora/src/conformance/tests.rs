@@ -1548,6 +1548,201 @@ fn an_endless_same_span_error_lexer_is_refused_not_hung() {
   Harness::<EndlessErrLexer<'_>>::over(["abc"]).run_partial();
 }
 
+// ── ... and why a budget per LEXER INSTANCE is one boundary short ───────────────────
+//
+// The repair above put the counter on the lexer instance, on the ground that the input layer runs
+// one `next()` call's whole internal loop on one instance. Both halves of that are true and the
+// conclusion drawn from them is not: the layer builds a fresh lexer for EVERY `next()`
+// (`Lexer::with_state` + `bump`), so a per-instance counter IS a per-call counter, and it restarts
+// on every call.
+//
+// The fixture below is what that buys an attacker. It spends the whole per-call ceiling on repeated
+// same-span errors and then yields one advancing token — on every call. The span-end dedup records
+// only the first error of each call, so the item log grows by two per token and the item budget
+// stays flat; the instance ceiling is never exceeded because the instance is new each time. Driven
+// over every prefix by `run_partial`, raw lex work is CUBIC in the source length: measured at
+// 4f39c1a, 1319 attempts over 4 units rising to 66779 over 24 — a fit to `8n³/3 + Θ(n²)` — with
+// neither guard firing and no hang to notice.
+//
+// Only a counter that no construction, reset or rollback returns capacity to ends that, which is
+// what `LexTally` is.
+
+/// Raw `Lexer::lex` attempts made by [`StallLexer`], summed over every instance the input layer
+/// builds. A `static` because the kit constructs the fixture itself — [`Lexer::with_state`] is
+/// handed a source and a state and nothing else — so a per-run handle cannot reach it. One test
+/// reads or writes it.
+static STALL_ATTEMPTS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The fixture's own alarm, set **above** the kit's aggregate ceiling for [`STALL_SRC`] (45004) and
+/// **below** the cubic total the lexer would otherwise reach (about 140k). The cell therefore
+/// distinguishes three outcomes rather than two: the kit's `lex-budget` means the aggregate held,
+/// this message means it did not, and no panic at all means the run walked the whole cube.
+const STALL_TRIP: usize = 60_000;
+
+/// 32 units — long enough that the cubic total dwarfs the quadratic ceiling with room to spare.
+const STALL_SRC: &str = "abcdefghijklmnopqrstuvwxyz012345";
+
+/// A lexer that spends **just under** the per-lexer-instance ceiling before every token it yields.
+///
+/// Every attempt but the last reports the same nonempty span at the current position — which the
+/// contract permits, since starts must be non-decreasing rather than strictly increasing, and which
+/// the dedup hides — and the last advances and hands back a token, so `next()` always returns and
+/// every drain terminates. Nothing here hangs: the defect is the *total*.
+struct StallLexer<'a> {
+  src: &'a str,
+  /// The resume cursor. Moved by a token and by `bump`, never by an error.
+  at: usize,
+  start: usize,
+  end: usize,
+  /// Attempts THIS instance has made. Reset by every rebuild, which is the point.
+  burned: usize,
+  state: (),
+}
+
+impl StallLexer<'_> {
+  /// The per-instance ceiling, reproduced so the fixture can spend all of it and not one more.
+  fn quota(&self) -> usize {
+    8 * self.src.len() + 64
+  }
+}
+
+impl<'a> Lexer<'a> for StallLexer<'a> {
+  type State = ();
+  type Source = str;
+  type Token = ETok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      at: 0,
+      start: 0,
+      end: 0,
+      burned: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self {
+      src,
+      at: 0,
+      start: 0,
+      end: 0,
+      burned: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), BadByte> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<ETok, BadByte>> {
+    let n = STALL_ATTEMPTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    assert!(
+      n <= STALL_TRIP,
+      "stall-fixture alarm: the aggregate reached {n} raw lex attempts over a {} unit source; \
+       nothing bounded the total",
+      STALL_SRC.len()
+    );
+    if self.at >= self.src.len() {
+      return None;
+    }
+    self.start = self.at;
+    self.end = boundary_after(self.src, self.at);
+    self.burned += 1;
+    if self.burned < self.quota() {
+      Some(Err(BadByte { reason: "stall" }))
+    } else {
+      self.at = self.end;
+      Some(Ok(ETok))
+    }
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.at += *n;
+    self.start = self.at;
+    self.end = self.at;
+  }
+}
+
+/// The expected substring is the **aggregate** tally's wording, not merely the `lex-budget` tag:
+/// the instance ceiling says "one lexer instance was asked", and if it were what stopped this the
+/// cell would red. Which counter fires is the whole subject of the cell.
+#[test]
+#[should_panic(expected = "lex-budget] the lexer was asked to lex more than")]
+fn a_lexer_that_stalls_just_under_the_per_call_ceiling_is_refused() {
+  STALL_ATTEMPTS.store(0, core::sync::atomic::Ordering::Relaxed);
+  Harness::<StallLexer<'_>>::over([STALL_SRC]).run_partial();
+}
+
+/// The `non-` in non-rewindable, measured rather than argued.
+///
+/// tokora #285 is this defect in the shipped `TokenLimiter`: a tally living in a `Checkpoint` field
+/// is handed back by a speculative rollback, and a budget you can refund is not a budget. The kit's
+/// tally is a count in a `Cell` behind an `Rc` whose handle rides in the lexer state, so what a
+/// restore puts back — and what a rebuilt lexer is handed — is a *pointer* to the one count.
+///
+/// The measurement is the **total**, not the reading at the instant of the restore. A refund does
+/// not have to land on the `restore` call: the state a checkpoint holds is handed to
+/// `Lexer::with_state` later, so a tally carried by value inside that state is returned then, and a
+/// cell that reads the counter on both sides of `restore` alone sees nothing. So this compares one
+/// straight drain against the same drain rolled back and replayed: replaying work the tally already
+/// paid for must cost again.
+#[test]
+fn a_checkpoint_restore_does_not_refund_the_tally() {
+  const SRC: &str = "hello world";
+  let ceiling = super::lex_attempt_ceiling(8, 8 * SRC.len() + 64);
+
+  let plain = super::LexTally::new(0, "test", SRC.len(), ceiling);
+  super::drive::<TileLexer<'_>, _>(SRC, &plain, |ir| {
+    while ir.next().expect("Silent never returns Err").is_some() {}
+  });
+  let once = plain.spent();
+  // A floor with a reason, not `> 0`: `TileLexer` tiles the source one character per token, so a
+  // straight drain cannot cost fewer attempts than the source has characters. Without it a plant
+  // that shrinks BOTH sides — a reset on every rebuild rather than only on a rollback — satisfies
+  // the ratio below on two meaningless numbers.
+  assert!(
+    once >= SRC.len(),
+    "a straight drain of {} character(s) charged only {once} attempt(s)",
+    SRC.len()
+  );
+
+  let replayed = super::LexTally::new(0, "test", SRC.len(), ceiling);
+  super::drive::<TileLexer<'_>, _>(SRC, &replayed, |ir| {
+    let ckp = ir.save();
+    while ir.next().expect("Silent never returns Err").is_some() {}
+    ir.restore(ckp);
+    while ir.next().expect("Silent never returns Err").is_some() {}
+  });
+
+  assert!(
+    replayed.spent() >= 2 * once,
+    "a drain rolled back and replayed charged {} attempt(s) where two straight drains charge {}: \
+     the rollback returned capacity the run had already spent",
+    replayed.spent(),
+    2 * once
+  );
+}
+
 // ── Positive: the crate's real logos adapter (LogosLexer) ───────────────────────────
 
 #[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
