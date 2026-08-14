@@ -2566,6 +2566,25 @@ mod prefix_backtracking {
     // and the cost §7 of the design names — the caller buffers to the seal.
     Harness::<DefaultLexer<'_>>::over(["1.5", "5e-3", "1.", "5e", "5ex"]).run_partial();
   }
+
+  /// The tier audits a **corpus**, not a vocabulary — the limitation
+  /// [`Token::READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS) states as an obligation on
+  /// whoever writes `SpanEnd`, executed here so it is not left as prose.
+  ///
+  /// Same lying vocabulary, same lie, same *truncation* — and it **passes**, because the corpus
+  /// omits the source the truncation would diverge from. `"1."` truncated at k=2 is `"1."` itself,
+  /// whose complete parse also begins `Int@0..1`, so the prefix drain is a faithful prefix of it
+  /// and nothing is observed. Only a corpus containing `"1.5"`, where the *longer* rule wins,
+  /// makes the committed `Int@0..1` an item the complete parse does not have.
+  ///
+  /// So a green `run_partial` is evidence about the sources it was given. Deriving the corpus from
+  /// the rules — one source per prefix-related pair, long enough for the longer rule to win — is
+  /// the part that cannot be delegated to the kit, and this cell is what makes that concrete
+  /// rather than a caveat someone reads past.
+  #[test]
+  fn the_same_lie_passes_over_a_corpus_that_omits_the_longer_source() {
+    Harness::<LyingLexer<'_>>::over(["1."]).run_partial();
+  }
 }
 
 // ── The other half of the value channel: a recorded value that is too low ──────────────
