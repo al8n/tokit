@@ -151,6 +151,21 @@ and will red until they do.
   tree's text is sliced from and the buffer the parse reads are the same argument of the same call
   — holds for all four doors.
 
+- **`CacheHarness::lex_attempts_multiple` — an override for the corpus builder's anti-hang
+  ceiling.** The default of 8 attempts per source unit plus a floor of 64 was presented as a
+  consequence of the lexer contract, and it is not one: the contract asks for *non-decreasing*
+  starts and *individually* nonempty spans, which permits overlapping and repeated-start items, so
+  a deterministic, finite, terminating lexer may emit many items per source unit. The cache kit
+  does not enforce even that much — it drives the raw lexer and never runs the lexer-contract tier
+  — so the number was an assumption wearing a derivation's clothes.
+
+  The consequence was a false *failure*: a lexer that terminates but emits densely was refused as
+  non-terminating, and with no override on the harness the certification could not be run at all.
+  Failing in the safe direction is not the same as being right. The multiple is now the caller's
+  and the refusal names it. It is spelled `lex_attempts_multiple` rather than `budget_multiple`
+  because it scales a different quantity than `Harness::budget_multiple` does: attempts the corpus
+  builder may make, not items a run may produce. `0` is treated as `1`, as on the lexer harness.
+
 ### Changed (breaking)
 
 - **`Emitter::checkpoint` takes `&mut self`** (#257). Capturing a mark is a capability, not an
@@ -505,9 +520,19 @@ and will red until they do.
   The corpus builder fills while `out.len() < want`, and that gate counts the tokens it *kept*
   while the loop consumes the whole item stream. An `Err` grows neither the corpus nor the lexer's
   exhaustion, so such a lexer never reaches `want` and never returns `None`, and the kit spun. The
-  loop now counts **attempts**, against a ceiling derived from the source, and refuses at it. Found
-  by enumerating every counter in the conformance module against the question "can the loop iterate
-  underneath it?", which is the question the `run_partial` budget below failed.
+  loop now counts **attempts** and refuses at a ceiling. Found by enumerating every counter in the
+  conformance module against the question "can the loop iterate underneath it?", which is the
+  question the `run_partial` budget below failed.
+
+  The ceiling itself needed a second repair. It was described as derived — "monotone progress and
+  nonempty spans bound a conforming lexer at one item per source unit" — and the contract enforced
+  elsewhere says no such thing: starts must be *non-decreasing* rather than strictly increasing and
+  spans *individually* nonempty rather than disjoint, so overlapping and repeated-start items are
+  legal and a deterministic, finite, terminating lexer may emit many items per unit. This kit
+  checks none of that in any case; it drives the raw lexer and never runs the lexer-contract tier.
+  A lexer that merely emitted densely was therefore refused as non-terminating with no override
+  available, so a cache certification against it could not be run at all. See
+  `CacheHarness::lex_attempts_multiple` under **Added**.
 
 - **`Harness::run_partial` hung, rather than refusing, on a lexer that never terminates — its
   anti-hang budget was checked at the `next()` boundary and `next()` is a loop.** `InputRef::next`
@@ -520,14 +545,45 @@ and will red until they do.
   needed the panic.
 
   Both drains — and every schedule in the integration tier, which had the identical shape — now
-  run the lexer under a wrapper that counts **every raw `Lexer::lex` attempt** against a ceiling
-  derived from the source, and refuses at it. The counter lives on the lexer instance, which is
-  where "inside `next()`" is: the input layer builds one lexer per operation and runs that call's
-  whole internal loop on it, while the drain loops above it are bounded independently because every
-  iteration either appends an item or leaves the loop. The ceiling is read off the source rather
-  than from `budget_multiple`, because it answers a different question — how many times *one*
-  lexer may be asked to lex, which the monotone-progress contract already fixes at one item per
-  source unit — and because `Lexer::with_state` is handed only a source and a state.
+  run the lexer under a wrapper that counts **every raw `Lexer::lex` attempt**, and the count is
+  **one counter per tier per input**, not one per call and not one per lexer.
+
+  That last distinction is the whole repair, and it took one attempt to get wrong. Putting the
+  counter on the lexer instance looks like putting it "inside `next()`", since the input layer runs
+  one call's whole internal loop on one instance — but the layer builds a **fresh lexer for every
+  `next()`** (`Lexer::with_state` plus `bump`), so a per-instance counter is a per-call counter and
+  restarts on every call. A lexer that spends the whole per-call ceiling on repeated same-span
+  errors and then yields one advancing token stays inside every guard: the span-end dedup keeps the
+  repeats out of the item log so the item budget stays flat, and each call gets a new instance. Run
+  over every prefix by `run_partial`, raw lex work is then cubic in the source length — 1319
+  attempts over 4 units rising to 66779 over 24, a fit to `8n³/3 + Θ(n²)` — with neither guard
+  firing and no hang to notice.
+
+  So the rule is stated rather than the guard moved again: **a budget bounds only the loops that
+  increment it.** Where the kit lexes directly the counter sits in the loop body and bounds it by
+  construction; where it lexes through the input layer it owns the outermost loops and the
+  innermost call and none of the ones between, so the counter belongs at the tier entry. Every
+  prefix, schedule, drain, `next`/`peek` call, lexer instance and checkpoint lineage beneath one
+  input charges the same one. That boundary is the last one available: the only loop above it
+  iterates the caller's own input list, which is data rather than lexer behaviour.
+
+  **The counter cannot be refunded, and that is enforced rather than asserted.** It is a `Cell` in
+  a private submodule, so it has exactly one reachable writer and a refund written from outside is
+  a compile error; the handle that reaches each rebuilt lexer is an `Rc` riding in the lexer state,
+  so a checkpoint restore puts back a pointer to the one count rather than a copy of it. A tally
+  kept as a field of the thing being rolled back is handed back by the rollback and is not a budget
+  at all. `Lexer::new` has no channel for a tally and does not invent one — it builds an
+  already-spent one, so an unseeded drive refuses on its first attempt instead of running
+  unbounded.
+
+  The per-instance ceiling stays, demoted to what it is: an early refusal that stops a single
+  non-returning `next()` after `O(units)` attempts rather than the tally's `O(units²)`. A guard may
+  be narrower than the bound; it may not *be* the bound while a loop underneath it resets it.
+
+  The aggregate ceiling is `drains * 4 * (budget + 1) + 64` and is deliberately loose: a lexer
+  evading it needs work that outgrows it, so any constant serves, while a tight ceiling would
+  falsely refuse a legitimate lexer, which no constant repairs. Measured across the whole in-tree
+  suite the tightest headroom is 42.8x.
 
   The integration tier's guards were the same defect and had not fired: the trait-tier checks that
   run before it happen to reject a non-terminating lexer first. That is an argument about check

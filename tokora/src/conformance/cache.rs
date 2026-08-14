@@ -529,7 +529,7 @@ where
   ///
   /// # Why this is a knob and not a derivation
   ///
-  /// The ceiling exists because [`corpus`](Self::corpus) fills a target count of *tokens* while
+  /// The ceiling exists because the corpus builder fills a target count of *tokens* while
   /// its loop consumes the whole item stream, and an `Err` grows neither: a lexer that only errors
   /// reaches neither the target nor exhaustion. Something has to stop that, and only an attempt
   /// count can.

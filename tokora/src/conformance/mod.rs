@@ -57,6 +57,15 @@
 //! [`READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS) claim behind the logos
 //! adapter.
 //!
+//! Both tiers that drive an `Input` are bounded by a single non-rewindable counter per input,
+//! `LexTally`, and not by the item budgets their drain loops also carry. The rule is that **a
+//! budget bounds only the loops that increment it**: between a drain loop and the `Lexer::lex` call
+//! sit `InputRef::next`/`peek` and the scanner's own loop, neither of which the kit owns, and the
+//! input layer builds a fresh lexer for every one of those calls — so an item budget per drain and
+//! an attempt ceiling per lexer instance are both restarted by a loop underneath them. The private
+//! `LexTally` carries the full statement, the argument for why the tier entry is the last boundary
+//! available, and why the counter cannot be refunded by a checkpoint restore.
+//!
 //! An **item** is a committed token *or* a lexer error the input layer raised, and both halves are
 //! load-bearing: the layer lexes bytes and then either commits or refuses, and truncation can turn
 //! one into the other. A tier that compared only tokens could not see the error arm at all — a
@@ -326,7 +335,7 @@ where
   /// is as much a decision about bytes as tokenizing it, and turning one into the other on append
   /// is precisely the unfaithfulness this tier exists to reject. Both arms are compared on
   /// discriminant, span and **value** — the whole [`Token`], the whole
-  /// [`Token::Error`](crate::Token::Error) — never on a rendering. Nothing from the diagnostic
+  /// [`Token::Error`] — never on a rendering. Nothing from the diagnostic
   /// channel is compared. See the [module docs](crate::conformance) for what that does and does not
   /// assert.
   ///
