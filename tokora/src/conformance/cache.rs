@@ -549,10 +549,13 @@ where
   /// `0` is treated as `1` and anything above `65536` **panics**, matching
   /// [`Harness::budget_multiple`](super::Harness::budget_multiple) in both directions.
   ///
-  /// The cap is not tidiness. `usize::MAX` here made the ceiling `usize::MAX` too, and no counter
-  /// can reach one past the largest value it can hold — so the `attempts >= limit` refusal became
-  /// unreachable and the knob *disarmed the guard it configures*: the endless lexer above ran
-  /// until the process was killed. A ceiling has to be a number the count can pass.
+  /// The cap is not tidiness. `usize::MAX` here made the ceiling `usize::MAX` too, and under the
+  /// `attempts > limit` order of the day no counter could reach one past the largest value it can
+  /// hold — so the refusal was unreachable and the knob *disarmed the guard it configures*: the
+  /// endless lexer above ran until the process was killed. The comparison is now `attempts >=
+  /// limit` asked before the increment, which such a ceiling does reach, after `usize::MAX`
+  /// attempts — enforced, and still not a refusal anybody is present for. A ceiling has to be a
+  /// number the count passes while the caller is still waiting.
   ///
   /// # Why above the cap is a refusal and not a clamp
   ///

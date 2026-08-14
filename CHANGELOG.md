@@ -621,9 +621,16 @@ and will red until they do.
   `limit + 1`-th still refuses. `instance_ceiling(budget)` is `budget + 1` over a budget that may be
   `usize::MAX - 1`, so the per-instance counter had the same defect and takes the same order.
 
+  A saturated ceiling is therefore still **enforced**: the comparison reaches `usize::MAX`, so what
+  the tally contributes on such a source is a flat hard cap of `usize::MAX` attempts rather than a
+  bound derived from the source. That cap has its own false refusal — the shortfall is flat while
+  the formula is quadratic, about 75× at 100,000 units on a 32-bit target — and it is recorded on
+  `lex_attempt_ceiling` beside the reason saturating still beats refusing at derivation time.
+
   **`Harness::budget_multiple` and `CacheHarness::lex_attempts_multiple` now panic above 65536
   rather than clamping to it.** The cap is unchanged and still necessary — a multiple of
-  `usize::MAX` computes a ceiling no counter can pass, which disarms the guard the knob configures
+  `usize::MAX` computes a ceiling of `usize::MAX`, which the comparison reaches only after
+  `usize::MAX` attempts, so the guard the knob configures never arrives in a run anybody waits out
   — but a clamp enforced it by *silently lowering the caller's budget*. The lexer contract permits
   finite density above the cap, so the clamp had a reachable victim: on a one-unit source a
   requested multiple of 65,601 should allow 65,665 items, the clamp allowed 65,600, and a legal
