@@ -2218,6 +2218,53 @@ fn the_aggregate_ceiling_is_the_same_number_at_every_target_width() {
   }
 }
 
+/// The `Capacity` arm, driven from the derivation rather than hand-built.
+///
+/// `u128` is finite, so `lex_attempt_ceiling` still has an arm for "this does not fit" — and no
+/// source reaches it, which is exactly the condition under which an arm rots. The two cells that
+/// exercise the kit-capacity *message* construct the tally directly; this one is the step before
+/// them, and it is the only place the `checked_mul` chain's overflow branch is executed at all.
+///
+/// The arguments are ones the kit never produces: `representable_budget` returns strictly below
+/// `usize::MAX`, so no real budget is `usize::MAX`. That is the point — the function is total over
+/// its parameter types and not merely over the values the kit happens to pass, and a `saturating_`
+/// chain that quietly returned `Derived(u128::MAX)` would be indistinguishable at every reachable
+/// input.
+///
+/// The expected arm is worked out by hand rather than recomputed from the implementation, so this
+/// is an oracle and not a mirror. At 64 bits `(2^64 - 1) * 4` is `2^66 - 4`, times a `budget + 1`
+/// of `2^64` is about `2^130`, which is past `u128::MAX` — `Capacity`. At 32 bits the same product
+/// is about `2^66`, which fits with 62 bits to spare — `Derived`.
+#[test]
+fn the_widest_possible_derivation_reports_capacity_rather_than_a_silent_maximum() {
+  let widest = super::lex_attempt_ceiling(usize::MAX, usize::MAX);
+
+  if usize::BITS >= 64 {
+    assert!(
+      matches!(widest, super::AttemptCeiling::Capacity),
+      "a derivation of about 2^130 must report the kit's counting capacity, not a number; it \
+       reported {}",
+      widest.limit()
+    );
+    assert_eq!(
+      widest.limit(),
+      u128::MAX,
+      "a capacity ceiling still counts as far as the counter goes"
+    );
+  } else {
+    assert!(
+      matches!(widest, super::AttemptCeiling::Derived(_)),
+      "at {} bits the widest derivation is about 2^66 and fits in a u128 with room to spare, so \
+       it is the derived number and not the kit's capacity",
+      usize::BITS
+    );
+    assert!(
+      widest.limit() < u128::MAX,
+      "a derived ceiling that lands on u128::MAX is a saturation wearing the wrong label"
+    );
+  }
+}
+
 /// Why the width mattered: an **ordinary** lexer over an **ordinary** source outran a 32-bit
 /// counter, and no knob could raise it past one.
 ///
