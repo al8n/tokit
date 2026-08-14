@@ -4108,6 +4108,25 @@ fn a_corpus_of_nothing_but_errors_is_refused_not_spun_on() {
   .run();
 }
 
+/// The same lexer at the **largest multiple the knob accepts** — because the knob could switch the
+/// guard off, and the way it did so left no trace.
+///
+/// `lex_attempts_multiple(usize::MAX)` saturated the ceiling to `usize::MAX`, and `attempts > limit`
+/// is then false for every value an attempt counter can hold: the loop above ran until the process
+/// was killed, reporting nothing on the way. A configured ceiling has to stay a number the count
+/// can pass, which is what the clamp and the checked arithmetic are for.
+///
+/// One source unit, so the accepted maximum is `65536 * 1 + 64` attempts and the cell costs
+/// milliseconds. It is the *setting* that is at its maximum here, not the ceiling.
+#[test]
+#[should_panic(expected = "lex-budget")]
+fn the_largest_accepted_lex_attempts_multiple_still_refuses_an_endless_lexer() {
+  CacheHarness::<EndlessErrCorpusLexer<'_>, DefaultCache<'_, EndlessErrCorpusLexer<'_>>>::new("a")
+    .named("endless-error corpus at the maximum multiple")
+    .lex_attempts_multiple(usize::MAX)
+    .run();
+}
+
 // ── Dense but finite: what the ceiling must not conflate with nontermination ─────────
 //
 // The guard above stops a lexer that never reaches the target. The ceiling it stops at was

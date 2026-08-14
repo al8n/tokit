@@ -534,6 +534,20 @@ and will red until they do.
   available, so a cache certification against it could not be run at all. See
   `CacheHarness::lex_attempts_multiple` under **Added**.
 
+  And the override then reopened the hang. Both anti-hang multiples — the one above and
+  `Harness::budget_multiple` — were combined with the source length by **saturating** arithmetic, so
+  `lex_attempts_multiple(usize::MAX)` produced a ceiling of `usize::MAX`, and no counter can exceed
+  the largest value it can hold. Every `attempts > limit` and `spent > limit` derived from such a
+  setting was false forever: the endless-error lexer these guards exist to refuse ran until the
+  process was killed, reporting nothing on the way, and the counter's own overflow is 2⁶⁴ increments
+  away in either profile. A knob documenting no maximum could therefore switch off the guard it
+  configures, silently. Both multiples are now clamped to `65536` per source unit — the point past
+  which the kit cannot tell a dense lexer from a nonterminating one, which is the honest limit of
+  what it certifies — and both ceilings are computed with checked arithmetic, so the *product*
+  cannot saturate on a 32-bit target either; an unrepresentable ceiling panics and names the knob
+  to lower instead of disarming itself. Each clamp is pinned by a cell that drives an endless lexer
+  at the maximum accepted setting and requires the `lex-budget` refusal to still arrive.
+
 - **`Harness::run_partial` hung, rather than refusing, on a lexer that never terminates — its
   anti-hang budget was checked at the `next()` boundary and `next()` is a loop.** `InputRef::next`
   keeps lexing after every lexer error it accepts until it finds a token or reaches end of input,
