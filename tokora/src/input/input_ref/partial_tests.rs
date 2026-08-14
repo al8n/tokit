@@ -3367,3 +3367,266 @@ fn run_partial_falsifies_the_span_end_claim_and_passes_the_honest_twin() {
   // is the CLAIM, not the lookahead. A lookahead lexer that reports honestly is conforming.
   crate::conformance::Harness::<HonestDuration<'_>>::new("5m5s").run_partial();
 }
+
+// ── The migration witness: what an UNDECLARED vocabulary costs ──────────────────────
+//
+// `Token::READ_FRONTIER_CLASS` answers for a logos-backed vocabulary, and the class it
+// answers with decides whether a partial parse makes progress at all. This section is the
+// witness for the migration: the same vocabulary, the same two-byte buffer, the same
+// budget — and three outcomes, selected by nothing but the class.
+//
+// The fixture is deliberately the *easiest possible* vocabulary to classify: two fixed
+// one-byte tokens over disjoint bytes. There is no prefix relation for the DFA to probe
+// into, no callback, no lookahead of any kind. `SpanEnd` is not merely defensible here, it
+// is the only honest answer — which is what makes the cost of failing to write it down a
+// property of the *declaration* and not of the grammar.
+
+#[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+#[logos(crate = crate::logos)]
+enum MTok {
+  #[token("a")]
+  A,
+  #[token("b")]
+  B,
+}
+
+impl core::fmt::Display for MTok {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      MTok::A => "a",
+      MTok::B => "b",
+    })
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MKind {
+  A,
+  B,
+}
+
+impl core::fmt::Display for MKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      MKind::A => "a",
+      MKind::B => "b",
+    })
+  }
+}
+
+impl Token<'_> for MTok {
+  type Kind = MKind;
+  type Error = ();
+
+  fn kind(&self) -> MKind {
+    match self {
+      MTok::A => MKind::A,
+      MTok::B => MKind::B,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// The same vocabulary with the honest class **written down** — the migration's other side.
+#[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+#[logos(crate = crate::logos)]
+enum STok {
+  #[token("a")]
+  A,
+  #[token("b")]
+  B,
+}
+
+impl core::fmt::Display for STok {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      STok::A => "a",
+      STok::B => "b",
+    })
+  }
+}
+
+impl Token<'_> for STok {
+  type Kind = MKind;
+  type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
+
+  fn kind(&self) -> MKind {
+    match self {
+      STok::A => MKind::A,
+      STok::B => MKind::B,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// A consumer error that answers both channels the session's contract reads: the
+/// [`Incomplete`] the frontier surfaces, and the terminal
+/// [`SessionRefusal`](crate::input::SessionRefusal) the budget gate converts through.
+#[derive(Debug, Clone, PartialEq)]
+enum MErr {
+  Lex,
+  Incomplete(usize),
+  Refused(crate::input::SessionRefusal),
+}
+
+impl From<()> for MErr {
+  fn from(_: ()) -> Self {
+    MErr::Lex
+  }
+}
+
+impl From<Incomplete<usize>> for MErr {
+  fn from(inc: Incomplete<usize>) -> Self {
+    MErr::Incomplete(inc.into_offset())
+  }
+}
+
+impl From<crate::input::SessionRefusal> for MErr {
+  fn from(refusal: crate::input::SessionRefusal) -> Self {
+    MErr::Refused(refusal)
+  }
+}
+
+impl MaybeIncomplete for MErr {
+  fn is_incomplete(&self) -> bool {
+    matches!(self, MErr::Incomplete(_))
+  }
+}
+
+impl crate::error::MaybeTerminal for MErr {
+  fn is_terminal(&self) -> bool {
+    matches!(self, MErr::Refused(_))
+  }
+}
+
+impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for MErr {
+  fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self {
+    MErr::Lex
+  }
+}
+
+type MLex<'a> = LogosLexer<'a, MTok>;
+type MCtx<'a> = (Fatal<MErr>, DefaultCache<'a, MLex<'a>>);
+type SLex<'a> = LogosLexer<'a, STok>;
+type SCtx<'a> = (Fatal<MErr>, DefaultCache<'a, SLex<'a>>);
+
+fn mctx<'a>() -> MCtx<'a> {
+  (Fatal::of(), DefaultCache::<'a, MLex<'a>>::default())
+}
+
+fn sctx<'a>() -> SCtx<'a> {
+  (Fatal::of(), DefaultCache::<'a, SLex<'a>>::default())
+}
+
+/// Takes exactly ONE token — the shape a latency-sensitive streaming caller has, and the only
+/// shape in which the class difference is observable at all. A drain-to-end parser asks for the
+/// item at the buffer end too, which every class withholds.
+fn take_one_m<'inp>(
+  inp: &mut InputRef<'inp, '_, MLex<'inp>, MCtx<'inp>, (), Partial>,
+) -> Result<MKind, MErr> {
+  match inp.next()? {
+    Some(t) => Ok(t.data().kind()),
+    None => Err(MErr::Lex),
+  }
+}
+
+fn take_one_s<'inp>(
+  inp: &mut InputRef<'inp, '_, SLex<'inp>, SCtx<'inp>, (), Partial>,
+) -> Result<MKind, MErr> {
+  match inp.next()? {
+    Some(t) => Ok(t.data().kind()),
+    None => Err(MErr::Lex),
+  }
+}
+
+/// The control: with the honest class written down, the one-byte token at `0..1` in a two-byte
+/// buffer is yielded on the FIRST attempt, exactly as the pre-0.10.0 span predicate yielded it.
+///
+/// `1 < 2`, so nothing about `A` can change when more bytes arrive. One attempt, two lexable
+/// bytes, budget intact.
+#[test]
+fn a_declared_span_end_vocabulary_yields_the_first_token_on_the_first_attempt() {
+  use crate::input::{Budget, PartialSession, RedriveFromBase};
+
+  let mut session = PartialSession::new((), Budget::Bytes(2), RedriveFromBase);
+  assert_eq!(
+    session.parse(sctx(), "ab", false, take_one_s),
+    Ok(MKind::A),
+    "span end 1 is strictly behind the buffer end 2, so the item is append-stable and yields"
+  );
+  assert_eq!(session.spent(), 2, "one attempt over a two-byte buffer");
+}
+
+/// The witness. The identical vocabulary WITHOUT the class written down is seal-only, and a
+/// budget calibrated for the declared behaviour turns that into a **terminal refusal** — the
+/// caller never receives the token, and no amount of further input can change that.
+///
+/// Read the two spends: the first attempt is admitted at `0 + 2 = 2`, which is exactly the cap,
+/// and it comes back `Incomplete`. Sealing does not change the buffer, so the retry projects
+/// `2 + 2 = 4` and the gate refuses **before finality is ever applied**. The seal that would
+/// have released the item is never reached.
+#[test]
+fn an_undeclared_vocabulary_is_seal_only_and_a_calibrated_budget_refuses_the_seal() {
+  use crate::input::{Budget, PartialSession, RedriveFromBase, SessionRefusal};
+
+  let mut session = PartialSession::new((), Budget::Bytes(2), RedriveFromBase);
+
+  assert_eq!(
+    session.parse(mctx(), "ab", false, take_one_m),
+    Err(MErr::Incomplete(2)),
+    "an undeclared vocabulary reports Unbounded, so even the item at 0..1 is withheld"
+  );
+  assert_eq!(session.spent(), 2, "and the attempt still spent the buffer");
+
+  assert_eq!(
+    session.parse(mctx(), "ab", true, take_one_m),
+    Err(MErr::Refused(SessionRefusal::BudgetExhausted {
+      spent: 4,
+      budget: 2
+    })),
+    "the seal projects 4 lexable bytes against a cap of 2 and is refused BEFORE any work: \
+     finality is never applied, so the item is terminally unreachable"
+  );
+  assert!(
+    <MErr as crate::error::MaybeTerminal>::is_terminal(&MErr::Refused(
+      SessionRefusal::BudgetExhausted {
+        spent: 4,
+        budget: 2
+      }
+    )),
+    "and the refusal is TERMINAL — not 'reduced precision', not 'buffer until final'"
+  );
+}
+
+/// The unbounded-budget half of the same migration: no refusal, but the whole stream is
+/// retained and re-driven, and nothing is yielded until the seal.
+#[test]
+fn an_undeclared_vocabulary_under_an_unbounded_budget_retains_until_the_seal() {
+  use crate::input::{Budget, PartialSession, RedriveFromBase};
+
+  let mut session = PartialSession::new((), Budget::Unbounded, RedriveFromBase);
+
+  assert_eq!(
+    session.parse(mctx(), "ab", false, take_one_m),
+    Err(MErr::Incomplete(2)),
+    "still withheld while the stream is open"
+  );
+  assert_eq!(
+    session.parse(mctx(), "ab", true, take_one_m),
+    Ok(MKind::A),
+    "only the seal releases it"
+  );
+  assert_eq!(
+    session.spent(),
+    4,
+    "and the two-byte prefix was lexed TWICE to get one one-byte token"
+  );
+}
