@@ -43,6 +43,12 @@ pub const OPT_IN_VALUE: &str = "native";
 /// route `build.rs` cannot see — but no longer the only one, and no longer trusted in reverse.
 pub const ANNOUNCE: &str = "TOKORA_SANITIZER";
 
+/// AddressSanitizer's runtime configuration, which is where the fake stack is switched on.
+pub const ASAN_OPTIONS: &str = "ASAN_OPTIONS";
+
+/// The one `ASAN_OPTIONS` flag [`frames_reused`] can observe.
+const FAKE_STACK_FLAG: &str = "detect_stack_use_after_return";
+
 /// Everything the decision rests on, as plain data.
 ///
 /// The live values are gathered by [`here`]; taking them as an argument is what gives every branch
@@ -187,6 +193,60 @@ pub fn frames_reused() -> bool {
   a == b && b == c
 }
 
+/// Whether an `ASAN_OPTIONS` value switches the fake stack **on**.
+///
+/// Off is the default: ASan compiles the fake-stack machinery in but leaves it dormant until the
+/// runtime is told otherwise, so `ASAN_OPTIONS` is what decides whether [`frames_reused`] can
+/// observe anything at all under ASan.
+///
+/// Parsed the way the sanitizer's own parser reads it — any of space, comma, colon, tab, newline
+/// or carriage return separates flags, and a repeated flag takes its **last** value — so this
+/// answers for the string ASan itself will act on rather than for a simplified spelling of it.
+/// Taken as an argument rather than read from the environment so its controls do not have to
+/// mutate a process-wide variable while other tests are running.
+pub fn asan_fake_stack_enabled(options: Option<&str>) -> bool {
+  let Some(options) = options else {
+    return false;
+  };
+  let mut on = false;
+  for flag in options.split([' ', ',', ':', '\n', '\t', '\r']) {
+    // `split_once`, so `detect_stack_use_after_return_2=1` is a different flag rather than a
+    // prefix match on this one.
+    if let Some((name, value)) = flag.split_once('=')
+      && name == FAKE_STACK_FLAG
+    {
+      on = matches!(value, "1" | "true" | "True" | "TRUE" | "yes");
+    }
+  }
+  on
+}
+
+/// Whether this run is one where a frame's locals are expected to **move** between two calls.
+///
+/// This is emphatically not "is this build instrumented", and the difference is what
+/// `stack_per_level`'s control for [`frames_reused`] used to get wrong. Only two things relocate a
+/// frame:
+///
+/// * **Miri**, which gives every frame's locals their own virtual allocation, and
+/// * **ASan's fake stack**, which is off unless [`ASAN_OPTIONS`] turns it on.
+///
+/// ThreadSanitizer does not move frames at all — it instruments memory accesses — and the CI
+/// sanitizer matrix runs it; neither does ASan with the fake stack left at its default. In those
+/// builds [`frames_reused`] correctly reports *reused*, and a control that demands otherwise fails
+/// while detection and refusal are both working exactly as intended.
+///
+/// The announcement is deliberately NOT consulted: [`ANNOUNCE`] is a claim that a build is
+/// instrumented, not a claim about the fake stack, and reading it here would make an exported
+/// variable able to force an assertion about the machine's behaviour.
+pub fn frame_relocation_expected() -> bool {
+  if cfg!(miri) {
+    return true;
+  }
+  let address = option_env!("TOKORA_BUILD_SANITIZERS")
+    .is_some_and(|list| list.split(',').any(|san| san == "address"));
+  address && asan_fake_stack_enabled(std::env::var(ASAN_OPTIONS).ok().as_deref())
+}
+
 /// The live evidence, gathered once.
 ///
 /// The two build facts come from `option_env!` rather than from the environment: instrumentation
@@ -200,16 +260,26 @@ pub fn here() -> (Option<String>, Option<String>, bool) {
   )
 }
 
+/// This process's own [`StackEvidence`], handed to `f`.
+///
+/// A closure rather than a return value because the announcement is borrowed from the `String` the
+/// environment lookup produced. Every reader of the live evidence goes through here, so a caller
+/// that wants to ask what the decision would be with **one** field held fixed — the controls do,
+/// to separate a refusal the compiler grounds from one the frame observation grounds — reuses the
+/// same gathering rather than assembling a second copy of it.
+pub fn with_evidence_here<R>(f: impl FnOnce(StackEvidence<'_>) -> R) -> R {
+  let (announced, opt_in, reused) = here();
+  f(evidence(&announced, &opt_in, reused))
+}
+
 /// [`instrumentation_refusal`] against this process.
 pub fn instrumentation_refusal_here() -> Option<String> {
-  let (announced, opt_in, reused) = here();
-  instrumentation_refusal(evidence(&announced, &opt_in, reused))
+  with_evidence_here(instrumentation_refusal)
 }
 
 /// [`measurement_refusal`] against this process.
 pub fn measurement_refusal_here() -> Option<String> {
-  let (announced, opt_in, reused) = here();
-  measurement_refusal(evidence(&announced, &opt_in, reused))
+  with_evidence_here(measurement_refusal)
 }
 
 fn evidence<'a>(

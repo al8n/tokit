@@ -546,7 +546,8 @@ fn per_nesting_level_stack_cost() {
 /// replaced it carried two assertions that no input could reach.
 mod refusals {
   use super::common::native_stack::{
-    ANNOUNCE, OPT_IN, StackEvidence, frames_reused, instrumentation_refusal, measurement_refusal,
+    ANNOUNCE, OPT_IN, StackEvidence, asan_fake_stack_enabled, frame_relocation_expected,
+    frames_reused, instrumentation_refusal, measurement_refusal, with_evidence_here,
   };
   use super::per_level_with;
 
@@ -717,20 +718,123 @@ mod refusals {
 
   /// The one detector that observes rather than asks, run against this process.
   ///
-  /// Under an uninstrumented build it must say frames ARE reused — otherwise the detector would
-  /// refuse every native run, which is a refusal nobody would keep. Under Miri, and under a
-  /// sanitizer with `detect_stack_use_after_return=1`, it says the opposite, and that is the
-  /// point: it is the leg that fires when instrumentation arrives by a route `build.rs` cannot
-  /// see.
+  /// # Three builds, three different things to assert
+  ///
+  /// [`frames_reused`] observes **relocation**, and relocation is not instrumentation. This
+  /// control used to assert `frames_reused() == !instrumented` with `instrumented` true for any
+  /// reported or announced sanitizer, which is a contradiction in two of the configurations CI
+  /// actually runs:
+  ///
+  /// * **ThreadSanitizer** — in the matrix, next to `address` — instruments memory accesses and
+  ///   leaves frames exactly where they were, so sequential calls reuse one frame and the old
+  ///   assertion failed while detection and refusal were both working.
+  /// * **ASan with the fake stack at its default**, which is *off*: `ci/sanitizer.sh` exports
+  ///   `ASAN_OPTIONS` without `detect_stack_use_after_return`, so the same contradiction applies
+  ///   to the `address` leg unless the runtime is explicitly told to relocate.
+  ///
+  /// So the arm is chosen by [`frame_relocation_expected`], which asks the two questions that
+  /// decide relocation — Miri, or ASan *with* the fake stack switched on — rather than the
+  /// question that decides instrumentation:
+  ///
+  /// | this build | what is asserted |
+  /// |---|---|
+  /// | relocates (Miri, ASan + fake stack) | the detector **fires**: frames are not reused |
+  /// | instrumented, does not relocate (TSan, ASan default) | the refusal **stands without the observation**: both strictness levels still refuse with `frames_reused` forced true |
+  /// | nothing detected | the detector is **quiet**: frames are reused, so it does not refuse every native run |
+  ///
+  /// The middle arm asserts nothing about [`frames_reused`] in either direction. That is
+  /// deliberate: what must hold under a non-relocating sanitizer is that the *declared*
+  /// instrumentation carries the refusal on its own, and an ASan runtime that changed its
+  /// fake-stack default would then move this build between the first two arms without inventing a
+  /// failure. Nor does the first arm require a declaration — a build that relocates is exactly the
+  /// build whose instrumentation may have arrived by a route `build.rs` cannot see, which is the
+  /// case the observation exists for.
   #[test]
   fn the_frame_reuse_detector_agrees_with_this_build() {
-    let instrumented = cfg!(miri)
-      || option_env!("TOKORA_BUILD_SANITIZERS").is_some()
+    let reused = frames_reused();
+
+    // Read from the raw sources rather than through the gathered evidence, so the middle arm's
+    // assertion covers the wiring from `build.rs` to the decision and not just the decision.
+    let compiler_says = option_env!("TOKORA_BUILD_SANITIZERS");
+    let declared = compiler_says.is_some()
+      || option_env!("TOKORA_BUILD_FLAGS_OPAQUE").is_some()
       || std::env::var(ANNOUNCE).is_ok_and(|v| !v.is_empty());
-    assert_eq!(
-      frames_reused(),
-      !instrumented,
-      "frames_reused() disagrees with what this build is (instrumented: {instrumented})"
+
+    if frame_relocation_expected() {
+      assert!(
+        !reused,
+        "this build relocates frames — Miri, or ASan with the fake stack on — and the detector did \
+         not see it"
+      );
+      return;
+    }
+
+    if declared {
+      // TSan, or ASan with the fake stack off. `frames_reused()` is right to report *reused*
+      // here, so the property that has to hold is the other one: the build is refused anyway. The
+      // observation is set aside for the question, which is what makes the answer a statement
+      // about the declaration alone.
+      let why = with_evidence_here(|e| {
+        instrumentation_refusal(StackEvidence {
+          frames_reused: true,
+          ..e
+        })
+      })
+      .expect(
+        "a declared sanitizer build was not refused once the frame observation was set aside — \
+         `pratt_limit_unit_sink`'s address witness runs on exactly this decision, and under a \
+         sanitizer that does not relocate it would run against redzoned frames",
+      );
+      if let Some(list) = compiler_says {
+        assert!(
+          why.contains(&format!("sanitize={list}")),
+          "the compiler reported sanitize={list} for this build and the refusal does not say so: \
+           {why}"
+        );
+      }
+      return;
+    }
+
+    assert!(
+      reused,
+      "nothing declares this build instrumented, yet frames are not reused — either the detector \
+       refuses every native run, which is a refusal nobody would keep, or instrumentation reached \
+       this process by a route build.rs cannot see"
     );
+  }
+
+  /// [`asan_fake_stack_enabled`] against the strings it has to read, including the one
+  /// `ci/sanitizer.sh` actually exports.
+  ///
+  /// The live wiring is exercised by the arm chosen above; this pins the parse, which is what
+  /// decides which arm that is. The last two rows are the ones that make it a parse rather than a
+  /// substring search.
+  #[test]
+  fn the_fake_stack_flag_is_read_the_way_the_sanitizer_reads_it() {
+    let cases: [(Option<&str>, bool); 10] = [
+      (None, false),
+      (Some(""), false),
+      // What `ci/sanitizer.sh` exports: no fake stack, so the `address` leg does NOT relocate.
+      (Some("detect_odr_violation=0 detect_leaks=0"), false),
+      (Some("detect_stack_use_after_return=1"), true),
+      (Some("detect_stack_use_after_return=true"), true),
+      (Some("detect_stack_use_after_return=0"), false),
+      (Some("detect_leaks=0:detect_stack_use_after_return=1"), true),
+      (Some("detect_stack_use_after_return=1,detect_leaks=0"), true),
+      // A repeated flag takes its LAST value, as the sanitizer's own parser does.
+      (
+        Some("detect_stack_use_after_return=1 detect_stack_use_after_return=0"),
+        false,
+      ),
+      // Not a prefix match: this is a different flag name.
+      (Some("detect_stack_use_after_return_2=1"), false),
+    ];
+    for (options, expected) in cases {
+      assert_eq!(
+        asan_fake_stack_enabled(options),
+        expected,
+        "ASAN_OPTIONS={options:?}"
+      );
+    }
   }
 }
