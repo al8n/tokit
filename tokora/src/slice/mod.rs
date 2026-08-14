@@ -113,7 +113,7 @@ impl Slice<'_> for [u8] {
   where
     Self: 'a;
 
-  #[inline]
+  #[inline(always)]
   fn iter<'a>(&'a self) -> Self::Iter<'a>
   where
     Self: 'a,
@@ -121,7 +121,7 @@ impl Slice<'_> for [u8] {
     <[u8]>::iter(self).copied()
   }
 
-  #[inline]
+  #[inline(always)]
   fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
   where
     Self: 'a,
@@ -129,7 +129,7 @@ impl Slice<'_> for [u8] {
     <[u8]>::iter(self).copied().enumerate()
   }
 
-  #[inline]
+  #[inline(always)]
   fn len(&self) -> usize {
     <[u8]>::len(self)
   }
@@ -148,7 +148,7 @@ impl Slice<'_> for str {
   where
     Self: 'a;
 
-  #[inline]
+  #[inline(always)]
   fn iter<'a>(&'a self) -> Self::Iter<'a>
   where
     Self: 'a,
@@ -156,7 +156,7 @@ impl Slice<'_> for str {
     self.chars()
   }
 
-  #[inline]
+  #[inline(always)]
   fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
   where
     Self: 'a,

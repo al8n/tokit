@@ -380,7 +380,7 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   }
 
   /// Maps the source string to a new type, preserving the span and language.
-  #[inline]
+  #[inline(always)]
   pub fn map<U>(self, f: impl FnOnce(S) -> U) -> Ident<U, Span, Lang> {
     Ident::new(self.span, f(self.ident))
   }

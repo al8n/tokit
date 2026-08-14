@@ -357,7 +357,7 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   }
 
   /// Maps the source string to a new type, preserving the span and language.
-  #[inline]
+  #[inline(always)]
   pub fn map<U>(self, f: impl FnOnce(S) -> U) -> Keyword<U, Span, Lang> {
     Keyword::new(self.span, f(self.ident))
   }
