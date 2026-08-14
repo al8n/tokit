@@ -611,6 +611,30 @@ and will red until they do.
   falsely refuse a legitimate lexer, which no constant repairs. Measured across the whole in-tree
   suite the tightest headroom is 42.8x.
 
+  **Both counters compare before they increment**, which is what keeps that looseness safe. The
+  aggregate ceiling *saturates*, and a saturated `usize::MAX` made `spent += 1; spent > limit`
+  overflow before it ever compared — debug panicked with the wrong message, release wrapped the
+  tally to zero and handed the run its whole allowance again, silently, as often as the work asked.
+  It is reachable without contrivance on a 32-bit target: 11,580 units at the default multiple, 127
+  at the maximum. `spent >= limit` asked first, with the increment only on the allowed path, makes
+  the arithmetic total without moving any lexer's verdict — `limit` attempts still pass and the
+  `limit + 1`-th still refuses. `instance_ceiling(budget)` is `budget + 1` over a budget that may be
+  `usize::MAX - 1`, so the per-instance counter had the same defect and takes the same order.
+
+  **`Harness::budget_multiple` and `CacheHarness::lex_attempts_multiple` now panic above 65536
+  rather than clamping to it.** The cap is unchanged and still necessary — a multiple of
+  `usize::MAX` computes a ceiling no counter can pass, which disarms the guard the knob configures
+  — but a clamp enforced it by *silently lowering the caller's budget*. The lexer contract permits
+  finite density above the cap, so the clamp had a reachable victim: on a one-unit source a
+  requested multiple of 65,601 should allow 65,665 items, the clamp allowed 65,600, and a legal
+  lexer emitting 65,601 errors and then `None` was refused on its exhaustion probe by `run_partial`
+  while `run` reported it as possibly nonterminating. That is the same conforming-lexer-rejected
+  outcome as above, reached from a setting the builder accepted without a word — and a caller reads
+  the `lex-budget` tag as a verdict on their lexer. Above the cap this kit cannot tell a dense lexer
+  from a nonterminating one, and it now says so at the call site, naming the knob and the maximum.
+  Below `1` both still adjust silently: that direction only widens the budget, and a wider budget
+  cannot manufacture a failure.
+
   The integration tier's guards were the same defect and had not fired: the trait-tier checks that
   run before it happen to reject a non-terminating lexer first. That is an argument about check
   order, not a bound, so they are wrapped too. The same wrapper is also what now bounds a
