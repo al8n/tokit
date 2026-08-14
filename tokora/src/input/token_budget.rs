@@ -2,18 +2,36 @@
 //! lexer is allowed to produce.
 
 /// A ceiling on the number of items one `Input` will let its lexer produce —
-/// **tokens and lexer errors alike** — enforced by the driver at the single classification
+/// **tokens and lexer errors alike** — enforced by the driver at the single lexing
 /// chokepoint and **not refunded by a rollback**.
 ///
 /// Default: [`unlimited`](Self::unlimited). A parse that does not configure one behaves exactly as
 /// it did before this type existed.
 ///
-/// # What it charges, and where
+/// # The gate is in front of the work
 ///
-/// One charge per item the lexer hands back, taken at `InputRef::classify` — the crate's single
-/// classification of a scan outcome, which **both** lexing drivers (the scanner behind every
-/// consume path, and the peek fill) reach. Four consequences follow from that site, and each was a
-/// decision rather than an accident:
+/// The ceiling is tested **before** the lexer is invoked, at `InputRef::lex_within_boundary` — the
+/// crate's single lexing site, which **both** lexing drivers (the scanner behind every consume
+/// path, and the peek fill) go through. An exhausted budget therefore does not merely refuse the
+/// item; it declines to run the lexer at all.
+///
+/// That ordering is the bound, not a refinement of it. A ceiling asked *after* the work has
+/// already happened refuses a produced item, and the refusal has to be recorded somewhere for the
+/// caller to see — in the poison boundary, which a rollback restores, a
+/// [`set_state`](crate::InputRef::set_state) drops, and a
+/// [`state_mut`](crate::InputRef::state_mut) drops. The counter survives all three; the *stop*
+/// does not. A public `attempt` that drains to the refusal and declines therefore re-enters
+/// against the same unchanged `spent`, and the lexer runs again — once per call, without bound,
+/// for free. Measured before the preflight landed: a budget of **zero** funded one full
+/// `Lexer::lex` per re-entry (256 rounds → 256 invocations, `spent` still `0`) by all three
+/// routes. **A durable counter is half a bound; the other half is enforcement that a rollback
+/// cannot refund.**
+///
+/// # What it charges
+///
+/// One charge per item the lexer hands back, taken at that same site the moment an item exists —
+/// so a step that produced none (end of input) charges nothing. Four consequences follow, and each
+/// was a decision rather than an accident:
 ///
 /// - **a lexer error is charged.** This is the shape the budget exists for. A plain (non-limit)
 ///   lexer error leaves [`Lexer::check`](crate::Lexer::check) `Ok`, so the scanner emits its
@@ -27,7 +45,8 @@
 ///   the fill. Charging at consumption would let a caller pay nothing for a cache it filled and
 ///   then abandoned;
 /// - **a cached token replayed after a rollback is not charged again**, because nothing lexes: the
-///   cache serves it and `classify` never runs. The budget prices *lexing*, not consumption.
+///   cache serves it and the lexing site is never reached. The budget prices *lexing*, not
+///   consumption.
 ///
 /// # What it does not bound, stated plainly
 ///
@@ -59,12 +78,17 @@
 /// read the refusal as an ordinary failure would re-drive forever, each redrive against a fresh
 /// budget.
 ///
+/// The stop is re-latched on **every** refused entry, and it has to be: the boundary is a
+/// per-lineage memo that a rollback restores and a state re-key drops, so a refusal that latched
+/// once and then trusted the latch would go quiet the first time one of those cleared it. The
+/// ceiling is re-derived from [`spent`](Self::spent) instead, which none of them touch.
+///
 /// The one thing the refusal cannot do is *report itself*. There is no channel for it — a
 /// diagnostic would have to be built as the emitter's own error type, which needs a `From` bound
-/// this crate deliberately does not add to every consume path — so the item that exhausts the
-/// budget is refused **silently**, before its own classification runs. That also means a lexer
-/// error on exactly that item is not emitted: the budget declined to authorize the work that would
-/// have produced the diagnostic.
+/// this crate deliberately does not add to every consume path — so the item that would have
+/// exhausted the budget is refused **silently**, and never lexed. That also means a lexer error at
+/// exactly that position is not emitted: the budget declined to authorize the work that would have
+/// produced the diagnostic.
 ///
 /// # It is not the lexer's counter, and not the session's
 ///
@@ -153,24 +177,37 @@ impl TokenBudget {
   }
 
   /// Whether the next item would be refused.
+  ///
+  /// **This is the gate**, and it is the whole of why the bound holds. The driver asks it *before*
+  /// it invokes the lexer, and it is answered out of [`spent`](Self::spent) — a cell no
+  /// [`Checkpoint`](super::Checkpoint) carries and no state re-key touches — so it is re-derived
+  /// identically on every entry no matter what a rollback put back in between. Asking after the
+  /// work, off a stop that *is* rollbackable, bounds nothing: see the type docs.
   #[inline(always)]
   pub const fn is_exhausted(&self) -> bool {
     self.spent >= self.max
   }
 
-  /// Charges one item, or refuses.
+  /// Charges the one item [`is_exhausted`](Self::is_exhausted) authorized.
   ///
-  /// `true` authorizes the item; `false` means the ceiling is reached and **nothing was spent** —
-  /// a refusal is not itself a charge, so [`spent`](Self::spent) never exceeds
-  /// [`limitation`](Self::limitation) and the refusal is idempotent. No `saturating_add` is needed
-  /// for the same reason: the increment runs only when `spent < max <= usize::MAX`.
+  /// **Precondition: `!is_exhausted()`**, established by the driver's preflight immediately before
+  /// it invoked the lexer, with nothing between the two that could spend (the budget has exactly
+  /// one writer and it is reached through `&mut`). So this cannot push [`spent`](Self::spent) past
+  /// [`limitation`](Self::limitation), and no `saturating_add` is needed: the increment runs only
+  /// when `spent < max <= usize::MAX`.
+  ///
+  /// Infallible **on purpose**. A second ceiling test here would be a second gate, and a second
+  /// gate is how the enforcement ends up somewhere other than in front of the work — the defect
+  /// this shape exists to close. The debug assertion is the witness that the one gate ran; should
+  /// it ever fail in a release build the effect is `spent` overshooting `max`, which makes
+  /// `is_exhausted` refuse *sooner*, never later.
   #[inline(always)]
-  pub(crate) const fn charge(&mut self) -> bool {
-    if self.spent >= self.max {
-      return false;
-    }
+  pub(crate) const fn spend(&mut self) {
+    debug_assert!(
+      self.spent < self.max,
+      "TokenBudget::spend without the driver's exhaustion preflight",
+    );
     self.spent += 1;
-    true
   }
 }
 

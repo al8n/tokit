@@ -1808,19 +1808,29 @@ fn resume_census_one_pairing_site() {
 
   // The two-borrow lexing entry point is the residual the types no longer carry: `Resume` is
   // unforgeable, but `lex_within_boundary` takes the halves as plain `&mut`, so nothing but this
-  // count stops a third caller from passing a lexer beside an offset it chose separately.
+  // count stops a third caller from passing a lexer beside an offset it chose separately. It is
+  // also where the token budget's exhaustion preflight lives — in front of `Lexer::lex`, where a
+  // rollback cannot refund it — so a third caller would be a third way to lex, and the gate would
+  // be back to a rule each driver has to remember.
+  assert!(
+    count(m, "fn lex_within_boundary<") == 1,
+    "RESUME_CENSUS drift: `lex_within_boundary` must be defined exactly once. It is the crate's \
+     single lexing site, and both the (state, offset) pairing and the token budget's preflight \
+     rest on there being no second one (grep RESUME_CENSUS)."
+  );
   let lex_sites: &[(&str, usize, &str)] = &[
-    ("mod.rs", 2, "the definition + `scan_with`'s loop"),
+    ("mod.rs", 1, "`scan_with`'s loop"),
     ("peek/mod.rs", 1, "the peek fill's loop"),
   ];
   for (name, want, who) in lex_sites {
-    let got = count(source(name), "lex_within_boundary(");
+    let got = count(source(name), "self.lex_within_boundary(");
     assert!(
       got == *want,
-      "RESUME_CENSUS drift: `{name}` names `lex_within_boundary` {got} time(s), expected {want} \
+      "RESUME_CENSUS drift: `{name}` calls `lex_within_boundary` {got} time(s), expected {want} \
        ({who}). It takes the lexer and the position as two separate `&mut` — which is what keeps \
        the position in a register — so its callers must reach them through `Resume::parts_mut` \
-       and nowhere else (grep RESUME_CENSUS)."
+       and nowhere else, and every caller is a lexing driver the budget preflight has to cover \
+       (grep RESUME_CENSUS)."
     );
   }
   for (name, src) in SOURCES {

@@ -714,8 +714,10 @@ where
   /// Configured at [`with_state_and_context`](Self::with_state_and_context) from
   /// [`InputContext::with_token_budget`] and defaulting to [`TokenBudget::unlimited`].
   ///
-  /// Its one writer is `InputRef::classify`, the single classification chokepoint both lexing
-  /// drivers reach, which charges one item and refuses when the ceiling is met. There is no
+  /// Its one writer is `InputRef::lex_within_boundary`, the single lexing site both lexing
+  /// drivers reach, which tests the ceiling *before* it invokes the lexer — a check taken after
+  /// the work, behind a stop a rollback can refund, bounds nothing — and charges one item after a
+  /// step produces one. There is no
   /// `token_budget_mut` on either this type or [`InputRef`], so grammar code has no route to lower
   /// it — the same absence [`recursion`](Self::recursion) and [`emitter`](Self::emitter) rely on.
   ///

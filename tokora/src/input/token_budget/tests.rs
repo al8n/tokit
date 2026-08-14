@@ -1,4 +1,4 @@
-//! The budget arithmetic: what a charge costs, and what a refusal does not.
+//! The budget arithmetic: the gate the driver asks before it works, and the charge it takes after.
 
 use super::TokenBudget;
 
@@ -6,7 +6,8 @@ use super::TokenBudget;
 fn an_unlimited_budget_never_refuses() {
   let mut budget = TokenBudget::unlimited();
   for _ in 0..1_000 {
-    assert!(budget.charge());
+    assert!(!budget.is_exhausted());
+    budget.spend();
   }
   assert_eq!(budget.spent(), 1_000);
   assert!(!budget.is_exhausted());
@@ -15,21 +16,21 @@ fn an_unlimited_budget_never_refuses() {
 #[test]
 fn a_bounded_budget_charges_exactly_its_limitation() {
   let mut budget = TokenBudget::with_limitation(3);
-  assert!(budget.charge());
-  assert!(budget.charge());
-  assert!(budget.charge());
+  for _ in 0..3 {
+    assert!(!budget.is_exhausted());
+    budget.spend();
+  }
   assert!(budget.is_exhausted());
-  // Refusing is not a charge, and refusing twice reads the same as refusing once.
-  assert!(!budget.charge());
-  assert!(!budget.charge());
+  // The gate is a pure read, so asking it again reads the same — a refusal is not a charge, and
+  // the driver re-asks it on every entry precisely because that is free and idempotent.
+  assert!(budget.is_exhausted());
   assert_eq!(budget.spent(), 3);
   assert_eq!(budget.limitation(), 3);
 }
 
 #[test]
 fn a_zero_budget_refuses_the_first_item() {
-  let mut budget = TokenBudget::with_limitation(0);
+  let budget = TokenBudget::with_limitation(0);
   assert!(budget.is_exhausted());
-  assert!(!budget.charge());
   assert_eq!(budget.spent(), 0);
 }

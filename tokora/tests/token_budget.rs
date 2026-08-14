@@ -15,7 +15,11 @@
 //!    keeps every item it charged;
 //! 3. **terminality** — exhaustion latches the poison boundary, so a committed consume reports it
 //!    terminal and a [`PartialSession`](tokora::input::PartialSession) latches instead of
-//!    re-driving forever against a fresh per-`Input` budget.
+//!    re-driving forever against a fresh per-`Input` budget;
+//! 4. **the refusal is not refundable either** — the durable counter is only half of a bound. The
+//!    other half is the stop that acts on it, and the poison boundary a refusal latches *is*
+//!    rollbackable. Section 4 re-opens that stop by every route that clears it and counts the
+//!    lexer calls an already-exhausted budget funds.
 
 use core::cell::Cell;
 
@@ -328,9 +332,9 @@ fn a_bounded_budget_charges_the_error_flood_and_stops_it() {
 
   assert_eq!(cost.charged, B, "exactly the ceiling, not N + 1");
   assert_eq!(
-    cost.scans,
-    B + 1,
-    "B items lexed, plus the one whose classification refused"
+    cost.scans, B,
+    "B items lexed, and NOT the B+1-th: the ceiling is tested in front of `Lexer::lex`, so the \
+     refused step never calls it"
   );
   assert_eq!(
     cost.diagnostics,
@@ -609,5 +613,198 @@ fn a_session_redrive_cannot_reset_the_refusal() {
     session.spent(),
     spent_after_first,
     "and refused before any work: a refused attempt spends no bytes"
+  );
+}
+
+// ── 4. The rollback door: an exhausted budget must fund no lexer call ─────────────────────────
+
+/// How the attacker clears the terminal stop between rounds. Every variant is a **public** API,
+/// and every one of them restores or drops the poison boundary the refusal latched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reopen {
+  /// An [`InputRef::attempt`] that drains to the refusal and then declines. The rollback copies
+  /// the checkpoint's saved boundary back — `None`, since the save predates the refusal.
+  DeclinedAttempt,
+  /// [`InputRef::set_state`], whose re-key drops the boundary outright (the documented
+  /// limit-recovery path).
+  SetState,
+  /// [`InputRef::state_mut`], which runs the identical re-key before handing out the `&mut`.
+  StateMut,
+  /// [`InputRef::sync_through`], a **fourth** boundary-clearing route the finding did not name: a
+  /// rewinding sync snapshots the boundary in its own positional memo (`ThroughEntry`, not a
+  /// `Checkpoint`) and `restore_entry` puts it back on the no-match exit — a door the checkpoint
+  /// machinery knows nothing about.
+  ///
+  /// Measured, it is **not** a fourth attack: under the pre-fix ordering it cost a *constant* `1`
+  /// lexer call at a zero budget and `5` at `B = 4`, flat across 4, 16 and 256 rounds, where the
+  /// three rollback routes grew one per round. A refusal exits through the scan's **trip** exit,
+  /// which keeps its progress and never reaches the rewinding restore, so the boundary it latched
+  /// survives the call and the next round stops at it. The row is kept because that argument is
+  /// about which *exit* a refusal takes — a property of the sync drivers, not of the budget — and
+  /// the row is what would notice it changing.
+  SyncThrough,
+}
+
+thread_local! {
+  /// How many times the probe below re-opens the stop.
+  static ROUNDS: Cell<usize> = const { Cell::new(0) };
+  /// Which door it re-opens it through.
+  static HOW: Cell<Reopen> = const { Cell::new(Reopen::DeclinedAttempt) };
+}
+
+/// Drains to the budget's refusal, clears the stop, and repeats. Reports what the budget spent;
+/// the [`SCANS`] instrument reports what the sequence cost.
+fn reopen_probe<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<usize, Err_> {
+  let rounds = ROUNDS.with(Cell::get);
+  let how = HOW.with(Cell::get);
+  for _ in 0..rounds {
+    match how {
+      Reopen::DeclinedAttempt => {
+        let kept: Option<()> = inp.attempt(|txn| {
+          while txn.next().ok().flatten().is_some() {}
+          // Decline: the restore puts the pre-refusal boundary — `None` — back.
+          None
+        });
+        assert!(kept.is_none(), "the attempt declined");
+      }
+      Reopen::SetState => {
+        while inp.next().ok().flatten().is_some() {}
+        inp.set_state(TokenLimiter::new());
+      }
+      Reopen::StateMut => {
+        while inp.next().ok().flatten().is_some() {}
+        let _ = inp.state_mut();
+      }
+      Reopen::SyncThrough => {
+        // A predicate nothing satisfies, so the scan runs to its no-match exit and takes the
+        // rewinding restore with it.
+        let _ = inp.sync_through(|_| false, || None)?;
+      }
+    }
+  }
+  Ok(inp.token_budget().spent())
+}
+
+/// `(lexer calls, budget spent)` after `rounds` drain-and-re-open cycles.
+fn reopen(src: &str, budget: TokenBudget, how: Reopen, rounds: usize) -> (usize, usize) {
+  ROUNDS.with(|c| c.set(rounds));
+  HOW.with(|c| c.set(how));
+  reset_scans();
+  let spent = Parser::with_context(Ctx::new(Verbose::new()).with_token_budget(budget))
+    .apply(reopen_probe)
+    .parse_with_state(src, TokenLimiter::new())
+    .expect("a collecting emitter never makes this fatal");
+  (scans(), spent)
+}
+
+const ROUTES: [Reopen; 4] = [
+  Reopen::DeclinedAttempt,
+  Reopen::SetState,
+  Reopen::StateMut,
+  Reopen::SyncThrough,
+];
+const ROUNDS_SWEEP: [usize; 3] = [4, 16, 256];
+
+/// The whole route × rounds matrix, so a failure prints every route rather than the first one.
+fn sweep(src: &str, budget: TokenBudget) -> [[(usize, usize); 3]; 4] {
+  let mut out = [[(0usize, 0usize); 3]; 4];
+  for (row, how) in out.iter_mut().zip(ROUTES) {
+    for (cell, rounds) in row.iter_mut().zip(ROUNDS_SWEEP) {
+      *cell = reopen(src, budget, how, rounds);
+    }
+  }
+  out
+}
+
+/// **Plant.** A budget of **zero** authorizes nothing, so it must fund **no** `Lexer::lex` call —
+/// however many times, and by whichever door, its stop is re-opened.
+///
+/// Falsifying output, measured against the pre-fix ordering (the ceiling asked *after* the lex):
+/// the scan count tracks the round count exactly — `(4, 0)`, `(16, 0)`, `(256, 0)` on the three
+/// rollback rows — while `spent` stays `0`, because a refusal is not a charge. A ceiling that
+/// authorizes nothing was funding one full lexer invocation per public call, and the attacker paid
+/// for none of them. The `SyncThrough` row read a flat `(1, 0)` instead: see [`Reopen`].
+#[test]
+fn a_zero_budget_funds_no_lexer_call_however_often_the_stop_is_reopened() {
+  assert_eq!(
+    sweep(&hostile(N), TokenBudget::with_limitation(0)),
+    [[(0, 0); 3]; 4],
+    "rows are {ROUTES:?}, columns {ROUNDS_SWEEP:?}, cells (lexer calls, spent)"
+  );
+}
+
+/// **Plant.** The same door, one level up: once a *bounded* budget is exhausted, re-opening its
+/// stop must not buy another lexer call. The total work is the ceiling, and it is **invariant in
+/// the round count** — which is what "the budget bounds the work" actually consists of.
+///
+/// Falsifying output, measured against the pre-fix ordering: `B + rounds` scans — `(8, 4)`,
+/// `(20, 4)`, `(260, 4)` at `B = 4` on the three rollback rows. The counter was durable and the
+/// enforcement was not, so `spent` sat pinned at the ceiling while the lexer ran without bound.
+/// The `SyncThrough` row read a flat `(5, 4)`: see [`Reopen`].
+#[test]
+fn an_exhausted_budget_funds_no_further_lexer_call_however_often_the_stop_is_reopened() {
+  const B: usize = 4;
+  assert_eq!(
+    sweep("aaaaaaaa", TokenBudget::with_limitation(B)),
+    [[(B, B); 3]; 4],
+    "rows are {ROUTES:?}, columns {ROUNDS_SWEEP:?}, cells (lexer calls, spent)"
+  );
+}
+
+/// The re-opened stop is still **terminal** on every round: clearing the boundary buys a fresh
+/// *check*, never a fresh lex, and the check refuses.
+///
+/// Guards the repair against the lazy fix of simply never re-latching: a preflight that refuses
+/// without recording the stop would leave a committed consume reporting a plain, non-terminal end
+/// of input, and a `PartialSession` would redrive on it forever.
+#[test]
+fn the_refusal_re_latches_on_every_reopened_round() {
+  fn probe<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<usize, Err_> {
+    for round in 0..8 {
+      inp.set_state(TokenLimiter::new());
+      match inp.next_or_stop() {
+        Err(e) => assert_eq!(e, Err_::Eot(true), "round {round} lost terminality"),
+        Ok(_) => panic!("round {round}: a zero budget authorized an item"),
+      }
+    }
+    Ok(inp.token_budget().spent())
+  }
+
+  reset_scans();
+  let spent = Parser::with_context(
+    Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(0)),
+  )
+  .apply(probe)
+  .parse_with_state("aaaa", TokenLimiter::new())
+  .expect("no error on this path");
+
+  assert_eq!(spent, 0);
+  assert_eq!(scans(), 0, "eight terminal stops, zero lexer calls");
+}
+
+/// The **unlimited sentinel**, measured rather than asserted: the preflight is a ceiling test, and
+/// an unbounded ceiling is never met, so no item is ever refused and the work is exactly the work.
+///
+/// The figure that would move if the sentinel were mishandled is `scans`: a preflight that refused
+/// on `usize::MAX` would cut the drain short, and one that skipped the charge would leave `charged`
+/// behind the item count. Both are read here against the same drain the unbounded section measures.
+#[test]
+fn the_unlimited_sentinel_refuses_nothing_and_costs_no_extra_scan() {
+  let unlimited = drain_under(&hostile(N), TokenBudget::unlimited());
+  // Every item produced, every item charged, and one scan per item plus the exhausting probe.
+  assert_eq!(unlimited.charged, N + 1);
+  assert_eq!(unlimited.scans, N + 2);
+  assert_eq!(unlimited.diagnostics, N);
+
+  // And the sentinel is not "a ceiling that happens not to be met": re-opening the stop finds
+  // nothing to refuse, so the drain runs to the genuine end of the source and every later round
+  // pays only the one exhausting probe. A preflight that mistook `usize::MAX` for a met ceiling
+  // would show `scans == 0` here.
+  let (scans, spent) = reopen("aaaaaaaa", TokenBudget::unlimited(), Reopen::SetState, 4);
+  assert_eq!(spent, 8, "all eight items, charged once each");
+  assert_eq!(
+    scans,
+    8 + 4,
+    "eight items plus one exhausting probe per round: nothing was refused"
   );
 }

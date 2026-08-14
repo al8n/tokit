@@ -189,11 +189,22 @@ and will red until they do.
   accepted token** while *N* scans run and *N* diagnostics accumulate durably in the emitter's log.
   Measured over *N* in {64, 128, 512, 2048}, the accept count stayed `1` while scans ran
   {66, 130, 514, 2050} and diagnostics {64, 128, 512, 2048} — so a ceiling denominated in accepts
-  is satisfied by all four. The charge is taken at the single classification chokepoint both lexing
-  drivers pass every produced item through, which makes "every item was charged" a property of the
-  module rather than a rule each driver remembers. Trivia is charged; a peek-fill is charged at
-  production, not at consumption; a cached token replayed after a rollback is not charged again,
-  because nothing lexes.
+  is satisfied by all four. Trivia is charged; a peek-fill is charged at production, not at
+  consumption; a cached token replayed after a rollback is not charged again, because nothing
+  lexes.
+
+  **The ceiling is tested in front of the lexer, not behind it**, at the single lexing site both
+  drivers pass through — which makes "no item was produced without authorization" and "every item
+  produced was charged" properties of the module rather than rules each driver remembers. A durable
+  counter is only half a bound. Asked *after* the work, the refusal has to be recorded in the
+  poison boundary for a caller to see it, and the boundary is a lineage memo: a rollback restores
+  it, and `set_state`/`state_mut` drop it. The spend would then be durable while the *enforcement*
+  was refundable, so a public `attempt` that drains to the refusal and declines re-enters against
+  an unchanged `spent` and the lexer runs again — once per call, without bound. Measured: a budget
+  of **zero** funded one full `Lexer::lex` per re-entry (4, 16, 256 rounds → 4, 16, 256
+  invocations, `spent` still `0`), identically by all three routes; with the preflight it funds
+  none. The exhausted `B = 4` case ran `B + rounds` scans and now runs `B`, invariant in the round
+  count.
 
   **Exhaustion is terminal**, and it had to be: a `PartialSession` rebuilds a fresh `Input` — and
   therefore a fresh budget — for every redrive, so a refusal read as an ordinary failure would
