@@ -49,6 +49,63 @@ pub const ASAN_OPTIONS: &str = "ASAN_OPTIONS";
 /// The one `ASAN_OPTIONS` flag [`frames_reused`] can observe.
 const FAKE_STACK_FLAG: &str = "detect_stack_use_after_return";
 
+/// What an **unspecified** [`FAKE_STACK_FLAG`] means — compiler-rt's own default for this target,
+/// which is not the same thing as "off".
+///
+/// `compiler-rt/lib/asan/asan_flags.inc` declares the flag as
+///
+/// ```text
+/// ASAN_FLAG(bool, detect_stack_use_after_return,
+///           SANITIZER_LINUX && !SANITIZER_ANDROID,
+///           "Enables stack-use-after-return checking at run-time.")
+/// ```
+///
+/// so the fake stack is **on** by default on Linux and off everywhere else, and `target_os =
+/// "linux"` is that predicate spelled in Rust: Android is its own `target_os`, so it is already
+/// excluded.
+///
+/// # Read out of the runtime, not only out of the header
+///
+/// In the ASan runtime rustup ships for `x86_64-unknown-linux-gnu`, the flag handler for
+/// `detect_stack_use_after_return` is registered against byte `0x1f` of `__asan::Flags`, and
+/// `__asan::Flags::SetDefaults` writes `1` there. The same runtime for `aarch64-apple-darwin`
+/// answers `Current Value: false` under `ASAN_OPTIONS=help=1`. The fourteen flags declared around
+/// it agree across the two platforms in every case but this one, which is exactly the conditional
+/// above.
+///
+/// # Why the OS is an argument
+///
+/// This used to be an unconditional `false`, and that is the whole of the defect it replaces: CI
+/// runs Linux and leaves the flag unspecified, so frames relocated while the decision below said
+/// they did not — and the control that exists to catch a fake stack took its other arm, where the
+/// observation it was written to check is deliberately ignored. **The absence of a setting is not
+/// the absence of the behaviour.**
+///
+/// Written as `cfg!(target_os = "linux")` the correction would be unfalsifiable from the host it
+/// was written on: this repository is developed on macOS, where a table that gets Linux wrong and
+/// a table that gets it right agree on every value the host can evaluate. As a lookup on a string
+/// the whole table is checkable from anywhere, so planting the old answer for `"linux"` fails a
+/// test here rather than only in the sanitizer job.
+///
+/// Nothing in CI rests on this being right in the first place: `ci/sanitizer.sh` runs the
+/// `address` leg twice with the flag set explicitly each way and requires the two runs to land in
+/// *different* arms. This decides only the unspecified case — the one a person reaching for
+/// `RUSTFLAGS=-Zsanitizer=address cargo test` gets — and if a future runtime flips its default the
+/// arm assertion fails loudly rather than passing quietly.
+pub fn fake_stack_default_for(target_os: &str) -> bool {
+  // Rust splits Android out of `target_os`, so `!SANITIZER_ANDROID` needs no second clause.
+  target_os == "linux"
+}
+
+/// [`fake_stack_default_for`] this build's target.
+///
+/// `std::env::consts::OS` rather than `cfg!`: it is the same compile-time fact, spelled so that
+/// the mapping above is the only thing deciding, and so a control can ask what the mapping says
+/// about a platform that is not the one running it.
+pub fn fake_stack_default() -> bool {
+  fake_stack_default_for(std::env::consts::OS)
+}
+
 /// Everything the decision rests on, as plain data.
 ///
 /// The live values are gathered by [`here`]; taking them as an argument is what gives every branch
@@ -193,29 +250,50 @@ pub fn frames_reused() -> bool {
   a == b && b == c
 }
 
-/// Whether an `ASAN_OPTIONS` value switches the fake stack **on**.
+/// Whether the fake stack is **on** for this run, given `ASAN_OPTIONS`.
 ///
-/// Off is the default: ASan compiles the fake-stack machinery in but leaves it dormant until the
-/// runtime is told otherwise, so `ASAN_OPTIONS` is what decides whether [`frames_reused`] can
-/// observe anything at all under ASan.
+/// `ASAN_OPTIONS` decides whether [`frames_reused`] can observe anything at all under ASan, and it
+/// decides it *against a default* rather than from nothing: an option the string does not mention
+/// keeps [`fake_stack_default`], which is on for Linux. Treating the unmentioned case as off is
+/// what let a relocating CI build be classified as a non-relocating one.
 ///
-/// Parsed the way the sanitizer's own parser reads it — any of space, comma, colon, tab, newline
-/// or carriage return separates flags, and a repeated flag takes its **last** value — so this
-/// answers for the string ASan itself will act on rather than for a simplified spelling of it.
-/// Taken as an argument rather than read from the environment so its controls do not have to
-/// mutate a process-wide variable while other tests are running.
+/// Parsed the way the sanitizer's own parser reads it — see
+/// [`asan_fake_stack_enabled_from`], which is this against a caller-supplied default so the parse
+/// can be pinned for both platforms from either one.
 pub fn asan_fake_stack_enabled(options: Option<&str>) -> bool {
+  asan_fake_stack_enabled_from(fake_stack_default(), options)
+}
+
+/// [`asan_fake_stack_enabled`] against an explicit platform default.
+///
+/// Any of space, comma, colon, tab, newline or carriage return separates flags, and a repeated
+/// flag takes its **last** value, so this answers for the string ASan itself will act on rather
+/// than for a simplified spelling of it. The values are `internal_strcmp`'d in compiler-rt's
+/// `FlagHandler<bool>::Parse` against exactly `1`/`true`/`yes` and `0`/`false`/`no`; **anything
+/// else is not a spelling of either**, and the runtime prints `Invalid value for bool option` and
+/// aborts before `main` rather than falling back to one — watched for `True`, `TRUE`, `False`,
+/// `bogus` and the empty string. Such a value leaves the flag where it was here for the same
+/// reason: `Parse` returns without writing it.
+///
+/// The default and the options are both arguments rather than read from the platform and the
+/// environment, so the controls neither mutate a process-wide variable while other tests are
+/// running nor answer only for the host they happen to run on.
+pub fn asan_fake_stack_enabled_from(default: bool, options: Option<&str>) -> bool {
+  let mut on = default;
   let Some(options) = options else {
-    return false;
+    return on;
   };
-  let mut on = false;
   for flag in options.split([' ', ',', ':', '\n', '\t', '\r']) {
     // `split_once`, so `detect_stack_use_after_return_2=1` is a different flag rather than a
     // prefix match on this one.
     if let Some((name, value)) = flag.split_once('=')
       && name == FAKE_STACK_FLAG
     {
-      on = matches!(value, "1" | "true" | "True" | "TRUE" | "yes");
+      match value {
+        "1" | "true" | "yes" => on = true,
+        "0" | "false" | "no" => on = false,
+        _ => {}
+      }
     }
   }
   on
@@ -228,12 +306,18 @@ pub fn asan_fake_stack_enabled(options: Option<&str>) -> bool {
 /// frame:
 ///
 /// * **Miri**, which gives every frame's locals their own virtual allocation, and
-/// * **ASan's fake stack**, which is off unless [`ASAN_OPTIONS`] turns it on.
+/// * **ASan's fake stack**, which [`ASAN_OPTIONS`] can turn on or off and which is on by default
+///   wherever [`fake_stack_default`] says so.
 ///
 /// ThreadSanitizer does not move frames at all — it instruments memory accesses — and the CI
-/// sanitizer matrix runs it; neither does ASan with the fake stack left at its default. In those
-/// builds [`frames_reused`] correctly reports *reused*, and a control that demands otherwise fails
-/// while detection and refusal are both working exactly as intended.
+/// sanitizer matrix runs it; neither does ASan with the fake stack explicitly off. In those builds
+/// [`frames_reused`] correctly reports *reused*, and a control that demands otherwise fails while
+/// detection and refusal are both working exactly as intended.
+///
+/// What this must not do is read an unspecified flag as an absent fake stack. On Linux — which is
+/// what the sanitizer matrix runs — the CI `address` leg leaves the flag unspecified and the
+/// frames relocate, so answering `false` there put the control in the arm that ignores the
+/// observation, and the detector went unvalidated in the one configuration built to exercise it.
 ///
 /// The announcement is deliberately NOT consulted: [`ANNOUNCE`] is a claim that a build is
 /// instrumented, not a claim about the fake stack, and reading it here would make an exported
@@ -245,6 +329,57 @@ pub fn frame_relocation_expected() -> bool {
   let address = option_env!("TOKORA_BUILD_SANITIZERS")
     .is_some_and(|list| list.split(',').any(|san| san == "address"));
   address && asan_fake_stack_enabled(std::env::var(ASAN_OPTIONS).ok().as_deref())
+}
+
+/// Whether anything **declares** this build instrumented, without observing the machine.
+///
+/// The three sources are read raw rather than through [`StackEvidence`] so a control resting on
+/// this covers the wiring from `build.rs` to the decision and not only the decision.
+pub fn declared_instrumented() -> bool {
+  option_env!("TOKORA_BUILD_SANITIZERS").is_some()
+    || option_env!("TOKORA_BUILD_FLAGS_OPAQUE").is_some()
+    || std::env::var(ANNOUNCE).is_ok_and(|v| !v.is_empty())
+}
+
+/// Which of the three things a run can be, for the frame-reuse control.
+///
+/// The arm is a value rather than a shape of `if`/`else` so that the arm a run *announces* is by
+/// construction the arm it *takes*: `ci/sanitizer.sh` requires its two `address` legs to land in
+/// different arms, and a gate reading a label that could disagree with the branch would be
+/// checking the label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameReuseArm {
+  /// Frames relocate — Miri, or ASan with the fake stack on. The detector must fire.
+  Relocating,
+  /// Instrumented and not relocating — TSan, or ASan with the fake stack off. Nothing is asserted
+  /// about the observation; what must hold is that the declaration refuses on its own.
+  Declared,
+  /// Nothing declares this build instrumented and nothing relocates. The detector must be quiet,
+  /// so that it is not a refusal of every native run.
+  Native,
+}
+
+impl FrameReuseArm {
+  /// The name printed by [`announce_arm`] and matched by `ci/sanitizer.sh` and
+  /// `ci/stack_probe.sh`.
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Relocating => "relocating",
+      Self::Declared => "declared",
+      Self::Native => "native",
+    }
+  }
+}
+
+/// The arm this process falls in.
+pub fn frame_reuse_arm() -> FrameReuseArm {
+  if frame_relocation_expected() {
+    FrameReuseArm::Relocating
+  } else if declared_instrumented() {
+    FrameReuseArm::Declared
+  } else {
+    FrameReuseArm::Native
+  }
 }
 
 /// The live evidence, gathered once.
@@ -302,9 +437,23 @@ fn evidence<'a>(
 /// Not `eprintln!`: libtest captures a passing test's output, so the one run where the reading is
 /// skipped would be the one run where nobody can see that it was.
 pub fn announce_skipped(what: &str, why: &str) {
+  on_real_stderr(&format!("{what}: NO MEASUREMENT TAKEN — {why}"));
+}
+
+/// Says — on the process's **real** stderr — which arm the frame-reuse control took.
+///
+/// Same reason as [`announce_skipped`] for bypassing libtest's capture, and one more: this is
+/// printed by a **passing** test, whose output libtest discards entirely. It is the only evidence
+/// outside the process that a leg exercised the arm it was run to exercise, and
+/// `ci/sanitizer.sh` fails the `address` matrix cell when its two legs report the same one.
+pub fn announce_arm(what: &str, arm: FrameReuseArm) {
+  on_real_stderr(&format!("{what}: CONTROL ARM {}", arm.as_str()));
+}
+
+fn on_real_stderr(line: &str) {
   use std::io::Write as _;
 
   let mut err = std::io::stderr().lock();
-  let _ = writeln!(err, "{what}: NO MEASUREMENT TAKEN — {why}");
+  let _ = writeln!(err, "{line}");
   let _ = err.flush();
 }

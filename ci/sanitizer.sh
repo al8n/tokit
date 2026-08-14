@@ -33,7 +33,12 @@ TARGET="${1:-x86_64-unknown-linux-gnu}"
 # aborting the run would report as a failure rather than as the platform fact it is.
 SANITIZERS="${2:-address thread}"
 
-export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
+# Deliberately silent about `detect_stack_use_after_return`, so the main `address` leg runs on
+# whatever compiler-rt's default for the runner is — which is what a person typing
+# `RUSTFLAGS=-Zsanitizer=address cargo test` gets. The two legs at the bottom of this script pin
+# both settings explicitly; this one is the unspecified case, and it is not assumed to mean off.
+BASE_ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
+export ASAN_OPTIONS="$BASE_ASAN_OPTIONS"
 
 # ## Refusal mode, stated rather than inherited
 #
@@ -47,11 +52,12 @@ export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
 # affirmation cannot override a detection — the probe returns the sanitizer as its reason, not the
 # variable — so this is the belt to that brace, and it keeps the skip line naming the sanitizer.
 #
-# Note what `ASAN_OPTIONS` above does NOT say: `detect_stack_use_after_return`. The fake stack is
-# off, so under the `address` leg frames are NOT relocated and `frames_reused()` correctly reports
-# that they are reused. ThreadSanitizer never relocates a frame at all. The refusal in both legs
-# rests on the compiler's `sanitize=` report, which is why it must not be made to depend on the
-# frame observation.
+# Note what `ASAN_OPTIONS` above does NOT say: `detect_stack_use_after_return`. That is not the
+# same as saying it is off. `compiler-rt/lib/asan/asan_flags.inc` gives the flag the default
+# `SANITIZER_LINUX && !SANITIZER_ANDROID`, so on this script's own default target the fake stack is
+# **on** and the `address` leg relocates frames. ThreadSanitizer never relocates one at all. The
+# refusal in both legs rests on the compiler's `sanitize=` report either way, which is why it must
+# not be made to depend on the frame observation.
 unset TOKORA_STACK_PROBE
 
 # ## Telling the tests they are instrumented — no longer this variable's job alone
@@ -85,6 +91,83 @@ unset TOKORA_STACK_PROBE
 #
 # It gates the two address comparisons and nothing else. The depth-cell assertions stay live under
 # every sanitizer, and a skipped one is announced loudly on stderr rather than quietly passing.
+fail() {
+  echo "::error::sanitizer: $1"
+  exit 1
+}
+
+# The test that announces which arm the frame-reuse control took, and the line it announces on.
+ARM_TEST=refusals::the_frame_reuse_detector_agrees_with_this_build
+
+# ## The fake stack is a RUNTIME choice, so both of its settings are run
+#
+# `frames_reused()` is the one detector that observes the machine instead of asking the build about
+# it, and it can only observe anything when ASan's fake stack is on. The control that consumes it
+# has an arm for each case, and the arm for a non-relocating sanitizer deliberately ignores the
+# observation — correct, and unfalsifiable on its own, because a run that lands there passes
+# whatever `frames_reused()` said.
+#
+# That is not hypothetical. While an unspecified `detect_stack_use_after_return` was read as *off*,
+# every `address` cell here took the ignoring arm on a runner whose frames were in fact being
+# relocated, and went green without once putting the detector to the question. A single leg cannot
+# show this; two can. Each forces the flag, each reports the arm it reached, and they are required
+# to be DIFFERENT arms — a pair that lands in the same one is the same blind spot with more steps.
+# Sets ARM to the arm the control announced. Not written to stdout and captured: `fail` has to be
+# able to end the script and be read while doing it, and neither survives a command substitution.
+ARM=""
+asan_arm() {
+  value="$1"
+  log="$2"
+  echo "--- detect_stack_use_after_return=${value} ---"
+  ASAN_OPTIONS="${BASE_ASAN_OPTIONS} detect_stack_use_after_return=${value}" \
+    RUSTFLAGS="-Z sanitizer=address" \
+    cargo test --workspace --target "$TARGET" --all-features --test stack_per_level \
+    -- --exact "$ARM_TEST" --nocapture >"$log" 2>&1 \
+    || { cat "$log"; fail "detect_stack_use_after_return=${value}: the arm control did not pass"; }
+  cat "$log"
+  # Required to have RUN, not merely to have not failed: the file cfg's itself out entirely at a
+  # feature point without a lexer, and a binary that ran no tests prints no banner either.
+  grep -q "test result: ok. 1 passed" "$log" \
+    || fail "detect_stack_use_after_return=${value}: ${ARM_TEST} did not run"
+  ARM="$(sed -n 's/^stack_per_level: CONTROL ARM \([a-z][a-z]*\)$/\1/p' "$log" | tail -1)"
+}
+
+both_fake_stack_settings() {
+  echo
+  echo "=== the fake stack, forced off and forced on: two legs, two arms ==="
+  log_off="${TMPDIR:-/tmp}/tokora-asan-arm-off.$$.log"
+  log_on="${TMPDIR:-/tmp}/tokora-asan-arm-on.$$.log"
+  trap 'rm -f "$log_off" "$log_on"' EXIT
+
+  asan_arm 0 "$log_off"
+  arm_off="$ARM"
+  asan_arm 1 "$log_on"
+  arm_on="$ARM"
+
+  echo
+  echo "detect_stack_use_after_return=0 -> arm ${arm_off:-<none>}"
+  echo "detect_stack_use_after_return=1 -> arm ${arm_on:-<none>}"
+
+  # Different first, then named, and in that order because each diagnosis has to have an input
+  # that produces it. Difference is what a leg pair is for, and it is what the two ways of getting
+  # the flag wrong both destroy — a lookup that cannot turn the fake stack on puts both legs in
+  # `declared`, one that cannot turn it off puts both in `relocating`. The names then catch the
+  # pair that differs and is still not this pair, which is what a broken declaration produces:
+  # `native` against `relocating`.
+  [ "$arm_off" != "$arm_on" ] || fail \
+    "both fake-stack settings landed in the '${arm_on:-<none>}' arm, so the flag did not decide \
+anything and one leg exercised nothing the other did not"
+  [ "$arm_off" = declared ] || fail \
+    "with the fake stack off the control must take the 'declared' arm — the ASan build that does \
+not relocate, where the refusal has to stand on the compiler's report alone — and it took \
+'${arm_off:-<none>}'"
+  [ "$arm_on" = relocating ] || fail \
+    "with the fake stack on the control must take the 'relocating' arm, where the detector is \
+required to fire — and it took '${arm_on:-<none>}'"
+
+  echo "the two legs took different arms: ${arm_off} and ${arm_on}."
+}
+
 for san in $SANITIZERS; do
   echo "=== sanitizer: ${san} on ${TARGET} ==="
   export TOKORA_SANITIZER="${san}"
@@ -99,4 +182,7 @@ for san in $SANITIZERS; do
         cargo test --tests --target "$TARGET" --all-features
       ;;
   esac
+  if [ "$san" = address ]; then
+    both_fake_stack_settings
+  fi
 done

@@ -73,6 +73,19 @@ if ! grep -qE "per nesting level: combinator [0-9]+ B, separated [0-9]+ B, hand-
   fail "no per-nesting-level figure was produced; the reading this job exists to take did not happen"
 fi
 
+# The frame-reuse control has three arms; `ci/sanitizer.sh` runs the two instrumented ones, and
+# this run is the third. What is gated here is that it RAN and said so. `native` is the only arm
+# that asserts frames are reused — the property the figure above was read on — and on a build that
+# produced a figure it is the only arm reachable, because every input to the other two also refuses
+# the measurement. So this is not a second opinion about the arm; it is the difference between the
+# control having run and the control having been filtered out of a green log, which is the same
+# thing `--exact` and `1 passed` buy for the witness below. Checked after the refusal and the
+# figure so those keep their own diagnoses.
+arm="$(sed -n 's/^stack_per_level: CONTROL ARM \([a-z][a-z]*\)$/\1/p' "$log" | tail -1)"
+if [ "$arm" != native ]; then
+  fail "the frame-reuse control reported '${arm:-no arm at all}' where it must report 'native'; the figure above was read on the assumption that frames are reused, and that is the arm which asserts it"
+fi
+
 echo
 echo "=== pratt_limit_unit_sink (the frame-release witness must RUN) ==="
 # Named with `--exact`, and the count is required to be 1: the file cfg's itself out entirely at a

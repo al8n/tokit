@@ -546,7 +546,8 @@ fn per_nesting_level_stack_cost() {
 /// replaced it carried two assertions that no input could reach.
 mod refusals {
   use super::common::native_stack::{
-    ANNOUNCE, OPT_IN, StackEvidence, asan_fake_stack_enabled, frame_relocation_expected,
+    ANNOUNCE, FrameReuseArm, OPT_IN, StackEvidence, announce_arm, asan_fake_stack_enabled,
+    asan_fake_stack_enabled_from, fake_stack_default, fake_stack_default_for, frame_reuse_arm,
     frames_reused, instrumentation_refusal, measurement_refusal, with_evidence_here,
   };
   use super::per_level_with;
@@ -728,19 +729,21 @@ mod refusals {
   /// * **ThreadSanitizer** — in the matrix, next to `address` — instruments memory accesses and
   ///   leaves frames exactly where they were, so sequential calls reuse one frame and the old
   ///   assertion failed while detection and refusal were both working.
-  /// * **ASan with the fake stack at its default**, which is *off*: `ci/sanitizer.sh` exports
-  ///   `ASAN_OPTIONS` without `detect_stack_use_after_return`, so the same contradiction applies
-  ///   to the `address` leg unless the runtime is explicitly told to relocate.
+  /// * **ASan with the fake stack off**, which has to be *asked for* on Linux:
+  ///   `ci/sanitizer.sh` exports `ASAN_OPTIONS` without `detect_stack_use_after_return`, and
+  ///   compiler-rt defaults that flag to on for non-Android Linux — see
+  ///   [`fake_stack_default`]. So the leg the sanitizer matrix actually runs relocates, and the
+  ///   contradiction applies to the `address` leg only once the runtime is explicitly told not to.
   ///
-  /// So the arm is chosen by [`frame_relocation_expected`], which asks the two questions that
-  /// decide relocation — Miri, or ASan *with* the fake stack switched on — rather than the
-  /// question that decides instrumentation:
+  /// So the arm is chosen by [`frame_reuse_arm`], which asks the two questions that decide
+  /// relocation — Miri, or ASan *with* the fake stack switched on — rather than the question that
+  /// decides instrumentation:
   ///
-  /// | this build | what is asserted |
-  /// |---|---|
-  /// | relocates (Miri, ASan + fake stack) | the detector **fires**: frames are not reused |
-  /// | instrumented, does not relocate (TSan, ASan default) | the refusal **stands without the observation**: both strictness levels still refuse with `frames_reused` forced true |
-  /// | nothing detected | the detector is **quiet**: frames are reused, so it does not refuse every native run |
+  /// | [`FrameReuseArm`] | this build | what is asserted |
+  /// |---|---|---|
+  /// | `Relocating` | Miri, ASan + fake stack | the detector **fires**: frames are not reused |
+  /// | `Declared` | TSan, ASan with the fake stack off | the refusal **stands without the observation**: both strictness levels still refuse with `frames_reused` forced true |
+  /// | `Native` | nothing detected | the detector is **quiet**: frames are reused, so it does not refuse every native run |
   ///
   /// The middle arm asserts nothing about [`frames_reused`] in either direction. That is
   /// deliberate: what must hold under a non-relocating sanitizer is that the *declared*
@@ -749,92 +752,228 @@ mod refusals {
   /// failure. Nor does the first arm require a declaration — a build that relocates is exactly the
   /// build whose instrumentation may have arrived by a route `build.rs` cannot see, which is the
   /// case the observation exists for.
+  ///
+  /// # Which arm ran is reported, because a silent arm is how this went wrong
+  ///
+  /// An arm that ignores the observation is the right thing to assert and the wrong thing to
+  /// reach by accident: while the fake-stack default was read as off, every CI `address` run took
+  /// the middle arm on a build whose frames were in fact relocating, and passed without ever
+  /// putting [`frames_reused`] to the question. Nothing in a green log distinguished that from
+  /// the arm being exercised. So the arm is announced on the real stderr **before** any assertion
+  /// can end the test, and `ci/sanitizer.sh` runs the `address` leg twice — fake stack off, then
+  /// on — and fails the cell unless the two land in different arms.
   #[test]
   fn the_frame_reuse_detector_agrees_with_this_build() {
     let reused = frames_reused();
+    let arm = frame_reuse_arm();
+    // Before the assertions, so a failing leg still says which arm it was in.
+    announce_arm("stack_per_level", arm);
 
-    // Read from the raw sources rather than through the gathered evidence, so the middle arm's
+    // Read from the raw source rather than through the gathered evidence, so the middle arm's
     // assertion covers the wiring from `build.rs` to the decision and not just the decision.
     let compiler_says = option_env!("TOKORA_BUILD_SANITIZERS");
-    let declared = compiler_says.is_some()
-      || option_env!("TOKORA_BUILD_FLAGS_OPAQUE").is_some()
-      || std::env::var(ANNOUNCE).is_ok_and(|v| !v.is_empty());
 
-    if frame_relocation_expected() {
-      assert!(
+    match arm {
+      FrameReuseArm::Relocating => assert!(
         !reused,
         "this build relocates frames — Miri, or ASan with the fake stack on — and the detector did \
          not see it"
-      );
-      return;
-    }
+      ),
 
-    if declared {
       // TSan, or ASan with the fake stack off. `frames_reused()` is right to report *reused*
       // here, so the property that has to hold is the other one: the build is refused anyway. The
       // observation is set aside for the question, which is what makes the answer a statement
       // about the declaration alone.
-      let why = with_evidence_here(|e| {
-        instrumentation_refusal(StackEvidence {
-          frames_reused: true,
-          ..e
+      FrameReuseArm::Declared => {
+        let why = with_evidence_here(|e| {
+          instrumentation_refusal(StackEvidence {
+            frames_reused: true,
+            ..e
+          })
         })
-      })
-      .expect(
-        "a declared sanitizer build was not refused once the frame observation was set aside — \
-         `pratt_limit_unit_sink`'s address witness runs on exactly this decision, and under a \
-         sanitizer that does not relocate it would run against redzoned frames",
-      );
-      if let Some(list) = compiler_says {
-        assert!(
-          why.contains(&format!("sanitize={list}")),
-          "the compiler reported sanitize={list} for this build and the refusal does not say so: \
-           {why}"
+        .expect(
+          "a declared sanitizer build was not refused once the frame observation was set aside — \
+           `pratt_limit_unit_sink`'s address witness runs on exactly this decision, and under a \
+           sanitizer that does not relocate it would run against redzoned frames",
         );
+        if let Some(list) = compiler_says {
+          assert!(
+            why.contains(&format!("sanitize={list}")),
+            "the compiler reported sanitize={list} for this build and the refusal does not say \
+             so: {why}"
+          );
+        }
       }
-      return;
-    }
 
-    assert!(
-      reused,
-      "nothing declares this build instrumented, yet frames are not reused — either the detector \
-       refuses every native run, which is a refusal nobody would keep, or instrumentation reached \
-       this process by a route build.rs cannot see"
+      FrameReuseArm::Native => assert!(
+        reused,
+        "nothing declares this build instrumented, yet frames are not reused — either the detector \
+         refuses every native run, which is a refusal nobody would keep, or instrumentation reached \
+         this process by a route build.rs cannot see"
+      ),
+    }
+  }
+
+  /// The arm is what the announcement says it is, and the two disagreeing is not possible.
+  ///
+  /// `ci/sanitizer.sh` reads the arm off a printed line; if the printed name and the branch could
+  /// come apart, that gate would be pinning a label. They cannot — both come from one
+  /// [`frame_reuse_arm`] call — and this pins the third leg of the triangle: that the arm agrees
+  /// with the raw declaration sources it is derived from.
+  #[test]
+  fn the_announced_arm_is_the_arm_this_build_is_in() {
+    let arm = frame_reuse_arm();
+    let declared = option_env!("TOKORA_BUILD_SANITIZERS").is_some()
+      || option_env!("TOKORA_BUILD_FLAGS_OPAQUE").is_some()
+      || std::env::var(ANNOUNCE).is_ok_and(|v| !v.is_empty());
+
+    match arm {
+      // Miri relocates without any declaration at all, which is why this one is not `declared`.
+      FrameReuseArm::Relocating => assert!(cfg!(miri) || declared, "{arm:?}"),
+      FrameReuseArm::Declared => assert!(declared, "{arm:?} on a build nothing declares"),
+      FrameReuseArm::Native => assert!(!declared, "{arm:?} on a build something declares"),
+    }
+    assert_eq!(
+      arm.as_str(),
+      match arm {
+        FrameReuseArm::Relocating => "relocating",
+        FrameReuseArm::Declared => "declared",
+        FrameReuseArm::Native => "native",
+      },
+      "ci/sanitizer.sh and ci/stack_probe.sh match on these names"
     );
   }
 
-  /// [`asan_fake_stack_enabled`] against the strings it has to read, including the one
+  /// [`asan_fake_stack_enabled_from`] against the strings it has to read, including the one
   /// `ci/sanitizer.sh` actually exports.
   ///
   /// The live wiring is exercised by the arm chosen above; this pins the parse, which is what
-  /// decides which arm that is. The last two rows are the ones that make it a parse rather than a
-  /// substring search.
+  /// decides which arm that is.
+  ///
+  /// # Every row is run against **both** platform defaults
+  ///
+  /// The previous table asked only what an unspecified flag means with the default hardcoded to
+  /// off, so it agreed with a lookup that answered "off" for a Linux run where the fake stack was
+  /// on. A row is only about the parse if it says what the parse does to a default it did not
+  /// choose: the `default` column is what compiler-rt would start from, and the rows where the
+  /// options do not mention the flag have to return it unchanged.
   #[test]
   fn the_fake_stack_flag_is_read_the_way_the_sanitizer_reads_it() {
-    let cases: [(Option<&str>, bool); 10] = [
-      (None, false),
-      (Some(""), false),
-      // What `ci/sanitizer.sh` exports: no fake stack, so the `address` leg does NOT relocate.
-      (Some("detect_odr_violation=0 detect_leaks=0"), false),
-      (Some("detect_stack_use_after_return=1"), true),
-      (Some("detect_stack_use_after_return=true"), true),
-      (Some("detect_stack_use_after_return=0"), false),
-      (Some("detect_leaks=0:detect_stack_use_after_return=1"), true),
-      (Some("detect_stack_use_after_return=1,detect_leaks=0"), true),
+    // (compiler-rt's default for the platform, ASAN_OPTIONS, the fake stack is on)
+    let cases: [(bool, Option<&str>, bool); 20] = [
+      // Unspecified in every spelling of unspecified: the default survives, both ways.
+      (false, None, false),
+      (true, None, true),
+      (false, Some(""), false),
+      (true, Some(""), true),
+      // What `ci/sanitizer.sh` exports. It does not mention the flag, so on Linux the `address`
+      // leg DOES relocate — the row this table used to get wrong.
+      (false, Some("detect_odr_violation=0 detect_leaks=0"), false),
+      (true, Some("detect_odr_violation=0 detect_leaks=0"), true),
+      // An explicit setting overrides the default in both directions.
+      (false, Some("detect_stack_use_after_return=1"), true),
+      (true, Some("detect_stack_use_after_return=0"), false),
+      (false, Some("detect_stack_use_after_return=true"), true),
+      (true, Some("detect_stack_use_after_return=false"), false),
+      (false, Some("detect_stack_use_after_return=yes"), true),
+      (true, Some("detect_stack_use_after_return=no"), false),
+      // Every separator the sanitizer's parser accepts.
+      (
+        false,
+        Some("detect_leaks=0:detect_stack_use_after_return=1"),
+        true,
+      ),
+      (
+        false,
+        Some("detect_stack_use_after_return=1,detect_leaks=0"),
+        true,
+      ),
+      (
+        false,
+        Some("detect_leaks=0\ndetect_stack_use_after_return=1"),
+        true,
+      ),
       // A repeated flag takes its LAST value, as the sanitizer's own parser does.
       (
+        false,
         Some("detect_stack_use_after_return=1 detect_stack_use_after_return=0"),
         false,
       ),
-      // Not a prefix match: this is a different flag name.
-      (Some("detect_stack_use_after_return_2=1"), false),
+      (
+        true,
+        Some("detect_stack_use_after_return=0 detect_stack_use_after_return=1"),
+        true,
+      ),
+      // Not a prefix match: this is a different flag name, so the default stands.
+      (false, Some("detect_stack_use_after_return_2=1"), false),
+      // `FlagHandler<bool>::Parse` is a case-sensitive compare against `1`/`true`/`yes` and
+      // `0`/`false`/`no`; `True` is none of them, so the runtime reports `Invalid value for bool
+      // option` and aborts rather than reading it as true. Watched, along with `TRUE`, `False`,
+      // `bogus` and the empty value. Nothing is written, so the default stands here too.
+      (true, Some("detect_stack_use_after_return=True"), true),
+      (false, Some("detect_stack_use_after_return=TRUE"), false),
     ];
-    for (options, expected) in cases {
+    for (default, options, expected) in cases {
       assert_eq!(
-        asan_fake_stack_enabled(options),
+        asan_fake_stack_enabled_from(default, options),
         expected,
-        "ASAN_OPTIONS={options:?}"
+        "default={default}, ASAN_OPTIONS={options:?}"
       );
     }
+  }
+
+  /// **The fix, as a control.** An unspecified flag means the platform's default, and the platform
+  /// default is compiler-rt's.
+  ///
+  /// [`asan_fake_stack_enabled`] returning a hardcoded `false` for an absent `ASAN_OPTIONS` is the
+  /// defect this replaces: right on this repository's development host, wrong on the Linux runner
+  /// the sanitizer matrix uses — so three configurations could be verified by hand, pre and post,
+  /// and still leave CI classifying a relocating build as a stationary one.
+  ///
+  /// # The row that matters is one this host cannot be
+  ///
+  /// Every platform is asked, not only the one running the test. `compiler-rt/lib/asan/`
+  /// `asan_flags.inc` declares the flag with the default `SANITIZER_LINUX && !SANITIZER_ANDROID`,
+  /// and Rust splits Android out of `target_os`, so the table is `linux` and nothing else. Asking
+  /// only about the host would make the correction and the defect indistinguishable from macOS,
+  /// where both answer `false`.
+  #[test]
+  fn an_unspecified_flag_means_the_platform_default() {
+    let table: [(&str, bool); 8] = [
+      // The one the whole finding is about, and the one this host cannot evaluate for itself.
+      ("linux", true),
+      // `SANITIZER_ANDROID` is carved back out. Rust spells it as its own `target_os`, and the
+      // sanitizer matrix's `cross` neighbours build for it.
+      ("android", false),
+      ("macos", false),
+      ("ios", false),
+      ("windows", false),
+      ("freebsd", false),
+      ("netbsd", false),
+      ("fuchsia", false),
+    ];
+    for (target_os, on) in table {
+      assert_eq!(
+        fake_stack_default_for(target_os),
+        on,
+        "compiler-rt's default for target_os = {target_os:?}"
+      );
+    }
+
+    assert_eq!(
+      fake_stack_default(),
+      fake_stack_default_for(std::env::consts::OS),
+      "this build's answer must come from the table, not from a second opinion"
+    );
+    assert_eq!(
+      asan_fake_stack_enabled(None),
+      fake_stack_default(),
+      "an absent ASAN_OPTIONS must mean compiler-rt's default, not `false`"
+    );
+    assert_eq!(
+      asan_fake_stack_enabled(Some("detect_odr_violation=0 detect_leaks=0")),
+      fake_stack_default(),
+      "`ci/sanitizer.sh`'s own options do not mention the flag, so they do not turn it off"
+    );
   }
 }
