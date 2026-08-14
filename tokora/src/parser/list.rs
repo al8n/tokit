@@ -94,6 +94,7 @@ pub type ListOf<'inp, L, Ctx, Lang, T> = Result<Vec<T>, ErrorOf<'inp, L, Ctx, La
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = core::convert::Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma, Tok::CloseBrace => Kind::CloseBrace } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -119,6 +120,7 @@ pub type ListOf<'inp, L, Ctx, Lang, T> = Result<Vec<T>, ErrorOf<'inp, L, Ctx, La
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { ',' => Tok::Comma, '}' => Tok::CloseBrace, c => Tok::Ident(c) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -214,6 +216,7 @@ where
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = core::convert::Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma, Tok::CloseBrace => Kind::CloseBrace } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -239,6 +242,7 @@ where
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { ',' => Tok::Comma, '}' => Tok::CloseBrace, c => Tok::Ident(c) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;

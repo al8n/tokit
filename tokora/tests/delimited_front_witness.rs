@@ -133,6 +133,8 @@ impl Token<'_> for FT {
   type Kind = FK;
   type Error = ();
 
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> FK {
     match self {
       FT::Open => FK::Open,
@@ -271,6 +273,10 @@ impl<'a> Lexer<'a> for FlipLexer<'a> {
       d if d.is_ascii_digit() => FT::Num(i64::from(d - b'0')),
       _ => FT::P,
     }))
+  }
+
+  fn read_frontier(&self) -> tokora::ReadFrontier<usize> {
+    tokora::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &usize) {

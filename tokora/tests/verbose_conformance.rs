@@ -1054,6 +1054,8 @@ mod sink_leg {
     type Kind = u8;
     type Error = LexErr;
 
+    const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+
     // Honest: byte-per-token, never skips a byte.
     const SURFACES_TRIVIA: bool = true;
 
@@ -1131,6 +1133,10 @@ mod sink_leg {
       self.tok_start = self.pos;
       self.pos += 1;
       Some(Ok(Tok(byte)))
+    }
+
+    fn read_frontier(&self) -> tokora::ReadFrontier<usize> {
+      tokora::ReadFrontier::SpanEnd
     }
 
     fn bump(&mut self, n: &usize) {

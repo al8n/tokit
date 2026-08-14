@@ -125,6 +125,8 @@ impl Token<'_> for ProbeTok {
   type Kind = ProbeKind;
   type Error = ProbeErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> ProbeKind {
     ProbeKind::Num
   }
@@ -1439,6 +1441,8 @@ impl core::fmt::Display for ByValKind {
 impl Token<'_> for ByValTok {
   type Kind = ByValKind;
   type Error = ByValErr;
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
 
   fn kind(&self) -> ByValKind {
     ByValKind::Num
@@ -3730,6 +3734,8 @@ impl Token<'_> for ZeroWidthTok {
   type Kind = ZeroWidthKind;
   type Error = ZeroWidthErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> ZeroWidthKind {
     ZeroWidthKind
   }
@@ -3806,6 +3812,10 @@ impl<'inp> crate::Lexer<'inp> for ZeroWidthLexer<'inp> {
     }
     self.yielded = true;
     Some(Ok(ZeroWidthTok))
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, _n: &usize) {}
@@ -4360,6 +4370,8 @@ impl core::fmt::Display for BalKind {
 impl Token<'_> for BalTok {
   type Kind = BalKind;
   type Error = ByValErr;
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
 
   fn kind(&self) -> BalKind {
     match self {
@@ -6321,6 +6333,8 @@ mod cst_event_oracles {
     type Kind = BalKind;
     type Error = ByValErr;
 
+    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
     const SURFACES_TRIVIA: bool = true;
 
     fn kind(&self) -> BalKind {
@@ -6908,6 +6922,8 @@ impl core::fmt::Display for ScanKind {
 impl Token<'_> for ScanTok {
   type Kind = ScanKind;
   type Error = ScanErr;
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
 
   fn kind(&self) -> ScanKind {
     ScanKind::Word
@@ -7760,6 +7776,8 @@ impl Token<'_> for BombTok {
   type Kind = BombKind;
   type Error = BombErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> BombKind {
     BombKind
   }
@@ -7859,6 +7877,10 @@ impl<'a> crate::Lexer<'a> for BombLexer<'a> {
       return Some(Err(BombErr::Limit));
     }
     Some(Ok(BombTok))
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &usize) {
@@ -9607,6 +9629,10 @@ impl<'a> crate::Lexer<'a> for OffsetLexer<'a> {
       return Some(Err(BombErr::Limit));
     }
     Some(Ok(BombTok))
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<BombOffset> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &BombOffset) {

@@ -270,6 +270,8 @@ impl core::fmt::Display for DummyKind {
 impl Token<'_> for DecimalToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -303,6 +305,8 @@ impl core::fmt::Display for HexToken {
 impl Token<'_> for HexToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -336,6 +340,8 @@ impl core::fmt::Display for OctalToken {
 impl Token<'_> for OctalToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -367,6 +373,8 @@ impl core::fmt::Display for BinaryToken {
 impl Token<'_> for BinaryToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -398,6 +406,8 @@ impl core::fmt::Display for FloatToken {
 impl Token<'_> for FloatToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -431,6 +441,8 @@ impl core::fmt::Display for HexFloatToken {
 impl Token<'_> for HexFloatToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -463,6 +475,8 @@ impl core::fmt::Display for InlineStringToken {
 impl Token<'_> for InlineStringToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -495,6 +509,8 @@ impl core::fmt::Display for MultilineStringToken {
 impl Token<'_> for MultilineStringToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -527,6 +543,8 @@ impl core::fmt::Display for RawStringToken {
 impl Token<'_> for RawStringToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -559,6 +577,8 @@ impl core::fmt::Display for CharToken {
 impl Token<'_> for CharToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -590,6 +610,8 @@ impl core::fmt::Display for ByteToken {
 impl Token<'_> for ByteToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -621,6 +643,8 @@ impl core::fmt::Display for ByteStringToken {
 impl Token<'_> for ByteStringToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -652,6 +676,8 @@ impl core::fmt::Display for TrueToken {
 impl Token<'_> for TrueToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -684,6 +710,8 @@ impl core::fmt::Display for FalseToken {
 impl Token<'_> for FalseToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }
@@ -716,6 +744,8 @@ impl core::fmt::Display for NullToken {
 impl Token<'_> for NullToken {
   type Kind = DummyKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> DummyKind {
     DummyKind
   }

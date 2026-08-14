@@ -136,6 +136,7 @@ lexer per operation rather than holding one across the whole parse):
 
 ```rust,ignore
 fn lex(&mut self) -> Option<Result<Self::Token, <Self::Token as Token<'inp>>::Error>>;
+fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 fn bump(&mut self, n: &Self::Offset);
 ```
 
@@ -289,6 +290,7 @@ single-character tokens (digits and `+`), so nothing but core tokora types is in
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::Plus => Kind::Plus } }
 #   fn is_trivia(&self) -> bool { false }
 # }
@@ -313,6 +315,7 @@ single-character tokens (digits and `+`), so nothing but core tokora types is in
 #     self.tok = SimpleSpan::new(start, self.pos);
 #     Some(Ok(match c { '+' => Tok::Plus, _ => Tok::Digit(c as u32 - '0' as u32) }))
 #   }
+#   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;

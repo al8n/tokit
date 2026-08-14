@@ -37,6 +37,8 @@ impl Token<'_> for Tok {
   type Kind = u8;
   type Error = LexErr;
 
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+
   // honest: byte-per-token, never skips a byte
   const SURFACES_TRIVIA: bool = true;
 
@@ -118,6 +120,10 @@ impl<'inp> Lexer<'inp> for ByteLexer<'inp> {
     } else {
       Some(Ok(Tok(byte)))
     }
+  }
+
+  fn read_frontier(&self) -> tokora::ReadFrontier<usize> {
+    tokora::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &usize) {

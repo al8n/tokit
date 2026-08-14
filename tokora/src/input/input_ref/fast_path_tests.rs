@@ -1693,6 +1693,8 @@ impl Token<'_> for LedgerTok {
   type Kind = LedgerKind;
   type Error = LedgerErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> LedgerKind {
     match self {
       Self::Word => LedgerKind::Word,
@@ -1817,6 +1819,10 @@ impl<'a> crate::Lexer<'a> for LedgerLexer<'a> {
     } else {
       LedgerTok::Word
     }))
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<LedgerOffset> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &LedgerOffset) {

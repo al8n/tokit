@@ -97,6 +97,8 @@ impl Token<'_> for FuzzTok {
   type Kind = FuzzKind;
   type Error = FuzzTokError;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   // honest: byte-per-token, never skips a byte
   const SURFACES_TRIVIA: bool = true;
 
@@ -293,6 +295,13 @@ impl<'a> Lexer<'a> for ScriptLexer<'a> {
       return Some(Err(FuzzTokError));
     }
     Some(Ok(FuzzTok { kind: kind_of(b) }))
+  }
+
+  /// One source byte in, one item out: every item is decided from the single byte its own span
+  /// covers, so nothing is ever probed past `span.end`.
+  #[inline]
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
   }
 
   #[inline]

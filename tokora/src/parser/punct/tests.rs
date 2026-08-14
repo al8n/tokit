@@ -48,6 +48,8 @@ impl TokenTrait<'_> for Token {
   type Kind = TokenKind;
   type Error = ();
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> TokenKind {
     match self {
       Token::Spread => TokenKind::Spread,

@@ -128,6 +128,7 @@ impl core::fmt::Display for Tok {
 impl TokenT<'_> for Tok {
   type Kind = TokKind;
   type Error = LexError;
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 
   fn kind(&self) -> TokKind {
     match self {

@@ -79,6 +79,8 @@ impl Token<'_> for Word {
   type Kind = WordKind;
   type Error = LexErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> WordKind {
     WordKind
   }
@@ -170,6 +172,10 @@ impl<'inp> Lexer<'inp> for WordLexer<'inp> {
       return Some(Err(LexErr::from(trip)));
     }
     Some(Ok(Word))
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &usize) {

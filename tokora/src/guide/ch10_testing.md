@@ -38,10 +38,28 @@ On top of the trait tier it drives a real `Input` session through fixed, named
 save/peek/drain/restore schedules and requires the committed token stream to equal the
 straight-lex stream — no randomness, the schedules are enumerated — and
 [`run_partial`](crate::conformance::Harness::run_partial) adds chapter 9's tier: for **every**
-split point of every input, a non-final drain of the prefix must yield exactly the tokens
+split point of every input, a non-final drain of the prefix must yield a *prefix of* the items
 before the cut and end incomplete, while a final drain of the whole source must reproduce the
-complete parse. That is the check that catches a lexer which is unfaithful under truncation —
-and truncation is exactly what a stream does to you.
+complete parse exactly. An **item** is a committed token *or* a lexer error the input layer
+raised — a refusal is a decision about bytes exactly as a token is, and appending can turn one
+into the other. That is the check that catches a lexer which is unfaithful under truncation — and
+truncation is exactly what a stream does to you.
+
+It asks for a prefix rather than equality because withholding *more* is always sound, and a lexer
+that reports a read frontier past its own spans does exactly that. Calc's lexer is logos-backed
+and declares [`READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS) as
+[`Unbounded`](crate::ReadFrontierClass::Unbounded) — the const has no default, so that is a
+written choice — and this run therefore withholds every item until the input is final. The
+run still passes, and it still catches an item that *changes* — a token whose kind, span or
+**value** moved, a token that became an error, an error whose payload moved. See
+[`Lexer::read_frontier`](crate::Lexer::read_frontier) for what declaring the class buys back.
+
+Comparing the *value* is why this tier — and only this tier — asks for `PartialEq` on your token
+and on its error type. It is one derive on a data type, and it is what makes the comparison
+total: every field participates, including the one you add next year. The alternative, a
+comparison key written by hand, is a projection, and the field it forgets is exactly the field
+that drifts. Calc's `Tok` and `LexError` already derive it; a vocabulary that cannot keeps
+[`run`](crate::conformance::Harness::run) and loses this tier.
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};
@@ -91,6 +109,7 @@ and truncation is exactly what a stream does to you.
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,

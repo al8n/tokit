@@ -425,6 +425,7 @@ re-encoding each result as a `Digit` token.
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Plus => Kind::Plus,
 #     Tok::Minus => Kind::Minus, Tok::Star => Kind::Star, Tok::Caret => Kind::Caret,
@@ -457,6 +458,7 @@ re-encoding each result as a `Digit` token.
 #       c => Tok::Ident(c),
 #     }))
 #   }
+#   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -623,6 +625,7 @@ grammar. The last stanza adds
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Plus => Kind::Plus,
 #     Tok::Minus => Kind::Minus, Tok::Star => Kind::Star, Tok::Caret => Kind::Caret,
@@ -655,6 +658,7 @@ grammar. The last stanza adds
 #       c => Tok::Ident(c),
 #     }))
 #   }
+#   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;

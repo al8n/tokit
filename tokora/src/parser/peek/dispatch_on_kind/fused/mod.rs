@@ -84,7 +84,9 @@ use crate::{
 /// # Why this combinator can never meet a partial-input frontier token
 ///
 /// The cache-withholding rule for [`Partial`](crate::input::Partial) inputs (peek never
-/// caches a token touching the buffer end) is preserved trivially: [`ParseInput`] is not
+/// caches a token the lexer decided by reading as far as the buffer end, per
+/// [`read_frontier`](crate::Lexer::read_frontier) — not a token whose *span* reaches it, which was
+/// the pre-0.10.0 proxy) is preserved trivially: [`ParseInput`] is not
 /// completeness-generic — it parses `InputRef<…, Complete>` only — so this combinator
 /// runs exclusively on [`Complete`](crate::input::Complete) inputs, where the frontier
 /// rules are inert and no frontier token exists to leak. (Even structurally, the scan it

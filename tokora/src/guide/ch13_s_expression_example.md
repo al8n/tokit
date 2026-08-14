@@ -50,6 +50,7 @@ the maintained program.
 # impl TokenT<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = LexError;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self { Self::Int(_) => Kind::Int, Self::Open => Kind::Open, Self::Close => Kind::Close } }
 #   fn is_trivia(&self) -> bool { false }
 # }

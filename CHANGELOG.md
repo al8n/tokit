@@ -151,6 +151,21 @@ and will red until they do.
   tree's text is sliced from and the buffer the parse reads are the same argument of the same call
   — holds for all four doors.
 
+- **`CacheHarness::lex_attempts_multiple` — an override for the corpus builder's anti-hang
+  ceiling.** The default of 8 attempts per source unit plus a floor of 64 was presented as a
+  consequence of the lexer contract, and it is not one: the contract asks for *non-decreasing*
+  starts and *individually* nonempty spans, which permits overlapping and repeated-start items, so
+  a deterministic, finite, terminating lexer may emit many items per source unit. The cache kit
+  does not enforce even that much — it drives the raw lexer and never runs the lexer-contract tier
+  — so the number was an assumption wearing a derivation's clothes.
+
+  The consequence was a false *failure*: a lexer that terminates but emits densely was refused as
+  non-terminating, and with no override on the harness the certification could not be run at all.
+  Failing in the safe direction is not the same as being right. The multiple is now the caller's
+  and the refusal names it. It is spelled `lex_attempts_multiple` rather than `budget_multiple`
+  because it scales a different quantity than `Harness::budget_multiple` does: attempts the corpus
+  builder may make, not items a run may produce. `0` is treated as `1`, as on the lexer harness.
+
 ### Changed (breaking)
 
 - **`Emitter::checkpoint` takes `&mut self`** (#257). Capturing a mark is a capability, not an
@@ -346,7 +361,352 @@ and will red until they do.
   from `iter` — `S::Component` is only `Clone + Eq + Hash + Display`, so there was never a
   generic sort to lose.
 
+- **`Lexer` gains a required method, `read_frontier`, and the partial-input holdback keys on it
+  instead of on the item's span** (#282). The holdback that keeps a partial parse equivalent to
+  the complete one used to withhold *the item whose span reaches the buffer end*. That is a
+  **proxy** for "more input could change this item", and it is exact only for a lexer that never
+  reads past what it emits. An ordered trial that attempts several readings and backtracks reads
+  past the span it emits by construction, so the proxy committed exactly the items appending one
+  byte would change: for the non-final prefix `5m5` a failed duration trial emits `Number("5")`
+  spanning byte 0, and `5m5s` is one `Duration`.
+
+  `read_frontier` reports the fact instead: **the maximum offset at which the lexer probed the
+  input while deciding the item, inclusive, where a probe answered by end of input counts at the
+  offset probed.** The driver withholds iff that frontier is **at or past the buffer end** —
+  probing at `len` is precisely "end of input was observable". The convention is deliberately
+  probe-*inclusive*; the exclusive reading does not count an end-of-input answer as a consult at
+  all, so a decision that observed "there is no byte at offset k" could report below the buffer
+  end and be committed, which is the break this fixes.
+
+  **`ReadFrontier::SpanEnd` keeps the previous behaviour bit for bit.** It means *no probe beyond
+  the item's own span end*, and it explicitly permits the terminator probe **at** `span.end` —
+  the one-boundary-byte lookahead a maximal-munch lexer performs, which is safe because that byte
+  is present exactly when the item is yielded. A lexer that answers `SpanEnd` is unaffected by
+  this release except that it now has to say so.
+
+  **Two other things move with it.** The driver computes `max(span.end, reported)`, so
+  monotonicity is a property of the driver rather than of the ecosystem: a lexer reporting
+  `ReadTo(0)` cannot un-withhold an item the previous rule withheld. And a withheld item's
+  `Incomplete` now carries the **buffer end** rather than the item's span end. Those two
+  coincided under the old predicate — the tests asserted the coincidence — and diverge under this
+  one (span end 1, frontier 3); `Incomplete`'s offset is documented as the frontier the caller
+  resumes from, and the span end would have claimed the input ran out at 1.
+
+  **What a caller sees change.** A refill loop, a run driven to `seal`, and every
+  [`Complete`](https://docs.rs/tokora/latest/tokora/input/struct.Complete.html) parse are
+  unaffected. A caller that drives `Partial` non-final **exactly once** and treats `Incomplete`
+  as failure will see tokens it used to be handed come back as `Incomplete`. Those commitments
+  were the unsound ones, so withholding them is the fix — but it is visible, and for a lexer that
+  answers `Unbounded` it is *every* token until the stream is sealed. That is sound and it is not
+  free: the caller buffers the whole stream, every attempt re-lexes from the base under
+  `RedriveFromBase`, and a `Budget` calibrated for one-token latency can trip terminally on a
+  perfectly valid stream.
+
+  **`cargo-semver-checks` did not catch this break, and its silence is not evidence.** The tool
+  reports "semver requires new major version" for this release, but on the unrelated
+  `IncompleteSyntax::as_mut_slice` removal above; `trait_method_added` **passed**. That is not a
+  configuration accident — adding a fresh required method to a second public, unsealed, unimplemented
+  trait (`Lexable`) reproduced the same PASS on cargo-semver-checks 0.49.0, stable toolchain,
+  `--all-features`, against the published 0.9.1 baseline. The break here is recorded from the
+  diff.
+
+- **The `Lexer` contract's claim that the Logos backend is faithful under truncation was false,
+  and is retracted** (#282). The clause asserted that "a maximal-munch lexer (the Logos backend,
+  and every hand-written lexer that commits each item from its own bytes) satisfies this". It does
+  not, and **no callback is required to break it**: `logos` backtracks to the last accepting prefix
+  after probing past it, which is ordinary DFA behaviour and is not what its "prevents
+  backtracking" README line is about (that one concerns ReDoS inside a single definition). With
+  pure `#[regex]` rules for `[0-9]+`, `[0-9]+\.[0-9]+` and `[0-9]+e[+-]?[0-9]+`, `"1."` lexes as
+  `Int@0..1  Dot@1..2` — the `Float` trial probed offset 2, found end of input, and rolled back —
+  while `"1.5"` is one `Float@0..3`. Any vocabulary with a prefix-accepting longer pattern, which
+  is most real vocabularies, was affected. The conformance kit's `run_partial` check already
+  failed such a vocabulary under the previous holdback, so the falsifier predated the fix.
+
+  Because `logos` exposes `span`, `slice` and `remainder` but not its probe frontier, the adapter
+  cannot answer from anything it can see, and its blanket impl means the answer cannot come from
+  an impl the dialect writes. It therefore delegates through **two** channels, both landing now:
+
+  - `Token::READ_FRONTIER_CLASS`, a **required** const on the vocabulary, with no default. It
+    answers for an item whose scan recorded nothing. Declaring `SpanEnd` is a claim about the
+    generated DFA, and `run_partial` is what falsifies a wrong one; `Unbounded` is the answer
+    that is always sound and never precise.
+
+    **Every `Token` impl must add this line, and that is the point.** The const shipped in a
+    first cut with a `ReadFrontierClass::Unbounded` default on the reasoning that an unaudited
+    vocabulary must not be assumed safe — right value, wrong delivery, because a default also
+    means the vocabulary is never asked. Every existing logos-backed impl kept compiling and
+    silently became seal-only, and that is not a loss of precision: for a fixed one-byte token
+    at span `0..1` in a two-byte non-final buffer, the old span predicate yields it (`1 < 2`)
+    while the inherited `Unbounded` withholds it, and under a `Budget` calibrated for the
+    yielding behaviour the sealing retry is refused before finality is ever applied. So the
+    obligation matches the one `read_frontier` itself carries one layer up: required, so an
+    implementor cannot be walked past it. Note the contrast with `Token::SURFACES_TRIVIA`, which
+    keeps its default — omission there fails *closed at compile time*, because the lossless
+    `cst::Sink` refuses to be built over an undeclared vocabulary; omission here failed *open at
+    run time*.
+  - `State::take_probe`, the **value** channel, taken out of the logos `Extras` — the one thing a
+    `logos` callback can write to. A callback that peeks with
+    `lexer.remainder()` knows exactly how far it looked and records the absolute offset — which
+    is `lexer.span().end + n - 1` for `n` bytes successfully inspected past the match, since a
+    span is half-open and `span.end` is already the first offset outside it; `span.end + n` is
+    right only when the scan also reached for the byte at that offset and found end of input.
+    It is defaulted to `None`, so no existing `State` impl breaks and a state that records
+    nothing pays nothing.
+
+    **It is ONE consuming operation, and that is a correction to the design.** The channel
+    shipped in a first cut as two independently defaulted members — a `probe(&self)` reader
+    beside a `clear_probe(&mut self)` reset — and that pair could be half-implemented. A `State`
+    overriding the reader and inheriting the empty reset compiled, the adapter called a reset
+    that did nothing, and a value carried in on a restored state survived into a scan that
+    recorded nothing. Provenance then *accepted* it, because a rebuilt lexer can begin its first
+    item at exactly the offset that value was keyed to — and a recorded value answers the
+    frontier contract outright, so the vocabulary's honest `Unbounded` was never consulted.
+    Non-final `"1."` with a state claiming a scan from 0 probed to 1: `read_frontier` answered
+    `ReadTo(1)`, the driver's floor left it at `max(1, 1) = 1`, and `1 < 2` **committed**
+    `Int@0..1` out of a buffer still being read; append `5` and the same bytes are one
+    `Float@0..3`. That is the defect `READ_FRONTIER_CLASS`'s removed default had — a default
+    that fails *open* — one level down, and the same repair does not apply: making the reset
+    required would break every `State` impl including the ones that record nothing. Collapsing
+    the pair does apply. Reading consumes, so there is no sibling to inherit or forget, and a
+    state that implements nothing records nothing. The adapter calls the one method twice per
+    `lex` — once before the scan, discarding whatever came in on the state, and once after,
+    capturing what the scan recorded — and `LogosLexer` now holds the captured value, so
+    `Lexer::read_frontier` stays the `&self` pure read the conformance kit's check 7 requires it
+    to be.
+
+  A recorded value answers the contract for its item outright, so it must cover the engine's
+  backtracking too and not only the callback's own peek.
+
+  **A value is accepted on provenance, not on freshness, because `Lexer::lex` is not one scan.**
+  `logos` resolves `Skip` *inside* a single `next()` — recursively through `lex.trivia();
+  T::lex(lex)` on 0.14/0.15, by `trivia()`-and-continue on 0.16 — so one call runs one DFA scan
+  per skipped item plus the scan that produces the item, and several callbacks with them. A
+  trivia callback records for a scan that yields nothing, and the scan that yields the item may
+  run no callback at all; reading "a value is present" as "this item recorded it" hands the
+  trivia's offset to the item. Because the skipped scan *precedes* the item, that offset is
+  **below** the item's real frontier — the one direction that under-reports, which is the
+  direction that lets an unstable item be committed. With a recording whitespace skip in front
+  of a callback-free integer, non-final `"  1."` committed `Int@2..3`; append `5` and the same
+  bytes are one `Float@2..5`, chunked equivalence broken on exactly the trivia-skipping path the
+  holdback claims to cover.
+
+  So the value is a `Probe`, carrying the offset its scan started at (`Probe::scanned_from`,
+  which is `lexer.span().start` inside the callback) beside `Probe::probed_to`, and the adapter
+  accepts it **iff that start equals the returned item's span start** — on the error arm exactly
+  as on the token arm, since a callback may mutate `extras` and the item still arrive as an
+  `Err`. Anything else falls back to `READ_FRONTIER_CLASS`, which the vocabulary had to write
+  down. The check lives in the adapter rather than in a rule recorders must follow,
+  because a recorder can only state a fact about the scan it is running in. The pre-scan take is
+  kept beside it and is not redundant: an equal start is *evidence* of provenance, and a lexer
+  rebuilt by `Lexer::with_state` + `Lexer::bump` — which is how `InputRef` resumes — can begin
+  its first item at exactly the offset a restored state's value was keyed to.
+
+- **`Harness::run_partial`'s non-final leg asks for a prefix rather than an equality** (#282). It
+  required a non-final drain of `src[0..k]` to yield *exactly* the complete-parse tokens ending
+  before `k`. Under the frontier holdback that is no longer attainable and never was the property:
+  a lexer that reports reading past what it emits withholds more, and one that reports `Unbounded`
+  withholds everything. Over-withholding is sound and converges — a refill strictly grows the
+  buffer and sealing ends the game — so requiring equality would have failed every conforming
+  lookahead lexer while testing precision instead of correctness. Yielding a token the complete
+  parse does not have before the cut, or a different one at the same position, still fails, and
+  the **final** leg still pins full equality. The trait tier also gains a check that
+  `read_frontier` is a pure read: repeated calls agree, and asking does not move the lexer.
+
+  **The sequence being prefix-checked is now items, not tokens: a lexer error the input layer
+  raised is an item too.** Both legs previously drove the input under a discarding emitter, so the
+  error arm was invisible to the check — and relaxing the length is exactly what made it invisible,
+  because once a short answer is legal, "withheld at the frontier" and "reported and thrown away"
+  are the same observation. A lexer that refused a region on a truncated buffer and tokenized it
+  once the missing byte arrived produced an empty list against a token, which is a legal prefix.
+  Two divergences that used to pass now fail: an item that is an **error** on the prefix and a
+  **token** on the full input at the same span, and an **error whose payload changes** on append.
+  Nothing from the diagnostic channel is compared: no rendered message, no severity, no labels.
+
+  **Both arms are compared on the value, and `run_partial` therefore requires
+  `L::Token: PartialEq` and `<L::Token as Token>::Error: PartialEq`.** Two blind spots closed
+  together, because they were one:
+
+  - the **token** arm kept only the kind and the span. A `Value(last_byte)`-shaped token holds one
+    kind and a one-byte span while its payload is decided by a byte that has not arrived, so the
+    prefix and the complete parse agreed on everything the tier compared and disagreed on the value
+    a parser callback receives. `run()` and `run_partial()` both passed while the AST changed.
+  - the **error** arm compared `format!("{payload:?}")`. That was defended on the ground that both
+    sides come from the same build of the same lexer inside one call, so editing a `Debug` moves
+    them together — which is true, and answers only the question of wording drift. `Debug` is not
+    **injective**, so two payloads that render alike compare equal and a real drift passes; and it
+    is not **stable**, so a rendering carrying an address or a counter reds a conforming lexer. The
+    two failures run in opposite directions and no care with the rendering fixes both.
+
+  Value equality fixes both at once. The bound is asked for at the entry point rather than taken as
+  a caller-supplied key because a bound is *total* — every field participates, including one added
+  later — while a hand-written key is a projection whose forgotten field is exactly the field that
+  drifts, which is the failure mode the `Debug` rendering already had. This is the restricted entry
+  point in any case: `Offset = usize`, a prefix-sliceable source and `L::State: Clone` were already
+  required here and are not required by `run`. **A vocabulary with neither loses this tier and
+  keeps every other**; recovering it costs a `#[derive(PartialEq)]`, or a hand-written impl where
+  derivation is wrong (a payload holding a possibly-`NaN` float is not equal to itself). `run`'s
+  bounds are unchanged.
+
+  The kind is still compared beside the token. Redundant for any `PartialEq` that agrees with
+  `Token::kind`, and kept because the two are independent caller code: a `PartialEq` coarser than
+  the classification the parser sees would otherwise pass silently.
+
 ### Fixed
+
+- **`CacheHarness::run` hung on a lexer that only returns errors — the same shape one tier over.**
+  The corpus builder fills while `out.len() < want`, and that gate counts the tokens it *kept*
+  while the loop consumes the whole item stream. An `Err` grows neither the corpus nor the lexer's
+  exhaustion, so such a lexer never reaches `want` and never returns `None`, and the kit spun. The
+  loop now counts **attempts** and refuses at a ceiling. Found by enumerating every counter in the
+  conformance module against the question "can the loop iterate underneath it?", which is the
+  question the `run_partial` budget below failed.
+
+  The ceiling itself needed a second repair. It was described as derived — "monotone progress and
+  nonempty spans bound a conforming lexer at one item per source unit" — and the contract enforced
+  elsewhere says no such thing: starts must be *non-decreasing* rather than strictly increasing and
+  spans *individually* nonempty rather than disjoint, so overlapping and repeated-start items are
+  legal and a deterministic, finite, terminating lexer may emit many items per unit. This kit
+  checks none of that in any case; it drives the raw lexer and never runs the lexer-contract tier.
+  A lexer that merely emitted densely was therefore refused as non-terminating with no override
+  available, so a cache certification against it could not be run at all. See
+  `CacheHarness::lex_attempts_multiple` under **Added**.
+
+  And the override then reopened the hang. Both anti-hang multiples — the one above and
+  `Harness::budget_multiple` — were combined with the source length by **saturating** arithmetic, so
+  `lex_attempts_multiple(usize::MAX)` produced a ceiling of `usize::MAX`, and no counter can exceed
+  the largest value it can hold. Every `attempts > limit` and `spent > limit` derived from such a
+  setting was false forever: the endless-error lexer these guards exist to refuse ran until the
+  process was killed, reporting nothing on the way, and the counter's own overflow is 2⁶⁴ increments
+  away in either profile. A knob documenting no maximum could therefore switch off the guard it
+  configures, silently. Both multiples are now capped at `65536` per source unit — the point past
+  which the kit cannot tell a dense lexer from a nonterminating one, which is the honest limit of
+  what it certifies — and both ceilings are computed with checked arithmetic, so the *product*
+  cannot saturate on a 32-bit target either; an unrepresentable ceiling panics and names the knob
+  to lower instead of switching itself off. The cap is a **refusal** rather than a clamp, for
+  reasons set out under the `run_partial` entry below, and each knob is pinned by a cell that
+  drives an endless lexer at the maximum *accepted* setting and requires the `lex-budget` refusal
+  to still arrive.
+
+- **`Harness::run_partial` hung, rather than refusing, on a lexer that never terminates — its
+  anti-hang budget was checked at the `next()` boundary and `next()` is a loop.** `InputRef::next`
+  keeps lexing after every lexer error it accepts until it finds a token or reaches end of input,
+  so a budget read once per call bounds the items a drain *yields* and says nothing about how often
+  the lexer is asked to lex. The two come apart on exactly the malformed lexer the kit exists to
+  reject: a lexer returning the same nonempty error forever is reported **once** — the input
+  layer's error dedup keys on the span end — and then silently skipped, so the item log stays flat
+  while the call never returns. `run_partial` spun instead of panicking, on the lexer that most
+  needed the panic.
+
+  Both drains — and every schedule in the integration tier, which had the identical shape — now
+  run the lexer under a wrapper that counts **every raw `Lexer::lex` attempt**, and the count is
+  **one counter per tier per input**, not one per call and not one per lexer.
+
+  That last distinction is the whole repair, and it took one attempt to get wrong. Putting the
+  counter on the lexer instance looks like putting it "inside `next()`", since the input layer runs
+  one call's whole internal loop on one instance — but the layer builds a **fresh lexer for every
+  `next()`** (`Lexer::with_state` plus `bump`), so a per-instance counter is a per-call counter and
+  restarts on every call. A lexer that spends the whole per-call ceiling on repeated same-span
+  errors and then yields one advancing token stays inside every guard: the span-end dedup keeps the
+  repeats out of the item log so the item budget stays flat, and each call gets a new instance. Run
+  over every prefix by `run_partial`, raw lex work is then cubic in the source length — 1319
+  attempts over 4 units rising to 66779 over 24, a fit to `8n³/3 + Θ(n²)` — with neither guard
+  firing and no hang to notice.
+
+  So the rule is stated rather than the guard moved again: **a budget bounds only the loops that
+  increment it.** Where the kit lexes directly the counter sits in the loop body and bounds it by
+  construction; where it lexes through the input layer it owns the outermost loops and the
+  innermost call and none of the ones between, so the counter belongs at the tier entry. Every
+  prefix, schedule, drain, `next`/`peek` call, lexer instance and checkpoint lineage beneath one
+  input charges the same one. That boundary is the last one available: the only loop above it
+  iterates the caller's own input list, which is data rather than lexer behaviour.
+
+  **The counter cannot be refunded, and that is enforced rather than asserted.** It is a `Cell` in
+  a private submodule, so it has exactly one reachable writer and a refund written from outside is
+  a compile error; the handle that reaches each rebuilt lexer is an `Rc` riding in the lexer state,
+  so a checkpoint restore puts back a pointer to the one count rather than a copy of it. A tally
+  kept as a field of the thing being rolled back is handed back by the rollback and is not a budget
+  at all. `Lexer::new` has no channel for a tally and does not invent one — it builds an
+  already-spent one, so an unseeded drive refuses on its first attempt instead of running
+  unbounded.
+
+  The per-instance ceiling stays, demoted to what it is: an early refusal that stops a single
+  non-returning `next()` after `O(units)` attempts rather than the tally's `O(units²)`. A guard may
+  be narrower than the bound; it may not *be* the bound while a loop underneath it resets it.
+
+  It also may not *contradict* the bound, which the first version of it did in both directions. It
+  was `8 * units + 64` computed from whichever source the instance had been handed, so it never saw
+  `Harness::budget_multiple` — a lexer certified under a raised budget met the default anyway — and
+  in the partial tier the source is a **prefix**, so the ceiling shrank as the cut moved in while
+  the run it bounded did not. Either way the outcome was a conforming lexer *rejected*, which is
+  the one failure a narrower guard may not produce: the sharper message it exists to give is worth
+  nothing if it is a lie. The ceiling is now derived once from the tier's configured budget — one
+  attempt for every item that budget allows, plus the exhaustion probe — and carried on the tally
+  beside the count, so every instance under one tier holds the same one and it is a number the item
+  budget already permits. A scan produces at most the items left in the run, so a lexer the item
+  budget accepts cannot reach it.
+
+  The aggregate ceiling is `drains * 4 * (budget + 1) + 64` and is deliberately loose: a lexer
+  evading it needs work that outgrows it, so any constant serves, while a tight ceiling would
+  falsely refuse a legitimate lexer, which no constant repairs. Measured across the whole in-tree
+  suite the tightest headroom is 42.8x.
+
+  **Both counters compare before they increment**, which is what keeps that looseness safe. While
+  the aggregate ceiling was a `usize` it *saturated*, and a saturated `usize::MAX` made
+  `spent += 1; spent > limit` overflow before it ever compared — debug panicked with the wrong
+  message, release wrapped the tally to zero and handed the run its whole allowance again,
+  silently, as often as the work asked. `spent >= limit` asked first, with the increment only on
+  the allowed path, makes the arithmetic total without moving any lexer's verdict — `limit`
+  attempts still pass and the `limit + 1`-th still refuses. `instance_ceiling(budget)` is
+  `budget + 1` over a budget that may be `usize::MAX - 1`, so the per-instance counter had the same
+  defect and takes the same order.
+
+  **The aggregate ceiling and the tally count in `u128`, not in the host's `usize`.** The formula
+  is quadratic in the source — `run_partial` drives every split point, so `drains` is `units + 3` —
+  while a `usize` is not, and in `usize` it saturated at 11,580 units at the default multiple and
+  127 at the maximum on a 32-bit target. The tally then stopped being a bound derived from the
+  source and became a flat `usize::MAX` cap, flat while the formula it replaced kept growing: about
+  75× short at 100,000 units.
+
+  That cap was reachable by an **ordinary lexer over an ordinary source**, which is what made it a
+  defect and not a recorded cost. A conforming `SpanEnd` lexer emitting one item per byte spends
+  about one attempt per item, and the partial sweep drives it over every split of the source: over
+  100 KB that is on the order of five billion prefix attempts, already past `usize::MAX` at 32 bits
+  before the two full-input drains are counted. Such a lexer passed at 64 bits and took an ordinary
+  `lex-budget` refusal at 32 — the kit reporting its own arithmetic as the lexer's fault — and
+  `budget_multiple` could not help, because every permitted setting collapses to the same cap. The
+  ceiling is now the same number at every target width, and the 32-bit refusal is gone rather than
+  raised.
+
+  **A ceiling the kit runs out of is reported as the kit's limit, under its own tag.** `u128` is
+  still finite, so the derivation is *checked* and records the one case it does not fit —
+  exactly, rather than inferred from a saturated value. Exhausting that ceiling panics under
+  `kit-capacity` rather than `lex-budget` and says INCONCLUSIVE and *not a verdict on the lexer*,
+  because the truth there is that the counter ran out and nothing was decided about the lexer
+  either way. Reaching it needs about 2⁵⁵ source units, and it is distinguished anyway: a caller
+  who does arrive must be told the right thing. `CacheHarness`'s unrepresentable-ceiling panic
+  takes the same tag for the same reason — it fires before the lexer is asked to lex once.
+
+  **`Harness::budget_multiple` and `CacheHarness::lex_attempts_multiple` now panic above 65536
+  rather than clamping to it.** The cap is unchanged and still necessary — a multiple of
+  `usize::MAX` computes a ceiling of `usize::MAX`, which the comparison reaches only after
+  `usize::MAX` attempts, so the guard the knob configures never arrives in a run anybody waits out
+  — but a clamp enforced it by *silently lowering the caller's budget*. The lexer contract permits
+  finite density above the cap, so the clamp had a reachable victim: on a one-unit source a
+  requested multiple of 65,601 should allow 65,665 items, the clamp allowed 65,600, and a legal
+  lexer emitting 65,601 errors and then `None` was refused on its exhaustion probe by `run_partial`
+  while `run` reported it as possibly nonterminating. That is the same conforming-lexer-rejected
+  outcome as above, reached from a setting the builder accepted without a word — and a caller reads
+  the `lex-budget` tag as a verdict on their lexer. Above the cap this kit cannot tell a dense lexer
+  from a nonterminating one, and it now says so at the call site, naming the knob and the maximum.
+  Below `1` both still adjust silently: that direction only widens the budget, and a wider budget
+  cannot manufacture a failure.
+
+  The integration tier's guards were the same defect and had not fired: the trait-tier checks that
+  run before it happen to reject a non-terminating lexer first. That is an argument about check
+  order, not a bound, so they are wrapped too. The same wrapper is also what now bounds a
+  zero-width-span lexer in a **release** build of a downstream's test suite: the input layer's
+  nonempty-span check is a `debug_assert!`, so before this the only thing standing between a
+  zero-width span and a spinning scanner was the per-`next()` budget this replaces.
 
 - **`IncompleteSyntax::as_slice` no longer stops at the ring boundary** (#245). The components
   live in a `GenericArrayDeque`, and a deque is not one physical slice: `push_front` moves the

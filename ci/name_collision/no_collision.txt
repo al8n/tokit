@@ -145,3 +145,47 @@ path_segments_iter/later_pick_discarded
 clear/same_pick
 clear/later_pick_used
 clear/later_pick_discarded
+# ── #282's read frontier — the by-value pick, and one `&mut self` item ────────────────────
+#
+# Four of this release's trait rows agree on both sides, and they agree for the two reasons
+# already written up above rather than for a new one. The rest score `loud`, on the same
+# templates and the same subjects, which is what says these four are a property of their SHAPE
+# and not a broken probe or a mis-chosen receiver.
+#
+# `*/same_pick` — `read_frontier`, `take_probe`. The `trait_method` template's `same_pick`
+# consumer declares `self` BY VALUE, which is the first step of the receiver walk. tokora's two
+# items declare `&self` and `&mut self`, both of them later steps. The subjects are
+# `PLexer<'static>` and `()`, neither of which derefs to anything, so there is no earlier step
+# for tokora's item to be found at. The consumer's item claims the call on both sides and
+# tokora's is never a candidate. The control is in the same run: the `later_pick_*` rows for
+# `read_frontier` put the consumer at `&self`, where tokora's item also sits, and they go
+# `loud` — so this template does construct collisions on these subjects when the receivers
+# agree.
+#
+# `take_probe` is the value channel, and it replaces the `probe`/`clear_probe` PAIR this branch
+# first shipped — one consuming operation, because two independently defaulted members could be
+# half-implemented (override the reader, inherit the empty reset) and the adapter then accepted
+# a value no scan on that lexer recorded. For this harness that is a rename plus a deletion:
+# `take_probe` has `clear_probe`'s receiver (`&mut self`), arity (zero) and subject (`()`), so
+# the analysis below is `clear_probe`'s unchanged and the rows are carried over rather than
+# re-derived. The `probe/same_pick` row goes with the name; `probed_to` remains an inherent
+# method on `Probe`, a different owner and a different template, and needs no entry here
+# because `Probe` is minted by this same diff and its rows can only reach `new-owner`.
+#
+# `take_probe/later_pick_used`, `take_probe/later_pick_discarded` — this is issue #225's
+# foreknown-vacuous shape verbatim: a `&mut self` trait method on a non-deref subject. The
+# consumer's `&self` is pick two and tokora's `&mut self` is pick three, so the consumer wins
+# the call whatever the receiver is, and #225's ruling declines to build the `&mut self`
+# consumer that would compete at pick three. Read these two rows as "the `&self` consumer keeps
+# its call", never as "`take_probe` cannot be stolen".
+#
+# Why the subjects satisfy the bounds, since `recvr` is trusted and not verified: `PLexer` is
+# the fixture's `LogosLexer<'static, Tok>`, which tokora implements `Lexer` for through the
+# adapter's blanket impl over `T: FromLogos` — `Tok` derives `Logos` and implements `Token`,
+# which is what that impl asks for. `()` is tokora's OWN `State` implementor (`impl State for
+# ()` in `state/mod.rs`), and it is what a `logos` vocabulary declaring no `extras` actually
+# uses, which `Tok` is.
+read_frontier/same_pick
+take_probe/same_pick
+take_probe/later_pick_used
+take_probe/later_pick_discarded

@@ -148,6 +148,7 @@ pub type DelimitedOf<'inp, D, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self {
 /// #     Tok::Digit(_) => Kind::Digit,
 /// #     Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen,
@@ -200,6 +201,7 @@ pub type DelimitedOf<'inp, D, L, Ctx, Lang, T> = Result<
 /// #       _ => Tok::Digit(0),
 /// #     }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -472,6 +474,7 @@ pub type TryDelimitedOf<'inp, D, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Ident(_) => Kind::Ident, Tok::LAngle => Kind::LAngle, Tok::RAngle => Kind::RAngle } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -502,6 +505,7 @@ pub type TryDelimitedOf<'inp, D, L, Ctx, Lang, T> = Result<
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { '<' => Tok::LAngle, '>' => Tok::RAngle, c => Tok::Ident(c) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -611,6 +615,7 @@ pub type ParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -641,6 +646,7 @@ pub type ParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { '0'..='9' => Tok::Digit(c as u32 - '0' as u32), '(' => Tok::LParen, ')' => Tok::RParen, _ => Tok::Digit(0) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -779,6 +785,7 @@ pub type TryParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -809,6 +816,7 @@ pub type TryParensOf<'inp, L, Ctx, Lang, T> = Result<
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { '0'..='9' => Tok::Digit(c as u32 - '0' as u32), '(' => Tok::LParen, ')' => Tok::RParen, _ => Tok::Digit(0) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -910,6 +918,7 @@ pub type BracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LBrace => Kind::LBrace, Tok::RBrace => Kind::RBrace } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -940,6 +949,7 @@ pub type BracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { '0'..='9' => Tok::Digit(c as u32 - '0' as u32), '{' => Tok::LBrace, '}' => Tok::RBrace, _ => Tok::Digit(0) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -1078,6 +1088,7 @@ pub type TryBracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LBrace => Kind::LBrace, Tok::RBrace => Kind::RBrace } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -1108,6 +1119,7 @@ pub type TryBracesOf<'inp, L, Ctx, Lang, T> = Result<
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { '0'..='9' => Tok::Digit(c as u32 - '0' as u32), '{' => Tok::LBrace, '}' => Tok::RBrace, _ => Tok::Digit(0) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -1210,6 +1222,7 @@ pub type BracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LBracket => Kind::LBracket, Tok::RBracket => Kind::RBracket } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -1240,6 +1253,7 @@ pub type BracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { '0'..='9' => Tok::Digit(c as u32 - '0' as u32), '[' => Tok::LBracket, ']' => Tok::RBracket, _ => Tok::Digit(0) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -1378,6 +1392,7 @@ pub type TryBracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LBracket => Kind::LBracket, Tok::RBracket => Kind::RBracket } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -1408,6 +1423,7 @@ pub type TryBracketsOf<'inp, L, Ctx, Lang, T> = Result<
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { '0'..='9' => Tok::Digit(c as u32 - '0' as u32), '[' => Tok::LBracket, ']' => Tok::RBracket, _ => Tok::Digit(0) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -1511,6 +1527,7 @@ pub type AnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LAngle => Kind::LAngle, Tok::RAngle => Kind::RAngle } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -1541,6 +1558,7 @@ pub type AnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { '0'..='9' => Tok::Digit(c as u32 - '0' as u32), '<' => Tok::LAngle, '>' => Tok::RAngle, _ => Tok::Digit(0) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
@@ -1679,6 +1697,7 @@ pub type TryAnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::LAngle => Kind::LAngle, Tok::RAngle => Kind::RAngle } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -1709,6 +1728,7 @@ pub type TryAnglesOf<'inp, L, Ctx, Lang, T> = Result<
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(match c { '0'..='9' => Tok::Digit(c as u32 - '0' as u32), '<' => Tok::LAngle, '>' => Tok::RAngle, _ => Tok::Digit(0) }))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;

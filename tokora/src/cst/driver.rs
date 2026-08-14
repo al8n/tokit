@@ -92,6 +92,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// impl Token<'_> for MiniTok {
 ///   type Kind = u8;
 ///   type Error = MiniErr;
+///   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///   const SURFACES_TRIVIA: bool = true; // ← the declaration under test
 ///   fn kind(&self) -> u8 { self.0 }
 ///   fn is_trivia(&self) -> bool { self.0 == b' ' }
@@ -117,6 +118,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// #     self.pos += 1;
 /// #     Some(Ok(MiniTok(byte)))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
 /// # }
 /// # const K_ROOT: u16 = 1;
@@ -181,6 +183,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// impl Token<'_> for MiniTok {
 ///   type Kind = u8;
 ///   type Error = MiniErr;
+///   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///   // no SURFACES_TRIVIA: defaults to false (a skipping, syntactic grammar)
 ///   fn kind(&self) -> u8 { self.0 }
 ///   fn is_trivia(&self) -> bool { self.0 == b' ' }
@@ -206,6 +209,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// #     self.pos += 1;
 /// #     Some(Ok(MiniTok(byte)))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
 /// # }
 /// # const K_ROOT: u16 = 1;
@@ -286,6 +290,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// # impl Token<'_> for MiniTok {
 /// #   type Kind = u8;
 /// #   type Error = MiniErr;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   const SURFACES_TRIVIA: bool = true;
 /// #   fn kind(&self) -> u8 { self.0 }
 /// #   fn is_trivia(&self) -> bool { self.0 == b' ' }
@@ -311,6 +316,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// #     self.pos += 1;
 /// #     Some(Ok(MiniTok(byte)))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
 /// # }
 /// # const K_ROOT: u16 = 1;
@@ -408,6 +414,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// # impl Token<'_> for MiniTok {
 /// #   type Kind = u8;
 /// #   type Error = MiniErr;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   const SURFACES_TRIVIA: bool = true;
 /// #   fn kind(&self) -> u8 { self.0 }
 /// #   fn is_trivia(&self) -> bool { self.0 == b' ' }
@@ -433,6 +440,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// #     self.pos += 1;
 /// #     Some(Ok(MiniTok(byte)))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
 /// # }
 /// /// A wrapper emitter: forwards every emission, and deliberately not `bound_source`.
@@ -514,6 +522,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// # impl Token<'_> for MiniTok {
 /// #   type Kind = u8;
 /// #   type Error = MiniErr;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   const SURFACES_TRIVIA: bool = true;
 /// #   fn kind(&self) -> u8 { self.0 }
 /// #   fn is_trivia(&self) -> bool { self.0 == b' ' }
@@ -539,6 +548,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// #     self.pos += 1;
 /// #     Some(Ok(MiniTok(byte)))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
 /// # }
 /// # const K_ROOT: u16 = 1;
@@ -660,6 +670,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// impl Token<'_> for MiniTok {
 ///   type Kind = u8;
 ///   type Error = MiniErr;
+///   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///   const SURFACES_TRIVIA: bool = true; // ← the declaration under test
 ///   fn kind(&self) -> u8 { self.0 }
 ///   fn is_trivia(&self) -> bool { self.0 == b' ' }
@@ -685,6 +696,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// #     self.pos += 1;
 /// #     Some(Ok(MiniTok(byte)))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
 /// # }
 /// # const K_ROOT: u16 = 1;
@@ -818,6 +830,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// impl Token<'_> for MiniTok {
 ///   type Kind = u8;
 ///   type Error = MiniErr;
+///   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///   const SURFACES_TRIVIA: bool = true; // ← the declaration under test
 ///   fn kind(&self) -> u8 { self.0 }
 ///   fn is_trivia(&self) -> bool { self.0 == b' ' }
@@ -843,6 +856,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// #     self.pos += 1;
 /// #     Some(Ok(MiniTok(byte)))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
 /// # }
 /// # const K_ROOT: u16 = 1;
@@ -980,6 +994,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// impl Token<'_> for MiniTok {
 ///   type Kind = u8;
 ///   type Error = MiniErr;
+///   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///   const SURFACES_TRIVIA: bool = true; // ← the declaration under test
 ///   fn kind(&self) -> u8 { self.0 }
 ///   fn is_trivia(&self) -> bool { self.0 == b' ' }
@@ -1005,6 +1020,7 @@ use super::{CstProfile, handle::Cst, sink::Sink};
 /// #     self.pos += 1;
 /// #     Some(Ok(MiniTok(byte)))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += *n; self.tok_start = self.pos; }
 /// # }
 /// # const K_ROOT: u16 = 1;

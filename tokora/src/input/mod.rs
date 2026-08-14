@@ -35,13 +35,28 @@
 //! world. The crate-internal `input::lineage` module carries the full cell taxonomy this sits in
 //! (grep `CELL_CENSUS`).
 //!
-//! ## One-token frontier latency
+//! ## Frontier latency, and how far back it reaches
 //!
-//! The holdback withholds a token whose span reaches the buffer end, so **the last token becomes
-//! visible only after more input arrives or the input is marked final**. This one-token latency is
-//! correct by construction: a token abutting the end could be the prefix of a longer one (`ab` may
-//! become `abc`), and the only proof it will not is more bytes — or `is_final`. With `is_final`
-//! set, or on a [`Complete`] input, the rules are inert and the last token yields immediately.
+//! The holdback withholds an item the lexer decided by **reading as far as the buffer end**
+//! ([`Lexer::read_frontier`]), so **the last such token becomes visible only after more input
+//! arrives or the input is marked final**. The latency is correct by construction: an item whose
+//! decision consulted the end could change once the end moves (`ab` may become `abc`), and the only
+//! proof it will not is more bytes — or `is_final`. With `is_final` set, or on a [`Complete`]
+//! input, the rules are inert and the last token yields immediately.
+//!
+//! **How many tokens that is depends on the lexer, and since 0.10.0 it is not always one.** A lexer
+//! that never reads past what it emits reports [`ReadFrontier::SpanEnd`] and
+//! keeps the one-token latency exactly as before. A lookahead lexer that probes ahead and
+//! backtracks reports where it actually read, so an item behind the end is withheld too — that is
+//! the fix, not a regression: committing it was what made a partial parse disagree with the
+//! complete one. And a lexer that cannot bound what it read reports
+//! [`Unbounded`](crate::ReadFrontier::Unbounded), which withholds **everything** until the stream
+//! is sealed. That last one is sound but expensive — see [`Lexer::read_frontier`] — and it is the
+//! answer the bundled logos adapter gives for a vocabulary that declares
+//! [`Unbounded`](crate::ReadFrontierClass::Unbounded) through
+//! [`Token::READ_FRONTIER_CLASS`]. That const has no default: a logos-backed vocabulary states
+//! its class or does not compile, because inheriting this one silently is the difference between
+//! a token yielded on the first attempt and a session that refuses before it is sealed.
 //!
 //! ## Terminal beats incomplete, and they never substitute
 //!
@@ -134,6 +149,7 @@
 //! impl Token<'_> for Word {
 //!   type Kind = WordKind;
 //!   type Error = Infallible;
+//!   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 //!   fn kind(&self) -> WordKind { WordKind }
 //!   fn is_trivia(&self) -> bool { false }
 //! }
@@ -160,6 +176,7 @@
 //!     self.end = e;
 //!     Some(Ok(Word))
 //!   }
+//!   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 //!   fn bump(&mut self, n: &usize) { self.end += *n; }
 //! }
 //!

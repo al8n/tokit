@@ -51,6 +51,7 @@ use super::{
 /// # impl Token<'_> for STok {
 /// #   type Kind = u8;
 /// #   type Error = ();
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   const SURFACES_TRIVIA: bool = true;
 /// #   fn kind(&self) -> u8 { 0 }
 /// #   fn is_trivia(&self) -> bool { false }
@@ -69,6 +70,7 @@ use super::{
 /// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(0, 0) }
 /// #   fn slice(&self) -> &'inp str { "" }
 /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, _: &usize) {}
 /// # }
 /// needs_emitter::<Lossless<'_>, Sink<'_, Lossless<'_>, Verbose<()>>>();
@@ -91,6 +93,7 @@ use super::{
 /// # impl Token<'_> for STok {
 /// #   type Kind = u8;
 /// #   type Error = ();
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   const SURFACES_TRIVIA: bool = true;
 /// #   fn kind(&self) -> u8 { 0 }
 /// #   fn is_trivia(&self) -> bool { false }
@@ -109,6 +112,7 @@ use super::{
 /// #   fn span(&self) -> SimpleSpan { SimpleSpan::new(0, 0) }
 /// #   fn slice(&self) -> &'inp str { "" }
 /// #   fn lex(&mut self) -> Option<Result<STok, ()>> { None }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, _: &usize) {}
 /// # }
 /// needs_emitter::<Lossless<'_>, Cst<'_, Lossless<'_>, Verbose<()>>>();

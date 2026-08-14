@@ -310,6 +310,17 @@ pub fn emitter_value() -> Silent<PErr> {
 '''
 
 
+# A `Lexer` subject: the fixture's own logos-backed lexer, which tokora implements `Lexer` for
+# through the adapter's blanket impl. `Lexer::new` is a trait method, so the fixture spells it
+# through the trait to keep the value's construction independent of whatever inherent
+# constructors the adapter happens to carry.
+LEXER_SUBJECT_FIXTURE = r'''
+pub fn lexer_value() -> PLexer<'static> {
+  <PLexer<'static> as Lexer<'static>>::new("1 2")
+}
+'''
+
+
 # ── Which subject a trait probe rides ────────────────────────────────────────────────────
 #
 # This was two hardcoded traits and an `else`:
@@ -437,6 +448,46 @@ TRAITS = {
     # `self_ty` stays absent because neither trait declares a receiver-less item, so no
     # `trait_assoc_fn` row can arise; filling it in "just in case" is how a probe ends up
     # riding a guess.
+    # ── `Lexer`, `State`, `Token` — the three traits #282's read frontier touches ────────
+    #
+    # All three are PRE-EXISTING, so each can be brought into scope by name on both sides and
+    # `scope` follows the `Emitter` precedent: `Lexer` and `Token` are already in the shared
+    # fixture's import list, `State` is not.
+    #
+    # `Lexer`'s subject is the fixture's OWN lexer — `PLexer<'static>` is `LogosLexer<'static,
+    # Tok>`, and tokora implements `Lexer` for it through the adapter's blanket impl over
+    # `T: FromLogos`, which `Tok` satisfies by deriving `Logos` and implementing `Token`. It is
+    # not a convenient nearby value: it is the one type in this fixture the trait is
+    # demonstrably implemented for. The subject is built rather than obtained from a parse,
+    # for the reason the error subjects are: the receiver has to be a value on the line where
+    # the call is made, and an `InputRef` never hands its lexer out.
+    "Lexer": {
+        "recvr": "lexer_value()",
+        # `Lexer` declares no receiver-less item, so a `trait_assoc_fn` row cannot arise and
+        # filling `self_ty` in "just in case" is how a probe ends up riding a guess.
+        "self_ty": None,
+        "scope": None,
+        "fixture": LEXER_SUBJECT_FIXTURE,
+    },
+    # `State`'s subject is `()`, and that is tokora's own implementor rather than a stand-in:
+    # `impl State for ()` is in `state/mod.rs`, and it is what a `logos` vocabulary with no
+    # `extras` actually uses — `Tok` above declares none, so `PLexer::State` IS `()`.
+    "State": {
+        "recvr": "()",
+        "self_ty": None,
+        "scope": "use tokora::State;",
+        "fixture": None,
+    },
+    # `Token`'s subject is the fixture's own `Tok`, which implements it a few lines above.
+    # `recvr` stays absent: the only item this release adds to `Token` is an associated CONST,
+    # which is path-resolved and needs the TYPE, and a receiver supplied for a shape the row
+    # cannot have is the same guess the other rows refuse.
+    "Token": {
+        "recvr": None,
+        "self_ty": "Tok",
+        "scope": None,
+        "fixture": None,
+    },
     "Diagnose": {
         "recvr": "UnexpectedEot::eot(7usize)",
         "self_ty": None,
@@ -1036,6 +1087,33 @@ INHERENT_SUBJECTS = {
             "new": ('Location::new(0, SimpleSpan::new(0, 1)), "probe"', "Label"),
         },
     },
+    # `Probe` is minted by the same diff as its three items, so it takes this table's
+    # new-owner shape: the base side cannot name the type at all, and only the head side's
+    # binding has to be right. Its module (`tokora::state`) is NOT new, so a plain
+    # `use tokora::Probe;` already names the owner in the base-side diagnostic and the
+    # `new_module_imports` indirection the `diagnostic` types need buys nothing here.
+    #
+    # It is `Copy` and both accessors are `&self`, so the receiver walk is `Code`'s exactly:
+    # tokora's inherent item is found at the `&T` step, one step before the generated
+    # consumer's `&mut self` item, and takes the call.
+    #
+    # `new` routes HERE rather than to `Location`, because `surface_diff.py` keeps the
+    # alphabetically last owner declaring a name and `Location` < `Probe`. It is written into
+    # this table for that reason and stays in the other three for the reason their header gives.
+    "Probe": {
+        "imports": "use tokora::Probe;\n",
+        "fixture": "",
+        "ty": "Probe",
+        "setup": "",
+        "build": "  let mut subject: Probe = Probe::new(3, 7);\n",
+        "calls": {
+            "scanned_from": ("", "usize"),
+            "probed_to": ("", "usize"),
+        },
+        "assoc_calls": {
+            "new": ("3, 7", "Probe"),
+        },
+    },
     "Location": {
         "imports": "use tokora::SimpleSpan;\n" + new_module_imports("tokora::diagnostic", "Location"),
         "fixture": "",
@@ -1406,6 +1484,20 @@ def trait_method(name, owner, spelling):
         "path_segments_iter": "",
         # `ErrorContainer::clear(&mut self)` — no argument beyond the receiver.
         "clear": "",
+        # #282's read frontier. Both take no argument beyond the receiver, so they are the
+        # empty-argument shape this table already serves — not the multi-argument support #225
+        # declines. `read_frontier` is `&self`; `take_probe` is `&mut self`, which is the
+        # foreknown-vacuous shape #225 names, so read its verdict against the bound written in
+        # `no_collision.txt` rather than as evidence the name is safe.
+        #
+        # `take_probe` is the value channel, and it replaces the `probe`/`clear_probe` pair this
+        # branch first shipped: two independently defaulted members could be half-implemented, so
+        # reading now consumes and there is one method where there were two. It keeps
+        # `clear_probe`'s row analysis because the shape is identical — `&mut self`, no argument,
+        # subject `()`. `probed_to`, which `probe` was itself a rename of, is an INHERENT method
+        # on `Probe`: a different template and a different row.
+        "read_frontier": "",
+        "take_probe": "",
     }.get(name)
     if args is None:
         # The pointer matters more than the refusal. An author who lands here reads "add a
@@ -1503,6 +1595,52 @@ fn drive() {{
 ''' + WITNESS
 
 
+def trait_assoc_const(name, owner, spelling):
+    """An associated CONST on a trait — `Type::NAME`, resolved by path.
+
+    Split out of `trait_assoc_item`'s blanket refusal because this half IS expressible, and
+    refusing it left a genuinely new public name unprobed. The rule is `trait_assoc_fn`'s, one
+    namespace over: a path carries no receiver, so there is no autoderef chain to pick a later
+    candidate off. With the consumer's trait and tokora's both applicable to the same type,
+    rustc reports E0034 and refuses to choose — so `loud` is the expected verdict here and a
+    `silent` one would be news.
+
+    The consumer's const cannot call `ran()` — a const initialiser runs at compile time and a
+    thread-local bump is not const — so the witness is taken at the USE site instead: `go()`
+    reads the const, compares it against the consumer's own value, and bumps only on a match.
+    A resolution that reached tokora's item instead would not compile anyway (its type is not
+    `u8`), which is the second reason this shape cannot be a silent steal.
+    """
+    rec = trait_subject(name, owner, "self_ty")
+    ty = rec["self_ty"]
+    read = f"let v: u8 = {ty}::{name};" if spelling == "used" else f"let v: u8 = {ty}::{name}; let _ = v;"
+    return FIXTURE + (rec["fixture"] or "") + f'''
+mod clash {{
+  use super::*;
+{trait_scope(rec)}
+  pub trait ConsumerConst {{
+    const {name}: u8;
+  }}
+
+  impl<T> ConsumerConst for T {{
+    const {name}: u8 = 7;
+  }}
+
+  pub fn go() {{
+    reached();
+    {read}
+    if v == 7 {{
+      ran();
+    }}
+  }}
+}}
+
+fn drive() {{
+  clash::go();
+}}
+''' + WITNESS
+
+
 def trait_assoc_item(name, owner, spelling):
     """An associated TYPE or CONST on a trait. There is no template, and saying so is the
     point: it used to be filed with the methods and fail with a message about a missing
@@ -1591,6 +1729,7 @@ DISPATCH = {
     "inherent_assoc_fn": inherent_assoc_fn,
     "trait_method": trait_method,
     "trait_assoc_fn": trait_assoc_fn,
+    "trait_assoc_const": trait_assoc_const,
     "trait_assoc_item": trait_assoc_item,
     "glob_name": glob_name,
     "glob_macro": glob_macro,

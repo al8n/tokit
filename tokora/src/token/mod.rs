@@ -80,6 +80,7 @@ mod pratt;
 ///     type Char = char;
 ///     type Kind = TokenKind;
 ///     type Logos = MyTokens;
+///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///
 ///     fn kind(&self) -> Self::Kind {
 ///         self.kind
@@ -112,6 +113,7 @@ mod pratt;
 ///     type Char = char;
 ///     type Kind = TokenKind;
 ///     type Logos = MyTokens;
+///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///
 ///     fn kind(&self) -> Self::Kind {
 ///         self.kind
@@ -144,6 +146,7 @@ mod pratt;
 ///     type Char = u8;  // Using u8 for byte-based lexing
 ///     type Kind = ByteTokenKind;
 ///     type Logos = ByteTokens;
+///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///
 ///     fn kind(&self) -> Self::Kind {
 ///         self.kind
@@ -200,6 +203,152 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// crate — materialization surfaces it as
   /// `cst::FinishError::UncoveredGap`.
   const SURFACES_TRIVIA: bool = false;
+
+  /// The **read-frontier class** this vocabulary claims, for an adapter that cannot compute an
+  /// exact frontier of its own — in practice the bundled logos adapter.
+  ///
+  /// `logos` exposes `span`, `slice` and `remainder`, but not its DFA's probe frontier, so
+  /// `LogosLexer` cannot answer [`Lexer::read_frontier`](crate::Lexer::read_frontier) from
+  /// anything it can see. It delegates to the vocabulary here — the same const-delegation shape
+  /// [`SURFACES_TRIVIA`](Self::SURFACES_TRIVIA) uses, and for the same reason: the adapter is one
+  /// blanket impl over every token type, so the `Token` impl is the only per-dialect site.
+  ///
+  /// The claim answers for an item whose **own scan** recorded no frontier in the lexer state —
+  /// which includes an item that inherited a value from a scan `logos` skipped inside the same
+  /// `next()` call. An item whose own scan recorded one is answered by that value instead: see
+  /// [`State::take_probe`](crate::State::take_probe), the value channel a `logos` callback writes
+  /// to, and
+  /// [`Probe`](crate::Probe) for how a value is matched to the scan that recorded it.
+  ///
+  /// # There is NO default, and that is deliberate
+  ///
+  /// This const has to be written down. It carried a
+  /// [`Unbounded`](crate::ReadFrontierClass::Unbounded) default when the frontier channel was
+  /// introduced, on the reasoning that a vocabulary which has not thought about the question
+  /// should not be assumed safe — and the *value* is right, but a default is the wrong way to
+  /// deliver it, because it also means a vocabulary that has not thought about the question is
+  /// never made to. Every existing logos-backed `Token` impl kept compiling and silently became
+  /// **seal-only**.
+  ///
+  /// That is not a loss of precision. Take the easiest vocabulary there is to classify — two
+  /// fixed one-byte tokens over disjoint bytes, no prefix relation, no callback — and one item at
+  /// span `0..1` in a two-byte non-final buffer. The span predicate this channel replaced yields
+  /// it (`1 < 2`). Inheriting `Unbounded` withholds it, and under a
+  /// [`Budget`](crate::input::Budget) calibrated for the yielding behaviour the retry is
+  /// **terminally refused** before finality is ever applied: the first attempt spends the two
+  /// bytes and returns `Incomplete`, the seal re-lexes the same buffer and projects four against a
+  /// cap of two. The caller never receives a token it used to receive on the first attempt. Under
+  /// an unbounded budget the same omission instead retains the whole stream and re-drives it until
+  /// the seal. Both are silent, and neither is what the author chose.
+  ///
+  /// So the obligation is the same one
+  /// [`Lexer::read_frontier`](crate::Lexer::read_frontier) carries: it is a **required** method
+  /// rather than a defaulted one, precisely so an implementor cannot be walked past it, and this
+  /// is that decision one layer down — the const the adapter delegates to when the method has
+  /// nothing of its own to report. A defaulted const and a required method cannot both be the
+  /// right answer to the same question.
+  ///
+  /// ```rust,compile_fail,E0046
+  /// use tokora::Token;
+  /// # #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+  /// # struct Kind;
+  /// # impl core::fmt::Display for Kind {
+  /// #   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.write_str("k") }
+  /// # }
+  /// #[derive(Clone, Debug)]
+  /// struct Tok;
+  ///
+  /// // Omitting READ_FRONTIER_CLASS does not compile: E0046, not a silent `Unbounded`.
+  /// // (Do not "fix" this cell by adding the const — the omission IS the assertion.)
+  /// impl Token<'_> for Tok {
+  ///   type Kind = Kind;
+  ///   type Error = ();
+  ///   fn kind(&self) -> Kind { Kind }
+  ///   fn is_trivia(&self) -> bool { false }
+  /// }
+  /// ```
+  ///
+  /// # Why [`SURFACES_TRIVIA`](Self::SURFACES_TRIVIA) keeps a default and this cannot
+  ///
+  /// The two consts have the same delegation shape, so the difference is worth naming: it is
+  /// **where omission fails**. `SURFACES_TRIVIA`'s `false` fails *closed at compile time* — the
+  /// lossless `cst::Sink` refuses to be constructed over a vocabulary that has not declared it, so
+  /// a consumer who needed `true` is stopped by the type system before anything runs. This const
+  /// fails *open at run time*: the parse compiles, drives, and silently changes what it yields.
+  /// A default is only safe when the thing it guards refuses to proceed without a real answer.
+  ///
+  /// # Choosing a value: `SpanEnd` is a claim about the DFA
+  ///
+  /// [`SpanEnd`](crate::ReadFrontierClass::SpanEnd) promises that deciding an item never probes
+  /// beyond that item's own span end. For a `logos` vocabulary that is **false whenever one
+  /// pattern is a proper prefix of another** — `[0-9]+` beside `[0-9]+\.[0-9]+`, an integer beside
+  /// a float or an exponent literal — because the engine probes into the longer pattern and then
+  /// backtracks to the accepting prefix. It is a claim about the generated DFA, not only about
+  /// callbacks.
+  ///
+  /// ## What a false `SpanEnd` costs, and why nothing at run time refuses it
+  ///
+  /// Requiring the const catches **omission**. A *mistaken value* is ordinary safe code with no
+  /// fail-closed guard, so it is worth being exact about what it buys and what stops it.
+  ///
+  /// The cost, on the two-rule vocabulary above declared `SpanEnd` and driven
+  /// [`Partial`](crate::input::Partial) non-final over the buffer `"1."`: `logos` probes into the
+  /// float arm, finds no byte at offset 2, backtracks to the accepting prefix and emits
+  /// `Int@0..1`. The adapter answers `SpanEnd`, the driver's effective frontier is
+  /// `max(1, 1) = 1`, and `1 < 2` **commits** it. Append `"5"`: the complete parse of `"1.5"` is
+  /// `Float@0..3`. The chunked parse and the single-shot parse now disagree — silently, with no
+  /// panic, no diagnostic and no [`Incomplete`](crate::error::Incomplete), which is the
+  /// unspecified-but-bounded posture the rest of this trait's contracts carry.
+  ///
+  /// **The adapter cannot check the claim, and the missing frontier is only half the reason.**
+  /// `logos` does not expose one: `span`, `slice`, `remainder`, `source` and `bump` are the whole
+  /// public `Lexer` surface on 0.14, 0.15 and 0.16 alike, `token_start`/`token_end` are private,
+  /// and the DFA's read path (`logos::internal::LexerInternal`) is `#[doc(hidden)]`, documented as
+  /// not for use outside the derive's output, takes `&self` and records nothing — reached through
+  /// `Logos::lex(&mut Lexer<'source, Self>)`, a **concrete** lexer for which no adapter can
+  /// substitute an instrumented one. But a complete read log would not settle it either. The
+  /// question is not *which offsets were read*; it is *would a byte appended at the buffer end
+  /// change this item* — and the falsifying input is *longer than the buffer*, which at the moment
+  /// [`read_frontier`](crate::Lexer::read_frontier) is asked is where the stream ends. The one
+  /// self-check available from the bytes in hand — re-lex `source[..span.end]` and see whether the
+  /// rest mattered — returns the same `Int@0..1` and **certifies the lie**. No run-time guard can
+  /// exist here, because the evidence does not.
+  ///
+  /// ## Discharging the claim: the partial tier is the auditor
+  ///
+  /// It is discharged by test, against a corpus that *does* contain the longer input. The
+  /// `conformance` kit's `run_partial` check drives every split point of every source and requires
+  /// each non-final prefix drain to be a **prefix of** the complete items ending before the cut.
+  /// The committed `Int@0..1` is an item the complete parse of `"1.5"` does not have before offset
+  /// 2, so the run panics, tagged `partial-equivalence`, naming the split. The crate pins this on
+  /// a fixture that lies on purpose —
+  /// `conformance::tests::prefix_backtracking::a_span_end_claim_over_a_float_vocabulary_is_falsified`,
+  /// `LyingNum`'s `SpanEnd` over a float vocabulary — with an exponent twin beside it and a passing
+  /// control at `Unbounded`.
+  ///
+  /// **That tier audits a corpus, not a vocabulary**, and the difference is the obligation this
+  /// claim really carries. It can only observe a divergence some source in the corpus produces:
+  /// over `["1.5"]` the lie is caught at split 2, and over `["1."]` **alone the same lie passes**,
+  /// because the complete parse of `"1."` also begins `Int@0..1` and the prefix drain is a faithful
+  /// prefix of it. So writing `SpanEnd` obliges you to more than running the kit: for every pair of
+  /// rules where one pattern is a proper prefix of another, the corpus needs a source on which the
+  /// **longer** rule wins. That is the source a truncation has something to diverge from. If you
+  /// cannot enumerate those pairs for your vocabulary, you have not audited the DFA, and
+  /// [`Unbounded`](crate::ReadFrontierClass::Unbounded) is the value that is true anyway.
+  ///
+  /// [`Unbounded`](crate::ReadFrontierClass::Unbounded) is the answer that is always sound and is
+  /// never precise. It remains the right value for a vocabulary whose DFA you have not audited —
+  /// write it, and read
+  /// [`Lexer::read_frontier`](crate::Lexer::read_frontier) for what it costs.
+  ///
+  /// A vocabulary whose lexer is **hand-written** answers
+  /// [`Lexer::read_frontier`](crate::Lexer::read_frontier) directly and this const is never read
+  /// for it. It is still required, for the same reason `read_frontier` is required of a lexer that
+  /// will only ever be driven [`Complete`](crate::input::Complete): the trait cannot see which
+  /// case it is in, and a vocabulary that later meets an adapter should already have an answer on
+  /// file rather than acquire one by omission. Write
+  /// [`Unbounded`](crate::ReadFrontierClass::Unbounded); it is inert.
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass;
 
   /// Returns the kind (category) of this token.
   ///
@@ -261,6 +410,7 @@ pub trait Token<'a>: Clone + core::fmt::Debug + 'a {
   /// impl Token<'_> for MyToken {
   ///     type Kind = TokenKind;
   ///     type Error = ();
+  ///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
   ///
   ///     fn kind(&self) -> Self::Kind {
   ///         self.kind
@@ -282,6 +432,7 @@ impl<'a, T: Token<'a>> Token<'a> for &'a T {
   type Error = T::Error;
 
   const SURFACES_TRIVIA: bool = T::SURFACES_TRIVIA;
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = T::READ_FRONTIER_CLASS;
 
   #[inline(always)]
   fn kind(&self) -> Self::Kind {
@@ -333,6 +484,7 @@ impl<'a, T: Token<'a>> Token<'a> for &'a T {
 /// impl<'a> Token<'a> for MyToken<'a> {
 ///     type Kind = MyTokenKind;
 ///     type Error = ();
+///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///
 ///     fn kind(&self) -> Self::Kind {
 ///         match self {
@@ -404,6 +556,7 @@ impl<'a, T: IdentifierToken<'a>> IdentifierToken<'a> for &'a T {
 /// impl<'a> Token<'a> for MyToken<'a> {
 ///     type Kind = MyTokenKind;
 ///     type Error = ();
+///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///
 ///     fn kind(&self) -> Self::Kind {
 ///         match self {

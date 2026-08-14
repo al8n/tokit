@@ -581,6 +581,8 @@ impl Token<'_> for ExprTok {
   type Kind = ExprKind;
   type Error = ();
 
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> ExprKind {
     match self {
       ExprTok::Int(_) => ExprKind::Int,

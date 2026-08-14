@@ -1,10 +1,16 @@
 //! Partial-input (Sans-I/O) frontier-rule tests.
 //!
 //! Each of the three conservative rules at the scan chokepoint gets a focused case: frontier
-//! holdback (a token touching the buffer end), frontier error (a lexer error touching the buffer
-//! end), and non-final EOF. Plus the two boundary properties: `is_final == true` behaves exactly
-//! like a complete parse, and a *mid-buffer* token or error (strictly before the buffer end) is
-//! yielded / emitted normally even while partial.
+//! holdback (a token whose reported read frontier reaches the buffer end), frontier error (a lexer
+//! error decided the same way), and non-final EOF. Plus the two boundary properties:
+//! `is_final == true` behaves exactly like a complete parse, and a token or error *clear of the
+//! frontier* is yielded / emitted normally even while partial.
+//!
+//! Most fixtures here declare `ReadFrontierClass::SpanEnd`, for which the reported frontier and the
+//! item's span end coincide — so a comment below saying an item "touches the buffer end" is
+//! describing that fixture, not the rule. The rule is the reported frontier, and the cases from
+//! `an_honest_lookahead_lexer_is_withheld_where_the_span_proxy_committed_it` onwards are where the
+//! two are made to diverge.
 //!
 //! The last section covers the **terminal-dominance law**: a limit trip whose tripping token ends
 //! exactly at a non-final buffer end is *not* a frontier item to be withheld — no refill can
@@ -114,6 +120,14 @@ impl core::fmt::Display for PKind {
 impl Token<'_> for PTok {
   type Kind = PKind;
   type Error = ();
+
+  // `[a-z]+` and `[0-9]+` are over disjoint character classes and neither is a prefix of the
+  // other, so the DFA never probes into a longer candidate and backtracks: an item is decided
+  // from its own bytes plus the terminator at its span end, which is exactly `SpanEnd`. That
+  // makes this fixture's holdback behaviour identical to the pre-0.10.0 span rule, which is
+  // what the rule-1/2/3 tests below are pinning — they are about the holdback machinery, not
+  // about which class a vocabulary picks.
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
 
   fn kind(&self) -> PKind {
     match self {
@@ -427,6 +441,10 @@ impl<'a> crate::Lexer<'a> for FrontierLexer<'a> {
       end: self.at,
     };
     Some(lexed)
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &Self::Offset) {
@@ -790,6 +808,12 @@ impl core::fmt::Display for LTok {
 impl Token<'_> for LTok {
   type Kind = PKind;
   type Error = PErr;
+
+  // One pattern, `[a-z]+`, so there is no longer candidate for the DFA to probe into and
+  // backtrack from; the callback only bumps a tally and reads nothing ahead. `SpanEnd` is the
+  // honest answer, and it keeps these terminal-beats-incomplete tests exercising the ranking
+  // rather than the cost of a coarse class.
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
 
   fn kind(&self) -> PKind {
     PKind::Word
@@ -2753,5 +2777,1007 @@ fn commit_probed_rejects_a_rewound_payload() {
     "release: with the tripwire compiled out, the rewound payload settles whatever is at the \
      front NOW — `b` at 2..3, not the probed `a` at 0..1. That is the corruption the debug \
      assert exists to name."
+  );
+}
+
+// ── The read frontier: the predicate, the floor, and an honest lookahead lexer ────────
+//
+// Four properties, each with its own fixture, because each is a different way the holdback
+// can be wrong:
+//
+// 1. the predicate at the boundary and one either side — `frontier >= len` withholds and
+//    `frontier < len` does not, with no off-by-one at either edge;
+// 2. a real lookahead lexer that reports honestly is now withheld where the pre-0.10.0 span
+//    proxy committed it, and is still yielded when its trial died on a byte that had arrived;
+// 3. the same lexer LYING about its frontier is not trusted into safety — it is falsified;
+// 4. the driver's `max(span.end, reported)` floor contains a lexer that reports below its own
+//    span, which is the regression the fix could otherwise have introduced.
+
+/// What [`ProbeLexer`] answers from [`Lexer::read_frontier`].
+///
+/// It travels in the lexer state because [`Lexer::with_state`] is the only channel the input
+/// layer configures a rebuilt lexer through — the same reason [`EofSpan`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+  /// An absolute offset, reported verbatim whatever it is. The boundary sweep's knob.
+  At(usize),
+  /// The degenerate answer: "I cannot bound what I probed".
+  Unbounded,
+  /// **A contract violation.** Reports `ReadTo(0)` for every item, which is behind every
+  /// nonempty span. Only the driver's floor stands between this and a yielded frontier item.
+  Retracts,
+}
+
+impl State for Probe {
+  type Error = ();
+
+  fn check(&self) -> Result<(), Self::Error> {
+    Ok(())
+  }
+}
+
+/// A word/number lexer over the [`PTok`] vocabulary whose only unusual behaviour is the read
+/// frontier it claims ([`Probe`]). It skips ASCII whitespace exactly as the other fixtures do,
+/// so the item shapes are directly comparable.
+struct ProbeLexer<'a> {
+  src: &'a str,
+  at: usize,
+  span: crate::span::SimpleSpan,
+  state: Probe,
+}
+
+impl<'a> crate::Lexer<'a> for ProbeLexer<'a> {
+  type State = Probe;
+  type Source = str;
+  type Token = PTok;
+  type Span = crate::span::SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a Self::Source) -> Self {
+    Self::with_state(src, Probe::At(0))
+  }
+
+  fn with_state(src: &'a Self::Source, state: Self::State) -> Self {
+    Self {
+      src,
+      at: 0,
+      span: crate::span::SimpleSpan { start: 0, end: 0 },
+      state,
+    }
+  }
+
+  fn check(&self) -> Result<(), <Self::Token as Token<'a>>::Error> {
+    Ok(())
+  }
+
+  fn state(&self) -> &Self::State {
+    &self.state
+  }
+
+  fn state_mut(&mut self) -> &mut Self::State {
+    &mut self.state
+  }
+
+  fn into_state(self) -> Self::State {
+    self.state
+  }
+
+  fn source(&self) -> &'a Self::Source {
+    self.src
+  }
+
+  fn span(&self) -> Self::Span {
+    self.span
+  }
+
+  fn slice(&self) -> &'a str {
+    &self.src[self.span.start..self.span.end]
+  }
+
+  fn lex(&mut self) -> Option<Result<Self::Token, <Self::Token as Token<'a>>::Error>> {
+    let bytes = self.src.as_bytes();
+    while self.at < bytes.len() && bytes[self.at].is_ascii_whitespace() {
+      self.at += 1;
+    }
+    if self.at >= bytes.len() {
+      self.span = crate::span::SimpleSpan {
+        start: bytes.len(),
+        end: bytes.len(),
+      };
+      return None;
+    }
+    let start = self.at;
+    let first = bytes[start];
+    self.at += 1;
+    let lexed = if first.is_ascii_digit() {
+      while self.at < bytes.len() && bytes[self.at].is_ascii_digit() {
+        self.at += 1;
+      }
+      Ok(PTok::Num)
+    } else if first.is_ascii_lowercase() {
+      while self.at < bytes.len() && bytes[self.at].is_ascii_lowercase() {
+        self.at += 1;
+      }
+      Ok(PTok::Word)
+    } else {
+      Err(())
+    };
+    self.span = crate::span::SimpleSpan {
+      start,
+      end: self.at,
+    };
+    Some(lexed)
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    match self.state {
+      Probe::At(at) => crate::ReadFrontier::ReadTo(at),
+      Probe::Unbounded => crate::ReadFrontier::Unbounded,
+      Probe::Retracts => crate::ReadFrontier::ReadTo(0),
+    }
+  }
+
+  fn bump(&mut self, n: &Self::Offset) {
+    self.at += *n;
+    self.span = crate::span::SimpleSpan {
+      start: self.at,
+      end: self.at,
+    };
+  }
+}
+
+type ProbeCtx<'a> = (Verbose<PErr>, DefaultCache<'a, ProbeLexer<'a>>);
+
+/// Drives a non-final partial input over `src` with [`ProbeLexer`] in `probe`, draining
+/// `next()` to its first stop and returning the yielded kinds beside the terminating result.
+fn run_probe(src: &str, probe: Probe) -> (std::vec::Vec<PKind>, Result<Option<()>, PErr>) {
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, (), Partial>::with_state_and_context(
+    src,
+    probe,
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, ProbeLexer<'_>>::default(),
+    ),
+  );
+  let mut inp = input.as_ref();
+  let mut kinds = std::vec::Vec::new();
+  let result = loop {
+    match inp.next() {
+      Ok(Some(t)) => kinds.push(t.data().kind()),
+      Ok(None) => break Ok(None),
+      Err(e) => break Err(e),
+    }
+  };
+  (kinds, result)
+}
+
+#[test]
+fn the_predicate_is_at_or_past_the_buffer_end() {
+  // Buffer "ab cd", length 5. The first item is "ab" at 0..2, so its own span end is well
+  // clear of the end and the driver's floor cannot reach the boundary on its behalf: what
+  // decides this item is purely the frontier it reports.
+  //
+  // Below the end: yielded. The second item "cd" (3..5) then reports the same 4, which the
+  // floor raises to its span end 5, so the drain stops there — that is the boundary case
+  // arriving through the floor, and it is why the FIRST item is what this cell reads.
+  assert_eq!(
+    run_probe("ab cd", Probe::At(4)),
+    (std::vec![PKind::Word], Err(PErr::Incomplete(5))),
+    "frontier 4 < len 5: the item is decided from bytes that are all present, so it yields"
+  );
+
+  // Exactly at the end: withheld. `4 < 5` yields and `5 >= 5` does not, so the predicate is
+  // `>=` and not `>` — an EOF probe AT the buffer end is "end of input was observable".
+  assert_eq!(
+    run_probe("ab cd", Probe::At(5)),
+    (std::vec![], Err(PErr::Incomplete(5))),
+    "frontier 5 >= len 5: probing at the buffer end means end of input was observable"
+  );
+
+  // Past the end: withheld, and the Incomplete still carries the BUFFER end rather than the
+  // over-reported frontier. A refill driver must never be handed an offset outside its buffer.
+  assert_eq!(
+    run_probe("ab cd", Probe::At(6)),
+    (std::vec![], Err(PErr::Incomplete(5))),
+    "frontier 6 > len 5: withheld, and Incomplete reports the buffer end, not the report"
+  );
+}
+
+#[test]
+fn unbounded_reporter_withholds_every_item_until_sealed() {
+  // The degenerate answer, and the cost §7 of the design names: nothing yields at all while
+  // the stream is open, so the caller buffers to the seal. Sound, and expensive.
+  assert_eq!(
+    run_probe("ab cd", Probe::Unbounded),
+    (std::vec![], Err(PErr::Incomplete(5))),
+    "Unbounded is read as `end of input was observable`, so every item is withheld"
+  );
+
+  // Sealed, the frontier rules are inert and `read_frontier` is never even consulted — the
+  // call sits after the `is_final()` short circuit. Same lexer, whole stream.
+  let mut input = Input::<ProbeLexer<'_>, ProbeCtx<'_>, (), Partial>::with_state_and_context(
+    "ab cd",
+    Probe::Unbounded,
+    crate::input::InputContext::new(
+      Verbose::<PErr>::new(),
+      DefaultCache::<'_, ProbeLexer<'_>>::default(),
+    ),
+  );
+  input.seal();
+  let mut inp = input.as_ref();
+  let mut kinds = std::vec::Vec::new();
+  while let Ok(Some(t)) = inp.next() {
+    kinds.push(t.data().kind());
+  }
+  assert_eq!(
+    kinds,
+    std::vec![PKind::Word, PKind::Word],
+    "a sealed input ignores the frontier entirely, so even Unbounded yields everything"
+  );
+}
+
+#[test]
+fn the_driver_floors_a_frontier_that_retracts_behind_the_span() {
+  // The regression the fix could have introduced. `ReadTo(0)` is a contract violation — the
+  // frontier is supposed to be at least the item's own span end — and taken at face value it
+  // would YIELD an item the pre-0.10.0 span proxy withheld. `max(span.end, reported)` is what
+  // makes that impossible, and it lives in the driver precisely so no implementor has to be
+  // trusted for it.
+  //
+  // Buffer "ab", length 2. The single item spans 0..2, and 0 < 2, so an unfloored driver
+  // yields it.
+  assert_eq!(
+    run_probe("ab", Probe::Retracts),
+    (std::vec![], Err(PErr::Incomplete(2))),
+    "a lexer reporting ReadTo(0) cannot un-withhold a frontier item: the driver floors at \
+     the item's own span end"
+  );
+
+  // The control that keeps the cell above honest — the same violating report, on a buffer
+  // where the item's span end is NOT at the buffer end. The floor raises 0 to 2, and 2 < 5,
+  // so "ab" yields: the withholding above came from the floor, not from a driver that
+  // withholds unconditionally.
+  assert_eq!(
+    run_probe("ab cd", Probe::Retracts),
+    (std::vec![PKind::Word], Err(PErr::Incomplete(5))),
+    "the floor raises the report to the span end and no further: a mid-buffer item still yields"
+  );
+}
+
+// ── An honest lookahead lexer, and a lying one ────────────────────────────────────────
+
+/// The vocabulary of the design's motivating example: `5m5s` is one `Duration`, and anything
+/// else beginning `5m5` is a `Number` followed by the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DKind {
+  Number,
+  Duration,
+  Other,
+}
+
+impl core::fmt::Display for DKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      DKind::Number => "number",
+      DKind::Duration => "duration",
+      DKind::Other => "other",
+    })
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DTok(DKind);
+
+impl Token<'_> for DTok {
+  type Kind = DKind;
+  type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
+  fn kind(&self) -> DKind {
+    self.0
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// An ordered-trial lexer, and therefore a real lookahead lexer: it attempts `\d+ m \d+ s` and,
+/// when the trial fails, backtracks and emits just the leading digits. The trial necessarily
+/// reads past the span the failure path goes on to emit, which is the whole mechanism #282
+/// describes.
+///
+/// `LIES` picks what it *reports*. `false` is the honest `ReadTo(probed)`; `true` claims
+/// [`ReadFrontier::SpanEnd`](crate::ReadFrontier::SpanEnd) — the lookahead lexer whose author
+/// has not noticed the lookahead, which the crate must not be made safe by trusting. It is a
+/// const parameter rather than lexer state because the conformance kit builds its lexers with
+/// `L::new` and has no channel to pass one in.
+///
+/// `probed` is the maximum offset the trial consulted, **inclusive**, with a byte the trial
+/// wanted and did not find counting at the offset it was wanted. It does not live in
+/// [`State`](crate::State): it is set by the `lex` that produced the item and read by the
+/// `read_frontier` that answers about it, and nothing has to survive the input layer rebuilding
+/// the lexer.
+struct DurationLexer<'a, const LIES: bool> {
+  src: &'a str,
+  at: usize,
+  span: crate::span::SimpleSpan,
+  probed: usize,
+}
+
+impl<const LIES: bool> DurationLexer<'_, LIES> {
+  /// Runs the digits-`m`-digits-`s` trial from `start`, returning its end offset on success.
+  /// Records the furthest offset consulted into `self.probed` either way — including the
+  /// offset a wanted byte was absent from, which is what makes an end-of-input answer count.
+  fn try_duration(&mut self, start: usize) -> Option<usize> {
+    let bytes = self.src.as_bytes();
+    let mut i = start;
+    // Every read records the offset it read AT, so an offset that turned out to be past the
+    // end still raises the frontier to itself — that is the probe-inclusive convention.
+    macro_rules! peek {
+      ($i:expr) => {{
+        let idx: usize = $i;
+        self.probed = self.probed.max(idx);
+        bytes.get(idx).copied()
+      }};
+    }
+    while matches!(peek!(i), Some(b) if b.is_ascii_digit()) {
+      i += 1;
+    }
+    if i == start {
+      return None;
+    }
+    if peek!(i) != Some(b'm') {
+      return None;
+    }
+    i += 1;
+    let digits = i;
+    while matches!(peek!(i), Some(b) if b.is_ascii_digit()) {
+      i += 1;
+    }
+    if i == digits {
+      return None;
+    }
+    if peek!(i) != Some(b's') {
+      return None;
+    }
+    Some(i + 1)
+  }
+}
+
+impl<'a, const LIES: bool> crate::Lexer<'a> for DurationLexer<'a, LIES> {
+  type State = ();
+  type Source = str;
+  type Token = DTok;
+  type Span = crate::span::SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a Self::Source) -> Self {
+    Self {
+      src,
+      at: 0,
+      span: crate::span::SimpleSpan { start: 0, end: 0 },
+      probed: 0,
+    }
+  }
+
+  fn with_state(src: &'a Self::Source, _: Self::State) -> Self {
+    Self::new(src)
+  }
+
+  fn check(&self) -> Result<(), ()> {
+    Ok(())
+  }
+
+  fn state(&self) -> &Self::State {
+    &()
+  }
+
+  fn state_mut(&mut self) -> &mut Self::State {
+    unreachable!("the duration fixture never mutates a unit state")
+  }
+
+  fn into_state(self) -> Self::State {}
+
+  fn source(&self) -> &'a Self::Source {
+    self.src
+  }
+
+  fn span(&self) -> Self::Span {
+    self.span
+  }
+
+  fn slice(&self) -> &'a str {
+    &self.src[self.span.start..self.span.end]
+  }
+
+  fn lex(&mut self) -> Option<Result<DTok, ()>> {
+    let bytes = self.src.as_bytes();
+    while self.at < bytes.len() && bytes[self.at].is_ascii_whitespace() {
+      self.at += 1;
+    }
+    if self.at >= bytes.len() {
+      self.span = crate::span::SimpleSpan {
+        start: bytes.len(),
+        end: bytes.len(),
+      };
+      return None;
+    }
+    let start = self.at;
+    // Every item's frontier starts at its own first byte and only grows.
+    self.probed = start;
+    let (end, kind) = if bytes[start].is_ascii_digit() {
+      match self.try_duration(start) {
+        // The trial matched: the span IS what was read, so there is no lookahead to report.
+        Some(end) => (end, DKind::Duration),
+        // The trial failed. Backtrack to the leading digits — and `self.probed` still holds
+        // how far the failed trial looked, which is exactly what must be reported.
+        None => {
+          let mut i = start;
+          while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+          }
+          (i, DKind::Number)
+        }
+      }
+    } else {
+      let mut i = start + 1;
+      while i < bytes.len() && !bytes[i].is_ascii_whitespace() && !bytes[i].is_ascii_digit() {
+        i += 1;
+      }
+      self.probed = self.probed.max(i);
+      (i, DKind::Other)
+    };
+    self.at = end;
+    self.span = crate::span::SimpleSpan { start, end };
+    Some(Ok(DTok(kind)))
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    if LIES {
+      crate::ReadFrontier::SpanEnd
+    } else {
+      crate::ReadFrontier::ReadTo(self.probed)
+    }
+  }
+
+  fn bump(&mut self, n: &Self::Offset) {
+    self.at += *n;
+    self.span = crate::span::SimpleSpan {
+      start: self.at,
+      end: self.at,
+    };
+    self.probed = self.at;
+  }
+}
+
+// Named only for the conformance cell below, which is what constructs a `Harness` over each —
+// so the aliases carry its feature gate rather than standing unused under a feature point that
+// has the partial-input machinery and not the kit.
+/// The honest reporter — `ReadTo(probed)`.
+#[cfg(feature = "conformance")]
+type HonestDuration<'a> = DurationLexer<'a, false>;
+/// The reporter that claims `SpanEnd` while peeking.
+#[cfg(feature = "conformance")]
+type LyingDuration<'a> = DurationLexer<'a, true>;
+
+type DurCtx<'a, const LIES: bool> = (Verbose<PErr>, DefaultCache<'a, DurationLexer<'a, LIES>>);
+
+/// Drains a [`DurationLexer`] over `src` at `is_final`.
+fn run_duration<const LIES: bool>(
+  src: &str,
+  is_final: bool,
+) -> (std::vec::Vec<DKind>, Result<Option<()>, PErr>) {
+  let mut input =
+    Input::<DurationLexer<'_, LIES>, DurCtx<'_, LIES>, (), Partial>::with_state_and_context(
+      src,
+      (),
+      crate::input::InputContext::new(
+        Verbose::<PErr>::new(),
+        DefaultCache::<'_, DurationLexer<'_, LIES>>::default(),
+      ),
+    );
+  if is_final {
+    input.seal();
+  }
+  let mut inp = input.as_ref();
+  let mut kinds = std::vec::Vec::new();
+  let result = loop {
+    match inp.next() {
+      Ok(Some(t)) => kinds.push(t.data().kind()),
+      Ok(None) => break Ok(None),
+      Err(e) => break Err(e),
+    }
+  };
+  (kinds, result)
+}
+
+#[test]
+fn an_honest_lookahead_lexer_is_withheld_where_the_span_proxy_committed_it() {
+  // The design's table, driven. On the non-final prefix "5m5" the duration trial reads digits
+  // at 0, `m` at 1, digits at 2, and then wants `s` at offset 3 — which is the end of input.
+  // The frontier is therefore 3, the item emitted is Number("5") spanning 0..1, and
+  // `3 >= 3` withholds it.
+  //
+  // The pre-0.10.0 proxy read the SPAN: end 1 < 3, so it committed `Number`. Append `s` and
+  // the same bytes are one `Duration("5m5s")` — the chunked-equivalence break, in one line.
+  assert_eq!(
+    run_duration::<false>("5m5", false),
+    (std::vec![], Err(PErr::Incomplete(3))),
+    "an item whose decision consulted the buffer end is withheld, even though its own span \
+     ends at 1"
+  );
+
+  // And the append proves the withholding was right rather than merely conservative: the same
+  // prefix, one byte longer, is a different token.
+  assert_eq!(
+    run_duration::<false>("5m5s", true),
+    (std::vec![DKind::Duration], Ok(None)),
+    "with the byte present the trial succeeds and the item is a Duration, not a Number"
+  );
+
+  // The other half of the table, and the reason the predicate is not just `withhold
+  // everything`: on "5mX" the trial dies on a REAL byte at offset 2. The frontier is 2 < 3, so
+  // nothing about this decision can change when more input arrives — `Number` yields.
+  assert_eq!(
+    run_duration::<false>("5mX", false).0,
+    std::vec![DKind::Number],
+    "a trial killed by a byte that has ARRIVED is append-stable, so its item still yields"
+  );
+}
+
+#[test]
+fn a_lexer_that_claims_span_end_while_peeking_is_not_trusted_into_safety() {
+  // The same lexer, same input, lying: it peeked to offset 3 and reports `SpanEnd`. The driver
+  // believes it — the frontier is a contract, not a checked fact — and yields the Number.
+  //
+  // That is deliberate, and it is the shape of every clause in the Lexer contract: the crate
+  // does not police it at the scan chokepoint, it FALSIFIES it in the conformance kit. The
+  // `run_partial` leg below is what catches the claim; this assertion pins that a false claim
+  // really does change the committed stream, so that leg is not vacuous.
+  assert_eq!(
+    run_duration::<true>("5m5", false).0,
+    std::vec![DKind::Number, DKind::Other],
+    "a false SpanEnd claim commits the unstable Number — and then the `m` behind it, which \
+     the complete parse does not contain at all. That is why the conformance kit, and not \
+     the scan chokepoint, must be the thing that catches the claim"
+  );
+}
+
+/// The other half of the cell above: the conformance kit is what **falsifies** the claim the
+/// scan chokepoint believes.
+///
+/// Gated on the `conformance` feature, which is what ships `Harness`. The crate compiles under
+/// feature points that have the partial-input machinery and not the kit — `--no-default-features
+/// --features std,logos,combinators --tests` is one — and a test naming `crate::conformance`
+/// unconditionally does not build there.
+#[cfg(feature = "conformance")]
+#[test]
+fn run_partial_falsifies_the_span_end_claim_and_passes_the_honest_twin() {
+  // It compares the committed prefix against the complete parse of "5m5s", where the bytes are
+  // one Duration, and the divergence is exactly the Number the claim let through.
+  let caught = std::panic::catch_unwind(|| {
+    crate::conformance::Harness::<LyingDuration<'_>>::new("5m5s").run_partial();
+  });
+  let payload =
+    caught.expect_err("a lexer that claims SpanEnd while peeking must fail run_partial");
+  let text = payload
+    .downcast_ref::<std::string::String>()
+    .cloned()
+    .unwrap_or_default();
+  assert!(
+    text.contains("partial-equivalence"),
+    "the failure must come from the chunked-equivalence check, got: {text}"
+  );
+
+  // And the honest twin passes the same check over the same source: what `run_partial` rejects
+  // is the CLAIM, not the lookahead. A lookahead lexer that reports honestly is conforming.
+  crate::conformance::Harness::<HonestDuration<'_>>::new("5m5s").run_partial();
+}
+
+// ── The migration witness: what `Unbounded` costs a vocabulary that could claim SpanEnd ──
+//
+// `Token::READ_FRONTIER_CLASS` answers for a logos-backed vocabulary, and the class it
+// answers with decides whether a partial parse makes progress at all. This section is the
+// witness for the migration: the same vocabulary, the same two-byte buffer, the same
+// budget — and three outcomes, selected by nothing but the class.
+//
+// The fixture is deliberately the *easiest possible* vocabulary to classify: two fixed
+// one-byte tokens over disjoint bytes. There is no prefix relation for the DFA to probe
+// into, no callback, no lookahead of any kind. `SpanEnd` is not merely defensible here, it
+// is the only honest answer — which is what makes the cost measured below a property of the
+// *declaration* and not of the grammar.
+//
+// The const has no default any more, so `MTok`'s `Unbounded` is written rather than
+// inherited. Before that change these same three cells passed with the line absent, which is
+// what the defect was: every consumer's existing vocabulary was `MTok`.
+
+#[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+#[logos(crate = crate::logos)]
+enum MTok {
+  #[token("a")]
+  A,
+  #[token("b")]
+  B,
+}
+
+impl core::fmt::Display for MTok {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      MTok::A => "a",
+      MTok::B => "b",
+    })
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MKind {
+  A,
+  B,
+}
+
+impl core::fmt::Display for MKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      MKind::A => "a",
+      MKind::B => "b",
+    })
+  }
+}
+
+impl Token<'_> for MTok {
+  type Kind = MKind;
+  type Error = ();
+
+  // What a vocabulary used to get by saying nothing. Every assertion below is about the cost
+  // of this line reading `Unbounded` where `SpanEnd` is the truth.
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
+  fn kind(&self) -> MKind {
+    match self {
+      MTok::A => MKind::A,
+      MTok::B => MKind::B,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// The same vocabulary with the honest class **written down** — the migration's other side.
+#[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+#[logos(crate = crate::logos)]
+enum STok {
+  #[token("a")]
+  A,
+  #[token("b")]
+  B,
+}
+
+impl core::fmt::Display for STok {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      STok::A => "a",
+      STok::B => "b",
+    })
+  }
+}
+
+impl Token<'_> for STok {
+  type Kind = MKind;
+  type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
+
+  fn kind(&self) -> MKind {
+    match self {
+      STok::A => MKind::A,
+      STok::B => MKind::B,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// A consumer error that answers both channels the session's contract reads: the
+/// [`Incomplete`] the frontier surfaces, and the terminal
+/// [`SessionRefusal`](crate::input::SessionRefusal) the budget gate converts through.
+#[derive(Debug, Clone, PartialEq)]
+enum MErr {
+  Lex,
+  Incomplete(usize),
+  Refused(crate::input::SessionRefusal),
+}
+
+impl From<()> for MErr {
+  fn from(_: ()) -> Self {
+    MErr::Lex
+  }
+}
+
+impl From<Incomplete<usize>> for MErr {
+  fn from(inc: Incomplete<usize>) -> Self {
+    MErr::Incomplete(inc.into_offset())
+  }
+}
+
+impl From<crate::input::SessionRefusal> for MErr {
+  fn from(refusal: crate::input::SessionRefusal) -> Self {
+    MErr::Refused(refusal)
+  }
+}
+
+impl MaybeIncomplete for MErr {
+  fn is_incomplete(&self) -> bool {
+    matches!(self, MErr::Incomplete(_))
+  }
+}
+
+impl crate::error::MaybeTerminal for MErr {
+  fn is_terminal(&self) -> bool {
+    matches!(self, MErr::Refused(_))
+  }
+}
+
+impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for MErr {
+  fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self {
+    MErr::Lex
+  }
+}
+
+type MLex<'a> = LogosLexer<'a, MTok>;
+type MCtx<'a> = (Fatal<MErr>, DefaultCache<'a, MLex<'a>>);
+type SLex<'a> = LogosLexer<'a, STok>;
+type SCtx<'a> = (Fatal<MErr>, DefaultCache<'a, SLex<'a>>);
+
+fn mctx<'a>() -> MCtx<'a> {
+  (Fatal::of(), DefaultCache::<'a, MLex<'a>>::default())
+}
+
+fn sctx<'a>() -> SCtx<'a> {
+  (Fatal::of(), DefaultCache::<'a, SLex<'a>>::default())
+}
+
+/// Takes exactly ONE token — the shape a latency-sensitive streaming caller has, and the only
+/// shape in which the class difference is observable at all. A drain-to-end parser asks for the
+/// item at the buffer end too, which every class withholds.
+fn take_one_m<'inp>(
+  inp: &mut InputRef<'inp, '_, MLex<'inp>, MCtx<'inp>, (), Partial>,
+) -> Result<MKind, MErr> {
+  match inp.next()? {
+    Some(t) => Ok(t.data().kind()),
+    None => Err(MErr::Lex),
+  }
+}
+
+fn take_one_s<'inp>(
+  inp: &mut InputRef<'inp, '_, SLex<'inp>, SCtx<'inp>, (), Partial>,
+) -> Result<MKind, MErr> {
+  match inp.next()? {
+    Some(t) => Ok(t.data().kind()),
+    None => Err(MErr::Lex),
+  }
+}
+
+/// The control: with the honest class chosen, the one-byte token at `0..1` in a two-byte
+/// buffer is yielded on the FIRST attempt, exactly as the pre-0.10.0 span predicate yielded it.
+///
+/// `1 < 2`, so nothing about `A` can change when more bytes arrive. One attempt, two lexable
+/// bytes, budget intact.
+#[test]
+fn a_declared_span_end_vocabulary_yields_the_first_token_on_the_first_attempt() {
+  use crate::input::{Budget, PartialSession, RedriveFromBase};
+
+  let mut session = PartialSession::new((), Budget::Bytes(2), RedriveFromBase);
+  assert_eq!(
+    session.parse(sctx(), "ab", false, take_one_s),
+    Ok(MKind::A),
+    "span end 1 is strictly behind the buffer end 2, so the item is append-stable and yields"
+  );
+  assert_eq!(session.spent(), 2, "one attempt over a two-byte buffer");
+}
+
+/// The witness. The identical vocabulary answering `Unbounded` — which is what every
+/// vocabulary answered before the const lost its default — is seal-only, and a budget
+/// calibrated for the `SpanEnd` behaviour turns that into a **terminal refusal**: the caller
+/// never receives the token, and no amount of further input can change that.
+///
+/// Read the two spends: the first attempt is admitted at `0 + 2 = 2`, which is exactly the cap,
+/// and it comes back `Incomplete`. Sealing does not change the buffer, so the retry projects
+/// `2 + 2 = 4` and the gate refuses **before finality is ever applied**. The seal that would
+/// have released the item is never reached.
+#[test]
+fn an_unbounded_vocabulary_is_seal_only_and_a_calibrated_budget_refuses_the_seal() {
+  use crate::input::{Budget, PartialSession, RedriveFromBase, SessionRefusal};
+
+  let mut session = PartialSession::new((), Budget::Bytes(2), RedriveFromBase);
+
+  assert_eq!(
+    session.parse(mctx(), "ab", false, take_one_m),
+    Err(MErr::Incomplete(2)),
+    "a vocabulary answering Unbounded withholds even the item at 0..1"
+  );
+  assert_eq!(session.spent(), 2, "and the attempt still spent the buffer");
+
+  assert_eq!(
+    session.parse(mctx(), "ab", true, take_one_m),
+    Err(MErr::Refused(SessionRefusal::BudgetExhausted {
+      spent: 4,
+      budget: 2
+    })),
+    "the seal projects 4 lexable bytes against a cap of 2 and is refused BEFORE any work: \
+     finality is never applied, so the item is terminally unreachable"
+  );
+  assert!(
+    <MErr as crate::error::MaybeTerminal>::is_terminal(&MErr::Refused(
+      SessionRefusal::BudgetExhausted {
+        spent: 4,
+        budget: 2
+      }
+    )),
+    "and the refusal is TERMINAL — not 'reduced precision', not 'buffer until final'"
+  );
+}
+
+/// The unbounded-budget half of the same migration: no refusal, but the whole stream is
+/// retained and re-driven, and nothing is yielded until the seal.
+#[test]
+fn an_unbounded_vocabulary_under_an_unbounded_budget_retains_until_the_seal() {
+  use crate::input::{Budget, PartialSession, RedriveFromBase};
+
+  let mut session = PartialSession::new((), Budget::Unbounded, RedriveFromBase);
+
+  assert_eq!(
+    session.parse(mctx(), "ab", false, take_one_m),
+    Err(MErr::Incomplete(2)),
+    "still withheld while the stream is open"
+  );
+  assert_eq!(
+    session.parse(mctx(), "ab", true, take_one_m),
+    Ok(MKind::A),
+    "only the seal releases it"
+  );
+  assert_eq!(
+    session.spent(),
+    4,
+    "and the two-byte prefix was lexed TWICE to get one one-byte token"
+  );
+}
+
+// ── The inclusive rule, executed: `end + n` withholds an item `end + n - 1` yields ──
+//
+// A span is half-open, so `span.end` is the first offset the match does NOT cover. A callback
+// that reaches for `n` bytes from there touches `span.end ..= span.end + n - 1`, and the
+// frontier is the highest offset touched. Reporting `span.end + n` names an offset the scan
+// never reached — and when the byte the callback read was the buffer's last, that unnamed
+// offset is exactly end of input's.
+//
+// The two cells below are the same lexer over the same bytes, differing only in which formula
+// its recorder applies, and the driver's `frontier >= len` predicate turns the one-offset
+// difference into yielded-versus-withheld.
+
+/// A recorder whose callback reaches for exactly one byte past its match, and reports either
+/// the inclusive offset it touched or the one the old prose asked for.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct PeekRec {
+  /// `true` reports `span.end + n`, which the crate's own guidance used to say.
+  off_by_one: bool,
+  probe: Option<(usize, usize)>,
+}
+
+impl State for PeekRec {
+  type Error = ();
+
+  fn check(&self) -> Result<(), ()> {
+    Ok(())
+  }
+
+  fn take_probe(&mut self) -> Option<crate::Probe> {
+    self
+      .probe
+      .take()
+      .map(|(from, to)| crate::Probe::new(from, to))
+  }
+}
+
+/// The callback reaches for one byte at `span.end` — a real byte whenever one is there, and the
+/// end-of-input answer otherwise. Either way it has touched offset `span.end` and nothing above
+/// it, so the inclusive record is `span.end + 1 - 1`.
+fn record_peek(lex: &mut crate::logos::Lexer<'_, PeekTok>) {
+  const PEEKED: usize = 1;
+
+  let span = lex.span();
+  // The read itself. Its answer does not change the frontier: an attempted-and-absent byte
+  // counts at the offset it was wanted, exactly as a present one does.
+  let _ = lex.remainder().as_bytes().first();
+  let to = if lex.extras.off_by_one {
+    span.end + PEEKED
+  } else {
+    span.end + PEEKED - 1
+  };
+  lex.extras.probe = Some((span.start, to));
+}
+
+#[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+#[logos(crate = crate::logos, extras = PeekRec)]
+enum PeekTok {
+  #[token("a", record_peek)]
+  A,
+  #[token("b")]
+  B,
+}
+
+impl core::fmt::Display for PeekTok {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      PeekTok::A => "a",
+      PeekTok::B => "b",
+    })
+  }
+}
+
+impl Token<'_> for PeekTok {
+  type Kind = MKind;
+  type Error = ();
+
+  // Irrelevant here by construction: `A`'s own scan records a value, and a recorded value
+  // answers outright. The class is what the un-recording `B` falls back to.
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
+  fn kind(&self) -> MKind {
+    match self {
+      PeekTok::A => MKind::A,
+      PeekTok::B => MKind::B,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+type PeekLex<'a> = LogosLexer<'a, PeekTok>;
+type PeekCtx<'a> = (Fatal<MErr>, DefaultCache<'a, PeekLex<'a>>);
+
+/// Drives "ab" non-final and asks for the first item only. `A` is at `0..1`; its callback reads
+/// the byte at offset 1, which is the buffer's **last real byte**.
+fn first_item_of_ab(off_by_one: bool) -> Result<MKind, MErr> {
+  let mut input = Input::<PeekLex<'_>, PeekCtx<'_>, (), Partial>::with_state_and_context(
+    "ab",
+    PeekRec {
+      off_by_one,
+      probe: None,
+    },
+    crate::input::InputContext::new(
+      Fatal::<MErr>::of(),
+      DefaultCache::<'_, PeekLex<'_>>::default(),
+    ),
+  );
+  let mut inp = input.as_ref();
+  match inp.next() {
+    Ok(Some(t)) => Ok(t.data().kind()),
+    Ok(None) => Err(MErr::Lex),
+    Err(e) => Err(e),
+  }
+}
+
+#[test]
+fn the_inclusive_offset_yields_the_item_the_off_by_one_withholds() {
+  assert_eq!(
+    first_item_of_ab(false),
+    Ok(MKind::A),
+    "`span.end + n - 1` is 1 — the offset the callback actually read — and 1 < 2, so `A` is \
+     append-stable and yields"
+  );
+
+  assert_eq!(
+    first_item_of_ab(true),
+    Err(MErr::Incomplete(2)),
+    "`span.end + n` is 2, an offset the scan never touched and the one end of input sits at, \
+     so `frontier >= len` withholds an item nothing about the future can change"
   );
 }

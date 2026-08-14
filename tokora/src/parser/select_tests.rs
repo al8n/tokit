@@ -197,6 +197,8 @@ impl Token<'_> for SelTok {
   type Kind = SelKind;
   type Error = SelErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> SelKind {
     match self {
       SelTok::Int(_) => SelKind::Int,
@@ -390,12 +392,21 @@ fn try_dispatch_take_declines_genuine_eof_but_errs_on_a_terminal_stop() {
 // Both cells run with the chunk exhausted and `is_final = false`. Sealing the input
 // (`is_final = true`) turns the first into `Err(Eot)` and the second into
 // `Ok(Decline)` — which is why a fixture that only ever seals cannot see the widening.
+//
+// The chunk is deliberately trivia-only. These cells pin **rule 3**, non-final EOF, and
+// under 0.10.0 the way to reach it with this fixture is to produce no item at all: `SelTok`
+// has `[0-9]+` beside `[0-9]+\.[0-9]+`, so the logos DFA probes into the float arm and
+// backtracks, the vocabulary cannot honestly claim
+// `ReadFrontierClass::SpanEnd`, so it declares `Unbounded` and the holdback (rule 1)
+// withholds every item while the stream is open. Consuming a token first would therefore
+// stop at rule 1 and quietly relocate what these two cells prove. See
+// `partial_tests::unbounded_reporter_withholds_every_item_until_sealed` for the cell that
+// owns that behaviour.
 
 #[test]
 fn dispatch_take_surfaces_incomplete_at_an_open_partial_frontier() {
-  let mut input = sel_partial("1 ");
+  let mut input = sel_partial(" ");
   let mut inp = input.as_ref();
-  assert!(inp.next().unwrap().is_some());
   let out: Result<usize, SelErr> = crate::select!(&mut inp, {
     SelKind::Int => (span, SelTok::Int(_)) => crate::span::Span::start(&span),
   });
@@ -408,9 +419,8 @@ fn dispatch_take_surfaces_incomplete_at_an_open_partial_frontier() {
 
 #[test]
 fn try_dispatch_take_surfaces_incomplete_at_an_open_partial_frontier() {
-  let mut input = sel_partial("1 ");
+  let mut input = sel_partial(" ");
   let mut inp = input.as_ref();
-  assert!(inp.next().unwrap().is_some());
   let out: Result<ParseAttempt<usize>, SelErr> = crate::try_select!(&mut inp, {
     SelKind::Int => (span, SelTok::Int(_)) => crate::span::Span::start(&span),
   });
@@ -420,6 +430,35 @@ fn try_dispatch_take_surfaces_incomplete_at_an_open_partial_frontier() {
     "the tentative twin re-raises the frontier instead of declining it — a decline would \
      hand a sibling alternative an input that has not ended"
   );
+}
+
+/// The sealed counterpart of the two cells above, which the section comment asserts in prose:
+/// with `is_final = true` the frontier rules are inert and the same exhausted chunk is a genuine
+/// end of token stream — `Err(Eot)` for the committed form, `Ok(Decline)` for the tentative one.
+#[test]
+fn a_sealed_chunk_is_eot_and_decline_not_incomplete() {
+  {
+    let mut input = sel_partial(" ");
+    input.seal();
+    let mut inp = input.as_ref();
+    let out: Result<usize, SelErr> = crate::select!(&mut inp, {
+      SelKind::Int => (span, SelTok::Int(_)) => crate::span::Span::start(&span),
+    });
+    assert_eq!(out, Err(SelErr::Eot), "a sealed exhausted chunk is genuine");
+  }
+  {
+    let mut input = sel_partial(" ");
+    input.seal();
+    let mut inp = input.as_ref();
+    let out: Result<ParseAttempt<usize>, SelErr> = crate::try_select!(&mut inp, {
+      SelKind::Int => (span, SelTok::Int(_)) => crate::span::Span::start(&span),
+    });
+    assert_eq!(
+      out,
+      Ok(ParseAttempt::Decline),
+      "the tentative twin declines a genuine end of token stream"
+    );
+  }
 }
 
 // ── The macro surface ─────────────────────────────────────────────────────────

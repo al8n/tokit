@@ -94,6 +94,8 @@ impl Token<'_> for BenchTok {
   type Kind = BenchKind;
   type Error = ();
 
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> BenchKind {
     match self {
       BenchTok::Ws => BenchKind::Ws,
@@ -456,6 +458,8 @@ macro_rules! disp_token_impl {
     impl Token<'_> for $tok {
       type Kind = DispKind;
       type Error = ();
+
+      const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 
       fn kind(&self) -> DispKind {
         match self {

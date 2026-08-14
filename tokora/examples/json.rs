@@ -376,6 +376,8 @@ impl<'inp> TokenT<'inp> for Token<'inp> {
 
   type Error = JsonLexerError;
 
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+
   #[inline]
   fn kind(&self) -> Self::Kind {
     TokenKind::from(self)

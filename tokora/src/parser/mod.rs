@@ -694,7 +694,7 @@ where
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] struct Kind;
 /// # impl fmt::Display for Kind { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("digit") } }
 /// # #[derive(Debug, Clone, Copy, PartialEq)] struct Digit(u32);
-/// # impl Token<'_> for Digit { type Kind = Kind; type Error = Infallible; fn kind(&self) -> Kind { Kind } fn is_trivia(&self) -> bool { false } }
+/// # impl Token<'_> for Digit { type Kind = Kind; type Error = Infallible; const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded; fn kind(&self) -> Kind { Kind } fn is_trivia(&self) -> bool { false } }
 /// # /// The byte view a `Mini` lexer needs of whatever it is reading.
 /// # trait Bytes: Source<usize> { fn byte(&self, at: usize) -> Option<u8>; }
 /// # impl Bytes for str { fn byte(&self, at: usize) -> Option<u8> { self.as_bytes().get(at).copied() } }
@@ -719,6 +719,7 @@ where
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(Digit(u32::from(byte - b'0'))))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// // A production the way a real grammar writes one: generic over the source type *and* over
@@ -768,7 +769,7 @@ where
 /// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] struct Kind;
 /// # impl fmt::Display for Kind { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("digit") } }
 /// # #[derive(Debug, Clone, Copy, PartialEq)] struct Digit(u32);
-/// # impl Token<'_> for Digit { type Kind = Kind; type Error = Infallible; fn kind(&self) -> Kind { Kind } fn is_trivia(&self) -> bool { false } }
+/// # impl Token<'_> for Digit { type Kind = Kind; type Error = Infallible; const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded; fn kind(&self) -> Kind { Kind } fn is_trivia(&self) -> bool { false } }
 /// # trait Bytes: Source<usize> { fn byte(&self, at: usize) -> Option<u8>; }
 /// # impl Bytes for str { fn byte(&self, at: usize) -> Option<u8> { self.as_bytes().get(at).copied() } }
 /// # impl Bytes for [u8] { fn byte(&self, at: usize) -> Option<u8> { self.get(at).copied() } }
@@ -791,6 +792,7 @@ where
 /// #     self.tok = SimpleSpan::new(start, self.pos);
 /// #     Some(Ok(Digit(u32::from(byte - b'0'))))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.pos += n; }
 /// # }
 /// # fn two_digits<'inp, Src, Ctx>(

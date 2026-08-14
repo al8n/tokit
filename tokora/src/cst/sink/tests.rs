@@ -32,6 +32,8 @@ impl Token<'_> for MiniTok {
   type Kind = u8;
   type Error = MiniErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   // honest: byte-per-token, never skips a byte
   const SURFACES_TRIVIA: bool = true;
 
@@ -113,6 +115,10 @@ impl<'inp> Lexer<'inp> for MiniLexer<'inp> {
     } else {
       Some(Ok(MiniTok(byte)))
     }
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &usize) {
@@ -6254,6 +6260,10 @@ impl<'inp> Lexer<'inp> for ByteSrcLexer<'inp> {
     Some(Ok(MiniTok(byte)))
   }
 
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
   fn bump(&mut self, n: &usize) {
     self.pos += *n;
     self.tok_start = self.pos;
@@ -6384,6 +6394,8 @@ impl Token<'_> for OwnedTok {
   type Kind = u8;
   type Error = MiniErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   const SURFACES_TRIVIA: bool = true;
 
   fn kind(&self) -> u8 {
@@ -6454,6 +6466,10 @@ impl<'inp> Lexer<'inp> for OwnedLexer<'inp> {
     Some(Ok(OwnedTok(
       std::string::String::from_utf8_lossy(&[byte]).into_owned(),
     )))
+  }
+
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &usize) {

@@ -77,6 +77,8 @@ impl Token<'_> for NumTok {
   type Kind = NumKind;
   type Error = NumErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> NumKind {
     NumKind::Num
   }

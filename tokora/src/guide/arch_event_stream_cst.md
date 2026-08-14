@@ -513,6 +513,7 @@ as a token, so `SURFACES_TRIVIA` is honestly `true` — and nothing but core tok
 # impl TokenT<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   // The lexer surfaces every byte — the compile-time wall on `Sink::new` requires it.
 #   const SURFACES_TRIVIA: bool = true;
 #   fn kind(&self) -> Kind { match self { Tok::Num => Kind::Num, Tok::Plus => Kind::Plus } }
@@ -539,6 +540,7 @@ as a token, so `SURFACES_TRIVIA` is honestly `true` — and nothing but core tok
 #     self.tok = SimpleSpan::new(start, self.pos);
 #     Some(Ok(if c == b'+' { Tok::Plus } else { Tok::Num }))
 #   }
+#   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 #   fn bump(&mut self, n: &usize) { self.pos += n; }
 # }
 use rowan::Language;

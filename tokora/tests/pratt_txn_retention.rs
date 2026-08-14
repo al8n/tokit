@@ -206,6 +206,8 @@ impl TokenT<'_> for Tok {
   type Kind = Kind;
   type Error = ();
 
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> Kind {
     match self {
       Tok::Num(_) => Kind::Num,
@@ -320,6 +322,10 @@ impl<'a> Lexer<'a> for CountLexer<'a> {
       d if d.is_ascii_digit() => Ok(Tok::Num(i64::from(d - b'0'))),
       _ => Err(()),
     })
+  }
+
+  fn read_frontier(&self) -> tokora::ReadFrontier<usize> {
+    tokora::ReadFrontier::SpanEnd
   }
 
   fn bump(&mut self, n: &usize) {

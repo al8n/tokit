@@ -167,6 +167,7 @@ pub enum SessionRefusal {
 /// # impl Token<'_> for Word {
 /// #   type Kind = WordKind;
 /// #   type Error = Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> WordKind { WordKind }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -193,6 +194,7 @@ pub enum SessionRefusal {
 /// #     self.end = e;
 /// #     Some(Ok(Word))
 /// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
 /// #   fn bump(&mut self, n: &usize) { self.end += *n; self.start = self.end; }
 /// # }
 /// # #[derive(Debug, PartialEq)]

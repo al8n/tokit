@@ -267,7 +267,7 @@ use generic_arraydeque::{
 use mayber::Maybe;
 
 use crate::{
-  Lexer, Span, Window,
+  Lexer, Slice, Source, Span, Window,
   cache::{
     Cache, CachedToken, CachedTokenOf, CachedTokenRefOf, MaybeRefCachedTokenOf, PeekedTokenExt,
   },
@@ -421,6 +421,7 @@ const NO_NOTE: &str = "";
 /// # }
 /// # impl tokora::Token<'_> for MyTok {
 /// #   type Kind = MyKind; type Error = ();
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> MyKind { MyKind }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -447,6 +448,9 @@ where
   /// The suffix every failure message on this pass carries after the cache's name, so a failure
   /// says which constructor built the cache it is talking about. Empty on the `C::new()` pass.
   via: &'static str,
+  /// Raw lex attempts per source unit the corpus builder may make. See
+  /// [`lex_attempts_multiple`](CacheHarness::lex_attempts_multiple).
+  lex_multiple: usize,
   _cache: PhantomData<fn() -> C>,
   _lang: PhantomData<fn(&Lang)>,
 }
@@ -507,6 +511,7 @@ where
       name: "cache",
       built_by: None,
       via: "",
+      lex_multiple: super::DEFAULT_BUDGET_MULTIPLE,
       _cache: PhantomData,
       _lang: PhantomData,
     }
@@ -517,6 +522,77 @@ where
   #[must_use]
   pub fn named(mut self, name: &'static str) -> Self {
     self.name = name;
+    self
+  }
+
+  /// Raises the corpus builder's anti-hang ceiling to `multiple * source_units + 64` raw lex
+  /// attempts. The default is 8.
+  ///
+  /// # Why this is a knob and not a derivation
+  ///
+  /// The ceiling exists because the corpus builder fills a target count of *tokens* while
+  /// its loop consumes the whole item stream, and an `Err` grows neither: a lexer that only errors
+  /// reaches neither the target nor exhaustion. Something has to stop that, and only an attempt
+  /// count can.
+  ///
+  /// But the default was justified by an invariant this kit does **not** enforce. "Monotone
+  /// progress and nonempty spans bound a conforming lexer at one item per source unit" is not what
+  /// the lexer contract says: starts must be *non-decreasing*, not strictly increasing, and spans
+  /// must be individually nonempty, not disjoint. Overlapping items and repeated starts are legal,
+  /// so a deterministic, finite, terminating lexer may emit many items per source unit — and one
+  /// that emits more than `8 * units + 64` of them before the tokens the kit asked for was refused
+  /// as nonterminating with no way to say otherwise.
+  ///
+  /// That is a false *failure* rather than a false pass — the guard rejects a legitimate lexer, it
+  /// never accepts a spinning one — but a certification that cannot be run is not a safe failure.
+  /// This is the way to say otherwise.
+  ///
+  /// `0` is treated as `1` and anything above `65536` **panics**, matching
+  /// [`Harness::budget_multiple`](super::Harness::budget_multiple) in both directions.
+  ///
+  /// The cap is not tidiness. `usize::MAX` here made the ceiling `usize::MAX` too, and under the
+  /// `attempts > limit` order of the day no counter could reach one past the largest value it can
+  /// hold — so the refusal was unreachable and the knob *disarmed the guard it configures*: the
+  /// endless lexer above ran until the process was killed. The comparison is now `attempts >=
+  /// limit` asked before the increment, which such a ceiling does reach, after `usize::MAX`
+  /// attempts — enforced, and still not a refusal anybody is present for. A ceiling has to be a
+  /// number the count passes while the caller is still waiting.
+  ///
+  /// # Why above the cap is a refusal and not a clamp
+  ///
+  /// The clamp was silent, and it *lowered* the ceiling the caller asked for. Everything the
+  /// paragraphs above say about the default — that a finite, terminating lexer may legitimately
+  /// need more attempts than a per-unit multiple predicts, and that refusing it is a false failure
+  /// with no way to say otherwise — applies again one level up, to the caller who says so and is
+  /// quietly given a smaller number. They then read the kit's `lex-budget` refusal as a verdict on
+  /// their lexer. Above 65536 attempts per source unit this kit cannot tell a dense lexer from one
+  /// that never reaches the target, and the honest answer is to say that at the call site.
+  ///
+  /// Below `1` the adjustment stays silent, because it only widens the ceiling and a wider ceiling
+  /// cannot manufacture a refusal.
+  ///
+  /// It is spelled `lex_attempts_multiple` and not `budget_multiple` because it scales a different
+  /// quantity: the lexer harness's budget bounds the *items a run may produce*, this bounds the
+  /// *attempts the corpus builder may make*.
+  ///
+  /// # Panics
+  ///
+  /// Panics when `multiple` exceeds `65536`, naming this knob and that maximum. The panic comes
+  /// from the builder, before any lexing, so it is never mistakeable for the corpus builder's
+  /// `lex-budget` refusal.
+  #[must_use]
+  pub fn lex_attempts_multiple(mut self, multiple: usize) -> Self {
+    let cap = super::MAX_BUDGET_MULTIPLE;
+    assert!(
+      multiple <= cap,
+      "tokora cache conformance: CacheHarness::lex_attempts_multiple is capped at {cap} attempts \
+       per source unit and was given {multiple}. The request is refused rather than lowered to \
+       {cap}: a silent clamp configures a ceiling you did not ask for, and a lexer that \
+       legitimately needs more attempts than the clamped ceiling allows is then refused as if it \
+       never terminated — a failure that reads as the lexer's and is the kit's. Above {cap} per \
+       unit this kit cannot tell a dense lexer from one that never reaches the target."
+    );
+    self.lex_multiple = multiple.max(1);
     self
   }
 
@@ -562,6 +638,7 @@ where
       name: self.name,
       built_by: None,
       via: "",
+      lex_multiple: self.lex_multiple,
       _cache: PhantomData,
       _lang: PhantomData,
     }
@@ -573,6 +650,7 @@ where
         name: self.name,
         built_by: self.built_by,
         via: " built by with_options",
+        lex_multiple: self.lex_multiple,
         _cache: PhantomData,
         _lang: PhantomData,
       }
@@ -637,10 +715,97 @@ where
 
   /// Lexes up to `want` successful items out of the source, each paired with the state that
   /// produced it — exactly the shape the input layer caches.
+  ///
+  /// # The loop counts **attempts**, and the `want` gate counts pushes
+  ///
+  /// Those are different quantities and the difference is a hang. An `Err` does not grow `out`, so
+  /// `out.len() < want` never becomes false for a lexer that returns errors forever — and such a
+  /// lexer never returns `None` either, so the `break` is unreachable too. The gate is on the
+  /// filtered subset while the loop consumes the whole item stream, which is the same shape as an
+  /// item budget read at the `next()` boundary while `next()` loops over the errors it accepts.
+  ///
+  /// So the attempts carry their own ceiling. Unlike the drive-side tally in the parent module,
+  /// this counter and the `lex()` it counts are in the **same loop body**, so it bounds its loop by
+  /// construction and needs nothing shared: the loops above it are the kit's fixed list of checks.
+  ///
+  /// # The ceiling is configured, because there is no invariant here to derive it from
+  ///
+  /// `lex_multiple * units + BUDGET_FLOOR`, and the multiple is the caller's
+  /// ([`lex_attempts_multiple`](Self::lex_attempts_multiple)) precisely because the number cannot
+  /// be derived. It used to be justified as "monotone progress and nonempty spans bound a
+  /// conforming lexer at one item per source unit"; the contract enforced elsewhere says
+  /// *non-decreasing* starts and *individually* nonempty spans, which permits overlapping and
+  /// repeated-start items, so a finite terminating lexer may legitimately emit many items per unit.
+  /// Nothing in this kit checks even that much — it drives the raw lexer and never runs the
+  /// lexer-contract tier. The default is a nontermination guard with a generous constant, not a
+  /// consequence of anything, and it is overridable for the lexer that legitimately exceeds it.
+  ///
+  /// # The ceiling has to be a number `attempts` can pass
+  ///
+  /// It is computed with checked arithmetic, and the multiple it scales is refused above
+  /// [`MAX_BUDGET_MULTIPLE`](super::MAX_BUDGET_MULTIPLE), because the *configured* ceiling used to
+  /// be able to switch this loop off outright. `lex_attempts_multiple(usize::MAX)` saturated to a
+  /// limit of `usize::MAX`, and under the **`attempts > limit`** order of the day no `usize` could
+  /// satisfy that comparison: the endless-error lexer this guard exists to refuse ran forever,
+  /// with the counter wrapping through zero under a release profile, so the arithmetic did not
+  /// stop it either. A guard whose own knob can switch it off is not a guard, and the failure is
+  /// silent: the run does not report anything, it simply never ends.
+  ///
+  /// The comparison is now `attempts >= limit`, asked **before** the increment, and a `usize` does
+  /// reach `usize::MAX` — so such a ceiling is enforced, after `usize::MAX` attempts, without the
+  /// counter wrapping. That is still not a refusal anybody is present for, which is why the cap
+  /// stays; but the cap is what keeps the guard *useful*, not what keeps it alive. Nothing in this
+  /// loop wraps at any setting the builder accepts, and nothing wraps at the ones it does not.
+  ///
+  /// # Panics
+  ///
+  /// Panics — tagged `lex-budget` — when the ceiling is spent. The alternative is not a shorter
+  /// corpus; it is a kit that never returns.
+  ///
+  /// Panics, separately and tagged `kit-capacity`, when `lex_multiple * units + BUDGET_FLOOR` does
+  /// not fit in a `usize`. With the multiple capped that needs a source of more than
+  /// `usize::MAX / 65536` units, so what it refuses is not a corpus anyone can build. The tag
+  /// differs because the outcome does: no lexing has happened, so nothing has been learned about
+  /// the lexer, and a `lex-budget` tag on a failure of the kit's own arithmetic reads as a verdict
+  /// on the caller's code. The message names the knob to lower rather than reporting a number
+  /// nobody configured.
   fn corpus(&self, want: usize) -> Vec<CachedTokenOf<'inp, L>> {
+    let name = self.label();
+    let units = self.source.slice(..).map(|s| s.len()).unwrap_or(0);
+    let limit = super::representable_budget(self.lex_multiple, units).unwrap_or_else(|| {
+      panic!(
+        "tokora cache conformance [{name} kit-capacity]: INCONCLUSIVE — the corpus builder's \
+         ceiling for a source of {units} units at a multiple of {} does not fit in a usize. This \
+         is a limit of the kit's arithmetic and NOT a verdict on the lexer, which has not been \
+         asked to lex once. Lower the multiple with CacheHarness::lex_attempts_multiple: an \
+         unrepresentable ceiling has to be replaced by some other number, and usize::MAX is one no \
+         run reaches while anybody is waiting for it.",
+        self.lex_multiple
+      )
+    });
     let mut lexer = L::new(self.source);
     let mut out = Vec::new();
+    let mut attempts = 0usize;
     while out.len() < want {
+      // Checked before the increment, the same order both counters in the parent module use.
+      // This one is provably total either way — `representable_budget` returns only values
+      // strictly below `usize::MAX`, so `attempts` tops out at `limit` — but "the ceiling is
+      // compared before the counter moves" is the rule, and a counter that keeps the rule only
+      // because of a bound proved somewhere else is the one that breaks when that bound moves.
+      if attempts >= limit {
+        let cap = super::MAX_BUDGET_MULTIPLE;
+        panic!(
+          "tokora cache conformance [{name} lex-budget]: building the corpus asked the lexer to \
+           lex more than {limit} times over a source of {units} units without collecting {want} \
+           token(s). Every attempt is counted, the errors included — an error does not grow the \
+           corpus, so a lexer that keeps returning one never reaches the target and never \
+           exhausts. If this lexer does terminate and simply emits many items per source unit, \
+           which the contract permits, raise the ceiling with \
+           CacheHarness::lex_attempts_multiple; that multiple is capped at {cap} per source \
+           unit, above which the kit cannot tell a dense lexer from a nonterminating one."
+        );
+      }
+      attempts += 1;
       let Some(res) = lexer.lex() else { break };
       let span = lexer.span();
       let state = lexer.state().clone();
