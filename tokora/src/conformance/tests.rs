@@ -1595,7 +1595,8 @@ fn the_largest_accepted_budget_multiple_still_refuses_an_endless_lexer() {
 static STALL_ATTEMPTS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// The fixture's own alarm, set **above** the kit's aggregate ceiling for [`STALL_SRC`] (45004) and
-/// **below** the cubic total the lexer would otherwise reach (about 140k). The cell therefore
+/// **below** the cubic total the lexer would otherwise reach (179795, measured by lifting the
+/// aggregate ceiling and this alarm together and reading the counter). The cell therefore
 /// distinguishes three outcomes rather than two: the kit's `lex-budget` means the aggregate held,
 /// this message means it did not, and no panic at all means the run walked the whole cube.
 const STALL_TRIP: usize = 60_000;
