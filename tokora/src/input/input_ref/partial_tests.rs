@@ -3370,7 +3370,7 @@ fn run_partial_falsifies_the_span_end_claim_and_passes_the_honest_twin() {
   crate::conformance::Harness::<HonestDuration<'_>>::new("5m5s").run_partial();
 }
 
-// ── The migration witness: what an UNDECLARED vocabulary costs ──────────────────────
+// ── The migration witness: what `Unbounded` costs a vocabulary that could claim SpanEnd ──
 //
 // `Token::READ_FRONTIER_CLASS` answers for a logos-backed vocabulary, and the class it
 // answers with decides whether a partial parse makes progress at all. This section is the
@@ -3380,8 +3380,12 @@ fn run_partial_falsifies_the_span_end_claim_and_passes_the_honest_twin() {
 // The fixture is deliberately the *easiest possible* vocabulary to classify: two fixed
 // one-byte tokens over disjoint bytes. There is no prefix relation for the DFA to probe
 // into, no callback, no lookahead of any kind. `SpanEnd` is not merely defensible here, it
-// is the only honest answer — which is what makes the cost of failing to write it down a
-// property of the *declaration* and not of the grammar.
+// is the only honest answer — which is what makes the cost measured below a property of the
+// *declaration* and not of the grammar.
+//
+// The const has no default any more, so `MTok`'s `Unbounded` is written rather than
+// inherited. Before that change these same three cells passed with the line absent, which is
+// what the defect was: every consumer's existing vocabulary was `MTok`.
 
 #[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
 #[logos(crate = crate::logos)]
@@ -3420,6 +3424,8 @@ impl Token<'_> for MTok {
   type Kind = MKind;
   type Error = ();
 
+  // What a vocabulary used to get by saying nothing. Every assertion below is about the cost
+  // of this line reading `Unbounded` where `SpanEnd` is the truth.
   const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
 
   fn kind(&self) -> MKind {
@@ -3551,7 +3557,7 @@ fn take_one_s<'inp>(
   }
 }
 
-/// The control: with the honest class written down, the one-byte token at `0..1` in a two-byte
+/// The control: with the honest class chosen, the one-byte token at `0..1` in a two-byte
 /// buffer is yielded on the FIRST attempt, exactly as the pre-0.10.0 span predicate yielded it.
 ///
 /// `1 < 2`, so nothing about `A` can change when more bytes arrive. One attempt, two lexable
@@ -3569,16 +3575,17 @@ fn a_declared_span_end_vocabulary_yields_the_first_token_on_the_first_attempt() 
   assert_eq!(session.spent(), 2, "one attempt over a two-byte buffer");
 }
 
-/// The witness. The identical vocabulary WITHOUT the class written down is seal-only, and a
-/// budget calibrated for the declared behaviour turns that into a **terminal refusal** — the
-/// caller never receives the token, and no amount of further input can change that.
+/// The witness. The identical vocabulary answering `Unbounded` — which is what every
+/// vocabulary answered before the const lost its default — is seal-only, and a budget
+/// calibrated for the `SpanEnd` behaviour turns that into a **terminal refusal**: the caller
+/// never receives the token, and no amount of further input can change that.
 ///
 /// Read the two spends: the first attempt is admitted at `0 + 2 = 2`, which is exactly the cap,
 /// and it comes back `Incomplete`. Sealing does not change the buffer, so the retry projects
 /// `2 + 2 = 4` and the gate refuses **before finality is ever applied**. The seal that would
 /// have released the item is never reached.
 #[test]
-fn an_undeclared_vocabulary_is_seal_only_and_a_calibrated_budget_refuses_the_seal() {
+fn an_unbounded_vocabulary_is_seal_only_and_a_calibrated_budget_refuses_the_seal() {
   use crate::input::{Budget, PartialSession, RedriveFromBase, SessionRefusal};
 
   let mut session = PartialSession::new((), Budget::Bytes(2), RedriveFromBase);
@@ -3586,7 +3593,7 @@ fn an_undeclared_vocabulary_is_seal_only_and_a_calibrated_budget_refuses_the_sea
   assert_eq!(
     session.parse(mctx(), "ab", false, take_one_m),
     Err(MErr::Incomplete(2)),
-    "an undeclared vocabulary reports Unbounded, so even the item at 0..1 is withheld"
+    "a vocabulary answering Unbounded withholds even the item at 0..1"
   );
   assert_eq!(session.spent(), 2, "and the attempt still spent the buffer");
 
@@ -3613,7 +3620,7 @@ fn an_undeclared_vocabulary_is_seal_only_and_a_calibrated_budget_refuses_the_sea
 /// The unbounded-budget half of the same migration: no refusal, but the whole stream is
 /// retained and re-driven, and nothing is yielded until the seal.
 #[test]
-fn an_undeclared_vocabulary_under_an_unbounded_budget_retains_until_the_seal() {
+fn an_unbounded_vocabulary_under_an_unbounded_budget_retains_until_the_seal() {
   use crate::input::{Budget, PartialSession, RedriveFromBase};
 
   let mut session = PartialSession::new((), Budget::Unbounded, RedriveFromBase);
@@ -3632,5 +3639,140 @@ fn an_undeclared_vocabulary_under_an_unbounded_budget_retains_until_the_seal() {
     session.spent(),
     4,
     "and the two-byte prefix was lexed TWICE to get one one-byte token"
+  );
+}
+
+// ── The inclusive rule, executed: `end + n` withholds an item `end + n - 1` yields ──
+//
+// A span is half-open, so `span.end` is the first offset the match does NOT cover. A callback
+// that reaches for `n` bytes from there touches `span.end ..= span.end + n - 1`, and the
+// frontier is the highest offset touched. Reporting `span.end + n` names an offset the scan
+// never reached — and when the byte the callback read was the buffer's last, that unnamed
+// offset is exactly end of input's.
+//
+// The two cells below are the same lexer over the same bytes, differing only in which formula
+// its recorder applies, and the driver's `frontier >= len` predicate turns the one-offset
+// difference into yielded-versus-withheld.
+
+/// A recorder whose callback reaches for exactly one byte past its match, and reports either
+/// the inclusive offset it touched or the one the old prose asked for.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct PeekRec {
+  /// `true` reports `span.end + n`, which the crate's own guidance used to say.
+  off_by_one: bool,
+  probe: Option<(usize, usize)>,
+}
+
+impl State for PeekRec {
+  type Error = ();
+
+  fn check(&self) -> Result<(), ()> {
+    Ok(())
+  }
+
+  fn probe(&self) -> Option<crate::Probe> {
+    self.probe.map(|(from, to)| crate::Probe::new(from, to))
+  }
+
+  fn clear_probe(&mut self) {
+    self.probe = None;
+  }
+}
+
+/// The callback reaches for one byte at `span.end` — a real byte whenever one is there, and the
+/// end-of-input answer otherwise. Either way it has touched offset `span.end` and nothing above
+/// it, so the inclusive record is `span.end + 1 - 1`.
+fn record_peek(lex: &mut crate::logos::Lexer<'_, PeekTok>) {
+  const PEEKED: usize = 1;
+
+  let span = lex.span();
+  // The read itself. Its answer does not change the frontier: an attempted-and-absent byte
+  // counts at the offset it was wanted, exactly as a present one does.
+  let _ = lex.remainder().as_bytes().first();
+  let to = if lex.extras.off_by_one {
+    span.end + PEEKED
+  } else {
+    span.end + PEEKED - 1
+  };
+  lex.extras.probe = Some((span.start, to));
+}
+
+#[derive(Debug, Clone, PartialEq, crate::logos::Logos)]
+#[logos(crate = crate::logos, extras = PeekRec)]
+enum PeekTok {
+  #[token("a", record_peek)]
+  A,
+  #[token("b")]
+  B,
+}
+
+impl core::fmt::Display for PeekTok {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str(match self {
+      PeekTok::A => "a",
+      PeekTok::B => "b",
+    })
+  }
+}
+
+impl Token<'_> for PeekTok {
+  type Kind = MKind;
+  type Error = ();
+
+  // Irrelevant here by construction: `A`'s own scan records a value, and a recorded value
+  // answers outright. The class is what the un-recording `B` falls back to.
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
+  fn kind(&self) -> MKind {
+    match self {
+      PeekTok::A => MKind::A,
+      PeekTok::B => MKind::B,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+type PeekLex<'a> = LogosLexer<'a, PeekTok>;
+type PeekCtx<'a> = (Fatal<MErr>, DefaultCache<'a, PeekLex<'a>>);
+
+/// Drives "ab" non-final and asks for the first item only. `A` is at `0..1`; its callback reads
+/// the byte at offset 1, which is the buffer's **last real byte**.
+fn first_item_of_ab(off_by_one: bool) -> Result<MKind, MErr> {
+  let mut input = Input::<PeekLex<'_>, PeekCtx<'_>, (), Partial>::with_state_and_context(
+    "ab",
+    PeekRec {
+      off_by_one,
+      probe: None,
+    },
+    crate::input::InputContext::new(
+      Fatal::<MErr>::of(),
+      DefaultCache::<'_, PeekLex<'_>>::default(),
+    ),
+  );
+  let mut inp = input.as_ref();
+  match inp.next() {
+    Ok(Some(t)) => Ok(t.data().kind()),
+    Ok(None) => Err(MErr::Lex),
+    Err(e) => Err(e),
+  }
+}
+
+#[test]
+fn the_inclusive_offset_yields_the_item_the_off_by_one_withholds() {
+  assert_eq!(
+    first_item_of_ab(false),
+    Ok(MKind::A),
+    "`span.end + n - 1` is 1 — the offset the callback actually read — and 1 < 2, so `A` is \
+     append-stable and yields"
+  );
+
+  assert_eq!(
+    first_item_of_ab(true),
+    Err(MErr::Incomplete(2)),
+    "`span.end + n` is 2, an offset the scan never touched and the one end of input sits at, \
+     so `frontier >= len` withholds an item nothing about the future can change"
   );
 }
