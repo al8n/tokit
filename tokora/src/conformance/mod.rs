@@ -439,12 +439,36 @@ where
 ///
 /// # Why this boundary is the last one
 ///
-/// Not because it is wider than the last one, but because **there is no loop left above it that
-/// lexer behaviour can drive.** The tally is created once per input by the tier entry
-/// ([`check_partial`], [`check_integration`]); the only loop above that is
+/// Two reasons, and the second is the one that matters.
+///
+/// **There is no loop left above it that lexer behaviour can drive.** The tally is created once per
+/// input by the tier entry ([`check_partial`], [`check_integration`]); the only loop above that is
 /// `for (idx, src) in self.inputs`, whose trip count is the caller's own input list — data, not
 /// behaviour. Everything below it — prefixes, schedules, drains, `next`/`peek` calls, lexer
 /// instances, scanner iterations — charges the same counter.
+///
+/// **And there is nothing left below it to subdivide.** Each guard before this one counted a
+/// *proxy* for lexer work — probe clears, items a drain yielded, attempts by one instance — and
+/// every proxy had a finer loop underneath it to hide in, which is why the same defect kept
+/// reappearing one boundary further out. This counts [`Lexer::lex`] itself, which is the primitive
+/// the kit is trying to bound: there is no finer operation for a loop to sit between it and the
+/// counter, because the counter *is* at the operation. Raw lexing is also the only unbounded
+/// resource down there — a token served from the cache costs no lex, and every other observable the
+/// layer reads (`span`, `slice`, `read_frontier`, `bump`) is called a bounded number of times per
+/// attempt or per item.
+///
+/// What that leaves open is only *where the handle is created*, and that is a parameter rather than
+/// a mechanism. If a loop is ever added above a tier entry — a repeat knob, a second corpus pass —
+/// the repair is to construct the tally one level further out and pass the same handle down. The
+/// four relocations before this one each needed a new mechanism; this one would need an argument
+/// moved.
+///
+/// # What it still cannot bound, and why nothing could
+///
+/// A [`Lexer::lex`] call that never returns. Every lever the kit has is *between* calls, so a lexer
+/// that loops inside one is beyond this counter and beyond any counter a kit could hold. What this
+/// bounds is the case that looks identical from outside and is not: a lexer that returns promptly,
+/// every time, forever.
 ///
 /// # Why it cannot be refunded
 ///
