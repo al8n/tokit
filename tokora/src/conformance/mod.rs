@@ -204,6 +204,7 @@ const MAX_BUDGET_MULTIPLE: usize = 1 << 16;
 /// impl Token<'_> for CharTok {
 ///   type Kind = CharKind;
 ///   type Error = Infallible;
+///   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 ///   fn kind(&self) -> CharKind { CharKind }
 ///   fn is_trivia(&self) -> bool { false }
 /// }

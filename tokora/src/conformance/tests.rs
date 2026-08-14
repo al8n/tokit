@@ -25,6 +25,8 @@ impl Token<'_> for PTok {
   type Kind = PKind;
   type Error = Infallible;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> PKind {
     PKind
   }
@@ -811,6 +813,7 @@ struct PeekTok(PeekKind);
 impl Token<'_> for PeekTok {
   type Kind = PeekKind;
   type Error = Infallible;
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> PeekKind {
     self.0
   }
@@ -934,6 +937,8 @@ struct ETok;
 impl Token<'_> for ETok {
   type Kind = PKind;
   type Error = BadByte;
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
 
   fn kind(&self) -> PKind {
     PKind
@@ -1109,6 +1114,8 @@ impl Token<'_> for VTok {
   type Kind = VKind;
   type Error = Infallible;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> VKind {
     VKind
   }
@@ -1244,6 +1251,8 @@ impl Token<'_> for CTok {
   type Kind = PKind;
   type Error = Collide;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> PKind {
     PKind
   }
@@ -1364,6 +1373,8 @@ struct TTok;
 impl Token<'_> for TTok {
   type Kind = PKind;
   type Error = Ticking;
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
 
   fn kind(&self) -> PKind {
     PKind
@@ -2412,6 +2423,8 @@ mod logos_adapter {
     type Kind = TileKind;
     type Error = ();
 
+    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
     fn kind(&self) -> TileKind {
       match self {
         TileTok::Word => TileKind::Word,
@@ -2475,11 +2488,13 @@ mod prefix_backtracking {
   }
 
   macro_rules! num_vocabulary {
-    // No class declared: the vocabulary takes `Token`'s own default. Written as a separate arm
-    // rather than as `$class = <Self as Token>::READ_FRONTIER_CLASS`, which is a const cycle —
-    // and the point of this arm is to exercise the DEFAULT, not to restate it.
+    // No class argued at the call site. The const has no default to fall into, so this arm
+    // supplies the conservative value the vocabulary used to inherit — which is what the
+    // `DefaultNum` cells below have always been exercising. Written as a separate arm rather
+    // than as `$class = <Self as Token>::READ_FRONTIER_CLASS`, which is a const cycle.
     ($name:ident) => {
-      num_vocabulary!(@body $name,);
+      num_vocabulary!(@body $name, const READ_FRONTIER_CLASS: crate::ReadFrontierClass =
+        crate::ReadFrontierClass::Unbounded;);
     };
     ($name:ident, $class:expr) => {
       num_vocabulary!(@body $name, const READ_FRONTIER_CLASS: crate::ReadFrontierClass = $class;);
@@ -2522,7 +2537,7 @@ mod prefix_backtracking {
     };
   }
 
-  // The claim a vocabulary like this must NOT make, and the claim it gets by default.
+  // The claim a vocabulary like this must NOT make, and the conservative one beside it.
   num_vocabulary!(LyingNum, crate::ReadFrontierClass::SpanEnd);
   num_vocabulary!(DefaultNum);
 
@@ -2653,6 +2668,8 @@ mod recorded_value {
         type Kind = NumKind;
         type Error = ();
 
+        const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
         fn kind(&self) -> NumKind {
           match self {
             $name::Int => NumKind::Int,
@@ -2681,7 +2698,7 @@ mod recorded_value {
     // span end 1, and `1 < 2` commits it. The complete parse is one `Float@0..3` and has no
     // token ending before 2 at all.
     //
-    // The class default is `Unbounded` and would have withheld everything, so this cell fails
+    // The declared class is `Unbounded` and would have withheld everything, so this cell fails
     // only because the value was ACCEPTED — which makes it a check on the accept path as much
     // as on the recorder.
     Harness::<UnderReportingLexer<'_>>::over(["1.5"]).run_partial();
