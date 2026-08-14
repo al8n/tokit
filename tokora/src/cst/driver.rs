@@ -1171,9 +1171,9 @@ where
   P: ParseInput<'inp, L, O, (Sink<'inp, L, E>, C), Lang>,
 {
   // Delegated rather than duplicated, so the defaulted door and the configured one cannot come to
-  // disagree about anything except the budget: `InputContext::new` is the *same* constructor the
+  // disagree about anything except the budgets: `InputContext::new` is the *same* constructor the
   // `(emitter, cache)` tuple's `ParseContext::provide` used to reach, carrying the same
-  // `PARSE_DEFAULT_DEPTH`.
+  // `PARSE_DEFAULT_DEPTH` and the same unlimited token ceiling.
   parse_lossless_with_context(src, state, InputContext::new(inner, cache), profile, f)
 }
 
@@ -1186,24 +1186,29 @@ where
 ///
 /// # What it is for
 ///
-/// [`InputContext`] carries three things — the emitter, the cache, and the
+/// [`InputContext`] carries four things — the emitter, the cache, the
 /// [`RecursionLimiter`](crate::state::recursion_tracker::RecursionLimiter) the parse descends
-/// against — and until this door existed a lossless parse could choose the first two and not the
-/// third. That is a real gap and not a theoretical one: the budget defaults to
+/// against, and the [`TokenBudget`](crate::input::TokenBudget) its lexer produces items against —
+/// and until this door existed a lossless parse could choose the emitter and the cache and neither
+/// budget. That is a real gap and not a theoretical one: the depth budget defaults to
 /// [`PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH),
 /// which is deliberately conservative, and a grammar with legitimately deep documents had no way
-/// to say so. `ParserContext::with_recursion_limiter` is not reachable from here —
-/// [`Cst::from_sink`](Cst), `Sink::finish` and `Input::into_emitter` are all crate-private, so the
-/// plumbing cannot be hand-rolled either — so the escape hatch has to be a door.
+/// to say so; the item ceiling defaults to unlimited, and a lossless parse over untrusted input
+/// had no way to say otherwise. `ParserContext::with_recursion_limiter` is not reachable from here
+/// — [`Cst::from_sink`](Cst), `Sink::finish` and `Input::into_emitter` are all crate-private, so
+/// the plumbing cannot be hand-rolled either — so the escape hatch has to be a door.
 ///
 /// ```rust,ignore
-/// use tokora::{input::InputContext, state::recursion_tracker::RecursionLimiter};
+/// use tokora::{
+///   input::{InputContext, TokenBudget}, state::recursion_tracker::RecursionLimiter,
+/// };
 ///
 /// let (cst, parsed) = parse_lossless_with_context(
 ///   src,
 ///   Default::default(),
 ///   InputContext::new(Verbose::new(), DefaultCache::new())
-///     .with_recursion_limiter(RecursionLimiter::with_limitation(256)),
+///     .with_recursion_limiter(RecursionLimiter::with_limitation(256))
+///     .with_token_budget(TokenBudget::with_limitation(1_000_000)),
 ///   profile,
 ///   run,
 /// );
