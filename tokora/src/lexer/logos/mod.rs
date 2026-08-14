@@ -340,15 +340,6 @@ macro_rules! bail {
 #[cfg(feature = "logos_0_16")]
 pub use self::logos_0_16::{FromLogos, LogosLexer};
 
-#[cfg(all(feature = "logos_0_15", not(feature = "logos_0_16")))]
-pub use self::logos_0_15::{FromLogos, LogosLexer};
-
-#[cfg(all(
-  feature = "logos_0_14",
-  not(any(feature = "logos_0_15", feature = "logos_0_16"))
-))]
-pub use self::logos_0_14::{FromLogos, LogosLexer};
-
 /// A module containing integrations with the `logos` lexer library version 0.16.
 #[cfg(feature = "logos_0_16")]
 #[cfg_attr(docsrs, doc(cfg(feature = "logos_0_16")))]
@@ -356,22 +347,8 @@ pub mod logos_0_16 {
   bail!(logos_0_16);
 }
 
-/// A module containing integrations with the `logos` lexer library version 0.15.
-#[cfg(feature = "logos_0_15")]
-#[cfg_attr(docsrs, doc(cfg(feature = "logos_0_15")))]
-pub mod logos_0_15 {
-  bail!(logos_0_15);
-}
-
-/// A module containing integrations with the `logos` lexer library version 0.14.
-#[cfg(feature = "logos_0_14")]
-#[cfg_attr(docsrs, doc(cfg(feature = "logos_0_14")))]
-pub mod logos_0_14 {
-  bail!(logos_0_14);
-}
-
 #[cfg(test)]
 #[allow(warnings)]
 #[cfg(any(feature = "std", feature = "alloc"))]
-#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+#[cfg(feature = "logos_0_16")]
 mod tests;

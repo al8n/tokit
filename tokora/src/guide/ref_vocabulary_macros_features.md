@@ -544,7 +544,7 @@ currently-supported versioned feature (`bytes_1`), which pulls the optional depe
 | Feature | Enables | Implies | no_std posture |
 |---------|---------|---------|----------------|
 | `logos` | the [`LogosLexer`](crate::lexer::LogosLexer) adapter for logos 0.16 | `logos_0_16` | as the dep allows |
-| `logos_0_16` / `logos_0_15` / `logos_0_14` | version-pinned adapter | `dep:logos_0_16` / `_0_15` / `_0_14` | as the dep allows |
+| `logos_0_16` | version-pinned adapter, the only supported major | `dep:logos_0_16` | as the dep allows |
 
 ### Source backends ([`Slice`](crate::Slice) / [`Source`](crate::Source))
 

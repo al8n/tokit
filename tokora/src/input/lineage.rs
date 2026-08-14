@@ -646,11 +646,7 @@ impl Lineage {
 
   /// The number of live checkpoints — test-only observability for the no-growth guarantee that
   /// committing (and a success-path recover) gives the lineage stack.
-  #[cfg(all(
-    test,
-    any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-    feature = "std"
-  ))]
+  #[cfg(all(test, feature = "logos_0_16", feature = "std"))]
   pub(crate) fn live_len(&self) -> usize {
     self.live_ckpts.len()
   }
@@ -666,11 +662,7 @@ impl Lineage {
   /// Gated to its callers — the `logos` + `std` session tests and the `fuzz` harness's abandon
   /// oracle — so it is never dead code under `cargo hack --each-feature --tests`.
   #[cfg(any(
-    all(
-      test,
-      any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-      feature = "std"
-    ),
+    all(test, feature = "logos_0_16", feature = "std"),
     all(feature = "fuzz", feature = "std")
   ))]
   pub(crate) fn pinned_len(&self) -> usize {
@@ -685,11 +677,7 @@ impl Lineage {
 /// invisible to a value-level assertion. Each element a search inspects ticks the odometer once,
 /// which lets a cell assert the *law* (linear in depth) rather than a constant. Outside a
 /// `std` test build this is an empty `#[inline(always)]` body and the odometer does not exist.
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 #[inline(always)]
 fn scan_tick() {
   scan_probe::tick();
@@ -705,11 +693,7 @@ fn scan_tick() {
 /// because `feature = "std"` already implies it.
 #[cfg(all(
   any(feature = "std", feature = "alloc"),
-  not(all(
-    test,
-    any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-    feature = "std"
-  ))
+  not(all(test, feature = "logos_0_16", feature = "std"))
 ))]
 #[inline(always)]
 fn scan_tick() {}
@@ -717,18 +701,14 @@ fn scan_tick() {}
 /// The odometer itself — see [`scan_tick`].
 ///
 /// Gated to the exact feature set of the cells that read it — the `transaction` suite, which is
-/// gated `all(test, <any logos version>, feature = "std")`; the attribute directly below this
+/// gated `all(test, feature = "logos_0_16", feature = "std")`; the attribute directly below this
 /// doc comment is that predicate, spelled out. Gated any wider (it was `all(test, std)`) its
 /// `reset`/`scanned` are `dead_code` at a point like `--no-default-features --features
 /// conformance`, where `conformance` pulls in `std` but no logos version. The per-version logos
-/// CI cells added in the same release reach it the other way, through `--no-default-features
-/// --features std,logos_0_14` — no job compiled a test target in either configuration before,
-/// which is why this went unseen.
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+/// CI cells this was originally measured against (since retired along with logos 0.14/0.15)
+/// reached it the other way, through `--no-default-features --features std,logos_0_14` — no job
+/// compiled a test target in either configuration before, which is why this went unseen.
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 pub(crate) mod scan_probe {
   use core::cell::Cell;
 
@@ -737,13 +717,13 @@ pub(crate) mod scan_probe {
   }
 
   /// Zeroes the odometer and opens a fresh reading window.
-  #[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+  #[cfg(feature = "logos_0_16")]
   pub(crate) fn reset() {
     SCANNED.with(|c| c.set(0));
   }
 
   /// Elements inspected since the last [`reset`].
-  #[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+  #[cfg(feature = "logos_0_16")]
   pub(crate) fn scanned() -> usize {
     SCANNED.with(Cell::get)
   }

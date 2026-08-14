@@ -212,9 +212,9 @@ The feature that turns a backend on is `bytes_1`, not `bytes`; `hipstr_0_8`, not
 versioned feature enables a `package`-renamed optional dependency pinned to one SemVer-major line
 of the upstream crate (`bytes_1 = { package = "bytes", version = "1", … }`), and a bare alias
 forwards to the current one (`bytes = ["bytes_1"]`). This is the same discipline the crate uses
-for the logos adapter (`logos_0_14` / `logos_0_15` / `logos_0_16`): it lets tokora support several
-incompatible majors of a backend *at once*, and add support for a new major as a purely additive
-feature — no breaking change to anyone pinned to the old one.
+for the logos adapter (`logos_0_16`, the only supported major — 0.14 and 0.15 have been
+retired): the version in the name is what lets a future major be added as a purely additive
+feature, no breaking change to anyone pinned to the current one.
 
 ## `no_std` posture
 

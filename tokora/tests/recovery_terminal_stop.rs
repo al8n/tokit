@@ -1,7 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "logos_0_16"))]
 
 //! The recovery combinators' **scanner** terminal-stop law: a resource-limit trip inside a
 //! recovery attempt is re-raised, never retried — whichever emitter the parse was built with.

@@ -1890,7 +1890,7 @@ Defaults to `std`. `docs.rs` builds `all-features`.
 | `std` *(default)* | `std` library, all std-only backends | implies nothing else you must set |
 | `alloc` | `Vec`/`String` drivers without `std` | the no-std + allocator tier |
 | *(neither)* | core-only parsing | bounded containers only |
-| `logos` (`= logos_0_16`) | the [`LogosLexer`](crate::lexer::LogosLexer) adapter | also `logos_0_14`, `logos_0_15` for other versions |
+| `logos` (`= logos_0_16`) | the [`LogosLexer`](crate::lexer::LogosLexer) adapter | 0.16 is the only supported major |
 | `rowan` | the recording CST sink + typed lossless tree | implies `std`; the lossless-CST chapter |
 | `unstable-raw` | the raw `InputRef::{save, restore, commit}` checkpoint triple | otherwise the transaction guards are the surface |
 | `conformance` | the `conformance` lexer test kit | implies `std` |

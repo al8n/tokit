@@ -404,7 +404,7 @@ const NO_NOTE: &str = "";
 /// # Example
 ///
 /// ```
-/// # #[cfg(all(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"), feature = "std"))]
+/// # #[cfg(all(feature = "logos_0_16", feature = "std"))]
 /// # fn demo() {
 /// use tokora::cache::DefaultCache;
 /// use tokora::conformance::cache::CacheHarness;

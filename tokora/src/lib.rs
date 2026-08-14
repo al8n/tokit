@@ -23,27 +23,15 @@ extern crate std;
 #[macro_use]
 mod trace;
 
-// `tokora::logos` resolves to the NEWEST enabled logos version — 0.16 if it is on, else 0.15,
-// else 0.14 — so a derive written against this alias compiles on whichever version the build
-// selected. The plain `logos` feature enables `logos_0_16`, so `--features logos` keeps meaning
-// exactly what it always meant; a build enabling only `logos_0_14` points the alias at 0.14.
+// `tokora::logos` resolves to the one supported logos version, 0.16, so a derive written
+// against this alias compiles under it. The plain `logos` feature enables `logos_0_16`, so
+// `--features logos` keeps meaning exactly what it always meant.
 //
-// Same three-step precedence as the adapter re-exports in `lexer/logos/mod.rs`; keep the two in
-// step, since a derive resolving to one version and a `LogosLexer` to another will not compile.
+// Same re-export as the adapter's in `lexer/logos/mod.rs`; keep the two in step, since a derive
+// resolving to a different logos than the `LogosLexer` it is driven through will not compile.
 #[cfg(feature = "logos_0_16")]
 #[cfg_attr(docsrs, doc(cfg(feature = "logos_0_16")))]
 pub use logos_0_16 as logos;
-
-#[cfg(all(feature = "logos_0_15", not(feature = "logos_0_16")))]
-#[cfg_attr(docsrs, doc(cfg(feature = "logos_0_15")))]
-pub use logos_0_15 as logos;
-
-#[cfg(all(
-  feature = "logos_0_14",
-  not(any(feature = "logos_0_15", feature = "logos_0_16"))
-))]
-#[cfg_attr(docsrs, doc(cfg(feature = "logos_0_14")))]
-pub use logos_0_14 as logos;
 
 pub use cache::{Cache, DefaultCache};
 pub use check::Check;
@@ -352,16 +340,8 @@ mod require;
 pub mod __private {
   pub use super::{check::Check, error, lexer::*, require::Require, span, syntax, token, utils};
 
-  // Same newest-wins precedence as the crate-level `tokora::logos` alias above; the macro
-  // expansions that name `$crate::__private::logos` must resolve to the same version a user
-  // derive does.
-  #[cfg(all(
-    feature = "logos_0_14",
-    not(any(feature = "logos_0_15", feature = "logos_0_16"))
-  ))]
-  pub use ::logos_0_14 as logos;
-  #[cfg(all(feature = "logos_0_15", not(feature = "logos_0_16")))]
-  pub use ::logos_0_15 as logos;
+  // Same re-export as the crate-level `tokora::logos` alias above; the macro expansions that
+  // name `$crate::__private::logos` must resolve to the same version a user derive does.
   #[cfg(feature = "logos_0_16")]
   pub use ::logos_0_16 as logos;
   pub use paste;

@@ -287,9 +287,5 @@ macro_rules! keyword {
   };
 }
 
-#[cfg(all(
-  test,
-  feature = "std",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#[cfg(all(test, feature = "std", feature = "logos_0_16"))]
 mod tests;

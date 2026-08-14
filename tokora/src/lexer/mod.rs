@@ -7,18 +7,12 @@ use crate::span::{Span, Spanned};
 use super::{Source, State, token::Token};
 
 /// A module containing integrations with the `logos` lexer library.
-#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
-#[cfg_attr(
-  docsrs,
-  doc(cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")))
-)]
+#[cfg(feature = "logos_0_16")]
+#[cfg_attr(docsrs, doc(cfg(feature = "logos_0_16")))]
 mod logos;
 
-#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
-#[cfg_attr(
-  docsrs,
-  doc(cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")))
-)]
+#[cfg(feature = "logos_0_16")]
+#[cfg_attr(docsrs, doc(cfg(feature = "logos_0_16")))]
 pub use logos::*;
 
 /// The result of lexing a single token: either a successful token or an error.

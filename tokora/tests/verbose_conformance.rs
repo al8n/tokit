@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 
 //! The `Verbose` write-path conformance suite: every emit channel records on the shared
 //! emission log, so `checkpoint`, `rewind`, `labels()` and `diagnostics()` are exact for

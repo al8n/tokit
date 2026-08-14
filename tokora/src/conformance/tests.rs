@@ -2323,7 +2323,7 @@ fn a_conforming_per_byte_lexer_over_100kb_outruns_a_32_bit_counter() {
 
 // ── Positive: the crate's real logos adapter (LogosLexer) ───────────────────────────
 
-#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+#[cfg(feature = "logos_0_16")]
 mod logos_adapter {
   use super::Harness;
   use crate::Token;
@@ -2460,7 +2460,7 @@ mod logos_adapter {
 // The extra token is `Int@0..1`. logos probes into the `Float`/`Sci` arm, hits the end of the
 // truncated buffer, and backtracks to the accepting prefix; the span rule then saw end 1 < 2 and
 // committed it. Append the missing byte and the complete parse says `Float@0..3`.
-#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+#[cfg(feature = "logos_0_16")]
 mod prefix_backtracking {
   use super::Harness;
   use crate::Token;
@@ -2601,7 +2601,7 @@ mod prefix_backtracking {
 // callback did NOT see: the engine probes past its own match before settling, and a recorder
 // that reports only its own bytes under-reports for its own item. That is the burden
 // `State::take_probe` puts on the recorder, and the two cells below are the check on it.
-#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
+#[cfg(feature = "logos_0_16")]
 mod recorded_value {
   use super::Harness;
   use crate::lexer::LogosLexer;

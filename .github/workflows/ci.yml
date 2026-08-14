@@ -78,15 +78,14 @@ name: CI
 # not `tokora-benches`'s. The counts below are tokora's unless the row says otherwise.
 #
 #   * **lib** (1) — built by nearly every job. Clippy-linted by `clippy` and `hack-clippy`; run
-#     as a unittest by `test`, `test-valve-off`, `test-release`, `logos-versions`, `no-std` and
-#     `coverage`.
+#     as a unittest by `test`, `test-valve-off`, `test-release`, `no-std` and `coverage`.
 #   * **bins** (0) — none declared. `--all-targets` on the `clippy` line carries any that appear.
 #   * **custom-build** (1, `tokora/build.rs`) — built by every job that builds the crate, and it
 #     IS clippy-linted, which is worth knowing because no `--<kind>` flag names it: it rides
 #     along with the package. Confirmed by injecting a `clippy::len_zero` into it and watching
 #     the `clippy` line report it, rather than by reading the flag list.
 #   * **tests** (103 integration targets) — clippy-linted by `clippy` and by
-#     `hack-clippy --tests`; run by the five test jobs above.
+#     `hack-clippy --tests`; run by the four test jobs above.
 #   * **benches** (5, and they belong to `tokora-benches`, not to tokora — #216) — clippy-linted
 #     by `clippy`, which is why that job carries `--workspace`; compiled and executed once each
 #     by `bench (smoke)`, which names each target it builds. tokora itself declares zero bench
@@ -405,45 +404,6 @@ jobs:
       - name: cargo test --release --all-features -- --ignored fuzz_deep_run
         run: cargo test --release -p tokora --all-features --lib -- --ignored --exact fuzz::tests::fuzz_deep_run
 
-  # ── Gate: per-version logos parity ──────────────────────────────────────────
-  # The crate advertises three logos majors, and this is the only job that RUNS tests against
-  # 0.14 and 0.15: the `hack --each-feature` matrix only clippy-checks each version, and every
-  # other test job pins the newest. `fail-fast: false` so one version's failure does not hide
-  # the other's result.
-  logos-versions:
-    name: logos parity (0.14, 0.15)
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        logos: [logos_0_14, logos_0_15]
-    steps:
-      - uses: actions/checkout@v7
-      - name: Cache cargo build and registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-logos-${{ matrix.logos }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-logos-${{ matrix.logos }}-
-      - name: Install Rust
-        run: rustup update stable --no-self-update && rustup default stable
-      # `combinators` is spelled out because it is a DEFAULT feature: without it this leg
-      # would still compile, but every combinator suite is `#![cfg]`'d on it, so the run
-      # would silently shrink to the handful of files that need no combinator at all.
-      #
-      # `conformance` is spelled out for the same reason and is not optional here: the cache
-      # conformance kit (`tokora::conformance::cache_tests`) builds its fixture lexer with a
-      # real `logos::Logos` derive, so it is the most version-sensitive file in the crate — and
-      # until this feature was named here, the one leg whose entire purpose is version parity
-      # was the one leg that never compiled it, so it ran against exactly one of the three
-      # advertised logos majors (whichever `--all-features` selects) instead of all three (#208).
-      - name: cargo test --no-default-features --features std,combinators,conformance,${{ matrix.logos }}
-        run: cargo test -p tokora --no-default-features --features std,combinators,conformance,${{ matrix.logos }}
-
   # ── Gate: mechanical public-API diff against the last published version ─────
   # `continue-on-error` is deliberate and the reason is written down because "advisory" usually
   # decays into "ignored": the tool rides rustdoc-JSON on a pinned nightly, so a toolchain bump
@@ -750,8 +710,8 @@ jobs:
 
   # ── Gate: the feature COMBINATIONS --each-feature cannot reach ──────────────
   #
-  # The job above runs `--no-default-features`, each of the 40 features ALONE, and
-  # `--all-features` — 42 legs, and never a proper subset of size two or more. So an
+  # The job above runs `--no-default-features`, each of the 39 features ALONE, and
+  # `--all-features` — 41 legs, and never a proper subset of size two or more. So an
   # `all(A, B)` predicate is compiled in exactly ONE of them, `--all-features`, where a third
   # feature may supply whatever the pair itself was missing. That is coverage-shaped and is not
   # coverage: downstream in smear, a `rowan + graphqlx` pair failed from the commit that
@@ -759,7 +719,7 @@ jobs:
   # the macros, `graphqlx` alone did not compile the substrate, and `--all-features` also had
   # `graphql`, which supplied the consumers whose absence was the bug (#200).
   #
-  # `--feature-powerset --depth 2` would close it and is the wrong trade at 40 features: ~780
+  # `--feature-powerset --depth 2` would close it and is the wrong trade at 38 features: ~703
   # configurations buys a gate nobody keeps. That was written when the Miri queue was also in
   # this workflow and the argument was partly a wall-clock one; Miri is in `miri.yml` now and the
   # argument is unchanged, because ~780 `cargo check` legs would themselves make this lane the
@@ -772,8 +732,8 @@ jobs:
   # runs what it prints, so the set CI builds and the set the script validates cannot drift.
   #
   # MOST OF THESE LEGS CARRY `--tests`, SO THEY COMPILE INTEGRATION SUITES, AND FOR SOME SUITES
-  # THIS IS THE ONLY PLACE. Eight are gated `all(std, any(logos_0_16, logos_0_15, logos_0_14))`
-  # with no combinator family and no umbrella, and `--no-default-features --features
+  # THIS IS THE ONLY PLACE. Eight are gated `all(std, logos_0_16)` with no combinator family and
+  # no umbrella, and `--no-default-features --features
   # std,logos,trace --tests` is the only configuration anywhere in CI that type-checks their
   # bodies with the families OFF — every other build that has `std` and a logos version at once
   # also has `combinators`. That was documented and not derived until 2026-08-11, and the gate

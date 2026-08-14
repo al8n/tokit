@@ -265,14 +265,13 @@ EXTRA_LEGS = [
         #
         # THAT ABSENCE DOES A SECOND JOB THIS SCRIPT CANNOT SEE, and it is recorded here because
         # the only place it is visible is the leg itself. Eight integration suites carry the
-        # crate-level gate `all(std, any(logos_0_16, logos_0_15, logos_0_14))` with no family and
-        # no umbrella — `boost`, `error_extra`, `forwarding_discrimination`, `input_ref`,
-        # `lexer_error_paths`, `recovery_terminal_stop`, `session_points`, `sync`. No
-        # `--each-feature` leg supplies `std` AND a logos version at once, and every other
-        # configuration that does has `combinators` too — every `--all-features` job (`test`,
-        # `test (release)`, `msrv`, `sanitizer`, `coverage`), `test (valve-off)` and the Miri
-        # matrices (which name `--features logos` WITHOUT `--no-default-features`, so `default`
-        # brings the umbrella), the logos-parity matrix (which names it outright), and the
+        # crate-level gate `all(std, logos_0_16)` with no family and no umbrella — `boost`,
+        # `error_extra`, `forwarding_discrimination`, `input_ref`, `lexer_error_paths`,
+        # `recovery_terminal_stop`, `session_points`, `sync`. No `--each-feature` leg supplies
+        # `std` AND logos at once, and every other configuration that does has `combinators` too
+        # — every `--all-features` job (`test`, `test (release)`, `msrv`, `sanitizer`,
+        # `coverage`), `test (valve-off)` and the Miri matrices (which name `--features logos`
+        # WITHOUT `--no-default-features`, so `default` brings the umbrella), and the
         # `std,logos,combinators` and `rowan,logos,combinators` legs. So THIS is the only
         # configuration in CI that type-checks those eight bodies with the families off, which is
         # the configuration in which a family-only helper leaking into them would show up. One of
@@ -299,7 +298,7 @@ EXTRA_LEGS = [
         # that feature today; split the umbrella into per-family legs and it would have gone back
         # to recommending deletion. It is subset dominance now. This paragraph is the history,
         # not the mechanism.
-        "why": "all(test, trace, any(logos_0_16, logos_0_15, logos_0_14), std)",
+        "why": "all(test, trace, logos_0_16, std)",
     },
     {
         "features": "rowan,combinators",
@@ -327,12 +326,12 @@ EXTRA_LEGS = [
         "tests": True,
         "unique_predicates": False,
         "unique_suites": True,
-        # The other half: `pratt_recovery` gates on `all(std, rowan, combinators, any(logos_*))`,
-        # so it needs a lexer version too and the leg above cannot reach it. Any leg that can is
+        # The other half: `pratt_recovery` gates on `all(std, rowan, combinators, logos_0_16)`,
+        # so it needs a lexer too and the leg above cannot reach it. Any leg that can is
         # a superset of `std,logos,combinators`, which is why that leg's `unique_predicates` is
         # now False — see the note there. It is not a reason to fold the two into one: this leg
         # has a lexer, so it cannot make the logos-off claim the leg above exists for.
-        "why": "pratt_recovery, all(std, rowan, combinators, any(logos_0_16, _15, _14))",
+        "why": "pratt_recovery, all(std, rowan, combinators, logos_0_16)",
     },
     {
         "features": "std,logos,combinators,tinyvec_1",
@@ -340,7 +339,7 @@ EXTRA_LEGS = [
         "unique_predicates": False,
         "unique_suites": True,
         # DECLARED FOR ONE SUITE. `container_contract` gates on
-        # `all(std, combinators, tinyvec_1, any(logos_*))`, and `tinyvec_1` is named by no other
+        # `all(std, combinators, tinyvec_1, logos_0_16)`, and `tinyvec_1` is named by no other
         # crate-level gate and by no multi-feature predicate in `tokora/src/` — so until this leg
         # existed, `--all-features` was that body's only build anywhere, which is the
         # configuration this script refuses to count as coverage.

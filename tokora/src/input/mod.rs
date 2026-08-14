@@ -240,12 +240,7 @@ use super::*;
 pub use checkpoint::Checkpoint;
 pub use completeness::{Complete, Completeness, Partial, SurfaceIncomplete};
 pub use cursor::Cursor;
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std",
-  feature = "combinators"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std", feature = "combinators"))]
 pub(crate) use input_ref::ClosePayload;
 pub(crate) use input_ref::CloseStatus;
 pub(crate) use input_ref::Session;
@@ -1121,11 +1116,7 @@ where
   /// exactly the live begin points, and with no handle alive there are none. Gated to its callers
   /// (the session tests and the `fuzz` harness's abandon oracle).
   #[cfg(any(
-    all(
-      test,
-      any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-      feature = "std"
-    ),
+    all(test, feature = "logos_0_16", feature = "std"),
     all(feature = "fuzz", feature = "std")
   ))]
   pub(crate) fn pinned_checkpoints_len(&self) -> usize {
@@ -1136,11 +1127,7 @@ where
   /// restored nor released. The [`Input`]-level twin of
   /// [`InputRef::live_checkpoints_len`](InputRef), for the same after-the-handle-dies question:
   /// an abandoned session point releases its lineage entry too, so it does not strand one.
-  #[cfg(all(
-    test,
-    any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-    feature = "std"
-  ))]
+  #[cfg(all(test, feature = "logos_0_16", feature = "std"))]
   pub(crate) fn live_checkpoints_len(&self) -> usize {
     self.lineage.live_len()
   }

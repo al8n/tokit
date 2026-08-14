@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 #![allow(clippy::type_complexity)]
 //! Regression suite for issue #85 — "Delimited many parsers misclassify a cached wrong
 //! opener at end of input".

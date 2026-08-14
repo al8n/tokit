@@ -551,6 +551,35 @@ and will red until they do.
   `Token::kind`, and kept because the two are independent caller code: a `PartialEq` coarser than
   the classification the parser sees would otherwise pass silently.
 
+- **Only Logos 0.16 is supported now; the `logos_0_14` and `logos_0_15` features, and the
+  `logos@0.14`/`logos@0.15` optional dependencies behind them, are removed.** The crate carried
+  three simultaneous Logos majors behind a newest-wins precedence chain — `tokora::logos`, the
+  `LogosLexer` adapter re-export, and each macro-generated per-version `RecursionTracker` /
+  `TokenTracker` / `Tracker` impl all picked 0.16, else 0.15, else 0.14 — and the CI job whose
+  only purpose was running tests against 0.14 and 0.15 (`logos parity (0.14, 0.15)`; the
+  `--each-feature` matrix only ever clippy-checked them). Both are retired with the versions
+  themselves. `logos = ["logos_0_16"]` is unchanged: `--features logos` means what it always
+  meant.
+
+  The removal is mechanical everywhere the precedence chain existed only to pick the newest of
+  three arms — the 0.16 arm is what survives, unconditionally. Every crate-level and item-level
+  `#[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]` gate —
+  142 occurrences of the same disjunction across the library and the integration test suite —
+  simplifies to `#[cfg(feature = "logos_0_16")]` for the same reason: `any` over one surviving
+  alternative is that alternative. The guide and the README carry the same fact in prose, not in
+  a `cfg`, and are corrected the same way. `ci/feature_cfg_coverage.py`'s derived leg count drops
+  with it (28 multi-feature predicates over 322 sites, 49 covering legs, before; 25 over 308, 47
+  legs, after) — a shrink in what the source actually asks for, not a loosened gate.
+
+  BREAKING CHANGE: `logos_0_14` and `logos_0_15` no longer exist as Cargo features, and the
+  `logos@0.14`/`logos@0.15` optional dependencies are gone from the manifest. A consumer building
+  with `--features logos_0_14` or `--features logos_0_15` — naming a version directly rather than
+  through the `logos` alias — fails to resolve the manifest rather than silently falling back.
+  `tokora::logos` and the `LogosLexer` adapter now resolve to 0.16 unconditionally; a consumer
+  who was pinned to 0.15 or 0.14 (whether through the version-specific feature or through a
+  `Cargo.lock` that never re-resolved) must move to `logos_0_16` — via the `logos` alias or
+  directly — to keep building.
+
 ### Fixed
 
 - **`CacheHarness::run` hung on a lexer that only returns errors — the same shape one tier over.**

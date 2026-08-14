@@ -36,8 +36,8 @@ Most applications use the maintained Logos adapter:
 tokora = { version = "0.9", features = ["logos"] }
 ```
 
-`logos` is the alias for the current `logos_0_16` integration. The default `std` feature remains
-enabled unless you set `default-features = false`.
+`logos` is the alias for the `logos_0_16` integration, the only Logos major tokora supports. The
+default `std` feature remains enabled unless you set `default-features = false`.
 
 > **Which version this describes.** Every `[dependencies]` snippet in this README resolves against
 > the latest release, **0.9.1**. A feature that `main` has grown since is named with the version it
@@ -131,9 +131,7 @@ is `std` alone, and every combinator is compiled unconditionally.
 | `punct` | The punctuator parsers (`Comma::parse`, …) and the `parens`/`braces`/`brackets`/`angles` delimited shapes built on them. |
 | `then` | `then`, `then_ignore`, `ignore_then`, `then_value`, `and_then`, `and_then_with`. |
 | `validate` | `validate` / `validate_with`. |
-| `logos` | Alias for `logos_0_16`, the current Logos integration. |
-| `logos_0_14` | Enables the optional `logos@0.14` adapter. |
-| `logos_0_15` | Enables the optional `logos@0.15` adapter. |
+| `logos` | Alias for `logos_0_16`, the only supported Logos integration. |
 | `logos_0_16` | Enables the optional `logos@0.16` adapter used by `logos`. |
 | `stacker` | Runs each **Pratt frame prologue** on a fresh heap stack segment when the native stack is nearly exhausted; implies `std` and `pratt`. It segments those two prologues and nothing else — a consumer's own `descend`/`descending` frames are ordinary native frames and are untouched — so it does **not** move `RecursionLimiter::PARSE_DEFAULT_DEPTH`, the budget they share. `RecursionLimiter::SEGMENTED_PRATT_DEPTH` is the larger figure it does justify, for a caller whose whole descent is Pratt frames to opt into. It is not a substitute for the recursion budget: a segment is an `mmap`, so a deep enough input still ends the process with nothing on any `Result` channel. |
 | `trace` | Enables parser tracing; implies `std`. |
@@ -164,11 +162,10 @@ is a default feature, so a plain dependency line sees the whole surface; a `defa
 build names the families it uses.
 
 Feature aliases select their versioned counterpart; versioned features make the corresponding
-optional dependency available. One Logos version is normally sufficient, though multiple versioned
-integrations may coexist. When several are enabled, the unversioned
-`tokora::lexer::LogosLexer` selects 0.16, then 0.15, then 0.14. `tokora::logos` is available only
-with `logos_0_16` and re-exports that version. `rowan` does not enable `logos`, and `smallvec_1`
-is the versioned feature that adds `alloc`.
+optional dependency available. `tokora::logos` and the unversioned `tokora::lexer::LogosLexer`
+are available with `logos_0_16` and re-export/adapt that version — the only Logos major tokora
+supports. `rowan` does not enable `logos`, and `smallvec_1` is the versioned feature that adds
+`alloc`.
 
 ## Platform support
 

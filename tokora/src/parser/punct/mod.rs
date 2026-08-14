@@ -179,10 +179,5 @@ define_parsers!(
   OptionalChain::optional_chain::"?.",
 );
 
-#[cfg(all(
-  test,
-  feature = "punct",
-  feature = "std",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#[cfg(all(test, feature = "punct", feature = "std", feature = "logos_0_16"))]
 mod tests;

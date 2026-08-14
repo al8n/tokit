@@ -57,12 +57,7 @@ pub(crate) use try_expect::CloseStatus;
 // `ClosePayload` is threaded through the delimited drivers without being named there (the
 // `Close(payload)` arm passes it straight to `commit_probed`); only the tests name the origin,
 // so the re-export is gated to exactly the cfg that compiles `partial_tests`.
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std",
-  feature = "combinators"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std", feature = "combinators"))]
 pub(crate) use try_expect::ClosePayload;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -76,49 +71,24 @@ pub use stacked::{SavepointId, StackedTransaction};
 #[cfg(all(test, any(feature = "std", feature = "alloc")))]
 mod census_tests;
 
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 mod tests;
 
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std",
-  feature = "combinators"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std", feature = "combinators"))]
 mod partial_tests;
 
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 mod capacity_tests;
 
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 mod session_tests;
 
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 mod fast_path_tests;
 
 /// What holds a recursion level and what silently gives it back — the runtime half of the table on
 /// [`Descent`]. Needs `std` for the unwind cell's `catch_unwind`.
-#[cfg(all(
-  test,
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-  feature = "std"
-))]
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 mod descent_tests;
 
 /// A reference to an `Input` instance.
@@ -838,11 +808,7 @@ where
   /// Test-support observability: gated to exactly the feature set of its callers (the
   /// `logos` + `std` guard test suites), so it exists precisely when they do and is never
   /// dead code under `--tests` with leaner feature combinations.
-  #[cfg(all(
-    test,
-    any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-    feature = "std"
-  ))]
+  #[cfg(all(test, feature = "logos_0_16", feature = "std"))]
   pub(super) fn is_poisoned(&self) -> bool {
     self.poison_boundary.is_some()
   }
@@ -2334,11 +2300,7 @@ where
   /// `any(std, alloc)`) keeps the method from being dead code under
   /// `cargo hack --each-feature --tests`, whose single-feature combinations never enable both
   /// `logos` and `std` and so compile neither this method nor its callers.
-  #[cfg(all(
-    test,
-    any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"),
-    feature = "std"
-  ))]
+  #[cfg(all(test, feature = "logos_0_16", feature = "std"))]
   pub(crate) fn live_checkpoints_len(&self) -> usize {
     self.session.lineage.live_len()
   }

@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 #![allow(clippy::type_complexity)]
 //! The close-miss suppression's witness: it must answer *is the front still that token?*, not
 //! *has anything been consumed?*

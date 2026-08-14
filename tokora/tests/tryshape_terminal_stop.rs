@@ -1,8 +1,4 @@
-#![cfg(all(
-  feature = "std",
-  feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
-))]
+#![cfg(all(feature = "std", feature = "combinators", feature = "logos_0_16"))]
 
 //! The try-shape terminal-stop law: an attempt shape declines —
 //! `Ok(None)`, zero consumption — **iff the opener is definitely absent** (wrong next

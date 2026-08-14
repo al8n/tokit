@@ -2,7 +2,7 @@
   feature = "std",
   feature = "rowan",
   feature = "combinators",
-  any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14")
+  feature = "logos_0_16"
 ))]
 
 //! The pins for `examples/expr_recovery.rs` — tokora's error-recovery posture, held to the
