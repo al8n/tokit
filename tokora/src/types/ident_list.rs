@@ -42,7 +42,7 @@ impl<S, Span, Container, Lang: ?Sized> AsSpan<Span> for IdentList<S, Span, Conta
 
 impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
   /// Returns `true` if all identifiers in the path are valid.
-  #[inline]
+  #[inline(always)]
   pub fn is_valid(&self) -> bool
   where
     Container: AsRef<[Ident<S, Span, Lang>]>,
@@ -51,7 +51,7 @@ impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
   }
 
   /// Returns `true` if any segment in the path is an error node.
-  #[inline]
+  #[inline(always)]
   pub fn is_error(&self) -> bool
   where
     Container: AsRef<[Ident<S, Span, Lang>]>,
@@ -60,7 +60,7 @@ impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
   }
 
   /// Returns `true` if any segment in the path is a missing node.
-  #[inline]
+  #[inline(always)]
   pub fn is_missing(&self) -> bool
   where
     Container: AsRef<[Ident<S, Span, Lang>]>,
@@ -103,7 +103,7 @@ impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
   }
 
   /// Bump the span of the path by the given offset.
-  #[inline]
+  #[inline(always)]
   pub fn bump(&mut self, by: &Span::Offset) -> &mut Self
   where
     Span: crate::span::Span,
