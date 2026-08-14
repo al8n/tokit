@@ -68,47 +68,105 @@ fn take_marks() -> Vec<usize> {
   MARKS.with(|m| core::mem::take(&mut *m.borrow_mut()))
 }
 
+/// This build's reason that the address of a local is **not** a position on a native stack, if
+/// it has one.
+///
+/// Two instrumentations break the reading, and neither can be tuned around:
+///
+/// * **Miri** interprets the program, so a frame's locals are a virtual allocation rather than
+///   an offset into any real stack. `cfg!(miri)` is set for the interpreted build and is the
+///   stable spelling.
+/// * **A sanitizer** may relocate a frame's locals onto a heap-allocated *fake stack* — ASan's
+///   `detect_stack_use_after_return` machinery. There is no stable `cfg` to test:
+///   `cfg(sanitize = "address")` needs `feature(cfg_sanitize)`, which a stable-compiled
+///   integration test cannot carry. So the leg announces itself instead — `ci/sanitizer.sh`
+///   exports `TOKORA_SANITIZER` for every sanitizer it runs and its command is
+///   `cargo test --tests --all-features`, which SELECTS this file. Read at run time rather than
+///   through `option_env!`, so a cached build cannot carry a stale answer either way.
+///   `tests/pratt_limit_unit_sink.rs` gates its own address witness on the same variable.
+///
+/// This matters more here than a `cfg` would suggest. [`per_level`]'s own checks cannot tell a
+/// fake stack from a real one: allocations handed out monotonically with a constant stride pass
+/// the ordering check and the nonzero check, and the harness would then print allocation
+/// spacing as bytes per nesting level. A probe that prints a plausible number in an environment
+/// it cannot measure is the defect this probe was added to remove, one level up.
+///
+/// The argument is the environment's value rather than a read inside the body, so the refusal
+/// path has a positive control that does not have to mutate the process environment.
+fn frames_are_relocated(sanitizer: Option<&str>) -> Option<String> {
+  if cfg!(miri) {
+    return Some(String::from(
+      "miri: frame locals are separate virtual allocations, not offsets into a contiguous \
+       native stack, so their differences are allocation spacing",
+    ));
+  }
+  match sanitizer {
+    Some(san) if !san.is_empty() => Some(format!(
+      "TOKORA_SANITIZER={san}: a sanitizer-instrumented build may relocate a frame's locals onto \
+       a heap-backed fake stack, so the address of a local is not where its frame sits"
+    )),
+    _ => None,
+  }
+}
+
+/// [`frames_are_relocated`] against the real environment.
+fn relocation_reason() -> Option<String> {
+  frames_are_relocated(std::env::var("TOKORA_SANITIZER").ok().as_deref())
+}
+
+/// Says — on the process's **real** stderr — that no figure was produced and why.
+///
+/// Not `eprintln!`: libtest captures a passing test's output, so the one run where the
+/// measurement is skipped would be the one run where nobody can see that it was.
+fn announce_skipped(why: &str) {
+  use std::io::Write as _;
+  let mut err = std::io::stderr().lock();
+  let _ = writeln!(err, "stack_per_level: NO MEASUREMENT TAKEN — {why}");
+}
+
 /// The per-level cost, taken as the median of the consecutive differences so that one
 /// irregular level (the outermost, the innermost) does not set the number.
 ///
 /// # What this refuses to answer
 ///
 /// Differencing two addresses is only a frame size on a **contiguous native stack**, and
-/// nothing in the type system says the samples came from one. Three ways they might not, each
-/// of which this function rejects rather than reports:
+/// nothing in the type system says the samples came from one. Each way they might not be is
+/// rejected rather than reported, and the order of the checks is load-bearing:
 ///
-/// - **The stack grows upward.** Then inner frames have HIGHER addresses. `w[0] - w[1]`
-///   underflows; written as `saturating_sub` it produces `0` for every level and the harness
-///   prints a plausible `0 B`. [`usize::abs_diff`] measures the magnitude in either direction,
-///   so an upward-growing stack is *supported* here, not merely detected.
-/// - **The addresses are not a chain at all.** An interpreter that gives each frame's locals
-///   its own virtual allocation produces addresses with no relation to frame size — possibly
-///   monotone, possibly not. The monotonicity check below catches the unordered case; the
-///   ordered case is what the `miri` refusal is for, since Miri is exactly that interpreter and
-///   `cargo miri test` selects this file's feature set (`std` + `combinators` + `logos`).
+/// - **The environment relocates frames.** [`frames_are_relocated`] first, before anything is
+///   read out of the samples, because a fake stack can produce samples that pass every check
+///   below.
 /// - **A delta is zero.** Every level here is a real recursive call, so a zero means the
-///   samples are not measuring what the caller thinks. Zero is the value both other failures
-///   degrade to, so it is rejected on its own as well.
+///   samples are not measuring what the caller thinks. This is checked BEFORE direction: under
+///   the strict `>` / `<` this file used to carry, a repeated address failed the ordering check
+///   first and the zero-delta assertion could not fire at all — a dedicated refusal path with
+///   no reachable input is not a refusal path.
+/// - **The addresses are not a chain at all.** Checked after, and non-strictly, so it rejects
+///   exactly the shape the zero check does not: samples that go both ways. An interpreter that
+///   gives each frame's locals its own virtual allocation produces addresses with no relation
+///   to frame size; this catches the unordered case, and the refusal above catches the ordered
+///   one.
+///
+/// [`usize::abs_diff`] rather than `saturating_sub` makes an upward-growing stack a *supported*
+/// layout instead of a silent `0 B` for every level.
+///
+/// `per_level_with` takes the relocation reason as an argument so every refusal here has a
+/// positive control in [`refusals`]; [`per_level`] is the same function against the real
+/// environment.
 fn per_level(marks: &[usize]) -> usize {
-  // A backstop, not the primary guard: the test itself is `#[ignore]`d under Miri, and this
-  // catches a `cargo miri test -- --ignored` that walks past that.
+  per_level_with(relocation_reason(), marks)
+}
+
+fn per_level_with(relocated: Option<String>, marks: &[usize]) -> usize {
   assert!(
-    !cfg!(miri),
-    "stack-pointer differencing has no meaning under Miri: frame locals are separate virtual \
-     allocations, not a contiguous native stack"
+    relocated.is_none(),
+    "refusing to read frame sizes out of these samples — {}",
+    relocated.unwrap_or_default()
   );
   assert!(
     marks.len() >= 2,
     "need at least two levels to difference, got {}",
     marks.len()
-  );
-
-  let descending = marks.windows(2).all(|w| w[0] > w[1]);
-  let ascending = marks.windows(2).all(|w| w[0] < w[1]);
-  assert!(
-    descending || ascending,
-    "stack samples are not monotone in one direction, so consecutive differences are not frame \
-     sizes: {marks:?}"
   );
 
   let mut deltas: Vec<usize> = marks.windows(2).map(|w| w[0].abs_diff(w[1])).collect();
@@ -118,10 +176,16 @@ fn per_level(marks: &[usize]) -> usize {
      frame chain: {marks:?}"
   );
 
+  let descending = marks.windows(2).all(|w| w[0] >= w[1]);
+  let ascending = marks.windows(2).all(|w| w[0] <= w[1]);
+  assert!(
+    descending || ascending,
+    "stack samples are not monotone in one direction, so consecutive differences are not frame \
+     sizes: {marks:?}"
+  );
+
   deltas.sort_unstable();
-  let median = deltas[deltas.len() / 2];
-  assert_ne!(median, 0, "median of nonzero deltas is zero: {deltas:?}");
-  median
+  deltas[deltas.len() / 2]
 }
 
 // ── error type ────────────────────────────────────────────────────────────────
@@ -376,6 +440,15 @@ fn per_nesting_level_stack_cost() {
   assert_eq!(combinator_marks.len(), DEPTH);
   assert_eq!(hand_marks.len(), DEPTH);
 
+  // Everything above is a parse the two doors have to agree on, and it holds under any
+  // instrumentation. Only the numbers below need a native stack, so the refusal is here rather
+  // than at the top of the test: an environment that cannot be measured still gets its parse
+  // checked, and gets no figure.
+  if let Some(why) = relocation_reason() {
+    announce_skipped(&why);
+    return;
+  }
+
   let combinator_cost = per_level(&combinator_marks);
   let hand_cost = per_level(&hand_marks);
   println!(
@@ -383,4 +456,83 @@ fn per_nesting_level_stack_cost() {
      ratio {:.1}x",
     combinator_cost as f64 / hand_cost.max(1) as f64
   );
+}
+
+/// A positive control for every way [`per_level_with`] refuses, plus the two layouts it is
+/// supposed to accept.
+///
+/// Without these the refusals are unfalsifiable: the file's first version differenced with
+/// `saturating_sub` and printed `0 B` for every layout it did not model, and the fix that
+/// replaced it carried two assertions that no input could reach.
+mod refusals {
+  use super::{frames_are_relocated, per_level_with};
+
+  /// Innermost frame at the lowest address — the common layout.
+  #[test]
+  fn accepts_descending() {
+    assert_eq!(per_level_with(None, &[9000, 8000, 7000, 6000]), 1000);
+  }
+
+  /// An upward-growing stack is SUPPORTED, not merely detected: the same magnitude comes back.
+  #[test]
+  fn accepts_ascending() {
+    assert_eq!(per_level_with(None, &[6000, 7000, 8000, 9000]), 1000);
+  }
+
+  /// Irregular levels do not set the number; the median does.
+  #[test]
+  fn median_ignores_one_irregular_level() {
+    assert_eq!(per_level_with(None, &[9000, 8000, 7000, 500]), 1000);
+  }
+
+  #[test]
+  #[should_panic(expected = "need at least two levels to difference, got 1")]
+  fn refuses_undersized() {
+    per_level_with(None, &[9000]);
+  }
+
+  /// The check that could not fire before the reorder: strict monotonicity rejected a repeated
+  /// address first, so the zero-delta refusal had no reachable input.
+  #[test]
+  #[should_panic(expected = "cost zero bytes of stack")]
+  fn refuses_zero_delta() {
+    per_level_with(None, &[9000, 8000, 8000, 7000]);
+  }
+
+  /// …including when the repeat is the only pair, which is the shape a probe that samples one
+  /// frame twice produces.
+  #[test]
+  #[should_panic(expected = "cost zero bytes of stack")]
+  fn refuses_all_zero_deltas() {
+    per_level_with(None, &[9000, 9000, 9000]);
+  }
+
+  #[test]
+  #[should_panic(expected = "not monotone in one direction")]
+  fn refuses_reversed() {
+    per_level_with(None, &[9000, 8000, 8500, 7000]);
+  }
+
+  #[test]
+  #[should_panic(expected = "refusing to read frame sizes out of these samples")]
+  fn refuses_relocated_frames() {
+    // Samples that would otherwise pass every check — a fake stack can look exactly like this.
+    per_level_with(
+      frames_are_relocated(Some("address")),
+      &[9000, 8000, 7000, 6000],
+    );
+  }
+
+  #[test]
+  fn sanitizer_variable_is_read_as_presence() {
+    assert!(frames_are_relocated(Some("address")).is_some());
+    assert!(frames_are_relocated(Some("thread")).is_some());
+    // Unset and set-but-empty are the same thing, and neither is a sanitizer. Under Miri the
+    // detector fires on `cfg!(miri)` regardless, so it is the one build where these hold the
+    // other way.
+    if !cfg!(miri) {
+      assert!(frames_are_relocated(None).is_none());
+      assert!(frames_are_relocated(Some("")).is_none());
+    }
+  }
 }
