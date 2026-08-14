@@ -727,7 +727,8 @@ where
   /// Panics, separately, when `lex_multiple * units + BUDGET_FLOOR` does not fit in a `usize`.
   /// With the multiple clamped that needs a source of more than `usize::MAX / 65536` units, so
   /// what it refuses is not a corpus anyone can build — it is the one remaining way to reach an
-  /// unrepresentable ceiling, and an unrepresentable ceiling is the disarmed guard above.
+  /// unrepresentable ceiling, and an unrepresentable ceiling is the disarmed guard above. The
+  /// message names the knob to lower rather than reporting a number nobody configured.
   fn corpus(&self, want: usize) -> Vec<CachedTokenOf<'inp, L>> {
     let name = self.label();
     let units = self.source.slice(..).map(|s| s.len()).unwrap_or(0);

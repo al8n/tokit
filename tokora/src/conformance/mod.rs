@@ -330,9 +330,10 @@ where
   ///
   /// # Panics
   ///
-  /// Panics when `budget_multiple * source_units + 64` does not fit in a `usize`. Reaching it
-  /// needs a source of more than `usize::MAX / 65536` units — 256 TiB on a 64-bit target — so what
-  /// this replaces is not a run that used to work: it is a silently disarmed budget.
+  /// Panics when `budget_multiple * source_units + 64` does not fit in a `usize` with room above
+  /// it for the exhaustion probe. Reaching it needs a source of more than `usize::MAX / 65536`
+  /// units — 256 TiB on a 64-bit target — so what this replaces is not a run that used to work: it
+  /// is a silently disarmed budget.
   fn budget(&self, src: &'inp L::Source) -> usize {
     let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
     representable_budget(self.budget_multiple, units).unwrap_or_else(|| {
@@ -897,14 +898,21 @@ where
   }
 }
 
-/// `multiple * units + BUDGET_FLOOR`, or `None` when that does not fit in a `usize`.
+/// `multiple * units + BUDGET_FLOOR`, or `None` when that does not fit in a `usize` **with room
+/// left above it for the exhaustion probe**.
 ///
 /// The one place either budget knob turns into a number, so the "a ceiling must be a value a
 /// counter can exceed" rule is stated once. `None` is not a clamp on purpose: clamping to
 /// [`usize::MAX`] is exactly the disarmed guard, and clamping to anything smaller would silently
 /// substitute a ceiling the caller did not ask for. Both callers panic and say which knob to lower.
+///
+/// The strict upper bound is what makes [`instance_ceiling`]'s `+ 1` total rather than merely
+/// unreachable. `checked_add(BUDGET_FLOOR)` alone permits `usize::MAX`, and a derivation that adds
+/// to the budget would wrap there — the same disarmed comparison one step further on, arrived at by
+/// arithmetic instead of by configuration.
 fn representable_budget(multiple: usize, units: usize) -> Option<usize> {
-  multiple.checked_mul(units)?.checked_add(BUDGET_FLOOR)
+  let budget = multiple.checked_mul(units)?.checked_add(BUDGET_FLOOR)?;
+  (budget < usize::MAX).then_some(budget)
 }
 
 /// The per-lexer-instance early-refusal ceiling for a tier whose item budget is `budget`.
@@ -912,8 +920,8 @@ fn representable_budget(multiple: usize, units: usize) -> Option<usize> {
 /// One full pass: every item the run is allowed to produce, plus the exhaustion probe that ends
 /// it. See [`Budgeted`] for why the guard exists and why this is the only number it may use.
 ///
-/// Cannot overflow: `budget` comes from [`representable_budget`], whose `+ BUDGET_FLOOR` already
-/// proved there are at least 64 values of headroom above it.
+/// Cannot overflow: every budget in the kit comes from [`representable_budget`], which returns only
+/// values strictly below [`usize::MAX`].
 fn instance_ceiling(budget: usize) -> usize {
   budget + 1
 }
