@@ -660,6 +660,36 @@ jobs:
       - name: Probe every added name against its real owner
         run: bash ci/name_collision/run.sh "$base" /tmp/nc/inventory.json
 
+  # ── Gate: the native stack probes take their reading ────────────────────────
+  # The two address-differencing probes refuse rather than report on a build that cannot be shown
+  # to have a contiguous native stack, and `stack_per_level` refuses unless
+  # `TOKORA_STACK_PROBE=native` affirms one. No job set that affirmation, so `cargo test` printed a
+  # skip line in every green run and the figure this repository measures was unreachable in CI —
+  # the refusal that stopped a false number printing also stopped the true one. This job supplies
+  # the affirmation, and `ci/stack_probe.sh` reds when the figure does not come back.
+  #
+  # It is the mirror of the sanitizer job below, which leaves the affirmation unset so both probes
+  # refuse. Do not merge the two: under a sanitizer the addresses are not stack offsets.
+  stack-probe:
+    name: stack probe (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-stackprobe-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-stackprobe-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: ci/stack_probe.sh
+        run: bash ci/stack_probe.sh
+
   # ── Gate: sanitizers ────────────────────────────────────────────────────────
   # One sanitizer per cell, `fail-fast: false`, so an unsupported sanitizer reports as one red
   # cell rather than aborting the run. `leak` and `memory` are deliberately NOT in the matrix:

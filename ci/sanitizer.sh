@@ -35,6 +35,25 @@ SANITIZERS="${2:-address thread}"
 
 export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
 
+# ## Refusal mode, stated rather than inherited
+#
+# `stack_per_level` prints a bytes-per-nesting-level figure only when `TOKORA_STACK_PROBE=native`
+# affirms an uninstrumented build, and `ci/stack_probe.sh` is the job that supplies that
+# affirmation. This script is that job's mirror: every leg here IS instrumented, so the affirmation
+# must not be in the environment.
+#
+# It is unset rather than merely left alone because this script is run by hand as well as by CI,
+# and a shell that already exports it would otherwise carry it into an ASan process. The
+# affirmation cannot override a detection — the probe returns the sanitizer as its reason, not the
+# variable — so this is the belt to that brace, and it keeps the skip line naming the sanitizer.
+#
+# Note what `ASAN_OPTIONS` above does NOT say: `detect_stack_use_after_return`. The fake stack is
+# off, so under the `address` leg frames are NOT relocated and `frames_reused()` correctly reports
+# that they are reused. ThreadSanitizer never relocates a frame at all. The refusal in both legs
+# rests on the compiler's `sanitize=` report, which is why it must not be made to depend on the
+# frame observation.
+unset TOKORA_STACK_PROBE
+
 # ## Telling the tests they are instrumented — no longer this variable's job alone
 #
 # Two tests compare the addresses of stack locals: `pratt_limit_unit_sink`'s unwind cell, which
