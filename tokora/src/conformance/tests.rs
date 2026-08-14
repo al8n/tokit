@@ -1086,6 +1086,94 @@ fn an_error_whose_payload_changes_on_append_is_falsified() {
   Harness::<DriftingErrLexer<'_>>::over(["abz"]).run_partial();
 }
 
+// ── The anti-hang budget, and why it cannot live at the `next()` boundary ───────────
+//
+// `InputRef::next` is a LOOP: it keeps lexing after every lexer error it accepts until it finds
+// a token or reaches end of input. A budget checked once per `next()` call therefore bounds the
+// number of items the drain yields and not the work the lexer is asked to do — and the two come
+// apart exactly on a malformed lexer, which is the case the kit exists to reject.
+//
+// The fixture below is the smallest witness: it never advances and never exhausts, so one `next()`
+// never returns. The input layer's error dedup keys on the span end, so after the first report the
+// log stops growing too and a log-length budget stays flat forever. Only a counter UNDERNEATH
+// `next()` — one that counts every raw `Lexer::lex` attempt — can end this run.
+
+/// A lexer that neither advances nor exhausts: every [`lex`](Lexer::lex) returns the **same**
+/// nonempty error span, forever.
+///
+/// Deliberately not a plausible lexer. It is the malformed input the harness is supposed to
+/// refuse, reduced to its two load-bearing properties: the span is nonempty (so the input layer's
+/// zero-width contract check does not fire first) and it never changes (so the dedup watermark
+/// suppresses every report after the first).
+struct EndlessErrLexer<'a> {
+  src: &'a str,
+  state: (),
+}
+
+impl EndlessErrLexer<'_> {
+  /// The one span this lexer ever reports: the first character of the source.
+  fn only_span(&self) -> SimpleSpan {
+    SimpleSpan::new(0, boundary_after(self.src, 0))
+  }
+}
+
+impl<'a> Lexer<'a> for EndlessErrLexer<'a> {
+  type State = ();
+  type Source = str;
+  type Token = ETok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self { src, state: () }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self { src, state }
+  }
+  fn check(&self) -> Result<(), BadByte> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    self.only_span()
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[..self.only_span().end]
+  }
+  fn lex(&mut self) -> Option<Result<ETok, BadByte>> {
+    if self.src.is_empty() {
+      return None;
+    }
+    Some(Err(BadByte { reason: "endless" }))
+  }
+  /// `SpanEnd`, so the error is not withheld at the frontier: the point of the fixture is the
+  /// loop inside one `next()`, not the holdback.
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
+  fn bump(&mut self, _n: &usize) {}
+}
+
+#[test]
+#[should_panic(expected = "lex-budget")]
+fn an_endless_same_span_error_lexer_is_refused_not_hung() {
+  // Before the budget moved underneath `next()`, this call did not fail — it HUNG. The first
+  // `complete_stream` drain enters `next()`, the scanner accepts an error, skips it, lexes the
+  // identical error again, and never returns; the log holds the one report the dedup let through,
+  // so the per-`next()` budget it was checked against never grows.
+  Harness::<EndlessErrLexer<'_>>::over(["abc"]).run_partial();
+}
+
 // ── Positive: the crate's real logos adapter (LogosLexer) ───────────────────────────
 
 #[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]

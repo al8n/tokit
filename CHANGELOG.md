@@ -477,6 +477,33 @@ and will red until they do.
 
 ### Fixed
 
+- **`Harness::run_partial` hung, rather than refusing, on a lexer that never terminates — its
+  anti-hang budget was checked at the `next()` boundary and `next()` is a loop.** `InputRef::next`
+  keeps lexing after every lexer error it accepts until it finds a token or reaches end of input,
+  so a budget read once per call bounds the items a drain *yields* and says nothing about how often
+  the lexer is asked to lex. The two come apart on exactly the malformed lexer the kit exists to
+  reject: a lexer returning the same nonempty error forever is reported **once** — the input
+  layer's error dedup keys on the span end — and then silently skipped, so the item log stays flat
+  while the call never returns. `run_partial` spun instead of panicking, on the lexer that most
+  needed the panic.
+
+  Both drains — and every schedule in the integration tier, which had the identical shape — now
+  run the lexer under a wrapper that counts **every raw `Lexer::lex` attempt** against a ceiling
+  derived from the source, and refuses at it. The counter lives on the lexer instance, which is
+  where "inside `next()`" is: the input layer builds one lexer per operation and runs that call's
+  whole internal loop on it, while the drain loops above it are bounded independently because every
+  iteration either appends an item or leaves the loop. The ceiling is read off the source rather
+  than from `budget_multiple`, because it answers a different question — how many times *one*
+  lexer may be asked to lex, which the monotone-progress contract already fixes at one item per
+  source unit — and because `Lexer::with_state` is handed only a source and a state.
+
+  The integration tier's guards were the same defect and had not fired: the trait-tier checks that
+  run before it happen to reject a non-terminating lexer first. That is an argument about check
+  order, not a bound, so they are wrapped too. The same wrapper is also what now bounds a
+  zero-width-span lexer in a **release** build of a downstream's test suite: the input layer's
+  nonempty-span check is a `debug_assert!`, so before this the only thing standing between a
+  zero-width span and a spinning scanner was the per-`next()` budget this replaces.
+
 - **`IncompleteSyntax::as_slice` no longer stops at the ring boundary** (#245). The components
   live in a `GenericArrayDeque`, and a deque is not one physical slice: `push_front` moves the
   head off zero, after which `as_slices()` has two segments. The accessor returned the first
