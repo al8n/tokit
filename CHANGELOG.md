@@ -444,14 +444,35 @@ and will red until they do.
     keeps its default — omission there fails *closed at compile time*, because the lossless
     `cst::Sink` refuses to be built over an undeclared vocabulary; omission here failed *open at
     run time*.
-  - `State::probe` and `State::clear_probe`, the **value** channel, read off the logos `Extras`
-    — the one thing a `logos` callback can write to. A callback that peeks with
+  - `State::take_probe`, the **value** channel, taken out of the logos `Extras` — the one thing a
+    `logos` callback can write to. A callback that peeks with
     `lexer.remainder()` knows exactly how far it looked and records the absolute offset — which
     is `lexer.span().end + n - 1` for `n` bytes successfully inspected past the match, since a
     span is half-open and `span.end` is already the first offset outside it; `span.end + n` is
     right only when the scan also reached for the byte at that offset and found end of input.
-    Both methods are defaulted (`None` and a no-op), so no existing `State` impl breaks and a
-    state that records nothing pays nothing.
+    It is defaulted to `None`, so no existing `State` impl breaks and a state that records
+    nothing pays nothing.
+
+    **It is ONE consuming operation, and that is a correction to the design.** The channel
+    shipped in a first cut as two independently defaulted members — a `probe(&self)` reader
+    beside a `clear_probe(&mut self)` reset — and that pair could be half-implemented. A `State`
+    overriding the reader and inheriting the empty reset compiled, the adapter called a reset
+    that did nothing, and a value carried in on a restored state survived into a scan that
+    recorded nothing. Provenance then *accepted* it, because a rebuilt lexer can begin its first
+    item at exactly the offset that value was keyed to — and a recorded value answers the
+    frontier contract outright, so the vocabulary's honest `Unbounded` was never consulted.
+    Non-final `"1."` with a state claiming a scan from 0 probed to 1: `read_frontier` answered
+    `ReadTo(1)`, the driver's floor left it at `max(1, 1) = 1`, and `1 < 2` **committed**
+    `Int@0..1` out of a buffer still being read; append `5` and the same bytes are one
+    `Float@0..3`. That is the defect `READ_FRONTIER_CLASS`'s removed default had — a default
+    that fails *open* — one level down, and the same repair does not apply: making the reset
+    required would break every `State` impl including the ones that record nothing. Collapsing
+    the pair does apply. Reading consumes, so there is no sibling to inherit or forget, and a
+    state that implements nothing records nothing. The adapter calls the one method twice per
+    `lex` — once before the scan, discarding whatever came in on the state, and once after,
+    capturing what the scan recorded — and `LogosLexer` now holds the captured value, so
+    `Lexer::read_frontier` stays the `&self` pure read the conformance kit's check 7 requires it
+    to be.
 
   A recorded value answers the contract for its item outright, so it must cover the engine's
   backtracking too and not only the callback's own peek.
@@ -475,7 +496,7 @@ and will red until they do.
   as on the token arm, since a callback may mutate `extras` and the item still arrive as an
   `Err`. Anything else falls back to `READ_FRONTIER_CLASS`, which the vocabulary had to write
   down. The check lives in the adapter rather than in a rule recorders must follow,
-  because a recorder can only state a fact about the scan it is running in. `clear_probe` is
+  because a recorder can only state a fact about the scan it is running in. The pre-scan take is
   kept beside it and is not redundant: an equal start is *evidence* of provenance, and a lexer
   rebuilt by `Lexer::with_state` + `Lexer::bump` — which is how `InputRef` resumes — can begin
   its first item at exactly the offset a restored state's value was keyed to.

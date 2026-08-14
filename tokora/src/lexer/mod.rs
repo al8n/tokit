@@ -353,7 +353,7 @@ pub enum ReadFrontier<O> {
 /// The claim answers for **an item whose scan recorded no frontier in the lexer state** — and for
 /// one whose state holds a value recorded by a *different* scan, which is what a skipped trivia
 /// callback leaves behind. Only a value the item's own scan recorded answers instead of the claim
-/// (see [`State::probe`] and [`Probe`](crate::Probe)).
+/// (see [`State::take_probe`] and [`Probe`](crate::Probe)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ReadFrontierClass {

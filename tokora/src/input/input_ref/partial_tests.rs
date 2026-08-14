@@ -3676,12 +3676,11 @@ impl State for PeekRec {
     Ok(())
   }
 
-  fn probe(&self) -> Option<crate::Probe> {
-    self.probe.map(|(from, to)| crate::Probe::new(from, to))
-  }
-
-  fn clear_probe(&mut self) {
-    self.probe = None;
+  fn take_probe(&mut self) -> Option<crate::Probe> {
+    self
+      .probe
+      .take()
+      .map(|(from, to)| crate::Probe::new(from, to))
   }
 }
 

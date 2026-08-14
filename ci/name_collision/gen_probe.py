@@ -1484,20 +1484,20 @@ def trait_method(name, owner, spelling):
         "path_segments_iter": "",
         # `ErrorContainer::clear(&mut self)` — no argument beyond the receiver.
         "clear": "",
-        # #282's read frontier. All three take no argument beyond the receiver, so they are the
+        # #282's read frontier. Both take no argument beyond the receiver, so they are the
         # empty-argument shape this table already serves — not the multi-argument support #225
-        # declines. `read_frontier` and `probe` are `&self`; `clear_probe` is `&mut self`,
-        # which is the foreknown-vacuous shape #225 names, so read its verdict against the
-        # bound written in `no_collision.txt` rather than as evidence the name is safe.
+        # declines. `read_frontier` is `&self`; `take_probe` is `&mut self`, which is the
+        # foreknown-vacuous shape #225 names, so read its verdict against the bound written in
+        # `no_collision.txt` rather than as evidence the name is safe.
         #
-        # `probe` is `State::probed_to` renamed, not a new name: the value channel now returns a
-        # `Probe` carrying the offset its scan started at, so the old name described half of it.
-        # The row keeps `probed_to`'s analysis because the shape is unchanged — `&self`, no
-        # argument — and `probed_to` itself moved to an INHERENT method on `Probe`, which is a
-        # different template and a different row.
+        # `take_probe` is the value channel, and it replaces the `probe`/`clear_probe` pair this
+        # branch first shipped: two independently defaulted members could be half-implemented, so
+        # reading now consumes and there is one method where there were two. It keeps
+        # `clear_probe`'s row analysis because the shape is identical — `&mut self`, no argument,
+        # subject `()`. `probed_to`, which `probe` was itself a rename of, is an INHERENT method
+        # on `Probe`: a different template and a different row.
         "read_frontier": "",
-        "probe": "",
-        "clear_probe": "",
+        "take_probe": "",
     }.get(name)
     if args is None:
         # The pointer matters more than the refusal. An author who lands here reads "add a

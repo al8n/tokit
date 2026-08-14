@@ -2600,7 +2600,7 @@ mod prefix_backtracking {
 // the scan that produced the item. What provenance therefore cannot police is what that scan's
 // callback did NOT see: the engine probes past its own match before settling, and a recorder
 // that reports only its own bytes under-reports for its own item. That is the burden
-// `State::probe` puts on the recorder, and the two cells below are the check on it.
+// `State::take_probe` puts on the recorder, and the two cells below are the check on it.
 #[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]
 mod recorded_value {
   use super::Harness;
@@ -2639,12 +2639,8 @@ mod recorded_value {
       Ok(())
     }
 
-    fn probe(&self) -> Option<Probe> {
-      self.probe
-    }
-
-    fn clear_probe(&mut self) {
-      self.probe = None;
+    fn take_probe(&mut self) -> Option<Probe> {
+      self.probe.take()
     }
   }
 

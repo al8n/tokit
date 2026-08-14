@@ -870,12 +870,8 @@ where
     self.inner.check()
   }
 
-  fn probe(&self) -> Option<crate::state::Probe> {
-    self.inner.probe()
-  }
-
-  fn clear_probe(&mut self) {
-    self.inner.clear_probe();
+  fn take_probe(&mut self) -> Option<crate::state::Probe> {
+    self.inner.take_probe()
   }
 }
 

@@ -123,7 +123,7 @@ pub trait State: core::fmt::Debug + Clone {
   /// typically wraps this one into the token's error type).
   fn check(&self) -> Result<(), Self::Error>;
 
-  /// The [`Probe`] the most recent scan recorded here, if it recorded one.
+  /// Takes the [`Probe`] the most recent scan recorded here, leaving nothing behind.
   ///
   /// This is the **value channel** behind [`Lexer::read_frontier`](crate::Lexer::read_frontier)
   /// for an adapter that cannot see its engine's probe frontier. The bundled logos adapter is the
@@ -136,6 +136,26 @@ pub trait State: core::fmt::Debug + Clone {
   /// Offsets are `usize` because that is the offset type of every source the logos adapter can
   /// carry. A hand-written lexer implements
   /// [`Lexer::read_frontier`](crate::Lexer::read_frontier) directly and never needs this.
+  ///
+  /// # Reading IS clearing, and that is the point
+  ///
+  /// The channel needs two things of a state: hand the value over, and be empty before the next
+  /// scan runs. Those were once two defaulted members, and the pair could be half-implemented —
+  /// override the reader, inherit the empty reset, and the state hands out a value nothing ever
+  /// removes. That is not a coarser answer but a wrong one, because a recorded value **answers
+  /// the frontier contract outright**: a value predating the lexer entirely wins over the
+  /// vocabulary's honest [`Unbounded`](crate::ReadFrontierClass::Unbounded), and the driver's
+  /// `max(span.end, reported)` floor can leave it below a growing buffer's length, releasing an
+  /// item whose scan really did reach the buffer end.
+  ///
+  /// One consuming operation cannot be half-implemented: there is no sibling to forget, and a
+  /// state that implements nothing records nothing. Taking is therefore part of the contract, not
+  /// an optimisation — an implementation that returns the value without removing it re-offers,
+  /// on the next scan, a value that scan did not record.
+  ///
+  /// The adapter calls this **twice** per `lex`, and both calls are this one method: once
+  /// immediately before the scan, discarding whatever came in on a restored state, and once
+  /// after, capturing what the scan recorded.
   ///
   /// # It answers for ONE scan, and the recorded start is what says which
   ///
@@ -150,10 +170,10 @@ pub trait State: core::fmt::Debug + Clone {
   /// that yields nothing, and the scan that does yield the item may run no callback at all. See
   /// [`Probe`] for the mechanism.
   ///
-  /// [`clear_probe`](Self::clear_probe) runs immediately before each scan as well, which is a
-  /// second, independent guard: provenance rejects a stale value by mismatch, and clearing
-  /// removes it, so a rebuilt lexer positioned by [`bump`](crate::Lexer::bump) cannot start an
-  /// item at exactly the offset a restored state's value was keyed to.
+  /// The pre-scan take is a second, independent guard: provenance rejects a stale value by
+  /// mismatch, and taking removes it, so a rebuilt lexer positioned by
+  /// [`bump`](crate::Lexer::bump) cannot start an item at exactly the offset a restored state's
+  /// value was keyed to.
   ///
   /// # What a recorded value must cover
   ///
@@ -179,30 +199,16 @@ pub trait State: core::fmt::Debug + Clone {
   ///
   /// The default is `None` — "this state records nothing" — which degrades to the vocabulary's
   /// class claim and never below it. That is the safe direction: not implementing this costs
-  /// precision, never soundness.
+  /// precision, never soundness. A state that records nothing pays nothing: the default is an
+  /// empty `#[inline(always)]` body.
   ///
   /// Like everything else a scan makes visible, it must be a pure function of source, offset and
   /// state (see the [determinism clause](crate::Lexer#the-lexer-contract)). Living in the state is
   /// exactly what makes it rewind with a checkpoint restore and reproduce on replay.
   #[inline(always)]
-  fn probe(&self) -> Option<Probe> {
+  fn take_probe(&mut self) -> Option<Probe> {
     None
   }
-
-  /// Clears whatever [`probe`](Self::probe) would report, so the next scan starts from
-  /// "nothing recorded".
-  ///
-  /// The adapter calls this immediately before each scan. It is not what makes the value
-  /// per-item — [`Probe::scanned_from`] is, and it has to be, because one scan is not one `lex`
-  /// call. What clearing adds is the guard provenance cannot supply: an equal start is only
-  /// *evidence* of provenance, and a lexer rebuilt from a restored state and positioned by
-  /// [`bump`](crate::Lexer::bump) can begin an item at exactly the offset that state's value was
-  /// keyed to. Clearing removes the value before any scan can be matched against it.
-  ///
-  /// The default is a no-op, matching [`probe`](Self::probe)'s `None`. A state that records
-  /// nothing pays nothing: both are `#[inline(always)]` and empty.
-  #[inline(always)]
-  fn clear_probe(&mut self) {}
 }
 
 impl State for () {

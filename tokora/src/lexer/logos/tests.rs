@@ -667,12 +667,11 @@ impl crate::State for PeekRecorder {
     Ok(())
   }
 
-  fn probe(&self) -> Option<crate::Probe> {
-    self.probe.map(|(from, to)| crate::Probe::new(from, to))
-  }
-
-  fn clear_probe(&mut self) {
-    self.probe = None;
+  fn take_probe(&mut self) -> Option<crate::Probe> {
+    self
+      .probe
+      .take()
+      .map(|(from, to)| crate::Probe::new(from, to))
   }
 }
 
@@ -824,6 +823,17 @@ fn run_trivia_partial(
   src: &str,
   is_final: bool,
 ) -> (std::vec::Vec<TriviaKind>, Result<Option<()>, TripErr>) {
+  run_trivia_partial_from(src, PeekRecorder::default(), is_final)
+}
+
+/// [`run_trivia_partial`] starting from a state that already carries a value — the shape
+/// `InputRef::resume_from` produces, where a recording made by some earlier scan travels in the
+/// state into a lexer that never ran it.
+fn run_trivia_partial_from(
+  src: &str,
+  state: PeekRecorder,
+  is_final: bool,
+) -> (std::vec::Vec<TriviaKind>, Result<Option<()>, TripErr>) {
   let mut input = crate::input::Input::<
     TriviaLexer<'_>,
     TriviaCtx<'_>,
@@ -831,7 +841,7 @@ fn run_trivia_partial(
     crate::input::Partial,
   >::with_state_and_context(
     src,
-    PeekRecorder::default(),
+    state,
     crate::input::InputContext::new(
       crate::emitter::Verbose::<TripErr>::new(),
       crate::cache::DefaultCache::<'_, TriviaLexer<'_>>::default(),
@@ -879,7 +889,7 @@ fn a_probe_left_by_a_scan_that_produced_no_item_does_not_survive_the_next_call()
   // `"  "` is all trivia: the callback records `(0, 2)`, the rescan hits end of input, and
   // `lex()` returns `None` with a value still sitting in the state. No item was produced, so
   // nothing asks `read_frontier` about it — but the leftover must not be able to reach a later
-  // item either. `clear_probe` before each scan is what guarantees that, and it is the guard
+  // item either. The `take_probe` before each scan is what guarantees that, and it is the guard
   // provenance cannot supply: a rebuilt lexer positioned by `bump` can start an item at exactly
   // the offset a stale value was keyed to.
   let mut lexer = TriviaLexer::new("  ");
@@ -895,7 +905,7 @@ fn a_probe_left_by_a_scan_that_produced_no_item_does_not_survive_the_next_call()
 
 #[test]
 fn a_probe_restored_with_the_state_cannot_answer_for_a_rebuilt_lexers_first_item() {
-  // Why `clear_probe` is kept rather than retired as redundant, spelled as a falsifier.
+  // Why the pre-scan take is kept rather than retired as redundant, spelled as a falsifier.
   //
   // The input layer rebuilds a lexer through `with_state` + `bump`
   // (`InputRef::resume_from`), so a value recorded by some earlier scan — in another lexer, at
@@ -904,8 +914,8 @@ fn a_probe_restored_with_the_state_cannot_answer_for_a_rebuilt_lexers_first_item
   // and the rebuilt lexer's first item really does begin at 0, so the check would accept it.
   //
   // `Int@0..1` in `"1."` is decided by probing offset 2 and finding end of input, so accepting
-  // the restored `1` is the same under-report the skipped-trivia cells above pin. Clearing
-  // before the scan removes the value before any start can be matched against it.
+  // the restored `1` is the same under-report the skipped-trivia cells above pin. Taking the
+  // value before the scan removes it before any start can be matched against it.
   let mut lexer = TriviaLexer::with_state(
     "1.",
     PeekRecorder {
@@ -918,5 +928,48 @@ fn a_probe_restored_with_the_state_cannot_answer_for_a_rebuilt_lexers_first_item
     lexer.read_frontier(),
     crate::ReadFrontier::Unbounded,
     "the scan that produced this item recorded nothing — the value arrived with the state"
+  );
+}
+
+#[test]
+fn a_probe_restored_with_the_state_cannot_release_an_item_out_of_a_growing_buffer() {
+  // The cell above one level up, where the same accepted value is an unsoundness rather than a
+  // wrong answer — and the reason the channel is ONE consuming operation rather than a reader
+  // beside a reset.
+  //
+  // While those were two independently defaulted members, a `State` could override the reader and
+  // silently inherit the empty reset. The adapter then called a reset that did nothing, the scan
+  // recorded nothing, and provenance ACCEPTED the restored value because the starts matched. A
+  // recorded value answers the frontier contract outright, so the vocabulary's honest `Unbounded`
+  // was never consulted: `read_frontier` returned `ReadTo(1)`, the driver floored it at the item's
+  // own span end — still 1 — and `1 < 2` committed `Int` out of a buffer still being read. One
+  // appended byte and the same offsets are `Float@0..3`.
+  //
+  // `State::take_probe` consumes, so the pre-scan take IS the reset and there is no sibling to
+  // inherit. This cell is what fails if that take is ever dropped from `lex`.
+  assert_eq!(
+    run_trivia_partial_from(
+      "1.",
+      PeekRecorder {
+        probe: Some((0, 1)),
+      },
+      false,
+    ),
+    (std::vec![], Err(TripErr::Incomplete)),
+    "a value recorded before this lexer existed may not release an item out of a growing buffer"
+  );
+
+  // The append that proves the withholding was right and not merely conservative.
+  assert_eq!(
+    run_trivia_partial_from(
+      "1.5",
+      PeekRecorder {
+        probe: Some((0, 1)),
+      },
+      true,
+    )
+    .0,
+    std::vec![TriviaKind::Float],
+    "one byte more and the committed integer was never an integer"
   );
 }
