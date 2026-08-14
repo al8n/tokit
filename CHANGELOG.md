@@ -541,12 +541,14 @@ and will red until they do.
   setting was false forever: the endless-error lexer these guards exist to refuse ran until the
   process was killed, reporting nothing on the way, and the counter's own overflow is 2⁶⁴ increments
   away in either profile. A knob documenting no maximum could therefore switch off the guard it
-  configures, silently. Both multiples are now clamped to `65536` per source unit — the point past
+  configures, silently. Both multiples are now capped at `65536` per source unit — the point past
   which the kit cannot tell a dense lexer from a nonterminating one, which is the honest limit of
   what it certifies — and both ceilings are computed with checked arithmetic, so the *product*
   cannot saturate on a 32-bit target either; an unrepresentable ceiling panics and names the knob
-  to lower instead of disarming itself. Each clamp is pinned by a cell that drives an endless lexer
-  at the maximum accepted setting and requires the `lex-budget` refusal to still arrive.
+  to lower instead of switching itself off. The cap is a **refusal** rather than a clamp, for
+  reasons set out under the `run_partial` entry below, and each knob is pinned by a cell that
+  drives an endless lexer at the maximum *accepted* setting and requires the `lex-budget` refusal
+  to still arrive.
 
 - **`Harness::run_partial` hung, rather than refusing, on a lexer that never terminates — its
   anti-hang budget was checked at the `next()` boundary and `next()` is a loop.** `InputRef::next`
@@ -611,21 +613,41 @@ and will red until they do.
   falsely refuse a legitimate lexer, which no constant repairs. Measured across the whole in-tree
   suite the tightest headroom is 42.8x.
 
-  **Both counters compare before they increment**, which is what keeps that looseness safe. The
-  aggregate ceiling *saturates*, and a saturated `usize::MAX` made `spent += 1; spent > limit`
-  overflow before it ever compared — debug panicked with the wrong message, release wrapped the
-  tally to zero and handed the run its whole allowance again, silently, as often as the work asked.
-  It is reachable without contrivance on a 32-bit target: 11,580 units at the default multiple, 127
-  at the maximum. `spent >= limit` asked first, with the increment only on the allowed path, makes
-  the arithmetic total without moving any lexer's verdict — `limit` attempts still pass and the
-  `limit + 1`-th still refuses. `instance_ceiling(budget)` is `budget + 1` over a budget that may be
-  `usize::MAX - 1`, so the per-instance counter had the same defect and takes the same order.
+  **Both counters compare before they increment**, which is what keeps that looseness safe. While
+  the aggregate ceiling was a `usize` it *saturated*, and a saturated `usize::MAX` made
+  `spent += 1; spent > limit` overflow before it ever compared — debug panicked with the wrong
+  message, release wrapped the tally to zero and handed the run its whole allowance again,
+  silently, as often as the work asked. `spent >= limit` asked first, with the increment only on
+  the allowed path, makes the arithmetic total without moving any lexer's verdict — `limit`
+  attempts still pass and the `limit + 1`-th still refuses. `instance_ceiling(budget)` is
+  `budget + 1` over a budget that may be `usize::MAX - 1`, so the per-instance counter had the same
+  defect and takes the same order.
 
-  A saturated ceiling is therefore still **enforced**: the comparison reaches `usize::MAX`, so what
-  the tally contributes on such a source is a flat hard cap of `usize::MAX` attempts rather than a
-  bound derived from the source. That cap has its own false refusal — the shortfall is flat while
-  the formula is quadratic, about 75× at 100,000 units on a 32-bit target — and it is recorded on
-  `lex_attempt_ceiling` beside the reason saturating still beats refusing at derivation time.
+  **The aggregate ceiling and the tally count in `u128`, not in the host's `usize`.** The formula
+  is quadratic in the source — `run_partial` drives every split point, so `drains` is `units + 3` —
+  while a `usize` is not, and in `usize` it saturated at 11,580 units at the default multiple and
+  127 at the maximum on a 32-bit target. The tally then stopped being a bound derived from the
+  source and became a flat `usize::MAX` cap, flat while the formula it replaced kept growing: about
+  75× short at 100,000 units.
+
+  That cap was reachable by an **ordinary lexer over an ordinary source**, which is what made it a
+  defect and not a recorded cost. A conforming `SpanEnd` lexer emitting one item per byte spends
+  about one attempt per item, and the partial sweep drives it over every split of the source: over
+  100 KB that is on the order of five billion prefix attempts, already past `usize::MAX` at 32 bits
+  before the two full-input drains are counted. Such a lexer passed at 64 bits and took an ordinary
+  `lex-budget` refusal at 32 — the kit reporting its own arithmetic as the lexer's fault — and
+  `budget_multiple` could not help, because every permitted setting collapses to the same cap. The
+  ceiling is now the same number at every target width, and the 32-bit refusal is gone rather than
+  raised.
+
+  **A ceiling the kit runs out of is reported as the kit's limit, under its own tag.** `u128` is
+  still finite, so the derivation is *checked* and records the one case it does not fit —
+  exactly, rather than inferred from a saturated value. Exhausting that ceiling panics under
+  `kit-capacity` rather than `lex-budget` and says INCONCLUSIVE and *not a verdict on the lexer*,
+  because the truth there is that the counter ran out and nothing was decided about the lexer
+  either way. Reaching it needs about 2⁵⁵ source units, and it is distinguished anyway: a caller
+  who does arrive must be told the right thing. `CacheHarness`'s unrepresentable-ceiling panic
+  takes the same tag for the same reason — it fires before the lexer is asked to lex once.
 
   **`Harness::budget_multiple` and `CacheHarness::lex_attempts_multiple` now panic above 65536
   rather than clamping to it.** The cap is unchanged and still necessary — a multiple of
