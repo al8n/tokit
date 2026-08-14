@@ -158,6 +158,7 @@ impl From<&Token> for TokenKind {
 impl TokenT<'_> for Token {
   type Kind = TokenKind;
   type Error = LexError;
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
   fn kind(&self) -> TokenKind { TokenKind::from(self) }
   fn is_trivia(&self) -> bool { false }
 }
@@ -386,7 +387,7 @@ of a token-level `try_pratt_rhs` returning `None`: `parse_rhs` must always retur
 # impl From<&Token> for TokenKind {
 #   fn from(t: &Token) -> Self { match t { Token::Num(_) => Self::Num, Token::Ident(_) => Self::Ident, Token::PlusPlus => Self::PlusPlus, Token::MinusMinus => Self::MinusMinus, Token::EqEq => Self::EqEq, Token::BangEq => Self::BangEq, Token::LtEq => Self::LtEq, Token::GtEq => Self::GtEq, Token::AmpAmp => Self::AmpAmp, Token::PipePipe => Self::PipePipe, Token::Shl => Self::Shl, Token::Shr => Self::Shr, Token::Plus => Self::Plus, Token::Minus => Self::Minus, Token::Star => Self::Star, Token::Slash => Self::Slash, Token::Percent => Self::Percent, Token::Amp => Self::Amp, Token::Pipe => Self::Pipe, Token::Caret => Self::Caret, Token::Tilde => Self::Tilde, Token::Bang => Self::Bang, Token::Question => Self::Question, Token::Colon => Self::Colon, Token::Lt => Self::Lt, Token::Gt => Self::Gt, Token::Comma => Self::Comma, Token::LParen => Self::LParen, Token::RParen => Self::RParen, Token::LBracket => Self::LBracket, Token::RBracket => Self::RBracket } }
 # }
-# impl TokenT<'_> for Token { type Kind = TokenKind; type Error = LexError; fn kind(&self) -> TokenKind { TokenKind::from(self) } fn is_trivia(&self) -> bool { false } }
+# impl TokenT<'_> for Token { type Kind = TokenKind; type Error = LexError; const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded; fn kind(&self) -> TokenKind { TokenKind::from(self) } fn is_trivia(&self) -> bool { false } }
 # type CExprLexer<'a> = tokora::lexer::LogosLexer<'a, Token>;
 # #[derive(Debug)] enum CExprError { Lex(LexError), UnexpectedToken, UnexpectedEot }
 # impl From<LexError> for CExprError { fn from(e: LexError) -> Self { Self::Lex(e) } }
@@ -573,7 +574,7 @@ delimiter.
 # impl From<&Token> for TokenKind {
 #   fn from(t: &Token) -> Self { match t { Token::Num(_) => Self::Num, Token::Ident(_) => Self::Ident, Token::PlusPlus => Self::PlusPlus, Token::MinusMinus => Self::MinusMinus, Token::EqEq => Self::EqEq, Token::BangEq => Self::BangEq, Token::LtEq => Self::LtEq, Token::GtEq => Self::GtEq, Token::AmpAmp => Self::AmpAmp, Token::PipePipe => Self::PipePipe, Token::Shl => Self::Shl, Token::Shr => Self::Shr, Token::Plus => Self::Plus, Token::Minus => Self::Minus, Token::Star => Self::Star, Token::Slash => Self::Slash, Token::Percent => Self::Percent, Token::Amp => Self::Amp, Token::Pipe => Self::Pipe, Token::Caret => Self::Caret, Token::Tilde => Self::Tilde, Token::Bang => Self::Bang, Token::Question => Self::Question, Token::Colon => Self::Colon, Token::Lt => Self::Lt, Token::Gt => Self::Gt, Token::Comma => Self::Comma, Token::LParen => Self::LParen, Token::RParen => Self::RParen, Token::LBracket => Self::LBracket, Token::RBracket => Self::RBracket } }
 # }
-# impl TokenT<'_> for Token { type Kind = TokenKind; type Error = LexError; fn kind(&self) -> TokenKind { TokenKind::from(self) } fn is_trivia(&self) -> bool { false } }
+# impl TokenT<'_> for Token { type Kind = TokenKind; type Error = LexError; const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded; fn kind(&self) -> TokenKind { TokenKind::from(self) } fn is_trivia(&self) -> bool { false } }
 # type CExprLexer<'a> = tokora::lexer::LogosLexer<'a, Token>;
 # #[derive(Debug)] enum CExprError { Lex(LexError), UnexpectedToken, UnexpectedEot }
 # impl From<LexError> for CExprError { fn from(e: LexError) -> Self { Self::Lex(e) } }
@@ -790,7 +791,7 @@ operators — now executable inline:
 # impl From<&Token> for TokenKind {
 #   fn from(t: &Token) -> Self { match t { Token::Num(_) => Self::Num, Token::Ident(_) => Self::Ident, Token::PlusPlus => Self::PlusPlus, Token::MinusMinus => Self::MinusMinus, Token::EqEq => Self::EqEq, Token::BangEq => Self::BangEq, Token::LtEq => Self::LtEq, Token::GtEq => Self::GtEq, Token::AmpAmp => Self::AmpAmp, Token::PipePipe => Self::PipePipe, Token::Shl => Self::Shl, Token::Shr => Self::Shr, Token::Plus => Self::Plus, Token::Minus => Self::Minus, Token::Star => Self::Star, Token::Slash => Self::Slash, Token::Percent => Self::Percent, Token::Amp => Self::Amp, Token::Pipe => Self::Pipe, Token::Caret => Self::Caret, Token::Tilde => Self::Tilde, Token::Bang => Self::Bang, Token::Question => Self::Question, Token::Colon => Self::Colon, Token::Lt => Self::Lt, Token::Gt => Self::Gt, Token::Comma => Self::Comma, Token::LParen => Self::LParen, Token::RParen => Self::RParen, Token::LBracket => Self::LBracket, Token::RBracket => Self::RBracket } }
 # }
-# impl TokenT<'_> for Token { type Kind = TokenKind; type Error = LexError; fn kind(&self) -> TokenKind { TokenKind::from(self) } fn is_trivia(&self) -> bool { false } }
+# impl TokenT<'_> for Token { type Kind = TokenKind; type Error = LexError; const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded; fn kind(&self) -> TokenKind { TokenKind::from(self) } fn is_trivia(&self) -> bool { false } }
 # type CExprLexer<'a> = tokora::lexer::LogosLexer<'a, Token>;
 # #[derive(Debug)] enum CExprError { Lex(LexError), UnexpectedToken, UnexpectedEot }
 # impl From<LexError> for CExprError { fn from(e: LexError) -> Self { Self::Lex(e) } }

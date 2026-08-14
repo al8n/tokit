@@ -187,6 +187,8 @@ impl TokenT<'_> for Tok {
   type Kind = Kind;
   type Error = RErr;
 
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> Kind {
     match self {
       Tok::Ident => Kind::Ident,

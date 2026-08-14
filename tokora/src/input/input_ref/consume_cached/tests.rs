@@ -36,6 +36,8 @@ impl core::fmt::Display for TokKind {
 impl crate::Token<'_> for Tok {
   type Kind = TokKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
   fn kind(&self) -> TokKind {
     match self {
       Tok::Word => TokKind::Word,

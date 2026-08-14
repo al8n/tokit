@@ -32,6 +32,8 @@ impl Token<'_> for MiniTok {
   type Kind = u8;
   type Error = MiniErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   // honest: byte-per-token, never skips a byte
   const SURFACES_TRIVIA: bool = true;
 
@@ -6391,6 +6393,8 @@ struct OwnedTok(std::string::String);
 impl Token<'_> for OwnedTok {
   type Kind = u8;
   type Error = MiniErr;
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
 
   const SURFACES_TRIVIA: bool = true;
 

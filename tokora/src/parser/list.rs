@@ -94,6 +94,7 @@ pub type ListOf<'inp, L, Ctx, Lang, T> = Result<Vec<T>, ErrorOf<'inp, L, Ctx, La
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = core::convert::Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma, Tok::CloseBrace => Kind::CloseBrace } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }
@@ -215,6 +216,7 @@ where
 /// # impl Token<'_> for Tok {
 /// #   type Kind = Kind;
 /// #   type Error = core::convert::Infallible;
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   fn kind(&self) -> Kind { match self { Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma, Tok::CloseBrace => Kind::CloseBrace } }
 /// #   fn is_trivia(&self) -> bool { false }
 /// # }

@@ -120,7 +120,7 @@ impl Token<'_> for PTok {
   // from its own bytes plus the terminator at its span end, which is exactly `SpanEnd`. That
   // makes this fixture's holdback behaviour identical to the pre-0.10.0 span rule, which is
   // what the rule-1/2/3 tests below are pinning — they are about the holdback machinery, not
-  // about the class default.
+  // about which class a vocabulary picks.
   const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
 
   fn kind(&self) -> PKind {
@@ -806,7 +806,7 @@ impl Token<'_> for LTok {
   // One pattern, `[a-z]+`, so there is no longer candidate for the DFA to probe into and
   // backtrack from; the callback only bumps a tally and reads nothing ahead. `SpanEnd` is the
   // honest answer, and it keeps these terminal-beats-incomplete tests exercising the ranking
-  // rather than the class default.
+  // rather than the cost of a coarse class.
   const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::SpanEnd;
 
   fn kind(&self) -> PKind {
@@ -3066,6 +3066,8 @@ impl Token<'_> for DTok {
   type Kind = DKind;
   type Error = ();
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> DKind {
     self.0
   }
@@ -3417,6 +3419,8 @@ impl core::fmt::Display for MKind {
 impl Token<'_> for MTok {
   type Kind = MKind;
   type Error = ();
+
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
 
   fn kind(&self) -> MKind {
     match self {

@@ -48,6 +48,7 @@ binding parser below shows the complete plumbing without becoming a second full 
 # impl TokenT<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = LexError;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind {
 #     match self { Self::Let => Kind::Let, Self::Ident => Kind::Ident, Self::Assign => Kind::Assign, Self::Int(_) => Kind::Int, Self::Semi => Kind::Semi }
 #   }

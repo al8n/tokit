@@ -79,6 +79,8 @@ impl Token<'_> for Word {
   type Kind = WordKind;
   type Error = LexErr;
 
+  const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> WordKind {
     WordKind
   }

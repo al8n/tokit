@@ -132,6 +132,7 @@ the atoms rather than in the table.
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -282,6 +283,7 @@ unwrap(self) -> Unwrapped<…>                          // where Self: ParseInpu
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -417,6 +419,7 @@ consumed. `spanned`/`sliced`/`located` are taught in [chapter 3](super::ch03_com
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -543,6 +546,7 @@ and_then<T, U>(self, f: T) -> AndThen<…>             // f: FnMut(O) -> Result<
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -706,6 +710,7 @@ try_dispatch_take(inp, table, project)                        -> Result<ParseAtt
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -891,6 +896,7 @@ an impl-side `Fn` bound; a named function needs none, and `while_kind` needs nei
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -1040,6 +1046,7 @@ separated_while<Sep, Cond, W>(self, cond: Cond) -> SeparatedWhile<…>  // eleme
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -1179,6 +1186,7 @@ bounded(self, min, max)         delimited::<Delim>(self) -> DelimitedBy<Self, De
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -1325,6 +1333,7 @@ list<…>(item: P, until: Until) -> impl FnMut(&mut InputRef) -> Result<Vec<T>, 
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -1490,6 +1499,7 @@ try_delimited<D, …>(inner) / try_parens(inner) / … -> the same, wrapped in O
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Comma => Kind::Comma, Tok::Semi => Kind::Semi,
 #     Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen,
@@ -1641,6 +1651,7 @@ node_at(mark: EventMark, kind: u16, p: P) -> NodeAt<P>
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -1767,6 +1778,7 @@ no-op over a non-collecting emitter.
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,

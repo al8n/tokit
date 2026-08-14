@@ -133,6 +133,8 @@ impl Token<'_> for FT {
   type Kind = FK;
   type Error = ();
 
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> FK {
     match self {
       FT::Open => FK::Open,

@@ -241,8 +241,8 @@ macro_rules! bail {
       ///
       /// - the **class claim**, [`Token::READ_FRONTIER_CLASS`], a const on the vocabulary — the
       ///   same delegation shape as [`Token::SURFACES_TRIVIA`]. It answers for an item whose scan
-      ///   recorded nothing, and it defaults to
-      ///   [`Unbounded`](crate::ReadFrontierClass::Unbounded);
+      ///   recorded nothing, and — unlike that one — it has **no default**, so a vocabulary
+      ///   reaching this adapter has stated a class rather than inherited one;
       /// - the **value channel**, [`State::probe`], read off the logos `Extras`. A callback
       ///   that peeks with `remainder()` records how far it looked; that value answers for its own
       ///   item outright, so it must cover the engine's backtracking too, not only the peek.

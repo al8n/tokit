@@ -163,6 +163,8 @@ impl TokenT<'_> for Token {
   type Kind = TokenKind;
   type Error = ();
 
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
+
   fn kind(&self) -> TokenKind {
     TokenKind::from(self)
   }

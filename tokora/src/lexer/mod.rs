@@ -366,7 +366,11 @@ pub enum ReadFrontierClass {
   /// the span it goes on to emit.
   SpanEnd,
   /// The vocabulary refuses to bound what deciding an item probed — [`ReadFrontier::Unbounded`].
-  /// The safe default.
+  ///
+  /// The answer that is always sound and never precise, and the right one for a vocabulary whose
+  /// DFA has not been audited. It is **not** a default: [`Token::READ_FRONTIER_CLASS`] has none,
+  /// so this is a value someone wrote. Read [`Lexer::read_frontier`] before writing it — under a
+  /// non-final partial input it withholds every item until the stream is sealed.
   Unbounded,
 }
 
@@ -855,6 +859,8 @@ const _: () = {
   impl Token<'_> for DummyToken {
     type Kind = Self;
     type Error = ();
+
+    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
 
     #[inline(always)]
     fn kind(&self) -> Self::Kind {

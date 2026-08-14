@@ -52,8 +52,11 @@
 //! complete one. And a lexer that cannot bound what it read reports
 //! [`Unbounded`](crate::ReadFrontier::Unbounded), which withholds **everything** until the stream
 //! is sealed. That last one is sound but expensive — see [`Lexer::read_frontier`] — and it is the
-//! answer the bundled logos adapter gives unless the vocabulary declares otherwise
-//! ([`Token::READ_FRONTIER_CLASS`]).
+//! answer the bundled logos adapter gives for a vocabulary that declares
+//! [`Unbounded`](crate::ReadFrontierClass::Unbounded) through
+//! [`Token::READ_FRONTIER_CLASS`]. That const has no default: a logos-backed vocabulary states
+//! its class or does not compile, because inheriting this one silently is the difference between
+//! a token yielded on the first attempt and a session that refuses before it is sealed.
 //!
 //! ## Terminal beats incomplete, and they never substitute
 //!
@@ -146,6 +149,7 @@
 //! impl Token<'_> for Word {
 //!   type Kind = WordKind;
 //!   type Error = Infallible;
+//!   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 //!   fn kind(&self) -> WordKind { WordKind }
 //!   fn is_trivia(&self) -> bool { false }
 //! }

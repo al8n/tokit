@@ -91,6 +91,7 @@ you will report the wrong one.
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,
@@ -358,6 +359,7 @@ to its transaction, so it cannot outlive it.
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,
@@ -652,6 +654,7 @@ parses in the next, and decides in a third.
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,

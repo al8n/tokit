@@ -52,6 +52,7 @@ impl core::fmt::Display for Token {
 impl TokenT<'_> for Token {
   type Kind = Kind;
   type Error = ();
+  const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
   fn kind(&self) -> Kind {
     match self {
       Self::BraceOpen => Kind::BraceOpen, Self::BraceClose => Kind::BraceClose,
@@ -110,6 +111,7 @@ diagnostic.
 # impl core::fmt::Display for Token { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { core::fmt::Display::fmt(&self.kind(), f) } }
 # impl TokenT<'_> for Token {
 #   type Kind = Kind; type Error = LexError;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self { Self::Bool(_) => Kind::Bool, Self::Null => Kind::Null } }
 #   fn is_trivia(&self) -> bool { false }
 # }
@@ -220,6 +222,7 @@ siblings):
 # impl TokenT<'_> for JsonToken {
 #   type Kind = JsonKind;
 #   type Error = ();
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> JsonKind {
 #     match self { Self::Number(_) => JsonKind::Number, Self::OpenBracket => JsonKind::OpenBracket, Self::CloseBracket => JsonKind::CloseBracket, Self::Comma => JsonKind::Comma }
 #   }

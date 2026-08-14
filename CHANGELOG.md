@@ -426,16 +426,32 @@ and will red until they do.
   cannot answer from anything it can see, and its blanket impl means the answer cannot come from
   an impl the dialect writes. It therefore delegates through **two** channels, both landing now:
 
-  - `Token::READ_FRONTIER_CLASS`, a const on the vocabulary — the same delegation shape as
-    `Token::SURFACES_TRIVIA`. It answers for an item whose scan recorded nothing, and it defaults
-    to the conservative `ReadFrontierClass::Unbounded`, because a vocabulary that has not thought
-    about it must not be silently assumed safe. Declaring `SpanEnd` is a claim about the generated
-    DFA, and `run_partial` is what falsifies a wrong one.
+  - `Token::READ_FRONTIER_CLASS`, a **required** const on the vocabulary, with no default. It
+    answers for an item whose scan recorded nothing. Declaring `SpanEnd` is a claim about the
+    generated DFA, and `run_partial` is what falsifies a wrong one; `Unbounded` is the answer
+    that is always sound and never precise.
+
+    **Every `Token` impl must add this line, and that is the point.** The const shipped in a
+    first cut with a `ReadFrontierClass::Unbounded` default on the reasoning that an unaudited
+    vocabulary must not be assumed safe — right value, wrong delivery, because a default also
+    means the vocabulary is never asked. Every existing logos-backed impl kept compiling and
+    silently became seal-only, and that is not a loss of precision: for a fixed one-byte token
+    at span `0..1` in a two-byte non-final buffer, the old span predicate yields it (`1 < 2`)
+    while the inherited `Unbounded` withholds it, and under a `Budget` calibrated for the
+    yielding behaviour the sealing retry is refused before finality is ever applied. So the
+    obligation matches the one `read_frontier` itself carries one layer up: required, so an
+    implementor cannot be walked past it. Note the contrast with `Token::SURFACES_TRIVIA`, which
+    keeps its default — omission there fails *closed at compile time*, because the lossless
+    `cst::Sink` refuses to be built over an undeclared vocabulary; omission here failed *open at
+    run time*.
   - `State::probe` and `State::clear_probe`, the **value** channel, read off the logos `Extras`
     — the one thing a `logos` callback can write to. A callback that peeks with
-    `lexer.remainder()` knows exactly how far it looked and records the absolute offset. Both
-    methods are defaulted (`None` and a no-op), so no existing `State` impl breaks and a state
-    that records nothing pays nothing.
+    `lexer.remainder()` knows exactly how far it looked and records the absolute offset — which
+    is `lexer.span().end + n - 1` for `n` bytes successfully inspected past the match, since a
+    span is half-open and `span.end` is already the first offset outside it; `span.end + n` is
+    right only when the scan also reached for the byte at that offset and found end of input.
+    Both methods are defaulted (`None` and a no-op), so no existing `State` impl breaks and a
+    state that records nothing pays nothing.
 
   A recorded value answers the contract for its item outright, so it must cover the engine's
   backtracking too and not only the callback's own peek.
@@ -457,8 +473,8 @@ and will red until they do.
   which is `lexer.span().start` inside the callback) beside `Probe::probed_to`, and the adapter
   accepts it **iff that start equals the returned item's span start** — on the error arm exactly
   as on the token arm, since a callback may mutate `extras` and the item still arrive as an
-  `Err`. Anything else falls back to `READ_FRONTIER_CLASS`, which is conservative by
-  construction. The check lives in the adapter rather than in a rule recorders must follow,
+  `Err`. Anything else falls back to `READ_FRONTIER_CLASS`, which the vocabulary had to write
+  down. The check lives in the adapter rather than in a rule recorders must follow,
   because a recorder can only state a fact about the scan it is running in. `clear_probe` is
   kept beside it and is not redundant: an equal start is *evidence* of provenance, and a lexer
   rebuilt by `Lexer::with_state` + `Lexer::bump` — which is how `InputRef` resumes — can begin

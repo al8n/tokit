@@ -311,6 +311,7 @@ parse; the lexer is the same tiny hand-written `CharLexer` over single-character
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self { Tok::Digit(_) => Kind::Digit, Tok::Plus => Kind::Plus } }
 #   fn is_trivia(&self) -> bool { false }
 # }

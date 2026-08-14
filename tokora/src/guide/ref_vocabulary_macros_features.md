@@ -124,6 +124,7 @@ Comma::try_parse(inp)  -> Result<ParseAttempt<Comma<L::Span, (), Lang>>, Error>/
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,
@@ -320,6 +321,7 @@ one-character keyword, so the spelling is `"i"`; a real lexer reports the full w
 # impl Token<'_> for Tok {
 #   type Kind = Kind;
 #   type Error = Infallible;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> Kind { match self {
 #     Tok::Digit(_) => Kind::Digit, Tok::Ident(_) => Kind::Ident, Tok::Comma => Kind::Comma,
 #     Tok::Semi => Kind::Semi, Tok::Plus => Kind::Plus, Tok::Star => Kind::Star,

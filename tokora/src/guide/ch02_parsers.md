@@ -84,6 +84,7 @@ the same trait also provides `parse_bytes`, `parse_bstr`, and `parse_hipstr`.
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,
@@ -252,6 +253,7 @@ concrete default are one and the same parser:
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,
@@ -371,6 +373,7 @@ it emits [`UnexpectedEot`](crate::error::UnexpectedEot) instead:
 # impl TokenT<'_> for Tok {
 #   type Kind = TokKind;
 #   type Error = LexError;
+#   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 #   fn kind(&self) -> TokKind {
 #     match self {
 #       Tok::Int(_) => TokKind::Int, Tok::Let => TokKind::Let, Tok::Print => TokKind::Print,

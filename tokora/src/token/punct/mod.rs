@@ -83,6 +83,7 @@ macro_rules! define_punctuator_token_traits {
       /// impl Token<'_> for MyToken {
       ///     type Kind = MyTokenKind;
       ///     type Error = ();
+      ///     const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
       ///
       ///     fn kind(&self) -> Self::Kind {
       ///         self.kind

@@ -389,6 +389,8 @@ mod tests {
     type Kind = RtKind;
     type Error = RtErr;
 
+    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
+
     fn kind(&self) -> RtKind {
       match self {
         Self::Num => RtKind::Num,

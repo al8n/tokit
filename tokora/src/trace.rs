@@ -270,6 +270,8 @@ mod tests {
   impl Token<'_> for Tok {
     type Kind = Kind;
     type Error = Err;
+
+    const READ_FRONTIER_CLASS: crate::ReadFrontierClass = crate::ReadFrontierClass::Unbounded;
     fn kind(&self) -> Kind {
       Kind::Num
     }

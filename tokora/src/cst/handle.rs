@@ -51,6 +51,7 @@ use super::{
 /// # impl Token<'_> for STok {
 /// #   type Kind = u8;
 /// #   type Error = ();
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   const SURFACES_TRIVIA: bool = true;
 /// #   fn kind(&self) -> u8 { 0 }
 /// #   fn is_trivia(&self) -> bool { false }
@@ -92,6 +93,7 @@ use super::{
 /// # impl Token<'_> for STok {
 /// #   type Kind = u8;
 /// #   type Error = ();
+/// #   const READ_FRONTIER_CLASS: tokora::ReadFrontierClass = tokora::ReadFrontierClass::Unbounded;
 /// #   const SURFACES_TRIVIA: bool = true;
 /// #   fn kind(&self) -> u8 { 0 }
 /// #   fn is_trivia(&self) -> bool { false }
