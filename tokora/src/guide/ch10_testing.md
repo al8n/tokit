@@ -49,9 +49,16 @@ It asks for a prefix rather than equality because withholding *more* is always s
 that reports a read frontier past its own spans does exactly that. Calc's lexer is logos-backed
 and does not declare [`READ_FRONTIER_CLASS`](crate::Token::READ_FRONTIER_CLASS), so it
 takes the conservative default and this run withholds every item until the input is final. The
-run still passes, and it still catches an item that *changes* — a token whose kind or span moved,
-a token that became an error, an error whose payload moved. See
+run still passes, and it still catches an item that *changes* — a token whose kind, span or
+**value** moved, a token that became an error, an error whose payload moved. See
 [`Lexer::read_frontier`](crate::Lexer::read_frontier) for what declaring the class buys back.
+
+Comparing the *value* is why this tier — and only this tier — asks for `PartialEq` on your token
+and on its error type. It is one derive on a data type, and it is what makes the comparison
+total: every field participates, including the one you add next year. The alternative, a
+comparison key written by hand, is a projection, and the field it forgets is exactly the field
+that drifts. Calc's `Tok` and `LexError` already derive it; a vocabulary that cannot keeps
+[`run`](crate::conformance::Harness::run) and loses this tier.
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};

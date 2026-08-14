@@ -63,13 +63,17 @@
 //! refusal leaves no token behind, so a lexer that errors on a truncated prefix and tokenizes the
 //! full input showed up as "nothing yielded yet", which is a legal prefix.
 //!
-//! An error contributes **that it was an error**, its **span**, and a **signature** — the `Debug`
-//! rendering of the lexer's error payload, which is all [`Token::Error`] offers and is already the
-//! trait tier's key. Nothing from the *diagnostic* channel is compared: no rendered message, no
-//! [`Severity`](crate::emitter::Severity), no label stack. Nor is the signature an assertion on
-//! wording, because both sides of every comparison come from the same build of the same lexer
-//! inside one call — the complete parse is the oracle, never a recorded string — so editing an
-//! error type's `Debug` moves both sides together.
+//! Both arms are compared on **value**: a token contributes its kind, its span and the **token
+//! itself**; an error contributes that it *was* an error, its span and the **payload itself**. Not
+//! a rendering — `run_partial` asks for `PartialEq` on both and compares the values, because a
+//! `Debug` string is neither injective (two payloads can render alike, so a real drift passes) nor
+//! stable (a rendering carrying an address or a counter fails on a conforming lexer). Comparing
+//! only the token's *kind* had the same shape on the other arm: a payload decided by a byte that
+//! has not arrived kept its kind and its span, so both runs passed while the value a parser
+//! callback receives changed.
+//!
+//! Nothing from the *diagnostic* channel is compared: no rendered message, no
+//! [`Severity`](crate::emitter::Severity), no label stack.
 //!
 //! The non-final leg asks for a *prefix*, not equality, because **over-withholding is sound**: a
 //! lexer that reports reading past what it emits withholds more than the pre-0.10.0 span rule did,
@@ -300,6 +304,11 @@ where
   // lexer honest truncations without a growable source.
   L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
+  // Semantic equality on the compared values, and the only two bounds this tier asks for beyond
+  // what `run` needs. See `PartialItem::sig_eq` for why a `Debug` rendering cannot stand in, and
+  // `run_partial`'s own docs for who pays.
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
   /// Runs the **partial-input (Sans-I/O) chunked-equivalence** check against every input.
   ///
@@ -313,10 +322,38 @@ where
   ///
   /// The sequence is **tokens and lexer errors interleaved**, not tokens alone: refusing a region
   /// is as much a decision about bytes as tokenizing it, and turning one into the other on append
-  /// is precisely the unfaithfulness this tier exists to reject. An error is compared on its
-  /// discriminant, its span, and the `Debug` rendering of its payload; nothing from the diagnostic
-  /// channel is compared. See the [module docs](crate::conformance) for why that is not an
-  /// assertion on message wording.
+  /// is precisely the unfaithfulness this tier exists to reject. Both arms are compared on
+  /// discriminant, span and **value** — the whole [`Token`], the whole
+  /// [`Token::Error`](crate::Token::Error) — never on a rendering. Nothing from the diagnostic
+  /// channel is compared. See the [module docs](crate::conformance) for what that does and does not
+  /// assert.
+  ///
+  /// # Who pays for `PartialEq`, and what it buys
+  ///
+  /// This entry point requires `L::Token: PartialEq` and `<L::Token as Token>::Error: PartialEq`,
+  /// which [`run`](Self::run) does not. That is a deliberate choice between the two ways to compare
+  /// a value the kit does not own:
+  ///
+  /// - a **bound**, as here: the caller derives `PartialEq` — one line for the overwhelming
+  ///   majority of vocabularies, which are plain data — and the comparison is then *total*. Every
+  ///   field participates, including one added next year, so no future payload can slip past the
+  ///   check by being invisible to it.
+  /// - a **caller-supplied key or comparator**: no bound, so a token that genuinely cannot be
+  ///   `PartialEq` stays testable — but the key is a *projection* written by hand, the next field
+  ///   added escapes it silently, and a key that omits the drifting field re-opens exactly the hole
+  ///   this closes. That failure mode is the one the `Debug` rendering already had.
+  ///
+  /// The bound is the narrower of the two obligations in practice and the stronger guarantee, so it
+  /// is what this asks for. It is also the *restricted* entry point already —
+  /// [`Offset = usize`](crate::Lexer::Offset), a prefix-sliceable source and `L::State: Clone` are
+  /// all required here and not by [`run`](Self::run) — so it is the right place to ask.
+  ///
+  /// **A vocabulary with neither** loses this tier and keeps everything else: the trait tier and
+  /// the integration tier both run from [`run`](Self::run), whose bounds are unchanged. Recovering
+  /// this tier costs a `#[derive(PartialEq)]`, or a hand-written impl where derivation is wrong.
+  /// One caveat that comes with value equality rather than with this kit: a payload holding a
+  /// `f64` that can be `NaN` is not equal to itself, and such a type must hand-write an impl that
+  /// says what it means.
   ///
   /// This is where a lexer that is not faithful under truncation is caught — one whose item
   /// identity depends on input beyond what it reports having read (lookahead past a token that
@@ -533,12 +570,17 @@ enum PartialItem<'inp, L>
 where
   L: Lexer<'inp>,
 {
-  /// A committed token: its kind and its span.
-  Token(<L::Token as Token<'inp>>::Kind, L::Span),
-  /// A lexer error the input layer raised over bytes it lexed and refused: its span, and the
-  /// `Debug` rendering of the payload — see [`PartialRecorder`] for what that does and does not
-  /// assert.
-  LexerError(L::Span, String),
+  /// A committed token — the **whole token**, not only its kind, plus its span.
+  ///
+  /// The kind alone was not enough, and the gap was not academic: a `Value(last_byte)`-shaped
+  /// token can hold one kind and a one-byte span while its payload is decided by a byte that has
+  /// not arrived, so the prefix and the complete parse yield tokens that agree on everything this
+  /// tier compared and disagree on the value a parser callback receives. Both runs passed and the
+  /// AST changed. The token is `Clone`, so keeping it costs a clone per item in a test kit.
+  Token(L::Token, L::Span),
+  /// A lexer error the input layer raised over bytes it lexed and refused: its span and the
+  /// **payload itself** — see [`PartialRecorder`] for what that does and does not assert.
+  LexerError(L::Span, <L::Token as Token<'inp>>::Error),
 }
 
 impl<'inp, L> Clone for PartialItem<'inp, L>
@@ -547,8 +589,8 @@ where
 {
   fn clone(&self) -> Self {
     match self {
-      Self::Token(kind, span) => Self::Token(*kind, span.clone()),
-      Self::LexerError(span, sig) => Self::LexerError(span.clone(), sig.clone()),
+      Self::Token(tok, span) => Self::Token(tok.clone(), span.clone()),
+      Self::LexerError(span, payload) => Self::LexerError(span.clone(), payload.clone()),
     }
   }
 }
@@ -564,26 +606,59 @@ where
     }
   }
 
-  /// Whether two items agree on discriminant, span, and kind-or-error-signature.
+  /// Whether two items agree on discriminant, span, and **value** — the token itself on one arm,
+  /// the error payload on the other.
+  ///
+  /// # Semantically, never by rendering
+  ///
+  /// The error arm compared `format!("{payload:?}")` until this. Both sides do come from the same
+  /// build of the same lexer inside one [`run_partial`](Harness::run_partial) call, so that was
+  /// proof against *wording drift* — and silent about the two properties a comparison key actually
+  /// needs:
+  ///
+  /// - `Debug` is not **injective**. Two distinct payloads may render identically (a hand-written
+  ///   `Debug` that prints one string for several variants is legal and not rare), and then a
+  ///   payload that genuinely moves between the prefix and the complete input compares equal. The
+  ///   defect is present and the check is green.
+  /// - `Debug` is not **stable**. A rendering that includes an address, a counter or any other
+  ///   incidental fails between the separately constructed oracle and prefix lexers even though
+  ///   the payloads are equal — a red on a conforming lexer.
+  ///
+  /// The two errors run in opposite directions, so no amount of care with the *rendering* fixes
+  /// both. Value equality fixes both at once, which is why [`run_partial`](Harness::run_partial)
+  /// asks for `PartialEq` on the token and the error rather than for a well-behaved `Debug`.
+  ///
+  /// # The kind is compared as well as the token
+  ///
+  /// Redundant for any token whose `PartialEq` agrees with its [`kind`](Token::kind), which is
+  /// every sane one. It is kept because the two are independent caller code: a `PartialEq` that
+  /// ignores a field [`kind`](Token::kind) reads is coarser than the classification the parser
+  /// sees, and this comparison is the only thing standing between that and a silent pass. It can
+  /// only ever red *more*.
   fn sig_eq(&self, other: &Self) -> bool
   where
     <L::Token as Token<'inp>>::Kind: PartialEq,
+    L::Token: PartialEq,
+    <L::Token as Token<'inp>>::Error: PartialEq,
   {
     match (self, other) {
-      (Self::Token(a, sa), Self::Token(b, sb)) => a == b && sa == sb,
+      (Self::Token(a, sa), Self::Token(b, sb)) => a.kind() == b.kind() && a == b && sa == sb,
       (Self::LexerError(sa, a), Self::LexerError(sb, b)) => sa == sb && a == b,
       _ => false,
     }
   }
 
   /// A human-readable one-line rendering for panic context.
+  ///
+  /// `Debug` is the right tool *here* and the wrong one in [`sig_eq`](Self::sig_eq): this text is
+  /// read by a person diagnosing a failure, and nothing is decided from it.
   fn describe(&self) -> String
   where
     <L::Token as Token<'inp>>::Kind: core::fmt::Debug,
   {
     match self {
-      Self::Token(kind, span) => format!("token {kind:?}@{span:?}"),
-      Self::LexerError(span, sig) => format!("lexer error {sig}@{span:?}"),
+      Self::Token(tok, span) => format!("token {:?}@{span:?} (payload {tok:?})", tok.kind()),
+      Self::LexerError(span, payload) => format!("lexer error {payload:?}@{span:?}"),
     }
   }
 }
@@ -604,9 +679,9 @@ type PartialLog<'inp, L> = Rc<RefCell<Vec<PartialItem<'inp, L>>>>;
 /// # What it compares, and what it deliberately does not
 ///
 /// It records exactly three things per error: that the item **was** an error, its **span**, and
-/// the **`Debug` rendering of the lexer's error payload**. That is the minimum that separates the
-/// two divergences the token-only comparison could not see — an error that becomes a token at the
-/// same span, and an error whose payload changes once the missing bytes arrive.
+/// the lexer's error **payload itself**. That is the minimum that separates the two divergences the
+/// token-only comparison could not see — an error that becomes a token at the same span, and an
+/// error whose payload changes once the missing bytes arrive.
 ///
 /// It deliberately records **nothing from the diagnostic channel**: no rendered message, no
 /// [`Severity`](crate::emitter::Severity), no label stack, no `Diagnostic`. That is why this is a
@@ -618,13 +693,18 @@ type PartialLog<'inp, L> = Rc<RefCell<Vec<PartialItem<'inp, L>>>>;
 /// deduped refusal, arriving through the default
 /// [`commit_lexer_error`](Emitter::commit_lexer_error) forward.
 ///
-/// The `Debug` rendering is not an assertion on wording, and cannot become one. Both sides of
-/// every comparison come from the **same build of the same lexer** inside one
+/// # It records the payload, not a rendering of it
+///
+/// This recorded `format!("{payload:?}")` until 0.11.0, defended on the ground that both sides of
+/// every comparison come from the same build of the same lexer inside one
 /// [`run_partial`](Harness::run_partial) call — the complete parse is the oracle, never a recorded
-/// string — so editing an error type's `Debug` moves `expected` and `got` together. The check reds
-/// only when one build renders the same span differently for a prefix than for the full input,
-/// which is the defect. `Debug` is also the only signature available: [`Token::Error`] is
-/// `Clone + Debug` and nothing more, and it is already the comparison key the trait tier uses.
+/// string — so editing an error type's `Debug` moves `expected` and `got` together. That argument
+/// is **true**, and it answers only the question of wording drift. It is silent about the two
+/// properties a comparison key has to have, and `Debug` has neither: it is not injective, so a
+/// payload that really does move can render identically and pass; and it is not stable, so a
+/// payload rendering an address or a counter reds on a conforming lexer. See
+/// [`PartialItem::sig_eq`] for the full argument and for what the bound on
+/// [`run_partial`](Harness::run_partial) buys.
 struct PartialRecorder<'inp, L>
 where
   L: Lexer<'inp>,
@@ -646,7 +726,7 @@ where
     self
       .log
       .borrow_mut()
-      .push(PartialItem::LexerError(span, format!("{payload:?}")));
+      .push(PartialItem::LexerError(span, payload));
     Ok(())
   }
 
@@ -712,7 +792,7 @@ where
     match ir.next() {
       Ok(Some(spanned)) => {
         let (span, tok) = spanned.into_components();
-        log.borrow_mut().push(PartialItem::Token(tok.kind(), span));
+        log.borrow_mut().push(PartialItem::Token(tok, span));
       }
       Ok(None) => break false,
       Err(_) => break true,
@@ -757,7 +837,7 @@ where
     {
       Some(spanned) => {
         let (span, tok) = spanned.into_components();
-        log.borrow_mut().push(PartialItem::Token(tok.kind(), span));
+        log.borrow_mut().push(PartialItem::Token(tok, span));
       }
       None => break,
     }
@@ -772,6 +852,8 @@ where
   L::State: Clone,
   L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
   // Every drain below runs the lexer under `Budgeted`, which counts raw `L::lex` attempts. The
   // `log.len()` budgets these functions also carry are per-`next()` and therefore cannot see a
@@ -835,6 +917,8 @@ fn assert_partial_stream_eq<'inp, L>(
 ) where
   L: Lexer<'inp>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
   let n = expected.len().min(got.len());
   for i in 0..n {
@@ -867,6 +951,8 @@ fn assert_partial_prefix_of<'inp, L>(
 ) where
   L: Lexer<'inp>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
   let n = expected.len().min(got.len());
   for i in 0..n {

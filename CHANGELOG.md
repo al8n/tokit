@@ -468,12 +468,36 @@ and will red until they do.
   once the missing byte arrived produced an empty list against a token, which is a legal prefix.
   Two divergences that used to pass now fail: an item that is an **error** on the prefix and a
   **token** on the full input at the same span, and an **error whose payload changes** on append.
-  What is compared is the discriminant, the span, and the `Debug` rendering of the lexer error's
-  payload — a signature. Nothing from the diagnostic channel is: no rendered message, no severity,
-  no labels. Nor can the payload rendering become a wording assertion, because both sides of every
-  comparison come from the same build of the same lexer inside one `run_partial` call — the
-  complete parse is the oracle, never a recorded string — so editing an error type's `Debug` moves
-  both sides together.
+  Nothing from the diagnostic channel is compared: no rendered message, no severity, no labels.
+
+  **Both arms are compared on the value, and `run_partial` therefore requires
+  `L::Token: PartialEq` and `<L::Token as Token>::Error: PartialEq`.** Two blind spots closed
+  together, because they were one:
+
+  - the **token** arm kept only the kind and the span. A `Value(last_byte)`-shaped token holds one
+    kind and a one-byte span while its payload is decided by a byte that has not arrived, so the
+    prefix and the complete parse agreed on everything the tier compared and disagreed on the value
+    a parser callback receives. `run()` and `run_partial()` both passed while the AST changed.
+  - the **error** arm compared `format!("{payload:?}")`. That was defended on the ground that both
+    sides come from the same build of the same lexer inside one call, so editing a `Debug` moves
+    them together — which is true, and answers only the question of wording drift. `Debug` is not
+    **injective**, so two payloads that render alike compare equal and a real drift passes; and it
+    is not **stable**, so a rendering carrying an address or a counter reds a conforming lexer. The
+    two failures run in opposite directions and no care with the rendering fixes both.
+
+  Value equality fixes both at once. The bound is asked for at the entry point rather than taken as
+  a caller-supplied key because a bound is *total* — every field participates, including one added
+  later — while a hand-written key is a projection whose forgotten field is exactly the field that
+  drifts, which is the failure mode the `Debug` rendering already had. This is the restricted entry
+  point in any case: `Offset = usize`, a prefix-sliceable source and `L::State: Clone` were already
+  required here and are not required by `run`. **A vocabulary with neither loses this tier and
+  keeps every other**; recovering it costs a `#[derive(PartialEq)]`, or a hand-written impl where
+  derivation is wrong (a payload holding a possibly-`NaN` float is not equal to itself). `run`'s
+  bounds are unchanged.
+
+  The kind is still compared beside the token. Redundant for any `PartialEq` that agrees with
+  `Token::kind`, and kept because the two are independent caller code: a `PartialEq` coarser than
+  the classification the parser sees would otherwise pass silently.
 
 ### Fixed
 

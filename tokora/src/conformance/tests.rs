@@ -18,7 +18,7 @@ impl core::fmt::Display for PKind {
   }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct PTok;
 
 impl Token<'_> for PTok {
@@ -805,7 +805,7 @@ impl core::fmt::Display for PeekKind {
   }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct PeekTok(PeekKind);
 
 impl Token<'_> for PeekTok {
@@ -928,7 +928,7 @@ struct BadByte {
   reason: &'static str,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct ETok;
 
 impl Token<'_> for ETok {
@@ -1084,6 +1084,380 @@ fn an_error_whose_payload_changes_on_append_is_falsified() {
   // content depends on bytes past its own span is exactly the unfaithfulness this tier exists to
   // reject, and the span alone does not see it.
   Harness::<DriftingErrLexer<'_>>::over(["abz"]).run_partial();
+}
+
+// ── Equality is a question about the VALUE, not about a rendering ───────────────────
+//
+// Three cells over the two properties a comparison key needs and a `Debug` string has neither of.
+// The token arm needed the same repair for a third reason: it compared only the KIND, so a payload
+// could move while kind and span held still.
+
+/// A one-kind token that carries a **payload** — the thing the token arm compared nothing of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct VKind;
+
+impl core::fmt::Display for VKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("v")
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct VTok(u8);
+
+impl Token<'_> for VTok {
+  type Kind = VKind;
+  type Error = Infallible;
+
+  fn kind(&self) -> VKind {
+    VKind
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// Every token's payload is its own byte: faithful under truncation, payload and all.
+const OWN_BYTE: u8 = 0;
+/// Every token's payload is the **buffer's last byte** — decided by input that has not arrived,
+/// while the kind and the span stay exactly what a faithful lexer would produce.
+const LAST_BYTE: u8 = 1;
+
+/// A per-character lexer over `str` whose tokens carry a payload, parameterized by where that
+/// payload comes from. `MODE` is a const parameter rather than a field because the kit builds its
+/// lexers with `L::new`.
+struct ValueLexer<'a, const MODE: u8> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a, const MODE: u8> Lexer<'a> for ValueLexer<'a, MODE> {
+  type State = ();
+  type Source = str;
+  type Token = VTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<VTok, Infallible>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    let bytes = self.src.as_bytes();
+    let payload = match MODE {
+      OWN_BYTE => bytes[self.start],
+      // The defect: every token's value is read off the END of the buffer.
+      _ => *bytes.last().expect("the source is non-empty here"),
+    };
+    Some(Ok(VTok(payload)))
+  }
+  /// `SpanEnd`, deliberately false in `LAST_BYTE` mode — the same shape [`LastBytePeekLexer`]
+  /// uses. At the `Unbounded` default every item is withheld and the check would pass vacuously.
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+type OwnBytePayloadLexer<'a> = ValueLexer<'a, OWN_BYTE>;
+type DriftingPayloadLexer<'a> = ValueLexer<'a, LAST_BYTE>;
+
+#[test]
+fn a_payload_decided_by_its_own_bytes_passes_every_check() {
+  // The control for the cell below: carrying a payload is not what the check rejects.
+  Harness::<OwnBytePayloadLexer<'_>>::over(["abz", "a", "", "café"]).run();
+  Harness::<OwnBytePayloadLexer<'_>>::over(["abz", "a", "", "café"]).run_partial();
+}
+
+#[test]
+#[should_panic(
+  expected = "partial-equivalence] split k=2, position 0: prefix item diverges from the complete prefix: expected token"
+)]
+fn a_token_payload_that_changes_on_append_is_falsified() {
+  // `"abz"` at split k=2: the prefix `"ab"` yields `VTok(b'b')@0..1` and the complete parse
+  // `VTok(b'z')@0..1`. Same kind, same span, same discriminant — everything the tier compared
+  // before — and a different value in the parser's hands. `run()` and `run_partial()` both passed
+  // while the AST changed.
+  Harness::<DriftingPayloadLexer<'_>>::over(["abz"]).run_partial();
+}
+
+/// Two distinct payloads with **one** `Debug` rendering — the injectivity failure, which is legal
+/// and not rare (a hand-written `Debug` that prints one label for a family of variants).
+#[derive(Clone, PartialEq)]
+enum Collide {
+  Cut,
+  Junk,
+}
+
+impl core::fmt::Debug for Collide {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("LexError")
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CTok;
+
+impl Token<'_> for CTok {
+  type Kind = PKind;
+  type Error = Collide;
+
+  fn kind(&self) -> PKind {
+    PKind
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// [`DriftingErrLexer`]'s defect over a payload type whose `Debug` cannot tell the two values
+/// apart: the first item is always an error, and *which* error is decided by the buffer's last
+/// byte.
+struct CollidingErrLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for CollidingErrLexer<'a> {
+  type State = ();
+  type Source = str;
+  type Token = CTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Collide> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<CTok, Collide>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    if self.start == 0 {
+      let sealed = self.src.as_bytes().last() == Some(&b'z');
+      return Some(Err(if sealed { Collide::Junk } else { Collide::Cut }));
+    }
+    Some(Ok(CTok))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+#[should_panic(
+  expected = "partial-equivalence] split k=2, position 0: prefix item diverges from the complete prefix: expected lexer error"
+)]
+fn a_colliding_debug_does_not_hide_a_payload_that_moved() {
+  // Byte for byte `an_error_whose_payload_changes_on_append_is_falsified`'s divergence, over a
+  // payload whose `Debug` renders `Cut` and `Junk` identically. A comparison over the rendering
+  // sees `"LexError" == "LexError"` and passes — the very drift the sibling cell was written to
+  // catch, invisible to the mechanism that was catching it.
+  Harness::<CollidingErrLexer<'_>>::over(["abz"]).run_partial();
+}
+
+/// How many times a [`Ticking`] payload has been rendered. A module-level counter rather than a
+/// field, so two renderings of two *equal* payloads still differ — which is the property under
+/// test.
+static TICKING_RENDERS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// A payload whose **value** is stable and whose `Debug` never renders the same way twice — the
+/// stability failure, standing in for a rendering that carries an address, a generation number or
+/// any other incidental.
+#[derive(Clone, PartialEq)]
+struct Ticking {
+  reason: &'static str,
+}
+
+impl core::fmt::Debug for Ticking {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let tick = TICKING_RENDERS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    write!(f, "{}#{tick}", self.reason)
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TTok;
+
+impl Token<'_> for TTok {
+  type Kind = PKind;
+  type Error = Ticking;
+
+  fn kind(&self) -> PKind {
+    PKind
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// [`FaithfulErrLexer`]'s behaviour — an item is an error iff its own byte is `?` — over the
+/// unstable-`Debug` payload. Conforming in every respect the contract names.
+struct TickingErrLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for TickingErrLexer<'a> {
+  type State = ();
+  type Source = str;
+  type Token = TTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Ticking> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<TTok, Ticking>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    if self.src.as_bytes()[self.start] == b'?' {
+      return Some(Err(Ticking { reason: "junk" }));
+    }
+    Some(Ok(TTok))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+fn a_nondeterministic_debug_does_not_red_a_conforming_lexer() {
+  // The other direction, and the reason "compare the rendering, both sides come from the same
+  // build" was not enough: the two sides are the same build and still render differently, because
+  // rendering is not a function of the value. Under the `Debug` comparison this red at the first
+  // split of the first input; under value equality the payloads are equal and it passes.
+  //
+  // `run()` is deliberately NOT called here. The trait tier keeps the same `Debug`-string key in
+  // `Item::err_dbg`, so it would red this conforming lexer — the same defect, one tier up. Closing
+  // it means `L::Token: PartialEq` on `run` itself, which every existing caller of the kit's
+  // universal entry point would have to satisfy; that is a decision about the crate's public
+  // surface, not a repair this tier can make on its own.
+  Harness::<TickingErrLexer<'_>>::over(["a?b", "??", "?", ""]).run_partial();
 }
 
 // ── The anti-hang budget, and why it cannot live at the `next()` boundary ───────────
