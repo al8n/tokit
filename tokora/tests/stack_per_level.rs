@@ -5,18 +5,25 @@
 ))]
 #![allow(warnings)]
 
-//! What one level of grammar nesting costs on the native stack, measured two ways over the
+//! What one level of grammar nesting costs on the native stack, measured three ways over the
 //! **same grammar** in the **same binary** at the **same optimisation level**.
 //!
 //! `recursion_tracker`'s per-level table is measured against the pratt driver. This measures
 //! the other recursive shape a grammar can have: a repetition combinator whose element parser
-//! re-enters the same production. The two doors differ only in how the repetition is written —
+//! re-enters the same production. The three doors differ only in how the repetition is written —
 //!
 //! - `combinator_node` goes through `Collect<DelimitedBy<RepeatedWhile<..>, Bracket>, Vec<_>>`,
+//! - `separated_node` through `Collect<DelimitedBy<SeparatedWhile<..>, Bracket>, Vec<_>>`,
 //! - `hand_written_body` writes the loop out with `InputRef::next`,
 //!
-//! — so the difference between their per-level costs is what the combinator layer costs, with
+//! — so the difference between their per-level costs is what each combinator layer costs, with
 //! the lexer, the cache, the emitter and the token type held fixed.
+//!
+//! The separated door is here because it is the shape no corpus in this repository measured.
+//! The five criterion benches monomorphize `Repeated`, `Separated` and `Collect` out of
+//! `parser::many` and nothing else — no `DelimitedBy`, no `SeparatedWhile`, no cardinality or
+//! policy wrapper — so a change that costs stack in a recursive separated grammar is invisible
+//! to them, and it is the deeper of the two combinator doors.
 //!
 //! The measurement is a stack-pointer probe: each level records the address of one of its own
 //! locals, and the per-level cost is the difference between consecutive levels. That reads the
@@ -40,15 +47,19 @@ use tokora::{
   Accumulator, Emitter, EmitterView, InputRef, Lexer, Parse, ParseContext, ParseInput, Parser,
   ParserContext, Token as TokenTrait,
   cache::Peeked,
-  emitter::{FromUnclosed, FullContainerEmitter, UnclosedEmitter},
+  emitter::{
+    FromUnclosed, FullContainerEmitter, SeparatedEmitter, UnclosedEmitter,
+    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
+  },
   error::{
     Unclosed, UnexpectedEot,
-    syntax::FullContainer,
-    token::{UnexpectedToken, UnexpectedTokenOf},
+    syntax::{FullContainer, MissingSyntaxOf},
+    token::{MissingTokenOf, UnexpectedToken, UnexpectedTokenOf},
   },
   input::Cursor,
   parser::Action,
   span::Spanned,
+  utils::CowStr,
 };
 
 use common::{TestLexer, Token};
@@ -286,6 +297,43 @@ impl<'inp> UnclosedEmitter<'inp, TestLexer<'inp>> for NestEmitter {
   }
 }
 
+impl<'inp> SeparatedEmitter<'inp, TestLexer<'inp>> for NestEmitter {
+  fn emit_missing_separator(
+    &mut self,
+    _: CowStr,
+    _: MissingTokenOf<'inp, TestLexer<'inp>>,
+  ) -> Result<(), NestError> {
+    Err(NestError)
+  }
+
+  fn emit_missing_element(
+    &mut self,
+    _: MissingSyntaxOf<'inp, TestLexer<'inp>>,
+  ) -> Result<(), NestError> {
+    Err(NestError)
+  }
+}
+
+impl<'inp> UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>> for NestEmitter {
+  fn emit_unexpected_leading_separator(
+    &mut self,
+    _: CowStr,
+    _: UnexpectedTokenOf<'inp, TestLexer<'inp>>,
+  ) -> Result<(), NestError> {
+    Err(NestError)
+  }
+}
+
+impl<'inp> UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>> for NestEmitter {
+  fn emit_unexpected_trailing_separator(
+    &mut self,
+    _: CowStr,
+    _: UnexpectedTokenOf<'inp, TestLexer<'inp>>,
+  ) -> Result<(), NestError> {
+    Err(NestError)
+  }
+}
+
 fn nest_ctx<'inp>() -> ParserContext<'inp, TestLexer<'inp>, NestEmitter> {
   ParserContext::new(NestEmitter)
 }
@@ -301,6 +349,21 @@ impl<'inp, E> NestBound<'inp> for E where
   E: Emitter<'inp, TestLexer<'inp>, Error = NestError>
     + FullContainerEmitter<'inp, TestLexer<'inp>>
     + UnclosedEmitter<'inp, TestLexer<'inp>>
+{
+}
+
+/// The extra emitter surface the separated door needs on top of [`NestBound`].
+trait SepNestBound<'inp>:
+  SeparatedEmitter<'inp, TestLexer<'inp>>
+  + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+  + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
+{
+}
+
+impl<'inp, E> SepNestBound<'inp> for E where
+  E: SeparatedEmitter<'inp, TestLexer<'inp>>
+    + UnexpectedLeadingSeparatorEmitter<'inp, TestLexer<'inp>>
+    + UnexpectedTrailingSeparatorEmitter<'inp, TestLexer<'inp>>
 {
 }
 
@@ -345,6 +408,40 @@ where
 
   let children: Vec<usize> = combinator_node::<Ctx>
     .repeated_while::<_, U1>(more_children::<Ctx>)
+    .delimited_by_brackets()
+    .collect()
+    .parse_input(inp)?;
+
+  Ok(1 + children.iter().sum::<usize>())
+}
+
+// ── door 1b: the same grammar through the SEPARATED repetition combinator ─────
+
+/// `node := '[' node (',' node)* ']'`, with the repetition written as
+/// `Collect<DelimitedBy<SeparatedWhile<..>, Bracket>, Vec<_>>`.
+///
+/// This is the shape [`combinator_node`] does not reach. The five criterion benches
+/// monomorphize `Repeated`, `Separated` and `Collect` and nothing else out of `parser::many` —
+/// no `DelimitedBy`, no `SeparatedWhile`, no cardinality or policy wrapper — so an attribute
+/// change that costs stack HERE is invisible to a corpus made of them, and a recursive
+/// separated grammar is exactly where a per-level regression would hide. It goes through
+/// `parser::many::sep_while::delim::unbounded`, one of the 144 leaf modules the four
+/// `impl_separated_*` macros generate.
+///
+/// The document is the same `[[[…]]]`: one child per level, so the separator is never taken and
+/// the doors stay comparable level for level.
+fn separated_node<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<usize, NestError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: NestBound<'inp> + SepNestBound<'inp>,
+{
+  let anchor = 0u8;
+  mark(&anchor);
+
+  let children: Vec<usize> = separated_node::<Ctx>
+    .separated_by_comma_while::<_, U1>(more_children::<Ctx>)
     .delimited_by_brackets()
     .collect()
     .parse_input(inp)?;
@@ -426,6 +523,12 @@ fn per_nesting_level_stack_cost() {
   let combinator_marks = take_marks();
   let combinator_nodes = combinator.expect("combinator door rejected a well-formed document");
 
+  let separated: Result<usize, NestError> = Parser::with_context(nest_ctx())
+    .apply(separated_node)
+    .parse_str(&src);
+  let separated_marks = take_marks();
+  let separated_nodes = separated.expect("separated door rejected a well-formed document");
+
   let hand: Result<usize, NestError> = Parser::with_context(nest_ctx())
     .apply(hand_written_node)
     .parse_str(&src);
@@ -436,8 +539,13 @@ fn per_nesting_level_stack_cost() {
     combinator_nodes, hand_nodes,
     "the two doors disagree on what they parsed"
   );
+  assert_eq!(
+    separated_nodes, hand_nodes,
+    "the separated door disagrees with the other two on what it parsed"
+  );
   assert_eq!(combinator_nodes, DEPTH);
   assert_eq!(combinator_marks.len(), DEPTH);
+  assert_eq!(separated_marks.len(), DEPTH);
   assert_eq!(hand_marks.len(), DEPTH);
 
   // Everything above is a parse the two doors have to agree on, and it holds under any
@@ -450,11 +558,13 @@ fn per_nesting_level_stack_cost() {
   }
 
   let combinator_cost = per_level(&combinator_marks);
+  let separated_cost = per_level(&separated_marks);
   let hand_cost = per_level(&hand_marks);
   println!(
-    "per nesting level: combinator {combinator_cost} B, hand-written {hand_cost} B, \
-     ratio {:.1}x",
-    combinator_cost as f64 / hand_cost.max(1) as f64
+    "per nesting level: combinator {combinator_cost} B, separated {separated_cost} B, \
+     hand-written {hand_cost} B, ratios {:.1}x / {:.1}x",
+    combinator_cost as f64 / hand_cost.max(1) as f64,
+    separated_cost as f64 / hand_cost.max(1) as f64
   );
 }
 
