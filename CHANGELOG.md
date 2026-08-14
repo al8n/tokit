@@ -501,6 +501,14 @@ and will red until they do.
 
 ### Fixed
 
+- **`CacheHarness::run` hung on a lexer that only returns errors — the same shape one tier over.**
+  The corpus builder fills while `out.len() < want`, and that gate counts the tokens it *kept*
+  while the loop consumes the whole item stream. An `Err` grows neither the corpus nor the lexer's
+  exhaustion, so such a lexer never reaches `want` and never returns `None`, and the kit spun. The
+  loop now counts **attempts**, against a ceiling derived from the source, and refuses at it. Found
+  by enumerating every counter in the conformance module against the question "can the loop iterate
+  underneath it?", which is the question the `run_partial` budget below failed.
+
 - **`Harness::run_partial` hung, rather than refusing, on a lexer that never terminates — its
   anti-hang budget was checked at the `next()` boundary and `next()` is a loop.** `InputRef::next`
   keeps lexing after every lexer error it accepts until it finds a token or reaches end of input,

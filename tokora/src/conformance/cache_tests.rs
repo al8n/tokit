@@ -4029,3 +4029,81 @@ impl Thing {
     drift.join("\n  ")
   );
 }
+
+// ── The corpus builder's own anti-hang bound ────────────────────────────────────────
+//
+// `CacheHarness::corpus` fills until `out.len() < want` is false. That gate counts the tokens it
+// KEPT while the loop consumes the whole item stream, and an `Err` grows neither `out` nor the
+// lexer's exhaustion — so a lexer that only errors never reaches `want` and never returns `None`.
+// Same shape as an item budget read at the `next()` boundary while `next()` loops over the errors
+// it accepts: the counter measures a filtered subset of what the loop consumes.
+
+/// A hand-rolled lexer that neither advances nor exhausts: every [`lex`](Lexer::lex) returns the
+/// same nonempty error over the same span. Not logos-backed, deliberately — the defect is in the
+/// kit's own loop, not in any adapter.
+struct EndlessErrCorpusLexer<'a> {
+  src: &'a str,
+  state: CState,
+}
+
+impl<'a> Lexer<'a> for EndlessErrCorpusLexer<'a> {
+  type State = CState;
+  type Source = str;
+  type Token = CTok<'a>;
+  type Span = crate::SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      state: CState::default(),
+    }
+  }
+  fn with_state(src: &'a str, state: CState) -> Self {
+    Self { src, state }
+  }
+  fn check(&self) -> Result<(), CErr> {
+    Ok(())
+  }
+  fn state(&self) -> &CState {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut CState {
+    &mut self.state
+  }
+  fn into_state(self) -> CState {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> crate::SimpleSpan {
+    crate::SimpleSpan::new(0, self.src.len().min(1))
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[..self.src.len().min(1)]
+  }
+  fn lex(&mut self) -> Option<Result<CTok<'a>, CErr>> {
+    if self.src.is_empty() {
+      return None;
+    }
+    Some(Err(CErr::Any))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
+  fn bump(&mut self, _n: &usize) {}
+}
+
+#[test]
+#[should_panic(expected = "lex-budget")]
+fn a_corpus_of_nothing_but_errors_is_refused_not_spun_on() {
+  // Before the attempt ceiling this did not fail — it never returned. The kit's own driver is the
+  // subject here, so any cache serves; the run never reaches a check.
+  CacheHarness::<EndlessErrCorpusLexer<'_>, DefaultCache<'_, EndlessErrCorpusLexer<'_>>>::new(
+    "abc def",
+  )
+  .named("endless-error corpus")
+  .run();
+}

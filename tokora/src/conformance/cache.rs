@@ -267,7 +267,7 @@ use generic_arraydeque::{
 use mayber::Maybe;
 
 use crate::{
-  Lexer, Span, Window,
+  Lexer, Slice, Source, Span, Window,
   cache::{
     Cache, CachedToken, CachedTokenOf, CachedTokenRefOf, MaybeRefCachedTokenOf, PeekedTokenExt,
   },
@@ -637,10 +637,41 @@ where
 
   /// Lexes up to `want` successful items out of the source, each paired with the state that
   /// produced it — exactly the shape the input layer caches.
+  ///
+  /// # The loop counts **attempts**, and the `want` gate counts pushes
+  ///
+  /// Those are different quantities and the difference is a hang. An `Err` does not grow `out`, so
+  /// `out.len() < want` never becomes false for a lexer that returns errors forever — and such a
+  /// lexer never returns `None` either, so the `break` is unreachable too. The gate is on the
+  /// filtered subset while the loop consumes the whole item stream, which is the same shape as an
+  /// item budget read at the `next()` boundary while `next()` loops over the errors it accepts.
+  ///
+  /// So the attempts carry their own ceiling, derived from the source: monotone progress and
+  /// nonempty spans bound a conforming lexer at one item per source unit, and this is eight times
+  /// that plus a floor.
+  ///
+  /// # Panics
+  ///
+  /// Panics — tagged `lex-budget` — when the ceiling is spent. The alternative is not a shorter
+  /// corpus; it is a kit that never returns.
   fn corpus(&self, want: usize) -> Vec<CachedTokenOf<'inp, L>> {
+    let name = self.label();
+    let units = self.source.slice(..).map(|s| s.len()).unwrap_or(0);
+    let limit = 8usize.saturating_mul(units).saturating_add(64);
     let mut lexer = L::new(self.source);
     let mut out = Vec::new();
+    let mut attempts = 0usize;
     while out.len() < want {
+      attempts += 1;
+      if attempts > limit {
+        panic!(
+          "tokora cache conformance [{name} lex-budget]: building the corpus asked the lexer to \
+           lex more than {limit} times over a source of {units} units without collecting {want} \
+           token(s). Every attempt is counted, the errors included — an error does not grow the \
+           corpus, so a lexer that keeps returning one never reaches the target and never \
+           exhausts. Spans must be monotone and nonempty and the lexer must exhaust."
+        );
+      }
       let Some(res) = lexer.lex() else { break };
       let span = lexer.span();
       let state = lexer.state().clone();
