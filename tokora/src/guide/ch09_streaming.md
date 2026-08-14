@@ -27,17 +27,29 @@ While a partial input is **non-final**, three conservative rules fire at the sca
 each surfacing an [`Incomplete`](crate::error::Incomplete) rather than committing to an answer
 that later bytes could contradict:
 
-1. **The holdback.** A token whose span touches the end of the buffer is *withheld* — it might
-   be the prefix of a longer one.
+1. **The holdback.** A token the lexer decided by *reading as far as the end of the buffer* is
+   *withheld* — it might be the prefix of a longer one.
 2. **A lexer error at the frontier** is withheld the same way: garbage that abuts the end of
    the buffer might be the beginning of something valid.
 3. **End of input, when the input is not final,** is not end of input. It is a request for more
    bytes.
 
-Rule 1 is the one you feel, and it has a name: **one-token frontier latency**. The last token
-of a non-final buffer becomes visible only when more input arrives *or* `is_final` is set.
-That is not a limitation to be engineered around — it is the only sound answer. The sole proof
-that `2` is not the start of `23` is another byte, or a promise that there will not be one.
+"Read as far as the end" is a fact the lexer reports, through
+[`Lexer::read_frontier`](crate::Lexer::read_frontier) — **not** the item's span reaching the end.
+The two coincide only for a lexer that never reads past what it emits
+([`SpanEnd`](crate::ReadFrontier::SpanEnd)). A lexer that probes ahead and backtracks — which the
+bundled logos backend's DFA does whenever one pattern is a proper prefix of another, an integer
+beside a float — decides an item at `0..1` by looking at byte 2, and rule 1 holds *that* item back
+even though its span sits behind the end. Keying on the span instead was the pre-0.10.0 proxy, and
+it committed exactly the items one more byte would change.
+
+Rule 1 is the one you feel, and it has a name: **frontier latency**. A token whose decision
+consulted the end of a non-final buffer becomes visible only when more input arrives *or*
+`is_final` is set. That is not a limitation to be engineered around — it is the only sound answer.
+The sole proof that `2` is not the start of `23` is another byte, or a promise that there will not
+be one. How many tokens it costs is the lexer's answer, not the buffer's: one for a `SpanEnd`
+lexer, more for a lookahead one, and *every* token until the seal for one that reports
+[`Unbounded`](crate::ReadFrontier::Unbounded).
 
 ## `is_final` belongs to the driver, and it only goes one way
 

@@ -1,10 +1,16 @@
 //! Partial-input (Sans-I/O) frontier-rule tests.
 //!
 //! Each of the three conservative rules at the scan chokepoint gets a focused case: frontier
-//! holdback (a token touching the buffer end), frontier error (a lexer error touching the buffer
-//! end), and non-final EOF. Plus the two boundary properties: `is_final == true` behaves exactly
-//! like a complete parse, and a *mid-buffer* token or error (strictly before the buffer end) is
-//! yielded / emitted normally even while partial.
+//! holdback (a token whose reported read frontier reaches the buffer end), frontier error (a lexer
+//! error decided the same way), and non-final EOF. Plus the two boundary properties:
+//! `is_final == true` behaves exactly like a complete parse, and a token or error *clear of the
+//! frontier* is yielded / emitted normally even while partial.
+//!
+//! Most fixtures here declare `ReadFrontierClass::SpanEnd`, for which the reported frontier and the
+//! item's span end coincide — so a comment below saying an item "touches the buffer end" is
+//! describing that fixture, not the rule. The rule is the reported frontier, and the cases from
+//! `an_honest_lookahead_lexer_is_withheld_where_the_span_proxy_committed_it` onwards are where the
+//! two are made to diverge.
 //!
 //! The last section covers the **terminal-dominance law**: a limit trip whose tripping token ends
 //! exactly at a non-final buffer end is *not* a frontier item to be withheld — no refill can

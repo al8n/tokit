@@ -111,8 +111,13 @@ where
   /// # Partial mode: a short window, but never a hidden trip
   ///
   /// On a non-final [`Partial`](crate::input::Partial) input the fill stops at the frontier — a
-  /// token touching the buffer end never enters the cache — so a peek there simply returns a
-  /// **shorter window** than asked for; the [`Incomplete`](crate::error::Incomplete) surfaces when a
+  /// token the lexer decided by reading as far as the buffer end
+  /// ([`read_frontier`](crate::Lexer::read_frontier), floored at the item's own span end) never
+  /// enters the cache — so a peek there simply returns a **shorter window** than asked for. How
+  /// much shorter is the lexer's to say, not the span's: a lookahead lexer holds back items whose
+  /// spans sit well behind the buffer end, and one reporting
+  /// [`Unbounded`](crate::ReadFrontier::Unbounded) caches nothing at all until the stream is
+  /// sealed. The [`Incomplete`](crate::error::Incomplete) surfaces when a
   /// consume path reaches the same frontier. A **terminal** condition is not held back that way: a
   /// limit trip during the fill emits its diagnostic and latches the poison boundary before the
   /// holdback is consulted, so a peek can no more hide a tripped limit than a consume can. See

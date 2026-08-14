@@ -3113,11 +3113,19 @@ where
   /// later input could still extend from being mistaken for a finished one — each surfaces an
   /// [`Incomplete`](crate::error::Incomplete) on the `Err` channel instead:
   ///
-  /// 1. **Frontier holdback** — a token whose span **end touches the buffer end** is not yielded;
-  ///    it may be a prefix of a longer token once more input arrives.
-  /// 2. **Frontier error** — a **non-terminal** lexer error whose span **touches the buffer end** is
-  ///    not emitted; it may be a truncation artifact.
+  /// 1. **Frontier holdback** — a token the lexer decided by **reading as far as the buffer end**
+  ///    is not yielded; it may be a prefix of a longer token once more input arrives.
+  /// 2. **Frontier error** — a **non-terminal** lexer error decided the same way is not emitted; it
+  ///    may be a truncation artifact.
   /// 3. **Non-final EOF** — lexer exhaustion is not treated as genuine end of input; more may come.
+  ///
+  /// "Read as far as the buffer end" is the fact the lexer reports through
+  /// [`read_frontier`](crate::Lexer::read_frontier), floored at the item's own span end — **not**
+  /// the item's span reaching the end, which is the pre-0.10.0 proxy this replaced. The two
+  /// coincide only for a lexer that never reads past what it emits
+  /// ([`SpanEnd`](crate::ReadFrontier::SpanEnd)). A lexer that probes ahead and backtracks is held
+  /// back while its span sits behind the end — that is the case the proxy got wrong — and one
+  /// reporting [`Unbounded`](crate::ReadFrontier::Unbounded) is held back everywhere.
   ///
   /// # A terminal trip outranks all three
   ///
@@ -3132,9 +3140,12 @@ where
   /// With [`is_final`](Self::is_final) `== true`, or on a
   /// [`Complete`](crate::input::Complete) input, all three rules are off and `next` behaves
   /// identically to before this typestate existed (the checks are eliminated at monomorphization).
-  /// The frontier holdback means the last token only becomes visible after more input arrives or
-  /// the input is marked final — a **one-token latency** that is correct by construction. See the
-  /// [`input`](crate::input) module docs for the Sans-I/O resumption loop.
+  /// The frontier holdback means a token the lexer decided by reading to the end becomes visible
+  /// only after more input arrives or the input is marked final — a latency that is correct by
+  /// construction. It is **one** token for a [`SpanEnd`](crate::ReadFrontier::SpanEnd) lexer and
+  /// more for a lookahead one, up to every token for
+  /// [`Unbounded`](crate::ReadFrontier::Unbounded); see the [`input`](crate::input) module docs for
+  /// how far back it reaches, and for the Sans-I/O resumption loop.
   #[allow(clippy::should_implement_trait)]
   pub fn next(
     &mut self,
@@ -3285,13 +3296,24 @@ where
   ///
   /// # The floor is the driver's, not the ecosystem's
   ///
-  /// `frontier >= span.end` is a doc contract, and the safety story must not rest on every
-  /// implementor honouring it: a buggy `ReadTo(0)` would otherwise yield an item the pre-0.10.0
-  /// holdback withheld — a regression introduced by the fix. So the effective frontier is
-  /// `max(span.end, reported)`, one comparison that makes monotonicity a property of *this
-  /// function* rather than of the ecosystem. It is the same posture the crate already takes on the
-  /// post-exhaustion span, where the frontier reader "floors and clamps as defence in depth
-  /// against a non-conforming lexer; that clamp is not the specification".
+  /// `frontier >= span.end` is **not** an implementor obligation — it is the relation *this
+  /// function* establishes, by flooring what it reads at the item's span end. The distinction is
+  /// not pedantic in either direction:
+  ///
+  /// - an **honest** lexer can legitimately report below its span end. A span is half-open, so an
+  ///   item decided purely from its own bytes — a fixed token with no rule continuing past it,
+  ///   needing no terminator probe — truthfully reports `span.end - 1`, the offset of its own last
+  ///   byte. Demanding `>= span.end` of implementors would make the crate's own convention a
+  ///   contract violation. [`Lexer::read_frontier`] states the relation this way, and this comment
+  ///   must not restate it as a duty;
+  /// - a **buggy** lexer's `ReadTo(0)` would, unfloored, yield an item the pre-0.10.0 holdback
+  ///   withheld — a regression introduced by the fix.
+  ///
+  /// One comparison answers both: `effective = max(span.end, reported)` makes monotonicity a
+  /// property of this function rather than of the ecosystem, so an under-report costs precision
+  /// and never soundness. It is the same posture the crate already takes on the post-exhaustion
+  /// span, where the frontier reader "floors and clamps as defence in depth against a
+  /// non-conforming lexer; that clamp is not the specification".
   ///
   /// Over-reporting only over-withholds, and that converges: a refill strictly grows the buffer
   /// and sealing ends the game, so no livelock.
@@ -3491,10 +3513,15 @@ where
   /// [`Incomplete`](crate::error::Incomplete) on the `Err` channel, which every `scan_with(..)?`
   /// caller propagates unchanged:
   ///
-  /// - **frontier holdback / frontier error** — a lexed item (token *or* error) whose span end
-  ///   touches the buffer end is withheld, since more input could extend it — *unless it is
-  ///   terminal*, which [`classify`](Self::classify) ranks first (a limit trip fires here even at
-  ///   the frontier);
+  /// - **frontier holdback / frontier error** — a lexed item (token *or* error) whose **effective
+  ///   read frontier** (`max(span.end, `[`read_frontier`](Lexer::read_frontier)`)`) reaches the
+  ///   non-final buffer end is withheld, since the decision consulted the end and more input could
+  ///   change it. That is **not** the same as the item's span reaching the end: a lexer that probes
+  ///   ahead and backtracks is withheld while its span sits well behind the end, and a lexer
+  ///   reporting [`Unbounded`](crate::ReadFrontier::Unbounded) is withheld everywhere. The span
+  ///   rule this replaced was a proxy, exact only for a lexer that never reads past what it emits.
+  ///   Withheld *unless the item is terminal*, which [`classify`](Self::classify) ranks first (a
+  ///   limit trip fires here even at the frontier);
   /// - **non-final EOF** — lexer exhaustion that is *not* a poison-boundary trip surfaces
   ///   Incomplete, since more input may still arrive. A trip is exempt for the same reason it
   ///   outranks the holdback: it is terminal, and re-lexing the same prefix re-trips.
@@ -3630,7 +3657,8 @@ where
   Token(Spanned<L::Token, L::Span>),
   /// **Terminal.** This item tripped a resource limit: the poison boundary is *already latched* at
   /// the durable frontier, so even a fatal emitter cannot lose it. The driver emits the diagnostic
-  /// (deduplicated) and stops. Reached whether or not the tripping item touches the buffer end.
+  /// (deduplicated) and stops. Reached whether or not the tripping item is a frontier item — one
+  /// whose effective read frontier reaches a non-final buffer end.
   Trip(Spanned<<L::Token as Token<'inp>>::Error, L::Span>),
   /// A **non-terminal** lexer error, clear of the frontier: the driver emits it (deduplicated) and
   /// skips over it. Nothing is latched — the scan goes on looking for a token.
