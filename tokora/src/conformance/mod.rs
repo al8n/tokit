@@ -311,15 +311,14 @@ where
   /// - **The item guards go out of reach, and only those.** `out.len() > budget` cannot hold when
   ///   `budget` is `usize::MAX`, because no `Vec` holds that many items. This is the one guard the
   ///   old wording described correctly.
-  /// - **[`instance_ceiling`] *overflows*.** It is `budget + 1`, so at `usize::MAX` it wraps to
-  ///   `0` in release and panics with an arithmetic message in debug. A per-instance ceiling of
+  /// - **The per-instance ceiling *overflows*.** It is `budget + 1`, so at `usize::MAX` it wraps
+  ///   to `0` in release and panics with an arithmetic message in debug. A per-instance ceiling of
   ///   zero is not an inert guard — it refuses every lexer on its **first** attempt. The failure
   ///   is the opposite of the one the old wording named.
-  /// - **The aggregate tally still fires.** [`LexTally::spend`](tally::LexTally::spend) compares
-  ///   `spent >= limit` before it increments and counts in `u128`, over a ceiling
-  ///   ([`lex_attempt_ceiling`]) that is derived from the budget rather than equal to it. So it is
-  ///   enforced — just at a number no run reaches while anybody is waiting, which is a *useless*
-  ///   ceiling and not an absent one.
+  /// - **The aggregate tally still fires.** It compares `spent >= limit` before it increments and
+  ///   counts in `u128`, over a ceiling that is *derived* from the budget rather than equal to it.
+  ///   So it is enforced — just at a number no run reaches while anybody is waiting, which is a
+  ///   *useless* ceiling and not an absent one.
   ///
   /// None of the three is the reason the cap is a **refusal**. That reason is below, and it is a
   /// different problem again: it is about what a clamp does to a caller the kit accepts.
