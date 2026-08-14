@@ -1916,6 +1916,91 @@ fn a_checkpoint_restore_does_not_refund_the_tally() {
   );
 }
 
+// ── The counters at their own ceilings: `>=` before the increment, not after ─────────
+//
+// `MAX_BUDGET_MULTIPLE` keeps a CONFIGURED ceiling inside the range a counter can pass. It says
+// nothing about a DERIVED one, and `lex_attempt_ceiling` saturates: at `usize::MAX` the old
+// `spent += 1; if spent > limit` never reached its comparison, because the increment overflowed
+// first. Debug panicked with the wrong message; release wrapped the tally to zero and handed the
+// run its whole allowance again, as often as the work asked, printing nothing.
+//
+// The two cells below are that state reached directly, because reaching it by counting means
+// counting to `usize::MAX`. Both fail under the old order in BOTH profiles — release by not
+// panicking at all, debug by panicking with "attempt to add with overflow" instead of the message
+// the expectation names — and the release arm is the one that matters, since that is where the
+// wrap silently continued the run.
+
+/// The aggregate tally at a saturated ceiling: already at `usize::MAX`, with `usize::MAX` allowed.
+///
+/// The seeded constructor is `#[cfg(test)]` and mints a *new* count, so it cannot return capacity
+/// to a tally a run is holding — the module wall the invariant rests on is untouched.
+#[test]
+#[should_panic(expected = "lex-budget] the lexer was asked to lex more than")]
+fn a_saturated_aggregate_ceiling_refuses_rather_than_wrapping_the_tally() {
+  let tally = super::LexTally::preloaded(0, "saturated", 1, usize::MAX, usize::MAX, usize::MAX);
+  tally.spend();
+}
+
+/// The per-instance counter at the ceiling its own derivation can hand it.
+///
+/// `instance_ceiling(budget)` is `budget + 1` and `representable_budget` may return
+/// `usize::MAX - 1`, so `per_instance` can be `usize::MAX` — the identical defect one counter over.
+/// The tally is given room to spare so the aggregate does not answer first: the subject here is
+/// `Budgeted::spent_here`, and the expectation is the per-instance wording for that reason.
+#[test]
+#[should_panic(expected = "lex-budget] one lexer instance was asked to lex more than")]
+fn a_saturated_instance_ceiling_refuses_rather_than_wrapping_the_instance_counter() {
+  let tally = super::LexTally::new(0, "saturated", 1, usize::MAX, usize::MAX);
+  let mut lexer = super::Budgeted::wrap(
+    TileLexer::new("a"),
+    super::Tallied {
+      inner: (),
+      tally: super::Rc::clone(&tally),
+    },
+  );
+  lexer.spent_here = usize::MAX;
+  lexer.spend();
+}
+
+/// The 32-bit reachability behind both cells above, since a 64-bit host cannot show it.
+///
+/// `lex_attempt_ceiling(units + 3, budget)` saturates a 32-bit `usize` at 11,580 units at the
+/// default multiple and at 127 units at the maximum — sources anyone hands a test kit. The model
+/// is evaluated in `u128` and is first pinned against the real function on this host, where
+/// nothing saturates: a change to either formula reds this cell rather than leaving a private
+/// model describing an implementation that moved.
+#[test]
+fn the_aggregate_ceiling_saturates_a_32_bit_usize_at_ordinary_source_sizes() {
+  fn model(multiple: u128, units: u128) -> u128 {
+    let budget = multiple * units + super::BUDGET_FLOOR as u128;
+    (units + 3) * super::ATTEMPTS_PER_DRAIN_MULTIPLE as u128 * (budget + 1)
+      + super::BUDGET_FLOOR as u128
+  }
+
+  const U32_MAX: u128 = u32::MAX as u128;
+  let default = super::DEFAULT_BUDGET_MULTIPLE;
+  let max = super::MAX_BUDGET_MULTIPLE;
+
+  for &(multiple, units) in &[(default, 11_579), (default, 11_580), (max, 126), (max, 127)] {
+    let budget = super::representable_budget(multiple, units)
+      .expect("a 64-bit host represents every one of these budgets");
+    let host = super::lex_attempt_ceiling(units.saturating_add(3), budget);
+    assert_eq!(
+      host as u128,
+      model(multiple as u128, units as u128),
+      "the u128 model of the aggregate ceiling disagrees with lex_attempt_ceiling at \
+       multiple {multiple}, {units} units"
+    );
+  }
+
+  // Below each threshold the ceiling still fits, which is what makes the threshold a threshold
+  // rather than an assertion that big numbers are big.
+  assert!(model(default as u128, 11_579) <= U32_MAX);
+  assert!(model(default as u128, 11_580) > U32_MAX);
+  assert!(model(max as u128, 126) <= U32_MAX);
+  assert!(model(max as u128, 127) > U32_MAX);
+}
+
 // ── Positive: the crate's real logos adapter (LogosLexer) ───────────────────────────
 
 #[cfg(any(feature = "logos_0_16", feature = "logos_0_15", feature = "logos_0_14"))]

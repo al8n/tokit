@@ -745,8 +745,12 @@ where
     let mut out = Vec::new();
     let mut attempts = 0usize;
     while out.len() < want {
-      attempts += 1;
-      if attempts > limit {
+      // Checked before the increment, the same order both counters in the parent module use.
+      // This one is provably total either way — `representable_budget` returns only values
+      // strictly below `usize::MAX`, so `attempts` tops out at `limit` — but "the ceiling is
+      // compared before the counter moves" is the rule, and a counter that keeps the rule only
+      // because of a bound proved somewhere else is the one that breaks when that bound moves.
+      if attempts >= limit {
         let cap = super::MAX_BUDGET_MULTIPLE;
         panic!(
           "tokora cache conformance [{name} lex-budget]: building the corpus asked the lexer to \
@@ -759,6 +763,7 @@ where
            unit, above which the kit cannot tell a dense lexer from a nonterminating one."
         );
       }
+      attempts += 1;
       let Some(res) = lexer.lex() else { break };
       let span = lexer.span();
       let state = lexer.state().clone();

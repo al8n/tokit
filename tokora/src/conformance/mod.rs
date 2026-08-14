@@ -580,6 +580,36 @@ mod tally {
       })
     }
 
+    /// A tally that starts with `spent` attempts already charged — **test-only**, and the one
+    /// thing in this module that is not reachable from a shipped build.
+    ///
+    /// It is a *constructor*, not a writer, which is why it does not weaken the wall above: it
+    /// mints a new count, so it cannot return capacity to a tally that already exists, and every
+    /// handle a run holds still addresses the one cell it was built with. Nothing outside gains a
+    /// reset or a setter.
+    ///
+    /// It exists because the defect [`spend`](Self::spend) now forecloses lives at
+    /// [`usize::MAX`], and the only way to reach that count by charging it is to charge it
+    /// `usize::MAX` times. A regression that cannot be run is not a regression.
+    #[cfg(test)]
+    pub(super) fn preloaded(
+      idx: usize,
+      tier: &'static str,
+      units: usize,
+      spent: usize,
+      limit: usize,
+      per_instance: usize,
+    ) -> Rc<Self> {
+      Rc::new(Self {
+        spent: Cell::new(spent),
+        limit,
+        per_instance,
+        units,
+        idx,
+        tier,
+      })
+    }
+
     /// Attempts charged so far. Read-only: there is no counterpart that writes it.
     pub(super) fn spent(&self) -> usize {
       self.spent.get()
@@ -598,15 +628,40 @@ mod tally {
     /// Charges one [`Lexer::lex`](crate::Lexer::lex) attempt. The only mutator, and it only
     /// increments.
     ///
+    /// # The check comes before the increment, which is what makes the arithmetic total
+    ///
+    /// `spent += 1; if spent > limit` cannot be evaluated at all once `limit` is
+    /// [`usize::MAX`] — the increment overflows before the comparison is reached — so that
+    /// ceiling is not merely unreachable, it is *destructive*. And it is a ceiling this kit
+    /// hands itself: [`lex_attempt_ceiling`](super::lex_attempt_ceiling) **saturates**, which a
+    /// 32-bit target reaches at the default multiple over an 11,580-unit source and at the
+    /// maximum multiple over 127 — sources anyone can pass, not contrivances.
+    ///
+    /// The failure was profile-dependent and release held the bad arm. Debug panicked on the
+    /// overflow: the wrong message, but a stop. Release **wrapped the count to zero** and let the
+    /// run carry on from there, wrapping again as often as the work asked, with no `lex-budget`
+    /// refusal ever printed — which is precisely the disarmed guard the tally exists to prevent,
+    /// arrived at by arithmetic instead of by configuration.
+    ///
+    /// Asking `spent >= limit` first and incrementing only on the allowed path *removes* the
+    /// overflow rather than making it unlikely: the `+ 1` runs only when `spent < limit`, so its
+    /// result is at most `limit`, which is at most [`usize::MAX`]. The allowance is unchanged —
+    /// `limit` attempts pass and the `limit + 1`-th refuses, exactly as before — so no lexer's
+    /// verdict moves.
+    ///
+    /// A saturated ceiling still leaves the aggregate guard unable to fire, and that is a
+    /// deliberate trade rather than an oversight: see
+    /// [`lex_attempt_ceiling`](super::lex_attempt_ceiling) for why refusing there would reject a
+    /// conforming lexer over an ordinary source.
+    ///
     /// # Panics
     ///
     /// Panics — tagged `lex-budget` — on the attempt that would exceed the ceiling. That is the
     /// intended failure mode: the alternative is not a passing run, it is a run that does not
     /// end, or ends after cubic work.
     pub(super) fn spend(&self) {
-      let spent = self.spent.get() + 1;
-      self.spent.set(spent);
-      if spent > self.limit {
+      let spent = self.spent.get();
+      if spent >= self.limit {
         let (idx, tier, limit, units) = (self.idx, self.tier, self.limit, self.units);
         panic!(
           "tokora conformance [input #{idx} {tier} lex-budget] the lexer was asked to lex more \
@@ -619,6 +674,7 @@ mod tally {
            and nonempty and the lexer must exhaust."
         );
       }
+      self.spent.set(spent + 1);
     }
 
     /// The refusal for [`Budgeted`](super::Budgeted)'s per-instance early guard, built here so
@@ -770,12 +826,20 @@ struct Budgeted<L, S> {
 
 impl<L, S> Budgeted<L, S> {
   /// Charges one attempt to the shared tally, then to this instance's fast-fail ceiling.
+  ///
+  /// Both charges check *before* they increment, and this one for the same reason
+  /// `LexTally::spend` does: the ceiling it compares against is
+  /// [`instance_ceiling(budget)`](instance_ceiling), which is `budget + 1`, and
+  /// [`representable_budget`] is permitted to return `usize::MAX - 1` — so `per_instance` can be
+  /// [`usize::MAX`], a value `spent_here` can never exceed and `spent_here += 1` wraps at. The
+  /// tally is still charged first, so the aggregate bound sees every attempt this guard is about
+  /// to refuse.
   fn spend(&mut self) {
     self.state.tally.spend();
-    self.spent_here += 1;
-    if self.spent_here > self.state.tally.per_instance() {
+    if self.spent_here >= self.state.tally.per_instance() {
       self.state.tally.refuse_instance();
     }
+    self.spent_here += 1;
   }
 
   /// Carries a mutation made through [`Lexer::state_mut`] into the inner lexer, and **only** then:
@@ -940,14 +1004,26 @@ fn instance_ceiling(budget: usize) -> usize {
 /// needs work that grows faster than the ceiling, so any constant works — while the failure a
 /// tight ceiling would cause is a **false refusal** of a legitimate lexer, which no constant fixes.
 ///
-/// # Saturating, unlike the budget it is built from
+/// # Saturating, unlike the budget it is built from — and what that costs on a 32-bit target
 ///
 /// [`Harness::budget`] is checked because a saturated *budget* is a disarmed guard on a source
 /// anyone can hand the kit. This one is quadratic in the source — `drains` is `units + 3` in the
-/// partial tier — so saturating it needs about 2²³ units at the largest multiple, and the tier that
-/// asks for that many drains would be making 2⁴⁶ attempts. There is no run that reaches the
-/// saturation and terminates, so there is no guard to disarm; a panic here would only be a false
-/// refusal waiting for a source that cannot be lexed anyway.
+/// partial tier — so on a **64-bit** target saturating it needs about 2²³ units at the largest
+/// multiple, and the tier that asks for that many drains would be making 2⁴⁶ attempts.
+///
+/// **That argument was the whole record, and it holds only at 64 bits.** The same product
+/// saturates a 32-bit `usize` at **127** units at the maximum multiple and at **11,580** units at
+/// the default one — ordinary sources, and runs a conforming lexer finishes. So the saturated
+/// ceiling is reachable in practice, and the record has to say what happens when it is.
+///
+/// Saturating is still the right direction, because the alternative is worse in kind: panicking
+/// here would refuse an 11 KB source on a 32-bit target, which is a **conforming lexer rejected**,
+/// and no constant fixes that. What saturation costs is that on those sources the aggregate
+/// ceiling becomes a number the count cannot reach, leaving the tier bounded by the per-instance
+/// ceiling ([`instance_ceiling`], `O(units)`) and the per-drain item budgets rather than by the
+/// tally. What it no longer costs is a *wrap*: `LexTally::spend` checks before it increments, so a
+/// [`usize::MAX`] ceiling makes the count climb without ever restarting, where it used to reset to
+/// zero under a release profile and hand the run its whole allowance again.
 fn lex_attempt_ceiling(drains: usize, budget: usize) -> usize {
   drains
     .saturating_mul(ATTEMPTS_PER_DRAIN_MULTIPLE)
