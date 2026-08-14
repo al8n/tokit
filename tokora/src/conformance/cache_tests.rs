@@ -4107,3 +4107,146 @@ fn a_corpus_of_nothing_but_errors_is_refused_not_spun_on() {
   .named("endless-error corpus")
   .run();
 }
+
+// ── Dense but finite: what the ceiling must not conflate with nontermination ─────────
+//
+// The guard above stops a lexer that never reaches the target. The ceiling it stops at was
+// justified by "monotone progress and nonempty spans bound a conforming lexer at one item per
+// source unit" — which is not what the contract enforced elsewhere says. Starts must be
+// NON-DECREASING, not strictly increasing, and spans must be INDIVIDUALLY nonempty, not disjoint,
+// so repeated and overlapping items are legal and a finite terminating lexer may emit many items
+// per unit. This kit does not even check that much: it drives the raw lexer and never runs the
+// lexer-contract tier.
+//
+// So the number was an assumption wearing a derivation's clothes, and a lexer that merely emits a
+// lot per unit was refused as nonterminating with no way to say otherwise. The two cells below are
+// the same lexer at the same density under the two ceilings.
+
+/// Lexer errors this fixture emits at each position before the token there.
+///
+/// Chosen so `want` tokens cost more than the default ceiling over [`DENSE_SRC`] and comfortably
+/// less than the raised one, which is what makes the pair of cells below say something.
+const DENSE_ERRORS_PER_TOKEN: u32 = 24;
+
+/// Eight ASCII units, so the corpus is long enough for `DefaultCache`'s residency plus its peek
+/// window while the default ceiling stays small.
+const DENSE_SRC: &str = "abcdefgh";
+
+/// A **finite, deterministic, terminating** lexer that emits [`DENSE_ERRORS_PER_TOKEN`] errors at
+/// a position before the token there, and exhausts at the end of the source like any other.
+///
+/// Every error reports the same nonempty span as the token that follows it — legal, since the
+/// contract asks for non-decreasing starts rather than strictly increasing ones — and the token
+/// carries its own slice, so the corpus stays pairwise distinct on all three axes and the kit's
+/// comparisons keep their discriminating power.
+struct DenseErrCorpusLexer<'a> {
+  src: &'a str,
+  at: usize,
+  start: usize,
+  end: usize,
+  burst: u32,
+  state: CState,
+}
+
+impl<'a> Lexer<'a> for DenseErrCorpusLexer<'a> {
+  type State = CState;
+  type Source = str;
+  type Token = CTok<'a>;
+  type Span = crate::SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      at: 0,
+      start: 0,
+      end: 0,
+      burst: 0,
+      state: CState::default(),
+    }
+  }
+  fn with_state(src: &'a str, state: CState) -> Self {
+    Self {
+      src,
+      at: 0,
+      start: 0,
+      end: 0,
+      burst: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), CErr> {
+    Ok(())
+  }
+  fn state(&self) -> &CState {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut CState {
+    &mut self.state
+  }
+  fn into_state(self) -> CState {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> crate::SimpleSpan {
+    crate::SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<CTok<'a>, CErr>> {
+    if self.at >= self.src.len() {
+      return None;
+    }
+    self.start = self.at;
+    self.end = self.at + 1;
+    if self.burst < DENSE_ERRORS_PER_TOKEN {
+      self.burst += 1;
+      return Some(Err(CErr::Any));
+    }
+    self.burst = 0;
+    self.at = self.end;
+    self.state.lexed += 1;
+    Some(Ok(CTok::Word(&self.src[self.start..self.end])))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+
+  fn bump(&mut self, n: &usize) {
+    self.at += *n;
+    self.start = self.at;
+    self.end = self.at;
+  }
+}
+
+/// The false failure the knob exists to resolve, pinned so it is a documented limit of the default
+/// rather than a surprise — and so the refusal keeps naming the way out of it.
+///
+/// This lexer terminates. What the default ceiling refuses is its *density*.
+#[test]
+#[should_panic(expected = "raise the ceiling with CacheHarness::lex_attempts_multiple")]
+fn the_default_ceiling_refuses_a_lexer_that_is_merely_dense() {
+  CacheHarness::<DenseErrCorpusLexer<'_>, DefaultCache<'_, DenseErrCorpusLexer<'_>>>::new(
+    DENSE_SRC,
+  )
+  .named("dense-error corpus")
+  .run();
+}
+
+/// And the whole contract passes at that same density once the ceiling is raised: the guard bounds
+/// nontermination, not slowness.
+///
+/// This is the half that matters. A guard that refuses a legitimate lexer with no override is a
+/// certification that cannot be run — a safe direction to fail in, and still a failure.
+#[test]
+fn a_finite_dense_error_lexer_passes_once_the_ceiling_is_raised() {
+  CacheHarness::<DenseErrCorpusLexer<'_>, DefaultCache<'_, DenseErrCorpusLexer<'_>>>::new(
+    DENSE_SRC,
+  )
+  .named("dense-error corpus")
+  .lex_attempts_multiple(64)
+  .run();
+}
