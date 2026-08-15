@@ -147,8 +147,8 @@ where
   ///
   /// Read through [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) and compared through
   /// [`scanner_tripped_during_attempt`](Self::scanner_tripped_during_attempt); its only writer is
-  /// [`latch_if_limit_tripped`](Self::latch_if_limit_tripped), the crate's terminal predicate, and
-  /// no handle method exposes a mutable route to the cell.
+  /// [`publish_scanner_trip`](Self::publish_scanner_trip), the infallible half of recording a
+  /// terminal scanner stop, and no handle method exposes a mutable route to the cell.
   pub(super) scanner_trips: &'closure mut usize,
   /// The **session cell**: the input's lineage memos (the live-checkpoint stack, the pin set, and
   /// the cache-push/checkpoint-id/savepoint counters), the handle's **emitter borrow** (the
@@ -1023,8 +1023,8 @@ where
   /// [`install_rekey`](Self::install_rekey) does not touch, with no `token_budget_mut` anywhere to
   /// lower it. Clearing the boundary therefore buys a re-entrant caller a fresh *check*, never a
   /// fresh lex. The refusal still latches the boundary and counts the trip, through the same
-  /// [`latch_scanner_trip`](Self::latch_scanner_trip) a lexer limit trip goes through, so the stop
-  /// travels the pipeline exactly as it did — and it re-latches on every refused entry, because a
+  /// [`publish_scanner_trip`](Self::publish_scanner_trip) a lexer limit trip goes through, so the
+  /// stop travels the pipeline exactly as it did — and it re-latches on every refused entry, because a
   /// latch that trusted itself would go quiet the moment one of those three doors cleared it.
   ///
   /// The boundary probe stays **first**. An input already stopped at its boundary returns `Stop`
@@ -1143,63 +1143,78 @@ where
   where
     Fr: Frontier<'inp, L>,
   {
-    // STEP 1 — a genuine end of input is not a met ceiling.
+    // STEP 1 — a genuine end of input is not a met ceiling. Nothing is owed yet, so the two
+    // caller-code steps this runs (`Source::len`, `Offset::Ord`) may unwind freely.
     if lex_at.ge(&self.input.len()) {
       return LexStep::Stop;
     }
-    // STEP 2 — the one-shot. Skipped once it has been spent, which is what bounds the work at one
+    // STEP 2 — STAGE the stop, before the lexer call that decides whether one is owed.
+    //
+    // Deriving the boundary is three caller-implemented steps — `Cache::back` (through
+    // `InputRef::offset`), `Span::end_ref` and `Offset::clone` (through `Frontier::boundary`) —
+    // and clamping it against an existing latch is a fourth, `Offset::Ord`. Every one of them can unwind, and running them *after* the refusal is
+    // decided put four foreign steps between the decision and the carriers that report it: an
+    // unwind there published the probe latch and neither the trip count nor the poison boundary,
+    // so a host that caught it inside an `attempt` and left — declining, or committing another
+    // branch — without re-entering the scanner saw two clean carriers and reported a **successful
+    // parse over input the budget had silently dropped**. `next` folds a terminal stop into
+    // `Ok(None)`, so the counter was the consumer's only evidence, and it was not written.
+    // Measured on `4e09636`, ceiling 2 over a four-item source: the derivation's `Cache::back`
+    // (#7 of 7) and its `L::Offset::clone` (#13 of 13) each returned `(2 items kept, probe spent,
+    // 0 trips, not poisoned)` on the committing exit
+    // (`a_refusal_survives_a_panicking_cache_back_in_its_boundary_derivation` and its
+    // `..._offset_clone_...` sibling).
+    //
+    // Hoisting is free of meaning: `Lexer::lex` cannot touch `self`, so the offset — and the
+    // boundary derived from it — is the same value on either side of the call. It costs one
+    // derivation on the skipped-tail exit below, which is the cold path's cold path.
+    let stop = self.stage_scanner_trip(frontier.boundary(self.offset()));
+    // STEP 3 — the one-shot. Skipped once it has been spent, which is what bounds the work at one
     // lexer call for the life of the `Input`.
     //
-    // The refused item is HELD rather than dropped where its existence is read. It is
-    // `Spanned<Lexed<L::Token>, L::Span>` — three consumer types, each free to carry a `Drop` —
-    // and a destructor that unwinds out of this frame takes with it every durable write that has
-    // not happened yet. Read as `lex_spanned(..).is_none()` it died at the end of the `if`
-    // condition, which is its own temporary scope: *before* the probe latch, the trip count and
-    // the boundary. A host that catches the unwind and re-enters then found the probe unspent and
-    // lexed again, so the one-call bound became one call per retry. Measured on `81d6340`: 4 / 16
-    // / 256 retries funded 4 / 16 / 256 `Lexer::lex` calls with `spent` pinned at the ceiling
-    // (`a_panicking_destructor_cannot_un_publish_the_at_limit_refusal`).
-    //
-    // For the same reason the probe calls `Lexer::lex` directly and latches on its answer, rather
-    // than through `Lexed::lex_spanned`. The wrapper's second half is `Lexer::span` — caller code,
-    // between the item's production and the latch, and an unwind there left the probe unspent with
-    // the lexer already advanced. Measured on `2f74187` with `span` armed to panic: 4 / 16 / 256
-    // retries funded 4 / 16 / 256 `Lexer::lex` calls at a ceiling of zero
-    // (`a_panicking_lexer_span_cannot_un_latch_the_one_shot_probe`). The item is *materialised*
-    // after the latch and still held to the end, so both windows are closed at once and the
-    // destructor order above is unchanged.
-    //
-    // What that costs, stated rather than left implicit: building the item calls `Lexer::span`
-    // BEFORE `latch_scanner_trip` below, so a `span` that unwinds publishes the probe latch and
-    // neither the trip count nor the boundary. That is a deferral of one entry, not a loss — the
-    // next entry finds the probe spent, takes the `None` arm and records both, at zero `Lexer::lex`
-    // calls (measured: the trip column is `rounds - 1` while the lexer column stays `1`). The
-    // durable half that bounds the work goes first; the other half is one a re-entry re-derives for
-    // free, which is why it is not worth hoisting the item's construction out from under the
-    // destructor cell to buy.
-    let refused = if self.token_budget.limit_probe_spent() {
-      None
-    } else {
-      let Some(produced) = lexer.lex() else {
-        // The remaining bytes hold no item: the lexer skipped them. An end of input, and the
-        // probe is NOT latched — see above for why that half is deliberately not one-shot.
-        return LexStep::Stop;
-      };
-      // An item exists and the ceiling refuses it. Latch before the stop is recorded: the latch is
-      // the durable half and the boundary is the refundable one, so the order is the same
-      // arm-then-act discipline `latch_scanner_trip` applies to its own two writes.
-      self.token_budget.latch_limit_probe();
-      Some(Spanned::new(
-        lexer.span(),
-        Lexed::<L::Token>::from(produced),
-      ))
+    // The already-spent arm publishes before it returns, with no caller-code step of any kind
+    // between the branch and the writes: the stop it publishes was staged above.
+    if self.token_budget.limit_probe_spent() {
+      let displaced = self.publish_scanner_trip(stop);
+      drop(displaced);
+      return LexStep::Exhausted;
+    }
+    let Some(produced) = lexer.lex() else {
+      // The remaining bytes hold no item: the lexer skipped them. An end of input — so the staged
+      // stop is DISCARDED rather than published, and the probe is not latched either. See above
+      // for why that half is deliberately not one-shot.
+      return LexStep::Stop;
     };
-    let boundary = frontier.boundary(self.offset());
-    self.latch_scanner_trip(boundary);
-    // Every durable fact is published, so the consumer's destructors may run now. Explicit rather
-    // than left to the end of scope: what makes the order correct is that nothing durable comes
-    // after this line, and a `drop` naming the value is what a later edit has to step over.
-    drop(refused);
+    // ── the refusal is DECIDED: an item exists and the ceiling refuses it ──
+    //
+    // Publish all three durable facts here, and nothing consumer-controlled may appear between
+    // this comment and the end of the publication. What runs is a `bool` store, a `usize`
+    // increment and one `mem::replace`; the boundary's derivation and clamp are already done, and
+    // the refused item does not exist yet.
+    //
+    // That ordering is what the probe calling `Lexer::lex` directly bought and what this
+    // completes. `Lexed::lex_spanned`'s second half is `Lexer::span` — caller code between the
+    // item's production and the latch — and an unwind there left the probe unspent with the lexer
+    // already advanced: measured on `2f74187`, 4 / 16 / 256 retries funded 4 / 16 / 256
+    // `Lexer::lex` calls at a ceiling of zero
+    // (`a_panicking_lexer_span_cannot_un_latch_the_one_shot_probe`). That cell used to accept a
+    // residual — the item was materialised before the trip count, so its `span` unwind deferred
+    // the stop by one entry. There is no residual now: the item is built after every write.
+    self.token_budget.latch_limit_probe();
+    let displaced = self.publish_scanner_trip(stop);
+    // Every durable fact is published, so consumer code may run again. The displaced boundary's
+    // destructor goes first, then the refused item — which is materialised only now, and dies
+    // where it stands: it cannot be yielded (it is the `max + 1`-th item) and it cannot be
+    // reported (a refusal has no diagnostic channel), so `Lexer::span`, the `Lexed` conversion and
+    // the three consumer destructors under `Spanned<Lexed<L::Token>, L::Span>` all run against a
+    // refusal that is already whole. The `drop`s are named rather than left to end of scope
+    // because what makes this correct is that nothing durable comes after them, and a named drop
+    // is what a later edit has to step over.
+    drop(displaced);
+    drop(Spanned::new(
+      lexer.span(),
+      Lexed::<L::Token>::from(produced),
+    ));
     LexStep::Exhausted
   }
 
@@ -1223,8 +1238,8 @@ where
   ///
   /// # The one writer of the scanner-trip counter
   ///
-  /// The count is taken in [`latch_scanner_trip`](Self::latch_scanner_trip), the sole writer of
-  /// [`Input::scanner_trips`](super::Input), which this predicate and the token-budget refusal are
+  /// The count is taken in [`publish_scanner_trip`](Self::publish_scanner_trip), the sole writer
+  /// of [`Input::scanner_trips`](super::Input), which this predicate and the token-budget refusal are
   /// the only two callers of — this one from [`classify`](Self::classify), the budget's from
   /// [`lex_within_boundary`](Self::lex_within_boundary) one step earlier. Both of those are single
   /// chokepoints reached by **both** lexing drivers — the scanner ([`scan_with`](Self::scan_with))
@@ -1235,30 +1250,67 @@ where
   /// window, so those are precisely the trips an attempt can be judged over.
   #[inline(always)]
   fn latch_if_limit_tripped(&mut self, lexer: &L, boundary: L::Offset) -> bool {
+    // STAGE, DECIDE, PUBLISH — the one order this crate records a terminal stop in, here and at
+    // the budget's refusal. `Lexer::check` is the decision and it is caller code; the clamp is
+    // `Offset::Ord` and it is caller code too. Staging first is what keeps the second out of the
+    // window between the first and the writes it obliges. Nothing else is added on the
+    // non-terminal path: `classify` already derived `boundary` above this call, so the stage is a
+    // discriminant test on a latch that is `None` on every input that has not tripped.
+    let stop = self.stage_scanner_trip(boundary);
     if lexer.check().is_err() {
-      self.latch_scanner_trip(boundary);
+      let displaced = self.publish_scanner_trip(stop);
+      drop(displaced);
       true
     } else {
       false
     }
   }
 
-  /// Records a **terminal scanner stop** at `boundary`: counts it on the session and latches the
-  /// durable frontier.
+  /// The **fallible half** of recording a terminal scanner stop: decides what the boundary write
+  /// will be, and performs no write at all.
+  ///
+  /// A trip can only maintain or increase poison, so the frontier it records is the more-poisoned
+  /// (smaller) of any existing latch and this one. That clamp is an `Offset::Ord` comparison —
+  /// **caller code** — and this is the only step of a stop that can unwind. Taking it here, off
+  /// `&self`, is what lets both callers run it *before* the decision that obliges them to publish,
+  /// so nothing consumer-controlled is left between the decision and the write. In practice a
+  /// live scan never reaches a trip past an already-latched boundary (it stops at the boundary
+  /// first), so this only ever establishes the frontier or lowers it.
+  #[inline(always)]
+  fn stage_scanner_trip(&self, boundary: L::Offset) -> StagedTrip<L::Offset> {
+    match self.poison_boundary.as_ref() {
+      Some(existing) if *existing <= boundary => StagedTrip::Keep,
+      _ => StagedTrip::Lower(boundary),
+    }
+  }
+
+  /// The **infallible half**: publishes a staged stop — counts it on the session and installs the
+  /// durable frontier — and hands back the boundary it displaced.
   ///
   /// Two conditions reach it, both terminal, and they sit on opposite sides of the lexer call —
   /// the lexer's own limit trip ([`latch_if_limit_tripped`](Self::latch_if_limit_tripped), from
   /// [`classify`](Self::classify), about an item that exists) and the input-layer
   /// [`TokenBudget`](crate::input::TokenBudget)'s refusal (from
-  /// [`lex_within_boundary`](Self::lex_within_boundary), before any item does). They differ in
-  /// what they know and in whether a diagnostic follows; they do not differ in what the stop *is*,
-  /// so the recording lives in one place and neither caller can record half of it.
+  /// [`settle_met_ceiling`](Self::settle_met_ceiling), before any item does). They differ in what
+  /// they know and in whether a diagnostic follows; they do not differ in what the stop *is*, so
+  /// the recording lives in one place and neither caller can record half of it.
   ///
   /// The budget's caller reaches it on **every** refused entry, not only the first. The boundary
   /// it writes is a lineage memo that a restore puts back and a state re-key drops, so a refusal
   /// that latched once and then trusted the latch would go silent the moment a caller cleared
   /// it — the count and the boundary are both re-established instead, off a ceiling that neither
   /// of those operations can touch.
+  ///
+  /// # Nothing in this body can unwind, and the type is what says so
+  ///
+  /// It takes a [`StagedTrip`], which only [`stage_scanner_trip`](Self::stage_scanner_trip)
+  /// produces: the comparison is therefore already decided before this is callable, and it cannot
+  /// be re-run here. What is left is a `usize` increment and one `Option::replace` — which *is*
+  /// `mem::replace`, a move, not an assignment. `*self.poison_boundary = Some(..)` would drop the
+  /// displaced `Option<L::Offset>` **before** installing the new one, putting caller `Drop` code
+  /// between the count and the boundary; the displaced value is returned instead, and
+  /// `#[must_use]` makes a caller name it. Same discipline as
+  /// [`replace_position`](Self::replace_position) and [`AtFrontier::adopt`].
   ///
   /// The bump runs **before** the boundary write and before any caller offers a diagnostic to the
   /// emitter — the same ordering [`raise_level`](Self::raise_level) uses for the descent counter,
@@ -1267,8 +1319,11 @@ where
   /// `wrapping_add`, again for the sibling's reason: the reading is an inequality against a
   /// per-attempt baseline, and wrapping is the one overflow behaviour under which consecutive
   /// values always differ.
+  #[must_use = "drop the displaced boundary AFTER the publication: dropping it here puts caller                 code between the two writes that record a terminal stop"]
   #[inline(always)]
-  fn latch_scanner_trip(&mut self, boundary: L::Offset) {
+  fn publish_scanner_trip(&mut self, staged: StagedTrip<L::Offset>) -> Option<L::Offset> {
+    // ── publication point: two infallible writes, nothing between them ──
+    //
     // COUNT, then record where. The count is the fact ("a scanner budget was spent inside this
     // attempt"); the boundary is the position, and it is a lineage memo a rollback puts back.
     // Counting every detected trip — including one that does not lower an already-latched
@@ -1276,13 +1331,11 @@ where
     // attempt must not compare equal to that attempt's baseline just because the position it
     // latched is one an earlier trip had already reached.
     *self.scanner_trips = self.scanner_trips.wrapping_add(1);
-    // A trip can only maintain or increase poison: clamp to the more-poisoned
-    // (smaller) of any existing frontier and this one. In practice a live scan
-    // never reaches a trip past an already-latched boundary (it stops at the
-    // boundary first), so this only ever records the frontier or lowers it.
-    match self.poison_boundary.as_ref() {
-      Some(existing) if *existing <= boundary => {}
-      _ => *self.poison_boundary = Some(boundary),
+    match staged {
+      StagedTrip::Keep => None,
+      // `Option::replace` IS `mem::replace(self, Some(v))` — it installs and hands the old value
+      // back. `*self.poison_boundary = Some(..)` is the spelling that drops first.
+      StagedTrip::Lower(boundary) => self.poison_boundary.replace(boundary),
     }
   }
 
@@ -3931,13 +3984,33 @@ where
   /// established there was an item in the first place.
   ///
   /// The poison boundary is *already latched* and the scanner trip *already counted*, through the
-  /// same [`latch_scanner_trip`](InputRef::latch_scanner_trip) a lexer limit trip goes through, so
-  /// the stop cannot be lost by any exit path. There is **no diagnostic**: the refused item is
+  /// same [`publish_scanner_trip`](InputRef::publish_scanner_trip) a lexer limit trip goes
+  /// through, so the stop cannot be lost by any exit path. There is **no diagnostic**: the refused item is
   /// either one no lexer ran to find, or the probe's, which is dropped where it stands because a
   /// refusal has no channel to report itself on. Drivers therefore take the same exit a
   /// [`Verdict::Trip`] takes **after** its emit succeeded — and must not adopt the `Resume`'s lexer
   /// state on it, which is what keeps the probe's mutation off the committed `L::State`.
   Exhausted,
+}
+
+/// A terminal scanner stop whose one fallible step is already taken: the boundary write, decided
+/// and not yet performed.
+///
+/// The carrier between [`InputRef::stage_scanner_trip`] and
+/// [`InputRef::publish_scanner_trip`], and the reason the split is **structural** rather than an
+/// ordering someone has to maintain. Publishing takes one of these by value, only staging makes
+/// one, and staging is the only step of a stop that runs caller code — so the comparison is
+/// necessarily complete before the publication is callable, and there is no spelling of
+/// "publish, then compare".
+///
+/// It is not `Option<L::Offset>`: publishing *returns* an `Option<L::Offset>` — the boundary it
+/// displaced — and two adjacent options with opposite meanings is exactly the confusion this
+/// window was lost to once already.
+enum StagedTrip<O> {
+  /// An already-latched boundary is at least as poisoned; the publication is the count alone.
+  Keep,
+  /// This stop establishes the frontier, or lowers it; the publication installs it.
+  Lower(O),
 }
 
 /// Where a scan latches the poison boundary on a limit trip: the **durable frontier**, the offset
