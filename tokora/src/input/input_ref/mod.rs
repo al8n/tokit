@@ -983,8 +983,9 @@ where
   /// caller and advanced to each token's end) reaches the boundary, returns
   /// [`LexStep::Stop`] so the caller's end-of-input handling produces the poisoned outcome — the
   /// tripping token and everything after it is never re-scanned. With no boundary
-  /// (or strictly before it), and with the budget unexhausted, this is exactly
-  /// [`Lexed::lex_spanned`].
+  /// (or strictly before it), and with the budget unexhausted, this produces exactly what
+  /// [`Lexed::lex_spanned`] would — the same two calls in the same order — with the budget's
+  /// charge threaded between them, which is why it is spelled out here rather than delegated.
   ///
   /// # The token budget is asked HERE, in front of the lexer, and charged here after it
   ///
@@ -994,6 +995,17 @@ where
   /// properties of the module rather than rules each driver has to remember. The check and the
   /// charge are one function apart from each other with nothing between them but the lexer call
   /// they bracket, and that is deliberate: it is not possible to keep one and lose the other.
+  ///
+  /// **The charge answers to `Lexer::lex`, not to the wrapper around it.**
+  /// [`Lexed::lex_spanned`] is two caller-implemented calls, not one — `lex`, and then
+  /// [`span`](crate::Lexer::span) to wrap what it produced. A `span` that unwinds has already let
+  /// the lexer advance past an item, and the unwind carries the whole wrapper away with the charge
+  /// still unmade; a host that catches it and re-enters gets that item's work again, free, once per
+  /// call. So this site calls [`lex`](crate::Lexer::lex) itself and charges the moment it answers
+  /// `Some` — before the span is read, before the item is built, and with nothing between the two
+  /// but the `else` that returns. Measured on `2f74187`, at a ceiling of `4` with `span` armed to
+  /// panic: 4 / 16 / 256 caught retries funded 4 / 16 / 256 `Lexer::lex` calls with `spent` still
+  /// `0` (`a_panicking_lexer_span_cannot_un_charge_the_item_it_was_wrapping`).
   ///
   /// **The order is the bound.** Asking after the lexer has already run refuses an item that the
   /// work has already been spent producing, and the refusal then has to live somewhere the caller
@@ -1047,13 +1059,21 @@ where
     if self.token_budget.is_exhausted() {
       return self.settle_met_ceiling(lexer, lex_at, frontier);
     }
-    let Some(lexed) = Lexed::<L::Token>::lex_spanned(lexer) else {
+    let Some(produced) = lexer.lex() else {
       // The lexer is exhausted. Nothing was produced, so nothing is charged — the budget's unit is
       // the item, and this step has none.
       return LexStep::Stop;
     };
     // CHARGE, and only now: an item exists, and the preflight above authorized exactly this one.
+    //
+    // This is `Lexer::lex`'s own answer, not `Lexed::lex_spanned`'s. The wrapper reads
+    // `Lexer::span` before it returns, and that call is caller code that may unwind out of here
+    // carrying the charge for an item the lexer has already produced — see the section above.
     self.token_budget.spend();
+    // The item is assembled AFTER the charge, so every caller-implemented step it takes —
+    // `Lexer::span`, and the destructors of anything the conversion moves — runs against a budget
+    // that already accounts for the work.
+    let lexed = Spanned::new(lexer.span(), Lexed::<L::Token>::from(produced));
     // Lexer contract: every lexed item has a nonempty span. The span wraps both the
     // `Token` and `Error` variants here, and this is the input layer's only lexing
     // site, so this one check guards every scanner and peek path. A zero-width span at
@@ -1139,10 +1159,28 @@ where
     // lexed again, so the one-call bound became one call per retry. Measured on `81d6340`: 4 / 16
     // / 256 retries funded 4 / 16 / 256 `Lexer::lex` calls with `spent` pinned at the ceiling
     // (`a_panicking_destructor_cannot_un_publish_the_at_limit_refusal`).
+    //
+    // For the same reason the probe calls `Lexer::lex` directly and latches on its answer, rather
+    // than through `Lexed::lex_spanned`. The wrapper's second half is `Lexer::span` — caller code,
+    // between the item's production and the latch, and an unwind there left the probe unspent with
+    // the lexer already advanced. Measured on `2f74187` with `span` armed to panic: 4 / 16 / 256
+    // retries funded 4 / 16 / 256 `Lexer::lex` calls at a ceiling of zero
+    // (`a_panicking_lexer_span_cannot_un_latch_the_one_shot_probe`). The item is *materialised*
+    // after the latch and still held to the end, so both windows are closed at once and the
+    // destructor order above is unchanged.
+    //
+    // What that costs, stated rather than left implicit: building the item calls `Lexer::span`
+    // BEFORE `latch_scanner_trip` below, so a `span` that unwinds publishes the probe latch and
+    // neither the trip count nor the boundary. That is a deferral of one entry, not a loss — the
+    // next entry finds the probe spent, takes the `None` arm and records both, at zero `Lexer::lex`
+    // calls (measured: the trip column is `rounds - 1` while the lexer column stays `1`). The
+    // durable half that bounds the work goes first; the other half is one a re-entry re-derives for
+    // free, which is why it is not worth hoisting the item's construction out from under the
+    // destructor cell to buy.
     let refused = if self.token_budget.limit_probe_spent() {
       None
     } else {
-      let Some(item) = Lexed::<L::Token>::lex_spanned(lexer) else {
+      let Some(produced) = lexer.lex() else {
         // The remaining bytes hold no item: the lexer skipped them. An end of input, and the
         // probe is NOT latched — see above for why that half is deliberately not one-shot.
         return LexStep::Stop;
@@ -1151,7 +1189,10 @@ where
       // the durable half and the boundary is the refundable one, so the order is the same
       // arm-then-act discipline `latch_scanner_trip` applies to its own two writes.
       self.token_budget.latch_limit_probe();
-      Some(item)
+      Some(Spanned::new(
+        lexer.span(),
+        Lexed::<L::Token>::from(produced),
+      ))
     };
     let boundary = frontier.boundary(self.offset());
     self.latch_scanner_trip(boundary);

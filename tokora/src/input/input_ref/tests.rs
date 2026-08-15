@@ -7517,6 +7517,48 @@ fn lex_calls() -> usize {
 }
 
 thread_local! {
+  /// `BombLexer::span` calls since the last arm, and the index that panics (0 = disarmed).
+  ///
+  /// `Lexer::span` is the SECOND caller-implemented call of a lexing step — `Lexer::lex` produces
+  /// the item, `span` says where it was — so an unwind out of it sits between an item that exists
+  /// and every durable write the input layer makes about it. That window is not reachable by
+  /// arming a destructor: the item's `Drop` runs strictly after the value is built, and this
+  /// panics before it can be.
+  static SPAN_CALLS: Cell<usize> = const { Cell::new(0) };
+  static SPAN_CALL_BOMB: Cell<usize> = const { Cell::new(0) };
+}
+
+fn arm_lexer_span(at: usize) {
+  SPAN_CALLS.with(|c| c.set(0));
+  SPAN_CALL_BOMB.with(|c| c.set(at));
+}
+
+fn disarm_lexer_span() {
+  SPAN_CALL_BOMB.with(|c| c.set(0));
+}
+
+thread_local! {
+  /// `BombLexer::lex` calls since the last arm, and the index that panics *before producing
+  /// anything* (0 = disarmed).
+  ///
+  /// The control for the two `span` cells: a lexer that dies with no item handed back has produced
+  /// nothing the budget is denominated in, so re-entering and lexing again is irreducible rather
+  /// than a bypass. Separate from [`LEX_CALLS`], which is the cumulative meter the cells read and
+  /// must not be reset per round.
+  static LEX_SINCE_ARM: Cell<usize> = const { Cell::new(0) };
+  static LEX_CALL_BOMB: Cell<usize> = const { Cell::new(0) };
+}
+
+fn arm_lexer_lex(at: usize) {
+  LEX_SINCE_ARM.with(|c| c.set(0));
+  LEX_CALL_BOMB.with(|c| c.set(at));
+}
+
+fn disarm_lexer_lex() {
+  LEX_CALL_BOMB.with(|c| c.set(0));
+}
+
+thread_local! {
   /// How many armed bombs have actually FIRED since the last [`reset_bomb_fired`].
   ///
   /// The arming counters above say how many times a step *ran*; this one says the armed index was
@@ -7844,6 +7886,18 @@ impl<'a> crate::Lexer<'a> for BombLexer<'a> {
   }
 
   fn span(&self) -> BombSpan {
+    // Armable, and disarmed everywhere else. This is caller code the input layer calls *after*
+    // `Lexer::lex` has already handed an item back, which is the one place a panic can leave the
+    // lexer advanced past an item the budget never saw.
+    let n = SPAN_CALLS.with(|c| {
+      let v = c.get() + 1;
+      c.set(v);
+      v
+    });
+    if n == SPAN_CALL_BOMB.with(Cell::get) {
+      record_bomb_fired();
+      panic!("R24 budget-window: the armed `Lexer::span` call (#{n}) panics");
+    }
     BombSpan {
       start: self.start,
       end: self.end,
@@ -7856,6 +7910,16 @@ impl<'a> crate::Lexer<'a> for BombLexer<'a> {
 
   fn lex(&mut self) -> Option<Result<BombTok, BombErr>> {
     LEX_CALLS.with(|c| c.set(c.get() + 1));
+    // The control's bomb: the call is counted, and then it dies with nothing produced.
+    let n = LEX_SINCE_ARM.with(|c| {
+      let v = c.get() + 1;
+      c.set(v);
+      v
+    });
+    if n == LEX_CALL_BOMB.with(Cell::get) {
+      record_bomb_fired();
+      panic!("R24 budget-window: the armed `Lexer::lex` call (#{n}) panics before producing");
+    }
     let bytes = self.src.as_bytes();
     let mut i = self.end;
     while i < bytes.len() && bytes[i] == b' ' {
@@ -10568,5 +10632,232 @@ fn a_panicking_destructor_cannot_un_publish_the_at_limit_refusal() {
     ],
     "cells are (Lexer::lex calls, spent, rounds that unwound, scanner trips, poisoned) at 1 / 4 / \
      16 / 256 retries"
+  );
+}
+
+// ── The budget's two writes versus a panicking `Lexer::span` ──────────────────
+//
+// The cell above closes the window a *destructor* opens, which is after the refused item exists.
+// One window sits earlier and no destructor can reach it: `Lexed::lex_spanned` is `Lexer::lex`
+// followed by `Lexer::span`, both caller code, and the input layer's writes were outside both. A
+// `span` that unwinds has already let the lexer produce and advance past an item, and it carries
+// the whole wrapper away before the charge (the authorized step) or the probe latch (the cold
+// at-limit sibling) is made. A host that catches it and re-enters buys that item's work again —
+// once per call, without bound, which is precisely the one-call bound this branch exists to
+// install.
+//
+// Both sites now call `Lexer::lex` themselves and write on its answer, so the two cells below are
+// flat in `rounds`. The third is the control that makes them mean something.
+
+/// Retries a **budget-authorized** step `rounds` times with `Lexer::span` armed to panic, clearing
+/// the poison boundary in between so the budget's own durable cell is the only thing left bounding
+/// the work. The ceiling is `4`, so the authorized path is the one under attack.
+///
+/// Returns `(Lexer::lex calls, budget spent, rounds that unwound, bombs fired)`.
+fn charge_under_a_panicking_lexer_span(rounds: usize) -> (usize, usize, usize, usize, usize, bool) {
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  )
+  .with_token_budget(crate::input::TokenBudget::with_limitation(4));
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    "ab cd",
+    BombTally::default(),
+    context,
+  );
+  let mut inp = input.as_ref();
+
+  reset_lex_calls();
+  reset_bomb_fired();
+  let mut unwound = 0usize;
+  for _ in 0..rounds {
+    inp.set_state(BombTally::default());
+    // The first `Lexer::span` of the round is the one that wraps the item `Lexer::lex` just
+    // produced — the unwind site between an item existing and the budget hearing about it.
+    arm_lexer_span(1);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      inp.next().map(|item| item.is_some())
+    }));
+    disarm_lexer_span();
+    unwound += usize::from(caught.is_err());
+  }
+  (
+    lex_calls(),
+    inp.token_budget().spent(),
+    unwound,
+    bomb_fired(),
+    inp.scanner_trip_snapshot(),
+    inp.is_poisoned(),
+  )
+}
+
+/// The same attack against the **cold at-limit probe**: a ceiling of zero, so every entry reaches
+/// `settle_met_ceiling` and the write under attack is the one-shot's latch rather than the charge.
+fn probe_under_a_panicking_lexer_span(rounds: usize) -> (usize, usize, usize, usize, usize, bool) {
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  )
+  .with_token_budget(crate::input::TokenBudget::with_limitation(0));
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    "ab cd",
+    BombTally::default(),
+    context,
+  );
+  let mut inp = input.as_ref();
+
+  reset_lex_calls();
+  reset_bomb_fired();
+  let mut unwound = 0usize;
+  for _ in 0..rounds {
+    inp.set_state(BombTally::default());
+    arm_lexer_span(1);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      inp.next().map(|item| item.is_some())
+    }));
+    disarm_lexer_span();
+    unwound += usize::from(caught.is_err());
+  }
+  (
+    lex_calls(),
+    inp.token_budget().spent(),
+    unwound,
+    bomb_fired(),
+    inp.scanner_trip_snapshot(),
+    inp.is_poisoned(),
+  )
+}
+
+/// **The control.** The same retry loop with the panic moved one call *earlier* — `Lexer::lex`
+/// itself dies before handing anything back — at the same ceiling of `4` as the charge cell.
+fn a_lexer_that_dies_before_producing(rounds: usize) -> (usize, usize, usize, usize, usize, bool) {
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  )
+  .with_token_budget(crate::input::TokenBudget::with_limitation(4));
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    "ab cd",
+    BombTally::default(),
+    context,
+  );
+  let mut inp = input.as_ref();
+
+  reset_lex_calls();
+  reset_bomb_fired();
+  let mut unwound = 0usize;
+  for _ in 0..rounds {
+    inp.set_state(BombTally::default());
+    arm_lexer_lex(1);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      inp.next().map(|item| item.is_some())
+    }));
+    disarm_lexer_lex();
+    unwound += usize::from(caught.is_err());
+  }
+  (
+    lex_calls(),
+    inp.token_budget().spent(),
+    unwound,
+    bomb_fired(),
+    inp.scanner_trip_snapshot(),
+    inp.is_poisoned(),
+  )
+}
+
+/// **Plant.** A `Lexer::span` that unwinds after `Lexer::lex` handed an item back cannot un-charge
+/// it: the work is bounded by the ceiling, not by the retry count.
+///
+/// Falsifying output, measured on `2f74187` (the charge sat outside `Lexed::lex_spanned`, so the
+/// unwind carried it away with the wrapper): `(1, 0, 1, 1, 0, false)`, `(4, 0, 4, 4, 0, false)`,
+/// `(16, 0, 16, 16, 0, false)`, `(256, 0, 256, 256, 0, false)` — one lexer call per round with
+/// `spent` never leaving zero, so the ceiling of `4` bounded nothing at all and the gate never even
+/// re-armed.
+///
+/// The shape after the repair is `4` charged steps (one per unit of ceiling), then a fifth
+/// `Lexer::lex` for the one-shot at-limit probe, then nothing: `spent` sticks at the ceiling and
+/// the lexer is never called again however many times the host retries. The `bombs fired` column
+/// is the payload witness — it is the count of rounds that actually reached an armed `Lexer::span`,
+/// and it drops below `rounds` after the repair for the right reason: once the budget is spent and
+/// the probe is latched there is no item to wrap, so there is no `span` call left to arm.
+///
+/// The two terminal carriers are read for the residual, not for the bound. The refused item is
+/// still *materialised* before `latch_scanner_trip` — deliberately, because that is what keeps the
+/// destructor cell above meaningful — so the `Lexer::span` call that builds it is one more foreign
+/// step in front of the trip count and the boundary, and the round that unwinds through it
+/// publishes neither. The trip column is `rounds - 5` for exactly that reason (four charged rounds
+/// and one probing round unwind before any stop is recorded), and it is a **deferral of one entry,
+/// not a loss**: the next entry finds the probe spent, records the trip and poisons, and does it at
+/// zero `Lexer::lex` calls — which is what the flat first column says. The durable half that bounds
+/// the work is published before the span call; the refundable half is not, and does not need to be.
+#[test]
+fn a_panicking_lexer_span_cannot_un_charge_the_item_it_was_wrapping() {
+  assert_eq!(
+    [1usize, 4, 16, 256].map(charge_under_a_panicking_lexer_span),
+    [
+      (1, 1, 1, 1, 0, false),
+      (4, 4, 4, 4, 0, false),
+      (5, 4, 5, 5, 11, true),
+      (5, 4, 5, 5, 251, true)
+    ],
+    "cells are (Lexer::lex calls, spent, rounds that unwound, bombs fired, scanner trips, \
+     poisoned) at 1 / 4 / 16 / 256 retries against a ceiling of 4"
+  );
+}
+
+/// **Plant.** The same unwind against the cold one-shot: the probe latch is published on
+/// `Lexer::lex`'s answer, so the at-limit question costs one `Lexer::lex` for the life of the
+/// `Input` no matter how many retries unwind out of the wrapper.
+///
+/// Falsifying output, measured on `2f74187`: `(1, 0, 1, 1, 0, false)`, `(4, 0, 4, 4, 0, false)`,
+/// `(16, 0, 16, 16, 0, false)`, `(256, 0, 256, 256, 0, false)` — one lexer call per round at a
+/// ceiling of **zero**, which is the unbounded-work shape in its purest form: a budget that
+/// authorizes nothing funding work without limit, and not one terminal carrier ever published.
+///
+/// After the repair the trip column is `rounds - 1`: the one round that unwinds does so between the
+/// probe latch and `latch_scanner_trip`, and every round after it publishes both carriers at zero
+/// `Lexer::lex` calls. Same residual as the cell above, in its smallest form — one deferred entry,
+/// bought by keeping the refused item's construction where its destructor still tests the order the
+/// previous repair installed.
+#[test]
+fn a_panicking_lexer_span_cannot_un_latch_the_one_shot_probe() {
+  assert_eq!(
+    [1usize, 4, 16, 256].map(probe_under_a_panicking_lexer_span),
+    [
+      (1, 0, 1, 1, 0, false),
+      (1, 0, 1, 1, 3, true),
+      (1, 0, 1, 1, 15, true),
+      (1, 0, 1, 1, 255, true)
+    ],
+    "cells are (Lexer::lex calls, spent, rounds that unwound, bombs fired, scanner trips, \
+     poisoned) at 1 / 4 / 16 / 256 retries against a ceiling of 0"
+  );
+}
+
+/// **The control, and it is meant to track the retry count.** A `Lexer::lex` that dies *before*
+/// handing anything back produced no item, so there is nothing the budget's unit is denominated in
+/// and nothing to charge; re-entering and lexing again is irreducible, not a bypass.
+///
+/// This is what keeps the two cells above from being satisfied by "a panic stops the counter". The
+/// numbers here are the ones those cells produced *before* the repair — identical, on the same
+/// harness — and they are correct here and a defect there. The whole difference is whether an item
+/// crossed the lexer's return.
+///
+/// It is also the cell that does **not** move across this repair: it read the same at `2f74187`,
+/// because there was never anything for either write to answer to. The terminal carriers stay at
+/// `(0, false)` at every round count for the same reason — no item, so no step of the budget's, and
+/// nothing ever reaches a stop to record.
+#[test]
+fn a_lexer_that_dies_before_producing_is_irreducible_and_charges_nothing() {
+  assert_eq!(
+    [1usize, 4, 16, 256].map(a_lexer_that_dies_before_producing),
+    [
+      (1, 0, 1, 1, 0, false),
+      (4, 0, 4, 4, 0, false),
+      (16, 0, 16, 16, 0, false),
+      (256, 0, 256, 256, 0, false)
+    ],
+    "cells are (Lexer::lex calls, spent, rounds that unwound, bombs fired, scanner trips, \
+     poisoned) at 1 / 4 / 16 / 256 retries against a ceiling of 4"
   );
 }

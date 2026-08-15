@@ -1825,8 +1825,15 @@ fn resume_census_one_pairing_site() {
   // the lexer, not about calls to the function that wraps them. A third invocation is a third way
   // to produce an item, and the one-shot's bound (one probe for the life of an `Input`) would stop
   // being a property of the module.
+  //
+  // The predicate is the CALL, not a wrapper around it. It used to be `lex_spanned(`, which is
+  // `Lexer::lex` followed by `Lexer::span` — two caller-implemented calls, with the charge and the
+  // probe latch outside both. An unwind out of the second one carried away a charge for an item
+  // the lexer had already produced, and a census keyed on the wrapper could not see the gap
+  // because the gap was *inside* it. Both sites now call `Lexer::lex` themselves and write on its
+  // answer, so this counts that.
   for (name, want) in [("lex_within_boundary", 1), ("settle_met_ceiling", 1)] {
-    let got = count(&method_body(m, name), "lex_spanned(");
+    let got = count(&method_body(m, name), "lexer.lex(");
     assert!(
       got == want,
       "RESUME_CENSUS drift: `{name}` invokes the lexer {got} time(s), expected {want}. The budget \
@@ -1834,13 +1841,32 @@ fn resume_census_one_pairing_site() {
        neither (grep RESUME_CENSUS)."
     );
   }
+  // Any receiver, not just the `lexer` binding the two bodies name: a driver that reached
+  // `Lexer::lex` through a differently-named local would satisfy the two body counts above and
+  // still be a third way to produce an item.
   for (name, src) in SOURCES {
     let want = usize::from(*name == "mod.rs") * 2;
+    let got = count(src, ".lex(");
     assert!(
-      count(src, "lex_spanned(") == want,
-      "RESUME_CENSUS drift: `{name}` invokes the lexer outside `lex_within_boundary` and its cold \
-       at-limit sibling (grep RESUME_CENSUS)."
+      got == want,
+      "RESUME_CENSUS drift: `{name}` invokes the lexer {got} time(s), expected {want} — outside \
+       `lex_within_boundary` and its cold at-limit sibling (grep RESUME_CENSUS)."
     );
+  }
+  // And no route reaches it one layer down, where neither write can see the item. `lex_spanned(`
+  // is the shape the two sites used to have; `::lex(` is every path form of the same call
+  // (`Lexed::lex`, `L::lex`, `<L as Lexer>::lex`), none of which the method-call count above can
+  // see. Both must be absent from the whole layer, which makes this census strictly wider than the
+  // one it replaces rather than the same claim moved.
+  for (name, src) in SOURCES {
+    for needle in ["lex_spanned(", "::lex("] {
+      assert!(
+        count(src, needle) == 0,
+        "RESUME_CENSUS drift: `{name}` reaches `Lexer::lex` through `{needle}` — one layer below \
+         the charge and the probe latch, so a caller-implemented step between the item and the \
+         write is invisible to both (grep RESUME_CENSUS)."
+      );
+    }
   }
   let lex_sites: &[(&str, usize, &str)] = &[
     ("mod.rs", 1, "`scan_with`'s loop"),
