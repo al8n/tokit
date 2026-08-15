@@ -30,6 +30,21 @@
 recursion/used
 recursion/discarded
 
+# ── `InputRef::token_budget` — the identical shape as `recursion`, same owner ────────────
+#
+# tokora's is `pub const fn token_budget(&self) -> &TokenBudgetTally` — the doc on it says so
+# directly: "The same absence [`recursion`] relies on." Same owner, same receiver kind, same
+# `inherent_method` template, so the analysis above applies verbatim: the probe's receiver
+# expression already has type `&mut InputRef<..>`, the consumer's `fn token_budget(&mut self)
+# -> u8` matches it at the FIRST step of the walk, and tokora's `&self` item is one autoref
+# step later and never a candidate. The earlier pick wins, on both sides.
+#
+# Read these two rows exactly as the `recursion` rows: "the `&mut self` consumer keeps its
+# call", never as "`token_budget` cannot be stolen". `recursion` is itself the control this
+# time — same owner, same template, same outcome, for the same stated reason.
+token_budget/used
+token_budget/discarded
+
 # ── `Emitter::commit_lexer_error` — the SAME rule, in the mirror ──────────────────────────
 #
 # tokora's is `fn commit_lexer_error(&mut self, ..)` on the `Emitter` trait. The

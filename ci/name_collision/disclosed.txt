@@ -57,7 +57,23 @@ peek_then_head/later_pick_discarded
 # inventory is a two-sided delta, so once this merges the name is no longer new, the row falls
 # out of every future plan, and the harness can never re-litigate it (README, "Staleness is
 # checked only for rows this run planned").
-unlimited/discarded
+#
+# THE LINE ITSELF IS NOW REMOVED, and the paragraph above is kept anyway — the finding is
+# permanent (it is in the CHANGELOG), the reconciliation LINE is not. `run.sh` reconciles by
+# the bare `name/spelling` label, with no owner in it, and the input-token-budget branch mints
+# a SECOND, unrelated inherent associated fn also spelled `unlimited` — `TokenBudget::unlimited`
+# (see the `new-owner` rows this branch's own run adds below `token_budget`'s no_collision.txt
+# entry). `surface_diff.py` recorded that name against the new owner, `RecursionLimiter` did not
+# change, and `RecursionLimiter::unlimited` is not part of this diff's added-name set at all —
+# so THIS run's `unlimited/discarded` probe is against `TokenBudget`, not `RecursionLimiter`,
+# and it lands `new-owner`, not `SILENT`. Leaving the line in place would make every run from
+# here on report it STALE, forever, over a row it was never testing. Removing it does not
+# revisit whether `RecursionLimiter::unlimited/discarded` still steals silently — a two-sided
+# delta harness cannot re-litigate a name that is no longer new, on this owner or any other,
+# which is the same rule the paragraph above already states for why this had to be disclosed at
+# #148's time and not later. If `RecursionLimiter` itself is ever touched again by a diff that
+# makes `unlimited` new there a second time, that run reconstructs the finding on its own
+# evidence rather than trusting this stale line.
 
 # ── `ParseState`'s four ZERO-ARGUMENT forwarders — a PRE-EXISTING callback view ───────────
 #
