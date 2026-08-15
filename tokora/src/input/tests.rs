@@ -43,7 +43,14 @@ fn input_context_new_and_into_components() {
   // change the behaviour of every parse that never asked for it.
   assert_eq!(b, crate::input::TokenBudget::unlimited());
   assert_eq!(b.limitation(), usize::MAX);
-  assert_eq!(b.spent(), 0);
+  // A context carries a CEILING and no spend, so there is no `b.spent()` to read here — the tally
+  // is the input's and is built at `Input::with_state_and_context`. The cell below drives that
+  // through and reads it off the input instead.
+  assert_eq!(
+    crate::input::TokenBudgetTally::new(b).spent(),
+    0,
+    "and what the context hands the input starts at zero",
+  );
 }
 
 #[test]
@@ -61,7 +68,11 @@ fn input_context_with_token_budget_replaces_the_default() {
     .with_token_budget(crate::input::TokenBudget::with_limitation(7));
   let (_, _, r, b) = ctx.into_components();
   assert_eq!(b.limitation(), 7);
-  assert_eq!(b.spent(), 0);
+  assert_eq!(
+    crate::input::TokenBudgetTally::new(b).spent(),
+    0,
+    "the door sets a ceiling; the spend is the input's and starts at zero",
+  );
   // And it did not disturb the cell beside it.
   assert_eq!(
     r.limitation(),

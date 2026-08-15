@@ -19,16 +19,20 @@
 //! 4. **the refusal is not refundable either** — the durable counter is only half of a bound. The
 //!    other half is the stop that acts on it, and the poison boundary a refusal latches *is*
 //!    rollbackable. Section 4 re-opens that stop by every route that clears it and counts the
-//!    lexer calls an already-exhausted budget funds.
+//!    lexer calls an already-exhausted budget funds;
+//! 5. **and it is not transplantable** — the same fact pointed the other way. A tally that a safe
+//!    caller can install into an `Input` it did not come from fabricates a refusal that never
+//!    happened, which is what section 6 pins, through both public `with_token_budget` doors.
 
 use core::cell::Cell;
 
 use tokora::{
-  InputRef, Lexer, Parse, Parser, ParserContext, Partial, ScanLookahead, SimpleSpan, Token,
+  InputRef, Lexer, Parse, ParseContext, Parser, ParserContext, Partial, ScanLookahead, SimpleSpan,
+  Token,
   cache::DefaultCache,
   emitter::Verbose,
   error::{Incomplete, MaybeIncomplete, MaybeTerminal, UnexpectedEot, token::UnexpectedToken},
-  input::{Budget, PartialSession, RedriveFromBase, SessionRefusal, TokenBudget},
+  input::{Budget, InputContext, PartialSession, RedriveFromBase, SessionRefusal, TokenBudget},
   state::token_tracker::{TokenLimitExceeded, TokenLimiter},
 };
 
@@ -1125,5 +1129,370 @@ fn a_probe_that_found_no_item_leaves_the_end_of_input_answer_stable() {
     scans(),
     "asking an exhausted budget where the stream ended costs exactly what asking an unbounded one \
      costs: the budget prices items produced, and these probes produce none"
+  );
+}
+
+// ── 6. The tally is the input's, and only the ceiling crosses the door ────────────────────────
+//
+// A budget is two things that were one type until this section existed: the **ceiling** a caller
+// configures, and the **tally** one `Input` keeps against it. `TokenBudget` is the first and is
+// `Copy`, because both `with_token_budget` doors are public and take it by value.
+// `TokenBudgetTally` is the second and is neither `Clone` nor `Copy`, has no public constructor,
+// and is reachable only by reference through `InputRef::token_budget`.
+//
+// While they were one type, `Copy` carried the live cell through the doors. The reviewer's path,
+// reproduced at `6aa0b08`: drain a parse under a ceiling of 2 until it refuses, `*inp
+// .token_budget()` the value out, hand it to a **fresh** parse over an **empty** source. Through
+// `ParserContext::with_token_budget` and through a caller-written `ParseContext` reaching
+// `InputContext::with_token_budget`, both read
+// `(outcome: Err(terminal), refused_an_item: true, scans: 0)` — the first driver gate counted a
+// scanner trip and reported a terminal stop, with `Lexer::lex` never invoked in that input, on an
+// empty source. The redrive variant fed the same value to a second `PartialSession` attempt and
+// read `items=0 refused_an_item=true scans=0`.
+//
+// That is the counter's own defect pointed backwards. The rest of this suite exists because a
+// rollback must not refund work that happened; this section exists because a transplant must not
+// fabricate work that did not.
+//
+// The cells below carry the reviewer's path as far as the API still allows — a caller can copy the
+// ceiling, and there is nothing else left to copy — and verify each of the three bounds written at
+// the accessor.
+
+/// A caller-written [`ParseContext`] reaching [`InputContext::with_token_budget`] directly: the
+/// second public door, and the one a `ParserContext` cell alone would not cover.
+struct RawDoor<'a> {
+  budget: TokenBudget,
+  _l: core::marker::PhantomData<&'a ()>,
+}
+
+impl<'inp> ParseContext<'inp, Lex<'inp>> for RawDoor<'inp> {
+  type Emitter = Verbose<Err_>;
+  type Cache = Cache<'inp>;
+
+  fn provide(self) -> InputContext<Self::Emitter, Self::Cache> {
+    InputContext::new(Verbose::new(), Cache::<'inp>::new()).with_token_budget(self.budget)
+  }
+}
+
+/// What a fresh parse saw: items reported (or the terminal flag of the error that stopped it),
+/// the durable refusal witness, the spend, and the lexer calls it made.
+#[derive(Debug, PartialEq, Eq)]
+struct Fresh {
+  outcome: Result<usize, bool>,
+  refused: bool,
+  spent: usize,
+  scans: usize,
+}
+
+macro_rules! fresh_driver {
+  ($name:ident, $ctx:ty) => {
+    fn $name<'inp>(
+      inp: &mut InputRef<'inp, '_, Lex<'inp>, $ctx>,
+    ) -> Result<(usize, bool, usize), Err_> {
+      let mut n = 0usize;
+      while inp.next_or_stop()?.is_some() {
+        n += 1;
+      }
+      Ok((
+        n,
+        inp.token_budget().refused_an_item(),
+        inp.token_budget().spent(),
+      ))
+    }
+  };
+}
+
+fresh_driver!(drive_fresh, Ctx<'inp>);
+fresh_driver!(drive_fresh_raw, RawDoor<'inp>);
+
+fn fresh(outcome: Result<(usize, bool, usize), Err_>, scans: usize) -> Fresh {
+  match outcome {
+    Ok((n, refused, spent)) => Fresh {
+      outcome: Ok(n),
+      refused,
+      spent,
+      scans,
+    },
+    Err(e) => Fresh {
+      outcome: Err(e.is_terminal()),
+      // Unreadable on this arm — the input is gone with the error — so it is reported as the
+      // worst case rather than as a `false` that could be mistaken for a passing row.
+      refused: true,
+      spent: usize::MAX,
+      scans,
+    },
+  }
+}
+
+/// Drains a parse to its refusal and hands back **everything a caller can still carry out of it**.
+///
+/// That is the ceiling and nothing else. `inp.token_budget()` is a `&TokenBudgetTally`, which has
+/// no `Clone`, no `Copy` and no public constructor, so `*inp.token_budget()` does not compile:
+/// at `6aa0b08` it did, and it is what made the transplant possible.
+fn refuse_and_carry_the_ceiling() -> TokenBudget {
+  fn drain<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<usize, Err_> {
+    while inp.next()?.is_some() {}
+    assert!(
+      inp.token_budget().refused_an_item(),
+      "precondition: the source parse really did refuse an item"
+    );
+    assert_eq!(inp.token_budget().spent(), 2);
+    Ok(inp.token_budget().limitation())
+  }
+
+  let limitation = Parser::with_context(
+    Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(2)),
+  )
+  .apply(drain)
+  .parse_with_state("aaaaaaaa", TokenLimiter::new())
+  .expect("`next` folds the terminal stop into Ok(None)");
+
+  TokenBudget::with_limitation(limitation)
+}
+
+/// **The transplant, carried as far as the API allows, through both public doors.**
+///
+/// A ceiling read out of a parse that refused, installed into a fresh `Input` over an **empty**
+/// source. The empty source is the discriminator: it holds no item at any ceiling, so a terminal
+/// stop there cannot be the budget correctly refusing something — it can only be a refusal the new
+/// input inherited. `scans: 1` is the one `Lexer::lex` that reports the end of input; the
+/// transplant's signature was `scans: 0`, a stop decided before the lexer was ever asked.
+///
+/// Falsifying output, and the pre-repair reading of both rows:
+/// `Fresh { outcome: Err(true), refused: true, spent: 18446744073709551615, scans: 0 }`.
+#[test]
+fn a_ceiling_carried_out_of_a_refused_parse_carries_no_refusal_with_it() {
+  let ceiling = refuse_and_carry_the_ceiling();
+  assert_eq!(ceiling.limitation(), 2, "the ceiling is what crosses");
+
+  reset_scans();
+  let door_a = fresh(
+    Parser::with_context(Ctx::new(Verbose::new()).with_token_budget(ceiling))
+      .apply(drive_fresh)
+      .parse_with_state("", TokenLimiter::new()),
+    scans(),
+  );
+
+  reset_scans();
+  let door_b = fresh(
+    Parser::with_context(RawDoor {
+      budget: ceiling,
+      _l: core::marker::PhantomData,
+    })
+    .apply(drive_fresh_raw)
+    .parse_with_state("", TokenLimiter::new()),
+    scans(),
+  );
+
+  let clean = Fresh {
+    outcome: Ok(0),
+    refused: false,
+    spent: 0,
+    scans: 1,
+  };
+  assert_eq!(
+    door_a, clean,
+    "ParserContext::with_token_budget: a fresh Input over an empty source is a plain end of input"
+  );
+  assert_eq!(
+    door_b, clean,
+    "InputContext::with_token_budget: and so is the other door"
+  );
+}
+
+/// **The negative.** None of the above may be bought by making every budget refuse, or by making
+/// the witness unwritable.
+///
+/// Three rows, and the third is the control that keeps the first two from passing vacuously: a
+/// fresh input under a ceiling it does not reach parses normally, a fresh input under a ceiling it
+/// *does* reach still refuses and still says so.
+#[test]
+fn a_fresh_input_refuses_nothing_it_was_not_asked_to_and_still_refuses_what_it_was() {
+  reset_scans();
+  let empty = fresh(
+    Parser::with_context(
+      Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(2)),
+    )
+    .apply(drive_fresh)
+    .parse_with_state("", TokenLimiter::new()),
+    scans(),
+  );
+  assert_eq!(
+    empty,
+    Fresh {
+      outcome: Ok(0),
+      refused: false,
+      spent: 0,
+      scans: 1
+    },
+    "an empty source is an end of input, not a refusal"
+  );
+
+  reset_scans();
+  let inside = fresh(
+    Parser::with_context(
+      Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(64)),
+    )
+    .apply(drive_fresh)
+    .parse_with_state("aaaa", TokenLimiter::new()),
+    scans(),
+  );
+  assert_eq!(
+    inside,
+    Fresh {
+      outcome: Ok(4),
+      refused: false,
+      spent: 4,
+      scans: 5
+    },
+    "well inside the ceiling: four items, four charges, no refusal"
+  );
+
+  // And the ceiling still bites when it is reached, with the witness written.
+  fn drain_witnessed<'inp>(
+    inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>,
+  ) -> Result<(usize, bool, usize), Err_> {
+    let mut n = 0usize;
+    while inp.next()?.is_some() {
+      n += 1;
+    }
+    Ok((
+      n,
+      inp.token_budget().refused_an_item(),
+      inp.token_budget().spent(),
+    ))
+  }
+
+  let refused = Parser::with_context(
+    Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(2)),
+  )
+  .apply(drain_witnessed)
+  .parse_with_state("aaaaaaaa", TokenLimiter::new())
+  .expect("`next` folds the terminal stop into Ok(None)");
+  assert_eq!(
+    refused,
+    (2, true, 2),
+    "a ceiling that IS reached refuses and writes its witness — the repair removed the transplant, \
+     not the refusal"
+  );
+}
+
+/// **Bound 3, by cell: the witness does not survive a [`PartialSession`] redrive.**
+///
+/// Attempt 1 refuses under a ceiling of 2 and drains with `next`, which folds the terminal stop
+/// into `Ok(None)` — so the session does **not** latch and a second attempt really runs. Attempt 2
+/// is then given everything attempt 1 left a caller holding, which is the ceiling.
+///
+/// Falsifying output at `6aa0b08`, with `*inp.token_budget()` supplied as attempt 2's context:
+/// `items=0 refused_an_item=true scans=0`. The bound was written at the accessor while it was
+/// false.
+#[test]
+fn a_redrive_starts_its_tally_at_zero_and_lexes() {
+  fn drain<'inp>(
+    inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>, (), Partial>,
+  ) -> Result<usize, Err_> {
+    while inp.next()?.is_some() {}
+    assert!(inp.token_budget().refused_an_item(), "attempt 1 refused");
+    Ok(inp.token_budget().limitation())
+  }
+
+  fn witness<'inp>(
+    inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>, (), Partial>,
+  ) -> Result<(usize, bool, usize), Err_> {
+    let mut n = 0usize;
+    while inp.next()?.is_some() {
+      n += 1;
+    }
+    Ok((
+      n,
+      inp.token_budget().refused_an_item(),
+      inp.token_budget().spent(),
+    ))
+  }
+
+  let mut session = PartialSession::new(TokenLimiter::new(), Budget::Unbounded, RedriveFromBase);
+
+  let carried = session
+    .parse(
+      Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(2)),
+      "aaaaaaaa",
+      false,
+      drain,
+    )
+    .expect("attempt 1 concludes Ok");
+  assert!(!session.is_latched(), "and left the session unlatched");
+
+  reset_scans();
+  let second = session
+    .parse(
+      Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(carried)),
+      "aaaaaaaa",
+      true,
+      witness,
+    )
+    .expect("attempt 2 concludes Ok");
+
+  assert_eq!(
+    second,
+    (2, true, 2),
+    "attempt 2 gets its own tally at zero, lexes its own two items against its own ceiling, and \
+     writes its own refusal — it does not inherit attempt 1's"
+  );
+  assert_eq!(
+    scans(),
+    3,
+    "two authorized items and the one at-limit probe: attempt 2 did the work, rather than \
+     short-circuiting on a refusal it was handed"
+  );
+}
+
+/// **Bound 2, by cell: the witness is input-absolute, not attempt-relative.**
+///
+/// A window opened *after* the first refusal reads the same `true` whether or not anything was
+/// refused inside it. That is what the bound says the accessor does **not** answer, and the pair
+/// of readings below is why a caller judging one `attempt` on its own terms needs a different
+/// signal.
+#[test]
+fn the_witness_is_absolute_and_says_nothing_about_the_window_it_is_read_in() {
+  fn probe<'inp>(
+    inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>,
+  ) -> Result<(bool, bool, usize), Err_> {
+    while inp.next()?.is_some() {}
+    let after_the_refusal = inp.token_budget().refused_an_item();
+
+    // A window that refuses nothing of its own: everything it could reach was already refused, so
+    // nothing inside it is lexed and nothing inside it is charged.
+    let base = inp.token_budget().spent();
+    let inside = Cell::new((false, 0usize));
+    let kept: Option<()> = inp.attempt(|txn| {
+      while txn.next().ok().flatten().is_some() {}
+      inside.set((
+        txn.token_budget().refused_an_item(),
+        txn.token_budget().spent(),
+      ));
+      None
+    });
+    assert!(kept.is_none(), "the window declined");
+
+    let (witness_inside, spent_inside) = inside.get();
+    Ok((after_the_refusal, witness_inside, spent_inside - base))
+  }
+
+  let (before, inside, charged_in_window) = Parser::with_context(
+    Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(2)),
+  )
+  .apply(probe)
+  .parse_with_state("aaaaaaaa", TokenLimiter::new())
+  .expect("`next` folds the terminal stop into Ok(None)");
+
+  assert!(before, "the input refused, somewhere in its life");
+  assert!(
+    inside,
+    "and a window opened afterwards reads the same `true` — it is not a statement about the window"
+  );
+  assert_eq!(
+    charged_in_window, 0,
+    "while the window itself refused nothing and lexed nothing: the accessor is a fact about the \
+     input's whole life, and it does not become attempt-relative by being read inside an attempt"
   );
 }

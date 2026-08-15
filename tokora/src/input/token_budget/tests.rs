@@ -1,10 +1,15 @@
 //! The budget arithmetic: the gate the driver asks before it works, and the charge it takes after.
 
-use super::TokenBudget;
+use super::{TokenBudget, TokenBudgetTally};
+
+/// A tally the way an `Input` gets one: from a configuration and from nothing else.
+fn tally(max: usize) -> TokenBudgetTally {
+  TokenBudgetTally::new(TokenBudget::with_limitation(max))
+}
 
 #[test]
 fn an_unlimited_budget_never_refuses() {
-  let mut budget = TokenBudget::unlimited();
+  let mut budget = TokenBudgetTally::new(TokenBudget::unlimited());
   for _ in 0..1_000 {
     assert!(!budget.is_exhausted());
     budget.spend();
@@ -15,7 +20,7 @@ fn an_unlimited_budget_never_refuses() {
 
 #[test]
 fn a_bounded_budget_charges_exactly_its_limitation() {
-  let mut budget = TokenBudget::with_limitation(3);
+  let mut budget = tally(3);
   for _ in 0..3 {
     assert!(!budget.is_exhausted());
     budget.spend();
@@ -30,7 +35,7 @@ fn a_bounded_budget_charges_exactly_its_limitation() {
 
 #[test]
 fn a_zero_budget_refuses_the_first_item() {
-  let budget = TokenBudget::with_limitation(0);
+  let budget = tally(0);
   assert!(budget.is_exhausted());
   assert_eq!(budget.spent(), 0);
 }
@@ -53,7 +58,7 @@ fn a_zero_budget_refuses_the_first_item() {
 /// actually had.
 #[test]
 fn the_unlimited_sentinel_never_refuses_at_the_top_of_the_counter() {
-  let mut budget = TokenBudget::unlimited();
+  let mut budget = TokenBudgetTally::new(TokenBudget::unlimited());
   // The last state before the sentinel, reached by charging rather than by writing `spent`
   // directly, so `spend`'s own precondition is exercised on the way in.
   budget.spent = usize::MAX - 1;
@@ -78,7 +83,7 @@ fn the_unlimited_sentinel_never_refuses_at_the_top_of_the_counter() {
 /// build and silent in the other.
 #[test]
 fn the_charge_at_the_sentinel_saturates_rather_than_wrapping() {
-  let mut budget = TokenBudget::unlimited();
+  let mut budget = TokenBudgetTally::new(TokenBudget::unlimited());
   budget.spent = usize::MAX;
 
   budget.spend();
@@ -107,5 +112,65 @@ fn the_sentinel_distance_is_a_reachable_count_at_thirty_two_bit_width() {
   assert_eq!(
     TokenBudget::with_limitation(usize::MAX),
     TokenBudget::unlimited()
+  );
+}
+
+/// **The repair, at the only place an input's tally can come from.** A tally is built from a
+/// [`TokenBudget`] and from nothing else, so the ceiling crosses the seam and the spend cannot.
+///
+/// This is what makes the transplant unrepresentable rather than merely unlikely. Before the split,
+/// `spent` and the probe latch rode in the `Copy` configuration a caller hands to
+/// `with_token_budget`: `*input.token_budget()` out of a refused parse and into the next context
+/// made the next `Input` start exhausted with a refusal on record. Reproduced at `6aa0b08` through
+/// both public doors over an **empty** source — `Err(terminal)`, `refused_an_item() == true`, and
+/// **zero** `Lexer::lex` calls.
+///
+/// Falsifying output if a spend ever finds its way back into the configuration and through here:
+/// the second block reads a nonzero `spent` or a latched probe.
+#[test]
+fn a_tally_is_built_from_the_ceiling_alone() {
+  let config = TokenBudget::with_limitation(4);
+
+  let fresh = TokenBudgetTally::new(config);
+  assert_eq!(fresh.limitation(), 4, "the ceiling crosses");
+  assert_eq!(fresh.spent(), 0);
+  assert!(!fresh.refused_an_item());
+  assert!(!fresh.limit_probe_spent());
+
+  // Spend the first tally to its ceiling and latch its probe — the exact state the transplant
+  // used to carry — then build again from the same configuration value.
+  let mut refused = TokenBudgetTally::new(config);
+  for _ in 0..4 {
+    refused.spend();
+  }
+  refused.latch_limit_probe();
+  assert!(refused.is_exhausted() && refused.refused_an_item());
+
+  let again = TokenBudgetTally::new(config);
+  assert_eq!(again.spent(), 0, "the configuration carried no spend");
+  assert!(!again.refused_an_item(), "and no refusal");
+  assert!(
+    !again.is_exhausted(),
+    "so the new input is not born refusing"
+  );
+  assert_eq!(again.limitation(), 4, "while the ceiling still crossed");
+}
+
+/// The configuration type is a number, and equality says so.
+///
+/// Two budgets are equal exactly when they name the same ceiling. That is only true because the
+/// spend lives elsewhere: while it rode here, two budgets with the same ceiling and different
+/// spends compared unequal, and — far worse — the unequal half was installable.
+#[test]
+fn the_configuration_is_the_ceiling_and_nothing_else() {
+  assert_eq!(
+    TokenBudget::with_limitation(7),
+    TokenBudget::with_limitation(7)
+  );
+  assert_eq!(TokenBudget::default(), TokenBudget::unlimited());
+  assert_eq!(
+    core::mem::size_of::<TokenBudget>(),
+    core::mem::size_of::<usize>(),
+    "a ceiling, and no room for anything else",
   );
 }

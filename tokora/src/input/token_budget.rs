@@ -1,5 +1,9 @@
-//! The **input-layer token budget**: a durable ceiling on the items one `Input`'s
-//! lexer is allowed to produce.
+//! The **input-layer token budget**: a durable ceiling on the items one `Input`'s lexer is
+//! allowed to produce, and the per-`Input` tally the driver keeps against it.
+//!
+//! Two types, because they are two different things and conflating them was a defect. See
+//! [`TokenBudget`] for the ceiling a caller configures and [`TokenBudgetTally`] for what one
+//! `Input` has spent against it.
 
 /// A ceiling on the number of items one `Input` will let its lexer produce —
 /// **tokens and lexer errors alike** — enforced by the driver at the single lexing
@@ -7,6 +11,27 @@
 ///
 /// Default: [`unlimited`](Self::unlimited). A parse that does not configure one behaves exactly as
 /// it did before this type existed.
+///
+/// # It is configuration, and it holds no tally
+///
+/// This type is a **number**: the ceiling, and nothing else. What one `Input` has *spent* against
+/// that ceiling lives in [`TokenBudgetTally`], which the input owns, which no caller can construct,
+/// and which is deliberately neither `Clone` nor `Copy`.
+///
+/// The split is the shape, not a detail of it. This type is `Copy` because a caller passes it to
+/// [`InputContext::with_token_budget`](super::InputContext::with_token_budget) and
+/// [`ParserContext::with_token_budget`](crate::ParserContext::with_token_budget), and both doors
+/// are public. When the spend and the one-shot probe latch rode *here*, `Copy` made them travel
+/// through those doors: a caller could read the live cell out of one input with
+/// `*input.token_budget()`, hand it to the next parse, and that parse began **exhausted, with a
+/// refusal already on record and no poison boundary** — so its first driver gate counted a scanner
+/// trip and reported a terminal stop with the lexer never invoked, over an empty source included.
+/// That is this budget's own defect pointed backwards: the counter exists so a rollback cannot
+/// refund work that happened, and a transplantable counter fabricates work that did not.
+///
+/// A tally cannot be built, cloned or copied out of an input, so there is nothing to install; and
+/// an `Input`'s tally is constructed from this configuration alone, so construction has no other
+/// value available to start from.
 ///
 /// # The gate is in front of the work
 ///
@@ -21,11 +46,11 @@
 /// [`set_state`](crate::InputRef::set_state) drops, and a
 /// [`state_mut`](crate::InputRef::state_mut) drops. The counter survives all three; the *stop*
 /// does not. A public `attempt` that drains to the refusal and declines therefore re-enters
-/// against the same unchanged `spent`, and the lexer runs again — once per call, without bound,
-/// for free. Measured before the preflight landed: a budget of **zero** funded one full
-/// `Lexer::lex` per re-entry (256 rounds → 256 invocations, `spent` still `0`) by all three
-/// routes. **A durable counter is half a bound; the other half is enforcement that a rollback
-/// cannot refund.**
+/// against the same unchanged [`spent`](TokenBudgetTally::spent), and the lexer runs again — once
+/// per call, without bound, for free. Measured before the preflight landed: a budget of **zero**
+/// funded one full `Lexer::lex` per re-entry (256 rounds → 256 invocations, `spent` still `0`) by
+/// all three routes. **A durable counter is half a bound; the other half is enforcement that a
+/// rollback cannot refund.**
 ///
 /// # What it charges
 ///
@@ -61,10 +86,10 @@
 /// - **not the cost of an item.** A lexer that scans a kilobyte to decide one token spends one
 ///   charge for it. A bound denominated in attempt cost is a different budget with a different
 ///   charging site, and this crate does not have one;
-/// - **not a session.** It lives on one `Input`, and a
+/// - **not a session.** The ceiling is per `Input`, the tally is per `Input`, and a
 ///   [`PartialSession`](crate::input::PartialSession) builds a fresh `Input` — and therefore a
-///   fresh budget — for every redrive. What stops a session is the terminal latch this budget's
-///   refusal feeds (see below) together with the session's own byte
+///   fresh tally, at zero — for every redrive. What stops a session is the terminal latch this
+///   budget's refusal feeds (see below) together with the session's own byte
 ///   [`Budget`](crate::input::Budget), which is denominated in Σ attempt-lexable bytes precisely
 ///   because *that* is the quantity an adversarial chunker controls.
 ///
@@ -84,15 +109,12 @@
 ///    the last token of `"aa  "` the lex position is `2` and the source is `4` long, so the
 ///    positional test says input remains — and no item does. Every lexer that discards trailing
 ///    whitespace or a comment tail has that shape. Only running the lexer can tell the two apart, so
-///    the site runs it **once**, and latches the outcome in a private field of this struct when it
-///    produced.
+///    the site runs it **once**, and latches the outcome in [`TokenBudgetTally`] when it produced.
 ///
-/// The latch is what keeps step 2 from being the previous defect wearing a new hat. It rides beside
-/// [`spent`](Self::spent) — same cell, same four arguments: not a [`Checkpoint`](super::Checkpoint)
-/// field, so a rollback does not clear it; not reached by the state re-key behind
-/// [`set_state`](crate::InputRef::set_state) or [`state_mut`](crate::InputRef::state_mut); and no
-/// `token_budget_mut` exists to lower it. So the ceiling funds **one** `Lexer::lex` over the life of
-/// one `Input`, however often its stop is re-opened, by any route.
+/// The latch is what keeps step 2 from being the previous defect wearing a new hat, and
+/// [`TokenBudgetTally`] carries the four arguments that make it durable. So the ceiling funds
+/// **one** `Lexer::lex` over the life of one `Input`, however often its stop is re-opened, by any
+/// route.
 ///
 /// A probe that produced **nothing** latches nothing, deliberately. It performed no work this budget
 /// is denominated in, and its answer must stay re-derivable rather than frozen — asking an
@@ -114,7 +136,7 @@
 /// The stop is re-latched on **every** refused entry, and it has to be: the boundary is a
 /// per-lineage memo that a rollback restores and a state re-key drops, so a refusal that latched
 /// once and then trusted the latch would go quiet the first time one of those cleared it. The
-/// ceiling is re-derived from [`spent`](Self::spent) instead, which none of them touch.
+/// ceiling is re-derived from [`spent`](TokenBudgetTally::spent) instead, which none of them touch.
 ///
 /// The one thing the refusal cannot do is *report itself*. There is no channel for it — a
 /// diagnostic would have to be built as the emitter's own error type, which needs a `From` bound
@@ -141,8 +163,8 @@
 /// there is no `recursion_mut` and no `emitter_mut`: the cell has exactly one writer, and it is on
 /// the driver's side of the seam. Configure it once, at
 /// [`InputContext::with_token_budget`](super::InputContext::with_token_budget) or
-/// [`ParserContext::with_token_budget`](crate::ParserContext::with_token_budget); read it through
-/// [`InputRef::token_budget`](crate::InputRef::token_budget).
+/// [`ParserContext::with_token_budget`](crate::ParserContext::with_token_budget); read the tally
+/// through [`InputRef::token_budget`](crate::InputRef::token_budget).
 ///
 /// # Examples
 ///
@@ -155,23 +177,14 @@
 ///
 /// let budget = TokenBudget::with_limitation(1_000);
 /// assert_eq!(budget.limitation(), 1_000);
-/// assert_eq!(budget.spent(), 0);
-/// assert!(!budget.is_exhausted());
+///
+/// // A configuration value has no spend to read: two of them are equal exactly when they name
+/// // the same ceiling, whatever either one was later used to parse.
+/// assert_eq!(budget, TokenBudget::with_limitation(1_000));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TokenBudget {
   max: usize,
-  spent: usize,
-  /// The **one-shot at-limit probe**, spent. See the type docs' *A met ceiling is not an end of
-  /// input* section for what the probe answers and why the answer has to be latched here rather
-  /// than in the poison boundary beside it.
-  ///
-  /// It rides in this struct on purpose: every argument that makes [`spent`](Self::spent) a durable
-  /// latch — no [`Checkpoint`](super::Checkpoint) field, untouched by the state re-key, no
-  /// `token_budget_mut` — is an argument about the *cell*, `Input::token_budget`, and therefore
-  /// covers this flag verbatim. A separate cell would have needed its own copy of all four, and a
-  /// copy is a thing that can drift.
-  probed_at_limit: bool,
 }
 
 impl Default for TokenBudget {
@@ -192,16 +205,12 @@ impl Default for TokenBudget {
 impl TokenBudget {
   /// No ceiling: the driver charges every item and refuses none.
   ///
-  /// `usize::MAX` is the sentinel, and [`is_exhausted`](Self::is_exhausted) reads it as *the
-  /// absence of a ceiling* rather than as a very large one — see there for the difference and why
-  /// it is not cosmetic.
+  /// `usize::MAX` is the sentinel, and
+  /// [`TokenBudgetTally::is_exhausted`] reads it as *the absence of a ceiling* rather than as a
+  /// very large one — see there for the difference and why it is not cosmetic.
   #[inline(always)]
   pub const fn unlimited() -> Self {
-    Self {
-      max: usize::MAX,
-      spent: 0,
-      probed_at_limit: false,
-    }
+    Self { max: usize::MAX }
   }
 
   /// A ceiling of `max` items produced. The `max + 1`-th item the lexer hands back is refused.
@@ -210,17 +219,89 @@ impl TokenBudget {
   /// therefore the same behaviour. There is no ceiling above it to distinguish it from.
   #[inline(always)]
   pub const fn with_limitation(max: usize) -> Self {
-    Self {
-      max,
-      spent: 0,
-      probed_at_limit: false,
-    }
+    Self { max }
   }
 
   /// The ceiling this budget was built with.
   #[inline(always)]
   pub const fn limitation(&self) -> usize {
     self.max
+  }
+}
+
+/// What **one `Input`** has spent against its [`TokenBudget`], and whether that input's one-shot
+/// at-limit probe has already been spent on a refused item.
+///
+/// Read it through [`InputRef::token_budget`](crate::InputRef::token_budget). It is the driver's
+/// cell: `InputRef::lex_within_boundary` charges it, `InputRef::settle_met_ceiling` latches its
+/// probe, and there is no `token_budget_mut` on either [`InputRef`](crate::InputRef) or the input
+/// behind it.
+///
+/// # It is per input, and it cannot be moved between inputs
+///
+/// **No `Clone`, no `Copy`, and no public constructor.** An input's tally is built by the input,
+/// from the [`TokenBudget`] its context carried and from nothing else, so a fresh `Input` begins at
+/// `spent == 0` with the probe unspent whatever the caller configured.
+///
+/// That is a repair, not a decoration. The spend and the probe latch used to ride in the `Copy`
+/// [`TokenBudget`] a caller passes to the two public `with_token_budget` doors, which made a live
+/// cell transplantable: `*input.token_budget()` out of a refused parse, into the next context, and
+/// the next `Input` began exhausted with a refusal already on record — its first driver gate
+/// counting a scanner trip and reporting a terminal stop over a source it never lexed. Separating
+/// the tally from the configuration is what makes that unrepresentable rather than merely
+/// discouraged.
+///
+/// # Deliberately outside the rollback set
+///
+/// Both halves are durable, by the same four arguments, and those arguments are about the *cell*
+/// this type occupies rather than about either field:
+///
+/// - it is not a [`Checkpoint`](super::Checkpoint) field, so a rollback does not put it back;
+/// - it is not reached by the state re-key behind [`set_state`](crate::InputRef::set_state) or
+///   [`state_mut`](crate::InputRef::state_mut);
+/// - no `token_budget_mut` exists to lower it;
+/// - and nothing but the driver holds a `&mut` to it.
+///
+/// A budget a rollback refunds is not a budget: an attempt that lexed a thousand items and then
+/// declined performed a thousand items of scanning, and handing the count back would give an
+/// adversary who forces speculation unbounded free work. What that costs is stated rather than
+/// hidden — a re-lex after a rollback is charged again, so the ceiling bounds produce-events and
+/// not distinct document tokens. See [`TokenBudget`].
+#[derive(Debug)]
+pub struct TokenBudgetTally {
+  /// The configured ceiling, copied in at construction. Immutable for the life of the input:
+  /// [`TokenBudget`] has no mutator and this field has no writer.
+  budget: TokenBudget,
+  spent: usize,
+  /// The **one-shot at-limit probe**, spent. See [`TokenBudget`]'s *A met ceiling is not an end of
+  /// input* section for what the probe answers, and this type's *Deliberately outside the rollback
+  /// set* for why the answer is latched here rather than in the poison boundary beside it.
+  ///
+  /// It rides in this struct on purpose: every argument that makes [`spent`](Self::spent) durable
+  /// is an argument about the cell, and therefore covers this flag verbatim. A separate cell would
+  /// have needed its own copy of all four, and a copy is a thing that can drift.
+  probed_at_limit: bool,
+}
+
+impl TokenBudgetTally {
+  /// A fresh tally against `budget`: nothing spent, probe unspent.
+  ///
+  /// The **only** constructor, crate-internal, and the only thing `Input` construction can do with
+  /// the configured budget. There is no route by which an input starts anywhere but here — which is
+  /// the whole of why a refusal cannot be fabricated by installing one input's state into another.
+  #[inline(always)]
+  pub(crate) const fn new(budget: TokenBudget) -> Self {
+    Self {
+      budget,
+      spent: 0,
+      probed_at_limit: false,
+    }
+  }
+
+  /// The ceiling this input's budget was configured with.
+  #[inline(always)]
+  pub const fn limitation(&self) -> usize {
+    self.budget.limitation()
   }
 
   /// How many items the driver has charged against it.
@@ -237,33 +318,33 @@ impl TokenBudget {
   /// it invokes the lexer, and it is answered out of [`spent`](Self::spent) — a cell no
   /// [`Checkpoint`](super::Checkpoint) carries and no state re-key touches — so it is re-derived
   /// identically on every entry no matter what a rollback put back in between. Asking after the
-  /// work, off a stop that *is* rollbackable, bounds nothing: see the type docs.
+  /// work, off a stop that *is* rollbackable, bounds nothing: see [`TokenBudget`].
   ///
   /// A met ceiling is **not** an end of input, and this predicate does not claim to be one: it
   /// says an item *would* be refused, not that one exists. Which of the two the driver is looking
-  /// at is settled at the lexing site, not here — see the type docs.
+  /// at is settled at the lexing site, not here — see [`TokenBudget`].
   ///
   /// # `usize::MAX` is the absence of a ceiling, not a ceiling
   ///
   /// The sentinel is excluded explicitly rather than left to `spent >= max`. Left to it, an
-  /// [`unlimited`](Self::unlimited) budget charged `usize::MAX` times reaches `spent == max` and
-  /// begins refusing **terminally** — the one budget that promised to refuse nothing. The distance
-  /// is unreachable at a 64-bit `usize`; at 32 bits it is `4_294_967_295` produce-events, and this
-  /// crate charges a *re-lex* as a produce-event, so a long-lived `Input` over a speculating
-  /// grammar covers it without a four-billion-token document.
+  /// [`unlimited`](TokenBudget::unlimited) budget charged `usize::MAX` times reaches `spent == max`
+  /// and begins refusing **terminally** — the one budget that promised to refuse nothing. The
+  /// distance is unreachable at a 64-bit `usize`; at 32 bits it is `4_294_967_295` produce-events,
+  /// and this crate charges a *re-lex* as a produce-event, so a long-lived `Input` over a
+  /// speculating grammar covers it without a four-billion-token document.
   ///
   /// The comparison order is load-bearing for cost, not only for meaning: `spent >= max` is false
   /// on every entry that is not at a ceiling, so the sentinel test is never reached on the hot
   /// path and this stays **one comparison per item** for bounded and unlimited budgets alike.
   #[inline(always)]
   pub const fn is_exhausted(&self) -> bool {
-    self.spent >= self.max && self.max != usize::MAX
+    self.spent >= self.budget.max && self.budget.max != usize::MAX
   }
 
   /// Charges the one item [`is_exhausted`](Self::is_exhausted) authorized.
   ///
   /// **Precondition: `!is_exhausted()`**, established by the driver's preflight immediately before
-  /// it invoked the lexer, with nothing between the two that could spend (the budget has exactly
+  /// it invoked the lexer, with nothing between the two that could spend (the tally has exactly
   /// one writer and it is reached through `&mut`).
   ///
   /// The increment **saturates**, and that is a consequence of the sentinel being excluded from the
@@ -283,25 +364,24 @@ impl TokenBudget {
   pub(crate) const fn spend(&mut self) {
     debug_assert!(
       !self.is_exhausted(),
-      "TokenBudget::spend without the driver's exhaustion preflight",
+      "TokenBudgetTally::spend without the driver's exhaustion preflight",
     );
     self.spent = self.spent.saturating_add(1);
   }
 
-  /// Whether this budget has **refused an item** — the one question a host that caught an unwind
-  /// and concluded can still ask.
+  /// Whether this input's budget has **refused an item** — the one question a host that caught an
+  /// unwind and concluded can still ask.
   ///
   /// `true` means the ceiling was met, the lexer was run, it handed back an item, and that item was
-  /// refused. `false` means no item of this `Input`'s was ever refused by this budget. The bit is
+  /// refused. `false` means no item of this `Input`'s was ever refused by its budget. The bit is
   /// written **at the refusal**, in front of every consumer step the refusal runs, and nothing
   /// lowers it: it is not a [`Checkpoint`](super::Checkpoint) field, the state re-key behind
   /// [`set_state`](crate::InputRef::set_state) / [`state_mut`](crate::InputRef::state_mut) does not
-  /// reach it, and there is no `token_budget_mut`. Read it through
-  /// [`InputRef::token_budget`](crate::InputRef::token_budget).
+  /// reach it, and there is no `token_budget_mut`.
   ///
   /// # Why it exists
   ///
-  /// A refusal has **no diagnostic channel** (see the type docs), and
+  /// A refusal has **no diagnostic channel** (see [`TokenBudget`]), and
   /// [`next`](crate::InputRef::next) folds a terminal stop into `Ok(None)`. The in-band carriers —
   /// the scanner-trip counter and the poison boundary — are published before any consumer code
   /// runs, so an ordinary parse always sees them. What they cannot reach is a host that catches an
@@ -319,7 +399,7 @@ impl TokenBudget {
   ///   [`Lexer::check`](crate::Lexer::check) — never writes it. That tally lives in `L::State` and
   ///   a [`Checkpoint`](super::Checkpoint) carries it, so no durable bit here could speak for it.
   ///   `false` therefore means *the budget refused nothing*, not *the parse was not truncated*;
-  /// - **it is session-absolute, not attempt-relative.** It says an item was refused somewhere in
+  /// - **it is input-absolute, not attempt-relative.** It says an item was refused somewhere in
   ///   the life of this `Input`, never *inside my window*, so a window opened after the first
   ///   refusal reads the same `true` whether or not anything was refused inside it. A caller
   ///   judging one [`attempt`](crate::InputRef::attempt) on its own terms wants the crate's
@@ -329,18 +409,12 @@ impl TokenBudget {
   ///   [`UnexpectedEot`](crate::error::UnexpectedEot) the `*_or_stop` family raises, read through
   ///   [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal);
   /// - **it does not survive a [`PartialSession`](super::PartialSession) redrive.** A redrive
-  ///   builds a fresh `Input` and therefore a fresh budget, at zero. What carries a refusal across
-  ///   attempts is the session's own terminal latch, which the refusal feeds by being terminal.
-  ///
-  /// # Examples
-  ///
-  /// ```rust
-  /// use tokora::input::TokenBudget;
-  ///
-  /// // Nothing has been refused until something is.
-  /// assert!(!TokenBudget::with_limitation(4).refused_an_item());
-  /// assert!(!TokenBudget::unlimited().refused_an_item());
-  /// ```
+  ///   builds a fresh `Input`, and an input's tally is constructed from the attempt context's
+  ///   [`TokenBudget`] and from nothing else — so it is at zero. Nothing a caller can hold carries
+  ///   the bit into the next attempt: this type has no `Clone`, no `Copy` and no public
+  ///   constructor, and the configuration that *is* copyable holds no tally to carry. What carries
+  ///   a refusal across attempts is the session's own terminal latch, which the refusal feeds by
+  ///   being terminal.
   #[inline(always)]
   pub const fn refused_an_item(&self) -> bool {
     self.probed_at_limit

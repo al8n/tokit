@@ -34,8 +34,8 @@ and will red until they do.
 
 ### Added
 
-- **`TokenBudget::refused_an_item` — the one question a host that caught an unwind and concluded
-  can still ask.** A budget refusal has **no diagnostic channel** (a diagnostic would have to be
+- **`TokenBudgetTally::refused_an_item` — the one question a host that caught an unwind and
+  concluded can still ask.** A budget refusal has **no diagnostic channel** (a diagnostic would have to be
   built as the emitter's own error type, which needs a `From` bound this crate deliberately does not
   add to every consume path), and `InputRef::next` folds a terminal stop into `Ok(None)`. The
   in-band carriers — `Input::scanner_trips` and the poison boundary — are published before any
@@ -50,11 +50,18 @@ and will red until they do.
   **Three bounds, each of which limits what a reading licenses.** It witnesses **this budget only**
   — the lexer's own limit trip, latched off `Lexer::check`, never writes it, and could not, since
   that tally lives in `L::State` and a `Checkpoint` carries it; so `false` means *the budget refused
-  nothing*, not *the parse was not truncated*. It is **session-absolute, not attempt-relative** —
+  nothing*, not *the parse was not truncated*. It is **input-absolute, not attempt-relative** —
   it says an item was refused somewhere in the life of this `Input`, never *inside my window*, which
   is what `scanner_trips` against a baseline answers and what every in-crate reader of terminality
   uses. And it **does not survive a `PartialSession` redrive**, which builds a fresh `Input` and a
-  fresh budget; what carries a refusal across attempts is the session's own terminal latch.
+  fresh tally; what carries a refusal across attempts is the session's own terminal latch.
+
+  **The third bound was written here while it was false**, and the type split under **Changed
+  (breaking)** is what makes it true: supply a copied budget as the next attempt's context and the
+  witness used to survive. All three are now cells rather than sentences —
+  `a_lexer_limit_trip_is_terminal_and_the_budget_witness_stays_false`,
+  `the_witness_is_absolute_and_says_nothing_about_the_window_it_is_read_in`, and
+  `a_redrive_starts_its_tally_at_zero_and_lexes`.
 
   Read it through `InputRef::token_budget`, which is already `pub`; there is still no
   `token_budget_mut`.
@@ -273,6 +280,35 @@ and will red until they do.
   documents"), not the cost of an item, and not a session. Calibrate against produce-events.
 
 ### Changed (breaking)
+
+- **`TokenBudget` is the ceiling; `input::TokenBudgetTally` is what one `Input` spent against it.**
+  `TokenBudget::{spent, is_exhausted, refused_an_item}` are gone from that type and live on the new
+  one, and `InputRef::token_budget` now returns `&TokenBudgetTally`. Every existing *read* — `inp
+  .token_budget().spent()`, `.is_exhausted()`, `.refused_an_item()`, `.limitation()` — compiles
+  unchanged, because that is where those questions were always asked. What breaks is reading them
+  off a `TokenBudget` **value a caller owns**, where the answers were meaningless: a caller can only
+  hold a freshly-constructed one, so `spent()` was `0` and `refused_an_item()` was `false` by
+  construction.
+
+  It is a repair, not a tidy-up. `TokenBudget` is `Copy` — both `with_token_budget` doors are public
+  and take it by value — and while the spend and the one-shot probe latch rode in it, `Copy` carried
+  the **live cell** through those doors. `*input.token_budget()` out of a parse that had refused,
+  into the next context, and the next `Input` began exhausted with a refusal already on record and
+  no poison boundary: its first driver gate counted a scanner trip and reported a *terminal* stop
+  with `Lexer::lex` never invoked — over an empty source included. Reproduced at `6aa0b08` through
+  `ParserContext::with_token_budget` and through a caller-written `ParseContext` reaching
+  `InputContext::with_token_budget`, both reading `(Err(terminal), refused_an_item = true, 0
+  scans)`, and again as a `PartialSession` redrive whose second attempt read `items = 0,
+  refused_an_item = true, 0 scans`.
+
+  That is this budget's own reason for existing, pointed backwards. The counter is durable so that a
+  rollback cannot refund work that happened; a transplantable counter fabricates work that did not.
+  The split is what makes the fabrication **unrepresentable**: a tally has no `Clone`, no `Copy` and
+  no public constructor, an `Input`'s tally is built from the configuration and from nothing else,
+  and the configuration is a ceiling with nothing else in it.
+
+  Migration: nothing, unless you called `spent()`, `is_exhausted()` or `refused_an_item()` on a
+  budget you built yourself. Those answers are now asked of the input that has one.
 
 - **`InputContext::into_components` returns a four-tuple** (#285): `(emitter, cache, recursion,
   token_budget)`. It is destructuring rather than four getters *precisely* so that adding a
@@ -770,7 +806,7 @@ and will red until they do.
   outside the gate: an entry whose boundary is latched but **not yet reached**, which is still owed
   a refusal and still reaches it through the prologue; no route in the tree was found that produces
   one, since every publication installs the boundary at the lex position it is standing on. Both
-  are now *detectable* rather than silent — see `TokenBudget::refused_an_item` under **Added**.
+  are now *detectable* rather than silent — see `TokenBudgetTally::refused_an_item` under **Added**.
 
 - **`CacheHarness::run` hung on a lexer that only returns errors — the same shape one tier over.**
   The corpus builder fills while `out.len() < want`, and that gate counts the tokens it *kept*

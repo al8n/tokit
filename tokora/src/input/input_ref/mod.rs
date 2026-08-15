@@ -132,7 +132,12 @@ where
   /// item an authorized step produced, and its cold sibling
   /// [`settle_met_ceiling`](Self::settle_met_ceiling), which spends the one-shot probe that tells
   /// a met ceiling from an end of input. There is no `token_budget_mut`.
-  pub(super) token_budget: &'closure mut super::TokenBudget,
+  ///
+  /// It is the input's [`TokenBudgetTally`](super::TokenBudgetTally) and not the
+  /// [`TokenBudget`](super::TokenBudget) its context carried: the configuration is a ceiling a
+  /// caller may copy, the tally is per-input state a caller must not be able to move to another
+  /// input.
+  pub(super) token_budget: &'closure mut super::TokenBudgetTally,
   /// The **resource-trip counter**, borrowed from the owning [`Input`](super::Input) — see that
   /// field for what is recorded, why it is the *fact* of a trip rather than the depth, and why it
   /// counts rather than latching a `bool`.
@@ -973,8 +978,14 @@ where
   /// Configure it with
   /// [`InputContext::with_token_budget`](crate::input::InputContext::with_token_budget) or
   /// [`ParserContext::with_token_budget`](crate::ParserContext::with_token_budget).
+  ///
+  /// What comes back is **this input's** tally, and it is not a value: it is neither `Clone` nor
+  /// `Copy`, so it cannot be read out here and installed as another parse's starting state. That
+  /// door was open while the spend rode in the copyable [`TokenBudget`](super::TokenBudget), and
+  /// it fabricated refusals in inputs that never refused anything — see
+  /// [`TokenBudgetTally`](super::TokenBudgetTally).
   #[inline(always)]
-  pub const fn token_budget(&self) -> &super::TokenBudget {
+  pub const fn token_budget(&self) -> &super::TokenBudgetTally {
     self.token_budget
   }
 
@@ -1020,7 +1031,8 @@ where
   /// **zero** funded 256 `Lexer::lex` calls over 256 declined attempts with `spent` still `0`, and
   /// the same by `set_state` and by `state_mut`.
   ///
-  /// So the gate is [`TokenBudget::is_exhausted`](crate::input::TokenBudget::is_exhausted),
+  /// So the gate is
+  /// [`TokenBudgetTally::is_exhausted`](crate::input::TokenBudgetTally::is_exhausted),
   /// re-derived on every entry from `spent` — a cell that is not a [`Checkpoint`] field and that
   /// [`install_rekey`](Self::install_rekey) does not touch, with no `token_budget_mut` anywhere to
   /// lower it. Clearing the boundary therefore buys a re-entrant caller a fresh *check*, never a
@@ -1155,8 +1167,8 @@ where
   /// per `Input`, and only where the answer is genuinely in doubt.
   ///
   /// That "once" is the whole of why this is not the previous defect wearing a new hat, and it is
-  /// carried by [`TokenBudget`](crate::input::TokenBudget) —
-  /// [`latch_limit_probe`](crate::input::TokenBudget::latch_limit_probe), in the same cell as
+  /// carried by [`TokenBudgetTally`](crate::input::TokenBudgetTally) —
+  /// [`latch_limit_probe`](crate::input::TokenBudgetTally::latch_limit_probe), in the same cell as
   /// `spent`, which is not a [`Checkpoint`] field, which [`install_rekey`](Self::install_rekey)
   /// does not touch, and which no `token_budget_mut` exists to lower. A restore, a
   /// [`set_state`](Self::set_state), a [`state_mut`](Self::state_mut) and a

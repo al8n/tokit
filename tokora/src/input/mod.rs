@@ -249,7 +249,7 @@ pub use input_ref::{
 };
 pub(crate) use lineage::Lineage;
 pub use session::{Budget, PartialSession, RedriveFromBase, ReplayMode, SessionRefusal};
-pub use token_budget::TokenBudget;
+pub use token_budget::{TokenBudget, TokenBudgetTally};
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use input_ref::{SavepointId, SessionPointId, StackedTransaction};
@@ -744,7 +744,14 @@ where
   /// A [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and therefore
   /// a fresh budget. What survives a redrive is the session's own terminal latch, which this
   /// budget's refusal feeds by being terminal.
-  token_budget: TokenBudget,
+  ///
+  /// # It is a [`TokenBudgetTally`], not the [`TokenBudget`] the context carried
+  ///
+  /// The configuration is `Copy` because two public doors take it; the tally is not, because a
+  /// tally that could travel through those doors fabricates a refusal in an input that never had
+  /// one. The two are different types precisely so that
+  /// [`with_state_and_context`](Self::with_state_and_context) has nothing to install but a ceiling.
+  token_budget: TokenBudgetTally,
   /// **Where resource terminality is stored**: how many times a resource budget has been exceeded
   /// in this input session. Nonzero once any trip has happened, and monotone — it only ever counts
   /// up.
@@ -1074,11 +1081,13 @@ where
       // deliberately walking one deeper first — and a deliberately-deep one is a caller stating
       // that this parse continues someone else's descent, which is exactly what the cell means.
       recursion,
-      // The caller's item ceiling, moved in as given — including its spend, which every
-      // constructor starts at zero. Unlike the recursion cell there is no legitimate reading of a
-      // pre-spent budget arriving here (nothing continues someone else's scan), but nothing in
-      // the type can arrive pre-spent either: `spent` is private and only `charge` raises it.
-      token_budget,
+      // The caller's item CEILING, and a tally of this input's own that starts at zero. Unlike
+      // the recursion cell there is no legitimate reading of a pre-spent budget arriving here —
+      // nothing continues someone else's scan — and unlike the recursion cell that is now a
+      // property of the types rather than of this line: `TokenBudget` is a ceiling and holds no
+      // spend, `TokenBudgetTally::new` is the only constructor of one and starts it at zero, and
+      // a tally is neither `Clone` nor `Copy`, so no caller has one to hand over.
+      token_budget: TokenBudgetTally::new(token_budget),
       // Untripped. The caller's budget can arrive pre-raised; the trip count cannot, because it
       // is a fact about THIS session and there is no constructor that carries one in. Starting at
       // zero is also what makes an attempt baseline taken before the first descent mean "no trip

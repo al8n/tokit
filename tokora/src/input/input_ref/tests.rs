@@ -11726,7 +11726,7 @@ fn a_second_entry_publishes_at_every_offset_clone_past_the_driver_prologue() {
 // smaller". The trip that the entry was about to publish is not published, so the attempt's
 // **delta** is clean and the boundary is unlatched — a host reading the in-band carriers sees a
 // successful parse over two of four items. What it does not see is that the budget already
-// refused: `TokenBudget::refused_an_item` is durable, written at the refusal in the prologue, and
+// refused: `TokenBudgetTally::refused_an_item` is durable, written at the refusal in the prologue,
 // no rollback, re-key or unwind can clear it. It is the only carrier that reaches this path,
 // because nothing crate-side runs on it again.
 
@@ -11734,7 +11734,7 @@ fn a_second_entry_publishes_at_every_offset_clone_past_the_driver_prologue() {
 /// `attempt` with the `bomb_at`-th `Cache::pop_front` of the measured region armed to panic
 /// (0 = disarmed), catching it and **committing** without re-entering the scanner.
 ///
-/// Returns `(items the parse reported, `TokenBudget::refused_an_item`, scanner trips during the
+/// Returns `(items the parse reported, `TokenBudgetTally::refused_an_item`, scanner trips during
 /// attempt, poisoned, bombs fired)` — the same [`Refusal`] shape the sweeps above read, with the
 /// public accessor in the discriminator's place.
 fn truncation_under_a_panicking_front_drain(how: Reopened, bomb_at: usize) -> Refusal {
@@ -11811,7 +11811,7 @@ fn truncation_under_a_panicking_front_drain(how: Reopened, bomb_at: usize) -> Re
   )
 }
 
-/// **Plant, and the positive cell for [`TokenBudget::refused_an_item`].** The one truncation the
+/// **Plant, and the positive cell for [`TokenBudgetTally::refused_an_item`].** The one truncation
 /// per-driver gate leaves reachable is silent in every in-band carrier — and the durable accessor
 /// still answers `true`.
 ///
@@ -11842,7 +11842,7 @@ fn the_front_drain_is_the_residue_and_the_budget_accessor_is_its_only_witness() 
       truncation_under_a_panicking_front_drain(how, 1),
       (kept, true, 0, false, 1),
       "{how:?}: a `Cache::pop_front` that unwinds runs BEFORE the driver's gate, so the entry \
-       publishes nothing — and `TokenBudget::refused_an_item` is the only carrier left saying the \
+       publishes nothing — and `TokenBudgetTally::refused_an_item` is the only carrier left saying \
        input was truncated. Cells are (items reported, budget refused an item, trips in the \
        attempt, poisoned, bombs fired)"
     );
@@ -11956,6 +11956,61 @@ fn a_parse_that_ends_honestly_never_reports_a_budget_refusal() {
       "ceiling {ceiling}: (items consumed, budget refused an item)"
     );
   }
+}
+
+/// **Bound 1, by cell: the accessor witnesses THIS budget and nothing else.**
+///
+/// The other terminal scanner stop is the lexer's own limit trip, decided by `Lexer::check` and
+/// published by [`latch_if_limit_tripped`](InputRef::latch_if_limit_tripped). It truncates the
+/// parse exactly as a budget refusal does — a counted scanner trip and a latched boundary — and it
+/// leaves this accessor `false`, because the tally it moved lives in `L::State`, which a
+/// [`Checkpoint`](crate::input::Checkpoint) carries and a re-key replaces.
+///
+/// So a `false` licenses *the budget refused nothing*, and never *the parse was not truncated*.
+/// The row asserts both halves at once: the trip is real (one trip, poisoned, two of four items)
+/// **and** the witness is silent about it. The budget is
+/// [`unlimited`](crate::input::TokenBudget::unlimited) here, so nothing in the row is the budget's
+/// doing — while `spent` still moves, because an unlimited ceiling charges every item and refuses
+/// none.
+///
+/// Falsifying output if the two publishers were ever wired together — if
+/// `latch_if_limit_tripped` latched the probe, or the accessor read the trip counter rather than
+/// its own durable bit — the witness column reads `true` and the bound is false as written.
+#[test]
+fn a_lexer_limit_trip_is_terminal_and_the_budget_witness_stays_false() {
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  );
+  // No `with_token_budget`: `TokenBudget::unlimited`, the default, which refuses nothing.
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    TRIP_SRC,
+    BombTally {
+      scanned: 0,
+      limit: TRIP_LIMIT,
+    },
+    context,
+  );
+  let mut inp = input.as_ref();
+
+  let base = inp.scanner_trip_snapshot();
+  let mut taken = 0usize;
+  while let Ok(Some(_)) = inp.next() {
+    taken += 1;
+  }
+
+  assert_eq!(
+    (
+      taken,
+      inp.scanner_trip_snapshot() - base,
+      inp.is_poisoned(),
+      inp.token_budget().refused_an_item(),
+      inp.token_budget().is_exhausted(),
+    ),
+    (TRIP_LIMIT, 1, true, false, false),
+    "(items reported, scanner trips, poisoned, budget refused an item, budget exhausted): the \
+     lexer's own trip is terminal and is NOT this witness",
+  );
 }
 
 // ── The LEXER's limit trip versus a consumer error destructor ─────────────────
