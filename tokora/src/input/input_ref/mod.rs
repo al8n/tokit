@@ -1129,19 +1129,36 @@ where
     }
     // STEP 2 — the one-shot. Skipped once it has been spent, which is what bounds the work at one
     // lexer call for the life of the `Input`.
-    if !self.token_budget.limit_probe_spent() {
-      if Lexed::<L::Token>::lex_spanned(lexer).is_none() {
+    //
+    // The refused item is HELD rather than dropped where its existence is read. It is
+    // `Spanned<Lexed<L::Token>, L::Span>` — three consumer types, each free to carry a `Drop` —
+    // and a destructor that unwinds out of this frame takes with it every durable write that has
+    // not happened yet. Read as `lex_spanned(..).is_none()` it died at the end of the `if`
+    // condition, which is its own temporary scope: *before* the probe latch, the trip count and
+    // the boundary. A host that catches the unwind and re-enters then found the probe unspent and
+    // lexed again, so the one-call bound became one call per retry. Measured on `81d6340`: 4 / 16
+    // / 256 retries funded 4 / 16 / 256 `Lexer::lex` calls with `spent` pinned at the ceiling
+    // (`a_panicking_destructor_cannot_un_publish_the_at_limit_refusal`).
+    let refused = if self.token_budget.limit_probe_spent() {
+      None
+    } else {
+      let Some(item) = Lexed::<L::Token>::lex_spanned(lexer) else {
         // The remaining bytes hold no item: the lexer skipped them. An end of input, and the
         // probe is NOT latched — see above for why that half is deliberately not one-shot.
         return LexStep::Stop;
-      }
+      };
       // An item exists and the ceiling refuses it. Latch before the stop is recorded: the latch is
       // the durable half and the boundary is the refundable one, so the order is the same
       // arm-then-act discipline `latch_scanner_trip` applies to its own two writes.
       self.token_budget.latch_limit_probe();
-    }
+      Some(item)
+    };
     let boundary = frontier.boundary(self.offset());
     self.latch_scanner_trip(boundary);
+    // Every durable fact is published, so the consumer's destructors may run now. Explicit rather
+    // than left to the end of scope: what makes the order correct is that nothing durable comes
+    // after this line, and a `drop` naming the value is what a later edit has to step over.
+    drop(refused);
     LexStep::Exhausted
   }
 

@@ -10484,3 +10484,89 @@ fn a_restore_above_the_flag_keeps_the_front_report_watermark() {
      mechanism exists to remove"
   );
 }
+
+// ── The at-limit refusal versus a consumer destructor ─────────────────────────
+//
+// `settle_met_ceiling` learns that an item exists by lexing one and then refusing it. The refused
+// item is `Spanned<Lexed<L::Token>, L::Span>` — three consumer types, each free to carry a `Drop`.
+// If one of those destructors unwinds and the host catches it, every durable fact the refusal was
+// about to publish is lost, and the next entry lexes again: the one-call bound becomes one call
+// per retry. So the durable writes go FIRST and the refused item dies after them.
+
+/// Retries an at-limit refusal `rounds` times with the refused item's `L::Span` drop armed on
+/// every round, clearing the poison boundary in between so the budget's own durable bits are the
+/// only thing left bounding the work.
+///
+/// Returns `(Lexer::lex calls, budget spent, rounds that unwound, scanner trips, poisoned)`.
+///
+/// The last two are the refusal's **terminal carriers**, and reading them here is only meaningful
+/// because of the order this cell pins: at `rounds == 1` the single round is the one that unwinds,
+/// so a carrier that reads as written was written *before* the refused item's destructor ran. Both
+/// are otherwise unobserved by the budget suite — removing either one, or both, leaves every cell
+/// in `tests/token_budget.rs` green, because the refusal's terminality is produced by the
+/// `Scan::Tripped` exit itself and consults neither.
+fn refusal_under_a_panicking_destructor(rounds: usize) -> (usize, usize, usize, usize, bool) {
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  )
+  .with_token_budget(crate::input::TokenBudget::with_limitation(0));
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    "ab cd",
+    BombTally::default(),
+    context,
+  );
+  let mut inp = input.as_ref();
+
+  reset_lex_calls();
+  let mut unwound = 0usize;
+  for _ in 0..rounds {
+    // The documented limit-recovery door: its re-key drops the poison boundary the refusal
+    // latched, leaving the budget's own durable bits as the only thing bounding the work.
+    inp.set_state(BombTally::default());
+    // The refused item's span is the first span this round drops.
+    arm_span_drop(1);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      inp.next().map(|item| item.is_some())
+    }));
+    disarm_span_drop();
+    unwound += usize::from(caught.is_err());
+  }
+  (
+    lex_calls(),
+    inp.token_budget().spent(),
+    unwound,
+    inp.scanner_trip_snapshot(),
+    inp.is_poisoned(),
+  )
+}
+
+/// **Plant.** A budget of zero funds exactly one `Lexer::lex`, and publishes both terminal
+/// carriers, even when the refused item's destructor unwinds out of the refusal and the host
+/// retries.
+///
+/// Falsifying output, measured on `81d6340` (the refused item was a temporary of the `is_none()`
+/// condition, so it died *before* `latch_limit_probe`): `(1, 0, 1, 0, false)`,
+/// `(4, 0, 4, 0, false)`, `(16, 0, 16, 0, false)`, `(256, 0, 256, 0, false)` — one lexer call per
+/// round with `spent` pinned at the ceiling, which is the same unbounded-work shape the twelve-cell
+/// table in `tests/token_budget.rs` exists to refuse, and not one of the three durable writes ever
+/// reached.
+///
+/// The `unwound` column is the payload witness: a cell where nothing panicked would read
+/// `(1, 0, 0, ..)` and pass vacuously. The trip count is `rounds` and not `1` because the refusal
+/// re-latches on **every** refused entry — the boundary is a memo the `set_state` above drops, so
+/// only the count and the probe bit carry across.
+#[test]
+fn a_panicking_destructor_cannot_un_publish_the_at_limit_refusal() {
+  assert_eq!(
+    [1usize, 4, 16, 256].map(refusal_under_a_panicking_destructor),
+    [
+      (1, 0, 1, 1, true),
+      (1, 0, 1, 4, true),
+      (1, 0, 1, 16, true),
+      (1, 0, 1, 256, true),
+    ],
+    "cells are (Lexer::lex calls, spent, rounds that unwound, scanner trips, poisoned) at 1 / 4 / \
+     16 / 256 retries"
+  );
+}
