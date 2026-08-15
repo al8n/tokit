@@ -673,6 +673,55 @@ and will red until they do.
 
 ### Fixed
 
+- **An at-limit refusal on a *second* entry could be decided and then not recorded, and the
+  analysis that was supposed to have found it looked at the wrong set of sites.** Once the one-shot
+  probe is spent, the input carries a **recorded** decision that it already refused an item — a
+  durable cell no rollback and no state re-key can clear. The poison boundary that short-circuits
+  the next entry is not durable: a rollback copies the saved one back, a `set_state` drops it. With
+  the boundary cleared, `settle_met_ceiling` was re-entered in a state where a refusal was the only
+  possible outcome, and it then ran four consumer steps in front of the publication that outcome
+  obliged — `Source::len`, the `Offset::Ord` against it, **the destructor of the owned offset `len`
+  hands back**, and the whole boundary derivation. An unwind in any of them, caught inside an
+  `attempt` whose baseline follows the first refusal, left that attempt reading no new trip and an
+  unpoisoned input. Measured over `"ab cd ef gh"` at a ceiling of `2`, with the stop re-opened by a
+  declining `attempt`: **`(2 of 4 items reported Ok, probe spent, 0 trips, not poisoned)`** on the
+  committing exit — a successful parse over truncated input — and the same by `set_state`
+  (`a_second_entry_publishes_at_every_offset_destructor`, and its `..._offset_clone_...` sibling
+  for the derivation).
+
+  The already-spent entry is now a **publisher in its own right**, tested first and answering off a
+  `bool` on a crate-owned struct, so its decision costs no consumer code at all. Its witness — the
+  trip count, the half outside the rollback set — is published before any `Source`, `Cache`, `Span`
+  or `Offset` call and before any destructor; the boundary follows, because deriving one *is* four
+  consumer steps and no ordering makes them infallible, and losing that memo costs a short-circuit
+  the next entry re-establishes rather than the parse its terminality. `publish_scanner_trip`
+  gained two named halves (`count_scanner_trip`, `install_scanner_boundary`) so that order is
+  expressible while `Input::scanner_trips` keeps exactly one writer and `StagedTrip::install`
+  exactly one caller.
+
+  **The criterion was the defect.** R25's enumeration — every MIR `drop` terminator in the
+  publication region, classified by whether a durable write **post-dominates** it — is exact about
+  the sites it examines and wrong about *which* sites it examines: whole-body post-dominance
+  quantifies over every path through a body, so a site is excluded the moment any path reaches an
+  exit without writing. On the already-spent path no such exit exists, and the twenty-three sites
+  it counted were classified as though it did. Re-derived under **path-conditioned** dominance —
+  the same census, run separately with the `limit_probe_spent` switch pruned to each arm — the
+  counts are `0` in class under `probe unspent`, `0` under the unconditioned reading it replaces,
+  and **1 destruction site plus 3 consumer calls** under `probe spent`. All four are the ones
+  repaired here; the same census over the repaired tree reads `0` under every condition.
+  `REFUSAL_CENSUS` now polices the whole region above the already-spent count rather than a window
+  between two points, and `TRIP_CENSUS` derives its publisher set from two needles instead of one.
+
+  **Disclosed residual.** Two `L::Offset::clone`s still run in front of the publication on that
+  path, and they are in the *driver*, not the settle: `Resume`'s own position clone in
+  `resume_from`, and the scan's `lex_at` local in `scan_with`. Both happen before
+  `lex_within_boundary` is entered, so no ordering inside the lexing site can reach them; closing
+  them needs the driver to answer *"has this input already refused?"* before it builds a lexer,
+  which is a change to **where** the refusal is published rather than to the order in which it is.
+  The residual is pinned exactly — `a_second_entry_publishes_at_every_offset_clone_past_the_driver_prologue`
+  requires the non-publishing indices to be exactly the prefix `{1, 2}`, so it fails both if a step
+  is added in front of the publication and if the publication moves later.
+
 - **`CacheHarness::run` hung on a lexer that only returns errors — the same shape one tier over.**
   The corpus builder fills while `out.len() < want`, and that gate counts the tokens it *kept*
   while the loop consumes the whole item stream. An `Err` grows neither the corpus nor the lexer's

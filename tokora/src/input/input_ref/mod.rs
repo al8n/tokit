@@ -1099,11 +1099,46 @@ where
   /// fully-parsed document as [`LexStep::Exhausted`], which a committed consume surfaces as a
   /// *terminal* end of input and a [`PartialSession`](super::PartialSession) latches on forever.
   ///
+  /// # The already-spent entry is a publisher, not a step of the settle
+  ///
+  /// It is tested **first**, above every other step, and it is the one arm of this body that
+  /// knows its answer before it runs any consumer code. The probe latch is durable — see below —
+  /// so `limit_probe_spent()` reading `true` is a **recorded decision** that this input already
+  /// refused an item. A second entry therefore cannot end any other way, and the trip count is
+  /// owed from the body's first line rather than from something the body is about to learn.
+  ///
+  /// So that arm counts the trip and only then derives the boundary. Everything the settle below
+  /// runs before its own decision — `Source::len`, the `Offset::Ord` against it, the destructor of
+  /// the owned offset `len` hands back, and the boundary derivation — is consumer code, and on the
+  /// already-spent path each of those sat in front of a publication that was already owed. An
+  /// unwind there, caught inside an `attempt` whose baseline follows the first refusal, left the
+  /// attempt reading no new trip and an unpoisoned input. Measured on `2a91235`, ceiling `2` over
+  /// a four-item source with the boundary re-opened by a declining `attempt`: the armed
+  /// `L::Offset` destructor returns `(2 of 4 items reported Ok, probe spent, 0 trips, not
+  /// poisoned)` on the committing exit — **a successful parse over truncated input** — and the
+  /// same by `set_state` and at every `L::Offset::clone` of the derivation
+  /// (`a_second_entry_publishes_at_every_offset_destructor` and its `..._offset_clone` sibling).
+  ///
+  /// **The witness is the count, and the boundary is a memo.** They are published separately here,
+  /// which is the one place in the crate they are — [`count_scanner_trip`](Self::count_scanner_trip)
+  /// first, with nothing consumer-controlled in front of it, and
+  /// [`install_scanner_boundary`](Self::install_scanner_boundary) after the derivation the memo
+  /// needs. That is deliberate rather than a relaxation: the count is outside the rollback set and
+  /// is what a recovery gate judges an attempt by, while the boundary is a per-lineage memo that a
+  /// restore copies back and a re-key drops. Losing the memo to an unwind costs a short-circuit
+  /// the next entry re-establishes; losing the count costs the parse its terminality. The
+  /// alternative — reconstructing the boundary before the witness — is exactly the ordering that
+  /// put four consumer steps in front of it, because every way to reach a boundary runs consumer
+  /// code.
+  ///
   /// # Two steps, and the second cannot be repeated
   ///
   /// **The end of the source, positionally.** With `lex_at` at the source end there is no item and
   /// cannot be one, whatever the counter says. Free, and it answers a zero budget over an empty
-  /// source and every document whose last item ends at its last byte.
+  /// source and every document whose last item ends at its last byte. It is asked only of an input
+  /// whose probe is **unspent**: once a refusal is on record, what `Source::len` — caller code,
+  /// answering off a `&self` this layer does not own — says about the end of the source cannot
+  /// make the refusal un-happen.
   ///
   /// **The one-shot probe**, for the residue a positional test cannot see: a tail the lexer
   /// *skips*. After the last token of `"aa  "` the lex position is `2` against a source length of
@@ -1145,8 +1180,30 @@ where
   where
     Fr: Frontier<'inp, L>,
   {
-    // STEP 1 — a genuine end of input is not a met ceiling. Nothing is owed yet, so the two
-    // caller-code steps this runs (`Source::len`, `Offset::Ord`) may unwind freely.
+    // STEP 0 — the ALREADY-SPENT publisher, and it is first because its answer is already
+    // recorded. `limit_probe_spent()` is a `bool` on a crate-owned struct, so this decision costs
+    // no consumer code at all; reading `true` means an item was refused on an earlier entry, and
+    // the durable cell that says so is outside the rollback set. A second entry cannot end any
+    // other way, so the count is owed HERE — in front of `Source::len`, in front of the
+    // `Offset::Ord` against it, in front of that offset's destructor, and in front of the
+    // derivation. See the section above for what each of those cost while they ran first.
+    if self.token_budget.limit_probe_spent() {
+      // The witness. A `usize` increment, and nothing consumer-controlled precedes it in this
+      // body or in `lex_within_boundary` above it (`reached_boundary` compares only when a
+      // boundary is latched, and a latched boundary returns `Stop` from there without reaching
+      // this).
+      self.count_scanner_trip();
+      // The memo, second, because deriving it is four consumer steps and no ordering can make
+      // them infallible. An unwind here loses a short-circuit the next entry re-establishes; the
+      // witness above is already published.
+      let stop = self.stage_scanner_trip(frontier.boundary(self.offset()));
+      let displaced = self.install_scanner_boundary(stop);
+      drop(displaced);
+      return LexStep::Exhausted;
+    }
+    // STEP 1 — a genuine end of input is not a met ceiling. Nothing is owed yet — the probe is
+    // unspent, so no refusal is on record — and the two caller-code steps this runs
+    // (`Source::len`, `Offset::Ord`) may unwind freely.
     if lex_at.ge(&self.input.len()) {
       return LexStep::Stop;
     }
@@ -1171,16 +1228,9 @@ where
     // boundary derived from it — is the same value on either side of the call. It costs one
     // derivation on the skipped-tail exit below, which is the cold path's cold path.
     let stop = self.stage_scanner_trip(frontier.boundary(self.offset()));
-    // STEP 3 — the one-shot. Skipped once it has been spent, which is what bounds the work at one
-    // lexer call for the life of the `Input`.
-    //
-    // The already-spent arm publishes before it returns, with no caller-code step of any kind
-    // between the branch and the writes: the stop it publishes was staged above.
-    if self.token_budget.limit_probe_spent() {
-      let displaced = self.publish_scanner_trip(stop);
-      drop(displaced);
-      return LexStep::Exhausted;
-    }
+    // STEP 3 — the one-shot, run only where the answer is not already on record. STEP 0 took the
+    // already-spent entry, which is what bounds the work at one lexer call for the life of the
+    // `Input`.
     let Some(produced) = lexer.lex() else {
       // The remaining bytes hold no item: the lexer skipped them. An end of input — so the staged
       // stop is DISCARDED rather than published, and the probe is not latched either. See above
@@ -1341,24 +1391,64 @@ where
   /// emitter — the same ordering [`raise_level`](Self::raise_level) uses for the descent counter,
   /// and for the same reason: a rejecting emitter reports the trip by *returning* `Err`, so a
   /// count taken after the emit would be skipped by the very path the counter exists for.
-  /// `wrapping_add`, again for the sibling's reason: the reading is an inequality against a
-  /// per-attempt baseline, and wrapping is the one overflow behaviour under which consecutive
-  /// values always differ.
+  ///
+  /// # Two halves, because one path has to publish them apart
+  ///
+  /// The body is [`count_scanner_trip`](Self::count_scanner_trip) followed by
+  /// [`install_scanner_boundary`](Self::install_scanner_boundary), and this is the entrance for
+  /// the two callers that hold a staged stop *before* their decision is taken — so for them
+  /// nothing runs between the halves and the pair is atomic exactly as it always was.
+  ///
+  /// The third publisher cannot hold one. `settle_met_ceiling`'s already-spent entry knows its
+  /// answer before it runs any consumer code at all, so its count is owed from its first line and
+  /// deriving a boundary first is what the four consumer steps in front of the publication were.
+  /// It calls the halves directly, in the order the obligation has: witness, then memo. Splitting
+  /// the pair is what makes that order expressible, and the halves are named rather than inlined
+  /// so that `scanner_trips` keeps exactly one writer and `StagedTrip::install` exactly one
+  /// caller.
   #[must_use = "drop the displaced boundary AFTER the publication: dropping it here puts caller                 code between the two writes that record a terminal stop"]
   #[inline(always)]
   fn publish_scanner_trip(&mut self, staged: StagedTrip<L::Offset>) -> Option<L::Offset> {
     // ── publication point: two infallible writes, nothing between them ──
-    //
-    // COUNT, then record where. The count is the fact ("a scanner budget was spent inside this
-    // attempt"); the boundary is the position, and it is a lineage memo a rollback puts back.
-    // Counting every detected trip — including one that does not lower an already-latched
-    // boundary — is deliberate: the reading is per attempt, and a second trip inside a later
-    // attempt must not compare equal to that attempt's baseline just because the position it
-    // latched is one an earlier trip had already reached.
+    self.count_scanner_trip();
+    self.install_scanner_boundary(staged)
+  }
+
+  /// The **witness** half of a terminal scanner stop: the session's trip count, and nothing else.
+  ///
+  /// The one writer of [`Input::scanner_trips`](super::Input). The count is the fact ("a scanner
+  /// budget was spent inside this attempt") and it is the carrier a recovery gate judges an
+  /// attempt by, because it is the half **outside the rollback set** — the boundary beside it is a
+  /// lineage memo a restore copies back and a re-key drops.
+  ///
+  /// Counting every detected trip — including one that does not lower an already-latched
+  /// boundary — is deliberate: the reading is per attempt, and a second trip inside a later
+  /// attempt must not compare equal to that attempt's baseline just because the position it
+  /// latched is one an earlier trip had already reached. `wrapping_add` for the same reason it is
+  /// used for the descent counter: the reading is an inequality against a per-attempt baseline,
+  /// and wrapping is the one overflow behaviour under which consecutive values always differ.
+  ///
+  /// A `usize` load, an add and a store. It cannot unwind, and it needs no staging: that is what
+  /// lets the already-spent refusal publish it before any consumer step of its own.
+  #[inline(always)]
+  fn count_scanner_trip(&mut self) {
     *self.scanner_trips = self.scanner_trips.wrapping_add(1);
-    // `Option::replace` IS `mem::replace(self, Some(v))` — it installs and hands the old value
-    // back. `*self.poison_boundary = Some(..)` is the spelling that drops first, and the sealed
-    // carrier's `install` is the only place either spelling is written.
+  }
+
+  /// The **memo** half: installs the staged frontier, and hands back the boundary it displaced.
+  ///
+  /// The only caller of [`StagedTrip::install`], which is in turn the only expression in the crate
+  /// that writes `poison_boundary`. `Option::replace` IS `mem::replace(self, Some(v))` — it
+  /// installs and hands the old value back. `*self.poison_boundary = Some(..)` is the spelling
+  /// that drops first, and would put caller `Drop` code inside the publication; the displaced
+  /// value is returned instead, and `#[must_use]` makes a caller name it. Same discipline as
+  /// [`replace_position`](Self::replace_position) and [`AtFrontier::adopt`].
+  ///
+  /// Infallible by type: the `Offset::Ord` clamp is [`StagedTrip::stage`]'s, already taken before
+  /// a value of that type can exist.
+  #[must_use = "drop the displaced boundary AFTER the publication: dropping it here puts caller                 code between the two writes that record a terminal stop"]
+  #[inline(always)]
+  fn install_scanner_boundary(&mut self, staged: StagedTrip<L::Offset>) -> Option<L::Offset> {
     staged.install(self.poison_boundary)
   }
 

@@ -9584,6 +9584,29 @@ fn disarm_offset_clone() -> usize {
   OFFSET_CLONES.with(Cell::get)
 }
 
+thread_local! {
+  /// `BombOffset::drop` calls since the last arm, and the index that panics (0 = disarmed).
+  ///
+  /// The clone counter next door reaches the offsets a body *builds*; this one reaches the
+  /// offsets it **destroys**, which is a different set and includes the one the finding is
+  /// about: `Source::len` hands back an owned `L::Offset`, the `>=` against it is the only use,
+  /// and the temporary dies at the end of that `if` condition — a consumer destructor with no
+  /// call of its own for a call-keyed instrument to arm.
+  static OFFSET_DROPS: Cell<usize> = const { Cell::new(0) };
+  static OFFSET_DROP_BOMB: Cell<usize> = const { Cell::new(0) };
+}
+
+fn arm_offset_drop(at: usize) {
+  OFFSET_DROPS.with(|c| c.set(0));
+  OFFSET_DROP_BOMB.with(|c| c.set(at));
+}
+
+/// Disarms and returns how many `L::Offset` drops the run performed.
+fn disarm_offset_drop() -> usize {
+  OFFSET_DROP_BOMB.with(|c| c.set(0));
+  OFFSET_DROPS.with(Cell::get)
+}
+
 /// An `L::Offset` whose `Clone` can be armed, and the source and lexer needed to reach one.
 ///
 /// Every offset the crate ships in-tree is `usize`, so `L::Offset::clone` — caller code that the
@@ -9622,6 +9645,23 @@ impl Clone for BombOffset {
       );
     }
     Self(self.0)
+  }
+}
+
+impl Drop for BombOffset {
+  fn drop(&mut self) {
+    let n = OFFSET_DROPS.with(|c| {
+      let v = c.get() + 1;
+      c.set(v);
+      v
+    });
+    if n == OFFSET_DROP_BOMB.with(Cell::get) {
+      record_bomb_fired();
+      panic!(
+        "R26 publication-path: the armed `L::Offset` drop (#{n}, at {}) panics",
+        self.0
+      );
+    }
   }
 }
 
@@ -11306,6 +11346,295 @@ fn a_refusal_survives_a_panicking_offset_clone_in_its_boundary_derivation() {
     for n in 1..=total {
       let (r, _) = refusal_under_a_panicking_offset_clone(n, exit);
       assert_refusal_is_all_or_nothing("L::Offset::clone", n, total, exit, r);
+    }
+  }
+}
+
+// ── The refusal on a SECOND entry, once the one-shot probe is already spent ───
+//
+// Everything above enters `settle_met_ceiling` with the probe UNSPENT, which is the only state
+// the two sweeps next door can reach: `next` folds the refusal into `Ok(None)`, so their drain
+// loop stops at the first one and never comes back. In that state nothing is owed on entry —
+// the body may still learn that the source has ended, or that its remaining bytes hold no item —
+// so every consumer step before `Lexer::lex` answers is legitimately free to unwind.
+//
+// The probe latch is DURABLE: not a `Checkpoint` field, not touched by the state re-key, with no
+// mutator to lower it. So once it is spent, the input carries a **recorded decision** that an
+// item was refused — and a second entry cannot end any other way. The poison boundary that
+// short-circuits the second entry is not durable: a rollback copies the saved one back and a
+// re-key drops it. Clear it, and the second entry has to re-derive and re-publish the stop.
+//
+// On that entry a durable write DOES dominate the body from its first line, and until this round
+// the body ran four consumer steps in front of it — `Source::len`, the `>=` against it, the
+// destructor of the owned offset it handed back, and the whole boundary derivation. An unwind in
+// any of them, caught inside an `attempt` whose baseline follows the first trip, leaves the
+// attempt reading no new trip and an unpoisoned input: **a committed success over truncated
+// input**, with the probe bit saying a refusal happened and no carrier saying so.
+
+/// How the host cleared the poison boundary between the first refusal and the second entry. Both
+/// are public API, and both are already in the twelve-cell table's `ROUTES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reopened {
+  /// A declining [`InputRef::attempt`]: the rollback copies the checkpoint's saved boundary —
+  /// `None`, since the save predates the refusal — back over the latched one.
+  Rollback,
+  /// [`InputRef::set_state`], the documented limit-recovery door, whose re-key drops the boundary
+  /// outright.
+  Rekey,
+}
+
+/// Which consumer step of the second entry is armed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Armed {
+  /// `L::Offset::drop` — the destructor of the owned offset `Source::len` hands back, and of
+  /// every offset the boundary derivation builds.
+  OffsetDrop,
+  /// `L::Offset::clone` — what `Frontier::boundary` *is* on the `AtCursor` path.
+  OffsetClone,
+}
+
+fn arm_step(which: Armed, at: usize) {
+  match which {
+    Armed::OffsetDrop => arm_offset_drop(at),
+    Armed::OffsetClone => arm_offset_clone(at),
+  }
+}
+
+fn disarm_step(which: Armed) -> usize {
+  match which {
+    Armed::OffsetDrop => disarm_offset_drop(),
+    Armed::OffsetClone => disarm_offset_clone(),
+  }
+}
+
+/// Spends the one-shot probe, clears the boundary by `how`, and then drains inside an `attempt`
+/// with the `at`-th step of `which` armed to panic (0 = disarmed), leaving by `exit` **without
+/// re-entering the scanner**.
+///
+/// Returns the attempt's [`Refusal`] reading and how many such steps the attempt performed. The
+/// trip column is a **delta against a baseline taken after the first refusal**, which is what a
+/// host judging this attempt has: the session-absolute count already says a trip happened once.
+fn refusal_after_the_probe_is_spent(
+  which: Armed,
+  at: usize,
+  how: Reopened,
+  exit: CaughtExit,
+) -> (Refusal, usize) {
+  let src = BombSrc(REFUSAL_SRC);
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, OffsetLexer<'_>>::default(),
+  )
+  .with_token_budget(crate::input::TokenBudget::with_limitation(REFUSAL_CEILING));
+  let mut input = Input::<OffsetLexer<'_>, OffsetCtx<'_>, ()>::with_state_and_context(
+    &src,
+    BombTally::default(),
+    context,
+  );
+  let mut inp = input.as_ref();
+
+  // PROLOGUE. The fill charges the two items the ceiling authorizes and parks them in the cache,
+  // so the measured attempt has a real prefix to replay without lexing; the fill that follows
+  // reaches the ceiling, runs the one-shot probe, and refuses. Nothing is consumed, so the
+  // rollback route has nothing to put back.
+  let _ = inp
+    .peek::<generic_arraydeque::typenum::U2>()
+    .expect("the recording emitter accepts every fill");
+  match how {
+    Reopened::Rollback => {
+      let declined: Option<()> = inp.attempt(|txn| {
+        let _ = txn.peek::<generic_arraydeque::typenum::U3>();
+        None
+      });
+      assert!(declined.is_none(), "the prologue attempt declines");
+    }
+    Reopened::Rekey => {
+      let _ = inp.peek::<generic_arraydeque::typenum::U3>();
+      inp.set_state(BombTally::default());
+    }
+  }
+  assert!(
+    inp.token_budget().limit_probe_spent(),
+    "{how:?}: the prologue must spend the one-shot probe, or the second entry is not the one \
+     under test"
+  );
+  assert!(
+    !inp.is_poisoned(),
+    "{how:?}: and it must clear the boundary the refusal latched, or the second entry stops at \
+     it without reaching the budget at all"
+  );
+
+  // The cached prefix is replayed UNARMED. Those consumes serve tokens the cache already holds,
+  // so they never reach the lexing site and nothing is owed while they run; a bomb among them
+  // would measure a window this cell is not about. Arming starts where the second entry does.
+  let replay = match how {
+    Reopened::Rollback => REFUSAL_CEILING,
+    Reopened::Rekey => 0,
+  };
+  let base = inp.scanner_trip_snapshot();
+  let steps = Cell::new(0usize);
+  reset_bomb_fired();
+  let kept = inp.attempt(|txn| {
+    let taken = Cell::new(0usize);
+    for _ in 0..replay {
+      if let Ok(Some(_)) = txn.next() {
+        taken.set(taken.get() + 1);
+      }
+    }
+    arm_step(which, at);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      while let Ok(Some(_)) = txn.next() {
+        taken.set(taken.get() + 1);
+      }
+    }));
+    steps.set(disarm_step(which));
+    match (caught.is_err(), exit) {
+      (true, CaughtExit::Decline) => None,
+      _ => Some(taken.get()),
+    }
+  });
+  (
+    (
+      kept.unwrap_or(0),
+      inp.token_budget().limit_probe_spent(),
+      inp.scanner_trip_snapshot() - base,
+      inp.is_poisoned(),
+      bomb_fired(),
+    ),
+    steps.get(),
+  )
+}
+
+/// Sweeps every step of `which` a second entry performs and returns the indices at which the
+/// refusal was **not** published, in order.
+///
+/// The reading demanded of each index is stronger than [`assert_refusal_is_all_or_nothing`]'s and
+/// has to be: there, the probe bit discriminates between "the decision was never taken" and "it
+/// was taken and published", and both readings are admissible. Here the decision is already taken
+/// and *recorded in a cell no rollback and no re-key can clear* before the entry begins, so
+/// `probe spent && trips == 0` is not a second admissible reading — it is the defect, and on a
+/// committing exit the `kept` column says what it cost.
+fn second_entry_publication_failures(
+  which: Armed,
+  how: Reopened,
+  exit: CaughtExit,
+) -> (std::vec::Vec<usize>, usize, Refusal) {
+  let (clean, total) = refusal_after_the_probe_is_spent(which, 0, how, exit);
+  assert!(
+    clean.1 && clean.2 == 1 && clean.3 && clean.4 == 0 && total >= 1,
+    "{which:?} on {how:?}/{exit:?}: the unarmed second entry must publish exactly one trip and \
+     re-latch the boundary, over {total} step(s) (saw {clean:?})"
+  );
+  let mut failures = std::vec::Vec::new();
+  for n in 1..=total {
+    let (r, _) = refusal_after_the_probe_is_spent(which, n, how, exit);
+    let (kept, probe_spent, trips, poisoned, fired) = r;
+    assert!(
+      fired == 1,
+      "{which:?} #{n} of {total} on {how:?}/{exit:?}: the armed step was never reached ({fired} \
+       bombs fired), so this round measures nothing — every index swept here is one the clean run \
+       performed"
+    );
+    assert!(
+      probe_spent,
+      "{which:?} #{n} of {total} on {how:?}/{exit:?}: the prologue's probe bit vanished, so this \
+       round is no longer measuring a second entry"
+    );
+    if trips == 0 {
+      assert!(
+        !poisoned,
+        "{which:?} #{n} of {total} on {how:?}/{exit:?}: the boundary was installed without the \
+         count. The count is the half outside the rollback set, so it is the half that must go \
+         first; a memo published alone is the pair recorded backwards (kept {kept} of \
+         {REFUSAL_ITEMS})"
+      );
+      failures.push(n);
+    }
+  }
+  (failures, total, clean)
+}
+
+/// The one shape a non-publishing index is allowed to have: a **prefix**.
+///
+/// A prefix says the publication happens at a single point and everything from there on is
+/// covered; scattered failures would say it happens in several places, or that a step after it can
+/// still un-publish. `owed_from` is the count of consumer steps the *driver* runs before the
+/// lexing site is entered — the region ordering inside the site cannot reach — and naming it as a
+/// number is what makes this cell fail in **both** directions: a step added in front of the
+/// publication grows the prefix, and a publication moved later grows it too.
+fn assert_failures_are_the_named_prefix(
+  which: Armed,
+  how: Reopened,
+  exit: CaughtExit,
+  owed_from: usize,
+  why: &str,
+) {
+  let (failures, total, clean) = second_entry_publication_failures(which, how, exit);
+  let expected: std::vec::Vec<usize> = (1..=owed_from).collect();
+  assert!(
+    failures == expected,
+    "{which:?} on {how:?}/{exit:?}: steps {failures:?} of {total} left the refusal unpublished, \
+     expected exactly {expected:?} — {why}. The clean run read {clean:?}. Any other index is a \
+     consumer step running in front of a publication that is already owed: the one-shot probe is \
+     spent, so this entry cannot end any other way than refusing, and a host that catches the \
+     unwind inside an `attempt` whose baseline follows the first refusal reads a clean delta and \
+     reports a successful parse over input the budget refused"
+  );
+}
+
+/// **Plant.** Once the probe is spent, **no** `L::Offset` destructor on a second entry can leave
+/// the refusal unpublished — by either boundary-clearing route, on either exit.
+///
+/// This is the site the finding named: `lex_at.ge(&self.input.len())` builds an owned `L::Offset`
+/// and destroys it at the end of the condition, which is a consumer step with no call of its own
+/// for a call-keyed instrument to arm. Falsifying output, measured on `2a91235`: on
+/// `Rollback`/`Commit` the armed drop returns `(2, true, 0, false, 1)` — **two of four items
+/// reported `Ok`** with the probe spent and neither carrier written — and `(0, true, 0, false, 1)`
+/// on `Rekey`/`Commit`. The prefix is **empty**: the drops the entry performs all belong to the
+/// site, and the publication now precedes every one of them.
+#[test]
+fn a_second_entry_publishes_at_every_offset_destructor() {
+  for how in [Reopened::Rollback, Reopened::Rekey] {
+    for exit in [CaughtExit::Decline, CaughtExit::Commit] {
+      assert_failures_are_the_named_prefix(
+        Armed::OffsetDrop,
+        how,
+        exit,
+        0,
+        "every `L::Offset` this entry destroys belongs to the lexing site, and the site publishes \
+         before it runs any consumer step at all",
+      );
+    }
+  }
+}
+
+/// **Plant.** The same second entry against `L::Offset::clone`, and it carries a **disclosed
+/// residual**: two clones run before the lexing site is entered, and ordering inside the site
+/// cannot reach them.
+///
+/// Falsifying output, measured on `2a91235`: all three clones read `(2, true, 0, false, 1)` on
+/// `Rollback`/`Commit` — the third being the one inside `frontier.boundary(self.offset())`, which
+/// the repair moved behind the count. The two boundary-derivation sweeps above never reach any of
+/// this: their drain stops at the first refusal, so the probe is unspent at every entry they
+/// measure and the derivation is legitimately free to unwind there.
+///
+/// The residual is `Resume`'s own position clone (`resume_from`) and the scan's `lex_at` local
+/// (`scan_with`), both of which run before `lex_within_boundary` is called and are therefore
+/// outside anything `settle_met_ceiling` can order. Closing them needs the driver to answer *"has
+/// this input already refused?"* before it builds a lexer — a restructuring of where the refusal
+/// is published, not another ordering — and it is disclosed in the CHANGELOG under that name.
+#[test]
+fn a_second_entry_publishes_at_every_offset_clone_past_the_driver_prologue() {
+  for how in [Reopened::Rollback, Reopened::Rekey] {
+    for exit in [CaughtExit::Decline, CaughtExit::Commit] {
+      assert_failures_are_the_named_prefix(
+        Armed::OffsetClone,
+        how,
+        exit,
+        2,
+        "the disclosed residual: `Resume`'s position clone in `resume_from` and the scan's \
+         `lex_at` local in `scan_with`, both of which run before `lex_within_boundary` is entered",
+      );
     }
   }
 }

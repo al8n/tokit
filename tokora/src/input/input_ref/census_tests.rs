@@ -419,6 +419,13 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
     // spelling and not the write went blind the last time this moved, too.
     "staged.install(",
     "latch.replace(",
+    // The trip COUNT, listed the day the publication grew two named halves. It was invisible here
+    // while `publish_scanner_trip` held both writes — the body matched on `staged.install(` and
+    // the count came along for the ride — and splitting the pair would have dropped it off this
+    // rail with no other symptom, which is precisely the "unlisted marker leaves no trace" failure
+    // the roster note below describes. The count is the half OUTSIDE the rollback set, so if
+    // anything on this list is a durable fact, it is.
+    "*self.scanner_trips = ",
     // The state replacement is a FACT WRITE, and leaving it off this list was the exact cost of
     // sharpening the rule. While the rail said "no caller code after the first mutation" it did
     // not matter what a mutation was; once it said "between the first and last FACT write", every
@@ -590,6 +597,11 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
   // still. Every name here has been read and carries no fallible step after its first mutation.
   const EXPECTED: &[&str] = &[
     "mod.rs::commit_position",
+    // The trip count's own body, joining with R26's split of the publication. Its region is the
+    // single `*self.scanner_trips = ` line, which is the point: the count has to be publishable
+    // with nothing at all around it, because the already-spent refusal publishes it before it has
+    // derived anything.
+    "mod.rs::count_scanner_trip",
     // `commit_token` is deliberately ABSENT, and its departure is the change that put
     // `settle_committed_token` here: the body is now a clamp followed by a call, and neither is a
     // fact write, so it holds no window of its own. The window moved into the half it calls.
@@ -600,13 +612,18 @@ fn settle_census_nothing_fallible_once_a_restore_has_begun() {
     // move, and they pass because that is all they do.
     "mod.rs::install_position",
     "mod.rs::install_rekey",
-    // The scanner stop's infallible half, joining the roster with the boundary-derivation repair:
+    // The scanner stop's boundary half, joining the roster with the boundary-derivation repair:
     // the boundary write became a `mem::replace` (it was an in-place assignment, a HAZARD marker
     // but never a FACT one, so this body used to be invisible here for the same reason
-    // `set_state` was). Its region is the count and the replace, and there is nothing between
-    // them — the clamp is `stage_scanner_trip`'s, above and outside, and the displaced boundary
-    // is returned rather than dropped.
-    "mod.rs::publish_scanner_trip",
+    // `set_state` was). It was `publish_scanner_trip` until R26 split the publication into a
+    // witness and a memo; the marker followed the write into the half that performs it. Its region
+    // is the single `staged.install(` line — the clamp is `stage_scanner_trip`'s, above and
+    // outside, and the displaced boundary is returned rather than dropped.
+    //
+    // `publish_scanner_trip` is deliberately ABSENT now: it holds no fact write of its own, only a
+    // call to each half, so this rail's rule — no caller code BETWEEN fact writes — has nothing to
+    // say about it. It is swept WHOLE by `TRIP_CENSUS` instead, which is the stricter reading.
+    "mod.rs::install_scanner_boundary",
     "mod.rs::rekey_offset_facts",
     // The clamp-then-install wrapper. Its region is the single `install_position` line, which is
     // the point: the fallible clamp above it is outside the region by construction.
@@ -1938,9 +1955,20 @@ fn resume_census_one_pairing_site() {
   }
 }
 
-/// REFUSAL_CENSUS — **the publication window of an at-limit refusal**: between the `Lexer::lex`
-/// that decides one is owed and the `publish_scanner_trip` that records it, `settle_met_ceiling`
-/// runs no consumer code at all.
+/// REFUSAL_CENSUS — **the two publication windows of an at-limit refusal**, and they open at
+/// different times.
+///
+/// The **fresh** refusal learns its answer from `Lexer::lex`, so its window is between that call
+/// and the `publish_scanner_trip` it obliges, and `settle_met_ceiling` runs no consumer code in
+/// between.
+///
+/// The **already-spent** entry does not learn anything. `limit_probe_spent()` reads a cell an
+/// earlier refusal wrote — durable, outside the rollback set, with no mutator — so the answer is
+/// *recorded* before the body starts, the trip count is owed from the body's first line, and the
+/// window is everything above the count. That is the stronger law, and it is the one the derived
+/// enumeration produced once it was conditioned on the probe bit instead of quantified over every
+/// path: whole-body post-dominance called the pre-decision steps free, and they are free only when
+/// the probe is unspent.
 ///
 /// The rest of the discipline is carried by the types and needs no rail. `publish_scanner_trip`
 /// takes a `StagedTrip`, and since R25 that is a **compiler** fact rather than a claim: the type
@@ -1951,13 +1979,15 @@ fn resume_census_one_pairing_site() {
 /// is `#[must_use]`-returned rather than dropped in place, so caller `Drop` code cannot land
 /// between the two writes either.
 ///
-/// What no type can state is **where the derivation sits relative to the lexer call**. Nothing
-/// stops a later edit from re-deriving the boundary below `Lexer::lex` — the same edit that was
-/// there until this rail existed, and its cost was not work but terminality: `next` folds a
-/// terminal stop into `Ok(None)`, so a host that caught an unwind out of the derivation inside an
-/// `attempt` and left without re-entering the scanner read two clean carriers and reported a
-/// successful parse over input the budget had refused. That is this cell's whole job, and
-/// `a_refusal_survives_a_panicking_cache_back_in_its_boundary_derivation` is its runtime twin.
+/// What no type can state is **where the derivation sits relative to the decision**. Nothing stops
+/// a later edit from re-deriving the boundary below `Lexer::lex`, or from putting `Source::len`
+/// back in front of the already-spent count — the two edits that were there until each half of
+/// this rail existed, and the cost of either is not work but terminality: `next` folds a terminal
+/// stop into `Ok(None)`, so a host that caught an unwind out of the derivation inside an `attempt`
+/// and left without re-entering the scanner read clean carriers and reported a successful parse
+/// over input the budget had refused. Runtime twins:
+/// `a_refusal_survives_a_panicking_cache_back_in_its_boundary_derivation` for the first half, and
+/// `a_second_entry_publishes_at_every_offset_destructor` for the second.
 #[test]
 #[cfg_attr(
   miri,
@@ -1974,15 +2004,20 @@ fn refusal_census_nothing_consumer_controlled_between_the_decision_and_the_publi
         panic!("REFUSAL_CENSUS drift: `settle_met_ceiling` no longer contains `{needle}`")
       })
   };
-  // Two exits publish a stop — the already-spent arm and the fresh refusal — off one staging.
-  let publishes = count(&body, "publish_scanner_trip(");
+  // Two exits record a stop, and they no longer record it the same way. The fresh refusal
+  // publishes a staged stop whole; the already-spent entry publishes the COUNT first and installs
+  // the boundary afterwards, off a second staging of its own. So: two stagings, one whole
+  // publication, one bare count, one bare install.
+  let staged = count(&body, "stage_scanner_trip(");
+  let whole = count(&body, "publish_scanner_trip(");
+  let counted = count(&body, "count_scanner_trip(");
+  let installed = count(&body, "install_scanner_boundary(");
   assert!(
-    publishes == 2 && count(&body, "stage_scanner_trip(") == 1,
-    "REFUSAL_CENSUS drift: `settle_met_ceiling` stages {} stop(s) and publishes {publishes}, \
-     expected one staging and two publications — the already-spent arm and the fresh refusal. A \
-     publication off a stop this body did not stage is a boundary derived after the decision \
-     (grep REFUSAL_CENSUS).",
-    count(&body, "stage_scanner_trip(")
+    staged == 2 && whole == 1 && counted == 1 && installed == 1,
+    "REFUSAL_CENSUS drift: `settle_met_ceiling` stages {staged} stop(s), publishes {whole} whole, \
+     counts {counted} and installs {installed} boundaries; expected 2 / 1 / 1 / 1. A publication \
+     off a stop this body did not stage is a boundary derived after the decision, and a second \
+     bare count is a trip recorded somewhere this rail does not read (grep REFUSAL_CENSUS)."
   );
   let last = |needle: &str| {
     lines
@@ -1990,18 +2025,17 @@ fn refusal_census_nothing_consumer_controlled_between_the_decision_and_the_publi
       .rposition(|line| line.contains(needle))
       .unwrap_or_else(|| panic!("REFUSAL_CENSUS drift: no `{needle}` in `settle_met_ceiling`"))
   };
-  let stage = at("stage_scanner_trip(");
-  let decide = at("lexer.lex(");
   let spent_arm = at("limit_probe_spent(");
-  let spent_publish = at("publish_scanner_trip(");
+  let spent_count = at("count_scanner_trip(");
+  let stage = last("stage_scanner_trip(");
+  let decide = at("lexer.lex(");
   let publish = last("publish_scanner_trip(");
   assert!(
-    stage < decide && stage < spent_arm,
-    "REFUSAL_CENSUS drift: the stop is staged at body line {stage}, the already-spent branch is \
-     at {spent_arm} and the lexer call that decides a fresh refusal is owed is at {decide}. \
-     Staging AFTER either decision puts the boundary derivation — `Cache::back`, \
-     `Span::end_ref`, `Offset::clone` — between a refusal and the carriers that report it (grep \
-     REFUSAL_CENSUS)."
+    stage < decide,
+    "REFUSAL_CENSUS drift: the fresh refusal's stop is staged at body line {stage} and the lexer \
+     call that decides one is owed is at {decide}. Staging AFTER the decision puts the boundary \
+     derivation — `Cache::back`, `Span::end_ref`, `Offset::clone` — between a refusal and the \
+     carriers that report it (grep REFUSAL_CENSUS)."
   );
   assert!(
     decide < publish,
@@ -2009,11 +2043,15 @@ fn refusal_census_nothing_consumer_controlled_between_the_decision_and_the_publi
      at {decide} that establishes there is an item to refuse (grep REFUSAL_CENSUS)."
   );
 
-  // Consumer code, in the two shapes this window can grow it: a call into a caller-implemented
-  // trait, and a value whose `Drop` is caller-implemented. `latch_limit_probe(` is the only
-  // statement the window is allowed to contain, and it is a `bool` store on a crate-owned type.
+  // Consumer code, in the two shapes either window can grow it: a call into a caller-implemented
+  // trait, and a value whose `Drop` is caller-implemented. `self.input.len(` and `.ge(` are here
+  // for the second window and not the first: they are STEP 1's end-of-source test, which is
+  // legitimate ahead of an unspent probe and was the defect ahead of a spent one.
   const HAZARDS: &[&str] = &[
+    "lexer.lex(",
     "lexer.span(",
+    "self.input.len(",
+    ".ge(",
     "self.offset(",
     "frontier.",
     ".boundary(",
@@ -2024,22 +2062,46 @@ fn refusal_census_nothing_consumer_controlled_between_the_decision_and_the_publi
     "drop(",
     "*self.poison_boundary = ",
   ];
-  // Both windows: the fresh refusal's, and the already-spent branch's — which must reach its
-  // publication with no consumer callback of its own, since a host that catches an unwind there
-  // is in exactly the same position.
-  for (open, close) in [(decide, publish), (spent_arm, spent_publish)] {
-    for (i, line) in lines.iter().enumerate().take(close + 1).skip(open) {
-      for hazard in HAZARDS {
-        assert!(
-          !line.contains(hazard),
-          "REFUSAL_CENSUS drift: body line {i} of `settle_met_ceiling` runs `{hazard}` between \
-           the decision (line {open}) and the publication (line {close}): `{}`. An unwind there \
-           leaves the probe latch published and the stop unrecorded, which a host that catches \
-           it and does not re-enter reads as a successful parse over dropped input (grep \
-           REFUSAL_CENSUS).",
-          line.trim()
-        );
+  // WINDOW 1 — the already-spent entry. It opens at the body's FIRST line, not at the branch:
+  // the answer is on record before the body runs, so anything above the count is a consumer step
+  // in front of an obligation that already exists. The branch itself is inside the window, which
+  // is why `limit_probe_spent(` may not be spelled in a way that builds anything.
+  assert!(
+    spent_arm < spent_count,
+    "REFUSAL_CENSUS drift: the already-spent branch is at body line {spent_arm} and its count at \
+     {spent_count} (grep REFUSAL_CENSUS)."
+  );
+  for (i, line) in lines.iter().enumerate().take(spent_count + 1) {
+    for hazard in HAZARDS {
+      assert!(
+        !line.contains(hazard),
+        "REFUSAL_CENSUS drift: body line {i} of `settle_met_ceiling` runs `{hazard}` ABOVE the \
+         already-spent entry's trip count at line {spent_count}: `{}`. The one-shot probe being \
+         spent is a durable record that this input already refused an item, so a second entry \
+         cannot end any other way and the count is owed from the body's first line. An unwind \
+         there, caught inside an `attempt` whose baseline follows the first refusal, leaves the \
+         attempt reading no new trip and an unpoisoned input — a committed success over truncated \
+         input (grep REFUSAL_CENSUS).",
+        line.trim()
+      );
+    }
+  }
+  // WINDOW 2 — the fresh refusal, between the lexer call that decides one is owed and the
+  // publication it obliges.
+  for (i, line) in lines.iter().enumerate().take(publish + 1).skip(decide) {
+    for hazard in HAZARDS {
+      if *hazard == "lexer.lex(" && i == decide {
+        continue;
       }
+      assert!(
+        !line.contains(hazard),
+        "REFUSAL_CENSUS drift: body line {i} of `settle_met_ceiling` runs `{hazard}` between \
+         the decision (line {decide}) and the publication (line {publish}): `{}`. An unwind there \
+         leaves the probe latch published and the stop unrecorded, which a host that catches \
+         it and does not re-enter reads as a successful parse over dropped input (grep \
+         REFUSAL_CENSUS).",
+        line.trim()
+      );
     }
   }
 }
@@ -2079,6 +2141,10 @@ fn trip_census_every_publisher_declares_its_window() {
   // adding a decision has to make, and it is not decoration: round 7's defect was **on the
   // decision line**, not below it, so a rail that only swept the lines between the decision and
   // the publication read the defect as clean. Planted and watched failing before it was believed.
+  //
+  // An **empty** decision list means the body has no decision of its own: it is a shared half that
+  // every decision reaches, and it is swept WHOLE rather than between two points. `WHOLE_BODY`
+  // next door makes the same move for the same reason.
   const WINDOWS: &[(&str, &[(&str, bool)])] = &[
     // The lexer's own limit trip. `Lexer::check` answering `Err` IS the decision, it is the one
     // caller-implemented call this predicate makes, and it answers with `Token::Error` — a
@@ -2088,13 +2154,22 @@ fn trip_census_every_publisher_declares_its_window() {
       "settle_met_ceiling",
       &[
         // The already-spent arm. `TokenBudget` is crate-owned and the answer is a `bool`, so this
-        // decision builds nothing a consumer can put a destructor on.
+        // decision builds nothing a consumer can put a destructor on — and, since R26, the answer
+        // is not learned here at all but READ OFF a durable cell an earlier refusal wrote, which
+        // is why its publication is the trip COUNT alone and comes before every consumer step in
+        // the body rather than after the boundary derivation.
         ("limit_probe_spent(", false),
         // The one-shot probe's answer: `Option<Result<L::Token, Token::Error>>`, consumer through
         // and through.
         ("lexer.lex(", true),
       ],
     ),
+    // The shared infallible half, and it decides nothing: both staged publishers call it, and its
+    // whole body is the window. It joined this census when R26 split it into
+    // `count_scanner_trip` + `install_scanner_boundary` — which took it OFF the restore-window
+    // roster next door, since it no longer holds a fact write of its own. Swept whole here is the
+    // stricter replacement, not a gap.
+    ("publish_scanner_trip", &[]),
   ];
 
   // A consumer-typed decision must **bind** its value, not test it and discard it. The scrutinee
@@ -2117,7 +2192,15 @@ fn trip_census_every_publisher_declares_its_window() {
     "matches!(",
   ];
 
-  // DERIVE the publishers: every two-space-indented `fn` in `mod.rs` whose body calls the
+  // What COUNTS as a publication, and it is two names since R26. The trip count and the boundary
+  // install are separate bodies now, because the already-spent refusal has to publish the count
+  // *before* it derives the boundary — so a rail keyed only on `publish_scanner_trip(` would have
+  // gone blind to the arm that needed it most, exactly as the restore rail's markers went blind
+  // each time a write changed spelling. `count_scanner_trip(` is the one that matters: the count
+  // is the carrier outside the rollback set.
+  const PUBLICATIONS: &[&str] = &["publish_scanner_trip(", "count_scanner_trip("];
+
+  // DERIVE the publishers: every two-space-indented `fn` in `mod.rs` whose body reaches a
   // publication. A publisher missing from `WINDOWS` fails below with the checklist.
   //
   // `all_method_bodies` is what reads the body, because it excludes the SIGNATURE line: reading
@@ -2125,7 +2208,10 @@ fn trip_census_every_publisher_declares_its_window() {
   // a publisher of itself, which is the self-match `all_method_bodies` was written to avoid.
   let publishers: std::vec::Vec<std::string::String> = all_method_bodies(src)
     .into_iter()
-    .filter(|(_, body)| code_only(body).contains("publish_scanner_trip("))
+    .filter(|(_, body)| {
+      let body = code_only(body);
+      PUBLICATIONS.iter().any(|p| body.contains(p))
+    })
     .map(|(name, _)| name)
     .collect();
   assert!(
@@ -2165,7 +2251,16 @@ fn trip_census_every_publisher_declares_its_window() {
   ];
 
   for (method, decisions) in WINDOWS {
-    let body = code_only(&method_body(src, method));
+    // The SAME reader the derivation above used, and that is load-bearing rather than tidy:
+    // `all_method_bodies` excludes the signature line, and `method_body` does not — so a body
+    // whose own name is a publication needle (`publish_scanner_trip`) counted its own declaration
+    // as a publication and read as a half that branches. A sweep and the derivation that feeds it
+    // must read the same text.
+    let body = all_method_bodies(src)
+      .into_iter()
+      .find(|(n, _)| n == method)
+      .map(|(_, b)| code_only(&b))
+      .unwrap_or_else(|| panic!("TRIP_CENSUS drift: `{method}` is gone (grep TRIP_CENSUS)"));
     let lines: std::vec::Vec<&str> = body.lines().collect();
 
     let mut opens: std::vec::Vec<(usize, &str)> = decisions
@@ -2198,9 +2293,34 @@ fn trip_census_every_publisher_declares_its_window() {
     let closes: std::vec::Vec<usize> = lines
       .iter()
       .enumerate()
-      .filter(|(_, line)| line.contains("publish_scanner_trip("))
+      .filter(|(_, line)| PUBLICATIONS.iter().any(|p| line.contains(p)))
       .map(|(i, _)| i)
       .collect();
+
+    // A body that decides nothing is swept WHOLE: there are no two points to sweep between, and
+    // the shared half must be free of every hazard wherever it appears. It must still hold
+    // exactly one publication — a second would mean the half itself had grown a branch.
+    if decisions.is_empty() {
+      assert!(
+        closes.len() == 1,
+        "TRIP_CENSUS drift: `{method}` declares no decision, so it is the shared publication half \
+         and must publish exactly once; it publishes at {closes:?}. A half that branches needs a \
+         declared decision like every other publisher (grep TRIP_CENSUS)."
+      );
+      for (i, line) in lines.iter().enumerate() {
+        for hazard in HAZARDS {
+          assert!(
+            !line.contains(hazard),
+            "TRIP_CENSUS drift: body line {i} of `{method}` runs `{hazard}`: `{}`. This body is \
+             the publication itself — every decision in the crate reaches it — so a consumer step \
+             anywhere in it sits between some decision and the carriers it obliges (grep \
+             TRIP_CENSUS).",
+            line.trim()
+          );
+        }
+      }
+      continue;
+    }
 
     // Decisions and publications INTERLEAVE, one for one: `d0 < p0 < d1 < p1 < …`. Pairing them
     // that way is what makes the sweep exact — "every publication after this decision" would put
