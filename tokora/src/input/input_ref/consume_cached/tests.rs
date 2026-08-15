@@ -55,12 +55,14 @@ fn parse_with<'inp, F, O>(src: &'inp str, mut f: F) -> Result<O, ()>
 where
   F: for<'c> FnMut(&mut crate::input::InputRef<'inp, 'c, TestLexer<'inp>, (), ()>) -> Result<O, ()>,
 {
-  let (emitter, cache, recursion) =
+  let (emitter, cache, recursion, token_budget) =
     <() as ParseContext<'_, TestLexer<'_>>>::provide(()).into_components();
   let mut input = Input::<TestLexer<'inp>, (), ()>::with_state_and_context(
     src,
     (),
-    crate::input::InputContext::new(emitter, cache).with_recursion_limiter(recursion),
+    crate::input::InputContext::new(emitter, cache)
+      .with_recursion_limiter(recursion)
+      .with_token_budget(token_budget),
   );
   let mut inp_ref = input.as_ref();
   f(&mut inp_ref)

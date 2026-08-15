@@ -15,7 +15,7 @@ fn dummy_context() -> InputContext<Fatal<()>, DefaultCache<'static, DummyLexer>>
 #[test]
 fn input_context_new_and_into_components() {
   let ctx = InputContext::new("emitter", 42u32);
-  let (e, c, r) = ctx.into_components();
+  let (e, c, r, b) = ctx.into_components();
   assert_eq!(e, "emitter");
   assert_eq!(c, 42u32);
   // `new` carries the default budget: protection on, at tokora's own native-stack-safe depth —
@@ -37,21 +37,53 @@ fn input_context_new_and_into_components() {
     "InputContext's parser-facing default must not equal RecursionLimiter::new()'s general one"
   );
   assert_eq!(r.depth(), 0);
+  // The token budget's default is the OPPOSITE of the recursion budget's: protection OFF. A depth
+  // ceiling protects the native stack, which every build shares, so a number can be picked for
+  // everyone; an item ceiling is a property of the grammar and the document, so seeding one would
+  // change the behaviour of every parse that never asked for it.
+  assert_eq!(b, crate::input::TokenBudget::unlimited());
+  assert_eq!(b.limitation(), usize::MAX);
+  // A context carries a CEILING and no spend, so there is no `b.spent()` to read here — the tally
+  // is the input's and is built at `Input::with_state_and_context`. The cell below drives that
+  // through and reads it off the input instead.
+  assert_eq!(
+    crate::input::TokenBudgetTally::new(b).spent(),
+    0,
+    "and what the context hands the input starts at zero",
+  );
 }
 
 #[test]
 fn input_context_with_recursion_limiter_replaces_the_default() {
   let ctx = InputContext::new("emitter", 42u32)
     .with_recursion_limiter(crate::state::recursion_tracker::RecursionLimiter::unlimited());
-  let (_, _, r) = ctx.into_components();
+  let (_, _, r, _) = ctx.into_components();
   assert_eq!(r.limitation(), usize::MAX);
   assert_eq!(r.depth(), 0);
 }
 
 #[test]
+fn input_context_with_token_budget_replaces_the_default() {
+  let ctx = InputContext::new("emitter", 42u32)
+    .with_token_budget(crate::input::TokenBudget::with_limitation(7));
+  let (_, _, r, b) = ctx.into_components();
+  assert_eq!(b.limitation(), 7);
+  assert_eq!(
+    crate::input::TokenBudgetTally::new(b).spent(),
+    0,
+    "the door sets a ceiling; the spend is the input's and starts at zero",
+  );
+  // And it did not disturb the cell beside it.
+  assert_eq!(
+    r.limitation(),
+    crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH
+  );
+}
+
+#[test]
 fn input_context_different_types() {
   let ctx = InputContext::new(std::vec![1, 2, 3], Some("cache"));
-  let (e, c, _) = ctx.into_components();
+  let (e, c, _, _) = ctx.into_components();
   assert_eq!(e, std::vec![1, 2, 3]);
   assert_eq!(c, Some("cache"));
 }

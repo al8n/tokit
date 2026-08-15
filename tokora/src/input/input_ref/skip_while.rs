@@ -509,11 +509,17 @@ where
     let mut lexing: Option<Resume<L, L::Offset>> = None;
     loop {
       if lexing.is_none() {
-        // A sticky limit trip latches a poison boundary at the durable frontier; once the lex
-        // position has reached it there is no token left to scan. Every token this call skipped
-        // is already committed — that commit is the scanner's `commit_at` here — so reaching the
-        // boundary leaves nothing to settle and the call simply stops.
-        if self.reached_boundary(self.span.end_ref()) {
+        // The DURABLE stop first, before the lexer is built: a budget that has already refused an
+        // item owes this turn a stop, and `InputRef::refusal_already_on_record` publishes it in
+        // front of the resume below rather than behind it. `AtCursor` is the durable frontier here
+        // for the same reason it is the scan's below — with the stream drained, `offset()` is
+        // `span().end()`, the end of the last skipped token.
+        //
+        // Then the positional memo: a sticky limit trip latches a poison boundary at the durable
+        // frontier; once the lex position has reached it there is no token left to scan. Every
+        // token this call skipped is already committed — that commit is the scanner's `commit_at`
+        // here — so either stop leaves nothing to settle and the call simply stops.
+        if self.refusal_already_on_record(&AtCursor) || self.reached_boundary(self.span.end_ref()) {
           return Ok(());
         }
         // The committed pair, read from one value, with the stream provably drained: exactly

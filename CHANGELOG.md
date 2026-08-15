@@ -34,6 +34,38 @@ and will red until they do.
 
 ### Added
 
+- **`TokenBudgetTally::refused_an_item` — the one question a host that caught an unwind and
+  concluded can still ask.** A budget refusal has **no diagnostic channel** (a diagnostic would have to be
+  built as the emitter's own error type, which needs a `From` bound this crate deliberately does not
+  add to every consume path), and `InputRef::next` folds a terminal stop into `Ok(None)`. The
+  in-band carriers — `Input::scanner_trips` and the poison boundary — are published before any
+  consumer code runs, so an ordinary parse always sees them. What they cannot reach is a host that
+  catches an unwind out of **its own** code (an `L::Offset` destructor, a `Cache` method,
+  `Lexer::span`) and then concludes without re-entering the scanner: nothing crate-side runs there
+  again, so every in-band signal is by definition unavailable. This accessor is the answer for that
+  host — *was this input truncated by the budget?* — and it is the same durable bit the driver's own
+  refusal gate reads: written at the refusal, in front of every consumer step the refusal runs, not
+  a `Checkpoint` field, not reached by the state re-key, with no `token_budget_mut` to lower it.
+
+  **Three bounds, each of which limits what a reading licenses.** It witnesses **this budget only**
+  — the lexer's own limit trip, latched off `Lexer::check`, never writes it, and could not, since
+  that tally lives in `L::State` and a `Checkpoint` carries it; so `false` means *the budget refused
+  nothing*, not *the parse was not truncated*. It is **input-absolute, not attempt-relative** —
+  it says an item was refused somewhere in the life of this `Input`, never *inside my window*, which
+  is what `scanner_trips` against a baseline answers and what every in-crate reader of terminality
+  uses. And it **does not survive a `PartialSession` redrive**, which builds a fresh `Input` and a
+  fresh tally; what carries a refusal across attempts is the session's own terminal latch.
+
+  **The third bound was written here while it was false**, and the type split under **Changed
+  (breaking)** is what makes it true: supply a copied budget as the next attempt's context and the
+  witness used to survive. All three are now cells rather than sentences —
+  `a_lexer_limit_trip_is_terminal_and_the_budget_witness_stays_false`,
+  `the_witness_is_absolute_and_says_nothing_about_the_window_it_is_read_in`, and
+  `a_redrive_starts_its_tally_at_zero_and_lexes`.
+
+  Read it through `InputRef::token_budget`, which is already `pub`; there is still no
+  `token_budget_mut`.
+
 - **`ErrorContainer::clear`.** `Errors` is now the only door onto its container (#247), so it has
   to serve the removals that door used to reach through `DerefMut`. The method is defaulted
   through `pop`, so an existing implementation keeps compiling unchanged; the four built-in
@@ -166,7 +198,127 @@ and will red until they do.
   because it scales a different quantity than `Harness::budget_multiple` does: attempts the corpus
   builder may make, not items a run may produce. `0` is treated as `1`, as on the lexer harness.
 
+- **`input::TokenBudget` — a durable, driver-enforced ceiling on the items a lexer may produce**
+  (#285), configured through `InputContext::with_token_budget` and
+  `ParserContext::with_token_budget`, read back through `InputRef::token_budget`. **Default
+  unlimited**, so nothing changes for a parse that does not ask for one.
+
+  The counter this crate already shipped, `TokenLimiter`, lives inside `L::State` — which is a
+  `Checkpoint` field. A rollback therefore reinstalls the saved tally and gives the count back, and
+  the two public state-surgery doors (`InputRef::set_state` and `InputRef::state_mut`, documented
+  as the limit-recovery path) replace it outright. That is the *correct* semantics for a bound on
+  tokens in the committed stream, and the whole terminal-trip pipeline is built on it, so it is
+  unchanged. It is the wrong semantics for a bound on work performed: an attempt that lexed a
+  thousand items and then declined performed a thousand items of scanning, and a counter that
+  forgets them bounds nothing against a grammar an adversary can make speculate. The new cell lives
+  on the `Input`, beside `recursion`, outside the rollback set, with **no mutator** — there is no
+  `Input::token_budget_mut` and no `InputRef::token_budget_mut`, the same absence `recursion` and
+  `emitter` rely on.
+
+  **The unit is the item produced, not the item accepted**, and the difference is the reason the
+  ceiling exists. A plain lexer error leaves `Lexer::check` `Ok`, so the scanner reports it and goes
+  on looking for the next valid token: one valid token followed by *N* bytes of garbage is **one
+  accepted token** while *N* scans run and *N* diagnostics accumulate durably in the emitter's log.
+  Measured over *N* in {64, 128, 512, 2048}, the accept count stayed `1` while scans ran
+  {66, 130, 514, 2050} and diagnostics {64, 128, 512, 2048} — so a ceiling denominated in accepts
+  is satisfied by all four. Trivia is charged; a peek-fill is charged at production, not at
+  consumption; a cached token replayed after a rollback is not charged again, because nothing
+  lexes.
+
+  **The ceiling is tested in front of the lexer, not behind it**, at the single lexing site both
+  drivers pass through — which makes "no item was produced without authorization" and "every item
+  produced was charged" properties of the module rather than rules each driver remembers. A durable
+  counter is only half a bound. Asked *after* the work, the refusal has to be recorded in the
+  poison boundary for a caller to see it, and the boundary is a lineage memo: a rollback restores
+  it, and `set_state`/`state_mut` drop it. The spend would then be durable while the *enforcement*
+  was refundable, so a public `attempt` that drains to the refusal and declines re-enters against
+  an unchanged `spent` and the lexer runs again — once per call, without bound. Measured: a budget
+  of **zero** funded one full `Lexer::lex` per re-entry (4, 16, 256 rounds → 4, 16, 256
+  invocations, `spent` still `0`), identically by all three routes; with the preflight it funds a
+  flat **one**, whatever the round count and by whichever of the four doors. The exhausted `B = 4`
+  case ran `B + rounds` scans and now runs `B + 1`.
+
+  **A met ceiling is not an end of input**, and the gate cannot answer that question on its own —
+  it knows what `spent` is, not whether another item exists. Answering the first as though it were
+  the second reports a *fully parsed* document as a terminal stop, which a terminal-aware consumer
+  rejects and a `PartialSession` latches on permanently; it fires at exactly the calibration a
+  budget is most likely to be given, `N` for a document of `N` items. So the site settles it in two
+  steps. The end of the source, positionally, costs nothing and covers a zero budget over an empty
+  source and every document whose last item ends at its last byte. The residue is a tail the lexer
+  *skips* — after the last token of `"aa  "` the lex position is `2` against a length of `4`, the
+  shape of every lexer that discards trailing whitespace — and only running the lexer can settle
+  that, so it is run **once** per `Input` and the outcome is latched in the budget beside `spent`,
+  where no rollback, no state re-key and no rewinding `sync` can reach it. That one call is the
+  whole cost of the repair: a bounded drain is now `items + 1` scans, which is the same shape the
+  *unbounded* drain has always had — items plus one exhausting probe. A probe that found no item
+  latches nothing and stays re-derivable, at exactly what asking an unbudgeted input the same
+  question costs.
+
+  **Exhaustion is terminal**, and it had to be: a `PartialSession` rebuilds a fresh `Input` — and
+  therefore a fresh budget — for every redrive, so a refusal read as an ordinary failure would
+  re-drive forever. The refusal latches the poison boundary and counts a scanner trip through the
+  same writer a lexer-side limit trip goes through, so `next` folds it into `Ok(None)`,
+  `next_or_stop` and the `*_or_stop` family surface the end-of-input error already marked terminal,
+  the recovery gates re-raise, and a session latches. What it cannot do is *report* itself: a
+  diagnostic would have to be built as the emitter's own error type, which no consume path is
+  bounded to construct, so the refused item is refused silently — including a lexer error on
+  exactly that item, which the one-shot probe drops where it stands.
+
+  **`unlimited()` is the absence of a ceiling, not `usize::MAX` of one.** `is_exhausted` excludes
+  the sentinel explicitly, because `spent >= max` made the one budget that promised to refuse
+  nothing begin refusing everything, terminally, once `spent` reached `usize::MAX`. That distance
+  is unreachable at a 64-bit `usize` and is `4_294_967_295` produce-events at 32 bits — and this
+  ceiling charges a *re-lex* as a produce-event, so it is a distance one long-lived `Input` over a
+  speculating grammar can cover without a four-billion-token document. `with_limitation(usize::MAX)`
+  is the same value and therefore the same behaviour. The charge saturates, since excluding the
+  sentinel from the gate is exactly what lets `spend` be reached at `spent == usize::MAX`, where a
+  bare increment would wrap the counter back to zero.
+
+  What it does **not** bound is stated at the type: not distinct document tokens (a region the
+  cache could not retain across a rollback is re-lexed, and re-lexing charges again — the direction
+  the input module's own docs already warn about, "counts replay as input and trips on valid
+  documents"), not the cost of an item, and not a session. Calibrate against produce-events.
+
 ### Changed (breaking)
+
+- **`TokenBudget` is the ceiling; `input::TokenBudgetTally` is what one `Input` spent against it.**
+  `TokenBudget::{spent, is_exhausted, refused_an_item}` are gone from that type and live on the new
+  one, and `InputRef::token_budget` now returns `&TokenBudgetTally`. Every existing *read* — `inp
+  .token_budget().spent()`, `.is_exhausted()`, `.refused_an_item()`, `.limitation()` — compiles
+  unchanged, because that is where those questions were always asked. What breaks is reading them
+  off a `TokenBudget` **value a caller owns**, where the answers were meaningless: a caller can only
+  hold a freshly-constructed one, so `spent()` was `0` and `refused_an_item()` was `false` by
+  construction.
+
+  It is a repair, not a tidy-up. `TokenBudget` is `Copy` — both `with_token_budget` doors are public
+  and take it by value — and while the spend and the one-shot probe latch rode in it, `Copy` carried
+  the **live cell** through those doors. `*input.token_budget()` out of a parse that had refused,
+  into the next context, and the next `Input` began exhausted with a refusal already on record and
+  no poison boundary: its first driver gate counted a scanner trip and reported a *terminal* stop
+  with `Lexer::lex` never invoked — over an empty source included. Reproduced at `6aa0b08` through
+  `ParserContext::with_token_budget` and through a caller-written `ParseContext` reaching
+  `InputContext::with_token_budget`, both reading `(Err(terminal), refused_an_item = true, 0
+  scans)`, and again as a `PartialSession` redrive whose second attempt read `items = 0,
+  refused_an_item = true, 0 scans`.
+
+  That is this budget's own reason for existing, pointed backwards. The counter is durable so that a
+  rollback cannot refund work that happened; a transplantable counter fabricates work that did not.
+  The split is what makes the fabrication **unrepresentable**: a tally has no `Clone`, no `Copy` and
+  no public constructor, an `Input`'s tally is built from the configuration and from nothing else,
+  and the configuration is a ceiling with nothing else in it.
+
+  Migration: nothing, unless you called `spent()`, `is_exhausted()` or `refused_an_item()` on a
+  budget you built yourself. Those answers are now asked of the input that has one.
+
+- **`InputContext::into_components` returns a four-tuple** (#285): `(emitter, cache, recursion,
+  token_budget)`. It is destructuring rather than four getters *precisely* so that adding a
+  component breaks every rebuild of a context, and this is the first time that has fired. A rebuild
+  goes through `InputContext::new`, which re-seeds the defaults, so a component a rebuild forgets to
+  re-apply is silently replaced by its default — for the token budget that means an untrusted parse
+  running unbounded while the caller's code still reads as if it had asked for a ceiling, and an
+  unbounded budget never refuses, so there is no diagnostic anywhere. Migration is one binding:
+  `let (e, c, r) = …` becomes `let (e, c, r, b) = …`, and a caller that rebuilds a context must
+  thread `b` back through `with_token_budget`.
 
 - **`Emitter::checkpoint` takes `&mut self`** (#257). Capturing a mark is a capability, not an
   observation — for a recording emitter it registers per-mark state a later `rewind` or `release`
@@ -581,6 +733,80 @@ and will red until they do.
   directly — to keep building.
 
 ### Fixed
+
+- **An at-limit refusal on a *second* entry could be decided and then not recorded, and the
+  analysis that was supposed to have found it looked at the wrong set of sites.** Once the one-shot
+  probe is spent, the input carries a **recorded** decision that it already refused an item — a
+  durable cell no rollback and no state re-key can clear. The poison boundary that short-circuits
+  the next entry is not durable: a rollback copies the saved one back, a `set_state` drops it. With
+  the boundary cleared, `settle_met_ceiling` was re-entered in a state where a refusal was the only
+  possible outcome, and it then ran four consumer steps in front of the publication that outcome
+  obliged — `Source::len`, the `Offset::Ord` against it, **the destructor of the owned offset `len`
+  hands back**, and the whole boundary derivation. An unwind in any of them, caught inside an
+  `attempt` whose baseline follows the first refusal, left that attempt reading no new trip and an
+  unpoisoned input. Measured over `"ab cd ef gh"` at a ceiling of `2`, with the stop re-opened by a
+  declining `attempt`: **`(2 of 4 items reported Ok, probe spent, 0 trips, not poisoned)`** on the
+  committing exit — a successful parse over truncated input — and the same by `set_state`
+  (`a_second_entry_publishes_at_every_offset_destructor`, and its `..._offset_clone_...` sibling
+  for the derivation).
+
+  The already-spent entry is now a **publisher in its own right**, tested first and answering off a
+  `bool` on a crate-owned struct, so its decision costs no consumer code at all. Its witness — the
+  trip count, the half outside the rollback set — is published before any `Source`, `Cache`, `Span`
+  or `Offset` call and before any destructor; the boundary follows, because deriving one *is* four
+  consumer steps and no ordering makes them infallible, and losing that memo costs a short-circuit
+  the next entry re-establishes rather than the parse its terminality. `publish_scanner_trip`
+  gained two named halves (`count_scanner_trip`, `install_scanner_boundary`) so that order is
+  expressible while `Input::scanner_trips` keeps exactly one writer and `StagedTrip::install`
+  exactly one caller.
+
+  **The criterion was the defect.** R25's enumeration — every MIR `drop` terminator in the
+  publication region, classified by whether a durable write **post-dominates** it — is exact about
+  the sites it examines and wrong about *which* sites it examines: whole-body post-dominance
+  quantifies over every path through a body, so a site is excluded the moment any path reaches an
+  exit without writing. On the already-spent path no such exit exists, and the twenty-three sites
+  it counted were classified as though it did. Re-derived under **path-conditioned** dominance —
+  the same census, run separately with the `limit_probe_spent` switch pruned to each arm — the
+  counts are `0` in class under `probe unspent`, `0` under the unconditioned reading it replaces,
+  and **1 destruction site plus 3 consumer calls** under `probe spent`. All four are the ones
+  repaired here; the same census over the repaired tree reads `0` under every condition.
+  `REFUSAL_CENSUS` now polices the whole region above the already-spent count rather than a window
+  between two points, and `TRIP_CENSUS` derives its publisher set from two needles instead of one.
+
+  **The residual that disclosure named is closed, in the place it said it would have to be.** Two
+  `L::Offset::clone`s still ran in front of the publication on that path, and they were in the
+  *driver*, not the settle: `Resume`'s own position clone in `resume_from`, and the scan's `lex_at`
+  local in `scan_with`. Both happen before `lex_within_boundary` is entered, so no ordering inside
+  the lexing site could reach them — closing them needed the driver to answer *"has this input
+  already refused?"* before it builds a lexer, which is a change to **where** the refusal is
+  published rather than to the order in which it is.
+
+  That answer is now asked at **all eleven** lexing drivers, by `InputRef::refusal_already_on_record`,
+  and it costs nothing to ask: `TokenBudget` is an `InputRef` field, so the durable half of a
+  refusal is a `bool` on a crate-owned struct readable at every driver entry. Its three conjuncts
+  are the probe bit, the ceiling, and `poison_boundary` being `None` — and the third is what keeps
+  this a change of ordering rather than of model. With no boundary latched, `reached_boundary` is
+  false at every offset, so the entry is provably headed for the lexing site and provably reaches
+  the same publication there; with one latched, the positional check decides and an input already
+  stopped at its boundary keeps returning its stop **without a trip being counted a second time**
+  (`a_latched_boundary_answers_without_counting_a_second_trip`). On the already-spent path the
+  entry now builds no `Resume`, enters no scan, and reaches `settle_met_ceiling` not at all: the
+  steps the sweeps used to walk are not re-ordered but gone, which is what those cells now pin as
+  counts — `L::Offset::drop` `2 → 0`, `L::Offset::clone` `3 → 1`, the one survivor being the
+  boundary memo's own, derived after the count. `RESUME_CENSUS` checks the gate's call count
+  against the `Resume::parts_mut` count file by file, so a twelfth driver cannot arrive without it.
+
+  **What remains, named rather than implied.** One consumer step is still ahead of the publication
+  and cannot move: the driver's **front-drain** (`Cache::pop_front`, or `Cache::is_empty` /
+  `Cache::len` for the probing forms). A driver has to know whether a token is already waiting
+  before it can conclude anything about lexing one. A panic there on an already-refused entry,
+  caught inside an `attempt` and concluded on without re-entering the scanner, still reports
+  `(2 of 4 items reported Ok, 0 trips in the window, not poisoned)` — measured, and pinned as the
+  residue by `the_front_drain_is_the_residue_and_the_budget_accessor_is_its_only_witness`. Also
+  outside the gate: an entry whose boundary is latched but **not yet reached**, which is still owed
+  a refusal and still reaches it through the prologue; no route in the tree was found that produces
+  one, since every publication installs the boundary at the lex position it is standing on. Both
+  are now *detectable* rather than silent — see `TokenBudgetTally::refused_an_item` under **Added**.
 
 - **`CacheHarness::run` hung on a lexer that only returns errors — the same shape one tier over.**
   The corpus builder fills while `out.len() < want`, and that gate counts the tokens it *kept*
@@ -1038,6 +1264,43 @@ skipped row, so the harness would have said so.
 Recorded in `ci/name_collision/disclosed.txt`, and on **this** branch: the probe's inventory is a
 two-sided delta, so once this merges the names exist on both sides, the rows leave every future
 plan, and the harness can never re-litigate them.
+
+- **A lexer limit trip could be decided and then not recorded, if the consumer's error type had a
+  destructor.** `latch_if_limit_tripped` — the crate's terminal predicate, and the sole route by
+  which a lexer-side resource trip reaches `Input::scanner_trips` and the poison boundary — asked
+  `if lexer.check().is_err()`. `Lexer::check` answers with `Token::Error`, which is bounded
+  `Clone + Debug` and nothing more, so it may carry a `Drop`; and the scrutinee of an `if` is a
+  temporary destroyed **at the end of the condition, before the branch body is entered**. So the
+  order of events was: terminality decided, consumer destructor runs, and only then the two writes
+  that record it. An unwind out of that destructor, caught inside an `attempt` by a host that then
+  left without re-entering the scanner, saw both carriers clean — and `next` folds a terminal stop
+  into `Ok(None)`, so the counter was the only evidence there was. Measured over `"ab cd ef gh"`
+  with a tally tripping on the third item: `(2 items reported Ok, check() answered Err once, 0
+  scanner trips, not poisoned)` — **a successful parse over truncated input**. The predicate now
+  binds the answer (`if let Err(error) = …`), publishes both facts, and drops the error by name
+  afterwards; the same cell reads `(2, 1, 1, poisoned)` at every error destructor in the round
+  (`a_limit_trip_is_all_or_nothing_at_every_lexer_error_destructor`).
+
+  This is the fourth window of one shape — *a consumer-controlled value created inside a condition
+  or an intermediate expression, destroyed at the end of that expression, before the durable
+  publication the decision implies* — and the three before it were all in this branch's own new
+  code. The whole publication region has now been enumerated mechanically rather than by
+  inspection: over the MIR of every body in the crate that performs one of the four durable writes,
+  every `drop` terminator was classified by whether a durable write **post-dominates** it, which is
+  exactly the property "the obligation is already incurred here". Twenty-three destruction sites
+  across the five bodies; one was in the class, and it was this one. `TRIP_CENSUS` in
+  `census_tests.rs` now derives the set of publishing methods from the source, so a new one cannot
+  arrive without declaring the decision that obliges it.
+
+- **The staged/publish split's "by construction" claim is now true by construction.** The
+  `StagedTrip` carrier that makes the fallible clamp precede the infallible writes was a bare
+  `enum` in `input_ref/mod.rs`, so its variants were nameable throughout `input_ref` and every
+  descendant of it — which is precisely the set of modules that can also reach
+  `publish_scanner_trip`. No forged caller existed, but `StagedTrip::Lower(b)` from a sibling
+  module compiled, and it would have published a boundary that was never compared against the
+  latch. The representation moved into a private child module (`input_ref/staged_trip.rs`) behind
+  an opaque newtype with a private field: `StagedTrip::stage` is now the only expression in the
+  language that produces one, and the forged spellings are `error[E0599]` and `error[E0603]`.
 
 ## 0.9.1 (2026-08-08)
 

@@ -36,8 +36,8 @@ use std::cell::Cell;
 
 #[allow(unused_imports)]
 use tokora::{
-  Emitter, InputRef, Lexer, ParseContext, ParseInput, Token as TokenT, TryParseInput,
-  Parse, Parser, ParserContext,
+  Emitter, InputRef, Lexer, ParseContext, ParseInput, ScanLookahead, Token as TokenT,
+  TryParseInput, Parse, Parser, ParserContext,
   emitter::Silent,
   error::{Unclosed, UnexpectedEot, token::UnexpectedToken},
   lexer::LogosLexer,
@@ -104,6 +104,11 @@ impl core::fmt::Display for Kind {
 impl TokenT<'_> for Tok {
   type Kind = Kind;
   type Error = PErr;
+  // No default (see `Token::SCAN_LOOKAHEAD`'s own doc): every logos-backed vocabulary in this
+  // crate states one, and the fixture is no exception now that #293 requires it. `Unbounded`
+  // is the value every test fixture in the crate proper picks — it is always sound and needs
+  // no per-pattern audit, which is exactly right for a throwaway probe token type.
+  const SCAN_LOOKAHEAD: ScanLookahead = ScanLookahead::Unbounded;
   fn kind(&self) -> Kind {
     match self {
       Tok::Num(_) => Kind::Num,
@@ -794,6 +799,9 @@ impl TokenT<'_> for MiniTok {
   type Kind = u8;
   type Error = PErr;
   const SURFACES_TRIVIA: bool = true;
+  // See the identical note on `Tok`'s impl above: required since #293, no default, and
+  // `Unbounded` is the crate-wide fixture convention.
+  const SCAN_LOOKAHEAD: ScanLookahead = ScanLookahead::Unbounded;
   fn kind(&self) -> u8 {
     self.0
   }
@@ -1130,6 +1138,29 @@ INHERENT_SUBJECTS = {
             "new": ("0, SimpleSpan::new(0, 1)", "Location"),
         },
     },
+    # `TokenBudget` is minted by the same diff as its items, so it takes this table's
+    # new-owner shape like every entry above it. Unlike `TokenBudgetTally` (see the bespoke
+    # branch in `inherent_method` below), it is the plain `Copy` configuration half — the one
+    # a caller builds directly and hands to a `with_token_budget` door — so it needs no special
+    # reaching: `unlimited()` and `with_limitation(n)` are its own public constructors.
+    #
+    # `limitation` is declared on BOTH `TokenBudget` and `TokenBudgetTally`, and
+    # `surface_diff.py` keeps the alphabetically LAST owner — `TokenBudget` < `TokenBudgetTally`
+    # — so the shared name routes to the tally, not here. This table's `calls` is therefore
+    # empty today; it is filled in anyway (a real, working `build`/`setup`, an explicit empty
+    # `calls`) rather than left to a KeyError, for the reason `Cst`'s empty `assoc_calls` gives.
+    "TokenBudget": {
+        "imports": "use tokora::input::TokenBudget;\n",
+        "fixture": "",
+        "ty": "TokenBudget",
+        "setup": "",
+        "build": "  let mut subject: TokenBudget = TokenBudget::with_limitation(1_000);\n",
+        "calls": {},
+        "assoc_calls": {
+            "unlimited": ("", "TokenBudget"),
+            "with_limitation": ("1_000", "TokenBudget"),
+        },
+    },
 }
 
 
@@ -1363,6 +1394,76 @@ fn drive() {{
   let a = ParseAttempt::Accept(1i64);
   reached();
   {call}
+}}
+""" + WITNESS
+    if owner == "TokenBudgetTally":
+        # `TokenBudgetTally` is minted by this same diff, so this is the NEW-OWNER shape — the
+        # base side cannot resolve the type at all, and the call has to be built at each item's
+        # REAL arity with the `used` spelling bound to its REAL return type (see
+        # `INHERENT_SUBJECTS`'s header). It is not an `INHERENT_SUBJECTS` entry, though every
+        # other new owner is, because that table's shared template constructs its subject with a
+        # `build` line evaluated once at the top of `drive()` and used afterward — and this type
+        # has no route to a value that could survive past that point.
+        #
+        # By design: no `TokenBudgetTally::new` is public, and it is neither `Clone` nor `Copy` —
+        # see the type's own doc, "It is per input, and it cannot be moved between inputs". A
+        # template that called a constructor, or that squirreled a value out through a `Clone`,
+        # would defeat the exact thing that round closed. The one door a real consumer has is
+        # `InputRef::token_budget(&self) -> &TokenBudgetTally`, so the subject is REACHED inside
+        # a real parse, the same shape `ParseState`'s branch above already uses for the same
+        # reason — and it is a BORROW, not an owned value, so it cannot outlive the callback
+        # either. Every statement below therefore runs inside `body`, not before it.
+        #
+        # The consumer's extension trait still declares `&mut self`, matching every other
+        # template in this file, even though the borrow this accessor hands back makes that
+        # candidate unreachable in principle: `subject: &TokenBudgetTally` cannot be reborrowed
+        # `&mut`, so tokora's `&self` item is found at the FIRST step of the receiver walk
+        # (`self: &TokenBudgetTally` matches the receiver expression's own type exactly) and the
+        # consumer's item is never even a candidate, let alone a losing one. That is a stronger
+        # result than the owned-value shape the other new-owner tables get — there the consumer's
+        # `&mut self` item is merely a later, losing pick — and it is a direct consequence of the
+        # type's own contract rather than a limitation of the probe: a caller who can only ever
+        # borrow shared cannot write an extension method that would contend for the call at all.
+        returns = {
+            "is_exhausted": "bool",
+            "limitation": "usize",
+            "refused_an_item": "bool",
+            "spent": "usize",
+        }.get(name)
+        if returns is None:
+            sys.exit(
+                f"gen_probe: no return-type mapping for TokenBudgetTally::{name!r} in "
+                f"gen_probe.py's inherent_method — add one, at the item's real return type."
+            )
+        call = (
+            f"let _v: {returns} = subject.{name}();"
+            if spelling == "used"
+            else f"subject.{name}();"
+        )
+        return FIXTURE + f"""
+use tokora::input::TokenBudgetTally;
+
+pub trait ConsumerExt {{
+  fn {name}(&mut self) -> u8;
+}}
+
+impl ConsumerExt for TokenBudgetTally {{
+  fn {name}(&mut self) -> u8 {{
+    ran();
+    7
+  }}
+}}
+
+fn drive() {{
+  fn body<'inp>(
+    inp: &mut InputRef<'inp, '_, PLexer<'inp>, PCtx<'inp>>,
+  ) -> Result<(), PErr> {{
+    reached();
+    let subject: &TokenBudgetTally = inp.token_budget();
+    {call}
+    Ok(())
+  }}
+  let _ = Parser::with_context(ctx()).apply(body).parse_str("1 2");
 }}
 """ + WITNESS
     # Not a default and not a skip: an owner with no template must stop the run, because a probe
