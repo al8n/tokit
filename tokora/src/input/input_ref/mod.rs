@@ -23,6 +23,7 @@ use super::{
 };
 
 pub(crate) use session::Session;
+use staged_trip::StagedTrip;
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use session::SessionPointId;
@@ -40,6 +41,7 @@ pub(crate) mod session;
 mod skip_while;
 #[cfg(any(feature = "std", feature = "alloc"))]
 mod stacked;
+mod staged_trip;
 mod sync_balanced;
 mod sync_through;
 mod sync_to;
@@ -1257,9 +1259,26 @@ where
     // non-terminal path: `classify` already derived `boundary` above this call, so the stage is a
     // discriminant test on a latch that is `None` on every input that has not tripped.
     let stop = self.stage_scanner_trip(boundary);
-    if lexer.check().is_err() {
+    // BIND the answer; do not test it and discard it. `Lexer::check` returns
+    // `Result<(), Token::Error>` — a **consumer-typed value, built inside the condition that
+    // decides terminality** — and the scrutinee of an `if` is a temporary that dies at the end of
+    // the condition, before the branch is entered. `Token::Error` is bounded `Clone + Debug` and
+    // nothing more, so that destructor is caller code and it used to run between the decision and
+    // both writes the decision obliges. Measured on `0f13f31`: a host that caught the unwind
+    // inside an `attempt` and committed reported `Ok` over **two of four** items with zero trips
+    // counted and the input unpoisoned — `(2 kept, 1 check error, 0 trips, not poisoned)`,
+    // `a_limit_trip_is_all_or_nothing_at_every_lexer_error_destructor` at `Token::Error` drop #1
+    // of 2.
+    //
+    // `if let Err(error)` moves the error out of the temporary into a local, so the only
+    // destructor left in the window belongs to a value the publication now precedes. It is
+    // dropped by NAME rather than left to end of scope, for the reason `settle_met_ceiling` gives:
+    // what makes this correct is that nothing durable comes after it, and a named drop is what a
+    // later edit has to step over.
+    if let Err(error) = lexer.check() {
       let displaced = self.publish_scanner_trip(stop);
       drop(displaced);
+      drop(error);
       true
     } else {
       false
@@ -1276,12 +1295,13 @@ where
   /// so nothing consumer-controlled is left between the decision and the write. In practice a
   /// live scan never reaches a trip past an already-latched boundary (it stops at the boundary
   /// first), so this only ever establishes the frontier or lowers it.
+  ///
+  /// The clamp itself lives in [`StagedTrip::stage`], the **only** constructor of the carrier, in
+  /// a child module that keeps the representation out of reach — see [`staged_trip`] for why
+  /// "only staging makes one" had to become a compiler fact instead of a claim in a doc comment.
   #[inline(always)]
   fn stage_scanner_trip(&self, boundary: L::Offset) -> StagedTrip<L::Offset> {
-    match self.poison_boundary.as_ref() {
-      Some(existing) if *existing <= boundary => StagedTrip::Keep,
-      _ => StagedTrip::Lower(boundary),
-    }
+    StagedTrip::stage(self.poison_boundary.as_ref(), boundary)
   }
 
   /// The **infallible half**: publishes a staged stop — counts it on the session and installs the
@@ -1303,14 +1323,19 @@ where
   ///
   /// # Nothing in this body can unwind, and the type is what says so
   ///
-  /// It takes a [`StagedTrip`], which only [`stage_scanner_trip`](Self::stage_scanner_trip)
-  /// produces: the comparison is therefore already decided before this is callable, and it cannot
-  /// be re-run here. What is left is a `usize` increment and one `Option::replace` — which *is*
-  /// `mem::replace`, a move, not an assignment. `*self.poison_boundary = Some(..)` would drop the
-  /// displaced `Option<L::Offset>` **before** installing the new one, putting caller `Drop` code
-  /// between the count and the boundary; the displaced value is returned instead, and
-  /// `#[must_use]` makes a caller name it. Same discipline as
-  /// [`replace_position`](Self::replace_position) and [`AtFrontier::adopt`].
+  /// It takes a [`StagedTrip`], and [`StagedTrip::stage`] is the only expression in the language
+  /// that produces one: the type is a newtype over a representation private to the
+  /// [`staged_trip`] module, so the comparison is already decided before this is callable and no
+  /// call site can forge a stop that skipped it. That is a **compiler** fact now; until R25 it was
+  /// a sentence in this paragraph, and a bare `enum` in `mod.rs` whose variants every descendant
+  /// of `input_ref` could name.
+  ///
+  /// What is left is a `usize` increment and one `Option::replace` — which *is* `mem::replace`, a
+  /// move, not an assignment. `*self.poison_boundary = Some(..)` would drop the displaced
+  /// `Option<L::Offset>` **before** installing the new one, putting caller `Drop` code between the
+  /// count and the boundary; the displaced value is returned instead, and `#[must_use]` makes a
+  /// caller name it. Same discipline as [`replace_position`](Self::replace_position) and
+  /// [`AtFrontier::adopt`].
   ///
   /// The bump runs **before** the boundary write and before any caller offers a diagnostic to the
   /// emitter — the same ordering [`raise_level`](Self::raise_level) uses for the descent counter,
@@ -1331,12 +1356,10 @@ where
     // attempt must not compare equal to that attempt's baseline just because the position it
     // latched is one an earlier trip had already reached.
     *self.scanner_trips = self.scanner_trips.wrapping_add(1);
-    match staged {
-      StagedTrip::Keep => None,
-      // `Option::replace` IS `mem::replace(self, Some(v))` — it installs and hands the old value
-      // back. `*self.poison_boundary = Some(..)` is the spelling that drops first.
-      StagedTrip::Lower(boundary) => self.poison_boundary.replace(boundary),
-    }
+    // `Option::replace` IS `mem::replace(self, Some(v))` — it installs and hands the old value
+    // back. `*self.poison_boundary = Some(..)` is the spelling that drops first, and the sealed
+    // carrier's `install` is the only place either spelling is written.
+    staged.install(self.poison_boundary)
   }
 
   /// Returns `true` if reached the end of input.
@@ -3991,26 +4014,6 @@ where
   /// [`Verdict::Trip`] takes **after** its emit succeeded — and must not adopt the `Resume`'s lexer
   /// state on it, which is what keeps the probe's mutation off the committed `L::State`.
   Exhausted,
-}
-
-/// A terminal scanner stop whose one fallible step is already taken: the boundary write, decided
-/// and not yet performed.
-///
-/// The carrier between [`InputRef::stage_scanner_trip`] and
-/// [`InputRef::publish_scanner_trip`], and the reason the split is **structural** rather than an
-/// ordering someone has to maintain. Publishing takes one of these by value, only staging makes
-/// one, and staging is the only step of a stop that runs caller code — so the comparison is
-/// necessarily complete before the publication is callable, and there is no spelling of
-/// "publish, then compare".
-///
-/// It is not `Option<L::Offset>`: publishing *returns* an `Option<L::Offset>` — the boundary it
-/// displaced — and two adjacent options with opposite meanings is exactly the confusion this
-/// window was lost to once already.
-enum StagedTrip<O> {
-  /// An already-latched boundary is at least as poisoned; the publication is the count alone.
-  Keep,
-  /// This stop establishes the frontier, or lowers it; the publication installs it.
-  Lower(O),
 }
 
 /// Where a scan latches the poison boundary on a limit trip: the **durable frontier**, the offset
