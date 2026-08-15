@@ -126,9 +126,10 @@ where
   pub(super) recursion: &'closure mut crate::state::recursion_tracker::RecursionLimiter,
   /// The **token budget**, borrowed from the owning [`Input`](super::Input) — see that field for
   /// why a rollback does not refund it. Read through [`token_budget`](Self::token_budget); its
-  /// only writer is [`lex_within_boundary`](Self::lex_within_boundary), which refuses the step
-  /// when the ceiling is already met — before the lexer runs — and otherwise charges the one item
-  /// the step produced. There is no `token_budget_mut`.
+  /// only writers are [`lex_within_boundary`](Self::lex_within_boundary), which charges the one
+  /// item an authorized step produced, and its cold sibling
+  /// [`settle_met_ceiling`](Self::settle_met_ceiling), which spends the one-shot probe that tells
+  /// a met ceiling from an end of input. There is no `token_budget_mut`.
   pub(super) token_budget: &'closure mut super::TokenBudget,
   /// The **resource-trip counter**, borrowed from the owning [`Input`](super::Input) — see that
   /// field for what is recorded, why it is the *fact* of a trip rather than the depth, and why it
@@ -961,10 +962,11 @@ where
   /// The **token budget** this parse's lexer produces items against: the ceiling, and what has
   /// been charged toward it.
   ///
-  /// Read-only, deliberately. There is no `token_budget_mut` — the cell has exactly one writer,
-  /// the crate-internal lexing chokepoint, which is on the driver's side of the seam, so a
-  /// budget cannot be lowered, refunded or re-seeded by grammar code. The same absence
-  /// [`recursion`](Self::recursion) relies on.
+  /// Read-only, deliberately. There is no `token_budget_mut` — the cell is written only by the
+  /// crate-internal lexing chokepoint (`lex_within_boundary`'s charge and `settle_met_ceiling`'s
+  /// one-shot latch), which is on the driver's side of the seam, so a budget cannot be lowered,
+  /// refunded or re-seeded by grammar code. The same absence [`recursion`](Self::recursion) relies
+  /// on.
   ///
   /// Configure it with
   /// [`InputContext::with_token_budget`](crate::input::InputContext::with_token_budget) or
@@ -1017,9 +1019,15 @@ where
   /// as it always has, without a trip being counted a second time; the budget is asked only where
   /// a lex would otherwise happen.
   ///
+  /// A met ceiling is **not** an end of input, and the two are told apart in
+  /// [`settle_met_ceiling`](Self::settle_met_ceiling) — out of line, because a gate that answers
+  /// `false` on every authorized step should cost one comparison and no code. Read it before
+  /// changing anything here: the answer costs one `Lexer::lex` for the life of an `Input`, and what
+  /// keeps it at one is a latch in the budget rather than in the boundary.
+  ///
   /// An **unlimited** budget — the default, and every parse that does not opt in — makes the gate
   /// one comparison against `usize::MAX` on a `usize` already in the handle's cache line, which is
-  /// never true, and the charge one unconditional increment on the same cell.
+  /// never true, and the charge one saturating increment on the same cell.
   #[inline(always)]
   fn lex_within_boundary<Fr>(
     &mut self,
@@ -1034,11 +1042,10 @@ where
       return LexStep::Stop;
     }
     // PREFLIGHT. Before `Lexer::lex`, not after: see the section above for why the other order
-    // bounds nothing.
+    // bounds nothing. Everything a met ceiling then has to decide is out of line — see
+    // `settle_met_ceiling` — so the authorized path is this one comparison and nothing else.
     if self.token_budget.is_exhausted() {
-      let boundary = frontier.boundary(self.offset());
-      self.latch_scanner_trip(boundary);
-      return LexStep::Exhausted;
+      return self.settle_met_ceiling(lexer, lex_at, frontier);
     }
     let Some(lexed) = Lexed::<L::Token>::lex_spanned(lexer) else {
       // The lexer is exhausted. Nothing was produced, so nothing is charged — the budget's unit is
@@ -1059,6 +1066,83 @@ where
     );
     *lex_at = lexed.span_ref().end_ref().clone();
     LexStep::Item(lexed)
+  }
+
+  /// The cold half of [`lex_within_boundary`](Self::lex_within_boundary): the ceiling is met, and
+  /// this decides whether that is a **refusal** or an **end of input**.
+  ///
+  /// The gate answers "would an item be refused?" and the caller needs "is there an item?". Those
+  /// come apart at precisely the calibration a budget is most likely to be given — `N` for a
+  /// document of `N` items — and answering the first as though it were the second reports a
+  /// fully-parsed document as [`LexStep::Exhausted`], which a committed consume surfaces as a
+  /// *terminal* end of input and a [`PartialSession`](super::PartialSession) latches on forever.
+  ///
+  /// # Two steps, and the second cannot be repeated
+  ///
+  /// **The end of the source, positionally.** With `lex_at` at the source end there is no item and
+  /// cannot be one, whatever the counter says. Free, and it answers a zero budget over an empty
+  /// source and every document whose last item ends at its last byte.
+  ///
+  /// **The one-shot probe**, for the residue a positional test cannot see: a tail the lexer
+  /// *skips*. After the last token of `"aa  "` the lex position is `2` against a source length of
+  /// `4`, so bytes remain and items do not — the shape of every lexer that discards trailing
+  /// whitespace or a comment tail. Nothing but `Lexer::lex` answers it, so it is invoked **once**
+  /// per `Input`, and only where the answer is genuinely in doubt.
+  ///
+  /// That "once" is the whole of why this is not the previous defect wearing a new hat, and it is
+  /// carried by [`TokenBudget`](crate::input::TokenBudget) —
+  /// [`latch_limit_probe`](crate::input::TokenBudget::latch_limit_probe), in the same cell as
+  /// `spent`, which is not a [`Checkpoint`] field, which [`install_rekey`](Self::install_rekey)
+  /// does not touch, and which no `token_budget_mut` exists to lower. A restore, a
+  /// [`set_state`](Self::set_state), a [`state_mut`](Self::state_mut) and a
+  /// [`sync_through`](Self::sync_through) rewind all clear the poison boundary; not one of them
+  /// reaches this flag, so re-opening the stop buys a fresh *check* and never a second probe.
+  ///
+  /// A probe that produced **nothing** latches nothing, on purpose. It performed no work the
+  /// ceiling is denominated in, and freezing its answer would freeze an end-of-input reading that
+  /// must stay re-derivable. Its cost is one `Lexer::lex` per ask — which is exactly what asking an
+  /// **unbudgeted** input the same question costs, on this input and on every other.
+  ///
+  /// # Why the item is dropped rather than carried
+  ///
+  /// The probe's item exists and is refused, which is the same outcome the ceiling has always
+  /// produced; what changed is that the work was performed to learn it. It cannot be yielded — that
+  /// is the `max + 1`-th item — and it cannot be reported, for the reason
+  /// [`TokenBudget`](crate::input::TokenBudget) gives: a refusal has no diagnostic channel. So the
+  /// value dies here, and with it any lexer error it carried. The lexer it mutated is the operation's
+  /// own `Resume`-local, and the `Exhausted` exits (`Scan::Tripped`, the peek fill's `tripped`
+  /// break) never adopt its state — so the probe leaves no mark on the committed `L::State`.
+  #[cold]
+  #[inline(never)]
+  fn settle_met_ceiling<Fr>(
+    &mut self,
+    lexer: &mut L,
+    lex_at: &L::Offset,
+    frontier: &Fr,
+  ) -> LexStep<'inp, L>
+  where
+    Fr: Frontier<'inp, L>,
+  {
+    // STEP 1 — a genuine end of input is not a met ceiling.
+    if lex_at.ge(&self.input.len()) {
+      return LexStep::Stop;
+    }
+    // STEP 2 — the one-shot. Skipped once it has been spent, which is what bounds the work at one
+    // lexer call for the life of the `Input`.
+    if !self.token_budget.limit_probe_spent() {
+      if Lexed::<L::Token>::lex_spanned(lexer).is_none() {
+        // The remaining bytes hold no item: the lexer skipped them. An end of input, and the
+        // probe is NOT latched — see above for why that half is deliberately not one-shot.
+        return LexStep::Stop;
+      }
+      // An item exists and the ceiling refuses it. Latch before the stop is recorded: the latch is
+      // the durable half and the boundary is the refundable one, so the order is the same
+      // arm-then-act discipline `latch_scanner_trip` applies to its own two writes.
+      self.token_budget.latch_limit_probe();
+    }
+    let boundary = frontier.boundary(self.offset());
+    self.latch_scanner_trip(boundary);
+    LexStep::Exhausted
   }
 
   /// Latches the input-level poison boundary if `lexer`'s state has tripped a limit
@@ -3775,15 +3859,26 @@ where
   /// No item, and no terminal fact of this step's own: either the poison boundary was already
   /// reached, or the lexer is exhausted. Which one it was is the caller's existing end-of-input
   /// question — a `reached_boundary` read — and this variant deliberately does not pre-empt it.
+  ///
+  /// A **met ceiling reaches it too**, whenever the ceiling was met at a position that has no item
+  /// after it: the end of the source, or a tail the lexer skips. That is the point — a budget that
+  /// authorized every item a document contains has refused nothing, and reporting it as
+  /// [`Exhausted`](Self::Exhausted) would make a complete parse terminal. See
+  /// [`settle_met_ceiling`](InputRef::settle_met_ceiling).
   Stop,
-  /// **Terminal, and the lexer was never invoked.** The [`TokenBudget`](crate::input::TokenBudget)
-  /// is exhausted, so the step was refused in front of the work rather than after it.
+  /// **Terminal: an item exists and the ceiling refuses it.** The
+  /// [`TokenBudget`](crate::input::TokenBudget) is exhausted *and* the step had something to
+  /// refuse — settled by [`settle_met_ceiling`](InputRef::settle_met_ceiling), which reaches this
+  /// variant without invoking the lexer at all on every entry but the one-shot probe that
+  /// established there was an item in the first place.
   ///
   /// The poison boundary is *already latched* and the scanner trip *already counted*, through the
   /// same [`latch_scanner_trip`](InputRef::latch_scanner_trip) a lexer limit trip goes through, so
-  /// the stop cannot be lost by any exit path. There is no diagnostic and there is nothing to
-  /// describe one: a lexer error's value belongs to the lexer, and no lexer ran. Drivers therefore
-  /// take the same exit a [`Verdict::Trip`] takes **after** its emit succeeded.
+  /// the stop cannot be lost by any exit path. There is **no diagnostic**: the refused item is
+  /// either one no lexer ran to find, or the probe's, which is dropped where it stands because a
+  /// refusal has no channel to report itself on. Drivers therefore take the same exit a
+  /// [`Verdict::Trip`] takes **after** its emit succeeded — and must not adopt the `Resume`'s lexer
+  /// state on it, which is what keeps the probe's mutation off the committed `L::State`.
   Exhausted,
 }
 

@@ -202,9 +202,25 @@ and will red until they do.
   was refundable, so a public `attempt` that drains to the refusal and declines re-enters against
   an unchanged `spent` and the lexer runs again — once per call, without bound. Measured: a budget
   of **zero** funded one full `Lexer::lex` per re-entry (4, 16, 256 rounds → 4, 16, 256
-  invocations, `spent` still `0`), identically by all three routes; with the preflight it funds
-  none. The exhausted `B = 4` case ran `B + rounds` scans and now runs `B`, invariant in the round
-  count.
+  invocations, `spent` still `0`), identically by all three routes; with the preflight it funds a
+  flat **one**, whatever the round count and by whichever of the four doors. The exhausted `B = 4`
+  case ran `B + rounds` scans and now runs `B + 1`.
+
+  **A met ceiling is not an end of input**, and the gate cannot answer that question on its own —
+  it knows what `spent` is, not whether another item exists. Answering the first as though it were
+  the second reports a *fully parsed* document as a terminal stop, which a terminal-aware consumer
+  rejects and a `PartialSession` latches on permanently; it fires at exactly the calibration a
+  budget is most likely to be given, `N` for a document of `N` items. So the site settles it in two
+  steps. The end of the source, positionally, costs nothing and covers a zero budget over an empty
+  source and every document whose last item ends at its last byte. The residue is a tail the lexer
+  *skips* — after the last token of `"aa  "` the lex position is `2` against a length of `4`, the
+  shape of every lexer that discards trailing whitespace — and only running the lexer can settle
+  that, so it is run **once** per `Input` and the outcome is latched in the budget beside `spent`,
+  where no rollback, no state re-key and no rewinding `sync` can reach it. That one call is the
+  whole cost of the repair: a bounded drain is now `items + 1` scans, which is the same shape the
+  *unbounded* drain has always had — items plus one exhausting probe. A probe that found no item
+  latches nothing and stays re-derivable, at exactly what asking an unbudgeted input the same
+  question costs.
 
   **Exhaustion is terminal**, and it had to be: a `PartialSession` rebuilds a fresh `Input` — and
   therefore a fresh budget — for every redrive, so a refusal read as an ordinary failure would
@@ -214,7 +230,17 @@ and will red until they do.
   the recovery gates re-raise, and a session latches. What it cannot do is *report* itself: a
   diagnostic would have to be built as the emitter's own error type, which no consume path is
   bounded to construct, so the refused item is refused silently — including a lexer error on
-  exactly that item, whose emission the budget declined to authorize.
+  exactly that item, which the one-shot probe drops where it stands.
+
+  **`unlimited()` is the absence of a ceiling, not `usize::MAX` of one.** `is_exhausted` excludes
+  the sentinel explicitly, because `spent >= max` made the one budget that promised to refuse
+  nothing begin refusing everything, terminally, once `spent` reached `usize::MAX`. That distance
+  is unreachable at a 64-bit `usize` and is `4_294_967_295` produce-events at 32 bits — and this
+  ceiling charges a *re-lex* as a produce-event, so it is a distance one long-lived `Input` over a
+  speculating grammar can cover without a four-billion-token document. `with_limitation(usize::MAX)`
+  is the same value and therefore the same behaviour. The charge saturates, since excluding the
+  sentinel from the gate is exactly what lets `spend` be reached at `spent == usize::MAX`, where a
+  bare increment would wrap the counter back to zero.
 
   What it does **not** bound is stated at the type: not distinct document tokens (a region the
   cache could not retain across a rollback is re-lexed, and re-lexing charges again — the direction

@@ -125,7 +125,7 @@
 //! | [`savepoint_seq`](Lineage) | `Lineage` | monotone id source | **nothing** — same |
 //! | `finality` (`is_final`) | `Input` (snapshot on `InputRef`) | **world fact** | **nothing** — and it cannot change while a handle lives |
 //! | `recursion` (the descent budget) | `Input` (borrowed through `InputRef`) | **control-stack fact** | **nothing** — a checkpoint does not carry it; the `Descent` guard's drop balances it with the frame it counts |
-//! | `token_budget` (the item ceiling) | `Input` (borrowed through `InputRef`) | **monotone session fact** | **nothing** — and here the reason is not that the cell cannot be observed to change, as it is for the two rows around it, but that a budget a rollback refunds is not a budget. An attempt that lexed a thousand items and declined performed a thousand items of scanning; giving the count back would hand an adversary who forces speculation free work without limit. Tested by `InputRef::lex_within_boundary` **before** it invokes the lexer and charged there, one per item a step produced, so the enforcement sits in front of the work rather than behind a stop a rollback can refund; the refusal records that stop through `InputRef::latch_scanner_trip`. No lowering writer exists, and there is no `token_budget_mut`. What it costs is that a re-lex is charged again, so the ceiling bounds produce-events rather than distinct document tokens |
+//! | `token_budget` (the item ceiling) | `Input` (borrowed through `InputRef`) | **monotone session fact** | **nothing** — and here the reason is not that the cell cannot be observed to change, as it is for the two rows around it, but that a budget a rollback refunds is not a budget. An attempt that lexed a thousand items and declined performed a thousand items of scanning; giving the count back would hand an adversary who forces speculation free work without limit. Tested by `InputRef::lex_within_boundary` **before** it invokes the lexer and charged there, one per item a step produced, so the enforcement sits in front of the work rather than behind a stop a rollback can refund; the refusal records that stop through `InputRef::latch_scanner_trip`. It carries a **second** durable bit, for the same reason: the gate answers "would an item be refused?" and a driver needs "is there an item?", so `InputRef::settle_met_ceiling` runs a one-shot probe wherever the two answers differ and latches it here — outside the rollback set exactly as the counter is, since a flag any of these doors cleared would buy a fresh probe every round. No lowering writer exists for either half, and there is no `token_budget_mut`. What it costs is that a re-lex is charged again, so the ceiling bounds produce-events rather than distinct document tokens |
 //! | `resource_trips` (how many budget trips) | `Input` (borrowed through `InputRef`) | **monotone session fact** | **nothing** — it only counts up, and there is no writer that lowers it. A rollback rewinds *input progress*; it cannot un-exceed a budget, so restoring this cell would erase a stop that has already been decided. Sites that need a *per-attempt* answer snapshot it and compare rather than reading it absolutely |
 //! | `scanner_trips` (how many scanner trips) | `Input` (borrowed through `InputRef`) | **monotone session fact** | **nothing** — the same class and the same argument as the cell above, for the other budget. It is the row that makes the `poison_boundary` row *safe*: a trip's **position** is a lineage memo and comes back with a restore, so no comparison of that memo can witness a trip across a rollback — at one level or at ten. The *fact* of the trip is recorded here instead, where nothing reaches it, which is why the recovery gate judges a scanner stop on this and reads the boundary only as the narrower standing-stop reading |
 //! | `witness` (input identity) | `Input` | witness | nothing (identity is fixed for the input's life) |
@@ -201,8 +201,11 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     //   `InputRef::lex_within_boundary` BEFORE it invokes the lexer and charged there one per item
     //   produced — the counter being durable is only half a bound, and the other half is that the
     //   check runs in front of the work rather than behind the poison boundary, which a restore
-    //   and a state re-key both clear. No lowering writer, no `token_budget_mut`, not in
-    //   `Checkpoint`.
+    //   and a state re-key both clear. The one-shot at-limit probe's latch rides in the same value
+    //   and is outside the set for the identical reason: `settle_met_ceiling` spends it to tell a
+    //   met ceiling from an end of input, and a flag the poison boundary's doors could clear would
+    //   fund that lexer call again on every round. No lowering writer, no `token_budget_mut`, not
+    //   in `Checkpoint`.
     token_budget: _,
     // — MONOTONE SESSION FACT: restore does NOT touch it, and must not. It is the sibling of the
     //   cell above and the opposite kind of fact from it: the *depth* is restored by the unwind
@@ -272,7 +275,8 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     //   drop, never restored. Same class as the `Input` field above it.
     recursion: _,
     // — MONOTONE SESSION FACT (borrowed): gated and charged one per produced item by
-    //   `lex_within_boundary`, never lowered and never restored. Same class as the `Input` field
+    //   `lex_within_boundary`, and carrying the one-shot at-limit probe `settle_met_ceiling`
+    //   spends; never lowered and never restored in either half. Same class as the `Input` field
     //   above it.
     token_budget: _,
     // — MONOTONE SESSION FACT (borrowed): counted up by `raise_level`'s trip arm, never lowered

@@ -717,7 +717,9 @@ where
   /// Its one writer is `InputRef::lex_within_boundary`, the single lexing site both lexing
   /// drivers reach, which tests the ceiling *before* it invokes the lexer — a check taken after
   /// the work, behind a stop a rollback can refund, bounds nothing — and charges one item after a
-  /// step produces one. There is no
+  /// step produces one. Its cold sibling `InputRef::settle_met_ceiling` writes the other half: a
+  /// met ceiling is not an end of input, and where the two differ it spends a **one-shot probe**
+  /// latched in this same value. There is no
   /// `token_budget_mut` on either this type or [`InputRef`], so grammar code has no route to lower
   /// it — the same absence [`recursion`](Self::recursion) and [`emitter`](Self::emitter) rely on.
   ///

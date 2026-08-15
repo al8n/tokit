@@ -1818,6 +1818,30 @@ fn resume_census_one_pairing_site() {
      single lexing site, and both the (state, offset) pairing and the token budget's preflight \
      rest on there being no second one (grep RESUME_CENSUS)."
   );
+  // And `Lexer::lex` is REACHED at exactly two points, both of them inside the site above: the
+  // authorized step, and the cold one-shot probe that tells a met ceiling from an end of input.
+  // The two are censused separately from the entry point because they are what the entry point is
+  // FOR — "no item was produced without the budget's authorization" is a claim about invocations of
+  // the lexer, not about calls to the function that wraps them. A third invocation is a third way
+  // to produce an item, and the one-shot's bound (one probe for the life of an `Input`) would stop
+  // being a property of the module.
+  for (name, want) in [("lex_within_boundary", 1), ("settle_met_ceiling", 1)] {
+    let got = count(&method_body(m, name), "lex_spanned(");
+    assert!(
+      got == want,
+      "RESUME_CENSUS drift: `{name}` invokes the lexer {got} time(s), expected {want}. The budget \
+       authorizes one item per authorized step and one probe per `Input`; a further invocation is \
+       neither (grep RESUME_CENSUS)."
+    );
+  }
+  for (name, src) in SOURCES {
+    let want = usize::from(*name == "mod.rs") * 2;
+    assert!(
+      count(src, "lex_spanned(") == want,
+      "RESUME_CENSUS drift: `{name}` invokes the lexer outside `lex_within_boundary` and its cold \
+       at-limit sibling (grep RESUME_CENSUS)."
+    );
+  }
   let lex_sites: &[(&str, usize, &str)] = &[
     ("mod.rs", 1, "`scan_with`'s loop"),
     ("peek/mod.rs", 1, "the peek fill's loop"),

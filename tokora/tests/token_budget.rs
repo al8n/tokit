@@ -173,6 +173,102 @@ impl<'a> Lexer<'a> for FloodLexer<'a> {
   }
 }
 
+/// A lexer with a **tail it skips**: `a` is a token, a space produces no item at all, anything
+/// else is a one-byte plain lexer error. Same vocabulary as [`FloodLexer`], so the same error type
+/// and the same context serve both.
+///
+/// It exists because the end-of-source test alone cannot settle "is there another item?". After
+/// the last token of `"aa  "` the lex position is `2` and the source length is `4`, so a positional
+/// test says input remains — and no item does. Every lexer that skips whitespace or a comment tail
+/// has this shape, which is to say almost every real one.
+struct SkipLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: TokenLimiter,
+}
+
+impl<'a> Lexer<'a> for SkipLexer<'a> {
+  type State = TokenLimiter;
+  type Source = str;
+  type Token = Word;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self::with_state(src, TokenLimiter::new())
+  }
+
+  fn with_state(src: &'a str, state: TokenLimiter) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+
+  fn check(&self) -> Result<(), LexErr> {
+    self.state.check().map_err(LexErr::Limit)
+  }
+
+  fn state(&self) -> &TokenLimiter {
+    &self.state
+  }
+
+  fn state_mut(&mut self) -> &mut TokenLimiter {
+    &mut self.state
+  }
+
+  fn into_state(self) -> TokenLimiter {
+    self.state
+  }
+
+  fn source(&self) -> &'a str {
+    self.src
+  }
+
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+
+  fn lex(&mut self) -> Option<Result<Word, LexErr>> {
+    SCANS.with(|c| c.set(c.get() + 1));
+    let b = self.src.as_bytes();
+    let mut at = self.end;
+    // The skip: bytes consumed by the scan and emitted as no item at all.
+    while at < b.len() && b[at] == b' ' {
+      at += 1;
+    }
+    self.start = at;
+    if at >= b.len() {
+      // The trait's post-exhaustion span: well-formed, ending at the lexer's final position.
+      self.end = at;
+      return None;
+    }
+    self.end = at + 1;
+    if b[at] == b'a' {
+      self.state.increase();
+      Some(Ok(Word))
+    } else {
+      Some(Err(LexErr::Bad))
+    }
+  }
+
+  fn read_frontier(&self) -> tokora::ReadFrontier<usize> {
+    tokora::ReadFrontier::SpanEnd
+  }
+
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+    self.start = self.end;
+  }
+}
+
 // ── Error type ────────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -235,6 +331,9 @@ impl MaybeTerminal for Err_ {
 type Lex<'a> = FloodLexer<'a>;
 type Cache<'a> = DefaultCache<'a, Lex<'a>>;
 type Ctx<'a> = ParserContext<'a, Lex<'a>, Verbose<Err_>, Cache<'a>>;
+
+type SkipCache<'a> = DefaultCache<'a, SkipLexer<'a>>;
+type SkipCtx<'a> = ParserContext<'a, SkipLexer<'a>, Verbose<Err_>, SkipCache<'a>>;
 
 /// `"a"` then `n` bytes of garbage: one valid token, then a flood of plain lexer errors.
 fn hostile(n: usize) -> String {
@@ -332,9 +431,13 @@ fn a_bounded_budget_charges_the_error_flood_and_stops_it() {
 
   assert_eq!(cost.charged, B, "exactly the ceiling, not N + 1");
   assert_eq!(
-    cost.scans, B,
-    "B items lexed, and NOT the B+1-th: the ceiling is tested in front of `Lexer::lex`, so the \
-     refused step never calls it"
+    cost.scans,
+    B + 1,
+    "B items lexed, then the ONE at-limit probe — never the B+2-th. The ceiling is tested in \
+     front of `Lexer::lex`, so no refusal calls it; the single extra call is the probe that told \
+     a met ceiling from an end of input, and it is latched in the budget so it never runs twice. \
+     Note the figure it equals: `N + 2` for `N + 1` items is what the UNBOUNDED drain above costs, \
+     items plus one exhausting probe. A ceiling now costs the same shape as an end of input, once."
   );
   assert_eq!(
     cost.diagnostics,
@@ -642,6 +745,11 @@ enum Reopen {
   /// survives the call and the next round stops at it. The row is kept because that argument is
   /// about which *exit* a refusal takes — a property of the sync drivers, not of the budget — and
   /// the row is what would notice it changing.
+  ///
+  /// Those two pre-fix figures are now what **all four** rows read, and the coincidence is worth
+  /// not misreading: this row measured `1` and `5` because a refusal kept the boundary it latched,
+  /// and every row measures them now because the ceiling funds exactly one at-limit probe. Same
+  /// numbers, different mechanism — which is precisely why the row still earns its place.
   SyncThrough,
 }
 
@@ -716,37 +824,44 @@ fn sweep(src: &str, budget: TokenBudget) -> [[(usize, usize); 3]; 4] {
   out
 }
 
-/// **Plant.** A budget of **zero** authorizes nothing, so it must fund **no** `Lexer::lex` call —
-/// however many times, and by whichever door, its stop is re-opened.
+/// **Plant.** A budget of **zero** authorizes nothing, so it must fund exactly **one** `Lexer::lex`
+/// call — the one-shot at-limit probe — however many times, and by whichever door, its stop is
+/// re-opened. One is not a weaker claim than zero: what an attack needs is a call *per round*, and
+/// the cell is flat in the round count.
 ///
 /// Falsifying output, measured against the pre-fix ordering (the ceiling asked *after* the lex):
 /// the scan count tracks the round count exactly — `(4, 0)`, `(16, 0)`, `(256, 0)` on the three
 /// rollback rows — while `spent` stays `0`, because a refusal is not a charge. A ceiling that
 /// authorizes nothing was funding one full lexer invocation per public call, and the attacker paid
 /// for none of them. The `SyncThrough` row read a flat `(1, 0)` instead: see [`Reopen`].
+///
+/// Falsifying output if the probe's latch moved out of [`TokenBudget`] and into the poison
+/// boundary: the same `(4, 0) / (16, 0) / (256, 0)`, because the boundary is what every one of
+/// these four doors clears.
 #[test]
-fn a_zero_budget_funds_no_lexer_call_however_often_the_stop_is_reopened() {
+fn a_zero_budget_funds_one_probe_however_often_the_stop_is_reopened() {
   assert_eq!(
     sweep(&hostile(N), TokenBudget::with_limitation(0)),
-    [[(0, 0); 3]; 4],
+    [[(1, 0); 3]; 4],
     "rows are {ROUTES:?}, columns {ROUNDS_SWEEP:?}, cells (lexer calls, spent)"
   );
 }
 
 /// **Plant.** The same door, one level up: once a *bounded* budget is exhausted, re-opening its
-/// stop must not buy another lexer call. The total work is the ceiling, and it is **invariant in
-/// the round count** — which is what "the budget bounds the work" actually consists of.
+/// stop must not buy another lexer call. The total work is the ceiling plus the one probe, and it
+/// is **invariant in the round count** — which is what "the budget bounds the work" actually
+/// consists of.
 ///
 /// Falsifying output, measured against the pre-fix ordering: `B + rounds` scans — `(8, 4)`,
 /// `(20, 4)`, `(260, 4)` at `B = 4` on the three rollback rows. The counter was durable and the
 /// enforcement was not, so `spent` sat pinned at the ceiling while the lexer ran without bound.
 /// The `SyncThrough` row read a flat `(5, 4)`: see [`Reopen`].
 #[test]
-fn an_exhausted_budget_funds_no_further_lexer_call_however_often_the_stop_is_reopened() {
+fn an_exhausted_budget_funds_one_probe_however_often_the_stop_is_reopened() {
   const B: usize = 4;
   assert_eq!(
     sweep("aaaaaaaa", TokenBudget::with_limitation(B)),
-    [[(B, B); 3]; 4],
+    [[(B + 1, B); 3]; 4],
     "rows are {ROUTES:?}, columns {ROUNDS_SWEEP:?}, cells (lexer calls, spent)"
   );
 }
@@ -779,7 +894,12 @@ fn the_refusal_re_latches_on_every_reopened_round() {
   .expect("no error on this path");
 
   assert_eq!(spent, 0);
-  assert_eq!(scans(), 0, "eight terminal stops, zero lexer calls");
+  assert_eq!(
+    scans(),
+    1,
+    "eight terminal stops, one lexer call: the first round's one-shot probe established that an \
+     item was there to refuse, and the seven that follow are answered out of the latch"
+  );
 }
 
 /// The **unlimited sentinel**, measured rather than asserted: the preflight is a ceiling test, and
@@ -806,5 +926,204 @@ fn the_unlimited_sentinel_refuses_nothing_and_costs_no_extra_scan() {
     scans,
     8 + 4,
     "eight items plus one exhausting probe per round: nothing was refused"
+  );
+}
+
+// ── 5. A met ceiling is not an end of input, and an end of input is not a met ceiling ─────────
+
+/// Drains a [`SkipLexer`] source with the committed consume, reporting how many items came out.
+fn drive_skip<'inp>(
+  inp: &mut InputRef<'inp, '_, SkipLexer<'inp>, SkipCtx<'inp>>,
+) -> Result<usize, Err_> {
+  let mut n = 0usize;
+  while inp.next_or_stop()?.is_some() {
+    n += 1;
+  }
+  Ok(n)
+}
+
+/// **Plant.** A budget of **zero** over an **empty** source. There is no item, so there is nothing
+/// to refuse: the answer is a genuine end of input.
+///
+/// Falsifying output, measured against the preflight as it landed in `7a28068`:
+/// `Err(Eot(true))` — a ceiling that has refused nothing reporting a *terminal* stop over a source
+/// with nothing in it. The preflight asked `spent >= max` before it knew whether an item existed,
+/// so its answer was a property of the counter alone.
+/// Read through the **committed** consume, deliberately: [`InputRef::next`] folds a terminal stop
+/// and a genuine end of input into the same `Ok(None)`, so it cannot see this defect at all.
+#[test]
+fn a_zero_budget_over_an_empty_source_is_end_of_input_not_exhaustion() {
+  fn drive<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<usize, Err_> {
+    let mut n = 0usize;
+    while inp.next_or_stop()?.is_some() {
+      n += 1;
+    }
+    Ok(n)
+  }
+
+  reset_scans();
+  let n = Parser::with_context(
+    Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(0)),
+  )
+  .apply(drive)
+  .parse_with_state("", TokenLimiter::new())
+  .expect("an empty source ends; it does not trip");
+
+  assert_eq!(n, 0);
+  assert_eq!(
+    scans(),
+    0,
+    "and the end-of-source test answered it without a lexer call"
+  );
+}
+
+/// **Plant.** The same shape one level up, and the one a calibrated budget actually meets: a
+/// ceiling of exactly the source's item count. After the last item the lex position *is* the end
+/// of the source, so the next step is an end of input — not the `max + 1`-th item being refused.
+///
+/// Falsifying output, measured against `7a28068`: `Err(Eot(true))` after four items on a
+/// four-item source. A terminal-aware consumer rejects a document it fully parsed, and a
+/// `PartialSession` latches on it permanently.
+#[test]
+fn a_budget_met_exactly_at_the_last_item_reports_a_genuine_end_of_input() {
+  fn drive<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<usize, Err_> {
+    let mut n = 0usize;
+    while inp.next_or_stop()?.is_some() {
+      n += 1;
+    }
+    Ok(n)
+  }
+
+  reset_scans();
+  let n = Parser::with_context(
+    Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(4)),
+  )
+  .apply(drive)
+  .parse_with_state("aaaa", TokenLimiter::new())
+  .expect("four items under a ceiling of four is a complete parse, not a terminal stop");
+
+  assert_eq!(n, 4);
+  assert_eq!(
+    scans(),
+    4,
+    "four items, and the end of input settled positionally — the ceiling bought no probe here"
+  );
+}
+
+/// The smallest ceiling that authorizes anything, in both of its shapes — the boundary between
+/// "the first item is authorized" and "the second is refused", which zero and `B = 8` bracket but
+/// neither one sits on.
+///
+/// Exactly-met (`"a"`, one item) must end; met-with-more (`"aa"`) must refuse, terminally, for the
+/// price of the one probe. A repair that got the end-of-input case right by weakening the refusal
+/// shows up here as the second half returning `Ok`.
+#[test]
+fn a_ceiling_of_one_ends_on_a_one_item_source_and_refuses_on_a_longer_one() {
+  fn drive<'inp>(inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx<'inp>>) -> Result<usize, Err_> {
+    let mut n = 0usize;
+    while inp.next_or_stop()?.is_some() {
+      n += 1;
+    }
+    Ok(n)
+  }
+
+  let one = || Ctx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(1));
+
+  reset_scans();
+  let exact = Parser::with_context(one())
+    .apply(drive)
+    .parse_with_state("a", TokenLimiter::new())
+    .expect("one item under a ceiling of one is a complete parse");
+  assert_eq!(exact, 1);
+  assert_eq!(
+    scans(),
+    1,
+    "the end of input settled positionally: no probe"
+  );
+
+  reset_scans();
+  let refused = Parser::with_context(one())
+    .apply(drive)
+    .parse_with_state("aa", TokenLimiter::new())
+    .expect_err("the second item is over the ceiling");
+  assert_eq!(refused, Err_::Eot(true), "and the refusal is terminal");
+  assert_eq!(
+    scans(),
+    2,
+    "the authorized item, then the one probe that found the item the ceiling refuses"
+  );
+}
+
+/// **Plant.** The residue the end-of-source test cannot see: a tail the lexer *skips*. After the
+/// last token of `"aa  "` the lex position is `2` and the source length is `4`, so the positional
+/// test says input remains — and no item does. Only running the lexer once can tell the two apart.
+///
+/// Falsifying output, measured against `7a28068`: `Err(Eot(true))` after two items. This is the
+/// shape almost every real lexer has, so it is the shape a calibrated ceiling meets in the field.
+#[test]
+fn a_tail_the_lexer_skips_is_an_end_of_input_not_a_met_ceiling() {
+  reset_scans();
+  let n = Parser::with_context(
+    SkipCtx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(2)),
+  )
+  .apply(drive_skip)
+  .parse_with_state("aa  ", TokenLimiter::new())
+  .expect("the tail is skipped, so the stream ended; the ceiling refused nothing");
+
+  assert_eq!(n, 2);
+  assert_eq!(
+    scans(),
+    3,
+    "two items, then the one at-limit probe that discovered the tail holds none"
+  );
+}
+
+/// The probe that found **nothing** latches nothing, so the end-of-input answer is *stable*: ask
+/// again and the answer is the same, at the same cost an unbudgeted input pays to answer it.
+///
+/// This is the half of the one-shot that is deliberately **not** one-shot. A probe that produced
+/// no item performed no work the ceiling exists to bound, and it costs exactly what the same
+/// question costs with no budget configured at all — one `Lexer::lex` per ask, which is the
+/// crate's standing end-of-input cost on every input, budgeted or not.
+#[test]
+fn a_probe_that_found_no_item_leaves_the_end_of_input_answer_stable() {
+  fn ask_three_times<'inp>(
+    inp: &mut InputRef<'inp, '_, SkipLexer<'inp>, SkipCtx<'inp>>,
+  ) -> Result<usize, Err_> {
+    let mut n = 0usize;
+    while inp.next_or_stop()?.is_some() {
+      n += 1;
+    }
+    for round in 0..2 {
+      match inp.next_or_stop() {
+        Ok(None) => {}
+        other => panic!("round {round}: the end of input moved to {other:?}"),
+      }
+    }
+    Ok(n)
+  }
+
+  reset_scans();
+  let budgeted = Parser::with_context(
+    SkipCtx::new(Verbose::new()).with_token_budget(TokenBudget::with_limitation(2)),
+  )
+  .apply(ask_three_times)
+  .parse_with_state("aa  ", TokenLimiter::new())
+  .expect("no error on this path");
+  assert_eq!(budgeted, 2);
+  let budgeted_scans = scans();
+
+  reset_scans();
+  let unbudgeted = Parser::with_context(SkipCtx::new(Verbose::new()))
+    .apply(ask_three_times)
+    .parse_with_state("aa  ", TokenLimiter::new())
+    .expect("no error on this path");
+  assert_eq!(unbudgeted, 2);
+
+  assert_eq!(
+    budgeted_scans,
+    scans(),
+    "asking an exhausted budget where the stream ended costs exactly what asking an unbounded one \
+     costs: the budget prices items produced, and these probes produce none"
   );
 }

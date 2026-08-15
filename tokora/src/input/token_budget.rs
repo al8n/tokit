@@ -68,6 +68,39 @@
 ///   [`Budget`](crate::input::Budget), which is denominated in Σ attempt-lexable bytes precisely
 ///   because *that* is the quantity an adversarial chunker controls.
 ///
+/// # A met ceiling is not an end of input
+///
+/// The gate answers *"would an item be refused?"*. A driver needs *"is there an item?"*, and the two
+/// come apart at exactly the place a calibrated ceiling lands: a budget of `N` over a document of
+/// `N` items. Answering the first question as though it were the second reports a fully-parsed
+/// document as a **terminal** stop — a terminal-aware consumer rejects it, and a
+/// [`PartialSession`](crate::input::PartialSession) latches on it permanently. So the site settles
+/// it in two steps, and neither one re-opens the rollback door the gate's position closed:
+///
+/// 1. **the end of the source**, positionally. With the lex position already at the end there is no
+///    item and cannot be one, whatever the counter says. This costs no lexer call, and it covers a
+///    zero budget over an empty source and every document whose last item ends at the last byte;
+/// 2. **the one-shot probe**, for the residue step 1 cannot see: a **tail the lexer skips**. After
+///    the last token of `"aa  "` the lex position is `2` and the source is `4` long, so the
+///    positional test says input remains — and no item does. Every lexer that discards trailing
+///    whitespace or a comment tail has that shape. Only running the lexer can tell the two apart, so
+///    the site runs it **once**, and latches the outcome in a private field of this struct when it
+///    produced.
+///
+/// The latch is what keeps step 2 from being the previous defect wearing a new hat. It rides beside
+/// [`spent`](Self::spent) — same cell, same four arguments: not a [`Checkpoint`](super::Checkpoint)
+/// field, so a rollback does not clear it; not reached by the state re-key behind
+/// [`set_state`](crate::InputRef::set_state) or [`state_mut`](crate::InputRef::state_mut); and no
+/// `token_budget_mut` exists to lower it. So the ceiling funds **one** `Lexer::lex` over the life of
+/// one `Input`, however often its stop is re-opened, by any route.
+///
+/// A probe that produced **nothing** latches nothing, deliberately. It performed no work this budget
+/// is denominated in, and its answer must stay re-derivable rather than frozen — asking an
+/// already-drained input where the stream ended costs exactly one lexer call each time it is asked,
+/// which is what that question costs on an input with no budget configured at all. The budget prices
+/// items produced; a probe that produces none is priced at what the crate already charges for an end
+/// of input.
+///
 /// # Exhaustion is terminal
 ///
 /// The refusal latches the poison boundary and counts a scanner trip, so it travels the pipeline a
@@ -86,9 +119,9 @@
 /// The one thing the refusal cannot do is *report itself*. There is no channel for it — a
 /// diagnostic would have to be built as the emitter's own error type, which needs a `From` bound
 /// this crate deliberately does not add to every consume path — so the item that would have
-/// exhausted the budget is refused **silently**, and never lexed. That also means a lexer error at
-/// exactly that position is not emitted: the budget declined to authorize the work that would have
-/// produced the diagnostic.
+/// exhausted the budget is refused **silently**. That also means a lexer error at exactly that
+/// position is not emitted: the item the one-shot probe produced is dropped where it stands, and
+/// every later refusal never lexes at all.
 ///
 /// # It is not the lexer's counter, and not the session's
 ///
@@ -129,6 +162,16 @@
 pub struct TokenBudget {
   max: usize,
   spent: usize,
+  /// The **one-shot at-limit probe**, spent. See the type docs' *A met ceiling is not an end of
+  /// input* section for what the probe answers and why the answer has to be latched here rather
+  /// than in the poison boundary beside it.
+  ///
+  /// It rides in this struct on purpose: every argument that makes [`spent`](Self::spent) a durable
+  /// latch — no [`Checkpoint`](super::Checkpoint) field, untouched by the state re-key, no
+  /// `token_budget_mut` — is an argument about the *cell*, `Input::token_budget`, and therefore
+  /// covers this flag verbatim. A separate cell would have needed its own copy of all four, and a
+  /// copy is a thing that can drift.
+  probed_at_limit: bool,
 }
 
 impl Default for TokenBudget {
@@ -148,18 +191,30 @@ impl Default for TokenBudget {
 
 impl TokenBudget {
   /// No ceiling: the driver charges every item and refuses none.
+  ///
+  /// `usize::MAX` is the sentinel, and [`is_exhausted`](Self::is_exhausted) reads it as *the
+  /// absence of a ceiling* rather than as a very large one — see there for the difference and why
+  /// it is not cosmetic.
   #[inline(always)]
   pub const fn unlimited() -> Self {
     Self {
       max: usize::MAX,
       spent: 0,
+      probed_at_limit: false,
     }
   }
 
   /// A ceiling of `max` items produced. The `max + 1`-th item the lexer hands back is refused.
+  ///
+  /// `with_limitation(usize::MAX)` **is** [`unlimited`](Self::unlimited) — the same value, and
+  /// therefore the same behaviour. There is no ceiling above it to distinguish it from.
   #[inline(always)]
   pub const fn with_limitation(max: usize) -> Self {
-    Self { max, spent: 0 }
+    Self {
+      max,
+      spent: 0,
+      probed_at_limit: false,
+    }
   }
 
   /// The ceiling this budget was built with.
@@ -176,25 +231,48 @@ impl TokenBudget {
     self.spent
   }
 
-  /// Whether the next item would be refused.
+  /// Whether the ceiling has been met, so that an item the lexer would hand back now is refused.
   ///
   /// **This is the gate**, and it is the whole of why the bound holds. The driver asks it *before*
   /// it invokes the lexer, and it is answered out of [`spent`](Self::spent) — a cell no
   /// [`Checkpoint`](super::Checkpoint) carries and no state re-key touches — so it is re-derived
   /// identically on every entry no matter what a rollback put back in between. Asking after the
   /// work, off a stop that *is* rollbackable, bounds nothing: see the type docs.
+  ///
+  /// A met ceiling is **not** an end of input, and this predicate does not claim to be one: it
+  /// says an item *would* be refused, not that one exists. Which of the two the driver is looking
+  /// at is settled at the lexing site, not here — see the type docs.
+  ///
+  /// # `usize::MAX` is the absence of a ceiling, not a ceiling
+  ///
+  /// The sentinel is excluded explicitly rather than left to `spent >= max`. Left to it, an
+  /// [`unlimited`](Self::unlimited) budget charged `usize::MAX` times reaches `spent == max` and
+  /// begins refusing **terminally** — the one budget that promised to refuse nothing. The distance
+  /// is unreachable at a 64-bit `usize`; at 32 bits it is `4_294_967_295` produce-events, and this
+  /// crate charges a *re-lex* as a produce-event, so a long-lived `Input` over a speculating
+  /// grammar covers it without a four-billion-token document.
+  ///
+  /// The comparison order is load-bearing for cost, not only for meaning: `spent >= max` is false
+  /// on every entry that is not at a ceiling, so the sentinel test is never reached on the hot
+  /// path and this stays **one comparison per item** for bounded and unlimited budgets alike.
   #[inline(always)]
   pub const fn is_exhausted(&self) -> bool {
-    self.spent >= self.max
+    self.spent >= self.max && self.max != usize::MAX
   }
 
   /// Charges the one item [`is_exhausted`](Self::is_exhausted) authorized.
   ///
   /// **Precondition: `!is_exhausted()`**, established by the driver's preflight immediately before
   /// it invoked the lexer, with nothing between the two that could spend (the budget has exactly
-  /// one writer and it is reached through `&mut`). So this cannot push [`spent`](Self::spent) past
-  /// [`limitation`](Self::limitation), and no `saturating_add` is needed: the increment runs only
-  /// when `spent < max <= usize::MAX`.
+  /// one writer and it is reached through `&mut`).
+  ///
+  /// The increment **saturates**, and that is a consequence of the sentinel being excluded from the
+  /// gate above rather than a belt-and-braces addition: `!is_exhausted()` no longer implies
+  /// `spent < max`, because at `max == usize::MAX` it holds at every value of `spent` including
+  /// `usize::MAX` itself. That is the one state where a bare `+= 1` wraps, and a wrap would hand an
+  /// unbounded budget a silently restarted counter. Saturating is also the *correct* answer there
+  /// and not merely a safe one: the sentinel has no ceiling to overshoot, so a `spent` that stops
+  /// climbing reports the only thing a saturated counter can honestly report.
   ///
   /// Infallible **on purpose**. A second ceiling test here would be a second gate, and a second
   /// gate is how the enforcement ends up somewhere other than in front of the work — the defect
@@ -204,10 +282,32 @@ impl TokenBudget {
   #[inline(always)]
   pub(crate) const fn spend(&mut self) {
     debug_assert!(
-      self.spent < self.max,
+      !self.is_exhausted(),
       "TokenBudget::spend without the driver's exhaustion preflight",
     );
-    self.spent += 1;
+    self.spent = self.spent.saturating_add(1);
+  }
+
+  /// Whether the **one-shot at-limit probe** has already been spent on an item.
+  ///
+  /// Read by the lexing site once the ceiling is met and the lex position is short of the end of
+  /// the source — the one situation where "a met ceiling" and "an end of input" are not the same
+  /// answer and nothing but running the lexer can tell them apart. `true` means a probe already ran
+  /// there and *produced*, so the answer is settled: refuse, and do not lex again.
+  #[inline(always)]
+  pub(crate) const fn limit_probe_spent(&self) -> bool {
+    self.probed_at_limit
+  }
+
+  /// Latches the one-shot probe, for a probe that **produced an item**.
+  ///
+  /// Monotone, and latched only on the producing outcome. A probe that produced nothing performed
+  /// no work this budget is denominated in, and latching *it* would freeze an end-of-input answer
+  /// that must stay re-derivable — the same reason the refusal re-latches its boundary on every
+  /// entry instead of trusting the latch.
+  #[inline(always)]
+  pub(crate) const fn latch_limit_probe(&mut self) {
+    self.probed_at_limit = true;
   }
 }
 
