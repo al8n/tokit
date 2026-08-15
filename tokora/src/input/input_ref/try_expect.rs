@@ -322,10 +322,12 @@ where
         Spanned::new(span, tok)
       }));
     }
-    // E4: an already-latched poison boundary at the cursor is a terminal stop,
-    // not proof of absence — surface the committed form's end-of-input error,
-    // marked terminal so recovery re-raises it.
-    if self.reached_boundary(self.offset()) {
+    // E4: a terminal stop is not proof of absence — surface the committed form's end-of-input
+    // error, marked terminal so recovery re-raises it. Two of them: a budget refusal already on
+    // record, asked first because it costs no consumer code and publishes in front of the prologue
+    // (`InputRef::refusal_already_on_record`), then an already-latched poison boundary at the
+    // cursor.
+    if self.refusal_already_on_record(&AtCursor) || self.reached_boundary(self.offset()) {
       return Err(
         UnexpectedEot::eot_of(self.span().end())
           .into_terminal()
@@ -419,9 +421,9 @@ where
         CloseStatus::WrongToken(peeked.cloned())
       });
     }
-    // A latched poison boundary at the cursor is a terminal stop, not proof of
-    // absence — mirrors `try_expect_or_stop`'s E4.
-    if self.reached_boundary(self.offset()) {
+    // A budget refusal already on record, or a latched poison boundary at the cursor: either is a
+    // terminal stop, not proof of absence — mirrors `try_expect_or_stop`'s E4.
+    if self.refusal_already_on_record(&AtCursor) || self.reached_boundary(self.offset()) {
       return Ok(CloseStatus::Tripped);
     }
     let mut resume = self.resume();
@@ -704,11 +706,13 @@ where
       Spanned<&L::Token, &L::Span>,
     ) -> Option<Result<O, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>>,
   {
-    // A sticky limit trip latches a poison boundary: at or past the durable
+    // A budget refusal already on record owes this entry a stop, and
+    // `InputRef::refusal_already_on_record` publishes it in front of the prologue below rather
+    // than behind it. A sticky limit trip latches a poison boundary: at or past the durable
     // frontier, stop without rebuilding a lexer, mirroring the short-circuit in
     // `next()`; strictly before it, lexing proceeds (replaying a drained prefix). A
     // scan that finds no matching token yields `Ok(None)`, the poisoned outcome too.
-    if self.reached_boundary(self.offset()) {
+    if self.refusal_already_on_record(&AtCursor) || self.reached_boundary(self.offset()) {
       return Ok(None);
     }
 
@@ -740,11 +744,13 @@ where
   where
     F: FnMut(Spanned<&L::Token, &L::Span>) -> bool,
   {
-    // A sticky limit trip latches a poison boundary: at or past the durable
+    // A budget refusal already on record owes this entry a stop, and
+    // `InputRef::refusal_already_on_record` publishes it in front of the prologue below rather
+    // than behind it. A sticky limit trip latches a poison boundary: at or past the durable
     // frontier, stop without rebuilding a lexer, mirroring the short-circuit in
     // `next()`; strictly before it, lexing proceeds (replaying a drained prefix). A
     // scan that finds no matching token yields `Ok(None)`, the poisoned outcome too.
-    if self.reached_boundary(self.offset()) {
+    if self.refusal_already_on_record(&AtCursor) || self.reached_boundary(self.offset()) {
       return Ok(None);
     }
 
@@ -778,11 +784,13 @@ where
   where
     F: FnMut(Spanned<&L::Token, &L::Span>) -> Option<O>,
   {
-    // A sticky limit trip latches a poison boundary: at or past the durable
+    // A budget refusal already on record owes this entry a stop, and
+    // `InputRef::refusal_already_on_record` publishes it in front of the prologue below rather
+    // than behind it. A sticky limit trip latches a poison boundary: at or past the durable
     // frontier, stop without rebuilding a lexer, mirroring the short-circuit in
     // `next()`; strictly before it, lexing proceeds (replaying a drained prefix). A
     // scan that finds no matching token yields `Ok(None)`, the poisoned outcome too.
-    if self.reached_boundary(self.offset()) {
+    if self.refusal_already_on_record(&AtCursor) || self.reached_boundary(self.offset()) {
       return Ok(None);
     }
 
@@ -818,9 +826,9 @@ where
     F: FnMut(Spanned<&L::Token, &L::Span>) -> Option<O>,
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   {
-    // An already-latched poison boundary at the cursor is a terminal stop, not proof
-    // of absence — mirrors `try_expect_or_stop`'s E4.
-    if self.reached_boundary(self.offset()) {
+    // A budget refusal already on record, or an already-latched poison boundary at the cursor:
+    // either is a terminal stop, not proof of absence — mirrors `try_expect_or_stop`'s E4.
+    if self.refusal_already_on_record(&AtCursor) || self.reached_boundary(self.offset()) {
       return Err(
         UnexpectedEot::eot_of(self.span().end())
           .into_terminal()

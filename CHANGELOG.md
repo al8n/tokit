@@ -34,6 +34,31 @@ and will red until they do.
 
 ### Added
 
+- **`TokenBudget::refused_an_item` — the one question a host that caught an unwind and concluded
+  can still ask.** A budget refusal has **no diagnostic channel** (a diagnostic would have to be
+  built as the emitter's own error type, which needs a `From` bound this crate deliberately does not
+  add to every consume path), and `InputRef::next` folds a terminal stop into `Ok(None)`. The
+  in-band carriers — `Input::scanner_trips` and the poison boundary — are published before any
+  consumer code runs, so an ordinary parse always sees them. What they cannot reach is a host that
+  catches an unwind out of **its own** code (an `L::Offset` destructor, a `Cache` method,
+  `Lexer::span`) and then concludes without re-entering the scanner: nothing crate-side runs there
+  again, so every in-band signal is by definition unavailable. This accessor is the answer for that
+  host — *was this input truncated by the budget?* — and it is the same durable bit the driver's own
+  refusal gate reads: written at the refusal, in front of every consumer step the refusal runs, not
+  a `Checkpoint` field, not reached by the state re-key, with no `token_budget_mut` to lower it.
+
+  **Three bounds, each of which limits what a reading licenses.** It witnesses **this budget only**
+  — the lexer's own limit trip, latched off `Lexer::check`, never writes it, and could not, since
+  that tally lives in `L::State` and a `Checkpoint` carries it; so `false` means *the budget refused
+  nothing*, not *the parse was not truncated*. It is **session-absolute, not attempt-relative** —
+  it says an item was refused somewhere in the life of this `Input`, never *inside my window*, which
+  is what `scanner_trips` against a baseline answers and what every in-crate reader of terminality
+  uses. And it **does not survive a `PartialSession` redrive**, which builds a fresh `Input` and a
+  fresh budget; what carries a refusal across attempts is the session's own terminal latch.
+
+  Read it through `InputRef::token_budget`, which is already `pub`; there is still no
+  `token_budget_mut`.
+
 - **`ErrorContainer::clear`.** `Errors` is now the only door onto its container (#247), so it has
   to serve the removals that door used to reach through `DerefMut`. The method is defaulted
   through `pop`, so an existing implementation keeps compiling unchanged; the four built-in
@@ -712,15 +737,40 @@ and will red until they do.
   `REFUSAL_CENSUS` now polices the whole region above the already-spent count rather than a window
   between two points, and `TRIP_CENSUS` derives its publisher set from two needles instead of one.
 
-  **Disclosed residual.** Two `L::Offset::clone`s still run in front of the publication on that
-  path, and they are in the *driver*, not the settle: `Resume`'s own position clone in
-  `resume_from`, and the scan's `lex_at` local in `scan_with`. Both happen before
-  `lex_within_boundary` is entered, so no ordering inside the lexing site can reach them; closing
-  them needs the driver to answer *"has this input already refused?"* before it builds a lexer,
-  which is a change to **where** the refusal is published rather than to the order in which it is.
-  The residual is pinned exactly — `a_second_entry_publishes_at_every_offset_clone_past_the_driver_prologue`
-  requires the non-publishing indices to be exactly the prefix `{1, 2}`, so it fails both if a step
-  is added in front of the publication and if the publication moves later.
+  **The residual that disclosure named is closed, in the place it said it would have to be.** Two
+  `L::Offset::clone`s still ran in front of the publication on that path, and they were in the
+  *driver*, not the settle: `Resume`'s own position clone in `resume_from`, and the scan's `lex_at`
+  local in `scan_with`. Both happen before `lex_within_boundary` is entered, so no ordering inside
+  the lexing site could reach them — closing them needed the driver to answer *"has this input
+  already refused?"* before it builds a lexer, which is a change to **where** the refusal is
+  published rather than to the order in which it is.
+
+  That answer is now asked at **all eleven** lexing drivers, by `InputRef::refusal_already_on_record`,
+  and it costs nothing to ask: `TokenBudget` is an `InputRef` field, so the durable half of a
+  refusal is a `bool` on a crate-owned struct readable at every driver entry. Its three conjuncts
+  are the probe bit, the ceiling, and `poison_boundary` being `None` — and the third is what keeps
+  this a change of ordering rather than of model. With no boundary latched, `reached_boundary` is
+  false at every offset, so the entry is provably headed for the lexing site and provably reaches
+  the same publication there; with one latched, the positional check decides and an input already
+  stopped at its boundary keeps returning its stop **without a trip being counted a second time**
+  (`a_latched_boundary_answers_without_counting_a_second_trip`). On the already-spent path the
+  entry now builds no `Resume`, enters no scan, and reaches `settle_met_ceiling` not at all: the
+  steps the sweeps used to walk are not re-ordered but gone, which is what those cells now pin as
+  counts — `L::Offset::drop` `2 → 0`, `L::Offset::clone` `3 → 1`, the one survivor being the
+  boundary memo's own, derived after the count. `RESUME_CENSUS` checks the gate's call count
+  against the `Resume::parts_mut` count file by file, so a twelfth driver cannot arrive without it.
+
+  **What remains, named rather than implied.** One consumer step is still ahead of the publication
+  and cannot move: the driver's **front-drain** (`Cache::pop_front`, or `Cache::is_empty` /
+  `Cache::len` for the probing forms). A driver has to know whether a token is already waiting
+  before it can conclude anything about lexing one. A panic there on an already-refused entry,
+  caught inside an `attempt` and concluded on without re-entering the scanner, still reports
+  `(2 of 4 items reported Ok, 0 trips in the window, not poisoned)` — measured, and pinned as the
+  residue by `the_front_drain_is_the_residue_and_the_budget_accessor_is_its_only_witness`. Also
+  outside the gate: an entry whose boundary is latched but **not yet reached**, which is still owed
+  a refusal and still reaches it through the prologue; no route in the tree was found that produces
+  one, since every publication installs the boundary at the lex position it is standing on. Both
+  are now *detectable* rather than silent — see `TokenBudget::refused_an_item` under **Added**.
 
 - **`CacheHarness::run` hung on a lexer that only returns errors — the same shape one tier over.**
   The corpus builder fills while `out.len() < want`, and that gate counts the tokens it *kept*

@@ -304,11 +304,17 @@ where
       return Ok(self.session.emitter);
     }
 
-    // A sticky limit trip latches a poison boundary at the durable frontier: once
-    // the cursor reaches it, never rebuild a lexer to scan past the trip. Serve
-    // whatever is already cached and stop. The request went unmet at a latched
-    // boundary — a terminal stop, not a genuine end of input.
-    if self.reached_boundary(self.offset()) {
+    // Two terminal short-circuits, the durable one first. A budget that has already refused an
+    // item owes this fill a stop, and `InputRef::refusal_already_on_record` publishes it in front
+    // of the fill's prologue (the resume's `L::State::clone` / `Lexer::with_state` / `Lexer::bump`
+    // and its position clone) rather than behind it; the fill would otherwise reach the identical
+    // publication at its first `lex_within_boundary`, with all of that in the way. Second, the
+    // positional memo: a sticky limit trip latches a poison boundary at the durable frontier, and
+    // once the cursor reaches it, never rebuild a lexer to scan past the trip. Either way serve
+    // whatever is already cached and stop — the request went unmet at a terminal stop, not at a
+    // genuine end of input, and nothing has been staged yet, so this exit is exactly the one the
+    // fill's own refusal arm takes after its truncation.
+    if self.refusal_already_on_record(&AtCursor) || self.reached_boundary(self.offset()) {
       *terminal = true;
       // The parked token is the front of the stream, so it heads the window and the cache fills in
       // behind it. Safe unguarded because every caller of this fill passes a buffer with room for at

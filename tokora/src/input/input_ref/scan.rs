@@ -1126,11 +1126,20 @@ where
         }
       } else {
         if lexing.is_none() {
+          // The DURABLE stop, asked before the position clone below and before the lexer is built:
+          // a budget that has already refused an item owes this turn a stop, and
+          // `InputRef::refusal_already_on_record` publishes it in front of that prologue rather
+          // than behind it. The frontier is the scan's own, so the boundary it derives is the one
+          // `settle_met_ceiling` would have derived at the lexing site.
+          let refused = scope
+            .ir
+            .refusal_already_on_record(scope.frontier.as_ref().expect("live"));
           let at = scope.live_frontier().span.end_ref().clone();
           // A sticky limit trip latches a poison boundary: once the lex position has reached the
           // durable frontier there is no token left to scan. Commit what the loop already
           // skipped — real progress — and yield the exhausted outcome without rebuilding a lexer.
-          if scope.ir.reached_boundary(&at) {
+          // The refusal above takes the same exit for the same reason.
+          if refused || scope.ir.reached_boundary(&at) {
             // Take-then-record, adjacent: see `take_frontier`.
             let frontier = scope.take_frontier();
             scope.ir.commit_at(frontier);

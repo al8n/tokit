@@ -1033,6 +1033,14 @@ where
   /// as it always has, without a trip being counted a second time; the budget is asked only where
   /// a lex would otherwise happen.
   ///
+  /// **This is not the only place the budget is asked, and the other place is above every driver's
+  /// prologue.** A refusal that is already on record obliges a stop from the driver's first line,
+  /// and everything a driver runs to reach this site — the resume, and the offset read that feeds
+  /// it — is caller code that no ordering *here* can get behind. So the durable half of the
+  /// question is asked again at each driver, by
+  /// [`refusal_already_on_record`](Self::refusal_already_on_record), which publishes there and
+  /// leaves this site the entry it cannot decide: a boundary latched and not yet reached.
+  ///
   /// A met ceiling is **not** an end of input, and the two are told apart in
   /// [`settle_met_ceiling`](Self::settle_met_ceiling) — out of line, because a gate that answers
   /// `false` on every authorized step should cost one comparison and no code. Read it before
@@ -1192,6 +1200,14 @@ where
       // body or in `lex_within_boundary` above it (`reached_boundary` compares only when a
       // boundary is latched, and a latched boundary returns `Stop` from there without reaching
       // this).
+      //
+      // What DOES precede it, outside the site, is the driver's prologue — and no ordering here
+      // can reach that, so the same question is asked a second time at the driver, by
+      // `refusal_already_on_record`. What is left for this arm once that one has run is the entry
+      // whose boundary is latched and **not yet reached**: the driver's gate declines that case
+      // because deciding it needs the positional comparison it exists to stay above. This arm is
+      // kept rather than folded into the gate for the same reason the census maintains the driver
+      // list at all — it is the chokepoint that holds whether or not that list is complete.
       self.count_scanner_trip();
       // The memo, second, because deriving it is four consumer steps and no ordering can make
       // them infallible. An unwind here loses a short-circuit the next entry re-establishes; the
@@ -1268,6 +1284,104 @@ where
       Lexed::<L::Token>::from(produced),
     ));
     LexStep::Exhausted
+  }
+
+  /// **The per-driver gate**: has this input *already* refused an item, so that this entry is owed
+  /// a stop before it builds anything? Returns whether the refusal was published here.
+  ///
+  /// A `true` obliges the caller to take its terminal exit **without lexing**. The count and the
+  /// boundary are both written by the time it returns, so the exit is the identical one the caller
+  /// already takes on an already-latched boundary — every driver in this layer answers a fresh trip
+  /// and a pre-latched boundary with the same value, which is what lets this sit in front of the
+  /// positional check rather than beside it.
+  ///
+  /// # Why the question is answerable here at all
+  ///
+  /// [`TokenBudget`](crate::input::TokenBudget) is an `InputRef` field, so the **durable** half of a
+  /// refusal — `limit_probe_spent`, a `bool` on a crate-owned struct — is readable at every driver
+  /// entry at no consumer cost. That is the whole of what makes a per-driver gate possible, and it
+  /// is worth separating from the question that is *not* answerable here: the **memo** question
+  /// ("is the boundary latched at my lex position?") needs an offset and an `Offset::Ord`, both
+  /// caller code. The durable question needs neither.
+  ///
+  /// # What it closes
+  ///
+  /// [`settle_met_ceiling`](Self::settle_met_ceiling)'s STEP 0 publishes with nothing
+  /// consumer-controlled in front of it **inside the lexing site** — and the site is reached
+  /// through a prologue no ordering within it can touch. On the already-spent path that prologue is
+  /// `Cache::back` and `Span::end_ref` (through [`offset`](Self::offset)), then `L::State::clone`,
+  /// `Lexer::with_state`, `Lexer::bump` and `L::Offset::clone` (through [`resume`](Self::resume)
+  /// and [`resume_from`](Self::resume_from)), then `scan_with`'s own position clone. Every one of
+  /// them is caller code, and every one of them ran in front of a publication that was **already
+  /// owed**: a host that caught an unwind there, inside an `attempt` whose baseline follows the
+  /// first refusal, read a clean trip delta and an unpoisoned input and reported a *successful
+  /// parse over input the budget had refused*.
+  ///
+  /// Asked here, the whole of that prologue is behind the publication. What is left in front of it
+  /// is the driver's own front-drain and nothing else — `Cache::pop_front` on the consume paths,
+  /// `Cache::is_empty` for the `try_expect` family, `Cache::len` for the peek fill.
+  ///
+  /// # The three conjuncts
+  ///
+  /// - **`limit_probe_spent`** — the recorded decision. It is written exactly at a refusal, it is
+  ///   not a [`Checkpoint`] field, [`install_rekey`](Self::install_rekey) does not touch it, and no
+  ///   `token_budget_mut` exists to lower it. It is also the cheap one, so it is asked first: a
+  ///   `bool` load that is `false` on every input that never configured a budget.
+  /// - **`is_exhausted`** — implied by the first (the probe latches only at a met ceiling, `spent`
+  ///   is monotone and `max` is immutable), and asked anyway. It is what makes the premise local:
+  ///   the two together *are* the condition [`lex_within_boundary`](Self::lex_within_boundary)
+  ///   tests, so this gate does not have to be read against that one to be believed.
+  /// - **no boundary latched** — the conjunct that keeps this from being a change of model rather
+  ///   than a change of ordering. With `poison_boundary` at `None`,
+  ///   [`reached_boundary`](Self::reached_boundary) is `false` at *every* offset, so the entry is
+  ///   provably headed for the lexing site and provably reaches STEP 0 there: publishing here is
+  ///   the same publication, taken earlier. With one latched, the positional question decides, and
+  ///   the driver's own check is what asks it — an input already stopped at its boundary must keep
+  ///   returning its stop **without a trip being counted a second time**.
+  ///
+  /// The residue that leaves is named rather than implied: a boundary that is latched and *not yet
+  /// reached*, with the probe already spent. That entry is still owed a refusal and still reaches
+  /// it through the prologue. It is the one shape this gate does not cover.
+  #[inline(always)]
+  fn refusal_already_on_record<Fr>(&mut self, frontier: &Fr) -> bool
+  where
+    Fr: Frontier<'inp, L>,
+  {
+    // One `bool` load on the hot path, false on every input that never configured a budget and on
+    // every budgeted one that has not yet refused. Everything else is out of line.
+    if !self.token_budget.limit_probe_spent() {
+      return false;
+    }
+    self.publish_recorded_refusal(frontier)
+  }
+
+  /// The cold half of [`refusal_already_on_record`](Self::refusal_already_on_record): the two
+  /// remaining conjuncts, and the publication they oblige.
+  ///
+  /// The order inside is the obligation's — [`count_scanner_trip`](Self::count_scanner_trip)
+  /// first, with nothing consumer-controlled in front of it, then the memo, whose derivation is
+  /// `Cache::back`, `Span::end_ref` and `L::Offset::clone`. That is STEP 0's order and STEP 0's
+  /// reasoning: the count is outside the rollback set and is what a recovery gate judges an attempt
+  /// by, while the boundary is a per-lineage memo a restore copies back and a re-key drops. Losing
+  /// the memo to an unwind costs a short-circuit the next entry re-establishes; losing the count
+  /// costs the parse its terminality.
+  #[cold]
+  #[inline(never)]
+  fn publish_recorded_refusal<Fr>(&mut self, frontier: &Fr) -> bool
+  where
+    Fr: Frontier<'inp, L>,
+  {
+    if !self.token_budget.is_exhausted() || self.poison_boundary.is_some() {
+      return false;
+    }
+    // The witness. A `usize` increment, and the driver's front-drain is the only consumer step
+    // ahead of it.
+    self.count_scanner_trip();
+    // The memo, second, because deriving it is caller code and no ordering can make it infallible.
+    let stop = self.stage_scanner_trip(frontier.boundary(self.offset()));
+    let displaced = self.install_scanner_boundary(stop);
+    drop(displaced);
+    true
   }
 
   /// Latches the input-level poison boundary if `lexer`'s state has tripped a limit
@@ -3531,11 +3645,14 @@ where
       return Ok(Some(Spanned::new(span, lexed)));
     }
 
-    // A sticky limit trip latches a poison boundary: once the cache is drained and
-    // the cursor has reached the durable frontier, stop without rebuilding a lexer
-    // or rescanning the tripping token. Strictly before it, `next()` re-lexes (e.g.
-    // to replay a drained prefix after a restore).
-    if self.reached_boundary(self.offset()) {
+    // Two terminal short-circuits, and the DURABLE one is asked first because it costs no consumer
+    // code: a budget that has already refused an item owes this entry a stop, and
+    // `refusal_already_on_record` publishes it in front of the prologue below rather than behind it
+    // (see there). Second, the positional memo: a sticky limit trip latches a poison boundary, so
+    // once the cache is drained and the cursor has reached the durable frontier, stop without
+    // rebuilding a lexer or rescanning the tripping token. Strictly before it, `next()` re-lexes
+    // (e.g. to replay a drained prefix after a restore).
+    if self.refusal_already_on_record(&AtCursor) || self.reached_boundary(self.offset()) {
       return Ok(None);
     }
 
@@ -3604,10 +3721,11 @@ where
       return Ok(Some(Spanned::new(span, lexed)));
     }
 
-    // A sticky limit trip latches a poison boundary at the cursor: a terminal stop, not genuine end
-    // of input, so surface the terminal-marked end-of-input error where `next` returns a plain
-    // `None`. Mirrors `try_expect_or_stop`'s E4.
-    if self.reached_boundary(self.offset()) {
+    // The durable refusal first (see `refusal_already_on_record`), then the positional memo: a
+    // sticky limit trip latches a poison boundary at the cursor. Either way it is a terminal stop,
+    // not genuine end of input, so surface the terminal-marked end-of-input error where `next`
+    // returns a plain `None`. Mirrors `try_expect_or_stop`'s E4.
+    if self.refusal_already_on_record(&AtCursor) || self.reached_boundary(self.offset()) {
       return Err(
         UnexpectedEot::eot_of(self.span().end())
           .into_terminal()

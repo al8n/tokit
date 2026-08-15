@@ -288,15 +288,78 @@ impl TokenBudget {
     self.spent = self.spent.saturating_add(1);
   }
 
+  /// Whether this budget has **refused an item** — the one question a host that caught an unwind
+  /// and concluded can still ask.
+  ///
+  /// `true` means the ceiling was met, the lexer was run, it handed back an item, and that item was
+  /// refused. `false` means no item of this `Input`'s was ever refused by this budget. The bit is
+  /// written **at the refusal**, in front of every consumer step the refusal runs, and nothing
+  /// lowers it: it is not a [`Checkpoint`](super::Checkpoint) field, the state re-key behind
+  /// [`set_state`](crate::InputRef::set_state) / [`state_mut`](crate::InputRef::state_mut) does not
+  /// reach it, and there is no `token_budget_mut`. Read it through
+  /// [`InputRef::token_budget`](crate::InputRef::token_budget).
+  ///
+  /// # Why it exists
+  ///
+  /// A refusal has **no diagnostic channel** (see the type docs), and
+  /// [`next`](crate::InputRef::next) folds a terminal stop into `Ok(None)`. The in-band carriers —
+  /// the scanner-trip counter and the poison boundary — are published before any consumer code
+  /// runs, so an ordinary parse always sees them. What they cannot reach is a host that catches an
+  /// unwind out of *its own* code (an `L::Offset` destructor, a `Cache` method, `Lexer::span`) and
+  /// then concludes without re-entering the scanner: nothing crate-side runs there again. This is
+  /// the answer for that host — *was this input truncated by the budget?* — and it is durable
+  /// enough to survive the unwind that reached it.
+  ///
+  /// # What it does not answer
+  ///
+  /// Three bounds, and each one limits what a `true` (or a `false`) licenses:
+  ///
+  /// - **it witnesses this budget only.** The other terminal scanner stop — the lexer's own limit
+  ///   trip, latched by `InputRef::latch_if_limit_tripped` off
+  ///   [`Lexer::check`](crate::Lexer::check) — never writes it. That tally lives in `L::State` and
+  ///   a [`Checkpoint`](super::Checkpoint) carries it, so no durable bit here could speak for it.
+  ///   `false` therefore means *the budget refused nothing*, not *the parse was not truncated*;
+  /// - **it is session-absolute, not attempt-relative.** It says an item was refused somewhere in
+  ///   the life of this `Input`, never *inside my window*, so a window opened after the first
+  ///   refusal reads the same `true` whether or not anything was refused inside it. A caller
+  ///   judging one [`attempt`](crate::InputRef::attempt) on its own terms wants the crate's
+  ///   scanner-trip counter against a baseline taken at the attempt's start, which is what every
+  ///   in-crate reader of terminality uses and what this deliberately is not. In band, on the paths
+  ///   that do not unwind, the signal a caller already has is the terminal-marked
+  ///   [`UnexpectedEot`](crate::error::UnexpectedEot) the `*_or_stop` family raises, read through
+  ///   [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal);
+  /// - **it does not survive a [`PartialSession`](super::PartialSession) redrive.** A redrive
+  ///   builds a fresh `Input` and therefore a fresh budget, at zero. What carries a refusal across
+  ///   attempts is the session's own terminal latch, which the refusal feeds by being terminal.
+  ///
+  /// # Examples
+  ///
+  /// ```rust
+  /// use tokora::input::TokenBudget;
+  ///
+  /// // Nothing has been refused until something is.
+  /// assert!(!TokenBudget::with_limitation(4).refused_an_item());
+  /// assert!(!TokenBudget::unlimited().refused_an_item());
+  /// ```
+  #[inline(always)]
+  pub const fn refused_an_item(&self) -> bool {
+    self.probed_at_limit
+  }
+
   /// Whether the **one-shot at-limit probe** has already been spent on an item.
   ///
   /// Read by the lexing site once the ceiling is met and the lex position is short of the end of
   /// the source — the one situation where "a met ceiling" and "an end of input" are not the same
   /// answer and nothing but running the lexer can tell them apart. `true` means a probe already ran
   /// there and *produced*, so the answer is settled: refuse, and do not lex again.
+  ///
+  /// The same bit as [`refused_an_item`](Self::refused_an_item), under the name the driver asks it
+  /// by: a probe that produced is exactly a refusal, so "the answer is on record" and "an item was
+  /// refused" are one fact with two audiences. It is delegated rather than duplicated so the field
+  /// keeps one reader.
   #[inline(always)]
   pub(crate) const fn limit_probe_spent(&self) -> bool {
-    self.probed_at_limit
+    self.refused_an_item()
   }
 
   /// Latches the one-shot probe, for a probe that **produced an item**.

@@ -1853,6 +1853,60 @@ fn resume_census_one_pairing_site() {
     );
   }
 
+  // …and every one of those drivers asks the DURABLE refusal question before it builds the
+  // `Resume` it is about to split. The two tables are checked against each other rather than
+  // written down twice: a driver is a place a lexer gets built, and `InputRef::refusal_already_on_record`
+  // is what has to run in front of that.
+  //
+  // The gate is not an optimisation and the census is not bookkeeping. Building a resume is
+  // `L::State::clone` + `Lexer::with_state` + `Lexer::bump` + `L::Offset::clone`, reached through
+  // `Cache::back` and `Span::end_ref` — all of it caller code, all of it running before
+  // `lex_within_boundary` is entered, and therefore outside anything the lexing site's own ordering
+  // can reach. On an entry whose probe is already spent, a stop is owed from the driver's first
+  // line, so every one of those steps used to sit in front of a publication that was already due:
+  // an unwind there, caught inside an `attempt` whose baseline follows the first refusal, reported
+  // a successful parse over input the budget had refused. A new driver that splits a `Resume`
+  // without asking first re-opens exactly that window, and this is where it is caught.
+  let gate_sites: &[(&str, usize)] = &[
+    ("mod.rs", 2),
+    ("scan.rs", 1),
+    ("try_expect.rs", 6),
+    ("peek/mod.rs", 1),
+    ("skip_while.rs", 1),
+  ];
+  let mut gate_total = 0;
+  for (name, want) in gate_sites {
+    let got = count(source(name), ".refusal_already_on_record(");
+    gate_total += got;
+    let parts = parts_mut_sites
+      .iter()
+      .find(|(n, _, _)| n == name)
+      .map_or(0, |(_, w, _)| *w);
+    assert!(
+      got == *want && got == parts,
+      "RESUME_CENSUS drift: `{name}` calls `InputRef::refusal_already_on_record` {got} time(s) \
+       against {parts} `Resume::parts_mut` caller(s), expected {want} of each. Every lexing driver \
+       asks the durable refusal question BEFORE it builds a lexer, because that is the only place \
+       the answer can be published in front of the resume's own caller code (grep RESUME_CENSUS)."
+    );
+  }
+  assert!(
+    gate_total == parts_mut_total,
+    "RESUME_CENSUS drift: the per-driver refusal gate runs at {gate_total} sites across the input \
+     layer against {parts_mut_total} lexing drivers. They are the same set (grep RESUME_CENSUS)."
+  );
+  for (name, src) in SOURCES {
+    if gate_sites.iter().any(|(n, _)| n == name) {
+      continue;
+    }
+    assert!(
+      count(src, ".refusal_already_on_record(") == 0,
+      "RESUME_CENSUS drift: `{name}` asks the durable refusal question but builds no lexer — the \
+       gate publishes a scanner trip, so a caller that is not about to lex counts a stop nothing \
+       is owed (grep RESUME_CENSUS)."
+    );
+  }
+
   // The two-borrow lexing entry point is the residual the types no longer carry: `Resume` is
   // unforgeable, but `lex_within_boundary` takes the halves as plain `&mut`, so nothing but this
   // count stops a third caller from passing a lexer beside an offset it chose separately. It is
@@ -2150,6 +2204,16 @@ fn trip_census_every_publisher_declares_its_window() {
     // caller-implemented call this predicate makes, and it answers with `Token::Error` — a
     // consumer type bounded `Clone + Debug` and nothing more, so it may carry a destructor.
     ("latch_if_limit_tripped", &[("lexer.check(", true)]),
+    // The THIRD publisher, and the one that publishes furthest from the lexer: the per-driver
+    // gate's cold half. Its decision is a conjunction of three crate-owned cells — the probe bit
+    // (read by its `#[inline(always)]` caller), the ceiling, and whether a boundary is latched —
+    // so it builds nothing a consumer can put a destructor on, and the needle names the line the
+    // last two are tested on. It exists precisely because a decision that costs no consumer code
+    // can be taken ABOVE the driver's prologue, where the lexing site's own ordering cannot reach:
+    // the count therefore comes before `Cache::back`, `Span::end_ref`, `L::State::clone`,
+    // `Lexer::with_state`, `Lexer::bump` and two `L::Offset::clone`s, none of which the entry then
+    // performs at all.
+    ("publish_recorded_refusal", &[("is_exhausted(", false)]),
     (
       "settle_met_ceiling",
       &[
