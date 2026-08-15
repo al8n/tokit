@@ -1130,6 +1130,43 @@ Recorded in `ci/name_collision/disclosed.txt`, and on **this** branch: the probe
 two-sided delta, so once this merges the names exist on both sides, the rows leave every future
 plan, and the harness can never re-litigate them.
 
+- **A lexer limit trip could be decided and then not recorded, if the consumer's error type had a
+  destructor.** `latch_if_limit_tripped` — the crate's terminal predicate, and the sole route by
+  which a lexer-side resource trip reaches `Input::scanner_trips` and the poison boundary — asked
+  `if lexer.check().is_err()`. `Lexer::check` answers with `Token::Error`, which is bounded
+  `Clone + Debug` and nothing more, so it may carry a `Drop`; and the scrutinee of an `if` is a
+  temporary destroyed **at the end of the condition, before the branch body is entered**. So the
+  order of events was: terminality decided, consumer destructor runs, and only then the two writes
+  that record it. An unwind out of that destructor, caught inside an `attempt` by a host that then
+  left without re-entering the scanner, saw both carriers clean — and `next` folds a terminal stop
+  into `Ok(None)`, so the counter was the only evidence there was. Measured over `"ab cd ef gh"`
+  with a tally tripping on the third item: `(2 items reported Ok, check() answered Err once, 0
+  scanner trips, not poisoned)` — **a successful parse over truncated input**. The predicate now
+  binds the answer (`if let Err(error) = …`), publishes both facts, and drops the error by name
+  afterwards; the same cell reads `(2, 1, 1, poisoned)` at every error destructor in the round
+  (`a_limit_trip_is_all_or_nothing_at_every_lexer_error_destructor`).
+
+  This is the fourth window of one shape — *a consumer-controlled value created inside a condition
+  or an intermediate expression, destroyed at the end of that expression, before the durable
+  publication the decision implies* — and the three before it were all in this branch's own new
+  code. The whole publication region has now been enumerated mechanically rather than by
+  inspection: over the MIR of every body in the crate that performs one of the four durable writes,
+  every `drop` terminator was classified by whether a durable write **post-dominates** it, which is
+  exactly the property "the obligation is already incurred here". Twenty-three destruction sites
+  across the five bodies; one was in the class, and it was this one. `TRIP_CENSUS` in
+  `census_tests.rs` now derives the set of publishing methods from the source, so a new one cannot
+  arrive without declaring the decision that obliges it.
+
+- **The staged/publish split's "by construction" claim is now true by construction.** The
+  `StagedTrip` carrier that makes the fallible clamp precede the infallible writes was a bare
+  `enum` in `input_ref/mod.rs`, so its variants were nameable throughout `input_ref` and every
+  descendant of it — which is precisely the set of modules that can also reach
+  `publish_scanner_trip`. No forged caller existed, but `StagedTrip::Lower(b)` from a sibling
+  module compiled, and it would have published a boundary that was never compared against the
+  latch. The representation moved into a private child module (`input_ref/staged_trip.rs`) behind
+  an opaque newtype with a private field: `StagedTrip::stage` is now the only expression in the
+  language that produces one, and the forged spellings are `error[E0599]` and `error[E0603]`.
+
 ## 0.9.1 (2026-08-08)
 
 ### Added

@@ -7762,11 +7762,79 @@ impl State for BombTally {
   }
 }
 
+thread_local! {
+  /// `BombErr::drop` calls since the last arm, and the index that panics (0 = disarmed).
+  ///
+  /// `Token::Error` is bounded `Clone + Debug` and nothing more, so a consumer error is free to
+  /// carry a destructor — and the input layer's one `Lexer::check` call sits at the decision that
+  /// makes a scanner stop terminal. This is the instrument for that window; every other error
+  /// destructor a round runs is swept with it, because the claim is about the round and not about
+  /// one index.
+  static ERR_DROPS: Cell<usize> = const { Cell::new(0) };
+  static ERR_DROP_BOMB: Cell<usize> = const { Cell::new(0) };
+  /// How many [`BombErr::CheckLimit`] values the round built — i.e. how many times
+  /// `Lexer::check` **answered `Err`**.
+  ///
+  /// This is the round's DECISION BIT, and the counterpart of `limit_probe_spent` in the budget's
+  /// sweep: `check()` returning `Err` *is* the decision that a terminal stop is owed, and
+  /// `latch_if_limit_tripped` publishes unconditionally on it. So `(built >= 1) == (trips >= 1)`
+  /// is the all-or-nothing claim, and it fails in both directions.
+  static CHECK_ERRS_BUILT: Cell<usize> = const { Cell::new(0) };
+}
+
+fn arm_err_drop(at: usize) {
+  ERR_DROPS.with(|c| c.set(0));
+  ERR_DROP_BOMB.with(|c| c.set(at));
+  CHECK_ERRS_BUILT.with(|c| c.set(0));
+}
+
+/// Disarms and returns how many `Token::Error` values the run destroyed.
+fn disarm_err_drop() -> usize {
+  ERR_DROP_BOMB.with(|c| c.set(0));
+  ERR_DROPS.with(Cell::get)
+}
+
+fn check_errs_built() -> usize {
+  CHECK_ERRS_BUILT.with(Cell::get)
+}
+
+/// The error a tripped `Lexer::check` hands back, kept distinguishable from the one `Lexer::lex`
+/// hands back so a sweep can say which destructor it is standing on, and counted so the round has
+/// a decision bit.
+fn bomb_check_error(_: BombTripped) -> BombErr {
+  CHECK_ERRS_BUILT.with(|c| c.set(c.get() + 1));
+  BombErr::CheckLimit
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum BombErr {
   Lex,
   Limit,
+  /// What a tripped [`Lexer::check`](crate::Lexer::check) answers with — the same *class* of error
+  /// as [`Limit`](Self::Limit), spelled apart so a destructor sweep can name the value it armed.
+  /// `Lexer::lex` never builds one.
+  CheckLimit,
   Incomplete,
+}
+
+/// `Token::Error` is bounded `Clone + Debug` and **nothing else**, so a consumer error may carry a
+/// destructor that unwinds. This makes that permission observable.
+impl Drop for BombErr {
+  fn drop(&mut self) {
+    let n = ERR_DROPS.with(|c| {
+      let v = c.get() + 1;
+      c.set(v);
+      v
+    });
+    if n == ERR_DROP_BOMB.with(Cell::get) {
+      // Disarm before unwinding: the index is keyed on a counter that keeps climbing while the
+      // unwind runs, and a second fire inside the first one's unwind is an abort, not a
+      // measurement.
+      ERR_DROP_BOMB.with(|c| c.set(0));
+      record_bomb_fired();
+      panic!("R25 publication-window: the armed `Token::Error` drop (#{n}, {self:?}) panics");
+    }
+  }
 }
 
 impl From<()> for BombErr {
@@ -7862,7 +7930,7 @@ impl<'a> crate::Lexer<'a> for BombLexer<'a> {
   }
 
   fn check(&self) -> Result<(), BombErr> {
-    State::check(&self.state).map_err(BombErr::from)
+    State::check(&self.state).map_err(bomb_check_error)
   }
 
   fn state(&self) -> &BombTally {
@@ -9678,7 +9746,7 @@ impl<'a> crate::Lexer<'a> for OffsetLexer<'a> {
   }
 
   fn check(&self) -> Result<(), BombErr> {
-    State::check(&self.state).map_err(BombErr::from)
+    State::check(&self.state).map_err(bomb_check_error)
   }
 
   fn state(&self) -> &BombTally {
@@ -11238,6 +11306,141 @@ fn a_refusal_survives_a_panicking_offset_clone_in_its_boundary_derivation() {
     for n in 1..=total {
       let (r, _) = refusal_under_a_panicking_offset_clone(n, exit);
       assert_refusal_is_all_or_nothing("L::Offset::clone", n, total, exit, r);
+    }
+  }
+}
+
+// ── The LEXER's limit trip versus a consumer error destructor ─────────────────
+//
+// Everything above attacks the token budget's refusal. The *other* condition that reaches
+// `publish_scanner_trip` is the lexer's own limit trip, and it is decided by `Lexer::check` —
+// which returns `Result<(), Token::Error>`, a **consumer-typed value** built inside the branch
+// condition that decides terminality. `Token::Error` is bounded `Clone + Debug` and nothing else,
+// so that value is free to carry a destructor, and the destructor of an `if` scrutinee runs at
+// the end of the condition, BEFORE the branch body.
+//
+// That is the identical window rounds 3, 5 and 6 closed in three other places, reached through
+// the one caller-implemented call the terminal predicate makes. The cost is the same: `next`
+// folds a terminal stop into `Ok(None)`, so a host that catches the unwind inside an `attempt`
+// and leaves without re-entering the scanner reads a clean counter and an unpoisoned input and
+// reports a **successful parse over input the lexer had already refused**.
+
+/// `(items the parse reported, `Lexer::check` errors built, scanner trips during the attempt,
+/// poisoned, bombs fired)`.
+///
+/// `check errors built` is the **decision bit**, exactly as `probe spent` is for the budget's
+/// sweep: `Lexer::check` answering `Err` *is* the decision, and `latch_if_limit_tripped` publishes
+/// unconditionally on it. So `(built >= 1, trips >= 1)` must agree, and `(1, 0)` is the defect in
+/// one line.
+type Trip = (usize, usize, usize, bool, usize);
+
+/// Four items, and a lexer tally that trips on the **third** — so a clean drain accepts two and
+/// stops terminally, and the truncation a lost trip hides is two items wide.
+const TRIP_SRC: &str = "ab cd ef gh";
+const TRIP_LIMIT: usize = 2;
+
+/// Drains under a tripping lexer tally inside an `attempt` with the `bomb_at`-th `Token::Error`
+/// destructor armed to panic (0 = disarmed), catches whatever comes out, and leaves by `exit`
+/// **without re-entering the scanner**.
+///
+/// Returns the round's [`Trip`] reading and how many `Token::Error` values it destroyed.
+fn trip_under_a_panicking_error_drop(bomb_at: usize, exit: CaughtExit) -> (Trip, usize) {
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  );
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    TRIP_SRC,
+    BombTally {
+      scanned: 0,
+      limit: TRIP_LIMIT,
+    },
+    context,
+  );
+  let mut inp = input.as_ref();
+
+  let base = inp.scanner_trip_snapshot();
+  let drops = Cell::new(0usize);
+  let built = Cell::new(0usize);
+  reset_bomb_fired();
+  let kept = inp.attempt(|txn| {
+    let taken = Cell::new(0usize);
+    arm_err_drop(bomb_at);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      while let Ok(Some(_)) = txn.next() {
+        taken.set(taken.get() + 1);
+      }
+    }));
+    built.set(check_errs_built());
+    drops.set(disarm_err_drop());
+    match (caught.is_err(), exit) {
+      (true, CaughtExit::Decline) => None,
+      _ => Some(taken.get()),
+    }
+  });
+  (
+    (
+      kept.unwrap_or(0),
+      built.get(),
+      inp.scanner_trip_snapshot() - base,
+      inp.is_poisoned(),
+      bomb_fired(),
+    ),
+    drops.get(),
+  )
+}
+
+/// The trip's half of *all or nothing*, in one place so it cannot drift from the budget's.
+///
+/// Either the unwind landed before `Lexer::check` answered `Err` — nothing is owed, and a
+/// re-entry re-lexes the same prefix against the same committed `L::State` and re-trips — or the
+/// answer was taken and **both** carriers are already published.
+///
+/// `poisoned` is deliberately not asserted, for the reason
+/// [`assert_refusal_is_all_or_nothing`] gives: the boundary is a lineage memo a declining attempt
+/// legitimately rolls back. The count is the carrier that has to survive either exit.
+fn assert_trip_is_all_or_nothing(n: usize, total: usize, exit: CaughtExit, t: Trip) {
+  let (kept, built, trips, poisoned, fired) = t;
+  assert!(
+    fired == 1,
+    "`Token::Error` drop #{n} of {total} on {exit:?}: the armed destructor was never reached \
+     ({fired} bombs fired), so this round measures nothing"
+  );
+  assert!(
+    (built >= 1) == (trips >= 1),
+    "`Token::Error` drop #{n} of {total} on {exit:?}: the trip is half-recorded — `Lexer::check` \
+     answered `Err` {built} time(s) and {trips} trip(s) were counted (the parse reported {kept} \
+     of 4 items, poisoned={poisoned}). `check()` answering `Err` IS the decision that the stop is \
+     terminal, so every durable fact it implies must already be published before any consumer \
+     destructor — including the destructor of the `Result` that carried the answer — can run"
+  );
+}
+
+/// **Plant.** No `Token::Error` destructor anywhere in a tripping round can leave the lexer's
+/// limit trip half-recorded.
+///
+/// Falsifying output, measured on `0f13f31`: the armed index that lands on the `Lexer::check`
+/// error — drop #2 of 3 — returns `(0, 1, 0, false, 1)` on a decline and `(2, 1, 0, false, 1)` on
+/// a commit. That second cell is the whole defect in one row: **a parse reporting two of four
+/// items as `Ok`, with `check()` having answered `Err` and neither terminal carrier written.**
+/// The `if lexer.check().is_err()` scrutinee is a temporary, and a temporary of the condition
+/// dies at the end of the condition — before the branch that publishes is even entered.
+///
+/// The sweep is over every index rather than that one, because an index is a thing a later edit
+/// silently re-aims: the round's other error destructors are the `Lexer::lex` error travelling
+/// into `classify` and out through the emitter, and both must stay all-or-nothing too.
+#[test]
+fn a_limit_trip_is_all_or_nothing_at_every_lexer_error_destructor() {
+  for exit in [CaughtExit::Decline, CaughtExit::Commit] {
+    let (clean, total) = trip_under_a_panicking_error_drop(0, exit);
+    assert!(
+      clean == (TRIP_LIMIT, 1, 1, true, 0) && total >= 1,
+      "the unarmed run must accept the two items below the tally, answer `Err` from `check()` \
+       once and publish one trip, over {total} `Token::Error` drops (saw {clean:?})"
+    );
+    for n in 1..=total {
+      let (t, _) = trip_under_a_panicking_error_drop(n, exit);
+      assert_trip_is_all_or_nothing(n, total, exit, t);
     }
   }
 }
