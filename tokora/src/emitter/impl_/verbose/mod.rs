@@ -445,6 +445,35 @@ where
   /// while an earlier zero-width error at the *same* offset is kept — a
   /// distinction the former span-end offset heuristic could not make. `cursor`
   /// is unused.
+  ///
+  /// # Caller code on the rollback path, and what that costs mid-unwind
+  ///
+  /// The storage is keyed by `S` and holds the caller's error values, so undoing an emission
+  /// means descending a `BTreeMap` with the caller's `S: Ord`, taking the group handle through
+  /// the caller's `S: Clone`, and then **destroying** what it detaches — the error payload, the
+  /// span key of a group that has emptied, and the span key inside the log entry that named it.
+  /// Comparison, clone and destructor are all caller code, and this method cannot suppress a
+  /// panic raised inside any of them. A generic parameter is the caller's type in every position
+  /// it appears, and destruction is one of those positions.
+  ///
+  /// Each unwound entry is **panic-atomic**: every descent is taken before anything moves, and
+  /// the pops, the emptied-group removals and the log pop that follow compare nothing, clone
+  /// nothing and destroy nothing — what they detach is carried past the log pop and released
+  /// only once the channel is consistent again. So a caught panic leaves the entry either
+  /// untouched (a comparison or a clone that unwinds) or completely unwound (a destructor that
+  /// unwinds), never half-undone, with [`checkpoint`](Emitter::checkpoint) matching whichever it
+  /// is, and a retried `rewind` still reaches the clean result. That is what a caller who
+  /// catches the unwind gets.
+  ///
+  /// It is not what [`Emitter::rewind`]'s mid-unwind clause asks for. That clause needs
+  /// *totality* — a rollback running from a guard's `Drop` while a panic is already in flight
+  /// cannot raise a second one — and no ordering inside this method can deliver totality while
+  /// the map is keyed by a type the caller supplies and stores values the caller owns. So: a
+  /// span type whose `Ord`, `Clone` or `Drop` can panic, or an error type whose `Drop` can
+  /// panic, gives up the crate's rollback-on-drop guarantee when paired with `Verbose`, and the
+  /// process aborts on that path. Every span and error type this crate ships is unaffected, and
+  /// so is any user type whose comparison, clone and destructor are total — which is the
+  /// ordinary case, not a concession.
   #[inline(always)]
   fn rewind(&mut self, cursor: &Cursor<'inp, '_, L>, checkpoint: u64)
   where
