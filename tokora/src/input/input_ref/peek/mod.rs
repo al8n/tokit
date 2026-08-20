@@ -439,8 +439,74 @@ where
       // The single lexing site, shared with the scanner: the token budget is asked HERE, in front
       // of `Lexer::lex`, so an exhausted ceiling funds no fill step at all. `AtCursor` is the
       // peek's frontier for the refusal exactly as it is for a trip.
-      let item = match self.lex_within_boundary(lexer, &mut lex_at, &AtCursor) {
-        LexStep::Item(item) => item,
+      //
+      // The item is classified INSIDE the arm that produced it, for the same reason `scan_with`
+      // does: a binding that outlives this match materialises the payload into a local at the
+      // join, and the copy is charged per token. The three exits are unchanged in kind and in
+      // order; only the nesting is.
+      match self.lex_within_boundary(lexer, &mut lex_at, &AtCursor) {
+        LexStep::Item(item) => {
+          // The one classifier ([`InputRef::classify`]), shared with the scanner: a terminal trip
+          // is probed and LATCHED before the frontier holdback can withhold anything, so a peek
+          // can no more disguise a limit trip as "more input may help" than a consume can.
+          // `AtCursor` is the peek's frontier — a peek commits no progress, so a trip latches at
+          // the cursor, which during a fill is the end of the newest RETAINED token (the staged
+          // overflow is not durable; see the truncation below).
+          match self.classify(lexer, &AtCursor, item) {
+            // Frontier holdback (partial, non-final), reached only by a NON-terminal item: it may
+            // extend with more input, so it must never enter the cache — a later `next()` serves
+            // cached tokens without re-lexing, which would bypass the scan-path holdback — nor be
+            // emitted. Stop filling and withhold it; the peek returns a short window, and the
+            // Incomplete surfaces when a consume path re-lexes the frontier via `scan_with`. This
+            // preserves the invariant that the cache never holds a frontier token in this mode.
+            // Const-gated: `Complete::PARTIAL` is `false`, so `classify` never builds this verdict
+            // on the complete path and the arm is eliminated at monomorphization.
+            Verdict::Withheld(_) => break,
+            Verdict::Trip(err) => {
+              // A limit trip is sticky, and `classify` has already latched the durable frontier —
+              // so this (possibly fatal) emit cannot lose it: the failing return below carries the
+              // latch into every later operation.
+              if let Err(err) = self.emit_lexer_error_deduped(err) {
+                // Unstage before propagating. Nothing but the staged tokens has been pushed yet,
+                // so `buf` holds exactly `buf_len + staged` entries and truncating to `buf_len`
+                // drops each staged token exactly once (the deque owns them) and hands the
+                // caller's buffer back byte-for-byte as it arrived — the same observable the
+                // discarded staging buffer used to produce.
+                buf.truncate(buf_len);
+                return Err(err);
+              }
+              tripped = true;
+              break;
+            }
+            Verdict::Error(err) => {
+              // Emit immediately regardless of cache fullness so an error in the
+              // overflow region is never silently dropped. The dedup mark keeps a
+              // later consume that re-lexes this region from reporting it twice.
+              if let Err(err) = self.emit_lexer_error_deduped(err) {
+                // Unstage before propagating; see the `Trip` arm for why `buf_len` is the exact
+                // pre-fill length here.
+                buf.truncate(buf_len);
+                return Err(err);
+              }
+            }
+            Verdict::Token(tok) => {
+              let cached = CachedToken::new(tok, lexer.state().clone());
+
+              // Try to cache the token; if cache is full, stage it for the output buffer
+              match self.cache_append(cached) {
+                Ok(()) => {
+                  in_cache += 1;
+                }
+                Err(ct) => {
+                  // Cache full: stage the overflow token at the tail of the output buffer.
+                  stage_overflow::<_, W::CAPACITY>(buf, Maybe::Owned(ct));
+                  staged += 1;
+                }
+              }
+              want -= 1;
+            }
+          }
+        }
         // Boundary already reached, or the lexer is exhausted: the fill simply stops short.
         LexStep::Stop => break,
         // The token budget refused to authorize the step, so no lexer ran.
@@ -450,66 +516,6 @@ where
         LexStep::Exhausted => {
           tripped = true;
           break;
-        }
-      };
-      // The one classifier ([`InputRef::classify`]), shared with the scanner: a terminal trip is
-      // probed and LATCHED before the frontier holdback can withhold anything, so a peek can no
-      // more disguise a limit trip as "more input may help" than a consume can. `AtCursor` is the
-      // peek's frontier — a peek commits no progress, so a trip latches at the cursor, which
-      // during a fill is the end of the newest RETAINED token (the staged overflow is not
-      // durable; see the truncation below).
-      match self.classify(lexer, &AtCursor, item) {
-        // Frontier holdback (partial, non-final), reached only by a NON-terminal item: it may
-        // extend with more input, so it must never enter the cache — a later `next()` serves
-        // cached tokens without re-lexing, which would bypass the scan-path holdback — nor be
-        // emitted. Stop filling and withhold it; the peek returns a short window, and the
-        // Incomplete surfaces when a consume path re-lexes the frontier via `scan_with`. This
-        // preserves the invariant that the cache never holds a frontier token in this mode.
-        // Const-gated: `Complete::PARTIAL` is `false`, so `classify` never builds this verdict on
-        // the complete path and the arm is eliminated at monomorphization.
-        Verdict::Withheld(_) => break,
-        Verdict::Trip(err) => {
-          // A limit trip is sticky, and `classify` has already latched the durable frontier — so
-          // this (possibly fatal) emit cannot lose it: the failing return below carries the latch
-          // into every later operation.
-          if let Err(err) = self.emit_lexer_error_deduped(err) {
-            // Unstage before propagating. Nothing but the staged tokens has been pushed yet, so
-            // `buf` holds exactly `buf_len + staged` entries and truncating to `buf_len` drops
-            // each staged token exactly once (the deque owns them) and hands the caller's buffer
-            // back byte-for-byte as it arrived — the same observable the discarded staging
-            // buffer used to produce.
-            buf.truncate(buf_len);
-            return Err(err);
-          }
-          tripped = true;
-          break;
-        }
-        Verdict::Error(err) => {
-          // Emit immediately regardless of cache fullness so an error in the
-          // overflow region is never silently dropped. The dedup mark keeps a
-          // later consume that re-lexes this region from reporting it twice.
-          if let Err(err) = self.emit_lexer_error_deduped(err) {
-            // Unstage before propagating; see the `Trip` arm for why `buf_len` is the exact
-            // pre-fill length here.
-            buf.truncate(buf_len);
-            return Err(err);
-          }
-        }
-        Verdict::Token(tok) => {
-          let cached = CachedToken::new(tok, lexer.state().clone());
-
-          // Try to cache the token; if cache is full, stage it for the output buffer
-          match self.cache_append(cached) {
-            Ok(()) => {
-              in_cache += 1;
-            }
-            Err(ct) => {
-              // Cache full: stage the overflow token at the tail of the output buffer.
-              stage_overflow::<_, W::CAPACITY>(buf, Maybe::Owned(ct));
-              staged += 1;
-            }
-          }
-          want -= 1;
         }
       }
     }

@@ -1087,33 +1087,42 @@ where
         MetCeiling::Exhausted => LexStep::Exhausted,
       };
     }
-    let Some(produced) = lexer.lex() else {
+    // The item is consumed INSIDE the arm that produces it, not bound out of a `let-else` and used
+    // after the join. The two are semantically identical and they are not the same code: a binding
+    // that outlives the match materialises the payload into a local at the join point, and at this
+    // payload's size LLVM does not fold the copy back out — see the note on `scan_with`'s loop for
+    // the measurement. Nothing here may be lifted out of the arm.
+    match lexer.lex() {
       // The lexer is exhausted. Nothing was produced, so nothing is charged — the budget's unit is
       // the item, and this step has none.
-      return LexStep::Stop;
-    };
-    // CHARGE, and only now: an item exists, and the preflight above authorized exactly this one.
-    //
-    // This is `Lexer::lex`'s own answer, not `Lexed::lex_spanned`'s. The wrapper reads
-    // `Lexer::span` before it returns, and that call is caller code that may unwind out of here
-    // carrying the charge for an item the lexer has already produced — see the section above.
-    self.token_budget.spend();
-    // The item is assembled AFTER the charge, so every caller-implemented step it takes —
-    // `Lexer::span`, and the destructors of anything the conversion moves — runs against a budget
-    // that already accounts for the work.
-    let lexed = Spanned::new(lexer.span(), Lexed::<L::Token>::from(produced));
-    // Lexer contract: every lexed item has a nonempty span. The span wraps both the
-    // `Token` and `Error` variants here, and this is the input layer's only lexing
-    // site, so this one check guards every scanner and peek path. A zero-width span at
-    // the poison boundary would be excluded by the positional gate yet advance nothing,
-    // silently breaking replay and termination; catch it loudly in debug builds.
-    debug_assert!(
-      lexed.span_ref().end_ref() > lexed.span_ref().start_ref(),
-      "lexer contract violation: zero-width token span {:?}",
-      lexed.span_ref(),
-    );
-    *lex_at = lexed.span_ref().end_ref().clone();
-    LexStep::Item(lexed)
+      None => LexStep::Stop,
+      Some(produced) => {
+        // CHARGE, and only now: an item exists, and the preflight above authorized exactly this
+        // one.
+        //
+        // This is `Lexer::lex`'s own answer, not `Lexed::lex_spanned`'s. The wrapper reads
+        // `Lexer::span` before it returns, and that call is caller code that may unwind out of
+        // here carrying the charge for an item the lexer has already produced — see the section
+        // above.
+        self.token_budget.spend();
+        // The item is assembled AFTER the charge, so every caller-implemented step it takes —
+        // `Lexer::span`, and the destructors of anything the conversion moves — runs against a
+        // budget that already accounts for the work.
+        let lexed = Spanned::new(lexer.span(), Lexed::<L::Token>::from(produced));
+        // Lexer contract: every lexed item has a nonempty span. The span wraps both the
+        // `Token` and `Error` variants here, and this is the input layer's only lexing
+        // site, so this one check guards every scanner and peek path. A zero-width span at
+        // the poison boundary would be excluded by the positional gate yet advance nothing,
+        // silently breaking replay and termination; catch it loudly in debug builds.
+        debug_assert!(
+          lexed.span_ref().end_ref() > lexed.span_ref().start_ref(),
+          "lexer contract violation: zero-width token span {:?}",
+          lexed.span_ref(),
+        );
+        *lex_at = lexed.span_ref().end_ref().clone();
+        LexStep::Item(lexed)
+      }
+    }
   }
 
   /// The cold half of [`lex_within_boundary`](Self::lex_within_boundary): the ceiling is met, and
@@ -4064,8 +4073,41 @@ where
     let mut lex_at = at_slot.clone();
     let result = 'scan: {
       loop {
-        let item = match self.lex_within_boundary(lexer, &mut lex_at, frontier) {
-          LexStep::Item(item) => item,
+        // The item is classified INSIDE the arm that produced it. Binding it out of this match and
+        // classifying after the join is the same program and not the same code: the binding
+        // materialises the payload into a local at the join, and this function then carries +72
+        // `str` and +33 `mov.16b` — an extra per-token copy of the lexed item — for +3.4 % on the
+        // whole parse. The three exits below are the same three in the same order; only the
+        // nesting changed, and nothing may be hoisted back out of the `Item` arm.
+        match self.lex_within_boundary(lexer, &mut lex_at, frontier) {
+          LexStep::Item(item) => match self.classify(lexer, frontier, item) {
+            Verdict::Token(tok) => break 'scan Ok(Scan::Token(tok)),
+            // A terminal trip: the poison boundary is already latched, so even the fatal exit
+            // below keeps it. Emit the diagnostic and stop — this arm runs whether or not the
+            // tripping token sits on the frontier, which is the whole of the law.
+            Verdict::Trip(err) => {
+              break 'scan match self.emit_lexer_error_deduped(err) {
+                Ok(()) => Ok(Scan::Tripped),
+                Err(e) => Err(self.settle_fatal(lexer, e)),
+              };
+            }
+            Verdict::Error(err) => match self.emit_lexer_error_deduped(err) {
+              Ok(()) => {
+                // Non-limit error: skip over it and keep scanning for a token. The frontier does
+                // NOT move — an error is not a token. `lex_at` already carries the scan past it,
+                // and the token this loop goes on to find carries the post-error lexer state, so
+                // the position is threaded by the same two things that thread it everywhere else.
+                // Settling the error behind the frontier would put its span into `self.span` —
+                // which every other path in this crate reserves for the last consumed TOKEN — and,
+                // worse, would make that span depend on WHO crossed the error: a scan crosses it
+                // and would move; a *peek* that lexed the same region into the cache never can.
+                // See `AtFrontier`.
+              }
+              Err(e) => break 'scan Err(self.settle_fatal(lexer, e)),
+            },
+            // The holdback, reached only by a non-terminal item (see `classify`).
+            Verdict::Withheld(at) => break 'scan Err(Cmpl::surface_incomplete(at)),
+          },
           // Boundary already reached, or the lexer is exhausted: fall through to the
           // end-of-input handling below, which decides which of the two it was.
           LexStep::Stop => break,
@@ -4074,34 +4116,6 @@ where
           // so this takes the identical exit a `Trip` whose diagnostic the emitter accepted takes
           // — there is simply no diagnostic to offer first, and no item it could describe.
           LexStep::Exhausted => break 'scan Ok(Scan::Tripped),
-        };
-        match self.classify(lexer, frontier, item) {
-          Verdict::Token(tok) => break 'scan Ok(Scan::Token(tok)),
-          // A terminal trip: the poison boundary is already latched, so even the fatal exit below
-          // keeps it. Emit the diagnostic and stop — this arm runs whether or not the tripping
-          // token sits on the frontier, which is the whole of the law.
-          Verdict::Trip(err) => {
-            break 'scan match self.emit_lexer_error_deduped(err) {
-              Ok(()) => Ok(Scan::Tripped),
-              Err(e) => Err(self.settle_fatal(lexer, e)),
-            };
-          }
-          Verdict::Error(err) => match self.emit_lexer_error_deduped(err) {
-            Ok(()) => {
-              // Non-limit error: skip over it and keep scanning for a token. The frontier does NOT
-              // move — an error is not a token. `lex_at` already carries the scan past it, and the
-              // token this loop goes on to find carries the post-error lexer state, so the
-              // position is threaded by the same two things that thread it everywhere else.
-              // Settling the error behind the frontier would put its span into `self.span` — which
-              // every other path in this crate reserves for the last consumed TOKEN — and, worse,
-              // would make that span depend on WHO crossed the error: a scan crosses it and would
-              // move; a *peek* that lexed the same region into the cache never can. See
-              // `AtFrontier`.
-            }
-            Err(e) => break 'scan Err(self.settle_fatal(lexer, e)),
-          },
-          // The holdback, reached only by a non-terminal item (see `classify`).
-          Verdict::Withheld(at) => break 'scan Err(Cmpl::surface_incomplete(at)),
         }
       }
 
