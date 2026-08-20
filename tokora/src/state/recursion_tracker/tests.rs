@@ -102,6 +102,43 @@ fn enabling_stacker_does_not_move_the_shared_default() {
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// The number the derivation gives when it is pointed at the door the budget is spent on
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Same job as the four cells above and for the same reason: `policy` derives these from
+// `measured`, so a literal is the only statement made from OUTSIDE the derivation. It matters more
+// here than for a shipped cell, because nothing else in the tree reads either constant — the
+// compile-time relations beside them pin what the numbers must be *relative to* the measured rows,
+// and these two pin what they are.
+//
+// Unconditional rather than keyed on `debug_assertions`: both are derived from their own measured
+// row in every build, and neither is selected by the profile flag.
+
+/// What repointing [`PARSE_DEFAULT_DEBUG`](super::policy::PARSE_DEFAULT_DEBUG) at the lossless row
+/// produces — and it is not what the issue that found the mis-pointing inferred.
+#[test]
+fn the_repointed_debug_default_is_128() {
+  assert_eq!(
+    super::policy::PARSE_DEFAULT_DEBUG_ON_THE_LOSSLESS_ROW,
+    128,
+    "the derivation over the lossless row no longer produces 128. Either the row was re-measured \
+     — in which case this literal is the second half of that edit — or MIN_HEADROOM moved, in \
+     which case the shipped default moved too and the four cells above should have reddened first."
+  );
+}
+
+/// The release twin, and the first release figure in this file that is a derivation rather than a
+/// floor.
+#[test]
+fn the_repointed_release_default_is_1024() {
+  assert_eq!(
+    super::policy::PARSE_DEFAULT_RELEASE_ON_THE_LOSSLESS_ROW,
+    1024,
+    "the derivation over the release lossless row no longer produces 1024"
+  );
+}
+
 #[test]
 fn recursion_increase_saturates_at_max() {
   // At the ceiling `increase` must saturate rather than overflow-panic,

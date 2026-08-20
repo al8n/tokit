@@ -481,7 +481,8 @@ const MEASUREMENT_STACK: usize = 2 * 1024 * 1024;
 /// This is what makes the cell below a statement about a *stack* rather than about a counter. A
 /// frame of a handful of bytes would let any budget whatever fit in 2 MiB, and the cell would pass
 /// for a build in which the shared default was 1024.
-const HEAVY_LEVEL: usize = crate::state::recursion_tracker::measured::CONSUMER_BYTES_PER_LEVEL;
+const HEAVY_LEVEL: usize =
+  crate::state::recursion_tracker::measured::CONSUMER_SYNTACTIC_BYTES_PER_LEVEL;
 
 /// How deep [`heavy`] is willing to go before giving up and returning `Ok`.
 ///
