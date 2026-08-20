@@ -1207,6 +1207,56 @@ and will red until they do.
   against its own crate's `default` at the version `Cargo.lock` resolves; tinyvec's was the only
   empty one.
 
+- **Two quadratic scans in the lossless CST sink, one of them in release builds** (#250, #253).
+  Both were `Theta(n^2)` in the size of an ordinary parse, neither needed malformed input,
+  backtracking or the raw surface, and neither was visible to any output-tree test — the first
+  wrote nothing at all and the second recomputed a value it already agreed with.
+
+  **`Sink::wrap_hole` walked the whole retro-wrap undo journal on every recovery hole** (#250),
+  bumping two indices per entry. Both branch conditions are unreachable, and the loop's own comment
+  said so — which is exactly why deleting it needed a proof rather than a quotation, since a wrong
+  proof here does not cost time, it silently renames journal indices. The proof is now written at
+  the site and stands on two facts about the code rather than on today's producers: `cst_start_at`
+  is the only producer and its `validate_mark` in-bounds check makes `index < at_len - 1`
+  structurally, so every live entry has a `StartAt` standing at `at_len - 1`; and the backward scan
+  that computes the splice point `at` breaks on anything that is not a `Token` or a `Diag`, so
+  every index at or above `at` is one of those two and a `StartAt` is neither. Hence
+  `at_len <= at` and `index < at`, for every entry, in every reachable state — recovery inside a
+  Pratt fold, a partial session, a rewound checkpoint. Measured before the fix at exactly `J x H`
+  journal visits with `J` retro-wraps and `H` holes (4.00x per doubling, both profiles); the same
+  shape at `J = H = 4096` is **8.8x faster in release** and **10.9x in debug**, and both curves are
+  now linear. What replaces the loop is a `debug_assert` on the **newest** entry only — `O(1)`, not
+  the `O(J)` an `iter().all()` would cost — which decides the whole journal because `at_len` is
+  strictly increasing, and that ordering is itself now pinned by a `debug_assert` at the push.
+
+  **`Sink::cst_finish` recomputed the open-node depth from the event suffix on every close**
+  (#253), inside its global-underflow `debug_assert!`. The recount is anchored at the newest
+  emitter checkpoint or released floor, and the CST channel mints neither: the blessed `node()`
+  bracket takes no emitter checkpoint, so a predictive grammar of flat sibling nodes rescanned the
+  whole accumulated prefix once per node — `3n(n - 1)/2 + 2n` event visits, measured exactly, both
+  at the sink and end to end through `cst::parse_lossless` (4.00x per doubling). Release builds
+  compiled the assert out, so this was a debug, test, tooling and fuzzing cost, including the
+  default `cargo test` profile — and the fix had to add nothing to release. Depth is now a
+  maintained scalar rather than a recount, restored at a truncating rewind from the frozen depth
+  the target row already carried (or `0` at the origin), and left alone by every rewind that
+  truncates nothing. 16 384 flat siblings went from **2.09 s to 0.58 ms in debug**, curve `3.94x`
+  to `1.99x`; release is unchanged in behaviour and now pays `O(1)` at `Emitter::checkpoint` too,
+  which used to carry the same recount in every build.
+
+  The module's standing claim that depth is *"derived, never cached — a cached counter would need
+  its own restore rule"* is retired with the recount: the restore rule turned out to be three lines
+  the rewind contract had already forced into existence. What keeps the scalar exact is arity, not
+  discipline — **one** helper appends to the event log and charges the event's own `depth_delta`,
+  the one non-append mutation charges its two halves at its own site, and `DEPTH_CENSUS` fails the
+  build if a second `events.push` or `events.insert` appears. The equivalence to a full recount is
+  pinned across nesting, retro-wraps, demotes, hole wraps, raw injection, released floors and all
+  four rewind arms. The global-underflow check stays a `debug_assert` even though it is now free:
+  release refuses the same misuse typed through both finish doors, and a typed refusal a host can
+  catch is a stronger wall for a library than a panic.
+
+  No public API moved. The released-floor memo shrank from a whole mark-stack row to its mark,
+  because the depth half stopped having a reader.
+
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
 #247 removes `Errors`' `DerefMut` and replaces the three legitimate uses it served with inherent

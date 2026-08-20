@@ -8063,3 +8063,282 @@ fn cst_carries_the_trivia_policy_to_materialization() {
 // pin is `an_orphan_view_wrapper_carries_a_foreign_lexer_error_but_licenses_no_gap` in
 // `tests/parser_node.rs`, with the event-level statement at
 // `only_the_input_layers_lexer_error_carries_a_coverage_span` above.
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// E5 — the maintained open-node depth (al8n/tokora#253) and the journal theorem (#250)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The scalar against the oracle, after every step of whatever the caller just did.
+#[track_caller]
+fn depth_matches_oracle(sink: &VerboseSink<'_>, at: &str) {
+  assert_eq!(
+    sink.depth(),
+    sink.recount_depth(),
+    "the maintained depth drifted from a full recount after {at}"
+  );
+}
+
+/// DEPTH_CENSUS — the source lock behind E5's exactness claim. The scalar cannot drift by
+/// omission only while **one** site appends to the log and **one** site splices it, each
+/// charging the event's own `depth_delta`. A second `events.push` is exactly the shape that
+/// makes a maintained counter wrong, and it is invisible to every output-tree test.
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "reads crate source and string-matches: no UB surface, and miri interprets every byte"
+)]
+fn depth_census_one_append_door_and_one_splice() {
+  let src = include_str!("../sink.rs");
+
+  assert_eq!(
+    count(src, "self.events.push("),
+    1,
+    "DEPTH_CENSUS drift: the event log has exactly ONE append door (`push_event`), which is \
+     where E5 is charged. A second push appends an event whose depth_delta nobody counted."
+  );
+  assert_eq!(
+    count(src, "fn push_event"),
+    1,
+    "DEPTH_CENSUS drift: the one append door must be defined exactly once"
+  );
+  assert_eq!(
+    count(src, "self.events.insert("),
+    1,
+    "DEPTH_CENSUS drift: the hole wrap's prefix-preserving splice is the ONE log mutation \
+     that is not an append, and it charges its own half of the wrap"
+  );
+  assert_eq!(
+    count(src, "self.depth +="),
+    2,
+    "DEPTH_CENSUS drift: E5 is charged in exactly two places — the append door and the hole \
+     wrap's spliced StartNode"
+  );
+  assert_eq!(
+    count(src, "self.depth = "),
+    1,
+    "DEPTH_CENSUS drift: E5 is RESTORED in exactly one place — the truncating arm of rewind, \
+     from the spent row's frozen depth"
+  );
+  // #250: the deleted fix-up must stay deleted. A journal walk here is Theta(J) per hole and
+  // provably writes nothing (see the theorem at the splice).
+  assert_eq!(
+    count(src, "for entry in &mut self.journal"),
+    0,
+    "al8n/tokora#250 regressed: wrap_hole is walking the undo journal again. Every entry's \
+     StartAt sits strictly below the splice point, so the walk is Theta(J x H) of provably \
+     dead work — the O(1) newest-entry assert is what pins that."
+  );
+}
+
+/// Every write and restore path for E5, checked against the full recount after each step:
+/// nesting, tombstones, retro-wraps, demotes, tokens, diagnostics, and a hole wrap.
+#[test]
+fn depth_tracks_the_recount_across_every_emission_shape() {
+  let mut sink = verbose_sink("abcd");
+  depth_matches_oracle(&sink, "construction");
+  assert_eq!(sink.depth(), 0, "an empty log has no open node");
+
+  sink.cst_start(K_LIST);
+  depth_matches_oracle(&sink, "cst_start");
+  assert_eq!(sink.depth(), 1);
+
+  let tomb = sink.cst_mark();
+  depth_matches_oracle(&sink, "cst_mark (an inert tombstone: delta 0)");
+  assert_eq!(
+    sink.depth(),
+    1,
+    "a tombstone opens nothing until it is spent"
+  );
+
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  depth_matches_oracle(&sink, "record_token");
+
+  emit_error(&mut sink, 0, 1);
+  depth_matches_oracle(&sink, "a forwarded diagnostic");
+
+  sink.cst_start_at(tomb, K_WRAP);
+  depth_matches_oracle(&sink, "cst_start_at (a retro-wrap: delta +1)");
+  assert_eq!(sink.depth(), 2);
+  sink.cst_finish(K_WRAP);
+  depth_matches_oracle(&sink, "the retro-wrap's finish");
+  assert_eq!(sink.depth(), 1);
+
+  let start = sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+  sink.cst_demote(start, K_NODE);
+  depth_matches_oracle(&sink, "cst_demote (the failing exit: delta -1)");
+  assert_eq!(sink.depth(), 1, "Start(+1) … Demote(-1) nets zero");
+
+  sink.record_token(&MiniTok(b'c'), &span(2, 3));
+  Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(2, 3), 1)
+    .expect("verbose emitters collect");
+  depth_matches_oracle(&sink, "a hole wrap (Start + Finish: net zero)");
+  assert_eq!(sink.depth(), 1, "the hole wrap is depth-neutral");
+
+  sink.cst_finish(K_LIST);
+  depth_matches_oracle(&sink, "the outermost finish");
+  assert_eq!(sink.depth(), 0);
+}
+
+/// Deep nesting, then unwound: the scalar must be exact at every level in both directions.
+#[test]
+fn depth_tracks_the_recount_across_deep_nesting() {
+  const D: usize = 64;
+  let mut sink = verbose_sink("");
+  for i in 0..D {
+    sink.cst_start(K_NODE);
+    assert_eq!(sink.depth(), i as i64 + 1);
+    depth_matches_oracle(&sink, "a nested start");
+  }
+  for i in (0..D).rev() {
+    sink.cst_finish(K_NODE);
+    assert_eq!(sink.depth(), i as i64);
+    depth_matches_oracle(&sink, "a nested finish");
+  }
+}
+
+/// The four arms of `rewind`, each restoring E5 the way its own contract says it must:
+/// a spent row's frozen depth, the origin's zero, and the two arms that truncate nothing.
+#[test]
+fn depth_restores_across_every_rewind_arm() {
+  // (1) A truncating rewind onto a captured row: the row's frozen depth.
+  let mut sink = verbose_sink("ab");
+  sink.cst_start(K_LIST);
+  sink.cst_start(K_NODE);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
+  assert_eq!(sink.depth(), 2, "the row froze depth 2");
+  sink.cst_start(K_WRAP);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  assert_eq!(sink.depth(), 3);
+  rewind(&mut sink, ckp);
+  depth_matches_oracle(&sink, "a truncating rewind onto a captured row");
+  assert_eq!(sink.depth(), 2, "the abandoned branch's open node is gone");
+
+  // Regrowth over the rewound region stays exact.
+  sink.cst_start(K_WRAP);
+  sink.cst_finish(K_WRAP);
+  depth_matches_oracle(&sink, "regrowth after a rewind");
+  assert_eq!(sink.depth(), 2);
+
+  // (2) Rewind to the ORIGIN with no row: depth 0, the empty log's own value.
+  let mut sink = verbose_sink("ab");
+  sink.cst_start(K_LIST);
+  sink.cst_start(K_NODE);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  assert_eq!(sink.depth(), 2);
+  rewind(&mut sink, 0);
+  depth_matches_oracle(&sink, "a no-row unwind to the origin");
+  assert_eq!(sink.depth(), 0);
+  assert!(sink.events().is_empty());
+
+  // (3) Rewind to CURRENT length: truncates nothing, so the scalar is already right.
+  let mut sink = verbose_sink("ab");
+  sink.cst_start(K_LIST);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
+  rewind(&mut sink, ckp);
+  depth_matches_oracle(&sink, "a rewind-to-current");
+  assert_eq!(sink.depth(), 1, "the still-open node stays open");
+
+  // (4) An out-of-range FUTURE mark: a total no-op on every channel, E5 included.
+  let mut sink = verbose_sink("ab");
+  sink.cst_start(K_LIST);
+  sink.cst_start(K_NODE);
+  rewind(&mut sink, 999);
+  depth_matches_oracle(&sink, "an out-of-range future mark");
+  assert_eq!(sink.depth(), 2, "a future mark rewinds nothing");
+}
+
+/// A released row promotes the floor and spends no depth: `release` touches no event, so E5
+/// must be untouched by it — and a later rewind below the released mark must still restore
+/// from the surviving row rather than from the floor.
+#[test]
+fn depth_survives_release_and_a_rewind_below_the_released_floor() {
+  let mut sink = verbose_sink("abc");
+  sink.cst_start(K_LIST);
+  let outer = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
+  sink.cst_start(K_NODE);
+  let inner = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  Emitter::<MiniLexer<'_>>::release(&mut sink, inner);
+  depth_matches_oracle(&sink, "release");
+  assert_eq!(sink.depth(), 2, "a kept branch changes no event");
+
+  sink.cst_start(K_WRAP);
+  assert_eq!(sink.depth(), 3);
+  rewind(&mut sink, outer);
+  depth_matches_oracle(&sink, "a rewind below the released floor");
+  assert_eq!(sink.depth(), 1);
+}
+
+/// The raw injection hook charges E5 like every other append — the shapes it builds are
+/// exactly the corrupt ones the oracle most needs to agree about.
+#[test]
+fn depth_tracks_the_recount_across_raw_injection() {
+  let mut sink = verbose_sink("");
+  sink.push_raw_event_for_tests(Event::StartNode {
+    kind: K_NODE,
+    forward_parent: None,
+  });
+  depth_matches_oracle(&sink, "an injected StartNode");
+  sink.push_raw_event_for_tests(Event::FinishNode { kind: K_NODE });
+  depth_matches_oracle(&sink, "an injected FinishNode");
+  // The orphan finish the emission door refuses: the scalar goes negative, which is why E5 is
+  // signed — an unsigned cell would wrap and hide exactly the state the check looks for.
+  sink.push_raw_event_for_tests(Event::FinishNode { kind: K_NODE });
+  depth_matches_oracle(&sink, "an injected orphan finish");
+  assert_eq!(sink.depth(), -1);
+}
+
+/// al8n/tokora#250 — the undo journal stays exact across a hole wrap with **no** fix-up pass.
+/// The proof is that every entry's `StartAt` sits strictly below the splice point; this is the
+/// executable half: wrap a hole above a live retro-wrap chain, then rewind below the chain and
+/// require the journal to restore the tombstone's `forward_parent` to what it was.
+#[test]
+fn a_hole_wrap_leaves_the_undo_journal_exact_without_a_fixup() {
+  let mut sink = verbose_sink("abcd");
+  let tomb = sink.cst_mark();
+  assert_eq!(sink.forward_parent_at(0), None);
+
+  // Two same-target retro-wraps: two live journal entries, the chain head on the tombstone.
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  sink.cst_start_at(tomb, K_WRAP);
+  sink.cst_finish(K_WRAP);
+  let after_first = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
+  let head_after_first = sink.forward_parent_at(0);
+  sink.cst_start_at(tomb, K_WRAP);
+  sink.cst_finish(K_WRAP);
+  assert_eq!(sink.journal_len(), 2, "two live journaled writes");
+
+  // A recovery hole above them: one token, wrapped in place.
+  sink.record_token(&MiniTok(b'b'), &span(1, 2));
+  let before = sink.events().len();
+  Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(1, 2), 1)
+    .expect("verbose emitters collect");
+  assert_eq!(
+    sink.events().len(),
+    before + 3,
+    "the wrap splices a StartNode, appends a FinishNode, and the report takes a Diag slot"
+  );
+  assert_eq!(
+    sink.journal_len(),
+    2,
+    "a hole wrap neither adds nor drops a journaled write"
+  );
+  depth_matches_oracle(&sink, "a hole wrap above a live retro-wrap chain");
+
+  // The entries still name what they named: rewinding below the SECOND wrap must restore the
+  // chain head the FIRST wrap left. A journal index renamed by the splice would restore the
+  // wrong slot (or none) and leave the tombstone pointing at a wrap that no longer exists.
+  rewind(&mut sink, after_first);
+  assert_eq!(
+    sink.forward_parent_at(0),
+    head_after_first,
+    "the undo journal restored the exact chain head the first wrap left"
+  );
+  assert_eq!(sink.journal_len(), 1, "the second wrap's entry popped");
+
+  // And all the way down: the tombstone comes back unwrapped.
+  rewind(&mut sink, 0);
+  assert_eq!(sink.journal_len(), 0);
+  assert_eq!(sink.depth(), 0);
+}
