@@ -426,6 +426,18 @@ pub(crate) mod measured {
   /// being the looser of the two is what a cheaper frame means rather than evidence of an edit.
   pub(crate) const TOKORA_ABORTS_AT: usize = 125;
 
+  /// The tightest cell of **tokora's own release table** — the typed driver, 3 871 frames at
+  /// ~0.53 KiB against the token driver's 4 247 at ~0.48 KiB.
+  ///
+  /// A constant rather than only a row in [`RecursionLimiter`]'s own doc table, because a release
+  /// derivation has to read it and a figure that exists only in prose is the thing this module
+  /// stopped doing. The two now cannot drift.
+  ///
+  /// **Note which driver binds, and that it is the other one.** Debug's tightest cell is the
+  /// *token* driver at 125; release's is the *typed* driver at 3 871. Optimisation reorders them,
+  /// which is the same lesson [`CONSUMER_LOSSLESS_RELEASE_ABORTS_AT`] records about shapes.
+  pub(crate) const TOKORA_RELEASE_ABORTS_AT: usize = 3871;
+
   /// The thread every figure is stated on, and the one `std::thread::spawn` hands out.
   pub(crate) const STACK: usize = 2 * 1024 * 1024;
 
@@ -439,6 +451,43 @@ pub(crate) mod measured {
   /// [`SEGMENTED_PRATT_DEBUG`](super::policy::SEGMENTED_PRATT_DEBUG) by 16 as a side effect of
   /// fixing an unrelated default.
   pub(crate) const CONSUMER_SYNTACTIC_BYTES_PER_LEVEL: usize = STACK / CONSUMER_SYNTACTIC_ABORTS_AT;
+
+  /// **The release sweep of the syntactic row**, which this module recorded as owed for four
+  /// revisions and which never existed until now — the binding cell of four of its five axes.
+  ///
+  /// Same instrument, same 2 MiB thread, same one-parse-per-process bisection;
+  /// `opt-level = 3`, `debug-assertions = false`, `overflow-checks = false`. Last depth that
+  /// returns / first that aborts:
+  ///
+  /// | cell (syntactic door, 2 MiB, release) | returns | aborts |
+  /// |---|---|---|
+  /// | GraphQL, inline fragments, `str`, aarch64 | 504 | 505 |
+  /// | GraphQLx, inline fragments, `str`, aarch64 | **471** | 472 |
+  /// | GraphQLx, generic angle brackets, `str`, aarch64 | 567 | 568 |
+  /// | GraphQL, inline fragments, `str`, x86_64 | 513 | 514 |
+  /// | GraphQLx, inline fragments, `str`, x86_64 | 490 | 491 |
+  ///
+  /// The fifth axis — a `bytes::Bytes` source backing — is **not** measured here. On the debug
+  /// table that backing cost 0.89x and was the binding cell; the same discount over 471 would be
+  /// about 419. That is an extrapolation and is deliberately not this constant.
+  ///
+  /// **What the missing axis can and cannot change.** This row is read only to price a *fit*, and
+  /// the fit is what fixes [`PARSE_DEFAULT_RELEASE`](super::policy::PARSE_DEFAULT_RELEASE) at 256:
+  /// the next power of two up needs this cell above 512, and the loosest axis measured is 505. So
+  /// the missing axis cannot raise the answer, and to lower it the true binding cell would have to
+  /// fall below 256 — a 1.8x miss, twice the spread the whole debug table showed. The answer is
+  /// robust to the axis that is absent, which is the only reason recording four is honest.
+  pub(crate) const CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT: usize = 471;
+
+  /// Bytes of native stack one level of the heaviest measured syntactic grammar spends in a
+  /// **release** build — derived from [`CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT`]. ~4.3 KiB, against
+  /// ~41 KiB debug, so a release level of the heavy population is 9.2x cheaper.
+  ///
+  /// It prices the release half of the *fit* tier. It deliberately does **not** reprice
+  /// [`SEGMENTED_PRATT_RELEASE`](super::policy::SEGMENTED_PRATT_RELEASE), which is a memory policy
+  /// over segments rather than a thread-stack bound and whose value is its own decision.
+  pub(crate) const CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL: usize =
+    STACK / CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT;
 
   /// Bytes of native stack one **descent** of that consumer's lossless door spends, debug —
   /// derived from [`CONSUMER_LOSSLESS_ABORTS_AT`] the same way. ~3.1 KiB.
@@ -876,7 +925,9 @@ const _: () = {
   use measured::{
     CONSUMER_DEEPEST_SHIPPED_DOCUMENT, CONSUMER_LOSSLESS_ABORTS_AT,
     CONSUMER_LOSSLESS_BYTES_PER_LEVEL, CONSUMER_LOSSLESS_RELEASE_ABORTS_AT,
-    CONSUMER_LOSSLESS_RELEASE_BYTES_PER_LEVEL, STACK, TOKORA_ABORTS_AT,
+    CONSUMER_LOSSLESS_RELEASE_BYTES_PER_LEVEL, CONSUMER_SYNTACTIC_ABORTS_AT,
+    CONSUMER_SYNTACTIC_BYTES_PER_LEVEL, CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT,
+    CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL, STACK, TOKORA_ABORTS_AT, TOKORA_RELEASE_ABORTS_AT,
   };
   use policy::{
     MIN_HEADROOM, MIN_MARGIN_TENTHS, PARSE_DEFAULT_DEBUG, PARSE_DEFAULT_DEBUG_ON_THE_LOSSLESS_ROW,
@@ -911,7 +962,7 @@ const _: () = {
   // converge, the argument for two rows has gone with them and this file needs re-reading rather
   // than a wider constant.
   assert!(
-    CONSUMER_LOSSLESS_ABORTS_AT > measured::CONSUMER_SYNTACTIC_ABORTS_AT * 4,
+    CONSUMER_LOSSLESS_ABORTS_AT > CONSUMER_SYNTACTIC_ABORTS_AT * 4,
     "the syntactic and lossless consumer rows have converged. They are readings of two different \
      doors whose per-level costs differ by roughly an order of magnitude, so convergence means a \
      row was edited rather than re-measured — see `measured`'s header for what each door spends."
@@ -926,11 +977,24 @@ const _: () = {
      lossless descent had become as expensive as a Pratt frame"
   );
   // A release descent is cheaper than a debug one, so more of them fit the same thread. The same
-  // standing order the shipped pair carries, on the row that now has both halves measured.
+  // standing order the shipped pair carries, stated once per row now that all three have both
+  // halves measured — tokora's own, the syntactic consumer's, and the lossless consumer's.
   assert!(
     CONSUMER_LOSSLESS_RELEASE_ABORTS_AT > CONSUMER_LOSSLESS_ABORTS_AT,
     "the release lossless row is at or below the debug one, which inverts the only thing known \
      about the two profiles"
+  );
+  assert!(
+    TOKORA_RELEASE_ABORTS_AT > TOKORA_ABORTS_AT,
+    "tokora's own release row is at or below its debug one, which inverts the only thing known \
+     about the two profiles"
+  );
+  assert!(
+    CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT > CONSUMER_SYNTACTIC_ABORTS_AT
+      && CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL < CONSUMER_SYNTACTIC_BYTES_PER_LEVEL,
+    "the release syntactic row is at or below the debug one, or its derived per-level cost is not \
+     the cheaper of the two — the second cannot disagree with the first unless one was written \
+     down rather than derived"
   );
 
   // **THE DIRECTION OF THE DEFECT.** The shipped default is derived from the wrong door, and this
