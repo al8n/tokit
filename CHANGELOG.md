@@ -734,6 +734,105 @@ and will red until they do.
 
 ### Fixed
 
+- **`Verbose` recorded and rewound through two `BTreeMap`s that unwinding caller code could leave
+  disagreeing — twice over a map descent that had not finished, and once over a value the rollback
+  destroyed on the spot** (#249, #254). A `BTreeMap` insertion is two operations, not one: `entry`
+  searches — which is the only part that runs the caller's `S: Ord` — and `or_default` then fills
+  the handle without comparing again. Both write paths fused them, so the *first* map was already
+  mutated when the second descent ran, and a span type whose comparison unwinds tore the pair
+  apart.
+
+  On the record side (#249) the residue was an **empty label group under a span key the payload
+  map does not have**, published through `Verbose::labels`, unreachable by `rewind` because no log
+  entry names it, and left in place by the rewind the previous matrix ran as part of its
+  assertion. Measured over the error, warning and skipped-region channels alike, arming the second
+  descent: `labels={…, BombSpan(25): [], …}` against a payload map still holding four keys. The
+  record path documented itself as leaving "no payload, no label entry and no log entry" two lines
+  above conceding that this residue "is publicly visible"; the code now meets the contract instead
+  of the contract retreating to the code.
+
+  On the rollback side (#254) `rewind_to` popped the log entry **first** and then ran two to four
+  further descents, each of which could unwind after the mark had already moved. The residues were
+  a sheared emitter that no later call repairs — `mark=0` with both maps still full, or a payload
+  group removed while its label group survived — and the shape differed between profiles, because
+  two of the six comparisons were `debug_assert` lookups that release does not run (six armable
+  comparisons in debug against four in release for a group that empties; four against two for one
+  that does not). Popping the log *last* around map work that is still fallible would have been
+  **worse**, not better: it leaves the log naming a slot the payload group no longer has, and
+  `Diagnostics` indexes by that slot. What makes the ordering safe is that the fallible half is
+  hoisted out of it.
+
+  **And hoisting the descents did not make the rest of the rollback infallible.** Taking both
+  handles first removes every comparison and every clone from the commit, but a commit that
+  *destroys* what it removes still runs caller code, because a generic parameter is the caller's
+  type in every position it appears and destruction is one of those positions. Discarding what
+  `Vec::pop` returns runs `Error::drop` after the payload group has been shortened and before the
+  label group has; `btree_map::OccupiedEntry::remove` runs `S::drop` on the key it throws away,
+  after one map has lost the span and before its twin has. Either leaves the log naming a slot or
+  a key that is no longer there, and `Diagnostics` indexes by exactly that — the corruption the
+  descent ordering was fixed to prevent, reached through the one kind of caller code the census
+  had not listed, because the commit had been *defined* as infallible and then not re-derived.
+  Swept across three channels, three rollback shapes and both record shapes, **38 of the 107
+  armed destructor positions corrupted the channel and 0 of the 216 comparison and clone
+  positions did** — the two emptied-group key removals on every channel including the
+  payload-less skipped-region one, and the payload destructor on the error and warning channels.
+  The destructor positions that stay clean are clean for a reason and are pinned as such rather
+  than fixed: the two `S::drop`s that `BTreeMap::entry` runs on a key it did not need to store
+  are above the commit point, and the `S::drop` from popping the log entry is below it.
+
+  Both paths now take **every** map handle before they mutate anything, and the rollback **moves
+  rather than destroys**: `pop_group` hands back the popped element and the whole removed entry
+  (`remove_entry`, not `remove`, so the key returns instead of being dropped), the popped
+  `LogEntry` joins them, and all of it is released only once both maps and the log name the same
+  emissions again. The commit therefore runs no caller code whatsoever — no comparison, no clone,
+  no destructor. The release is **per unwound entry, not per call**: a rollback that collected a
+  whole suffix would satisfy every state assertion while moving its destructors into a later
+  entry's unwind, where a panic is a second panic. A caught panic now leaves a record with
+  nothing written, and a rollback with the entry either untouched (a comparison or clone) or
+  completely unwound (a destructor); a retried `rewind` still reaches the clean result. The
+  rollback resolves its handles through owned keys, so `Store::rewind_to` gains `S: Clone`
+  (already required by the `Emitter` impl, so no public bound moves) and spends two descents per
+  unwound entry rather than two-to-four, dropping the two debug-only lookups as well — which is
+  also why the residue no longer differs by profile: with no `debug_assert` lookup left on the
+  path, the sweep measures identical call counts and identical verdicts in debug and release.
+
+  **The matrix is a sweep now, not a sample, and its axes are what the code does to a caller
+  value rather than what has already gone wrong.** The previous one armed a single hand-picked
+  comparison and then read only `payload_len` — it never looked at the map the failed operation
+  had actually mutated. Each cell now measures how many `S::Ord`, `S::Clone`, `S::drop` and
+  `Error::drop` calls its path makes and arms each of them in turn, comparing both maps, the mark
+  and the replay against what they were:
+  `record_{,warning_,hole_}is_atomic_under_a_panicking_{ord,span_clone}` and
+  `record_is_atomic_under_a_panicking_span_drop` over a fresh span and an existing one, and
+  `rewind_{,warning_,hole_}is_atomic_under_a_panicking_ord`,
+  `rewind_is_atomic_under_a_panicking_span_clone`, `rewind_is_atomic_under_a_panicking_span_drop`
+  and `rewind_is_atomic_under_a_panicking_payload_drop` over three rollback shapes — a group that
+  empties, a group that only shortens, and a multi-entry suffix where a panic can land after
+  earlier entries have already committed. Two things a state oracle cannot see get their own
+  cells. `the_cells_with_no_caller_destructor_have_none` pins at zero the paths that genuinely
+  destroy nothing — a record over a fresh span, a record's payload on any shape, the hole
+  channel's non-existent `Error` — so that "this cell measures nothing" stops being
+  indistinguishable from "this cell measures a property", which is how the destructor axis went
+  missing in the first place. And `an_escaping_panic_destroys_no_payload_on_the_way_out` pins the
+  *timing* of the release: the payload-destructor count sampled when a panic is raised must
+  already equal the count when it is caught, which is false for exactly the collected-suffix
+  shape and true for nothing else the state assertions distinguish.
+
+  **What is not fixed, and cannot be by ordering.** `Emitter::rewind` may run from a guard's
+  `Drop` while a panic is already unwinding, where a second panic aborts the process, and it is
+  reachable for `Verbose` (`ScanScope::drop` → `on_incomplete` → `InputRef::restore_entry`).
+  Atomicity is not totality: a rollback that descends a map keyed by a caller-supplied `S` and
+  destroys values the caller owns runs caller code no matter how it is ordered. Running none of
+  it would take both a group identifier the log carries instead of the span, and somewhere
+  outside the rollback to hand the removed values to — a `rewind` that returns `()` has nowhere.
+  This round does not move that boundary: caller destructors could already escape `rewind_to`
+  before it, they merely corrupted the channel on the way out. `Emitter::rewind`'s clause claimed
+  all built-in emitters were structurally non-panicking there — true of `Fatal`, `Silent` and
+  `Ignored`, whose rollbacks are empty, and never true of `Verbose` — and now says so, naming all
+  four kinds of caller code, as does `Verbose::rewind`'s own documentation. Every span and error
+  type this crate ships, and any user type whose `Ord`, `Clone` and `Drop` are total, is
+  unaffected.
+
 - **An at-limit refusal on a *second* entry could be decided and then not recorded, and the
   analysis that was supposed to have found it looked at the wrong set of sites.** Once the one-shot
   probe is spent, the input carries a **recorded** decision that it already refused an item — a

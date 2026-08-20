@@ -463,9 +463,26 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// in flight — including for a [`Commit`](crate::Commit)-policy guard, which takes the
   /// rollback arm on the unwind edge. A panic raised here mid-unwind is a double panic and
   /// aborts the process. The clause [`release`](Self::release) already carries applies in full:
-  /// stay observably total on the restore path. The built-in emitters are structurally
-  /// non-panicking there (truncations and pops); the crate's rollback-on-drop guarantee is
-  /// conditional on yours being too.
+  /// stay observably total on the restore path. The crate's rollback-on-drop guarantee is
+  /// conditional on yours being so.
+  ///
+  /// Most of the built-in emitters are structurally non-panicking there because their rollback
+  /// is *empty*: `Fatal`, `Silent` and `Ignored` keep nothing to unwind. `Verbose` is the
+  /// exception, and it is a generic one rather than an oversight. Its rollback resolves
+  /// span-keyed groups, so it runs the caller's `S: Ord` and, to take the group handles it
+  /// mutates through, the caller's `S: Clone`; and undoing an emission ends by *destroying* what
+  /// it removed, so it runs the caller's `S::drop` and the error payload's `Drop` as well. A
+  /// generic parameter is the caller's type in every position it appears, destruction included,
+  /// and none of those four can be suppressed from inside the rollback.
+  /// What it does guarantee is **atomicity**: a caught panic leaves it either exactly as it was
+  /// or with the entry completely unwound, never with a group out of step with the log or a mark
+  /// out of step with either. Atomicity is not totality, and it is totality that this clause
+  /// needs, so a span type whose `Ord`, `Clone` or `Drop` can panic — or an error type whose
+  /// `Drop` can panic — forfeits the rollback-on-drop guarantee for `Verbose`. A rollback that
+  /// runs no caller code at all would have to address its groups by an identifier the log
+  /// carries and hand the values it removes back to someone who can outlive the unwind, which is
+  /// not what a `BTreeMap` keyed by the span and a `rewind` that returns `()` offer. Span and
+  /// error types that cannot panic (every one this crate ships) are unaffected.
   ///
   /// The property that actually has to hold is **"never abort the process"**, and it binds
   /// only while an unwind is in progress. An implementation that can *detect* a settle
@@ -476,8 +493,9 @@ pub trait Emitter<'a, L, Lang: ?Sized = ()> {
   /// double-panic abort would be worse than either. The recording CST `Sink` is the one
   /// in-crate implementation that takes this door (the `rowan` feature), and its
   /// `rewind`'s `# Panics` section states exactly which condition and why. An emitter with
-  /// nothing to detect — every built-in one — simply inherits the stricter "never panics"
-  /// reading, unchanged.
+  /// nothing to detect — every built-in one — is simply held to the stricter "never panics"
+  /// reading, unchanged; whether it can *meet* that reading is the separate question the
+  /// paragraph above answers for `Verbose`, which detects nothing and still runs caller code.
   ///
   /// Two riders come with that door, and neither is optional.
   ///
