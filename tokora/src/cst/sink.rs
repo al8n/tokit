@@ -14,16 +14,43 @@
 //! | E2 | [`Sink::journal`] | **undo journal** (the Verbose-parallel-maps discipline lifted to events) | rewind pops entries written above the mark, reverse order, restoring each overwritten `forward_parent`; never grows on rewind |
 //! | E3 | [`Sink::ledger`] | **monotone era source + truncation witness** | rewind APPENDS to it (a rewind *is* a truncation) and never removes; rewinding it would false-accept a stale mark |
 //! | E4 | [`Sink::rows`] | **release stack + per-checkpoint depth ledger + inner reading** | push at `checkpoint()` (freezing the depth and the inner emitter's own checkpoint reading), pop at `release()` (kept) and `rewind()` (spent, the popped row's inner reading is the inner's rewind target); depth entries are frozen facts about prefixes, never live counters |
-//! | — | [`Sink::floor`] | derived memo (the newest released row) | reset to the surviving top row when a rewind drops below it |
+//! | E5 | [`Sink::depth`] | **live open-node depth** — the one value derived from the log that the sink maintains rather than recounts | every append charges the event's own `depth_delta`, through the ONE push helper the DEPTH_CENSUS pins; a truncating rewind **restores** it from the target row's frozen depth (or `0` at the origin), and a non-truncating one leaves it untouched |
+//! | — | [`Sink::floor_mark`] | derived memo (the newest released row's mark) | reset to the surviving top row's mark when a rewind drops below it |
 //! | — | [`Sink::base_inner`] | derived memo (the inner's construction-time reading) | primed at the first advancing touch (provably the construction reading), never restored (the exact no-row target at the origin only) |
 //! | — | [`Sink::degraded`] | **latching poison** (a rewind the sink refused to perform) | set — never cleared — by the one rewind that must degrade instead of report (an unpaired settle detected mid-unwind); a rewind cannot un-refuse an earlier refusal, so it is deliberately outside the rewind timeline |
 //! | — | `inner`, `source`, `profile`, `trivia` | configuration / the wrapped emitter | never touched by rewind (the inner rewinds through its own contract) |
 //! | — | `witness` | sink identity (validated at every mark spend, every build) | never restored |
 //!
-//! Open-node **depth is derived, never cached**: there is no live depth counter anywhere —
-//! [`checkpoint`](Emitter::checkpoint) snapshots a frozen per-row depth, and every query
-//! recounts the suffix above the nearest frozen fact. A cached counter would need its own
-//! restore rule; a derived one is restored by truncation for free.
+//! # Open-node depth: maintained, and what pays for the restore rule
+//!
+//! Depth used to be **recounted** on every query — sum the `depth_delta`s above the nearest
+//! frozen `(mark, depth)` fact — on the reasoning that a cached counter would need its own
+//! restore rule while a derived one is restored by truncation for free. The restore rule turned
+//! out to be free too, and the recount did not: the frozen facts are minted by
+//! [`checkpoint`](Emitter::checkpoint)/[`release`](Emitter::release), and nothing in the CST
+//! channel mints one. The blessed [`node`](crate::parser::node) bracket takes no emitter
+//! checkpoint, so a predictive grammar emitting `n` flat sibling nodes left `rows` empty and
+//! the floor at `0` and recounted the whole accumulated prefix once per close —
+//! `3n(n − 1)/2 + 2n` event visits for `n` siblings, measured exactly (al8n/tokora#253).
+//!
+//! So [`depth`](Sink::depth) is a live scalar now, and the restore rule is the three lines the
+//! rewind contract already forced into existence:
+//!
+//! - a rewind that truncates **to a captured row** takes that row's frozen `depth`, which is
+//!   the depth of exactly the prefix that survives;
+//! - a rewind that truncates **to the origin** takes `0` — an empty log has no open node;
+//! - every other rewind truncates nothing ([`rewind`](Emitter::rewind)'s future-mark guard, its
+//!   rewind-to-current arm, and its mid-unwind degradation), so the scalar is already right.
+//!
+//! The fourth case — a truncating rewind to a mid-log mark no row captured — has no restore
+//! value, and needs none: it is an unpaired settle, refused by the preflight in every build for
+//! the inner emitter's sake long before depth was a cell.
+//!
+//! What keeps the scalar exact is not discipline but arity: **one** helper appends to the log
+//! ([`push_event`](Sink::push_event)) and charges the event's own `depth_delta`, and the one
+//! non-append mutation (the hole wrap's splice) charges its two halves explicitly. DEPTH_CENSUS
+//! — a source lock in this module's tests, in the shape of CST_FORWARD_CENSUS — fails the build
+//! if a second `events.push` or `events.insert` appears.
 
 use core::{marker::PhantomData, num::NonZeroU32};
 
@@ -102,8 +129,12 @@ impl TriviaPolicy {
 struct MarkRow {
   /// The captured mark: the event-log length at capture time.
   mark: u64,
-  /// The derived open-node depth at capture time — a frozen fact about the `mark`-length
-  /// prefix, not a live counter.
+  /// The open-node depth at capture time — a frozen fact about the `mark`-length prefix,
+  /// snapshotted from [`Sink::depth`] and never touched again.
+  ///
+  /// This is what makes the live scalar restorable: a truncating rewind to this row's mark
+  /// leaves exactly the prefix this number describes, so the restore is a copy rather than a
+  /// recount (see the depth section in the module docs).
   depth: i64,
   /// The inner emitter's own checkpoint reading captured at this sink checkpoint. Handed
   /// back to `inner.rewind` when this row is the rewind target, restoring the inner to
@@ -120,19 +151,6 @@ struct MarkRow {
   /// `forward_diag` then captured `inner.checkpoint()` per diagnostic with no matching
   /// release.) See the *Inner-emitter contract* section on [`Sink`].
   inner: u64,
-}
-
-impl MarkRow {
-  /// The empty-buffer baseline: depth 0 at length 0, inner at its base reading 0.
-  ///
-  /// Floor sentinel only — the floor's `inner` is never a rewind target (the no-row **origin**
-  /// fallback is `base_inner`), so the 0 here stays inert even for a reused inner whose
-  /// construction reading is nonzero.
-  const ZERO: Self = Self {
-    mark: 0,
-    depth: 0,
-    inner: 0,
-  };
 }
 
 /// The one rewind a sink can be asked for and be unable to perform: an **unpaired settle**
@@ -431,9 +449,22 @@ where
   /// carries the capability now (al8n/tokora#257), so no `&Sink` can push a row, and the sink
   /// holds no cell for one to push through.
   rows: Vec<MarkRow>,
-  /// The newest *released* row: a frozen `(mark, depth)` fact that keeps depth derivation
-  /// O(events-since-last-settle) instead of O(buffer) across commit-heavy loops.
-  floor: MarkRow,
+  /// E5 — the live open-node depth of the current buffer: pushes minus pops over every event
+  /// in [`Sink::events`], maintained rather than recounted.
+  ///
+  /// Signed, and deliberately so. The buffer is a raw surface, so a caller *can* drive the
+  /// count below zero (a `cst_finish` with nothing open anywhere); the whole point of the
+  /// value is to see that, and an unsigned cell would wrap instead of showing it. See the
+  /// depth section in the module docs for the restore rule and for the recount this replaced.
+  depth: i64,
+  /// The newest *released* row's mark: the youngest committed positional fact the sink holds,
+  /// and the floor of the hole wrap's backward scan.
+  ///
+  /// A `u64` and not a whole [`MarkRow`], because the depth half stopped having a reader when
+  /// [`Sink::depth`] became live: the row's frozen depth is now consulted only where it is
+  /// spent, at a rewind that lands on it. A floor that carried a `depth` nobody read would be
+  /// state to keep exact for no one.
+  floor_mark: u64,
   /// E3 — the monotone era source and truncation witness backing mark validation.
   ledger: TruncationLedger,
   /// The inner emitter's **construction-time** reading — the no-row **origin** rewind's exact
@@ -513,8 +544,12 @@ where
     journal: _,
     // — E4, release stack + depth ledger: push at checkpoint, pop at release/rewind.
     rows: _,
-    // — derived memo: the newest released row; reset when a rewind drops below it.
-    floor: _,
+    // — E5, the live open-node depth: charged by the ONE push helper on every append,
+    // restored at a truncating rewind from the target row's frozen depth (or 0 at the
+    // origin). A non-truncating rewind leaves it alone. DEPTH_CENSUS locks the arity.
+    depth: _,
+    // — derived memo: the newest released row's MARK; reset when a rewind drops below it.
+    floor_mark: _,
     // — E3, monotone era source + truncation witness: NEVER rewound.
     ledger: _,
     // — derived memo: the inner's construction-time reading, primed at first advancing touch,
@@ -602,7 +637,8 @@ where
       demotes: false,
       journal: Vec::new(),
       rows: Vec::new(),
-      floor: MarkRow::ZERO,
+      depth: 0,
+      floor_mark: 0,
       ledger: TruncationLedger::new(),
       base_inner: None,
       degraded: None,
@@ -656,22 +692,42 @@ where
     self.trivia
   }
 
-  /// Derives the open-node depth of the current buffer: the nearest frozen `(mark, depth)`
-  /// fact (the newest of the released floor and the innermost live row) plus the summed
-  /// deltas of the events above it. Depth is **never** cached live — this recount is the
-  /// restore rule (truncation restores it for free).
-  fn derived_depth(&self) -> i64 {
-    let top = self.rows.last().copied();
-    let base = match top {
-      Some(row) if row.mark >= self.floor.mark => row,
-      _ => self.floor,
-    };
-    let from = (base.mark as usize).min(self.events.len());
-    base.depth
-      + self.events[from..]
-        .iter()
-        .map(Event::depth_delta)
-        .sum::<i64>()
+  /// DEPTH_CENSUS — the **one** append door of the event log, and the only place
+  /// [`Sink::depth`] is charged for an event.
+  ///
+  /// Every `Event` the sink appends goes through here, so the scalar cannot drift by
+  /// omission: a new emission surface that forgets to maintain the depth is not a surface that
+  /// forgets — it is a surface that does not compile against `events`, because the field is
+  /// private and the source lock in this module's tests pins `self.events.push(` at exactly
+  /// one occurrence. The one mutation that is *not* an append — the hole wrap's splice —
+  /// charges its two halves at its own site, and is pinned there by the same lock.
+  #[inline]
+  fn push_event(&mut self, event: Event<L::Span>) {
+    self.depth += event.depth_delta();
+    self.events.push(event);
+  }
+
+  /// The open-node depth of the current buffer, in O(1).
+  ///
+  /// A full recount over the events above the nearest frozen `(mark, depth)` fact until
+  /// al8n/tokora#253: the CST channel mints no frozen facts of its own, so a grammar of flat
+  /// sibling [`node`](crate::parser::node)s recounted the whole prefix on every close. See the
+  /// depth section in the module docs.
+  #[inline(always)]
+  const fn depth(&self) -> i64 {
+    self.depth
+  }
+
+  /// The full-recount oracle the maintained [`depth`](Self::depth) is checked against: the
+  /// summed `depth_delta` of every event in the buffer, from zero.
+  ///
+  /// Test-only on purpose. Running it under `debug_assertions` would put the recount back in
+  /// exactly the profile #253 is about — the equivalence is pinned by tests that walk every
+  /// path that writes the scalar (checkpoint, release, the four rewind arms, retro-wraps,
+  /// demotes, hole wraps, regrowth) instead.
+  #[cfg(test)]
+  pub(crate) fn recount_depth(&self) -> i64 {
+    self.events.iter().map(Event::depth_delta).sum::<i64>()
   }
 
   /// Validates a mark before a spend — the panic-in-every-build wall.
@@ -918,7 +974,7 @@ where
       "the dialect mapper produced a kind outside the dialect's own kind space for a \
        committed token (the reserved tombstone kind, u16::MAX, is never admitted)"
     );
-    self.events.push(Event::Token {
+    self.push_event(Event::Token {
       kind,
       span: span.clone(),
     });
@@ -946,23 +1002,19 @@ where
     //
     // The splice below is an `insert`, so every index at or above it shifts by one, and the
     // sink's own bookkeeping is **positional**: a checkpoint mark IS an event-buffer length,
-    // the released-floor memo freezes a `(mark, depth)` pair over a prefix, and the undo
-    // journal names indices. A splice below any of them renames it. The journal is fixed up
-    // explicitly at the end of this method; the other two are made unreachable here, by
-    // construction, and that asymmetry is forced rather than a preference: the splice would
-    // put the `Start` below a mark and its `Finish` above it, so EVERY truncation point
+    // the released-floor memo is a mark, and the undo journal names indices. A splice below
+    // any of them renames it. All three are made unreachable here rather than repaired
+    // afterwards — the marks by construction (this floor), the journal by the theorem stated
+    // at the splice — and for the marks that is forced rather than a preference: the splice
+    // would put the `Start` below a mark and its `Finish` above it, so EVERY truncation point
     // between them tears the pair. No row arithmetic repairs that — a `+1` fixup just makes
     // the rewind keep an orphan `Start`. The start has to be bounded before the fact.
     //
     // `rows` is sorted non-decreasing (rows are pushed at the then-current length and every
     // truncation pops the rows above it), so `last()` is the youngest LIVE capture.
-    // `self.floor` is a COMMITTED row that `release` promoted, and it can sit **above**
-    // `rows.last()` — a guard opened above an older live capture and then committed leaves
-    // exactly that shape — so the floor is the max of the two, not the row stack alone.
-    // Dropping the `self.floor` term stales the depth memo instead of the row: `derived_depth`
-    // would go on adding the deltas above a mark whose prefix no longer holds the events it
-    // was frozen over, and `cst_finish`'s global-underflow check then fires on a buffer whose
-    // node really is open.
+    // `self.floor_mark` is a COMMITTED row's mark that `release` promoted, and it can sit
+    // **above** `rows.last()` — a guard opened above an older live capture and then committed
+    // leaves exactly that shape — so the floor is the max of the two, not the row stack alone.
     //
     // In-crate this costs nothing. `sync_balanced` is the only in-crate producer of an
     // `emit_skipped_region` call, and its span covers exactly the tokens its own scan just
@@ -991,7 +1043,7 @@ where
       .rows
       .last()
       .map_or(0, |row| row.mark)
-      .max(self.floor.mark) as usize;
+      .max(self.floor_mark) as usize;
 
     let mut wrap_start: Option<usize> = None;
     for (idx, ev) in self.events.iter().enumerate().rev() {
@@ -1013,28 +1065,70 @@ where
       return;
     };
 
-    let error_kind = self.profile.error_kind();
-    self.events.insert(
-      at,
-      Event::StartNode {
-        kind: error_kind,
-        forward_parent: None,
-      },
+    // ── THE JOURNAL NEEDS NO FIX-UP — a theorem about the scan, not a habit of the producers ──
+    //
+    // The splice renames every index at or above `at`, and journal entries are indices, so the
+    // obvious reading is that they need bumping. They do not, and this method used to bump them
+    // anyway: `Theta(J)` reads and branches per hole that provably wrote nothing, `Theta(J x H)`
+    // over a parse (al8n/tokora#250, measured at exactly `J x H`). What follows is why the loop
+    // is not merely unnecessary today but unreachable, because deleting a fix-up on a wrong
+    // proof does not cost time — it silently renames journal indices.
+    //
+    // ENTRY EXACTNESS. `cst_start_at` is the ONLY producer (one `journal.push` in the file). It
+    // pushes `at_len = new_index + 1`, where `new_index` is the index its `StartAt` was appended
+    // at, and `index = target`, the tombstone `validate_mark` just proved in bounds — so
+    // `index < events.len() == new_index == at_len - 1`, structurally, from the in-bounds check
+    // rather than by assumption. Every live entry therefore has a `StartAt` standing at
+    // `at_len - 1` and a `StartNode` standing at `index`, and both keep standing:
+    //
+    //   - appends never move an existing index;
+    //   - the two interior writes touch a `StartNode`'s `forward_parent` only — no index, no
+    //     variant;
+    //   - `rewind` truncates to `mark` and pops exactly the entries with `at_len > mark` (the
+    //     journal is strictly increasing in `at_len`, pinned by a debug assert at the push), so
+    //     every survivor has `at_len - 1 < mark`: its `StartAt` is below the cut;
+    //   - this splice is the last mutation, and it is the induction step below.
+    //
+    // THE SCAN'S OWN CONCLUSION. The backward loop above breaks on the first event that is
+    // neither a `Diag` nor an in-span `Token`, and records `at` as the LOWEST in-span `Token` it
+    // reached. So every index in `[at, events.len())` holds a `Token` or a `Diag` — that is what
+    // the loop computed, not something asserted about it. `Event::StartAt` is neither.
+    //
+    // Hence `at_len - 1 < at` for every live entry, i.e. `at_len <= at`, and `index < at_len - 1
+    // < at`: both branch conditions of the deleted loop (`at_len > at`, `index >= at`) were
+    // false for every entry, in every reachable state — including recovery inside a Pratt fold
+    // (whose `cst_mark` tombstone and per-fold `StartAt` are both scan-breakers), a partial
+    // session (which changes no cell this argument reads), and a rewound checkpoint (the pop
+    // rule above). The splice moves only indices `>= at`, none of which any entry names, so the
+    // entries stay exact and ENTRY EXACTNESS holds again for the next hole.
+    //
+    // The assert costs O(1), not O(J): `at_len` is strictly increasing, so the newest entry is
+    // the only one that can be the first to cross `at`. That equivalence is what the push-side
+    // monotonicity assert underwrites — read them as one pin, in debug builds only.
+    debug_assert!(
+      self
+        .journal
+        .last()
+        .is_none_or(|newest| newest.at_len <= at as u64),
+      "hole wrap at {at} with a journal entry at or above it: the backward scan admits only \
+       Token and Diag events, and every entry's StartAt is neither, so this is a scan that \
+       stopped breaking on a structural event or an entry whose StartAt no longer stands \
+       where at_len names. Either way the splice is about to rename an index the journal \
+       still points at."
     );
-    self.events.push(Event::FinishNode { kind: error_kind });
 
-    // Keep the undo journal exact across the splice: positions at or above the insert point
-    // shift by one. (Journal entries cannot reference the spliced region — every entry names
-    // a tombstone or a `StartAt`, both structural events the scan breaks on, so all of them
-    // sit strictly below `at` — but the bump is exact anyway.)
-    for entry in &mut self.journal {
-      if entry.at_len > at as u64 {
-        entry.at_len += 1;
-      }
-      if entry.index >= at as u64 {
-        entry.index += 1;
-      }
-    }
+    let error_kind = self.profile.error_kind();
+    // The wrap is depth-neutral, and its two halves are charged separately rather than netted
+    // out: the `+1` here and the `-1` in the `push_event` below come from the events' own
+    // `depth_delta`, so a change to either delta cannot silently unbalance E5. This `insert` is
+    // the one log mutation that is not an append, and DEPTH_CENSUS pins it at exactly one site.
+    let start = Event::StartNode {
+      kind: error_kind,
+      forward_parent: None,
+    };
+    self.depth += start.depth_delta();
+    self.events.insert(at, start);
+    self.push_event(Event::FinishNode { kind: error_kind });
   }
 }
 
@@ -1100,7 +1194,7 @@ where
     // The base must predate the first forwarded emission: it is the no-row origin-rewind target.
     let _ = self.base_inner_mark::<Lang>();
     let out = forward(&mut self.inner);
-    self.events.push(Event::Diag { error_span });
+    self.push_event(Event::Diag { error_span });
     out
   }
 }
@@ -1237,7 +1331,7 @@ where
   /// token-tracking inner the sink now supports is exactly that shape.
   fn checkpoint(&mut self) -> u64 {
     let mark = self.events.len() as u64;
-    let depth = self.derived_depth();
+    let depth = self.depth();
     let inner = self.inner.checkpoint();
     self.rows.push(MarkRow { mark, depth, inner });
     mark
@@ -1382,24 +1476,31 @@ where
     // save/restore) always finds that row live — a released mark is a committed mark, never
     // rewound to. `None` is the no-row case, resolved below by what the sink still knows —
     // and the preflight above has already removed the one no-row case with no answer.
-    let target_inner = {
+    let target_row = {
       let rows = &mut self.rows;
       while rows.last().is_some_and(|row| row.mark > mark) {
         rows.pop();
       }
       let hit = if rows.last().map(|row| row.mark) == Some(mark) {
-        rows.pop().map(|row| row.inner)
+        rows.pop()
       } else {
         None
       };
-      if self.floor.mark > mark {
-        self.floor = rows.last().copied().unwrap_or(MarkRow::ZERO);
+      if self.floor_mark > mark {
+        self.floor_mark = rows.last().map_or(0, |row| row.mark);
       }
       hit
     };
 
     if mark < len {
       self.events.truncate(mark as usize);
+      // E5 restored, and the restore is a COPY rather than a recount: the spent row froze the
+      // depth of exactly the prefix that just survived. `None` here is the origin unwind and
+      // nothing else — the preflight above refused every mid-log no-row rewind, and `mark ==
+      // len` never enters this block — so `0` is the depth of an empty log, not a fallback.
+      // (The `mark == 0` half of that is asserted at the inner-target match below, which takes
+      // the same two arms; one statement of it is enough.)
+      self.depth = target_row.map_or(0, |row| row.depth);
       // Reverse-replay the undo journal: every forward_parent write carried by a
       // truncated StartAt is reversed, newest first, restoring the overwritten value —
       // the Verbose parallel-maps pop discipline lifted to events. A write whose target
@@ -1436,7 +1537,7 @@ where
     // mark — the pre-0.8 behavior — or to a neighboring row's reading would destroy committed
     // inner state the surviving log still carries; the sink hands the inner a reading it can
     // prove, or nothing at all.
-    let inner_target = match target_inner {
+    let inner_target = match target_row.map(|row| row.inner) {
       Some(reading) => Some(reading),
       None if mark == len => None,
       None => {
@@ -1474,10 +1575,10 @@ where
   /// [`checkpoint`](Self::checkpoint) that keeps the stack at exactly the live captures
   /// (commit-heavy loops would otherwise strand one dead row per committed guard, and a
   /// stale row is exactly the aliased-mark state the length-mark design must never
-  /// consult). The popped row becomes the derived-depth floor: a frozen fact that keeps
-  /// depth recounts short across commit-heavy loops. Marks arrive newest-first on the
-  /// crate's paths (O(1) top pop); a mark already gone is a no-op, per the trait's
-  /// advisory contract.
+  /// consult). The popped row's mark becomes the sink's released-floor memo: the youngest
+  /// committed positional fact it holds, and the floor of the hole wrap's backward scan.
+  /// Marks arrive newest-first on the crate's paths (O(1) top pop); a mark already gone is a
+  /// no-op, per the trait's advisory contract.
   ///
   /// The row's captured inner reading is deliberately **not** forwarded to `inner.release` —
   /// it is a plain value, not an inner-side resource (see *Inner-emitter contract* on the
@@ -1522,9 +1623,9 @@ where
         .map(|pos| rows.remove(pos))
     };
     if let Some(row) = row
-      && row.mark >= self.floor.mark
+      && row.mark >= self.floor_mark
     {
-      self.floor = row;
+      self.floor_mark = row.mark;
     }
   }
 
@@ -1557,7 +1658,7 @@ where
        reserved and no validator admits it)"
     );
     let index = self.events.len() as u64;
-    self.events.push(Event::StartNode {
+    self.push_event(Event::StartNode {
       kind,
       forward_parent: None,
     });
@@ -1569,7 +1670,7 @@ where
     L: Lexer<'inp>,
   {
     // Detect-at-cause for TRUE GLOBAL underflow only: a finish must close *some* node
-    // that is open anywhere in the buffer (`derived_depth() > 0`). This is the soundest
+    // that is open anywhere in the buffer (`depth() > 0`). This is the soundest
     // invariant a DEPTH-ONLY predicate can enforce; it is deliberately no stricter,
     // because depth cannot separate the two histories that reach this call with a node
     // still open:
@@ -1602,14 +1703,18 @@ where
     // allocation on the hot emit path. The typed error at materialization is the wall; a rail
     // that fails on correct code would be worse than none.
     //
-    // Debug-only — the raw surface is sharp by contract.
+    // Debug-only, and it STAYS debug-only now that it is O(1). The tier is not a cost
+    // concession that the maintained depth has made obsolete: release already refuses this
+    // typed, through both finish doors (`OrphanFinish`/`MismatchedFinish`), and a typed refusal
+    // a host can catch is a stronger wall for a library than a panic, not a weaker one. The
+    // rewind preflight is an every-build panic precisely because release had NO wall there.
     debug_assert!(
-      self.derived_depth() > 0,
+      self.depth() > 0,
       "cst_finish with no open node anywhere in the buffer (global underflow): the \
        matching start was rolled back (or never emitted), and no enclosing node is open \
        to close instead"
     );
-    self.events.push(Event::FinishNode { kind });
+    self.push_event(Event::FinishNode { kind });
   }
 
   fn cst_demote(&mut self, mark: EventMark, kind: u16)
@@ -1631,7 +1736,7 @@ where
     // can never orphan its target — `target` is strictly below this index and truncation is a
     // suffix operation, so the two survive and die together, in the same era.
     self.demotes = true;
-    self.events.push(Event::Demote {
+    self.push_event(Event::Demote {
       target: mark.index(),
     });
   }
@@ -1641,7 +1746,7 @@ where
     L: Lexer<'inp>,
   {
     let index = self.events.len() as u64;
-    self.events.push(Event::StartNode {
+    self.push_event(Event::StartNode {
       kind: TOMBSTONE,
       forward_parent: None,
     });
@@ -1672,7 +1777,7 @@ where
       Some(Event::StartNode { forward_parent, .. }) if relative.is_some() => *forward_parent,
       _ => None,
     };
-    self.events.push(Event::StartAt { kind, target, prev });
+    self.push_event(Event::StartAt { kind, target, prev });
 
     // The one journaled in-place write: point the tombstone's forward_parent at the newest
     // wrap, making it the head of the chain materialization walks (`prev` carries the
@@ -1682,6 +1787,19 @@ where
     if let Some(relative) = relative
       && let Some(Event::StartNode { forward_parent, .. }) = self.events.get_mut(target as usize)
     {
+      // The journal is STRICTLY INCREASING in `at_len`, and `wrap_hole`'s O(1) no-fix-up
+      // assert rests on it: with the newest entry the largest, checking `last()` decides the
+      // whole journal. Every push takes `events.len() + 1` after an append, and a rewind pops
+      // every entry above its mark, so the order cannot invert — this pins that, in debug, at
+      // the one site that could break it.
+      debug_assert!(
+        self
+          .journal
+          .last()
+          .is_none_or(|prev_entry| prev_entry.at_len < new_index + 1),
+        "undo-journal order inverted: entries must be strictly increasing in at_len, which is \
+         what lets rewind's pop loop and wrap_hole's O(1) splice check read only the newest one"
+      );
       self.journal.push(JournalEntry {
         at_len: new_index + 1,
         index: target,
@@ -1970,7 +2088,11 @@ where
     // it here rather than leaving the canonicalization pass to be skipped over an injected
     // demote.
     self.demotes |= matches!(event, Event::Demote { .. });
-    self.events.push(event);
+    // Through the one append door like every other emission, so an injected event charges E5
+    // exactly as the door that would have produced it does: the raw shapes this hook exists to
+    // build are the ones the depth oracle most needs to see, and a bypass here would make the
+    // scalar and the recount disagree for a reason that is the harness's fault, not the sink's.
+    self.push_event(event);
   }
 }
 
