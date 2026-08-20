@@ -379,10 +379,34 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
     self.ident
   }
 
-  /// Maps the source string to a new type, preserving the span and language.
+  /// Maps the source string to a new type, preserving the span, the language, and the
+  /// recovery status.
+  ///
+  /// Recovery status is orthogonal to the source representation: mapping
+  /// `Ident<&str>` to `Ident<String>` changes how the spelling is stored, not whether the
+  /// parser actually found an identifier there. An [`error`](ErrorNode::error) or
+  /// [`missing`](ErrorNode::missing) placeholder therefore stays one across the map.
+  ///
+  /// The body destructures `Self` exhaustively instead of rebuilding through
+  /// [`Self::new`], and that shape is the point. `new` always produces a valid identifier,
+  /// so a `new`-based body silently laundered recovery placeholders into valid syntax with
+  /// nothing to flag the omission; the destructuring form fails to compile the next time a
+  /// field is added rather than dropping it.
   #[inline(always)]
   pub fn map<U>(self, f: impl FnOnce(S) -> U) -> Ident<U, Span, Lang> {
-    Ident::new(self.span, f(self.ident))
+    let Self {
+      _lang,
+      status,
+      span,
+      ident,
+    } = self;
+
+    Ident {
+      _lang,
+      status,
+      span,
+      ident: f(ident),
+    }
   }
 }
 

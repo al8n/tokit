@@ -84,6 +84,62 @@ fn ident_map() {
 }
 
 #[test]
+fn ident_map_preserves_recovery_status() {
+  struct MyLang;
+
+  type Borrowed = Ident<&'static str, SimpleSpan, MyLang>;
+  type Owned = Ident<String, SimpleSpan, MyLang>;
+
+  let span = SimpleSpan::new(4, 7);
+
+  // Recovery status is orthogonal to the source representation, so a source-only `map` must
+  // carry it across. The valid row is the non-vacuity control: it passes both before and after
+  // the fix, so a green table is evidence about the two recovery rows.
+  let rows: [(&str, Borrowed, &str, [bool; 3]); 3] = [
+    (
+      "valid",
+      Borrowed::new(span, "name"),
+      "NAME",
+      [true, false, false],
+    ),
+    (
+      "error",
+      Borrowed::error(span),
+      "<ERROR>",
+      [false, true, false],
+    ),
+    (
+      "missing",
+      Borrowed::missing(span),
+      "<MISSING>",
+      [false, false, true],
+    ),
+  ];
+
+  for (label, ident, expected_source, [valid, error, missing]) in rows {
+    let mapped: Owned = ident.map(str::to_uppercase);
+    assert_eq!(mapped.source_ref(), expected_source, "{label}: source");
+    assert_eq!(mapped.span(), span, "{label}: span");
+    assert_eq!(mapped.is_valid(), valid, "{label}: is_valid");
+    assert_eq!(mapped.is_error(), error, "{label}: is_error");
+    assert_eq!(mapped.is_missing(), missing, "{label}: is_missing");
+  }
+}
+
+#[test]
+fn ident_list_of_mapped_recovery_segments_is_not_valid() {
+  let span = SimpleSpan::new(4, 7);
+
+  let error = Ident::<&str>::error(span).map(str::to_uppercase);
+  let missing = Ident::<&str>::missing(span).map(str::to_uppercase);
+
+  let path = IdentList::<String>::new(span, vec![error, missing]);
+  assert!(!path.is_valid());
+  assert!(path.is_error());
+  assert!(path.is_missing());
+}
+
+#[test]
 fn ident_into_components() {
   use crate::utils::IntoComponents;
   let ident = Ident::<&str>::new(SimpleSpan::new(0, 3), "foo");
