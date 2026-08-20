@@ -1,8 +1,8 @@
 /// Tests for `state::{token_tracker, recursion_tracker, tracker}`.
 use tokora::state::{
-  recursion_tracker::{RecursionLimiter, RecursionTracker},
+  recursion_tracker::{RecursionLimiter, RecursionTracker, RecursionTrackerExt},
   token_tracker::{TokenLimiter, TokenTracker},
-  tracker::{LimitExceeded, Limiter, Tracker},
+  tracker::{LimitExceeded, Limiter, Tracker, TrackerExt},
 };
 
 // ── TokenLimiter ────────────────────────────────────────────────────────────
@@ -467,8 +467,8 @@ fn tracker_increase_token_and_decrease_recursion() {
 #[test]
 fn tracker_increase_token_and_check() {
   let mut l = Limiter::with_token_tracker(TokenLimiter::with_limitation(1));
-  assert!(<Limiter as Tracker>::increase_token_and_check(&mut l).is_ok());
-  assert!(<Limiter as Tracker>::increase_token_and_check(&mut l).is_err());
+  assert!(<Limiter as TrackerExt>::increase_token_and_check(&mut l).is_ok());
+  assert!(<Limiter as TrackerExt>::increase_token_and_check(&mut l).is_err());
 }
 
 #[test]
@@ -486,4 +486,154 @@ fn tracker_increase_token_and_decrease_recursion_and_check() {
   assert!(l.increase_token_and_decrease_recursion_and_check().is_ok());
   l.increase_recursion();
   assert!(l.increase_token_and_decrease_recursion_and_check().is_err());
+}
+
+// ── The combined check is the WHOLE tracker's check ──────────────────────────
+//
+// tokora#265. `Limiter` used to override the two combined `Tracker` methods and end each one
+// with `<Self as TokenTracker>::check`, so a recursion depth already past its maximum answered
+// `Ok(())` for as long as the token side held — including the decrementing form, whose whole
+// purpose is to report what is left over after the decrement.
+//
+// Every cell below pins the token maximum at `usize::MAX` so ONLY recursion can fail, and
+// asserts the token side is inside its limit at the instant of the check. Without that
+// assertion a cell that happened to trip the token limit would pass against the defect, which
+// is exactly why the pre-existing cells above are non-discriminating: each of them drives the
+// token counter over its own maximum, or drives recursion back within its limit before
+// checking.
+
+/// A limiter that can only ever fail on recursion.
+fn recursion_only(limitation: usize) -> Limiter {
+  Limiter::with_trackers(
+    TokenLimiter::with_limitation(usize::MAX),
+    RecursionLimiter::with_limitation(limitation),
+  )
+}
+
+/// The token side is inside its limit and the recursion side is outside its own, so a full
+/// tracker check must fail and a token-only check must not.
+fn assert_only_recursion_is_over(l: &Limiter) {
+  assert!(
+    <Limiter as TokenTracker>::check(l).is_ok(),
+    "non-vacuity: the token side must be inside its limit, so only a full check can fail"
+  );
+  assert!(
+    l.recursion().depth() > l.recursion().limitation(),
+    "non-vacuity: the recursion side must be outside its limit at the moment of the check"
+  );
+}
+
+#[test]
+fn tracker_token_increment_still_checks_preexisting_recursion_excess() {
+  let mut l = recursion_only(1);
+  l.increase_recursion();
+  l.increase_recursion();
+  assert_only_recursion_is_over(&l);
+
+  let err = <Limiter as TrackerExt>::increase_token_and_check(&mut l)
+    .expect_err("pre-existing recursion excess must be reported");
+  assert!(err.is_recursion());
+  assert_only_recursion_is_over(&l);
+}
+
+#[test]
+fn tracker_combined_decrease_still_checks_remaining_recursion_excess() {
+  let mut l = recursion_only(1);
+  l.increase_recursion();
+  l.increase_recursion();
+  l.increase_recursion();
+
+  // The decrement takes the depth from 3 to 2, which still exceeds the maximum of 1.
+  let err = l
+    .increase_token_and_decrease_recursion_and_check()
+    .expect_err("remaining recursion excess must be reported");
+  assert!(err.is_recursion());
+  assert_eq!(l.recursion().depth(), 2);
+  assert_only_recursion_is_over(&l);
+}
+
+#[test]
+fn tracker_combined_decrease_succeeds_once_the_decrement_lands_within_the_limit() {
+  let mut l = recursion_only(1);
+  l.increase_recursion();
+  l.increase_recursion();
+
+  // 2 -> 1, which is the maximum and therefore not an excess.
+  l.increase_token_and_decrease_recursion_and_check()
+    .expect("a decrement that lands on the maximum is within the limit");
+  assert_eq!(l.recursion().depth(), 1);
+  assert_eq!(l.token().tokens(), 1);
+}
+
+#[test]
+fn tracker_combined_methods_keep_recursion_first_precedence() {
+  let mut l = Limiter::with_trackers(
+    TokenLimiter::with_limitation(0),
+    RecursionLimiter::with_limitation(0),
+  );
+  l.increase_recursion();
+
+  // Both sides are over once the token increment lands, and `Limiter::check` reports recursion
+  // first, so the combined form must agree with it rather than answer with the token error.
+  let combined = <Limiter as TrackerExt>::increase_token_and_check(&mut l)
+    .expect_err("both limits are exceeded");
+  assert!(combined.is_recursion());
+  assert!(<Limiter as TokenTracker>::check(&l).is_err());
+  assert!(matches!(l.check(), Err(e) if e.is_recursion()));
+}
+
+#[test]
+fn tracker_increase_both_and_check_reports_preexisting_recursion_excess() {
+  let mut l = recursion_only(1);
+  l.increase_recursion();
+  l.increase_recursion();
+  assert_only_recursion_is_over(&l);
+
+  let err = l
+    .increase_both_and_check()
+    .expect_err("the increment pushes recursion further past a maximum it already exceeded");
+  assert!(err.is_recursion());
+}
+
+// ── The same cells through the logos forwarders ──────────────────────────────
+//
+// A `Limiter` installed as logos `Extras` reaches these methods through the blanket
+// `TrackerExt` impl on `Lexer<'a, T>`, so the forwarder cannot narrow what the extras answer.
+
+#[cfg(feature = "logos_0_16")]
+mod logos_forwarding {
+  use super::{Limiter, Tracker, TrackerExt, recursion_only};
+  use tokora::logos::{self, Logos};
+
+  #[derive(Logos, Debug, PartialEq)]
+  #[logos(crate = logos, extras = Limiter)]
+  enum Tok {
+    #[token("a")]
+    A,
+  }
+
+  #[test]
+  fn lexer_forwards_the_full_check_on_token_increment() {
+    let mut lexer = Tok::lexer_with_extras("a", recursion_only(1));
+    Tracker::increase_recursion(&mut lexer);
+    Tracker::increase_recursion(&mut lexer);
+
+    let err = TrackerExt::increase_token_and_check(&mut lexer)
+      .expect_err("the extras' recursion excess must survive the forwarder");
+    assert!(err.is_recursion());
+    assert_eq!(lexer.extras.recursion().depth(), 2);
+  }
+
+  #[test]
+  fn lexer_forwards_the_full_check_on_decrement() {
+    let mut lexer = Tok::lexer_with_extras("a", recursion_only(1));
+    Tracker::increase_recursion(&mut lexer);
+    Tracker::increase_recursion(&mut lexer);
+    Tracker::increase_recursion(&mut lexer);
+
+    let err = TrackerExt::increase_token_and_decrease_recursion_and_check(&mut lexer)
+      .expect_err("the excess left after the decrement must survive the forwarder");
+    assert!(err.is_recursion());
+    assert_eq!(lexer.extras.recursion().depth(), 2);
+  }
 }

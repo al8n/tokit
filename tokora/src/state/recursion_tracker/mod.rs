@@ -945,6 +945,9 @@ impl State for RecursionLimiter {
 }
 
 /// A recursion tracker trait.
+///
+/// The combined update-and-check operation lives on [`RecursionTrackerExt`], which is
+/// blanket-implemented and therefore cannot be overridden.
 pub trait RecursionTracker {
   /// The error type returned when the recursion limit is exceeded.
   type Error;
@@ -957,8 +960,26 @@ pub trait RecursionTracker {
 
   /// Checks if the recursion limit has been exceeded.
   fn check(&self) -> Result<(), Self::Error>;
+}
 
+/// The combined update-and-check operation over a [`RecursionTracker`].
+///
+/// Blanket-implemented for every `RecursionTracker`, so coherence refuses any other impl and no
+/// tracker can substitute a narrower check for [`RecursionTracker::check`] through any impl. This
+/// is the sibling of [`TrackerExt`](crate::state::tracker::TrackerExt), and it is separated for the
+/// same reason: the composition of an update with a check is not a customization point, because the
+/// only way to specialize it is to check less. The same boundary applies here too: a concrete dot
+/// call still prefers an inherent method of the same name over this blanket one — see that trait's
+/// doc for why.
+pub trait RecursionTrackerExt: RecursionTracker {
   /// Increases the recursion depth and checks the limit.
+  fn increase_and_check(&mut self) -> Result<(), Self::Error>;
+}
+
+impl<T> RecursionTrackerExt for T
+where
+  T: RecursionTracker + ?Sized,
+{
   #[inline(always)]
   fn increase_and_check(&mut self) -> Result<(), Self::Error> {
     self.increase();
@@ -1017,11 +1038,6 @@ const _: () = {
         fn check(&self) -> Result<(), Self::Error> {
           self.extras.check()
         }
-
-        #[inline(always)]
-        fn increase_and_check(&mut self) -> Result<(), Self::Error> {
-          self.extras.increase_and_check()
-        }
       }
 
       impl<'a, T> RecursionTracker for LogosLexer<'a, T>
@@ -1044,11 +1060,6 @@ const _: () = {
         #[inline(always)]
         fn check(&self) -> Result<(), Self::Error> {
           self.inner().check()
-        }
-
-        #[inline(always)]
-        fn increase_and_check(&mut self) -> Result<(), Self::Error> {
-          self.inner_mut().increase_and_check()
         }
       }
     };
