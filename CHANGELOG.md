@@ -1556,7 +1556,39 @@ and will red until they do.
   the failing path only, because the dipping event is still the diagnosis. **Release pays nothing**:
   the chain, its row field and the check are all behind `debug_assertions`, and release's wall
   remains the typed refusal both finish doors already raise. 2048 nested failing brackets went from
-  4 192 256 visits and 19.77 ms to **0 visits and 0.139 ms**, curve 4.00x to 2.00x.
+  **4 192 256 event-suffix visits to 0**, and the wall from 19.77 ms to 0.139 ms in the dev profile (re-measured end to end on the
+  committed `#[ignore]`d harness, which reproduces the pre-repair base at 17.34 ms: **17.34 ms
+  → 0.10 ms**, best of five).
+
+  **The membership query is `O(log depth)`, not `O(1)`, and the first cut of this repair was
+  `O(depth)` — which was not enough.** Following `parent` a link at a time is bounded through the
+  blessed `node()` combinator, where `RecursionLimiter` caps the nesting; the **raw `CstEmitter`
+  surface is not bounded by that limiter at all**, and #306 named that surface as a requirement.
+  Open `n` same-kind nodes, then for `k = 0 … n − 2` demote the `k`-th and open a fresh one, then
+  close `n` times: every mark is distinct and live so every query succeeds, the failing path's
+  suffix scan never runs, the chain never gets shorter, and the `k`-th walk passes `n − k` links.
+  `Θ(n²)` — #306's own shape, surviving its own repair on the surface it was filed about. The
+  measured shape hid it, because closing innermost-first means every query hits the chain's own
+  head and reads exactly one entry: `O(1)` for a reason that has nothing to do with the structure.
+
+  Each entry therefore also carries its depth and a **skip link** laid down by Myers' skew-binary
+  rule — hops of 1, 1, 3, 1, 1, 3, 7, … — and the query *descends* the chain instead of walking
+  it, taking a skip whenever its landing point is still at or above the queried index. Worst-case
+  entry reads for a single query are `4·log₂(n) − 4` (12 / 28 / 44 / 52 at depth 16 / 256 / 4096 /
+  16384), and the adversarial run above went from `n(n+1)/2 − 1` reads to `O(n log n)`: 32 895 /
+  131 327 / 524 799 / 2 098 175 became 4 885 / 11 287 / 25 625 / 57 371 at `n` = 256/512/1024/2048
+  — 4.00x per doubling down to 2.3x, and 36.6x fewer reads at `n = 2048`. The shape that hid it is
+  unaffected: 2048 innermost-first demotes still read exactly one entry each.
+
+  **The ladder needs no restore rule of its own**, which is why it could be added without
+  reopening the rewind argument. Every field of an entry is written once at the push and never
+  revisited, and a skip link is always a *proper ancestor* on its own entry's chain, so the slots
+  a search can reach from a restored head are a subset of the parent chain — all below the mark,
+  all kept by the existing pop loop. The `O(1)` alternative, a depth-indexed spine, was rejected
+  for exactly the property the ladder has: later opens overwrite a spine's slots, so a truncating
+  rewind would have to rebuild it in `O(depth)`, moving the cost off the query and onto every
+  rewind. Growth is the log's and needs no ceiling of its own: one entry per depth-increasing
+  event still in `events`, dying with it, so `opens.len() ≤ events.len()` at every moment.
 
   A closed node's chain slot is deliberately **never** reclaimed, and that is the one place this
   could have gone wrong quietly: reusing it would hold the vector at the live depth for a
@@ -1564,10 +1596,16 @@ and will red until they do.
   truncate-and-reopen rewind. Both that shape and a wrap reaching under a diagnostic run are cells,
   and both were confirmed to fail against a planted defect before being trusted. The equivalence
   the wall now rests on is not prose: `depth_matches_oracle` compares the maintained chain against
-  a from-scratch replay at every site that already walked every path writing #253's depth.
+  a from-scratch replay, and the skip-link search against the `parent` walk it replaced at every
+  event index, at every site that already walked every path writing #253's depth. The `Θ(n²)`
+  shape above is a committed work-counter test that counts both sides of the same query at the
+  same states, so the walk's quadratic is the plant that keeps the ladder's bound from passing
+  vacuously; the two wall-clock figures quoted here have committed `#[ignore]`d harnesses.
 
-  No public API moved. `Event`, `EventMark` and every emitter signature are untouched, and a
-  release build's `Sink` gains one `u64` on the struct and one on each mark-stack row.
+  No public API moved. `Event`, `EventMark` and every emitter signature are untouched; a debug
+  build's chain entry grows by 8 bytes, and a release build's `Sink` gains one `u64` on the struct
+  and one on each mark-stack row and pays nothing else — every line of the chain, the ladder and
+  the query is behind `debug_assertions`.
 
 - **`Limiter`'s combined update-and-check methods reported `Ok(())` over a recursion depth that
   was already past its maximum** (#265). `Tracker::check` promises to report whether *any*

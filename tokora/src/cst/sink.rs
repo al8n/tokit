@@ -16,7 +16,7 @@
 //! | E4 | [`Sink::rows`] | **release stack + per-checkpoint depth ledger + inner reading** | push at `checkpoint()` (freezing the depth and the inner emitter's own checkpoint reading), pop at `release()` (kept) and `rewind()` (spent, the popped row's inner reading is the inner's rewind target); depth entries are frozen facts about prefixes, never live counters |
 //! | E5 | [`Sink::depth`] | **live open-node depth** — the one value derived from the log that the sink maintains rather than recounts | every append charges the event's own `depth_delta`, through the ONE push helper the DEPTH_CENSUS pins; a truncating rewind **restores** it from the target row's frozen depth (or `0` at the origin), and a non-truncating one leaves it untouched |
 //! | E6 | [`Sink::diag_tail`] | **live start of the pure-`Diag` tail** — the second value maintained rather than recounted, and restored by the identical rule | every append through the ONE push helper sets it to the new length for a non-`Diag` and leaves it for a `Diag`; the hole wrap's splice charges its own half; a truncating rewind **restores** it from the target row's frozen value (or `0` at the origin), and a non-truncating one leaves it untouched |
-//! | E7 | [`Sink::opens`] (debug only) | **open-node chain** (a second append-only log, one entry per depth-increasing event) | append + suffix-truncate, the log's own two verbs — a rewind drops the entries whose `start` reached the truncated region and touches no other, so it needs no journal; a close never reclaims a slot (see [`OpenNode`]) |
+//! | E7 | [`Sink::opens`] (debug only) | **open-node chain** (a second append-only log, one entry per depth-increasing event, each carrying a parent link, its depth and a skew-binary skip link) | append + suffix-truncate, the log's own two verbs — a rewind drops the entries whose `start` reached the truncated region and touches no other, so it needs no journal; an entry is written once and never revisited, and a close never reclaims a slot (see [`OpenNode`]) |
 //! | E8 | [`Sink::open_top`] (debug only) | **live chain head** — the third value maintained rather than recounted | the ONE push helper pushes at a `+1` and follows `parent` at a `-1`; a truncating rewind **restores** it from the target row's frozen value (or `None` at the origin), and a non-truncating one leaves it untouched |
 //! | — | [`Sink::floor_mark`] | derived memo (the newest released row's mark) | reset to the surviving top row's mark when a rewind drops below it |
 //! | — | [`Sink::base_inner`] | derived memo (the inner's construction-time reading) | primed at the first advancing touch (provably the construction reading), never restored (the exact no-row target at the origin only) |
@@ -122,6 +122,48 @@
 //! back exactly like the depth. Release pays nothing for either — the check, the chain and the
 //! row field are all behind `debug_assertions`, and release's wall is the typed refusal both
 //! finish doors already raise.
+//!
+//! ## The chain is *searched*, not walked — and why `O(depth)` was not the answer
+//!
+//! Membership was first answered by following `parent` one link at a time, which is `O(depth)`.
+//! Through the blessed [`node`](crate::parser::node) combinator that is a bounded constant —
+//! `d` is grammar nesting depth and `RecursionLimiter` caps it — but **the raw `CstEmitter`
+//! surface is not bounded by that limiter at all**, and the query is reached from it directly.
+//! A hand-rolled sequence that keeps the chain long and demotes near its *bottom* is enough:
+//! open `n` same-kind nodes, then for `k = 0 … n − 2` demote the `k`-th and open a fresh one,
+//! then close `n` times. Every mark is distinct and live, so every query succeeds and the
+//! failing path's suffix scan never runs; the chain never gets shorter; and the `k`-th walk
+//! passes `n − k` links. `Θ(n²)`, in the same profile and on the same wall the recount was —
+//! i.e. the *shape* of #306 survived its first repair, on the surface #306 named as a
+//! requirement. The measured shape hid it: closing innermost-first means every query hits the
+//! chain's own head and reads exactly one entry, which is `O(1)` for a reason that has nothing
+//! to do with the structure.
+//!
+//! The repair is that each entry also carries its `depth` and a **skip link**, laid down by
+//! Myers' skew-binary rule (see [`skip_link_for`](Sink::skip_link_for)): hops of length
+//! 1, 1, 3, 1, 1, 3, 7, … whose defining property is that the chain can be *descended* in
+//! `O(log depth)` steps rather than walked in `O(depth)`. The query
+//! ([`probe_open_chain`](Sink::probe_open_chain)) takes an entry's skip when the landing point
+//! is still at or above the queried index and its `parent` otherwise; since `start` strictly
+//! decreases along the chain and neither move can step past the target, the search meets the
+//! index if the chain holds it and otherwise lands on the first entry below it. **`O(log
+//! depth)`, and the verdict is the walk's on every input** — the ladder changes how the chain
+//! is traversed, not what is on it.
+//!
+//! **It needs no restore rule of its own, and that is the point.** `depth` and `jump` are
+//! written once at the push, from entries that are already frozen, and never revisited — a skip
+//! link is always a *proper ancestor* on its own entry's chain (it is either the parent or a
+//! composition of two ancestor hops). So a truncating rewind that restores
+//! [`open_top`](Sink::open_top) from the target row restores that head's entire ladder along
+//! with its parent chain: every entry the search can reach is an ancestor of the head, every
+//! ancestor's `start` is below the mark, and the pop loop drops exactly the entries at or above
+//! it. The alternative — a depth-indexed spine, which would answer in `O(1)` — was rejected
+//! for exactly the property the ladder has: a spine is *overwritten* by later opens at the same
+//! depth, so a rewind would have to rebuild it in `O(depth)`, moving the same cost from the
+//! query onto every truncating rewind. Growth is unchanged and bounded by the log: one entry
+//! per depth-increasing event in [`events`](Sink::events), dropped when that event is, so
+//! `opens.len() ≤ events.len()` always, and the two new fields cost 8 bytes per entry in debug
+//! and nothing in release.
 
 use core::{marker::PhantomData, num::NonZeroU32};
 
@@ -272,6 +314,12 @@ struct DegradedRewind {
 /// checkpoint taken before the close still names it — a rewind would restore a top pointing at
 /// an unrelated node. A slot is stable for the life of the event it describes, exactly as an
 /// event index is.
+///
+/// **Every field is written once, at the push, and never again.** That immutability is what
+/// makes the whole chain a *frozen fact about the event prefix*: restoring
+/// [`Sink::open_top`] to a slot restores that slot's entire chain — links, depths and skips
+/// alike — with no fix-up pass, which is the property the rewind contract needs and the reason
+/// [`jump`](Self::jump) can be added without a second restore rule.
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OpenNode {
@@ -280,6 +328,18 @@ struct OpenNode {
   /// The slot of the node that was innermost-open when this one opened — the chain's next
   /// link — or `None` when it opened at the log's outermost level.
   parent: Option<u32>,
+  /// How many entries sit below this one on its chain: `0` at the log's outermost level, and
+  /// `parent.depth + 1` otherwise. Bounded by [`Sink::opens`]'s length, which the push door
+  /// already holds under `u32::MAX`.
+  depth: u32,
+  /// The **skip link**: a proper ancestor on this entry's own chain, or `None` for a skip that
+  /// lands past the outermost entry.
+  ///
+  /// Chosen by Myers' skew-binary rule — `jump(parent)`'s own jump when the two hops it
+  /// composes are the same length, and `parent` otherwise — which is what makes the chain
+  /// searchable in `O(log depth)` instead of walked in `O(depth)` (al8n/tokora#306's residue;
+  /// see the open-chain section in the module docs for why `O(depth)` was not enough).
+  jump: Option<u32>,
 }
 
 /// One undo-journal entry: an in-place `forward_parent` write performed by
@@ -596,6 +656,10 @@ where
   /// Same two verbs as the log — append at a `+1` event, suffix-truncate at a rewind — which is
   /// why it needs no undo journal of its own. See [`OpenNode`] for why a close does not reclaim
   /// its slot.
+  ///
+  /// Growth is the log's: one entry per depth-increasing event that is still in `events`, and
+  /// an entry dies with the event it names, so `opens.len() ≤ events.len()` holds at every
+  /// moment. There is no second growth site and no charging ceiling of its own to state.
   #[cfg(debug_assertions)]
   opens: Vec<OpenNode>,
   /// E8 — the innermost open node's slot in [`Sink::opens`], or `None` when nothing is open.
@@ -610,8 +674,12 @@ where
   /// the end of the buffer with no early exit on the success path, `Θ(d × len)` visits for `d`
   /// nested failing brackets. The scan wanted a **running minimum** over that suffix, which the
   /// maintained `depth` cannot supply — a scalar total is blind to a dip that recovers — so the
-  /// answer is this chain, and the query is a walk of at most the current depth. See the
-  /// open-chain section in the module docs for the equivalence.
+  /// answer is this chain. See the open-chain section in the module docs for the equivalence.
+  ///
+  /// The query is a *search* of the chain from this head and not a walk of it: `O(log depth)`,
+  /// over the skew-binary skip links each [`OpenNode`] carries. An `O(depth)` walk was the
+  /// first repair and was not enough — the raw event surface has no depth cap, and the same
+  /// `Θ(n²)` reappears there. That argument is in the module docs beside this one.
   #[cfg(debug_assertions)]
   open_top: Option<u32>,
   /// The newest *released* row's mark: the youngest committed positional fact the sink holds,
@@ -907,15 +975,23 @@ where
   /// raw surface, `depth` is signed precisely so that a close with nothing open is *visible*
   /// rather than wrapped, and the chain says the same thing by having no entry to drop. The
   /// equivalence in the module docs holds through that case.
+  ///
+  /// The push writes all four fields of the new [`OpenNode`] and never revisits an older one, so
+  /// every entry is a frozen fact about the prefix that produced it — the property the rewind
+  /// restore leans on.
   #[cfg(debug_assertions)]
   #[inline]
   fn charge_open_chain(&mut self, delta: i64, index: u64) {
     match delta {
       1 => {
         let parent = self.open_top;
+        let depth = parent.map_or(0, |slot| self.opens[slot as usize].depth + 1);
+        let jump = self.skip_link_for(parent);
         self.opens.push(OpenNode {
           start: index,
           parent,
+          depth,
+          jump,
         });
         self.open_top = u32::try_from(self.opens.len() - 1).ok();
         debug_assert!(
@@ -936,27 +1012,95 @@ where
     }
   }
 
-  /// Whether the node opened by the event at `index` is **still open** — the `O(depth)` answer
-  /// that replaced [`validate_start_mark`](Self::validate_start_mark)'s `O(suffix)` recount
-  /// (al8n/tokora#306).
+  /// A chain slot's depth, with the **virtual entry below the outermost one** at `-1`.
   ///
-  /// Walks the chain from [`open_top`](Self::open_top) outward. The `start` values strictly
-  /// decrease along `parent` (a node's parent opened before it), so the walk stops as soon as it
-  /// passes `index` rather than running the whole chain.
+  /// `None` is a real position in this arithmetic, not an absence: it is where a skip link that
+  /// runs off the bottom of the chain lands, and the skew-binary rule below has to be able to
+  /// measure a hop that ends there.
   #[cfg(debug_assertions)]
+  #[inline]
+  fn chain_depth(&self, slot: Option<u32>) -> i64 {
+    slot.map_or(-1, |s| i64::from(self.opens[s as usize].depth))
+  }
+
+  /// The skip link for a new entry whose parent is `parent` — **Myers' skew-binary rule**, in
+  /// `O(1)` and reading nothing it will not also freeze.
+  ///
+  /// Take `p = parent`, `j = jump(p)` and `jj = jump(j)`. When the two hops `p → j` and
+  /// `j → jj` are the *same length*, the new entry's skip composes them into one hop of roughly
+  /// twice the length (`jj`); otherwise it starts a fresh unit hop (`p`). Applied at every push
+  /// this lays down hops of length 1, 1, 3, 1, 1, 3, 7, … — the skew-binary ladder whose
+  /// defining property is that following `jump` from any entry reaches the outermost one in
+  /// `O(log depth)` steps, and that the greedy "skip when it does not overshoot, else step to
+  /// the parent" search in [`probe_open_chain`](Self::probe_open_chain) is `O(log depth)` too.
+  ///
+  /// The rule reads only `parent` and its two skip targets, all of which are already frozen, so
+  /// the link is decided once and — like every other field of an [`OpenNode`] — never rewritten.
+  #[cfg(debug_assertions)]
+  #[inline]
+  fn skip_link_for(&self, parent: Option<u32>) -> Option<u32> {
+    let p = parent?;
+    let hop = self.opens[p as usize].jump;
+    let double = hop.and_then(|j| self.opens[j as usize].jump);
+    if self.chain_depth(Some(p)) - self.chain_depth(hop)
+      == self.chain_depth(hop) - self.chain_depth(double)
+    {
+      double
+    } else {
+      Some(p)
+    }
+  }
+
+  /// Whether the node opened by the event at `index` is **still open** — the `O(log depth)`
+  /// answer that replaced [`validate_start_mark`](Self::validate_start_mark)'s `O(suffix)`
+  /// recount (al8n/tokora#306).
+  #[cfg(debug_assertions)]
+  #[inline]
   fn node_is_open(&self, index: u64) -> bool {
+    self.probe_open_chain(index).0
+  }
+
+  /// [`node_is_open`](Self::node_is_open)'s body, with the **work it did** returned beside the
+  /// answer: the number of [`opens`](Self::opens) entries the search read.
+  ///
+  /// The search descends the chain from [`open_top`](Self::open_top), where `start` strictly
+  /// decreases, taking the entry's skip link whenever that link lands at or above `index` and
+  /// its `parent` otherwise. Neither move can step past the target — a skip is taken only when
+  /// it does not, and a parent step moves exactly one link — so the walk meets `index` if the
+  /// chain holds it, and otherwise lands on the first entry below it and says no. The
+  /// skew-binary ladder [`skip_link_for`](Self::skip_link_for) builds bounds that at
+  /// `O(log depth)` steps.
+  ///
+  /// The second half of the pair exists so a test can *measure* that bound rather than assert
+  /// it in prose: the counter is the query's own, not a re-derivation of it, because the demote
+  /// wall's query is literally this function with the count dropped.
+  #[cfg(debug_assertions)]
+  fn probe_open_chain(&self, index: u64) -> (bool, u64) {
+    let mut reads = 0u64;
     let mut slot = self.open_top;
     while let Some(node) = slot.and_then(|s| self.opens.get(s as usize)) {
+      reads += 1;
       if node.start == index {
-        return true;
+        return (true, reads);
       }
       if node.start < index {
         // The chain descends past the queried index without meeting it.
-        return false;
+        return (false, reads);
       }
-      slot = node.parent;
+      // `node.start > index`: take the longest hop that does not overshoot the target.
+      slot = match node.jump {
+        Some(j) => {
+          reads += 1;
+          if self.opens[j as usize].start >= index {
+            Some(j)
+          } else {
+            node.parent
+          }
+        }
+        None => node.parent,
+      };
     }
-    false
+    (false, reads)
   }
 
   /// The open-node depth of the current buffer, in O(1).
@@ -1014,6 +1158,32 @@ where
     }
     out.reverse();
     out
+  }
+
+  /// The **retired `O(depth)` walk**, kept as [`probe_open_chain`](Self::probe_open_chain)'s
+  /// oracle: the same question answered by following `parent` one link at a time, with the
+  /// entries it read counted the same way.
+  ///
+  /// Test-only for [`recount_depth`](Self::recount_depth)'s reason, and it earns its place
+  /// twice. It is the *independent* answer the skew-binary search is checked against — the two
+  /// share no code and only the slow one is obviously right — and it is the **before** side of
+  /// the work counter, so the repair's numbers are measured against the walk they replaced
+  /// rather than against a remembered figure from an uncommitted harness.
+  #[cfg(all(test, debug_assertions))]
+  pub(crate) fn probe_open_chain_via_parents(&self, index: u64) -> (bool, u64) {
+    let mut reads = 0u64;
+    let mut slot = self.open_top;
+    while let Some(node) = slot.and_then(|s| self.opens.get(s as usize)) {
+      reads += 1;
+      if node.start == index {
+        return (true, reads);
+      }
+      if node.start < index {
+        return (false, reads);
+      }
+      slot = node.parent;
+    }
+    (false, reads)
   }
 
   /// The full-recount oracle for [`diag_tail`](Self::diag_tail): the length of the buffer with
@@ -1234,6 +1404,11 @@ where
     // dip below its own start, proved in the open-chain section of the module docs — so this is
     // a change of WHEN the suffix is read, not of WHAT is refused. Cases (1), (2) and (3) all
     // still fire, the interleaved strictness choice included.
+    //
+    // The chain is SEARCHED in `O(log depth)` over its skip links, not walked in `O(depth)`.
+    // The walk was the first repair and left #306's own shape behind: the raw surface this
+    // method is reachable from has no depth cap, so a sequence that demotes near the BOTTOM of
+    // a long chain put the same `Theta(n^2)` back on this line. See the module docs.
     #[cfg(debug_assertions)]
     if !self.node_is_open(index) {
       let mut depth: i64 = 0;
@@ -1886,6 +2061,16 @@ where
       // so the pop loop removes exactly the entries at or above the mark. The head is a copy
       // off the frozen row — and every ancestor it reaches has a `start` below the mark, so the
       // restored head can never name a popped slot.
+      //
+      // THE SKIP LINKS RIDE THAT UNCHANGED, which is why they need nothing here. Each entry's
+      // `jump` is a PROPER ANCESTOR on its own chain (it is either `parent`, or a composition
+      // of two ancestor hops), so the set of slots the search can reach from the restored head
+      // is a subset of the parent chain the sentence above already covers: below the mark,
+      // therefore kept. And `depth`/`jump` are written once at the push and never revisited, so
+      // no survivor's ladder was mutated by the events this rewind is undoing — there is
+      // nothing to roll back, only entries to drop. A depth-indexed spine, the O(1) shape, is
+      // exactly what this paragraph could NOT say: later opens overwrite its slots, so it would
+      // need an O(depth) rebuild right here.
       #[cfg(debug_assertions)]
       {
         while self.opens.last().is_some_and(|node| node.start >= mark) {
