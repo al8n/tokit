@@ -161,9 +161,21 @@ pub struct Keyword<S: ?Sized, Span = SimpleSpan, Lang: ?Sized = ()> {
 }
 
 impl<S, Span, Lang: ?Sized> From<Keyword<S, Span, Lang>> for super::Ident<S, Span, Lang> {
+  /// The resulting identifier is reported as valid unconditionally. `Keyword` has no field
+  /// that can hold a recovery status and no predicate that can report one, so there is
+  /// nothing to carry across. This conversion therefore cannot distinguish a keyword that
+  /// was spelled out in the source from one built by `Keyword::error` or `Keyword::missing`,
+  /// and it reports the latter as valid too — that gap is tracked as tokora#301 and is not
+  /// fixable here, because the information does not exist on the source side.
+  ///
+  /// The source is destructured exhaustively so that a `Keyword` field added later stops this
+  /// impl from compiling — a cross-type rebuild cannot be made total on the target side, but it
+  /// can be made total on the side whose fields it reads.
   #[inline(always)]
   fn from(keyword: Keyword<S, Span, Lang>) -> Self {
-    Self::new(keyword.span, keyword.ident)
+    let Keyword { _lang, span, ident } = keyword;
+
+    Self::new(span, ident)
   }
 }
 
@@ -357,9 +369,21 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   }
 
   /// Maps the source string to a new type, preserving the span and language.
+  ///
+  /// Destructures `Self` exhaustively rather than rebuilding through [`Self::new`]. Today
+  /// the two are equivalent, because `Keyword` carries nothing beyond the span, the source
+  /// and the language marker — but a `new`-based body drops any field added later without
+  /// a diagnostic, which is exactly how [`Ident::map`](super::Ident::map) came to launder
+  /// recovery placeholders into valid syntax. This form fails to compile instead.
   #[inline(always)]
   pub fn map<U>(self, f: impl FnOnce(S) -> U) -> Keyword<U, Span, Lang> {
-    Keyword::new(self.span, f(self.ident))
+    let Self { _lang, span, ident } = self;
+
+    Keyword {
+      _lang,
+      span,
+      ident: f(ident),
+    }
   }
 }
 
