@@ -133,6 +133,7 @@
 //! ordinary syntax errors included. There is no longer a baseline at that call site to hoist.
 
 use crate::error::{MaybeIncomplete, MaybeTerminal};
+use crate::input::{ResourceTripBaseline, ScannerTripBaseline};
 
 use super::*;
 
@@ -217,8 +218,8 @@ fn judge<'inp, 'closure, L, O, Ctx, Lang: ?Sized, Cmpl, F>(
   inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
   f: F,
   latch: &Option<L::Offset>,
-  trips: usize,
-  scans: usize,
+  trips: ResourceTripBaseline<'closure>,
+  scans: ScannerTripBaseline,
 ) -> Result<O, (Failure<'inp, L, Ctx, Lang>, bool)>
 where
   L: Lexer<'inp>,

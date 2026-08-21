@@ -279,43 +279,57 @@ and will red until they do.
   the input module's own docs already warn about, "counts replay as input and trips on valid
   documents"), not the cost of an item, and not a session. Calibrate against produce-events.
 
-- **`InputRef::trip_snapshot` / `tripped_during_attempt` and `InputRef::scanner_trip_snapshot` /
-  `scanner_tripped_during_attempt` are public.** All four were `pub(crate)`, so terminality was
+- **`InputRef::trip_snapshot` / `tripped_during_attempt` are public, and the baseline is an opaque
+  `input::ResourceTripBaseline`.** They were `pub(crate)`, so a **descent** budget trip was
   answerable outside this crate only through carriers the grammar supplies — `MaybeTerminal` on an
-  error type whose `From` is free to discard the trip, and a latch a `Checkpoint` refunds. Both
-  counters are the cells this crate added *because* those carriers cannot be trusted: written
-  before any grammar code runs, outside the rollback set, one writer each and no mutable route.
-  Reading them is now the caller's too. Additive, and no behaviour changes: the bodies, the
-  signatures and every in-crate call site are untouched.
+  error type whose `From` may discard the trip, and a latch a `Checkpoint` refunds — which are the
+  two carriers this counter was added because they cannot be trusted. The bodies and every in-crate
+  call site are unchanged; what moved is the visibility and the baseline's type.
 
   **The consumer, and what not having them cost it.** al8n/smear#169. A hand-written document-root
   loop catches a failed definition and decides whether that failure ends the document; deciding by
   reading the error, a nesting refusal reached the loop looking ordinary, the loop resynchronised
   and re-read the abandoned nest at document level, and one refusal became one diagnostic per
-  remaining unit — 67 at 66 levels, 804 at 800, growing with the document. Three rounds of repair
-  each left the verdict resting on something a *caller* implements. This crate does not publish API
-  on speculation and these four sat crate-private for exactly that reason; a real consumer with a
+  remaining unit — 67 at 66 levels, 804 at 800, growing with the document. This crate does not
+  publish API on speculation and these sat crate-private for that reason; a real consumer with a
   real defect is the argument that was missing.
 
-  **The pair, and not a guard that snapshots for you.** A guard is harder to misuse and this crate
-  has one — `parser::recovery_gate`'s attempt chokepoint — but it fits a consumer whose unit *is*
-  the closure it hands over. `parser::many`'s twelve drivers do not use it: they take these
-  baselines by hand, because the two have opposite granularities and neither can be derived from
-  the other. The descent baseline is per *element* and the scanner one per *collection*, and
-  `GATE_CENSUS` pins both placements in both directions. A guard that snapshots on the caller's
-  behalf fixes them to one unit, which is that fusion. So what is centralized here is the
-  **verdict**, never the baseline.
+  **The scanner twin stays crate-internal, and that is a measurement rather than a scoping
+  choice.** `scanner_trip_snapshot` / `scanner_tripped_during_attempt` were published in the same
+  change and withdrawn before release. `set_state` and `state_mut` re-key the input's
+  forward-scanning facts, and dropping the poison boundary there is the crate's **documented**
+  limit-recovery path, while that counter is monotone and never cleared — so a loop doing exactly
+  what the witness's own documentation prescribes can trip, recover, read the whole document, reach
+  a genuine end of input, and still be told it was truncated. Measured: eight tokens under a scan
+  budget of three, recovered with `set_state`, consumed all eight with the witness still answering
+  `true`. That is correct use under two conflicting public contracts, and reconciling them is a
+  change to this crate's terminal law that all twelve collection drivers, the recovery gate and
+  `skip_then_retry` would inherit — a design round, not a visibility change.
 
-  **What the `usize` promises is `!=` and nothing else**, stated on `trip_snapshot` and inherited by
-  its twin: the difference of two snapshots is not a published trip count. The session-absolute
-  reading (`!= 0`) is a real question with a published answer elsewhere — `Cst::resource_trips`, on
-  the finished tree — and asking it *inside* a parse is the defect the baseline exists to prevent,
-  so the docs say so and `tokora/tests/root_loop_trip_witness.rs` measures what it costs: over a
-  document whose first definition catches its own refusal, the absolute reading suppresses every
-  diagnostic after it while the attempt-relative one files all three. That file is also the
-  outside-the-crate use — the amplification at three document lengths, and the scanner half at the
-  exit that holds no error value at all, since `try_expect` folds a spent scan budget into the same
-  `Ok(None)` a finished document produces.
+  A consumer needing that question answered already has a better primitive, and it is better
+  precisely where the counter is wrong: **`InputRef::try_expect_or_stop`**, whose contract is that a
+  terminal stop is an error and never a decline. It reads the live boundary, so the same recovery
+  that leaves the counter poisoned correctly stops it reporting a stop. All three positions are
+  measured in `tokora/tests/root_loop_trip_witness.rs`. Nothing analogous threatens the descent
+  pair: no public API clears or re-keys that counter, and the one cooperative escape hatch is
+  deliberately not built.
+
+  **The baseline is a type, not a `usize`.** `ResourceTripBaseline` is opaque — no accessor, no
+  `PartialEq`, no constructor — so the session-absolute reading (`!= 0`), the difference of two
+  baselines, and "how many trips" are unspellable rather than discouraged, and the scanner
+  baseline's own type makes the two impossible to swap at the sites that take both. It carries the
+  handle's `'closure`, which is what makes it unstorable and so uncarryable across a
+  `PartialSession` redrive whose fresh input starts a fresh counter at zero; a `compile_fail`
+  doctest pins that, with a control beside it that stashes an ordinary `usize` from the same handle
+  and compiles. What the region cannot catch is two inputs alive at once — their handles' regions
+  unify and both counters start at zero — so the baseline also carries the issuing input's nonce
+  and a foreign one **fails closed**, reading as tripped.
+
+  What no type can decide is **placement**, and that is the misuse that survives: the descent
+  baseline belongs inside the element loop and the scanner one above it, and each taken at the
+  other's unit is a measured defect. Both directions are now behavioural cells rather than prose —
+  the hoisted descent baseline in `tokora/tests/root_loop_trip_witness.rs`, the per-element scanner
+  baseline in `input::input_ref::tests`.
 
 ### Changed (breaking)
 

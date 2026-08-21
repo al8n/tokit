@@ -51,6 +51,34 @@ mod transaction;
 mod try_expect;
 
 pub use descent::Descent;
+pub use descent::ResourceTripBaseline;
+
+/// The baseline half of the **scanner-trip witness**, and the reason the swap with
+/// [`ResourceTripBaseline`] does not compile.
+///
+/// Crate-internal, like the pair that issues it — [`InputRef::scanner_trip_snapshot`] records why.
+/// A distinct type rather than a bare `usize` because the two baselines have **opposite**
+/// granularities (this one per collection, the descent one per element) and every site that reads
+/// both takes both, so an argument swap was a plausible boolean and a silent wrong answer. It is
+/// a compile error now. The `'closure` brand its public sibling carries is deliberately absent:
+/// the impl block that issues this one elides the handle lifetime, and the misuse the brand rules
+/// out — a baseline escaping the handle — is not reachable from outside a crate that does not
+/// publish the pair.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScannerTripBaseline {
+  /// The counter's value when the baseline was taken.
+  count: usize,
+}
+
+#[cfg(test)]
+impl ScannerTripBaseline {
+  /// The raw count, for the in-crate cells that assert exact trip tallies rather than the
+  /// attempt-relative verdict. There is no such door on the public sibling.
+  #[inline(always)]
+  pub(crate) const fn count(self) -> usize {
+    self.count
+  }
+}
 pub use drop_policy::{Commit, DropPolicy, Rollback};
 pub use sync_balanced::{Balance, DelimClass, Hole};
 pub use transaction::Transaction;
@@ -927,10 +955,7 @@ where
   /// The scanner twin of [`trip_snapshot`](Self::trip_snapshot), used identically: take the
   /// baseline once per attempt, hand it back to
   /// [`scanner_tripped_during_attempt`](Self::scanner_tripped_during_attempt) when judging that
-  /// attempt. Everything [`trip_snapshot`](Self::trip_snapshot) says about the value transfers:
-  /// only `!=` is promised about it, the difference of two snapshots is not a published count, a
-  /// baseline belongs to one input session, and the absolute reading (`!= 0`) is a session fact
-  /// rather than the question a consulting site has.
+  /// attempt.
   ///
   /// **This, and not the poison boundary beside it, is what a recovery gate judges a scanner stop
   /// with.** The latch is a lineage memo: a [`Checkpoint`](crate::input::Checkpoint) carries it
@@ -949,13 +974,45 @@ where
   /// **once per collection**, above the loop, where hoisting the descent one would be the defect:
   /// taken per element it is re-read after the trip an earlier element caught, and *element 1
   /// tripped and accepted, element 2 declines* then concludes cleanly over a spent budget. That
-  /// asymmetry is the reason there are two pairs rather than one, and the reason neither can be
-  /// folded into a guard that snapshots on the caller's behalf.
+  /// asymmetry is why the two baselines are two **types**: the swap does not compile, in either
+  /// direction, at any of the sites that take both.
+  ///
+  /// # Why this pair is NOT public, where the descent pair is
+  ///
+  /// It was published for one round and withdrawn before release, and the reason is a second
+  /// public contract it cannot see. [`set_state`](Self::set_state) and
+  /// [`state_mut`](Self::state_mut) re-key the input's forward-scanning facts, and dropping the
+  /// poison boundary there is **the documented limit-recovery path** — swap in a fresh or
+  /// bigger-budget state and scanning resumes past the old boundary. Neither touches this counter,
+  /// which is monotone and never cleared. So a loop doing exactly what the section above
+  /// prescribes — one baseline, taken above the loop — can trip, recover through the documented
+  /// path, read the rest of the document and reach a genuine end of input with this witness still
+  /// answering `true`, rejecting a fully recovered parse as truncated. Measured, not reasoned
+  /// about: an eight-token source under a scan budget of three, recovered with `set_state`,
+  /// consumed all eight and the witness still said tripped.
+  ///
+  /// That is correct use under two conflicting public contracts rather than caller misuse, and
+  /// making the verdict account for a state-regime recovery is a change to this crate's terminal
+  /// law — a recovery generation ordered against the trip, in a cell whose own rollback behaviour
+  /// has to be settled — which every one of the twelve collection drivers, the recovery gate and
+  /// `skip_then_retry` would inherit. That is a design round, not a visibility change, so the pair
+  /// stays crate-internal until it has had one.
+  ///
+  /// **A consumer needing this question answered has a better primitive already**, and it is
+  /// better precisely where this one is wrong:
+  /// [`try_expect_or_stop`](Self::try_expect_or_stop), whose contract is that a terminal stop is
+  /// an error and never a decline. It reads the *live* boundary, so the same recovery that leaves
+  /// this counter poisoned correctly stops it reporting a stop. Measured on the same fixture: the
+  /// truncated run raised the terminal end-of-input error with no input-side witness anywhere, the
+  /// widened control returned all eight, and the recovered run also returned all eight.
+  /// `tokora/tests/root_loop_trip_witness.rs`'s section 3 is those three cells.
   ///
   /// Costs one `usize` load per attempt: no scan, no lookahead fill and no token commit reads it.
   #[inline(always)]
-  pub const fn scanner_trip_snapshot(&self) -> usize {
-    *self.scanner_trips
+  pub(crate) const fn scanner_trip_snapshot(&self) -> ScannerTripBaseline {
+    ScannerTripBaseline {
+      count: *self.scanner_trips,
+    }
   }
 
   /// Whether the **scanner tripped a resource limit during the attempt** that took `since` as its
@@ -967,26 +1024,24 @@ where
   /// cannot: a *rejecting* emitter reports a scanner trip by returning the value its
   /// `From<<L::Token as Token>::Error>` builds, and nothing on that path constructs an
   /// [`UnexpectedEnd`](crate::error::UnexpectedEnd) for
-  /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) to mark. That is the same
-  /// shape the descent half has and the reason both are public: terminality is a fact about the
-  /// **event**, this crate enumerates *carriers* of it, and a consumer holding an unmarked carrier
-  /// has no way to tell one from an ordinary failure.
+  /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) to mark.
   ///
   /// **Attempt-relative, not session-absolute**, and a **count** rather than a flag — the same two
   /// disciplines [`tripped_during_attempt`](Self::tripped_during_attempt) documents at length, for
-  /// the same two reasons, along with the argument for publishing the pair rather than a guard
-  /// that snapshots for you. Its granularity floor is the same as well: this witnesses that *a*
-  /// trip happened while the attempt ran, not that the `Err` in hand *is* that trip, so a unit
-  /// that catches a trip and then fails ordinarily is re-raised. It fails closed, never open.
+  /// the same two reasons. Its granularity floor is the same as well: this witnesses that *a* trip
+  /// happened while the attempt ran, not that the `Err` in hand *is* that trip, so a unit that
+  /// catches a trip and then fails ordinarily is re-raised. It fails closed, never open — with the
+  /// one exception [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) records, which is a
+  /// state-regime recovery it cannot see, and which is why that pair is crate-internal.
   ///
-  /// Its baseline's granularity, though, is **not** the descent one's: see
+  /// Its baseline's granularity is **not** the descent one's: see
   /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot), which is per *collection* where the
   /// descent baseline is per *element*.
   ///
   /// Costs one `usize` load and a comparison, on the failure arm only.
   #[inline(always)]
-  pub const fn scanner_tripped_during_attempt(&self, since: usize) -> bool {
-    *self.scanner_trips != since
+  pub(crate) const fn scanner_tripped_during_attempt(&self, since: ScannerTripBaseline) -> bool {
+    *self.scanner_trips != since.count
   }
 
   /// The **token budget** this parse's lexer produces items against: the ceiling, and what has

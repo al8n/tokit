@@ -1,3 +1,4 @@
+use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 
 use crate::{
@@ -6,6 +7,60 @@ use crate::{
 };
 
 use super::*;
+
+/// The baseline half of the **descent-trip witness** — what
+/// [`InputRef::trip_snapshot`](InputRef::trip_snapshot) hands out, and the only thing
+/// [`InputRef::tripped_during_attempt`](InputRef::tripped_during_attempt) accepts.
+///
+/// Opaque, and every absence in it is deliberate. There is **no accessor**, no `PartialEq`, no
+/// `Default` and no public constructor, so the only thing a caller can do with one is hand it back
+/// to the checker that issued it. That is the type doing what the prose used to do alone: the
+/// witness promises "a trip happened inside this attempt" and promises nothing about the counter
+/// underneath, so the difference of two baselines, the comparison of one against zero, and the
+/// question "how many trips" are all unspellable rather than merely discouraged.
+///
+/// # What the region parameter rules out, and what the nonce does
+///
+/// A baseline is meaningful only against the input that issued it, and the two mechanisms here
+/// cover different halves. Which does which was measured rather than assumed, because the
+/// plausible story is wrong in one place.
+///
+/// * **The `'closure` parameter** ties a baseline to the handle that issued it, and that is what
+///   makes it **unstorable**: a parser reaches its input through a universally quantified handle
+///   lifetime, so there is no region a caller can name that a baseline could be parked in and
+///   carried out. That is the shape of smuggling one across a
+///   [`PartialSession`](crate::input::PartialSession) redrive, whose fresh input starts a fresh
+///   counter at zero. [`InputRef::trip_snapshot`](InputRef::trip_snapshot) carries the case, with
+///   the control beside it that makes the refusal attributable to this type rather than to the
+///   scaffolding.
+///
+///   The parameter is **invariant**, through an `fn(&'closure ()) -> &'closure ()` rather than a
+///   bare reference, and that is prophylaxis and not a load-bearing claim: it matches
+///   `SessionPointId` and `SavepointId`, and
+///   it removes a family of coercions rather than any one demonstrated misuse. The escape above is
+///   refused with either variance.
+///
+/// * **The nonce** — the address of the issuing input's own counter slot — is what rules out **two
+///   inputs alive at once**. That one the parameter does *not* catch: two handles in one scope can
+///   have their regions unify, both counters start at zero, so a foreign baseline compares equal
+///   and would certify "nothing happened" over a parse it knows nothing about. Measured, in
+///   `input::input_ref::tests::a_baseline_from_another_live_input_reads_as_tripped`, which
+///   compiles — the brand does not stop it — and which goes red when the nonce term is neutered.
+///   The verdict **fails closed**: a foreign baseline reads as tripped, never as quiet, the
+///   direction every other reading of this witness fails in.
+///
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceTripBaseline<'closure> {
+  /// The counter's value when the baseline was taken.
+  count: usize,
+  /// The identity of the input that issued it: the address of that input's resource-trip slot.
+  /// Distinct inputs are distinct structs at distinct addresses, and the slot is a `usize` so it
+  /// is never zero-sized.
+  nonce: usize,
+  /// Invariant in `'closure`. The fn-pointer form, and not a bare reference, is the point: a
+  /// reference would be covariant and a covariant brand is no brand at all.
+  _brand: PhantomData<fn(&'closure ()) -> &'closure ()>,
+}
 
 impl<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl> InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>
 where
@@ -289,7 +344,7 @@ where
   /// exceeded in this input session so far — for an attempt-relative terminality witness.
   ///
   /// The descent twin of the scanner's `latch_snapshot`, and used exactly as
-  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) is: take the baseline once per
+  /// `scanner_trip_snapshot` is: take the baseline once per
   /// attempt, hand it back to [`tripped_during_attempt`](Self::tripped_during_attempt) when
   /// judging that attempt's failure.
   ///
@@ -299,30 +354,90 @@ where
   /// That arm is its one writer and no method on this handle hands out a mutable route to the
   /// cell, so a consumer can read this witness and cannot forge it.
   ///
-  /// # A baseline, and the only promise about it is `!=`
+  /// # The value is a baseline, and that is all the type lets it be
   ///
-  /// [`tripped_during_attempt`](Self::tripped_during_attempt) compares two of these for
-  /// inequality, and that comparison is the whole of what the value means. The **difference** of
-  /// two snapshots is not a published trip count: the `usize` is what the counter happens to be,
-  /// and arithmetic on it reads an implementation detail rather than an interface.
+  /// [`ResourceTripBaseline`] is opaque: no accessor, no `PartialEq`, no constructor. Hand it back
+  /// to [`tripped_during_attempt`](Self::tripped_during_attempt) and nothing else is expressible —
+  /// not the difference of two baselines, not a trip count, and not the session-absolute reading
+  /// below. The contract used to be a sentence asking callers not to do those things; it is now
+  /// the type refusing to let them.
   ///
-  /// It also belongs to **one input session**. A
-  /// [`PartialSession`](crate::input::PartialSession) redrive builds a fresh input and a fresh
-  /// counter starting at zero, so a snapshot carried across one is compared against a different
-  /// cell and answers nothing about either. Nothing in the `usize` says so, which is the one place
-  /// a caller can hold this value wrong that the type does not catch: take the baseline inside the
-  /// attempt it judges and the question does not arise.
+  /// **The session-absolute reading is the one that had to become unspellable.**
+  /// `trip_snapshot() != 0` would be "did this parse exceed a budget at all" — a true statement
+  /// about the session, and deliberately *not* the question any consulting site has. It stays true
+  /// forever once grammar code catches one trip and carries on, so a site that reads it mid-parse
+  /// charges every later failure — an ordinary syntax error in an unrelated construct included —
+  /// with a stop that is already over, and one deep construct early in a document suppresses every
+  /// diagnostic after it. `tokora/tests/root_loop_trip_witness.rs` measures what that costs. The
+  /// question itself is legitimate *after* the parse, where there is no later attempt to poison,
+  /// and it has a published answer there: `cst::Cst::resource_trips` (feature `rowan`).
   ///
-  /// **Read absolutely it answers a different question, and asking that one here is the defect the
-  /// baseline exists to prevent.** `trip_snapshot() != 0` is "did this parse exceed a budget at
-  /// all" — a true statement about the session, and deliberately *not* the question any consulting
-  /// site has. It stays true forever once grammar code catches one trip and carries on, so a site
-  /// that reads it mid-parse charges every later failure — an ordinary syntax error in an
-  /// unrelated construct included — with a stop that is already over, and one deep construct early
-  /// in a document suppresses every diagnostic after it. The session-absolute question has a
-  /// published answer where it is sound to ask, which is *after* the parse and on the finished
-  /// tree: `cst::Cst::resource_trips` (feature `rowan`), whose own docs say why the same reading is
-  /// safe there and unsafe here.
+  /// # A baseline cannot leave the handle that issued it
+  ///
+  /// It carries the handle's `'closure`, and a parser reaches its input through a universally
+  /// quantified handle lifetime, so there is no region a caller can name that one could be parked
+  /// in. That is the shape of carrying a baseline across a
+  /// [`PartialSession`](crate::input::PartialSession) redrive — which builds a fresh input and a
+  /// fresh counter starting at zero, so the carried baseline would compare against a different
+  /// cell and the next input's first trip would read as "nothing happened".
+  ///
+  /// **The control first**, because a `compile_fail` that fails for the wrong reason proves
+  /// nothing. The identical function stashing an ordinary `usize` read off the same handle
+  /// compiles, so the scaffolding — the `Cell`, the bounds, the borrow of `inp` — is sound:
+  ///
+  /// ```rust
+  /// use core::cell::Cell;
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext};
+  ///
+  /// fn stash_a_number<'inp, L, Ctx>(
+  ///   inp: &mut InputRef<'inp, '_, L, Ctx>,
+  ///   cell: &Cell<Option<usize>>,
+  /// ) where
+  ///   L: Lexer<'inp>,
+  ///   Ctx: ParseContext<'inp, L>,
+  /// {
+  ///   cell.set(Some(inp.recursion().depth()));
+  /// }
+  /// ```
+  ///
+  /// Change only the value's type, and it stops compiling — `'1 must outlive 'static`:
+  ///
+  /// ```compile_fail
+  /// use core::cell::Cell;
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext, input::ResourceTripBaseline};
+  ///
+  /// fn stash_a_baseline<'inp, L, Ctx>(
+  ///   inp: &mut InputRef<'inp, '_, L, Ctx>,
+  ///   cell: &Cell<Option<ResourceTripBaseline<'static>>>,
+  /// ) where
+  ///   L: Lexer<'inp>,
+  ///   Ctx: ParseContext<'inp, L>,
+  /// {
+  ///   // error[E0521]: borrowed data escapes outside of function
+  ///   cell.set(Some(inp.trip_snapshot()));
+  /// }
+  /// ```
+  ///
+  /// The legal use is the one the loop actually needs, and it compiles:
+  ///
+  /// ```rust
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext};
+  ///
+  /// fn judge_one_attempt<'inp, L, Ctx>(inp: &mut InputRef<'inp, '_, L, Ctx>) -> bool
+  /// where
+  ///   L: Lexer<'inp>,
+  ///   Ctx: ParseContext<'inp, L>,
+  /// {
+  ///   let trips = inp.trip_snapshot();
+  ///   // … the attempt this baseline judges runs here …
+  ///   inp.tripped_during_attempt(trips)
+  /// }
+  /// ```
+  ///
+  /// What the region parameter does **not** catch is two inputs alive at once — their handles'
+  /// regions can unify and both counters start at zero — so the baseline also carries the issuing
+  /// input's nonce and a foreign one reads as tripped. [`ResourceTripBaseline`] has both halves
+  /// and says which was measured how.
   ///
   /// # Why a pair, and not one guard that takes the snapshot for you
   ///
@@ -347,11 +462,27 @@ where
   ///
   /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries that argument.
   ///
-  /// Costs one `usize` load per attempt and nothing anywhere else: no scan, no lookahead fill and
-  /// no token commit reads or writes it.
+  /// Costs one `usize` load and one address read per attempt, and nothing anywhere else: no scan,
+  /// no lookahead fill and no token commit reads or writes either.
   #[inline(always)]
-  pub const fn trip_snapshot(&self) -> usize {
-    *self.resource_trips
+  pub fn trip_snapshot(&self) -> ResourceTripBaseline<'closure> {
+    ResourceTripBaseline {
+      count: *self.resource_trips,
+      nonce: self.trip_nonce(),
+      _brand: PhantomData,
+    }
+  }
+
+  /// The identity of **this** input, for [`ResourceTripBaseline`]'s nonce: the address of the
+  /// resource-trip slot it borrows.
+  ///
+  /// The same derivation [`begin_point`](InputRef::begin_point) uses for its session ids, off this
+  /// witness's own cell rather than the poison boundary. Two simultaneously-live inputs are
+  /// distinct structs at distinct addresses and the slot is a `usize`, so it is never zero-sized
+  /// and the two can never collide.
+  #[inline(always)]
+  fn trip_nonce(&self) -> usize {
+    core::ptr::from_ref(&*self.resource_trips).addr()
   }
 
   /// Whether a **resource budget was exceeded during the attempt** that took `since` as its
@@ -417,7 +548,7 @@ where
   /// pin one cell on this behaviour, paired against the cell that moves the catch outside the unit
   /// and gets the opposite answer.
   ///
-  /// # Why it is public
+  /// # Why it is public, and why its scanner twin is not
   ///
   /// This crate does not publish API on speculation, and this pair was crate-private for as long
   /// as the only sites judging an attempt were its own. What changed is a consumer with the
@@ -435,18 +566,33 @@ where
   /// `L::State` or beside the poison boundary, and a [`Checkpoint`](crate::input::Checkpoint)
   /// carries both, so a speculative rollback refunds it. This cell is neither: written by the trip
   /// arm before any grammar code runs, outside the rollback set, one writer, no mutable route.
-  /// That is the whole reason it exists, and a consumer that cannot read it is left with exactly
-  /// the carriers it was added because they cannot be trusted.
+  ///
+  /// **The scanner twin was published in the same change and withdrawn before release**, and the
+  /// asymmetry is the point rather than an accident of scope. That counter has a second public
+  /// contract it cannot see — [`set_state`](InputRef::set_state) drops the poison boundary as the
+  /// crate's *documented* limit-recovery path, and never touches the counter — so a loop following
+  /// its own documentation can recover, read a whole document, and still be told it was truncated.
+  /// `InputRef::scanner_trip_snapshot` carries that measurement and the primitive that answers the
+  /// question correctly instead ([`try_expect_or_stop`](InputRef::try_expect_or_stop)). **Nothing
+  /// analogous exists here.** No public API clears or re-keys the descent counter: a budget once
+  /// exceeded cannot be un-exceeded by more input, by an unwind, or by a rollback, and the one
+  /// cooperative escape hatch — the rebaseline above — is deliberately not built. The witness a
+  /// consumer can rely on is exactly the one with no second contract to conflict with.
   ///
   /// What is published is the **reading**. There is no writer here, no way to lower the counter,
   /// and no rebaseline: the granularity floor above is the floor for a consumer too.
   /// `tokora/tests/root_loop_trip_witness.rs` is the outside-the-crate use, including the cell
-  /// that measures what the amplification costs a root loop with no witness.
+  /// that measures what the amplification costs a root loop with no witness and the cell that
+  /// measures what a baseline hoisted out of the loop costs one that has it.
   ///
-  /// Costs one `usize` load and a comparison, on the failure arm only.
+  /// Costs two `usize` comparisons, on the failure arm only.
   #[inline(always)]
-  pub const fn tripped_during_attempt(&self, since: usize) -> bool {
-    *self.resource_trips != since
+  pub fn tripped_during_attempt(&self, since: ResourceTripBaseline<'closure>) -> bool {
+    // A baseline from another live input certifies nothing about this one, and this witness fails
+    // closed everywhere else, so it fails closed here: a foreign nonce reads as tripped rather
+    // than as "nothing happened". The brand rules out the cross-invocation shape at compile time;
+    // this is the one it cannot see.
+    since.nonce != self.trip_nonce() || *self.resource_trips != since.count
   }
 }
 

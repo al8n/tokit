@@ -40,24 +40,41 @@
 //! document's length without it, at three lengths, so what is pinned is the *growth* and not one
 //! number.
 //!
-//! # The reading that is available and wrong — section 2
+//! # The placement that compiles and is wrong — section 2
 //!
-//! Publishing the snapshot publishes `trip_snapshot() != 0`, which is a true statement about the
-//! session and not the question the loop has: it stays true forever once grammar code catches a
-//! trip and parses on. Section 2 is that misreading, run beside the attempt-relative one over a
-//! source whose first definition catches its own refusal. The two answer differently, and the
-//! absolute one suppresses every diagnostic after the deep construct — exactly the failure the
-//! witness was narrowed to avoid. Its widened-budget control is what makes the pair a measurement:
-//! with nothing tripping, the two loops agree.
+//! The baseline is a value the caller places, and **where** it is placed is the whole verdict.
+//! Taken once above the loop it is arithmetically a session-absolute read for every definition
+//! after the first: the counter is monotone, so a refusal any earlier definition caught keeps
+//! answering "tripped" for the rest of the document. Section 2 runs the hoisted loop beside the
+//! per-definition one over a source whose first definition catches its own refusal and whose next
+//! three fail ordinarily. The per-definition loop files all three; the hoisted one files none and
+//! ends the document on the first. The widened-budget control is what makes the pair a
+//! measurement: with nothing refusing, the two agree.
 //!
-//! # The scanner half, where there is no error value at all — section 3
+//! The *other* wrong placement — the scanner baseline taken per element rather than per collection
+//! — is pinned in-crate, beside the pair it belongs to, because that pair is not public. See
+//! `input::input_ref::tests`.
+//!
+//! What is no longer testable here is the session-absolute reading itself. `trip_snapshot()`
+//! returns an opaque `ResourceTripBaseline`, so `!= 0` does not compile, the difference of two
+//! baselines does not compile, and a baseline cannot be stashed and carried into another handle
+//! invocation. Those are compile-fail doctests on `InputRef::trip_snapshot`; what survives to be
+//! measured at runtime is placement, which no type can decide for a caller.
+//!
+//! # The scanner half, and why this file does not use the scanner counter — section 3
 //!
 //! `try_expect` folds a terminal scanner stop into the same `Ok(None)` it uses for a genuine end of
-//! input, so a root loop reaches its "the document ended" arm holding **no error**. No reading of an
-//! error value can answer there, for any error type, however carefully the grammar delegates
-//! `MaybeTerminal`. `scanner_tripped_during_attempt` against a baseline taken once above the loop is
-//! the whole of what tells a finished document from a truncated one, and section 3 drives both
-//! answers.
+//! input, so a root loop reaches its "the document ended" arm holding **no error**. The obvious
+//! answer is the input-side scanner counter, and it is the wrong one: `set_state` re-keys the
+//! forward-scanning facts and dropping the poison boundary there is the crate's *documented*
+//! limit-recovery path, while the counter is monotone and never cleared. A loop that recovers that
+//! way reads the whole document and the counter still says truncated. That pair is therefore
+//! crate-internal — `InputRef::scanner_trip_snapshot` records the measurement — and the primitive
+//! a consumer should reach for is [`InputRef::try_expect_or_stop`], whose contract is that a
+//! terminal stop is an error and never a decline. Section 3 is the three cells that show it is
+//! right in all three positions: truncated, untruncated, and recovered.
+//!
+//! [`InputRef::try_expect_or_stop`]: tokora::InputRef::try_expect_or_stop
 
 mod common;
 
@@ -272,19 +289,25 @@ where
   }
 }
 
-/// The misreading the snapshot's own documentation refuses: `trip_snapshot() != 0`, which asks
-/// whether *the parse* ever refused rather than whether *this definition* did.
-fn root_absolute<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<(), ()>
+/// The placement the snapshot's own documentation refuses: **one baseline, above the loop**.
+///
+/// It compiles, because it is a legal baseline used with its own checker — no type can tell a
+/// caller where to put it. Arithmetically it is a session-absolute read for every definition after
+/// the first, and section 2 measures the difference.
+fn root_hoisted<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<(), ()>
 where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
 {
+  // THE DEFECT: hoisted out of the loop, so every definition is judged against the document's
+  // start rather than against its own attempt.
+  let trips = inp.trip_snapshot();
   loop {
     match catching_definition(inp) {
       Ok(true) => {}
       Ok(false) => return Ok(()),
       Err(e) => {
-        if e.is_terminal() || inp.trip_snapshot() != 0 {
+        if e.is_terminal() || inp.tripped_during_attempt(trips) {
           return Err(e);
         }
         note_report();
@@ -393,10 +416,13 @@ fn with_room_to_descend_the_same_loop_parses_the_whole_document() {
 
 /// A caught refusal early in the document must not charge the ordinary failures after it.
 ///
+/// Both loops read the same witness with the same checker. The only difference is **where** the
+/// baseline is taken, and it decides the whole document.
+///
 /// `1 9 9 9`: the first definition descends, catches its own refusal and carries on; the three
 /// after it fail ordinarily on [`BAD`] having descended nothing at all.
 #[test]
-fn the_absolute_reading_charges_every_later_failure_with_a_refusal_that_is_over() {
+fn a_hoisted_baseline_charges_every_later_failure_with_a_refusal_that_is_over() {
   const SRC: &str = "1 9 9 9";
 
   reset();
@@ -415,19 +441,19 @@ fn the_absolute_reading_charges_every_later_failure_with_a_refusal_that_is_over(
   );
 
   reset();
-  let absolute = drive!(TIGHT, root_absolute, SRC);
-  assert!(trips() > 0, "the absolute run must refuse too");
+  let hoisted = drive!(TIGHT, root_hoisted, SRC);
+  assert!(trips() > 0, "the hoisted run must refuse too");
   assert_eq!(
-    absolute,
+    hoisted,
     Err(()),
-    "session-absolute: `trip_snapshot() != 0` is true forever after the caught refusal, so the \
-     next ordinary syntax error ends the document"
+    "hoisted: the counter is monotone, so a baseline taken above the loop keeps answering \
+     `tripped` after the caught refusal and the next ordinary syntax error ends the document"
   );
   assert_eq!(
     reports(),
     0,
-    "session-absolute: one deep construct early in the document suppressed every diagnostic after \
-     it — the failure the baseline exists to prevent"
+    "hoisted: one deep construct early in the document suppressed every diagnostic after it — the \
+     failure the per-definition placement exists to prevent"
   );
 }
 
@@ -435,7 +461,7 @@ fn the_absolute_reading_charges_every_later_failure_with_a_refusal_that_is_over(
 ///
 /// Without this, "the two loops disagree" is satisfiable by a loop that is simply broken.
 #[test]
-fn with_nothing_refusing_the_two_readings_agree() {
+fn with_nothing_refusing_the_two_placements_agree() {
   const SRC: &str = "1 9 9 9";
 
   reset();
@@ -448,13 +474,13 @@ fn with_nothing_refusing_the_two_readings_agree() {
   );
 
   reset();
-  assert_eq!(drive!(ROOMY, root_absolute, SRC), Ok(()));
+  assert_eq!(drive!(ROOMY, root_hoisted, SRC), Ok(()));
   assert_eq!(trips(), 0, "widened budget: nothing refuses");
   assert_eq!(
     reports(),
     3,
-    "session-absolute, no refusal: the same three — the counter is what the two readings differ \
-     over, and here it never moved"
+    "hoisted, no refusal: the same three — the counter is what the two placements differ over, and \
+     here it never moved"
   );
 }
 
@@ -533,8 +559,9 @@ impl core::fmt::Display for SKind {
 enum SErr {
   /// Whatever the lexer or the emitter produced.
   Ordinary,
-  /// What the witnessed loop returns when it refuses to call a truncated document finished.
-  Truncated,
+  /// The terminal end-of-input `try_expect_or_stop` raises over a stop — the carrier that makes
+  /// the truncation visible with no input-side witness at all.
+  Eot,
 }
 
 impl From<()> for SErr {
@@ -546,6 +573,12 @@ impl From<()> for SErr {
 impl From<ScanLimitExceeded> for SErr {
   fn from(_: ScanLimitExceeded) -> Self {
     SErr::Ordinary
+  }
+}
+
+impl<O, Lang: ?Sized> From<tokora::error::UnexpectedEot<O, Lang>> for SErr {
+  fn from(_: tokora::error::UnexpectedEot<O, Lang>) -> Self {
+    SErr::Eot
   }
 }
 
@@ -566,42 +599,53 @@ impl TokenTrait<'_> for STok {
 
 type SLexer<'a> = LogosLexer<'a, STok>;
 
-/// One definition over the limited stream: commit a number. `Ok(false)` means "nothing more to
-/// read" — which is the claim section 3 is about, because a spent scan budget produces it too.
-fn s_definition<'inp, Ctx>(inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>) -> Result<bool, SErr>
+/// The loop a consumer should write for the scanner half: the decision read is
+/// [`InputRef::try_expect_or_stop`], whose `Ok(None)` means definite absence and whose terminal
+/// stop is an error.
+///
+/// No input-side witness anywhere, and none needed. This is the whole of what section 3 argued the
+/// scanner counter was for, met by a primitive that was already public — and met *better*, because
+/// the counter is monotone while this reads the live boundary, so a documented `set_state`
+/// recovery correctly stops it reporting a stop.
+fn s_root_or_stop<'inp, Ctx>(inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>) -> Result<usize, SErr>
 where
   Ctx: ParseContext<'inp, SLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
 {
-  Ok(inp.try_expect(|_| true)?.is_some())
+  let mut parsed = 0usize;
+  while inp.try_expect_or_stop(|_| true)?.is_some() {
+    parsed += 1;
+  }
+  Ok(parsed)
 }
 
-/// The root loop **with** the scanner witness. The baseline is taken once, above the loop: a spent
-/// scan budget stays true of the input, so unlike the descent one it is not per element.
-fn s_root_witnessed<'inp, Ctx>(
+/// The same loop, recovering from the stop through the documented path — swap in a fresh state,
+/// which drops the poison boundary and resumes scanning past it.
+fn s_root_or_stop_recovering<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>,
 ) -> Result<usize, SErr>
 where
   Ctx: ParseContext<'inp, SLexer<'inp>>,
   Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
 {
-  let scans = inp.scanner_trip_snapshot();
   let mut parsed = 0usize;
+  let mut recovered = false;
   loop {
-    if s_definition(inp)? {
-      parsed += 1;
-      continue;
+    match inp.try_expect_or_stop(|_| true) {
+      Ok(Some(_)) => parsed += 1,
+      Ok(None) => return Ok(parsed),
+      Err(_) if !recovered => {
+        inp.set_state(ScanLimiter::with_limit(S_ROOMY));
+        recovered = true;
+      }
+      Err(e) => return Err(e),
     }
-    if inp.scanner_tripped_during_attempt(scans) {
-      return Err(SErr::Truncated);
-    }
-    return Ok(parsed);
   }
 }
 
-/// The root loop **without** it: `Ok(None)` is read as the end of the document, whatever produced
-/// it.
-fn s_root_unwitnessed<'inp, Ctx>(
+/// The loop that reads `try_expect`, whose `Ok(None)` covers a terminal stop — the shape the
+/// scanner witness would have had to rescue.
+fn s_root_try_expect<'inp, Ctx>(
   inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>,
 ) -> Result<usize, SErr>
 where
@@ -609,7 +653,7 @@ where
   Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
 {
   let mut parsed = 0usize;
-  while s_definition(inp)? {
+  while inp.try_expect(|_| true)?.is_some() {
     parsed += 1;
   }
   Ok(parsed)
@@ -634,47 +678,63 @@ const S_UNITS: usize = 8;
 const S_TIGHT: usize = 3;
 const S_ROOMY: usize = 1_000;
 
-/// A spent scan budget reaches the loop as `Ok(None)`, and only the input can say so.
+/// `try_expect` folds a spent scan budget into the same `Ok(None)` a finished document produces,
+/// and `try_expect_or_stop` does not.
+///
+/// The two loops differ in exactly one call. One reports a complete document over a truncated
+/// stream; the other raises the terminal end-of-input error, with no input-side witness in either.
 #[test]
-fn a_truncated_document_is_indistinguishable_from_a_finished_one_without_the_scanner_witness() {
-  let (unwitnessed, scanned) = s_drive!(S_TIGHT, s_root_unwitnessed, S_SRC);
+fn try_expect_or_stop_surfaces_the_scanner_stop_that_try_expect_hides() {
+  let (hidden, scanned) = s_drive!(S_TIGHT, s_root_try_expect, S_SRC);
   assert!(
     scanned > S_TIGHT,
     "the fixture must actually trip the scan budget: scanned {scanned}, limit {S_TIGHT}"
   );
-  let parsed = unwitnessed.expect(
-    "without the witness the loop reports a finished document — there is no error value at this \
-     exit for any reading of one to judge",
-  );
+  let parsed = hidden.expect("`try_expect` reports a finished document over the spent budget");
   assert!(
     parsed < S_UNITS,
     "the run must really be truncated: {parsed} of {S_UNITS} definitions parsed"
   );
 
-  let (witnessed, scanned) = s_drive!(S_TIGHT, s_root_witnessed, S_SRC);
-  assert!(scanned > S_TIGHT, "the witnessed run must trip too");
+  let (surfaced, scanned) = s_drive!(S_TIGHT, s_root_or_stop, S_SRC);
+  assert!(scanned > S_TIGHT, "the or_stop run must trip too");
   assert_eq!(
-    witnessed,
-    Err(SErr::Truncated),
-    "`scanner_tripped_during_attempt` against a baseline taken above the loop refuses to call a \
-     truncated document finished"
+    surfaced,
+    Err(SErr::Eot),
+    "`try_expect_or_stop` raises the terminal end-of-input error, which is the whole answer — no \
+     scanner counter, no baseline, no placement to get wrong"
   );
 }
 
-/// Non-vacuity: with a budget nothing reaches, both loops read the whole document and agree.
+/// Non-vacuity: with a budget nothing reaches, the safe primitive costs the parse nothing.
 #[test]
-fn with_scan_budget_to_spare_both_loops_read_the_whole_document() {
-  let (unwitnessed, scanned) = s_drive!(S_ROOMY, s_root_unwitnessed, S_SRC);
-  assert_eq!(unwitnessed, Ok(S_UNITS));
+fn with_scan_budget_to_spare_or_stop_reads_the_whole_document() {
+  let (out, scanned) = s_drive!(S_ROOMY, s_root_or_stop, S_SRC);
+  assert_eq!(out, Ok(S_UNITS));
   assert!(
     scanned <= S_ROOMY,
     "the control must not trip: scanned {scanned}"
   );
+}
 
-  let (witnessed, _) = s_drive!(S_ROOMY, s_root_witnessed, S_SRC);
+/// The position the crate-internal scanner counter gets **wrong**, and this primitive gets right.
+///
+/// `set_state` drops the poison boundary — the documented limit-recovery path — while the scanner
+/// counter is monotone and never cleared. A loop that recovers that way reads the whole document,
+/// and a counter-based verdict taken once above the loop still answers "tripped": measured at
+/// `(8, true)` for this exact fixture, which is why `InputRef::scanner_trip_snapshot` is not
+/// public. The live-boundary read has no such residue.
+#[test]
+fn a_documented_state_recovery_leaves_or_stop_reporting_a_finished_document() {
+  let (out, scanned) = s_drive!(S_TIGHT, s_root_or_stop_recovering, S_SRC);
+  assert!(
+    scanned > S_TIGHT,
+    "the fixture must actually trip before recovering: scanned {scanned}, limit {S_TIGHT}"
+  );
   assert_eq!(
-    witnessed,
+    out,
     Ok(S_UNITS),
-    "the witness costs an untripped parse nothing: same count, same verdict"
+    "the recovery is documented and complete, so the document is finished and not truncated — the \
+     verdict a monotone counter cannot reach"
   );
 }

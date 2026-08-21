@@ -243,9 +243,11 @@ pub use cursor::Cursor;
 #[cfg(all(test, feature = "logos_0_16", feature = "std", feature = "combinators"))]
 pub(crate) use input_ref::ClosePayload;
 pub(crate) use input_ref::CloseStatus;
+pub(crate) use input_ref::ScannerTripBaseline;
 pub(crate) use input_ref::Session;
 pub use input_ref::{
-  Balance, Commit, DelimClass, Descent, DropPolicy, Hole, InputRef, Rollback, Transaction,
+  Balance, Commit, DelimClass, Descent, DropPolicy, Hole, InputRef, ResourceTripBaseline, Rollback,
+  Transaction,
 };
 pub(crate) use lineage::Lineage;
 pub use session::{Budget, PartialSession, RedriveFromBase, ReplayMode, SessionRefusal};

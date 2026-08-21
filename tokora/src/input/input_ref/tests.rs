@@ -10801,7 +10801,7 @@ fn refusal_under_a_panicking_destructor(rounds: usize) -> (usize, usize, usize, 
     lex_calls(),
     inp.token_budget().spent(),
     unwound,
-    inp.scanner_trip_snapshot(),
+    inp.scanner_trip_snapshot().count(),
     inp.is_poisoned(),
   )
 }
@@ -10878,7 +10878,7 @@ fn one_refusal_under_a_span_drop(bomb_at: usize) -> (usize, bool, usize, bool, u
   (
     lex_calls(),
     inp.token_budget().limit_probe_spent(),
-    inp.scanner_trip_snapshot(),
+    inp.scanner_trip_snapshot().count(),
     inp.is_poisoned(),
     bomb_fired(),
     drops,
@@ -10974,7 +10974,7 @@ fn charge_under_a_panicking_lexer_span(rounds: usize) -> (usize, usize, usize, u
     inp.token_budget().spent(),
     unwound,
     bomb_fired(),
-    inp.scanner_trip_snapshot(),
+    inp.scanner_trip_snapshot().count(),
     inp.is_poisoned(),
   )
 }
@@ -11011,7 +11011,7 @@ fn probe_under_a_panicking_lexer_span(rounds: usize) -> (usize, usize, usize, us
     inp.token_budget().spent(),
     unwound,
     bomb_fired(),
-    inp.scanner_trip_snapshot(),
+    inp.scanner_trip_snapshot().count(),
     inp.is_poisoned(),
   )
 }
@@ -11048,7 +11048,7 @@ fn a_lexer_that_dies_before_producing(rounds: usize) -> (usize, usize, usize, us
     inp.token_budget().spent(),
     unwound,
     bomb_fired(),
-    inp.scanner_trip_snapshot(),
+    inp.scanner_trip_snapshot().count(),
     inp.is_poisoned(),
   )
 }
@@ -11218,7 +11218,7 @@ fn refusal_under_a_panicking_cache_back(bomb_at: usize, exit: CaughtExit) -> (Re
   );
   let mut inp = input.as_ref();
 
-  let base = inp.scanner_trip_snapshot();
+  let base = inp.scanner_trip_snapshot().count();
   let calls = Cell::new(0usize);
   reset_bomb_fired();
   let kept = inp.attempt(|txn| {
@@ -11239,7 +11239,7 @@ fn refusal_under_a_panicking_cache_back(bomb_at: usize, exit: CaughtExit) -> (Re
     (
       kept.unwrap_or(0),
       inp.token_budget().limit_probe_spent(),
-      inp.scanner_trip_snapshot() - base,
+      inp.scanner_trip_snapshot().count() - base,
       inp.is_poisoned(),
       bomb_fired(),
     ),
@@ -11263,7 +11263,7 @@ fn refusal_under_a_panicking_offset_clone(bomb_at: usize, exit: CaughtExit) -> (
   );
   let mut inp = input.as_ref();
 
-  let base = inp.scanner_trip_snapshot();
+  let base = inp.scanner_trip_snapshot().count();
   let clones = Cell::new(0usize);
   reset_bomb_fired();
   let kept = inp.attempt(|txn| {
@@ -11284,7 +11284,7 @@ fn refusal_under_a_panicking_offset_clone(bomb_at: usize, exit: CaughtExit) -> (
     (
       kept.unwrap_or(0),
       inp.token_budget().limit_probe_spent(),
-      inp.scanner_trip_snapshot() - base,
+      inp.scanner_trip_snapshot().count() - base,
       inp.is_poisoned(),
       bomb_fired(),
     ),
@@ -11513,7 +11513,7 @@ fn refusal_after_the_probe_is_spent(
     Reopened::Rollback => REFUSAL_CEILING,
     Reopened::Rekey => 0,
   };
-  let base = inp.scanner_trip_snapshot();
+  let base = inp.scanner_trip_snapshot().count();
   let steps = Cell::new(0usize);
   reset_bomb_fired();
   let kept = inp.attempt(|txn| {
@@ -11539,7 +11539,7 @@ fn refusal_after_the_probe_is_spent(
     (
       kept.unwrap_or(0),
       inp.token_budget().limit_probe_spent(),
-      inp.scanner_trip_snapshot() - base,
+      inp.scanner_trip_snapshot().count() - base,
       inp.is_poisoned(),
       bomb_fired(),
     ),
@@ -11782,7 +11782,7 @@ fn truncation_under_a_panicking_front_drain(how: Reopened, bomb_at: usize) -> Re
     Reopened::Rollback => REFUSAL_CEILING,
     Reopened::Rekey => 0,
   };
-  let base = inp.scanner_trip_snapshot();
+  let base = inp.scanner_trip_snapshot().count();
   reset_bomb_fired();
   let kept = inp.attempt(|txn| {
     let taken = Cell::new(0usize);
@@ -11805,7 +11805,7 @@ fn truncation_under_a_panicking_front_drain(how: Reopened, bomb_at: usize) -> Re
   (
     kept.unwrap_or(0),
     inp.token_budget().refused_an_item(),
-    inp.scanner_trip_snapshot() - base,
+    inp.scanner_trip_snapshot().count() - base,
     inp.is_poisoned(),
     bomb_fired(),
   )
@@ -11891,14 +11891,14 @@ fn a_latched_boundary_answers_without_counting_a_second_trip() {
   );
 
   // The boundary SURVIVES: every further ask is the same stop, and the same stop is one stop.
-  let base = inp.scanner_trip_snapshot();
+  let base = inp.scanner_trip_snapshot().count();
   for round in 0..8 {
     assert!(
       matches!(inp.next(), Ok(None)) && inp.is_poisoned(),
       "round {round}: a latched boundary must keep answering terminally"
     );
   }
-  let latched = inp.scanner_trip_snapshot() - base;
+  let latched = inp.scanner_trip_snapshot().count() - base;
 
   // The boundary is CLEARED: the ask that finds it gone is a refused entry, and a refused entry is
   // counted — once, and then the memo holds again.
@@ -11910,7 +11910,7 @@ fn a_latched_boundary_answers_without_counting_a_second_trip() {
       "round {round}: a cleared boundary must be re-established terminally"
     );
   }
-  let reopened = inp.scanner_trip_snapshot() - base - latched;
+  let reopened = inp.scanner_trip_snapshot().count() - base - latched;
 
   assert_eq!(
     (latched, reopened),
@@ -11918,6 +11918,124 @@ fn a_latched_boundary_answers_without_counting_a_second_trip() {
     "(trips over eight asks at a LATCHED boundary, trips over eight asks after it was CLEARED \
      once). The first is the documented behaviour the gate must not change; the second is the \
      refusal it must publish."
+  );
+}
+
+/// A [`ResourceTripBaseline`](crate::input::ResourceTripBaseline) issued by **another live input**
+/// reads as tripped.
+///
+/// The hole the `'closure` brand cannot close. Two inputs alive at once can have their handle
+/// regions unify — they are two locals in one scope here, which is the cheapest way to make that
+/// happen — and both counters start at zero, so a baseline from one compares *equal* against the
+/// other and would certify "nothing happened" over a parse it knows nothing about. That is the
+/// same hole [`SessionPointId`](crate::SessionPointId) carries a nonce for, and this witness
+/// carries one for the same reason.
+///
+/// The verdict **fails closed**: a foreign baseline reads as tripped, never as quiet. Neutering
+/// the nonce term in `tripped_during_attempt` turns the third assertion below red while the first
+/// two stay green, which is what makes the term load-bearing rather than merely present.
+#[test]
+fn a_baseline_from_another_live_input_reads_as_tripped() {
+  fn fresh<'a>(src: &'a str) -> Input<'a, BombLexer<'a>, BombCtx<'a>, ()> {
+    let context = crate::input::InputContext::new(
+      BombEmitter::default(),
+      DefaultCache::<'_, BombLexer<'_>>::default(),
+    );
+    Input::with_state_and_context(src, BombTally::default(), context)
+  }
+
+  let mut one = fresh(REFUSAL_SRC);
+  let mut two = fresh(REFUSAL_SRC);
+  let first = one.as_ref();
+  let second = two.as_ref();
+
+  let from_first = first.trip_snapshot();
+  let from_second = second.trip_snapshot();
+
+  assert!(
+    !first.tripped_during_attempt(from_first),
+    "its own baseline over an attempt that descended nothing: quiet"
+  );
+  assert!(
+    !second.tripped_during_attempt(from_second),
+    "and the same for the other input, so neither is trivially tripped"
+  );
+  assert!(
+    second.tripped_during_attempt(from_first),
+    "a baseline the OTHER input issued certifies nothing about this one. Both counters are 0, so \
+     the counts compare equal and only the nonce separates them — and the verdict fails closed, \
+     which is the direction every other reading of this witness fails in"
+  );
+  assert!(
+    first.tripped_during_attempt(from_second),
+    "and symmetrically, so the answer is not an artefact of which input was built first"
+  );
+}
+
+/// The **scanner** baseline belongs to the collection, and taken per element it goes blind to the
+/// stop an earlier element caught — *element 1 tripped and accepted, element 2 declines*.
+///
+/// The mirror of the descent hoisting cell in `tokora/tests/root_loop_trip_witness.rs`: there a
+/// baseline taken too far *out* charges failures that never tripped, here one taken too far *in*
+/// clears a budget that is still spent. Both loops below read the same witness with the same
+/// checker and differ only in where the baseline is taken, which is the asymmetry
+/// `scanner_trip_snapshot`'s docs assert and this cell measures.
+///
+/// Element 1 drains to the token-budget refusal and **accepts** what it took; element 2 finds
+/// nothing and **declines**. The per-collection baseline sees the trip at element 2's absence exit
+/// and refuses to call the collection finished; the per-element one is taken after the trip and
+/// reads clean.
+#[test]
+fn a_scanner_baseline_taken_per_element_goes_blind_to_the_stop_element_one_caught() {
+  fn drive(per_element: bool) -> (usize, bool) {
+    let context = crate::input::InputContext::new(
+      BombEmitter::default(),
+      DefaultCache::<'_, BombLexer<'_>>::default(),
+    )
+    .with_token_budget(crate::input::TokenBudget::with_limitation(REFUSAL_CEILING));
+    let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+      REFUSAL_SRC,
+      BombTally::default(),
+      context,
+    );
+    let mut inp = input.as_ref();
+
+    // Per COLLECTION: taken once, above the element loop. This is the correct placement.
+    let collection = inp.scanner_trip_snapshot();
+    let mut collected = 0usize;
+
+    // Element 1: drain to the refusal — which trips — and accept what it took.
+    let mut element = inp.scanner_trip_snapshot();
+    while let Ok(Some(_)) = inp.next() {
+      collected += 1;
+    }
+
+    // Element 2: ask again, take nothing, and DECLINE. Per element, its baseline is re-read here —
+    // after element 1's trip — which is the whole defect.
+    if per_element {
+      element = inp.scanner_trip_snapshot();
+    }
+    let declined = matches!(inp.next(), Ok(None));
+    assert!(
+      declined,
+      "element 2 must decline for this to be an absence exit"
+    );
+
+    let baseline = if per_element { element } else { collection };
+    (collected, inp.scanner_tripped_during_attempt(baseline))
+  }
+
+  assert_eq!(
+    drive(false),
+    (REFUSAL_CEILING, true),
+    "per collection: element 2's absence exit is refused, because the budget element 1 spent is \
+     still spent"
+  );
+  assert_eq!(
+    drive(true),
+    (REFUSAL_CEILING, false),
+    "per element: element 2's baseline is taken after element 1's trip, so the collection ends \
+     clean over a stream the stop truncated — the placement the docs refuse"
   );
 }
 
@@ -11993,7 +12111,7 @@ fn a_lexer_limit_trip_is_terminal_and_the_budget_witness_stays_false() {
   );
   let mut inp = input.as_ref();
 
-  let base = inp.scanner_trip_snapshot();
+  let base = inp.scanner_trip_snapshot().count();
   let mut taken = 0usize;
   while let Ok(Some(_)) = inp.next() {
     taken += 1;
@@ -12002,7 +12120,7 @@ fn a_lexer_limit_trip_is_terminal_and_the_budget_witness_stays_false() {
   assert_eq!(
     (
       taken,
-      inp.scanner_trip_snapshot() - base,
+      inp.scanner_trip_snapshot().count() - base,
       inp.is_poisoned(),
       inp.token_budget().refused_an_item(),
       inp.token_budget().is_exhausted(),
@@ -12062,7 +12180,7 @@ fn trip_under_a_panicking_error_drop(bomb_at: usize, exit: CaughtExit) -> (Trip,
   );
   let mut inp = input.as_ref();
 
-  let base = inp.scanner_trip_snapshot();
+  let base = inp.scanner_trip_snapshot().count();
   let drops = Cell::new(0usize);
   let built = Cell::new(0usize);
   reset_bomb_fired();
@@ -12085,7 +12203,7 @@ fn trip_under_a_panicking_error_drop(bomb_at: usize, exit: CaughtExit) -> (Trip,
     (
       kept.unwrap_or(0),
       built.get(),
-      inp.scanner_trip_snapshot() - base,
+      inp.scanner_trip_snapshot().count() - base,
       inp.is_poisoned(),
       bomb_fired(),
     ),
