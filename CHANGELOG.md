@@ -806,6 +806,32 @@ and will red until they do.
 
 ### Fixed
 
+- **`UnexpectedEnd::reconstruct`, `reconstruct_with_name`, and `reconstruct_without_name` no
+  longer clear the terminal-stop flag or drop the expected set** (#300). All three rebuilt the
+  value through the defaulting constructors `maybe_name_of` / `with_name_of` / `of`, each of
+  which hardcodes `expected: None` and `terminal: false` — so reconstructing to give an error a
+  new name and a transformed hint silently reset two fields the transformation never named.
+  `map_hint`, the method immediately preceding them in the same impl block, does the identical
+  job through a struct literal that carries `expected` and `terminal` across; the three that
+  followed it did not.
+
+  `terminal` is the sharp half: it marks a **terminal scanner stop** — a resource-limit trip, or
+  the poison boundary that latches it — rather than a genuine end of input, and recovery keys off
+  `MaybeTerminal` to re-raise the stop instead of spending it. A consumer that reconstructed such
+  an error before handing it on got back a value whose `is_terminal()` answered `false`, turning
+  a must-not-recover stop into an ordinary recoverable end-of-input. Dropping `expected` is a
+  diagnostics regression rather than a control-flow one: the reconstructed error lost the
+  end-of-input expected set `maybe_expected_of` had attached.
+
+  All three now use `map_hint`'s struct-literal shape: `offset`, `expected`, and `terminal`
+  carry through unchanged, and only what each method's own contract names is reset —
+  `reconstruct` and `reconstruct_with_name` take the new name, `reconstruct_without_name` clears
+  it. `reconstruct*` has no callers in `tokora/src`; the witness is a legal safe public call
+  sequence — a consumer that receives a terminal `UnexpectedEnd` this crate produced and
+  reconstructs it — the same standing as #265 and #266, which is why the severity is P2 and not
+  higher. Found by the census for #266, the same mechanism — rebuild through a constructor that
+  defaults a private field — with a different payload.
+
 - **`PARSE_DEFAULT_DEPTH` is derived from a five-axis measurement of a door that spends none of it,
   and the door it *is* enforced on has now been measured** (#297). `measured::CONSUMER_ABORTS_AT`
   was documented as "a real consumer grammar's debug build aborts at this depth […] on the tightest
