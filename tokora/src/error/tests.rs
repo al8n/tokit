@@ -266,3 +266,73 @@ fn arraydeque_error_container_remaining_capacity() {
   ErrorContainer::push(&mut c, 1);
   assert_eq!(ErrorContainer::remaining_capacity(&c), Some(2));
 }
+
+// --- UnexpectedEnd::reconstruct* carry `expected` and `terminal` (#300) ---
+
+#[test]
+fn unexpected_end_reconstruct_carries_expected_and_terminal() {
+  use crate::utils::Expected;
+
+  let e: UnexpectedEnd<FileHint, usize> =
+    UnexpectedEnd::maybe_expected_of(100usize, None, FileHint, Some(Expected::one("if")))
+      .into_terminal();
+  assert!(e.is_terminal());
+  assert_eq!(e.expected(), Some(&Expected::one("if")));
+
+  let e2 = e.reconstruct(Some("block"), |_| TokenHint);
+  assert_eq!(e2.name(), Some("block"));
+  assert_eq!(e2.offset(), 100);
+  assert!(
+    e2.is_terminal(),
+    "reconstruct must not clear the terminal-stop flag"
+  );
+  assert_eq!(
+    e2.expected(),
+    Some(&Expected::one("if")),
+    "reconstruct must not drop the expected set"
+  );
+}
+
+#[test]
+fn unexpected_end_reconstruct_with_name_carries_expected_and_terminal() {
+  use crate::utils::Expected;
+
+  let e: UnexpectedEnd<FileHint, usize> =
+    UnexpectedEnd::maybe_expected_of(100usize, None, FileHint, Some(Expected::one("if")))
+      .into_terminal();
+
+  let e2 = e.reconstruct_with_name("expression", |_| TokenHint);
+  assert_eq!(e2.name(), Some("expression"));
+  assert_eq!(e2.offset(), 100);
+  assert!(
+    e2.is_terminal(),
+    "reconstruct_with_name must not clear the terminal-stop flag"
+  );
+  assert_eq!(
+    e2.expected(),
+    Some(&Expected::one("if")),
+    "reconstruct_with_name must not drop the expected set"
+  );
+}
+
+#[test]
+fn unexpected_end_reconstruct_without_name_carries_expected_and_terminal() {
+  use crate::utils::Expected;
+
+  let e: UnexpectedEnd<FileHint, usize> =
+    UnexpectedEnd::maybe_expected_of(100usize, None, FileHint, Some(Expected::one("if")))
+      .into_terminal();
+
+  let e2 = e.reconstruct_without_name(|_| TokenHint);
+  assert_eq!(e2.name(), None);
+  assert_eq!(e2.offset(), 100);
+  assert!(
+    e2.is_terminal(),
+    "reconstruct_without_name must not clear the terminal-stop flag"
+  );
+  assert_eq!(
+    e2.expected(),
+    Some(&Expected::one("if")),
+    "reconstruct_without_name must not drop the expected set"
+  );
+}

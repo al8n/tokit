@@ -726,6 +726,10 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
 
   /// Reconstructs the error with a new (optional) name and a transformed hint.
   ///
+  /// The offset, the optional end-of-input [`expected`](Self::expected) set, and the
+  /// [`terminal`](Self::is_terminal) stop flag all carry over unchanged — only the name and the
+  /// hint are replaced.
+  ///
   /// ## Example
   ///
   /// ```rust
@@ -745,10 +749,21 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   where
     F: FnOnce(Hint) -> NewHint,
   {
-    UnexpectedEnd::maybe_name_of(self.offset, name.map(Into::into), f(self.hint))
+    UnexpectedEnd {
+      offset: self.offset,
+      name: name.map(Into::into),
+      hint: f(self.hint),
+      expected: self.expected,
+      terminal: self.terminal,
+      _lang: PhantomData,
+    }
   }
 
   /// Reconstructs the error with a new name and a transformed hint.
+  ///
+  /// The offset, the optional end-of-input [`expected`](Self::expected) set, and the
+  /// [`terminal`](Self::is_terminal) stop flag all carry over unchanged — only the name and the
+  /// hint are replaced.
   ///
   /// ## Example
   ///
@@ -769,10 +784,21 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   where
     F: FnOnce(Hint) -> NewHint,
   {
-    UnexpectedEnd::with_name_of(self.offset, name.into(), f(self.hint))
+    UnexpectedEnd {
+      offset: self.offset,
+      name: Some(name.into()),
+      hint: f(self.hint),
+      expected: self.expected,
+      terminal: self.terminal,
+      _lang: PhantomData,
+    }
   }
 
   /// Reconstructs the error with a transformed hint.
+  ///
+  /// The name is cleared, by contract. The offset, the optional end-of-input
+  /// [`expected`](Self::expected) set, and the [`terminal`](Self::is_terminal) stop flag all
+  /// carry over unchanged.
   ///
   /// ## Example
   ///
@@ -791,7 +817,14 @@ impl<Hint, O, Lang: ?Sized> UnexpectedEnd<Hint, O, Lang> {
   where
     F: FnOnce(Hint) -> NewHint,
   {
-    UnexpectedEnd::of(self.offset, f(self.hint))
+    UnexpectedEnd {
+      offset: self.offset,
+      name: None,
+      hint: f(self.hint),
+      expected: self.expected,
+      terminal: self.terminal,
+      _lang: PhantomData,
+    }
   }
 
   /// Returns a mutable reference to the offset of the unexpected end.
