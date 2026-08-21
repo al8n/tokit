@@ -476,21 +476,50 @@ fn a_leaked_guard_holds_its_level_for_the_rest_of_the_parse() {
 const MEASUREMENT_STACK: usize = 2 * 1024 * 1024;
 
 /// Bytes of native stack each level of [`heavy`] spends, set to the heaviest per-level cost
-/// anybody has measured: the consumer row, ~41 KiB.
+/// anybody has measured: the consumer's syntactic row, ~41 KiB.
 ///
 /// This is what makes the cell below a statement about a *stack* rather than about a counter. A
 /// frame of a handful of bytes would let any budget whatever fit in 2 MiB, and the cell would pass
 /// for a build in which the shared default was 1024.
-const HEAVY_LEVEL: usize = crate::state::recursion_tracker::measured::CONSUMER_BYTES_PER_LEVEL;
+///
+/// **It is the DEBUG price in every profile, and that is now the correct model rather than the
+/// conservative one.** It was briefly keyed on `debug_assertions`, for the revision in which the
+/// shipped default was keyed on it too. The default holds one number in both arms again — chosen
+/// precisely so that it survives the debug frame price whichever arm a build selects, because that
+/// flag observes neither `opt-level` nor the consumer's compilation — so pricing this cell at the
+/// debug cost in both profiles is what the guarantee actually is. Keying it would make the cell
+/// weaker than the claim it exists to witness.
+const HEAVY_LEVEL: usize =
+  crate::state::recursion_tracker::measured::CONSUMER_SYNTACTIC_BYTES_PER_LEVEL;
 
 /// How deep [`heavy`] is willing to go before giving up and returning `Ok`.
 ///
 /// **It exists so that a defect reds this cell instead of killing the process.** The budget is
 /// what should stop the recursion; if it does not, something has to, and an assertion failure is a
-/// test result while `fatal runtime error: stack overflow` is not. 24 levels at ~41 KiB is ≈0.94
-/// MiB — comfortably inside the 2 MiB thread — and it is above the shipped default, which is the
-/// other half of what it has to be or the cell would never reach the budget at all.
-const HEAVY_CAP: usize = 24;
+/// test result while `fatal runtime error: stack overflow` is not.
+///
+/// **Four levels past the shipped default, derived rather than written down.** A literal has to be
+/// re-chosen every time the default moves, and choosing it wrong is not symmetrical: too low makes
+/// the pin below vacuous — the recursion gives up before the budget is reached, and a budget that
+/// refuses nothing passes — while too high walks a 41 KiB frame into the guard page and kills the
+/// harness. Deriving it removes both. It is a safety stop and not an expectation; what this cell
+/// *expects* is that the budget refuses first, and that is asserted against the default itself.
+const HEAVY_CAP: usize = RecursionLimiter::PARSE_DEFAULT_DEPTH + 4;
+
+/// **The other side of the cap**, which the derived form makes checkable rather than assumed: the
+/// recursion [`heavy`] is about to run must itself fit the thread.
+///
+/// Without it, a default that grew past what 2 MiB holds would take the harness down *inside* the
+/// cell written to stop exactly that, instead of reporting. It is a `const` assertion and not a
+/// line in the test for the reason `state::recursion_tracker`'s own block gives: every operand is a
+/// constant, so a build is the stronger place to settle it than a run — and clippy refuses the
+/// weaker one.
+const _: () = assert!(
+  HEAVY_CAP * HEAVY_LEVEL < MEASUREMENT_STACK,
+  "the probe in `the_shared_budget_refuses_unsegmented_descent_within_a_2mib_thread` would recurse \
+   past the 2 MiB thread it is stated on. Its cap is the shipped default plus four, so this means \
+   the default itself no longer leaves room for the probe that checks it."
+);
 
 /// A **non-Pratt** recursive production with an ordinary, expensive native frame.
 ///

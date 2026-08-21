@@ -281,6 +281,60 @@ and will red until they do.
 
 ### Changed (breaking)
 
+- **`RecursionLimiter::PARSE_DEFAULT_DEPTH` is 32, in every build, and was 16** (#297). Every
+  unconfigured parse gets twice the depth. The profile arms hold the same number, deliberately, and
+  what a release build actually supports is published separately as the new
+  **`RecursionLimiter::OPTIMIZED_PARSE_DEPTH`** — 256, installed by nothing.
+
+  **Why 16 was wrong is measured, not argued.** It came from applying `MIN_HEADROOM` to a consumer
+  grammar's abort depth of 51 — a reading of that consumer's *syntactic* door, which takes no
+  `InputRef::descend` and therefore spends none of this budget. The door that does spend it aborts
+  at 667. The entry under **Fixed** has the sweep, the axes and the survive/abort pairs.
+
+  **The criterion is two-tier, and the asymmetry is the decision rather than a convenience.** This
+  cell is *shared*: `InputContext::new` seeds it for tokora's two Pratt engines (~16.4 KiB a frame),
+  for a caller's own hand-written `descending` (modelled at the measured heaviest, ~41 KiB), and for
+  a lossless consumer's descent (~3.1 KiB) — a 68x span, and no single row bounds it. So:
+
+  - **full `MIN_HEADROOM` against every population that actually *spends* the cell** — tokora's own
+    125 and the consumer's 667, minimum 125; `32 x 3 = 96 < 125`, and `64 x 3 = 192` is not;
+  - **a bare fit, no multiplier, at the heaviest population that is only *modelled*** —
+    `32 x 41 120 B = 1.31 MiB < 2 MiB`, and `64 x 41 120 B = 2.51 MiB` is not.
+
+  **Applying the multiplier to the modelled row as well gives 16; applying only the fit to the
+  spending rows gives 128. 32 is exactly the width of that distinction**, and it ships documented as
+  a criterion rather than as a number. 128 is refused by a measurement: it is *above* tokora's own
+  125, so an unconfigured Pratt parse in a debug build would reach the native stack before the
+  limiter — `128 x 16 112 B` measured is 98.3% of a 2 MiB thread.
+
+  **The two profile arms hold one number, and the reason is not a missing measurement.** The release
+  sweep exists and says 256. What is missing is any way for this crate to know whether the condition
+  256 rests on holds. `debug_assertions` is not `opt-level`, so `debug-assertions = false` at
+  `opt-level = 0` selects the release arm at unoptimised frame prices; and it is **per crate**,
+  while the frames this budget bounds are the **caller's** — so a build script reading cargo's
+  `OPT_LEVEL` would close the first gap and not the second, and a debug consumer against a release
+  tokora reinstates the mismatch with every signal available here reading "release". **A number
+  only safe when a fact holds, selected by a flag that cannot observe that fact, is not a default.**
+  A `const` assertion now prices *both* arms at the debug cost, which is the guard that held before
+  this campaign and the one whose loss made an intermediate revision unsafe.
+
+  **`OPTIMIZED_PARSE_DEPTH` (new, `pub`) is 256** — the same two-tier derivation over the release
+  rows: `256 x 3 = 768 < 3282`, and `256 x 4 452 B = 1.09 MiB < 2 MiB` where `512` needs 2.17 MiB
+  and is refused. **No new API is owed to use it**: `RecursionLimiter::with_limitation`,
+  `InputContext::with_recursion_limiter`, `ParserContext::with_recursion_limiter` and
+  `cst::parse_lossless_with_context` all predate this change. The constant exists because a
+  measurement nobody can reach is not an opt-in — without it a consumer would have to re-run the
+  bisection to arrive at a figure this crate already knows. **The precondition is the caller's to
+  check**: every frame the budget bounds, theirs included, compiled at `opt-level = 3`.
+
+  **What a caller does.** Nothing, unless they relied on 16 as an upper bound — a parse that refused
+  at 17 levels now accepts up to 32. A release deployment that wants the depth its profile supports
+  passes `OPTIMIZED_PARSE_DEPTH` explicitly. Nothing about a *configured* parse changes.
+
+  `SEGMENTED_PRATT_DEPTH` is unchanged at 1024. A release per-level figure to derive it from now
+  exists and would give 8192; it stays a floor because that is a decision about how much segment
+  *memory* an unconfigured parse may reach, not one the stack sweep licensed.
+
 - **`TokenBudget` is the ceiling; `input::TokenBudgetTally` is what one `Input` spent against it.**
   `TokenBudget::{spent, is_exhausted, refused_an_item}` are gone from that type and live on the new
   one, and `InputRef::token_budget` now returns `&TokenBudgetTally`. Every existing *read* — `inp
@@ -752,6 +806,69 @@ and will red until they do.
 
 ### Fixed
 
+- **`PARSE_DEFAULT_DEPTH` is derived from a five-axis measurement of a door that spends none of it,
+  and the door it *is* enforced on has now been measured** (#297). `measured::CONSUMER_ABORTS_AT`
+  was documented as "a real consumer grammar's debug build aborts at this depth […] on the tightest
+  of its five measured axes". Those five axes vary architecture, dialect, shape and source backing
+  — and hold fixed, without saying so, that every reading is of that consumer's **syntactic** door,
+  which takes no `InputRef::descend` and therefore spends no level of this budget at all.
+
+  Cross-checked three ways and then at runtime. A sweep of the consumer's syntactic tree finds no
+  `descend`/`descending` call; `RecursionLimitReached` has exactly **one** construction site in this
+  crate (`InputRef::descend`); that site's only in-crate callers are the two Pratt engines
+  (`InputRef::pratt`, `parser::pratt::expr`), which the consumer does not use. Directly: under the
+  shipped budget of 16, with the consumer's own lexer tally lifted, its syntactic door parses 64
+  nested braces clean while its lossless door refuses at exactly 16.
+
+  **The re-measurement.** Same method as the original — one parse per *process*, on an explicitly
+  sized 2 MiB thread, greatest depth that returns before the next aborts — pointed at the lossless
+  door, with the boundary converted into *descents* (the unit `RecursionLimiter::limitation` is
+  compared against) by an in-process oracle: the smallest ceiling under which the same document
+  parses clean. `aarch64-apple-darwin`, rustc 1.99.0-nightly (771916f90). Debug, last descent count
+  that returns: GraphQL inline fragments **717**, GraphQLx inline fragments **715**, GraphQLx
+  generic angle brackets **843**, GraphQL recovery bypass **669**, GraphQLx recovery bypass with
+  `)` and with `>` alike **667**, object-value cycle **875**, list-value cycle **1294**; x86_64
+  moves the first cell to 805, so aarch64 stays the binding architecture. The syntactic row's fifth
+  axis — a `bytes::Bytes` source backing — has **no lossless counterpart**: all twelve of that
+  consumer's lossless entry points take `&str`.
+
+  **The release table, which had never been taken, is the same instrument run twice.** Release,
+  aarch64: 4238 / 3861 / **3282** / 5472 / 4863 / 3455 / 3455 in the same order. Optimisation
+  reorders which shape binds — the generic angle brackets are the loosest debug cell and the
+  tightest release one — so a release figure extrapolated from debug's ratio would have named the
+  wrong shape as well as the wrong number.
+
+  **What the shipped formula makes of it**, unchanged, with `MIN_HEADROOM` and `MIN_MARGIN_TENTHS`
+  untouched: **128** debug (`128 × 3 = 384 < 667`, `256 × 3 = 768` is not) and **1024** release.
+  Both are published as `policy::PARSE_DEFAULT_DEBUG_ON_THE_LOSSLESS_ROW` and its release twin,
+  derived from the measured rows, pinned by the same two-halved assertion the shipped cells get and
+  by a literal from outside the derivation — **and read by nothing.**
+
+  **`PARSE_DEFAULT_DEPTH` is unchanged at 16, deliberately.** The mis-pointing errs in the
+  recoverable direction — the wrong row is the tighter one, so the cost is depth rather than an
+  abort — and repointing is one decision that moves four other things: an 8× loosening of a shipped
+  safety default and a behaviour break; `TOKORA_ABORTS_AT > CONSUMER_…_ABORTS_AT`, whose intent
+  ("the consumer row is the binding one") is an artefact of the syntactic door and inverts
+  legitimately on the lossless one; the release arm, which can then be derived rather than floored,
+  making the two arms diverge and the `debug_assertions`-as-profile-proxy caveat live for the first
+  time; and the provisional release assertion, which prices the release budget at the *debug*
+  per-level cost and must be re-priced or a 1024-level release budget "fits" a 2 MiB thread it does
+  not fit. Each of those is now a compiled relation rather than a paragraph.
+
+  What it costs today is measured rather than argued: over 472 shipped fixtures, that consumer's
+  deepest spends **11** descents, an ordinary filter query reaches 10 or 11, and
+  `f(where: {a: {b: [1]}})` spends **5** for what reads as three-deep because an argument list's
+  `(` is a one-off toll. So 16 leaves 1.45× over documents that already exist, under the 2× floor
+  that same consumer enforces on its own nesting ceiling at compile time — which it escapes only
+  because the binding number is tokora's.
+
+  No public API moved. `measured::CONSUMER_ABORTS_AT` and `CONSUMER_BYTES_PER_LEVEL` are
+  `pub(crate)` and are renamed `CONSUMER_SYNTACTIC_ABORTS_AT` / `CONSUMER_SYNTACTIC_BYTES_PER_LEVEL`
+  — a bare "consumer" figure is exactly the name that got read as describing the door the budget is
+  enforced on. The syntactic row keeps the two jobs it is still the right row for: pricing
+  `native_stack::RED_ZONE` and `SEGMENTED_PRATT_DEPTH`, both of which are about the *heaviest* frame
+  and would silently drop by 13× and rise by 16× respectively if the repoint had been done by
+  moving one constant.
 - **`Verbose` recorded and rewound through two `BTreeMap`s that unwinding caller code could leave
   disagreeing — twice over a map descent that had not finished, and once over a value the rollback
   destroyed on the spot** (#249, #254). A `BTreeMap` insertion is two operations, not one: `entry`

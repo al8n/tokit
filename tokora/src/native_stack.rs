@@ -208,15 +208,15 @@ pub(crate) fn maybe_grow<R>(frame: impl FnOnce() -> R) -> R {
 /// no arguments, so the messages name what to read instead of printing what they compared.
 #[cfg(feature = "stacker")]
 const _: () = {
-  use crate::state::recursion_tracker::measured::{CONSUMER_BYTES_PER_LEVEL, STACK};
+  use crate::state::recursion_tracker::measured::{CONSUMER_SYNTACTIC_BYTES_PER_LEVEL, STACK};
 
   // `RED_ZONE` is a prediction about how much stack one level spends between two consecutive
   // checks. A red zone below the heaviest level actually measured is not a prediction, it is a
   // known-wrong one: the frame overruns the segment into a guard page, which is a SIGSEGV and not
   // a diagnostic.
   assert!(
-    RED_ZONE >= CONSUMER_BYTES_PER_LEVEL * 4,
-    "RED_ZONE is under 4x CONSUMER_BYTES_PER_LEVEL, the heaviest measured per-level cost"
+    RED_ZONE >= CONSUMER_SYNTACTIC_BYTES_PER_LEVEL * 4,
+    "RED_ZONE is under 4x CONSUMER_SYNTACTIC_BYTES_PER_LEVEL, the heaviest measured per-level cost"
   );
   // A segment at or barely above the red zone re-enters it immediately, so every frame would
   // allocate.
@@ -227,7 +227,7 @@ const _: () = {
   // The claim in `SEGMENT`'s derivation is ~43 levels of the heaviest measured grammar; this is
   // the floor under it, and therefore under the allocation-frequency figure.
   assert!(
-    (SEGMENT - RED_ZONE) / CONSUMER_BYTES_PER_LEVEL >= 32,
+    (SEGMENT - RED_ZONE) / CONSUMER_SYNTACTIC_BYTES_PER_LEVEL >= 32,
     "a segment holds too few levels of the heaviest measured grammar for the allocation \
      frequency SEGMENT's derivation claims"
   );

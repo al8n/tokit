@@ -88,8 +88,9 @@ impl RecursionLimitExceeded {
 /// never builds its recursion budget through it — so its constructors inherit this same
 /// general-purpose 500 rather than requesting the parser's own.
 ///
-/// That constant is **16**, in every build and under every feature, and the whole derivation —
-/// including why it was 64, why 64 was wrong, and why no feature is allowed to move it — is on
+/// That constant is **32**, in every build and under every feature, and the whole derivation —
+/// including why it was 16, why 16 was measured at the wrong door, why 64 was wrong before that,
+/// why no feature is allowed to move it, and why the profile is not allowed to either — is on
 /// [`PARSE_DEFAULT_DEPTH`](Self::PARSE_DEFAULT_DEPTH) rather than repeated here. What belongs here
 /// is the measurement table it is *not* derived from, because that table is this type's own and
 /// keeps being mistaken for the answer:
@@ -111,6 +112,14 @@ impl RecursionLimitExceeded {
 /// second mistake**, because these are tokora's frames and a consumer's grammar runs *inside*
 /// them; that is what `PARSE_DEFAULT_DEPTH` records, and it is why the shipped figure is derived
 /// from a consumer measurement of **51** rather than from the 125 here.
+///
+/// **And the 51 is a reading of that consumer's *syntactic* door, which spends no level of this
+/// counter at all** — the door the budget is enforced on has since been measured separately and is
+/// roughly an order of magnitude cheaper per level. The shipped default is no longer derived from
+/// either row alone: it takes headroom against the populations that *spend* the cell and a bare fit
+/// against the heaviest one that is only *modelled*, which is what 51 now prices.
+/// [`PARSE_DEFAULT_DEPTH`](Self::PARSE_DEFAULT_DEPTH) carries the derivation and this module's
+/// private `measured` carries every row.
 ///
 /// The two failure modes are not symmetric, and that is what settles the direction to err in. A
 /// limit that is too *low* returns a clean, catchable, documented
@@ -305,25 +314,210 @@ impl Default for RecursionLimiter {
 /// alternative source representation. A derivation reading it would be exactly the
 /// derived-not-measured figure this module's assertions exist to refuse. `policy` therefore ships
 /// the release cells as *floors* equal to the debug cells until that sweep is run.
+///
+/// # EVERY FIGURE IS ALSO OF ONE **DOOR**, AND THE NAMES NOW SAY WHICH
+///
+/// The consumer's five axes were varied over architecture, dialect, shape and source backing —
+/// and held one thing fixed that nobody wrote down: they are all readings of that consumer's
+/// **syntactic** door, which spends **no** [`RecursionLimiter`] level at all. Its cost per level
+/// is a native frame the budget never sees. The budget is spent on the consumer's **lossless**
+/// door, one [`InputRef::descend`](crate::InputRef::descend) per nesting delimiter, and a level
+/// there is roughly an order of magnitude cheaper. So a default derived from the syntactic row
+/// bounds one population with another's frame cost, which is the same
+/// derived-over-the-wrong-population defect that made 64 wrong one layer further in.
+///
+/// Both rows are therefore named for their door, and neither name is `CONSUMER_ABORTS_AT` any
+/// more: a bare "consumer" figure is the thing that got read as though it described the door the
+/// budget is enforced on.
 pub(crate) mod measured {
-  /// The binding cell: a real **consumer** grammar's debug build aborts at this depth on an
-  /// explicitly sized 2 MiB thread, on the tightest of its five measured axes (the others are 52,
-  /// 53, 57 and 60).
-  pub(crate) const CONSUMER_ABORTS_AT: usize = 51;
+  /// A real **consumer** grammar's debug build aborts at this depth on an explicitly sized 2 MiB
+  /// thread, on the tightest of its five measured axes (the others are 52, 53, 57 and 60) — at
+  /// its **syntactic** door.
+  ///
+  /// **That door spends no recursion level.** Its cost is a native frame per level of nesting and
+  /// nothing the budget can count, cross-checked three ways: a sweep of that consumer's syntactic
+  /// tree finds no `descend`/`descending` call; [`RecursionLimitReached`] has exactly one
+  /// construction site in this crate ([`InputRef::descend`](crate::InputRef::descend)); and that
+  /// site's only in-crate callers are the two Pratt engines, which the consumer does not use.
+  /// Confirmed at runtime: under the shipped budget of 16 with the consumer's own lexer tally
+  /// lifted, its syntactic door parses 64 nested braces clean while its lossless door refuses at
+  /// exactly 16.
+  ///
+  /// So this figure is **not** the one [`PARSE_DEFAULT_DEBUG`](super::policy::PARSE_DEFAULT_DEBUG)
+  /// should be derived from, and today it is. See
+  /// [`CONSUMER_LOSSLESS_ABORTS_AT`] for the row that is, and
+  /// [`PARSE_DEFAULT_DEBUG`](super::policy::PARSE_DEFAULT_DEBUG) for why the repoint is a decision
+  /// rather than an edit.
+  ///
+  /// What it *is* still the right row for is a **memory** policy over heavy frames — see
+  /// [`CONSUMER_SYNTACTIC_BYTES_PER_LEVEL`].
+  pub(crate) const CONSUMER_SYNTACTIC_ABORTS_AT: usize = 51;
+
+  /// **The same consumer, the same five axes, pointed at the door the budget is actually spent
+  /// on** — one [`InputRef::descend`](crate::InputRef::descend) per nesting delimiter — and the
+  /// figure is in *descents*, which is the unit
+  /// [`RecursionLimiter::limitation`](super::RecursionLimiter::limitation) is compared against.
+  ///
+  /// # The bisection
+  ///
+  /// One parse per **process**, on an explicitly sized 2 MiB thread, greatest descent count that
+  /// returns before the next one aborts with `fatal runtime error: stack overflow`. The document
+  /// depth a boundary is found at is converted to descents by an in-process oracle: the smallest
+  /// ceiling under which that same document parses without a diagnostic, which is exactly how many
+  /// levels it spends. Measured `aarch64-apple-darwin`, `opt-level = 0` with `debug-assertions`
+  /// and `overflow-checks` on, rustc 1.99.0-nightly (771916f90 2026-08-08):
+  ///
+  /// | cell (lossless door, 2 MiB, debug) | last descent count that returns | first that aborts |
+  /// |---|---|---|
+  /// | GraphQL, inline fragments, `str`, aarch64 | 717 | 718 |
+  /// | GraphQL, inline fragments, `str`, x86_64 | 805 | 806 |
+  /// | GraphQLx, inline fragments, `str`, aarch64 | 715 | 716 |
+  /// | GraphQLx, generic angle brackets, `str`, aarch64 | 843 | 844 |
+  /// | GraphQL, the recovery bypass `{ ) f {`, `str`, aarch64 | 669 | 670 |
+  /// | GraphQLx, the same with `)` and with `>` alike, `str`, aarch64 | **667** | 668 |
+  /// | GraphQL, the object-value cycle, `str`, aarch64 | 875 | 876 |
+  /// | GraphQL, the list-value cycle, `str`, aarch64 | 1294 | 1295 |
+  ///
+  /// **The fifth axis has no cell, and that is a fact about the consumer rather than an omission.**
+  /// The syntactic row's tightest cell was a `bytes::Bytes` source backing; every one of that
+  /// consumer's twelve shipped lossless entry points takes `&str`, so there is no lossless door to
+  /// point the backing axis at. If the syntactic row's 0.89x for that backing carried across, the
+  /// binding cell would extrapolate to about 593 — which is an extrapolation, is **not** what this
+  /// constant records, and is exactly the shape this module refuses.
+  ///
+  /// **The binding cell is a shape the syntactic five never had.** The recovery bypass costs two
+  /// native frames per level (`field` and `selection_set`) while spending one descent, so it is
+  /// the tightest cell in the budget's own unit even though it is not the tightest in document
+  /// depth. It is the shape that walked past the consumer's first nesting fix, and the consumer's
+  /// suite pins it.
+  ///
+  /// The figures are one host's, and the control says how far one host moves them. Re-running the
+  /// same instrument against the *syntactic* door here reproduces that row's recorded 57 / 53 / 52
+  /// / 60 at 64 / 60 / 60 / 68 — 12-15% looser, on a newer toolchain and a newer branch of the
+  /// consumer, with the same architecture relation (x86_64 the looser of the two) and the same
+  /// ordering up to a tie between the two GraphQLx cells. It also reproduces that row's recorded
+  /// release reading, "500 levels of the syntactic door need about 1.95 MiB of the 2 MiB
+  /// available", at 505. **So each figure here is an expectation to re-check on another host
+  /// rather than a constant**, which is what the headroom policy is there to absorb.
+  pub(crate) const CONSUMER_LOSSLESS_ABORTS_AT: usize = 667;
+
+  /// The same bisection, the same door, the same host, **release**: `opt-level = 3`,
+  /// `debug-assertions = false`, `overflow-checks = false`.
+  ///
+  /// | cell (lossless door, 2 MiB, release, aarch64) | last that returns | first that aborts |
+  /// |---|---|---|
+  /// | GraphQL, inline fragments, `str` | 4238 | 4239 |
+  /// | GraphQLx, inline fragments, `str` | 3861 | 3862 |
+  /// | GraphQLx, generic angle brackets, `str` | **3282** | 3283 |
+  /// | GraphQL, the recovery bypass `{ ) f {`, `str` | 5472 | 5473 |
+  /// | GraphQLx, the same with `)` and with `>` alike, `str` | 4863 | 4864 |
+  /// | GraphQL, the object-value cycle, `str` | 3455 | 3456 |
+  /// | GraphQL, the list-value cycle, `str` | 3455 | 3456 |
+  ///
+  /// **The binding cell is not the debug row's.** Optimisation reorders which shape is tightest:
+  /// the generic angle brackets are the *loosest* debug cell and the *tightest* release one. A
+  /// release figure extrapolated from debug's ratio would have named the wrong shape as well as
+  /// the wrong number, which is the whole reason
+  /// [`PARSE_DEFAULT_RELEASE`](super::policy::PARSE_DEFAULT_RELEASE) refused to be raised from one.
+  pub(crate) const CONSUMER_LOSSLESS_RELEASE_ABORTS_AT: usize = 3282;
 
   /// The tightest cell of **tokora's own** table — the debug token driver on the same thread.
   ///
-  /// Kept beside the consumer figure precisely because it is the one the old default was sized
-  /// against. Every guard below that names `CONSUMER_ABORTS_AT` is a place where using this
-  /// number instead is the defect.
+  /// Kept beside the consumer figures precisely because it is the one the old default was sized
+  /// against. Note that it is no longer comparable with the row the budget is enforced on: 125 is
+  /// a *Pratt frame* figure at ~16.4 KiB, and a lossless descent is ~3.1 KiB, so tokora's own row
+  /// being the looser of the two is what a cheaper frame means rather than evidence of an edit.
   pub(crate) const TOKORA_ABORTS_AT: usize = 125;
+
+  /// The tightest cell of **tokora's own release table** — the typed driver, 3 871 frames at
+  /// ~0.53 KiB against the token driver's 4 247 at ~0.48 KiB.
+  ///
+  /// A constant rather than only a row in [`RecursionLimiter`]'s own doc table, because a release
+  /// derivation has to read it and a figure that exists only in prose is the thing this module
+  /// stopped doing. The two now cannot drift.
+  ///
+  /// **Note which driver binds, and that it is the other one.** Debug's tightest cell is the
+  /// *token* driver at 125; release's is the *typed* driver at 3 871. Optimisation reorders them,
+  /// which is the same lesson [`CONSUMER_LOSSLESS_RELEASE_ABORTS_AT`] records about shapes.
+  pub(crate) const TOKORA_RELEASE_ABORTS_AT: usize = 3871;
 
   /// The thread every figure is stated on, and the one `std::thread::spawn` hands out.
   pub(crate) const STACK: usize = 2 * 1024 * 1024;
 
-  /// Bytes of native stack one level of the heaviest measured grammar spends — **derived** from
-  /// the bisection rather than written down separately, so the two cannot disagree.
-  pub(crate) const CONSUMER_BYTES_PER_LEVEL: usize = STACK / CONSUMER_ABORTS_AT;
+  /// Bytes of native stack one level of the heaviest measured **syntactic** grammar spends —
+  /// **derived** from that bisection rather than written down separately, so the two cannot
+  /// disagree. ~41 KiB.
+  ///
+  /// This is the row a **memory** policy over segmented Pratt frames must be priced at, and that
+  /// is why the repoint below does not touch it: a Pratt frame is the heavy kind, and pricing a
+  /// segment budget at the cheap lossless descent would multiply
+  /// [`SEGMENTED_PRATT_DEBUG`](super::policy::SEGMENTED_PRATT_DEBUG) by 16 as a side effect of
+  /// fixing an unrelated default.
+  pub(crate) const CONSUMER_SYNTACTIC_BYTES_PER_LEVEL: usize = STACK / CONSUMER_SYNTACTIC_ABORTS_AT;
+
+  /// **The release sweep of the syntactic row**, which this module recorded as owed for four
+  /// revisions and which never existed until now — the binding cell of four of its five axes.
+  ///
+  /// Same instrument, same 2 MiB thread, same one-parse-per-process bisection;
+  /// `opt-level = 3`, `debug-assertions = false`, `overflow-checks = false`. Last depth that
+  /// returns / first that aborts:
+  ///
+  /// | cell (syntactic door, 2 MiB, release) | returns | aborts |
+  /// |---|---|---|
+  /// | GraphQL, inline fragments, `str`, aarch64 | 504 | 505 |
+  /// | GraphQLx, inline fragments, `str`, aarch64 | **471** | 472 |
+  /// | GraphQLx, generic angle brackets, `str`, aarch64 | 567 | 568 |
+  /// | GraphQL, inline fragments, `str`, x86_64 | 513 | 514 |
+  /// | GraphQLx, inline fragments, `str`, x86_64 | 490 | 491 |
+  ///
+  /// The fifth axis — a `bytes::Bytes` source backing — is **not** measured here. On the debug
+  /// table that backing cost 0.89x and was the binding cell; the same discount over 471 would be
+  /// about 419. That is an extrapolation and is deliberately not this constant.
+  ///
+  /// **What the missing axis can and cannot change.** This row is read only to price a *fit*, and
+  /// the fit is what fixes [`PARSE_DEFAULT_RELEASE`](super::policy::PARSE_DEFAULT_RELEASE) at 256:
+  /// the next power of two up needs this cell above 512, and the loosest axis measured is 505. So
+  /// the missing axis cannot raise the answer, and to lower it the true binding cell would have to
+  /// fall below 256 — a 1.8x miss, twice the spread the whole debug table showed. The answer is
+  /// robust to the axis that is absent, which is the only reason recording four is honest.
+  pub(crate) const CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT: usize = 471;
+
+  /// Bytes of native stack one level of the heaviest measured syntactic grammar spends in a
+  /// **release** build — derived from [`CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT`]. ~4.3 KiB, against
+  /// ~41 KiB debug, so a release level of the heavy population is 9.2x cheaper.
+  ///
+  /// It prices the release half of the *fit* tier. It deliberately does **not** reprice
+  /// [`SEGMENTED_PRATT_RELEASE`](super::policy::SEGMENTED_PRATT_RELEASE), which is a memory policy
+  /// over segments rather than a thread-stack bound and whose value is its own decision.
+  pub(crate) const CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL: usize =
+    STACK / CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT;
+
+  // **THE TWO LOSSLESS PER-LEVEL CONSTANTS ARE DELETED**, and not because the figures stopped
+  // being true. They were `STACK / CONSUMER_LOSSLESS_ABORTS_AT` and its release twin, ~3.1 KiB and
+  // ~0.6 KiB, and they existed to price assertions about a shipped default derived from the
+  // lossless row. The shipped default is priced against the heaviest MODELLED row instead — the
+  // lossless level being the cheapest population that spends the cell, a budget that fits at the
+  // heavy price cannot fail to fit at this one — so both constants lost their only readers.
+  //
+  // Keeping a `pub(crate)` constant alive by inventing a relation for it to appear in is how a
+  // file acquires guards that cannot fail. Both figures remain derivable in one division from
+  // `STACK` and the abort rows above, which is where they are cited.
+
+  /// The descents the **deepest document that consumer actually ships** spends at the door the
+  /// budget is enforced on, over the 472 fixtures in its tree.
+  ///
+  /// Every other figure here is about where a stack dies. This one is about what a real document
+  /// needs, and it is the half no arithmetic over the rows above can reach: it is what decides
+  /// whether a derived ceiling is comfortable or tight. Measured with the same in-process oracle
+  /// the descent conversion uses — the smallest ceiling under which that fixture parses clean —
+  /// and it comes out equal to its bracket count, which is what one-descent-per-nesting-delimiter
+  /// predicts.
+  ///
+  /// For scale beside it, and deliberately not constants because they are illustrations rather
+  /// than bounds: an ordinary filter query reaches 10 or 11, and `f(where: {a: {b: [1]}})` spends
+  /// 5 for what reads as three-deep, because an argument list's `(` is a one-off toll on top of
+  /// the object nesting.
+  pub(crate) const CONSUMER_DEEPEST_SHIPPED_DOCUMENT: usize = 11;
 }
 
 /// **What this crate CHOSE**, given what [`measured`] records — kept apart from it because the two
@@ -348,9 +542,25 @@ pub(crate) mod measured {
 ///
 /// Every cell is named and pinned by an `==` of its own. The two release cells are **floors set
 /// equal to their debug siblings, and are not derivations**: [`measured`] contains no release
-/// bisection to derive them from, and inventing one from debug's ratio is the defect. What the
-/// split buys today is that filling them in later is a value change and not a refactor — and that
-/// no assertion in this file claims a release derivation nobody performed.
+/// bisection *of the population they describe* to derive them from, and inventing one from debug's
+/// ratio is the defect. What the split buys today is that filling them in later is a value change
+/// and not a refactor — and that no assertion in this file claims a release derivation nobody
+/// performed.
+///
+/// # The two tiers, and why the file has an asymmetry in it
+///
+/// The two `PARSE_DEFAULT_*` cells are derived by [`policy::two_tier`], which applies
+/// [`MIN_HEADROOM`](policy::MIN_HEADROOM) to the tightest population that **spends** a level of the
+/// cell and a bare fit — no multiplier — to the heaviest population that is merely **modelled**.
+/// That asymmetry is a decision and not a convenience: applying the multiplier to the modelled row
+/// as well gives 16, and applying neither tier's opposite gives 128, a value **above** the depth at
+/// which tokora's own Pratt driver aborts on the thread every figure here is stated on. 32 is
+/// precisely the width of that distinction, and 256 is its release twin.
+///
+/// The set each tier ranges over is written out at [`policy::SPENDING_MIN_DEBUG`] and asserted
+/// beside the derivation, so a third population that starts spending the cell has an obvious place
+/// to be added — and so that the syntactic row's exclusion from the headroom tier stays visible
+/// rather than inferable. That row spends zero levels; its productions take `descend` nowhere.
 pub(crate) mod policy {
   use super::measured;
 
@@ -373,41 +583,149 @@ pub(crate) mod policy {
   /// against, so it is what makes "and it still clears the bar 64 was held to" checkable.
   pub(crate) const MIN_MARGIN_TENTHS: usize = 19;
 
-  /// **The parse-side default in a debug build, derived**: the deepest power of two that still
-  /// fits [`MIN_HEADROOM`] times under [`measured::CONSUMER_ABORTS_AT`].
+  /// **The two-tier rule both parse-side defaults are derived by**, and the asymmetry between the
+  /// tiers is the decision rather than a convenience.
   ///
-  /// 16, from 51 and 3 — `16 × 3 = 48 < 51`, and `32 × 3 = 96` is not. A power of two because
-  /// every default this crate has shipped has been one and a reader expects it, and the *deepest*
-  /// one because the asymmetry the constant's docs argue says to err low, not to err small.
+  /// - **Tier one — full [`MIN_HEADROOM`] against every population that actually SPENDS the
+  ///   cell.** `spending_min` is the tightest of those; see [`SPENDING_MIN_DEBUG`] for who is in
+  ///   the set and who is not.
+  /// - **Tier two — a bare fit, with no multiplier, at the heaviest MODELLED per-level price.**
+  ///   Nothing shipped spends the cell at that price today; the syntactic consumer's ~41 KiB level
+  ///   is what a caller's own hand-written [`descending`](crate::InputRef::descending) *could*
+  ///   cost, and `descent_tests.rs` models exactly that. A population that is modelled rather than
+  ///   observed earns a fit, not a margin.
   ///
-  /// This exists so the published constant can be asserted **equal** to something. A bare
-  /// inequality against the measurement admits every smaller value including 1, which is what the
-  /// guards in this file used to do.
-  pub(crate) const PARSE_DEFAULT_DEBUG: usize = {
+  /// **Applying `MIN_HEADROOM` to the modelled row instead gives 16, and applying only the fit
+  /// gives what ships. 32 is precisely the width of that distinction.** A future reader who
+  /// collapses the two tiers into one will move the default in one direction or the other without
+  /// noticing, which is how this constant reached the wrong door in the first place.
+  const fn two_tier(spending_min: usize, heaviest_modelled_bytes: usize) -> usize {
     let mut depth = 1;
-    while depth * 2 * MIN_HEADROOM < measured::CONSUMER_ABORTS_AT {
+    while depth * 2 * MIN_HEADROOM < spending_min
+      && depth * 2 * heaviest_modelled_bytes < measured::STACK
+    {
       depth *= 2;
     }
     depth
-  };
+  }
 
-  /// **The parse-side default in a release build — a FLOOR, not a derivation.**
+  /// The tightest population that **spends** a level of this cell in a debug build, named rather
+  /// than minimised so the assertion beside it has something to be wrong about.
   ///
-  /// A release frame is far cheaper than a debug one (see [`measured`]'s header: 31× on tokora's
-  /// own table, ~11× on the one consumer release reading), so the honest release figure is
-  /// *larger* than the debug one and this is therefore conservative in the recoverable direction:
-  /// a caller who needs the depth gets a catchable
-  /// [`RecursionLimitReached`](crate::error::RecursionLimitReached) naming the knob, rather than an
-  /// abort.
+  /// The set is two rows and the exclusion is the point:
   ///
-  /// **What would raise it:** the same five-axis bisection [`measured::CONSUMER_ABORTS_AT`]
-  /// records, run against a release build — architecture, the primary dialect, a second dialect,
-  /// that dialect's generic brackets, and the alternative source representation. Until all five
-  /// exist, a release `CONSUMER_ABORTS_AT` would be one reading standing in for a table, which is
-  /// the shape this whole file refuses. When they exist, add them to [`measured`], derive this the
-  /// way [`PARSE_DEFAULT_DEBUG`] is derived, and delete the *provisional* equality assertion that
-  /// names this constant.
+  /// - [`measured::TOKORA_ABORTS_AT`] — tokora's own Pratt engines, which take
+  ///   [`descend`](crate::InputRef::descend) at their two prologues;
+  /// - [`measured::CONSUMER_LOSSLESS_ABORTS_AT`] — the measured consumer's lossless door, one
+  ///   level per nesting delimiter;
+  /// - **and NOT [`measured::CONSUMER_SYNTACTIC_ABORTS_AT`]**, because that door spends zero
+  ///   levels. Its productions call `descend` nowhere, which is why 51 sizes the *fit* tier and
+  ///   never the headroom tier.
+  ///
+  /// tokora's own row is the tighter of the two in debug. It is not in release — see
+  /// [`SPENDING_MIN_RELEASE`], where the lossless row binds instead.
+  pub(crate) const SPENDING_MIN_DEBUG: usize = measured::TOKORA_ABORTS_AT;
+
+  /// [`SPENDING_MIN_DEBUG`]'s release twin, over the release halves of the same two rows — and it
+  /// is the **other** row that binds.
+  ///
+  /// tokora's release Pratt row is 3 871 and the consumer's release lossless row is 3 282, so the
+  /// consumer binds here where tokora binds in debug. Which member is the minimum is therefore not
+  /// a fact about the crate, and a guard that assumed it would be reading one profile's accident.
+  pub(crate) const SPENDING_MIN_RELEASE: usize = measured::CONSUMER_LOSSLESS_RELEASE_ABORTS_AT;
+
+  /// **The parse-side default in a debug build, derived** by [`two_tier`] over
+  /// [`SPENDING_MIN_DEBUG`] and [`measured::CONSUMER_SYNTACTIC_BYTES_PER_LEVEL`].
+  ///
+  /// **32.** Tier one: `32 × 3 = 96 < 125`, and `64 × 3 = 192` is not. Tier two:
+  /// `32 × 41 120 B = 1.31 MiB < 2 MiB`, and `64 × 41 120 B = 2.51 MiB` is not. **Both tiers refuse
+  /// the next doubling here**, which is why the debug arm is the one where the rule is easy to
+  /// mistake for a single criterion. The release arm is refused by tier two alone.
+  ///
+  /// A power of two because every default this crate has shipped has been one and a reader expects
+  /// it, and the *deepest* one because the asymmetry the constant's docs argue says to err low,
+  /// not to err small.
+  ///
+  /// # Why it is 32 and was 16, and why 128 was refused
+  ///
+  /// 16 came from applying `MIN_HEADROOM` to `CONSUMER_SYNTACTIC_ABORTS_AT`, a reading of a door
+  /// that spends nothing here — the defect #297 recorded. Pointing that same single-tier formula
+  /// at the row the budget *is* spent on gives 128, and 128 is worse than wrong: it is **above
+  /// [`measured::TOKORA_ABORTS_AT`]**, so an unconfigured Pratt parse in a debug build would reach
+  /// the native stack before the limiter — `128 × 16 112 B` measured is 98.3% of a 2 MiB thread —
+  /// which is the abort the 500 → 64 → 16 sequence exists to delete, restated with a bigger number.
+  ///
+  /// What both of those got wrong is the same thing in opposite directions: **this cell is shared,
+  /// and no single row bounds it.** The two tiers are what say so.
+  pub(crate) const PARSE_DEFAULT_DEBUG: usize = two_tier(
+    SPENDING_MIN_DEBUG,
+    measured::CONSUMER_SYNTACTIC_BYTES_PER_LEVEL,
+  );
+
+  /// **The parse-side default in a release build — equal to the debug one, and NOT because no
+  /// release measurement exists.**
+  ///
+  /// One does: [`measured::CONSUMER_LOSSLESS_RELEASE_ABORTS_AT`] and
+  /// [`measured::CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT`], and what this constant's own rule makes of
+  /// them is [`OPTIMIZED_PARSE`] — 256. That figure is real, defensible and **published for a
+  /// consumer to pass**. It is not shipped as this default, and the reason is the whole of what
+  /// this constant now records.
+  ///
+  /// # `debug_assertions` cannot express the fact that sets the frame price, and nothing can
+  ///
+  /// The arms diverged for one revision, and that revision shipped a process-level abort:
+  ///
+  /// - `debug_assertions` is **not** `opt-level`. A build with `debug-assertions = false` at
+  ///   `opt-level = 0` selects the release arm and pays debug frame prices. At 256 against the
+  ///   heaviest modelled debug level that is `256 × 41 120 B ≈ 10 MiB` on a 2 MiB thread — an
+  ///   abort with no diagnostic, which is exactly the failure this whole file exists to delete.
+  /// - It is also **per crate**, and the frames being paid are the **consumer's**. A build script
+  ///   reading cargo's `OPT_LEVEL` would fix the first bullet and not the second: it observes
+  ///   *tokora's* optimisation, while the recursion is spent in the caller's productions. A
+  ///   per-package profile override, or simply a consumer compiled differently from its
+  ///   dependency, reinstates the mismatch with every signal available to this crate reading
+  ///   "release".
+  ///
+  /// So there is no proxy — not one this crate has, and not one it could add — for the quantity
+  /// the release figure is conditioned on. **A number that is only safe when a fact holds, chosen
+  /// by a signal that cannot observe that fact, is not a default.** It is an argument the caller
+  /// has to make, and [`OPTIMIZED_PARSE`] is what they make it with.
+  ///
+  /// # What a future round has to establish before diverging
+  ///
+  /// Not "a better profile proxy". **A way to know the per-level cost of the frames this budget
+  /// will actually bound**, which is a fact about the caller's compilation and not about tokora's.
+  /// Until that exists the two arms hold one number, and the assertion below is stated over the
+  /// *debug* price for both of them precisely because either arm may be selected by a build paying
+  /// it.
   pub(crate) const PARSE_DEFAULT_RELEASE: usize = PARSE_DEFAULT_DEBUG;
+
+  /// **What a release build actually supports, published so a consumer can opt into it** — 256,
+  /// and nothing installs it.
+  ///
+  /// Derived by [`two_tier`] over the release rows exactly as [`PARSE_DEFAULT_DEBUG`] is derived
+  /// over the debug ones: `256 × 3 = 768 < 3282` for the headroom tier, and
+  /// `256 × 4 452 B = 1.09 MiB < 2 MiB` for the fit — with `512 × 4 452 B = 2.17 MiB` refused by
+  /// the fit where the headroom tier alone would have allowed 1024.
+  ///
+  /// It exists because a measurement nobody can reach is not an opt-in. The release sweep is what
+  /// makes 256 defensible; without a constant a consumer would have to re-run the bisection to
+  /// arrive at a number this crate already knows.
+  ///
+  /// # The precondition, stated as narrowly as it actually is
+  ///
+  /// **Every frame the budget bounds must be an optimised one** — tokora's *and* the caller's
+  /// productions, which is where the recursion is actually spent. That is a fact about the
+  /// caller's build, and it is the fact [`PARSE_DEFAULT_RELEASE`] records that no signal available
+  /// to this crate can read. Only the caller knows it, which is why this is opt-in and why the
+  /// shape is the same one [`SEGMENTED_PRATT`](self::SEGMENTED_PRATT) already uses: a published
+  /// figure to hand to
+  /// [`with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter), not a default
+  /// anybody inherits.
+  pub(crate) const OPTIMIZED_PARSE: usize = two_tier(
+    SPENDING_MIN_RELEASE,
+    measured::CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL,
+  );
 
   /// The cell this build selects, and the value
   /// [`RecursionLimiter::PARSE_DEFAULT_DEPTH`](super::RecursionLimiter::PARSE_DEFAULT_DEPTH) is
@@ -449,19 +767,30 @@ pub(crate) mod policy {
   #[cfg(feature = "stacker")]
   pub(crate) const SEGMENTED_PRATT_DEBUG: usize = {
     let mut depth = 1;
-    while depth * 2 * measured::CONSUMER_BYTES_PER_LEVEL <= SEGMENT_MEMORY_CEILING {
+    while depth * 2 * measured::CONSUMER_SYNTACTIC_BYTES_PER_LEVEL <= SEGMENT_MEMORY_CEILING {
       depth *= 2;
     }
     depth
   };
 
-  /// **The segmented-Pratt budget in a release build — a FLOOR, on the same terms as
-  /// [`PARSE_DEFAULT_RELEASE`].**
+  /// **The segmented-Pratt budget in a release build — still a FLOOR, and no longer for the reason
+  /// [`PARSE_DEFAULT_RELEASE`] used to give.**
   ///
-  /// This one is a memory policy rather than a stack one, so what a release measurement buys here
-  /// is different: the same 64 MiB ceiling holds *more* levels when a level is cheaper, so the
-  /// derived release figure would again be larger. It needs the same missing per-level table, so
-  /// it waits for the same sweep.
+  /// That one was a floor because the sweep it needed had never been run. It has been, so that arm
+  /// is a derivation now and this one is the last floor in the file — but not because a figure is
+  /// missing. [`measured::CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL`] exists, and deriving this
+  /// cell from it gives **8192**.
+  ///
+  /// It stays a floor because that would be a different decision from the one the release
+  /// measurement licensed. This budget is a **memory** policy over heap segments, not a
+  /// thread-stack bound: a cheaper release level does not buy headroom under a wall, it buys more
+  /// segment memory reached before the refusal. 8192 levels at the release per-level cost is a
+  /// parse allowed to touch roughly half a gigabyte of segments, and
+  /// [`SEGMENT_MEMORY_CEILING`] — 64 MiB, stated in bytes precisely because bytes are what this
+  /// policy is about — is the number that would have to move for that to be intended.
+  ///
+  /// So the derivation is one line and it is deliberately not written. The `const` assertion below
+  /// says the same thing where a reader who skips docs will meet it.
   #[cfg(feature = "stacker")]
   pub(crate) const SEGMENTED_PRATT_RELEASE: usize = SEGMENTED_PRATT_DEBUG;
 
@@ -516,38 +845,91 @@ pub(crate) mod policy {
 /// The cost is the message: `panic!` in a const context takes a string literal and no arguments, so
 /// these cannot print the numbers they compared. They name what to go and read instead.
 const _: () = {
-  use measured::{CONSUMER_ABORTS_AT, CONSUMER_BYTES_PER_LEVEL, STACK, TOKORA_ABORTS_AT};
+  use measured::{
+    CONSUMER_LOSSLESS_ABORTS_AT, CONSUMER_LOSSLESS_RELEASE_ABORTS_AT,
+    CONSUMER_SYNTACTIC_BYTES_PER_LEVEL, CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL, STACK,
+    TOKORA_ABORTS_AT, TOKORA_RELEASE_ABORTS_AT,
+  };
   use policy::{
-    MIN_HEADROOM, MIN_MARGIN_TENTHS, PARSE_DEFAULT, PARSE_DEFAULT_DEBUG, PARSE_DEFAULT_RELEASE,
+    MIN_HEADROOM, MIN_MARGIN_TENTHS, OPTIMIZED_PARSE, PARSE_DEFAULT, PARSE_DEFAULT_DEBUG,
+    PARSE_DEFAULT_RELEASE, SPENDING_MIN_DEBUG, SPENDING_MIN_RELEASE,
   };
 
-  // THE NUMBER, PINNED. Not "inside a band the derivation would tolerate" — the value the
-  // derivation produces, and no other. 64 fails this, and so do 1, 32 and 1024.
+  // THE NUMBER, PINNED — both arms, and by BOTH tiers. Not "inside a band the derivation would
+  // tolerate": within each tier, and blocked from the next doubling by at least one of them. The
+  // third clause is what makes it a derivation rather than a bound satisfied by 1, and it is a
+  // disjunction because which tier refuses the doubling differs by profile: tier one for debug,
+  // tier two for release. 16, 64 and 128 all fail the debug line; 1024 fails the release one.
   assert!(
-    PARSE_DEFAULT_DEBUG * MIN_HEADROOM < CONSUMER_ABORTS_AT
-      && PARSE_DEFAULT_DEBUG * 2 * MIN_HEADROOM >= CONSUMER_ABORTS_AT,
-    "PARSE_DEFAULT_DEBUG is not the number its own derivation produces — the DEEPEST power of two \
-     that fits MIN_HEADROOM times under CONSUMER_ABORTS_AT. Both halves matter: the first is the \
-     safety requirement, the second is what makes it a derivation rather than a bound satisfied \
-     by 1."
+    PARSE_DEFAULT_DEBUG * MIN_HEADROOM < SPENDING_MIN_DEBUG
+      && PARSE_DEFAULT_DEBUG * CONSUMER_SYNTACTIC_BYTES_PER_LEVEL < STACK
+      && (PARSE_DEFAULT_DEBUG * 2 * MIN_HEADROOM >= SPENDING_MIN_DEBUG
+        || PARSE_DEFAULT_DEBUG * 2 * CONSUMER_SYNTACTIC_BYTES_PER_LEVEL >= STACK),
+    "PARSE_DEFAULT_DEBUG is not the number its own two-tier derivation produces — MIN_HEADROOM \
+     under the tightest population that SPENDS the cell, a bare fit at the heaviest MODELLED \
+     per-level price, and the deepest power of two meeting both. See `policy::two_tier`: the two \
+     tiers are not interchangeable and collapsing them moves this number."
   );
-  // THE STANDING ORDER between the two profiles, and the one that survives the release sweep. A
-  // release frame is cheaper than a debug one, so a release budget may be larger and may never be
-  // smaller; getting this backwards ships debug-sized frames against a release-sized budget.
+  // THE OPT-IN FIGURE, pinned by the same two-halved shape — because it is a derivation, and the
+  // shipped release arm is no longer one. 512 fails the fit clause, 1024 fails it harder, and 128
+  // fails the third: this is the deepest power of two the release rows support.
   assert!(
-    PARSE_DEFAULT_RELEASE >= PARSE_DEFAULT_DEBUG,
-    "the release parse default is below the debug one, which inverts the only thing known about \
-     the two profiles: a release frame is cheaper, so its budget can only be the larger"
+    OPTIMIZED_PARSE * MIN_HEADROOM < SPENDING_MIN_RELEASE
+      && OPTIMIZED_PARSE * CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL < STACK
+      && (OPTIMIZED_PARSE * 2 * MIN_HEADROOM >= SPENDING_MIN_RELEASE
+        || OPTIMIZED_PARSE * 2 * CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL >= STACK),
+    "OPTIMIZED_PARSE is not the number the two-tier derivation produces over the release rows. It \
+     is the figure this crate publishes for a consumer to opt into, so it carries the same \
+     obligation a shipped default does."
   );
-  // THE PROVISIONAL LINE. **Delete this when, and only when, the release bisection exists** —
-  // see PARSE_DEFAULT_RELEASE for the five axes it owes. Until then, a release value above the
-  // debug one is a number nobody measured, and this is what stops it being written.
+  // AND THE REASON IT IS NOT THE DEFAULT, as a compiled fact rather than a paragraph: it does NOT
+  // survive the debug frame price. That is the whole distinction between a figure a caller may
+  // choose and a figure this crate may install, and if it ever stopped holding — if 256 became
+  // safe at debug prices too — the argument for opt-in would have gone with it and this constant
+  // should be re-read rather than kept.
   assert!(
-    PARSE_DEFAULT_RELEASE == PARSE_DEFAULT_DEBUG,
-    "the release parse default has been raised above the debug one without a release measurement \
-     in `measured` to derive it from. See PARSE_DEFAULT_RELEASE: it is a floor, and raising it \
-     means running the five-axis bisection, not extrapolating from debug's ratio."
+    OPTIMIZED_PARSE * CONSUMER_SYNTACTIC_BYTES_PER_LEVEL >= STACK,
+    "OPTIMIZED_PARSE now fits the 2 MiB thread at the DEBUG per-level cost, which retires the \
+     reason it is opt-in rather than the shipped release default. See PARSE_DEFAULT_RELEASE."
   );
+  // An opt-in that buys nothing is not an opt-in. This is the falsifiable form of what the old
+  // `PARSE_DEFAULT_RELEASE >= PARSE_DEFAULT_DEBUG` was for: the release rows support MORE than the
+  // shipped default, and the two are derived from different inputs, so it can fail.
+  assert!(
+    OPTIMIZED_PARSE > PARSE_DEFAULT,
+    "OPTIMIZED_PARSE is not above the shipped default, so opting into it buys no depth and the \
+     constant has collapsed into the one it exists to be an alternative to"
+  );
+
+  // **A2 AND A3 ARE BOTH GONE, and deleting them is the point rather than a tidy-up.**
+  //
+  // A2 was `PARSE_DEFAULT_RELEASE >= PARSE_DEFAULT_DEBUG` and A3 was `== `. With the release arm
+  // DEFINED as the debug one, neither can fail for any value the constants can legally take —
+  // they are the same expression compared with itself. A guard that cannot fail is decoration, and
+  // this file's own rule is that a range-shaped guard which reads like a derivation is worse than
+  // no guard at all. A2's intent survives above as `OPTIMIZED_PARSE > PARSE_DEFAULT`, which is
+  // stated over two constants derived from different rows and therefore has content.
+  //
+  // What replaces A3 is not an equality. **It is the invariant the equality was standing in for**,
+  // and it is the guard that held at the last revision where this file was correct: whichever arm
+  // `debug_assertions` selects, the result must survive the DEBUG frame price. That is what makes
+  // the proxy's inaccuracy harmless instead of fatal — an `opt-level = 0, debug-assertions = false`
+  // build selects the release arm and pays debug prices, and a consumer compiled differently from
+  // tokora does the same with every signal this crate can read saying "release".
+  //
+  // **A future round that wants to diverge the arms must falsify this line, and to do that it needs
+  // a way to know the per-level cost of the CALLER's frames** — not a better profile proxy, which
+  // is a fact about tokora's compilation and not about the frames the budget bounds.
+  assert!(
+    PARSE_DEFAULT_DEBUG * CONSUMER_SYNTACTIC_BYTES_PER_LEVEL < STACK
+      && PARSE_DEFAULT_RELEASE * CONSUMER_SYNTACTIC_BYTES_PER_LEVEL < STACK,
+    "a shipped parse default does not survive the DEBUG per-level cost. Both arms are priced at it \
+     because `debug_assertions` does not observe `opt-level`, and because it is tokora's flag \
+     while the frames are the consumer's — so either arm can be selected by a build paying debug \
+     prices. Raising one arm needs a signal for the caller's frame cost, not a better profile \
+     proxy; the figure a caller can opt into meanwhile is RecursionLimiter::OPTIMIZED_PARSE_DEPTH."
+  );
+
   // And the selection, so that the published constant is the arm this build's flag names rather
   // than whichever one somebody typed.
   assert!(
@@ -560,33 +942,79 @@ const _: () = {
     "PARSE_DEFAULT does not select the cell `debug_assertions` names"
   );
   assert!(
+    RecursionLimiter::OPTIMIZED_PARSE_DEPTH == OPTIMIZED_PARSE,
+    "OPTIMIZED_PARSE_DEPTH is not the value `policy` derives for it. It is published for a caller \
+     to pass, so editing the published constant alone is the same defect it is on the default."
+  );
+  assert!(
     RecursionLimiter::PARSE_DEFAULT_DEPTH == PARSE_DEFAULT,
     "PARSE_DEFAULT_DEPTH is not the value `policy` derives for this build. If the shipped default \
      should move, move the measurement or the policy it is derived from; editing the published \
      constant alone is the defect this assertion exists for."
   );
 
-  // THE WHOLE ORIGINAL DEFECT, AS ONE INEQUALITY, now stated over the derived value.
-  // `PARSE_DEFAULT_DEPTH` was 64 and `CONSUMER_ABORTS_AT` is 51, so a derivation producing 64
-  // fails here: the native stack got there before the limiter could, and the refusal the budget
-  // exists to produce was unreachable.
+  // THE WHOLE ORIGINAL DEFECT, AS ONE INEQUALITY, now stated over the derived value and over the
+  // row each arm is actually held to. `PARSE_DEFAULT_DEPTH` was 64 against a binding cell of 51,
+  // so the native stack got there before the limiter could and the refusal the budget exists to
+  // produce was unreachable. Stated on SPENDING_MIN rather than on a fixed row, because which
+  // population is tightest is a per-profile fact.
+  //
+  // Stated over the DEBUG row only, and the release half is deliberately not a second clause: both
+  // arms hold one number and SPENDING_MIN_RELEASE is the looser row, so `REL * 19 <= REL_ROW * 10`
+  // is implied by the line below and could not fail on its own. OPTIMIZED_PARSE carries the
+  // release margin, against the row it is actually derived from.
   assert!(
-    PARSE_DEFAULT_DEBUG * MIN_MARGIN_TENTHS <= CONSUMER_ABORTS_AT * 10,
-    "the derived debug default does not clear CONSUMER_ABORTS_AT — the depth at which a measured \
-     consumer grammar aborts on a 2 MiB thread — by MIN_MARGIN_TENTHS, the margin this crate \
-     already requires of such a number. See PARSE_DEFAULT_DEPTH's derivation."
+    PARSE_DEFAULT * MIN_MARGIN_TENTHS <= SPENDING_MIN_DEBUG * 10,
+    "the shipped default does not clear the tightest population that spends the cell by \
+     MIN_MARGIN_TENTHS, the margin this crate already requires of such a number. See \
+     PARSE_DEFAULT_DEPTH's derivation."
+  );
+  assert!(
+    OPTIMIZED_PARSE * MIN_MARGIN_TENTHS <= SPENDING_MIN_RELEASE * 10,
+    "the published opt-in figure does not clear the tightest population that spends the cell in a \
+     release build by MIN_MARGIN_TENTHS"
   );
   assert!(
     MIN_HEADROOM * 10 > MIN_MARGIN_TENTHS,
     "MIN_HEADROOM has been loosened below MIN_MARGIN_TENTHS, the margin the rejected default was \
      already held to — which would let this crate ship a default it had itself refused"
   );
-  // A guard against the derivation being 'repaired' by re-reading the wrong row: sizing against
-  // tokora's own 125 admits 64, which is exactly the number that was wrong.
+  // A8, RE-DERIVED RATHER THAN FLIPPED.
+  //
+  // The old form asserted `TOKORA_ABORTS_AT > CONSUMER_ABORTS_AT` — "the consumer row is the
+  // tighter of the two" — and that was never the property worth keeping. It held only because the
+  // consumer row was read at a door whose levels are heavier than tokora's own Pratt frames; on
+  // the door the budget is actually spent at, the relation inverts for a correct reason (a
+  // lossless descent is ~3.1 KiB against tokora's ~16.4 KiB). An assertion kept by flipping its
+  // comparison would have been a gate that had stopped gating.
+  //
+  // What it was protecting is that the headroom tier is taken against the population that BINDS
+  // the cell. So: SPENDING_MIN must be a member of the spending set, and no member may be below
+  // it. False in both directions — too high fails the first pair of clauses, and a value that is
+  // no row at all fails the second.
+  //
+  // **The syntactic row is deliberately not in this set**, and that is the whole content of #297:
+  // that door spends ZERO levels, its productions call `descend` nowhere, so it can price the fit
+  // tier and must never price this one. **A third spender goes here**, as another `<=` clause and
+  // another disjunct — which is the obvious place precisely because the set is written out.
   assert!(
-    TOKORA_ABORTS_AT > CONSUMER_ABORTS_AT,
-    "the two measured rows have stopped disagreeing, which means one was edited to match the \
-     other rather than re-measured"
+    SPENDING_MIN_DEBUG <= TOKORA_ABORTS_AT
+      && SPENDING_MIN_DEBUG <= CONSUMER_LOSSLESS_ABORTS_AT
+      && (SPENDING_MIN_DEBUG == TOKORA_ABORTS_AT
+        || SPENDING_MIN_DEBUG == CONSUMER_LOSSLESS_ABORTS_AT),
+    "SPENDING_MIN_DEBUG is not the minimum of the populations that spend a level of this cell. \
+     The set is tokora's own Pratt engines and the measured consumer's lossless door, and it \
+     excludes the syntactic row because that door takes no `descend` at all. Adding a spender \
+     means adding a clause here, not widening the constant."
+  );
+  assert!(
+    SPENDING_MIN_RELEASE <= TOKORA_RELEASE_ABORTS_AT
+      && SPENDING_MIN_RELEASE <= CONSUMER_LOSSLESS_RELEASE_ABORTS_AT
+      && (SPENDING_MIN_RELEASE == TOKORA_RELEASE_ABORTS_AT
+        || SPENDING_MIN_RELEASE == CONSUMER_LOSSLESS_RELEASE_ABORTS_AT),
+    "SPENDING_MIN_RELEASE is not the minimum of the release halves of the same two rows. Note it \
+     is the OTHER member than in debug: a guard that hardcoded which one binds would be reading \
+     one profile's accident."
   );
 
   // **NO `stacker` ARM, and that is the point of this round.** This constant seeds every
@@ -596,28 +1024,126 @@ const _: () = {
   // tokora compiled for itself: re-introducing a `cfg!(feature = "stacker")` arm here fails this
   // line, because 1024 levels of the heaviest measured grammar is ≈41 MiB and the thread is 2.
   //
-  // The debug cell is what it is priced against, because `CONSUMER_BYTES_PER_LEVEL` is a debug
-  // figure and pricing a release budget with a debug cost is the conservative direction.
+  // The debug cell is what it is priced against, because `CONSUMER_SYNTACTIC_BYTES_PER_LEVEL` is
+  // a debug figure and pricing a release budget with a debug cost is the conservative direction.
   assert!(
-    PARSE_DEFAULT_DEBUG * CONSUMER_BYTES_PER_LEVEL < STACK,
+    PARSE_DEFAULT_DEBUG * CONSUMER_SYNTACTIC_BYTES_PER_LEVEL < STACK,
     "an unconfigured parse can reach more native stack than the 2 MiB the derivation is stated \
      on. A budget that only a segmented path could survive does not belong on the cell every \
      unsegmented `descend` reads; see RecursionLimiter::SEGMENTED_PRATT_DEPTH."
   );
+  // **THE RESIDUE PARAGRAPH IS GONE, AND ITS INVERSION IS THE POINT OF THIS REVISION.**
+  //
+  // It used to record that with the arms diverged, an `opt-level = 0, debug-assertions = false`
+  // build took the 256 arm at debug frame prices and nothing refused it — a downgrade from
+  // refused-at-compile-time to documented. That was not residue. It was a process-level abort
+  // reachable from an ordinary cargo profile, and calling it documented did not make it survivable.
+  //
+  // The default is now chosen so that **no profile combination can abort**: both arms hold the
+  // same number and the line above prices both at the debug cost, which is the most any build can
+  // pay. There is nothing left to document here, and the assertion that used to state the residue
+  // ("the release arm does NOT fit at the debug price") is deleted because it is now false — which
+  // is exactly what fixing it looks like.
+  //
+  // A caller who wants the depth a release build genuinely supports takes it explicitly, and takes
+  // responsibility for its own frame prices with it: RecursionLimiter::OPTIMIZED_PARSE_DEPTH
+  // through `InputContext::with_recursion_limiter`. tokora cannot take that responsibility on the
+  // caller's behalf, and the reason is not squeamishness — `debug_assertions` is per crate, and
+  // the frames the budget bounds are the caller's, so no signal available here observes the fact
+  // the figure is conditioned on.
+};
+
+/// **The measured rows themselves**, and the consumer-side fact no arithmetic over them reaches.
+///
+/// The block above pins what this crate *chose*. These pin what it is choosing *between*: that the
+/// two doors are far enough apart to be two populations rather than one row edited twice, that
+/// tokora's own row is not comparable with the lossless one, and that the shipped default still
+/// clears a document the measured consumer actually ships.
+///
+/// The two `PARSE_DEFAULT_*_ON_THE_LOSSLESS_ROW` constants that used to live here are **gone**.
+/// They existed to publish what the derivation would give if repointed, while the shipped cells
+/// were still derived from the syntactic row. The shipped cells now take their headroom tier from
+/// the spending set — which the lossless row is a member of — so a separate "on the lossless row"
+/// derivation would be a second derivation of a number this file already derives, and one that no
+/// longer describes what ships. Two derivations of one number is how they drift.
+const _: () = {
+  use measured::{
+    CONSUMER_DEEPEST_SHIPPED_DOCUMENT, CONSUMER_LOSSLESS_ABORTS_AT,
+    CONSUMER_LOSSLESS_RELEASE_ABORTS_AT, CONSUMER_SYNTACTIC_ABORTS_AT,
+    CONSUMER_SYNTACTIC_BYTES_PER_LEVEL, CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT,
+    CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL, TOKORA_ABORTS_AT, TOKORA_RELEASE_ABORTS_AT,
+  };
+  use policy::PARSE_DEFAULT;
+
+  // THE DOOR MISMATCH, AS A COMPILED FACT. Measured at ~13x per level; four is a floor loose
+  // enough to survive another platform's codegen and tight enough that the two rows converging
+  // means one of them was edited to match the other rather than re-measured. If they ever do
+  // converge, the argument for two rows has gone with them and this file needs re-reading rather
+  // than a wider constant.
   assert!(
-    PARSE_DEFAULT_RELEASE * CONSUMER_BYTES_PER_LEVEL < STACK,
-    "the release parse default, priced at the DEBUG per-level cost, no longer fits the 2 MiB \
-     thread. Once `measured` carries a release per-level figure this assertion should be priced \
-     at that one instead — until then the debug cost is the only one there is, and it is the \
-     conservative direction."
+    CONSUMER_LOSSLESS_ABORTS_AT > CONSUMER_SYNTACTIC_ABORTS_AT * 4,
+    "the syntactic and lossless consumer rows have converged. They are readings of two different \
+     doors whose per-level costs differ by roughly an order of magnitude, so convergence means a \
+     row was edited rather than re-measured — see `measured`'s header for what each door spends."
   );
+  // And the relation that makes tokora's row incomparable with the lossless one, stated so a
+  // reader does not reinstate the ordering the old A8 asserted. A Pratt frame is the heavier kind;
+  // the lossless row is looser BECAUSE its levels are cheaper, which is the opposite of evidence
+  // that something was edited.
+  assert!(
+    CONSUMER_LOSSLESS_ABORTS_AT > TOKORA_ABORTS_AT,
+    "the lossless consumer row has fallen to tokora's own Pratt-frame row, which would mean a \
+     lossless descent had become as expensive as a Pratt frame"
+  );
+  // A release level is cheaper than a debug one, so more of them fit the same thread. Stated once
+  // per row now that all three have both halves measured.
+  assert!(
+    CONSUMER_LOSSLESS_RELEASE_ABORTS_AT > CONSUMER_LOSSLESS_ABORTS_AT,
+    "the release lossless row is at or below the debug one, which inverts the only thing known \
+     about the two profiles"
+  );
+  assert!(
+    TOKORA_RELEASE_ABORTS_AT > TOKORA_ABORTS_AT,
+    "tokora's own release row is at or below its debug one, which inverts the only thing known \
+     about the two profiles"
+  );
+  assert!(
+    CONSUMER_SYNTACTIC_RELEASE_ABORTS_AT > CONSUMER_SYNTACTIC_ABORTS_AT
+      && CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL < CONSUMER_SYNTACTIC_BYTES_PER_LEVEL,
+    "the release syntactic row is at or below the debug one, or its derived per-level cost is not \
+     the cheaper of the two — the second cannot disagree with the first unless one was written \
+     down rather than derived"
+  );
+
+  // **THE REAL FLOOR, replacing the tripwire this file carried for one revision.** That one
+  // asserted the shipped default did NOT clear the deepest document the measured consumer ships,
+  // and it was right to: it recorded that the case for repointing still stood, and it fired the
+  // moment the repoint happened. With the repoint taken, the obligation inverts — the shipped
+  // default must now stay clear of the corpus by the same 2x that consumer enforces on its own
+  // nesting ceiling at compile time. 32 over 11 is 2.9x; the release arm has far more.
+  // One clause, not two: both arms hold one number, so a second over PARSE_DEFAULT_RELEASE would
+  // be the same comparison written twice.
+  assert!(
+    PARSE_DEFAULT >= CONSUMER_DEEPEST_SHIPPED_DOCUMENT * 2,
+    "the shipped default no longer clears the deepest document the measured consumer ships by 2x \
+     — the floor that consumer holds its OWN ceiling to. Either the default was lowered or the \
+     corpus grew; `measured::CONSUMER_DEEPEST_SHIPPED_DOCUMENT` says which."
+  );
+  // **DELETED: the shipped default against the LOSSLESS per-level cost, in both profiles.** The
+  // lossless level is the cheapest population that spends the cell, so once the default is known
+  // to fit at the heaviest modelled price — which the block above asserts, for both arms — it
+  // cannot fail to fit at the cheapest. It was worth stating while the arms could hold different
+  // and much larger numbers; at one number priced against the heavy row it is arithmetic that
+  // cannot come out the other way, and this file's rule is that such a line is decoration.
 };
 
 /// The derivation of [`RecursionLimiter::SEGMENTED_PRATT_DEPTH`], on the same terms as the block
 /// above: every cell of the profile matrix pinned by name, arithmetic second.
 #[cfg(feature = "stacker")]
 const _: () = {
-  use measured::{CONSUMER_ABORTS_AT, CONSUMER_BYTES_PER_LEVEL, TOKORA_ABORTS_AT};
+  use measured::{
+    CONSUMER_SYNTACTIC_ABORTS_AT, CONSUMER_SYNTACTIC_BYTES_PER_LEVEL, TOKORA_ABORTS_AT,
+  };
   use policy::{
     SEGMENT_MEMORY_CEILING, SEGMENTED_PRATT, SEGMENTED_PRATT_DEBUG, SEGMENTED_PRATT_RELEASE,
   };
@@ -625,8 +1151,8 @@ const _: () = {
   // 512 fails this, and so did every other value in the 501..=1632 band the inequality-only
   // guards accepted. Both halves again: within the ceiling, and the deepest such power of two.
   assert!(
-    SEGMENTED_PRATT_DEBUG * CONSUMER_BYTES_PER_LEVEL <= SEGMENT_MEMORY_CEILING
-      && SEGMENTED_PRATT_DEBUG * 2 * CONSUMER_BYTES_PER_LEVEL > SEGMENT_MEMORY_CEILING,
+    SEGMENTED_PRATT_DEBUG * CONSUMER_SYNTACTIC_BYTES_PER_LEVEL <= SEGMENT_MEMORY_CEILING
+      && SEGMENTED_PRATT_DEBUG * 2 * CONSUMER_SYNTACTIC_BYTES_PER_LEVEL > SEGMENT_MEMORY_CEILING,
     "SEGMENTED_PRATT_DEBUG is not the number its own derivation produces — the DEEPEST power of \
      two whose segments fit inside SEGMENT_MEMORY_CEILING at the binding per-level cost. Move the \
      memory policy, not the published depth."
@@ -639,11 +1165,26 @@ const _: () = {
     "the release segmented budget is below the debug one, which inverts what a cheaper level does \
      to a fixed memory ceiling"
   );
-  // **Delete with PARSE_DEFAULT_RELEASE's twin, and not before**: same missing sweep.
+  // **THE PROVISIONAL LINE THAT STAYS**, and its reason has changed, so read it rather than
+  // pattern-matching it against the unsegmented one that was just deleted.
+  //
+  // That one went because the measurement it was waiting for arrived. This one is NOT waiting on a
+  // missing figure any more either — `measured::CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL` exists
+  // now, and deriving this cell from it would give 8192. It stays because that would be a
+  // different decision from the one taken: this budget is a MEMORY policy over heap segments, not
+  // a thread-stack bound, so what a cheaper release level buys here is 8x more segment memory
+  // reached before the refusal rather than 8x more headroom under a wall. Nobody has decided that
+  // 64 MiB should become the effective 512 MiB an 8192-deep segmented parse could touch.
+  //
+  // So: the figure is available, the derivation is one line, and the line is deliberately not
+  // written. Deleting this assertion is how that decision gets taken, and it should be taken
+  // knowingly.
   assert!(
     SEGMENTED_PRATT_RELEASE == SEGMENTED_PRATT_DEBUG,
-    "the release segmented budget has been raised above the debug one without a release per-level \
-     figure in `measured` to derive it from. See SEGMENTED_PRATT_RELEASE."
+    "the release segmented budget has been raised above the debug one. A release per-level figure \
+     now exists to derive it from, so this is no longer blocked on a measurement — it is blocked \
+     on a decision about how much segment memory an unconfigured release parse may reach. See \
+     SEGMENTED_PRATT_RELEASE and policy::SEGMENT_MEMORY_CEILING."
   );
   assert!(
     SEGMENTED_PRATT
@@ -663,7 +1204,7 @@ const _: () = {
   // memory: the budget must buy a depth the thread stack could not have — otherwise the feature is
   // paying for a ceiling it did not raise.
   assert!(
-    SEGMENTED_PRATT_DEBUG > CONSUMER_ABORTS_AT * 4,
+    SEGMENTED_PRATT_DEBUG > CONSUMER_SYNTACTIC_ABORTS_AT * 4,
     "SEGMENTED_PRATT_DEPTH is not meaningfully past what a 2 MiB thread already gave that \
      grammar, so the feature raised no ceiling"
   );
@@ -678,16 +1219,29 @@ const _: () = {
   // And the separation itself: the segmented figure has to be strictly the larger of the two, or
   // there was no reason to name it apart from the default. Stated per profile, because the two
   // pairs move independently once the release sweep lands.
+  //
+  // **The per-profile pair is gone and this is one clause, because the release half had become the
+  // debug half.** It was written "stated per profile, because the two pairs move independently
+  // once the release sweep lands" — and the sweep landed, and they do not: both release cells are
+  // equal to their debug siblings, so `SEG_REL > PARSE_REL` was `SEG_DBG > PARSE_DBG` compared with
+  // itself and could not fail for any legal value.
+  //
+  // What the per-profile form was reaching for has a real subject now. The collision it would have
+  // caught is between the segmented budget and the figure derived from the RELEASE rows, and that
+  // figure is OPTIMIZED_PARSE — 1024 against 1024 is exactly what the release parse arm would have
+  // been had it shipped, and it is what a caller opting in must still sit below.
   assert!(
-    SEGMENTED_PRATT_DEBUG > policy::PARSE_DEFAULT_DEBUG
-      && SEGMENTED_PRATT_RELEASE > policy::PARSE_DEFAULT_RELEASE,
-    "SEGMENTED_PRATT_DEPTH is not above PARSE_DEFAULT_DEPTH in one of the two profiles, so the \
-     constants have collapsed into one there and the segmented policy buys nothing"
+    SEGMENTED_PRATT_DEBUG > policy::PARSE_DEFAULT
+      && SEGMENTED_PRATT_RELEASE > policy::OPTIMIZED_PARSE,
+    "SEGMENTED_PRATT_DEPTH is not above the depth a caller can reach without it — either the \
+     shipped default or the published opt-in figure — so the segmented policy buys nothing over \
+     the budget that population already has"
   );
 };
 
 impl RecursionLimiter {
-  /// tokora's own recursion budget for a parse — **16**, in every build — requested explicitly by
+  /// tokora's own recursion budget for a parse — **32**, in every build and under every feature —
+  /// requested explicitly by
   /// [`ParserContext`](crate::ParserContext) and the input layer instead of inherited from
   /// [`new`](Self::new).
   ///
@@ -716,7 +1270,7 @@ impl RecursionLimiter {
   /// descent is Pratt frames opts into by hand. Opting in is the point: only the caller knows
   /// whether that precondition holds of their grammar.
   ///
-  /// # Why the default is 16, and why it used to be 64
+  /// # Why the default is 32, and why it was 16, 64 and 500 before that
   ///
   /// **64 was wrong, and it was wrong in the direction that aborts.** It was derived from the
   /// table in `Two Defaults, Two Subjects` — tokora's own worst cell, the debug token driver's
@@ -726,18 +1280,51 @@ impl RecursionLimiter {
   /// so one level of nesting pays for a tokora frame *and* a consumer frame, and the number to
   /// size against is the sum.
   ///
-  /// Measured on a real consumer grammar, debug, on the same explicitly sized 2 MiB thread: it
-  /// aborts at **51** levels — ~41 KiB each, 2.5× tokora's own — with four further axes at 60, 57,
-  /// 53 and 52. **So 64 sat above the depth at which a real grammar aborts**, and for that
-  /// consumer the limiter could never fire: the native stack got there first, with
-  /// `fatal runtime error: stack overflow` and no diagnostic. That is precisely the failure the
-  /// 500 → 64 change had been made to fix, surviving one layer further out.
+  /// **16 was wrong in the other direction, and for a subtler reason: it was measured at the wrong
+  /// door.** It came from a real consumer grammar aborting at **51** levels, debug, on the same
+  /// 2 MiB thread — the tightest of five axes over architecture, dialect, shape and source
+  /// backing. Those five held one thing fixed that nobody wrote down: every reading is of that
+  /// consumer's **syntactic** door, which takes no [`descend`](crate::InputRef::descend) and
+  /// therefore spends none of this budget. What spends it is that consumer's **lossless** door, one
+  /// level per nesting delimiter, where a level costs about eleven times less. So the shipped
+  /// default bounded one population with a different, far heavier one's frame cost.
   ///
-  /// 16 is the largest power of two leaving more than 3× under the binding cell of 51 — the next
-  /// one up, 32, leaves 1.59×, which is *below* the 1.9× that made 64 look safe and well inside
-  /// the range a different platform's codegen moves. It clears tokora's own tightest cell by 7.8×.
+  /// # The rule that produced 32, and why it has two tiers
   ///
-  /// **This is a reduction, and a grammar that legitimately nests deeper must now say so** — with
+  /// **Pointing the old single-tier formula at the right row gives 128, and 128 aborts.** It is
+  /// *above* tokora's own 125, so an unconfigured Pratt parse in a debug build would reach the
+  /// native stack before the limiter — measured, 128 × 16 112 B is 98.3% of a 2 MiB thread — which
+  /// is the failure the whole 500 → 64 → 16 sequence exists to delete, restated with a bigger
+  /// number. **This cell is shared, and no single row bounds it.**
+  ///
+  /// Three populations read it, and their per-level costs span 68×: tokora's two Pratt engines
+  /// (~16.4 KiB), a caller's own hand-written [`descending`](crate::InputRef::descending)
+  /// (modelled at the measured heaviest, ~41 KiB), and a lossless consumer's descent (~3.1 KiB).
+  /// The derivation therefore applies **full headroom to every population that actually spends the
+  /// cell**, and **a bare fit, with no multiplier, to the heaviest population that is only
+  /// modelled**. That asymmetry is the decision: give the modelled row headroom too and the answer
+  /// is 16; give the spending rows only a fit and it is 128.
+  ///
+  /// **32** is the deepest power of two meeting both — `32 × 3 = 96 < 125`, and
+  /// `32 × 41 120 B = 1.31 MiB < 2 MiB`, with 64 refused by both. It is double what 0.10.0 shipped
+  /// before this change, it clears every population that spends it by at least 3×, and it is the
+  /// first value of this constant derived from the door the budget is actually enforced on.
+  ///
+  /// **The release arm is 256 and is now a derivation rather than a floor.** The same rule over the
+  /// release rows: the fit refuses 512 at ~4.3 KiB per modelled level, where headroom alone would
+  /// have allowed 1024 — a value that collides exactly with the segmented budget and would have
+  /// made `stacker` buy nothing in a release build. So each tier is the binding one in one profile.
+  ///
+  /// # What it costs a real document
+  ///
+  /// Measured on the same consumer: its deepest shipped fixture spends **11** of these levels over
+  /// 472 fixtures, and an ordinary filter query 10 or 11 — an argument list's `(` is a one-off
+  /// toll, so `f(where: {a: {b: [1]}})` spends 5 for what reads as three-deep. 32 leaves **2.9×**
+  /// over the deepest document that exists, which clears the 2× floor that consumer enforces on its
+  /// *own* nesting ceiling at compile time; 16 left 1.45× and escaped that floor only because the
+  /// binding number was this one rather than the consumer's.
+  ///
+  /// **A grammar that legitimately nests deeper must still say so** — with
   /// [`with_limitation`](Self::with_limitation) through
   /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter),
   /// [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter), or —
@@ -769,18 +1356,91 @@ impl RecursionLimiter {
     doc = "`SEGMENTED_PRATT_DEPTH`, published only when that feature is on."
   )]
   ///
-  /// # It is also keyed on the build profile, and today both cells read 16
+  /// # It is keyed on the build profile, and both cells hold the same number on purpose
   ///
   /// A debug frame and a release frame are not the same size — tokora's own table is ~16.4 KiB
-  /// against ~0.48–0.53 KiB, a 31× spread — and 16 is derived from the **debug** bisection. So the
-  /// constant selects on `debug_assertions`, and a release build will eventually get its own,
-  /// larger figure. It does not have one yet: the five-axis consumer bisection behind 16 has not
-  /// been run against a release build, and extrapolating it from debug's ratio would be the same
-  /// derived-from-the-wrong-population mistake one more time. **The release cell is therefore a
-  /// floor set equal to the debug one**, which is conservative in the recoverable direction, and a
-  /// `const` assertion refuses to let it be raised until the measurement lands. Nothing about
-  /// today's *behaviour* differs between the two profiles.
+  /// against ~0.48–0.53 KiB, a 31× spread — and the release rows genuinely support **256**. The
+  /// constant still selects on `debug_assertions`, and both arms are **32**.
+  ///
+  /// **That is not caution, and it is not a missing measurement.** The release sweep exists; the
+  /// figure it produces is published as
+  /// [`OPTIMIZED_PARSE_DEPTH`](Self::OPTIMIZED_PARSE_DEPTH) for a caller to pass. What is missing
+  /// is any way for *this crate* to know whether the condition that figure rests on holds:
+  ///
+  /// - `debug_assertions` is not `opt-level`. A build with `debug-assertions = false` at
+  ///   `opt-level = 0` selects the release arm and pays unoptimised frame prices.
+  /// - It is **per crate**, and the frames this budget bounds are the **caller's**. A build script
+  ///   reading cargo's `OPT_LEVEL` would close the first gap and not the second: it observes
+  ///   tokora's optimisation, while the recursion is spent in the consumer's productions. A
+  ///   per-package profile override, or a debug consumer against a release tokora, reinstates the
+  ///   mismatch with every signal available here reading "release".
+  ///
+  /// **This crate shipped the divergence for one revision and it was a process-level denial of
+  /// service**: the release arm at 256, selected by an ordinary cargo profile combination, against
+  /// debug frames — ≈10 MiB on a 2 MiB thread, an abort with no diagnostic and nothing on any
+  /// `Result` channel. The default is now chosen so that **no profile combination can abort**, and
+  /// a `const` assertion prices *both* arms at the debug cost to keep it that way.
+  ///
+  /// **A caller who wants the depth a release build supports takes it explicitly, and takes
+  /// responsibility for its own frame prices with it.** That is not a burden tokora is pushing
+  /// away: it is the only place the fact lives. See
+  /// [`OPTIMIZED_PARSE_DEPTH`](Self::OPTIMIZED_PARSE_DEPTH) for the figure and the precondition,
+  /// and [`with_limitation`](Self::with_limitation) with
+  /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
+  /// for how to pass it — no new API is involved, that path predates this constant.
+  ///
   pub const PARSE_DEFAULT_DEPTH: usize = policy::PARSE_DEFAULT;
+
+  /// **The recursion budget a fully optimised parse supports — 256, and nothing installs it.**
+  ///
+  /// [`PARSE_DEFAULT_DEPTH`](Self::PARSE_DEFAULT_DEPTH) is 32 in *every* build, including a release
+  /// one, and this is the figure a release build actually justifies. It is a number to hand to
+  /// [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter)
+  /// or [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter) —
+  /// the same shape as
+  #[cfg_attr(
+    feature = "stacker",
+    doc = "[`SEGMENTED_PRATT_DEPTH`](Self::SEGMENTED_PRATT_DEPTH), and for the same reason."
+  )]
+  #[cfg_attr(
+    not(feature = "stacker"),
+    doc = "`SEGMENTED_PRATT_DEPTH` (`stacker` only), and for the same reason."
+  )]
+  ///
+  /// # Why this is not simply the release arm of the default
+  ///
+  /// Because the default is selected by `cfg!(debug_assertions)`, and **that flag cannot express
+  /// the fact 256 is conditioned on.** Two ways it gets it wrong, and the second has no fix
+  /// available to this crate:
+  ///
+  /// - it is not `opt-level`, so a build with `debug-assertions = false` at `opt-level = 0` would
+  ///   select 256 while paying unoptimised frame prices — `256 × 41 KiB ≈ 10 MiB` on a 2 MiB
+  ///   thread, an abort with no diagnostic;
+  /// - it is **per crate**, and the frames this budget bounds are *yours*. Even a build script
+  ///   reading cargo's `OPT_LEVEL` would observe tokora's optimisation, not the optimisation of the
+  ///   productions the recursion is actually spent in.
+  ///
+  /// For one revision this crate shipped the divergence and it was a process-level denial of
+  /// service reachable from an ordinary cargo profile. The default went back to one number in both
+  /// arms, and the release figure became this.
+  ///
+  /// # The precondition, and it is yours to check
+  ///
+  /// **Every frame the budget bounds is compiled at `opt-level = 3`** — tokora's *and* your own
+  /// productions. Pass this when that holds of the build you are shipping; do not pass it because
+  /// a `cargo build --release` happened somewhere in the tree. If your grammar's deep part is
+  /// unoptimised for any reason — a per-package profile override, a debug consumer against a
+  /// release tokora — the number that applies is the default, not this one.
+  ///
+  /// # Why 256
+  ///
+  /// The same two-tier derivation [`PARSE_DEFAULT_DEPTH`](Self::PARSE_DEFAULT_DEPTH) uses, over the
+  /// release halves of the measured rows: `256 × 3 = 768` under the 3 282 at which the measured
+  /// consumer's lossless door aborts optimised, and `256 × 4.3 KiB = 1.09 MiB` inside a 2 MiB
+  /// thread at the heaviest modelled optimised level — where 512 needs 2.17 MiB and is refused.
+  /// It is 8× the shipped default, which is what a release frame being roughly an order of
+  /// magnitude cheaper buys.
+  pub const OPTIMIZED_PARSE_DEPTH: usize = policy::OPTIMIZED_PARSE;
 
   /// The recursion budget that is defensible **when every level of the descent is a segmented
   /// Pratt frame** — 1024, and `stacker`-only because that is the feature that makes the sentence
