@@ -1740,6 +1740,34 @@ fn tokenless_hole_makes_no_node() {
   assert!(matches!(sink.events()[0], Event::Diag { .. }));
 }
 
+/// E6's one behavioural risk, met head-on: the scan enters at the start of the pure-`Diag`
+/// tail, so a wrappable token **under** a diagnostic run must still be found and wrapped
+/// (al8n/tokora#305). The ceiling skips exactly the iterations the `Diag` arm would have
+/// `continue`d over; it is not a boundary on how far back the wrap may reach.
+#[test]
+fn hole_wrap_reaches_under_a_diagnostic_run() {
+  let mut sink = verbose_sink("ab");
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  // Three diagnostics with no token between them: the buffer now ends in a pure-`Diag` tail,
+  // which is the shape whose rescan was quadratic.
+  emit_error(&mut sink, 0, 1);
+  emit_error(&mut sink, 0, 2);
+  emit_error(&mut sink, 0, 3);
+
+  Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(0, 1), 1).expect("collects");
+
+  assert!(
+    matches!(sink.events()[0], Event::StartNode { kind: K_ERR, .. }),
+    "the wrap still opens at the token beneath the Diag run: {:?}",
+    sink.events()
+  );
+  assert!(
+    matches!(sink.events()[5], Event::FinishNode { kind: K_ERR }),
+    "…and closes above it: {:?}",
+    sink.events()
+  );
+}
+
 /// The wrap survives a later rewind like any other events: a checkpoint below the hole
 /// unwinds wrap and tokens together.
 #[test]
@@ -8068,13 +8096,34 @@ fn cst_carries_the_trivia_policy_to_materialization() {
 // E5 — the maintained open-node depth (al8n/tokora#253) and the journal theorem (#250)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The scalar against the oracle, after every step of whatever the caller just did.
+/// The maintained scalars against their oracles, after every step of whatever the caller just
+/// did.
+///
+/// E6 (the `Diag`-tail start) rides E5's coverage deliberately: the two are written by the same
+/// one append door and restored by the same rule off the same row, so the paths that can drift
+/// one are the paths that can drift the other — and every caller of this helper already walks
+/// all of them (nesting, tombstones, retro-wraps, demotes, tokens, diagnostics, hole wraps,
+/// checkpoint/release, and all four rewind arms).
 #[track_caller]
 fn depth_matches_oracle(sink: &VerboseSink<'_>, at: &str) {
   assert_eq!(
     sink.depth(),
     sink.recount_depth(),
     "the maintained depth drifted from a full recount after {at}"
+  );
+  assert_eq!(
+    sink.diag_tail,
+    sink.recount_diag_tail(),
+    "the maintained Diag-tail start drifted from a full recount after {at}"
+  );
+  // E7/E8 the same way, and this one carries more than drift detection: the demote wall's
+  // verdict is now the chain's, so this equality IS the equivalence the wall rests on, checked
+  // against a from-scratch replay on every shape these callers build.
+  #[cfg(debug_assertions)]
+  assert_eq!(
+    sink.open_chain(),
+    sink.recount_open_chain(),
+    "the maintained open-node chain drifted from a full replay after {at}"
   );
 }
 
@@ -8246,6 +8295,28 @@ fn depth_restores_across_every_rewind_arm() {
   rewind(&mut sink, 999);
   depth_matches_oracle(&sink, "an out-of-range future mark");
   assert_eq!(sink.depth(), 2, "a future mark rewinds nothing");
+
+  // (5) TRUNCATE AND REOPEN — the arm a scalar depth cannot tell from arm (1), and the one
+  // E7/E8 have to get right on their own. The node open at the mark is CLOSED above it and a
+  // different node is opened in its place, so the rewind must reopen the first: same depth,
+  // different node. It is also the case that makes reclaiming a closed node's chain slot
+  // unsound — a reclaiming design hands the freed slot to `K_NODE`, the rewind then drops it as
+  // "above the mark", and the row's frozen head is left naming nothing (see `OpenNode`).
+  let mut sink = verbose_sink("ab");
+  sink.cst_start(K_LIST);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
+  sink.cst_finish(K_LIST);
+  sink.cst_start(K_NODE);
+  assert_eq!(sink.depth(), 1, "same depth as the mark, a different node");
+  rewind(&mut sink, ckp);
+  depth_matches_oracle(&sink, "a truncate-and-reopen rewind");
+  assert_eq!(sink.depth(), 1);
+  #[cfg(debug_assertions)]
+  assert_eq!(
+    sink.open_chain(),
+    std::vec![0],
+    "the rewind must reopen the node the mark had open, not leave the one that replaced it"
+  );
 }
 
 /// A released row promotes the floor and spends no depth: `release` touches no event, so E5

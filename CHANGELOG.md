@@ -1491,6 +1491,84 @@ and will red until they do.
   No public API moved. The released-floor memo shrank from a whole mark-stack row to its mark,
   because the depth half stopped having a reader.
 
+- **The other two quadratic scans in the same sink — the ones the census for #250/#253 found and
+  did not fix** (#305, #306). Both are in `cst/sink.rs`, both were measured before the repair and
+  after it, and they are unrelated to each other: different mechanisms, different profiles,
+  different structures.
+
+  **`Sink::wrap_hole` rescanned the whole accumulated diagnostic run on every recovery hole whose
+  span matched no buffered token** (#305) — **`Theta(H^2)` in every profile, release included**.
+  The backward scan steps over `Event::Diag` unconditionally, which is what lets a hole wrap
+  tokens that already carry diagnostics; when the hole matches no token the wrap appends **no**
+  structural event, so nothing stops the next scan, and `emit_skipped_region` forwards its own
+  report and lengthens the run by one. Measured at exactly `H(H - 1)/2` event visits — 2 096 128
+  / 8 386 560 / 33 550 336 / 134 209 536 / 536 854 528 at `H` = 2048/4096/8192/16384/32768, with
+  release wall times of 3.58 / 13.56 / 55.25 / 220.62 / 882.29 ms (3.79x, 4.07x, 3.99x, 4.00x per
+  doubling). The ordinary case was never affected: a hole that *does* wrap tokens appends a
+  `StartNode`/`FinishNode` pair, and those break the next hole's scan.
+
+  **No in-crate producer can reach it, and a consumer can.** `InputRef::sync_balanced` is this
+  crate's only emitter of skipped regions, and three independent properties of it each rule the
+  shape out — its `skipped` count is incremented only from the one per-token decision site, which
+  a crossed lexer error never reaches; every counted token was settled through `commit_token` and
+  therefore has a `Token` event; and its emitter checkpoint is taken before the scan, so the wrap's
+  floor sits below the first of them. Any one of the three makes `skipped > 0` imply a wrappable
+  token. `ParseState::emit_skipped_region` — reachable from `InputRef` and `EmitterView` — takes a
+  **caller-chosen** span, and a span matching no buffered token produces exactly the shape.
+
+  The repair is **E6, `Sink::diag_tail`**: the index at which the buffer's pure-`Diag` tail begins,
+  so the scan enters there instead of at the length. It changes no wrap and no tree — the skipped
+  iterations are exactly the ones the `Diag` arm would have `continue`d over, and the first index
+  the scan does examine is a non-`Diag` by the cell's own invariant, so an empty wrap now breaks on
+  its first iteration and every scan's run is disjoint from every other's. The alternative shape —
+  making the empty wrap leave a structural stopper — was priced and rejected: an empty `error_kind`
+  node would change the tree a consumer sees and contradict the documented "token-less holes
+  produce no node", and an opaque marker event would instead *narrow* a later, wider wrap at a
+  boundary with no semantic meaning. Rewind is where a watermark of this kind usually breaks, and
+  this one has no rule of its own to get wrong: it copies #253's, off a new frozen field on the
+  same mark-stack row. After the repair the same curves are **1 visit per hole** and 0.030 / 0.053
+  / 0.097 / 0.191 / 0.285 ms — linear, and **3096x** faster at `H = 32768`.
+
+  **`Sink::cst_demote`'s debug wall recounted the event suffix on every demote, success included**
+  (#306) — `Theta(d x len)`, debug and test builds only, measured at exactly `d(d - 1)` visits:
+  65 280 / 261 632 / 1 047 552 / 4 192 256 at nesting depth 256/512/1024/2048, 4.00x per doubling,
+  and **0** in release, where the scan is compiled out. Through the blessed `node()` bracket the
+  suffix is exactly that bracket's own body and `d` is capped by
+  `RecursionLimiter::PARSE_DEFAULT_DEPTH` — **32** in both profiles now, not the 1024 the issue was
+  filed against — so the blessed-door exposure is a bounded constant on failing brackets; the raw
+  `CstEmitter` surface is not bounded by the limiter at all, and that is what the measurement above
+  drives.
+
+  **#253's maintained depth cannot serve this scan, and neither can an early exit.** The scan wants
+  the *running minimum* of the suffix, and a scalar total is blind to a dip that recovers:
+  `Start(A) … Finish(A) … Start(C)` ends where it began with the marked node closed anyway. Nor can
+  the walk stop short — every delta is in `{-1, 0, +1}`, so from any position both a later dip and
+  no later dip stay reachable with the events that remain, travelling in either direction. What the
+  total *does* decide in `O(1)` is only the sub-case where the endpoint itself is low, which is not
+  the residue; taking it would have weakened the wall rather than accelerated it.
+
+  So the repair is a structure — **E7/E8, `Sink::opens` / `Sink::open_top`**: the ordinary
+  bracket-matching stack, laid out as an append-only vector of parent links so that its contents
+  are a function of the event prefix and its head is one restorable scalar. An entry leaves the
+  chain exactly when the depth first returns to one below its own start, so *on the chain* and
+  *no dip above* are the same predicate, and the wall's verdict is unchanged on every input — the
+  interleaved-closings strictness choice on the raw surface included. The old walk still runs, on
+  the failing path only, because the dipping event is still the diagnosis. **Release pays nothing**:
+  the chain, its row field and the check are all behind `debug_assertions`, and release's wall
+  remains the typed refusal both finish doors already raise. 2048 nested failing brackets went from
+  4 192 256 visits and 19.77 ms to **0 visits and 0.139 ms**, curve 4.00x to 2.00x.
+
+  A closed node's chain slot is deliberately **never** reclaimed, and that is the one place this
+  could have gone wrong quietly: reusing it would hold the vector at the live depth for a
+  well-nested document and leave a checkpoint's frozen head naming an unrelated node after a
+  truncate-and-reopen rewind. Both that shape and a wrap reaching under a diagnostic run are cells,
+  and both were confirmed to fail against a planted defect before being trusted. The equivalence
+  the wall now rests on is not prose: `depth_matches_oracle` compares the maintained chain against
+  a from-scratch replay at every site that already walked every path writing #253's depth.
+
+  No public API moved. `Event`, `EventMark` and every emitter signature are untouched, and a
+  release build's `Sink` gains one `u64` on the struct and one on each mark-stack row.
+
 - **`Limiter`'s combined update-and-check methods reported `Ok(())` over a recursion depth that
   was already past its maximum** (#265). `Tracker::check` promises to report whether *any*
   configured limit is exceeded, and the trait's combined methods were documented and defaulted as

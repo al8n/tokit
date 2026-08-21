@@ -15,6 +15,9 @@
 //! | E3 | [`Sink::ledger`] | **monotone era source + truncation witness** | rewind APPENDS to it (a rewind *is* a truncation) and never removes; rewinding it would false-accept a stale mark |
 //! | E4 | [`Sink::rows`] | **release stack + per-checkpoint depth ledger + inner reading** | push at `checkpoint()` (freezing the depth and the inner emitter's own checkpoint reading), pop at `release()` (kept) and `rewind()` (spent, the popped row's inner reading is the inner's rewind target); depth entries are frozen facts about prefixes, never live counters |
 //! | E5 | [`Sink::depth`] | **live open-node depth** — the one value derived from the log that the sink maintains rather than recounts | every append charges the event's own `depth_delta`, through the ONE push helper the DEPTH_CENSUS pins; a truncating rewind **restores** it from the target row's frozen depth (or `0` at the origin), and a non-truncating one leaves it untouched |
+//! | E6 | [`Sink::diag_tail`] | **live start of the pure-`Diag` tail** — the second value maintained rather than recounted, and restored by the identical rule | every append through the ONE push helper sets it to the new length for a non-`Diag` and leaves it for a `Diag`; the hole wrap's splice charges its own half; a truncating rewind **restores** it from the target row's frozen value (or `0` at the origin), and a non-truncating one leaves it untouched |
+//! | E7 | [`Sink::opens`] (debug only) | **open-node chain** (a second append-only log, one entry per depth-increasing event) | append + suffix-truncate, the log's own two verbs — a rewind drops the entries whose `start` reached the truncated region and touches no other, so it needs no journal; a close never reclaims a slot (see [`OpenNode`]) |
+//! | E8 | [`Sink::open_top`] (debug only) | **live chain head** — the third value maintained rather than recounted | the ONE push helper pushes at a `+1` and follows `parent` at a `-1`; a truncating rewind **restores** it from the target row's frozen value (or `None` at the origin), and a non-truncating one leaves it untouched |
 //! | — | [`Sink::floor_mark`] | derived memo (the newest released row's mark) | reset to the surviving top row's mark when a rewind drops below it |
 //! | — | [`Sink::base_inner`] | derived memo (the inner's construction-time reading) | primed at the first advancing touch (provably the construction reading), never restored (the exact no-row target at the origin only) |
 //! | — | [`Sink::degraded`] | **latching poison** (a rewind the sink refused to perform) | set — never cleared — by the one rewind that must degrade instead of report (an unpaired settle detected mid-unwind); a rewind cannot un-refuse an earlier refusal, so it is deliberately outside the rewind timeline |
@@ -51,6 +54,74 @@
 //! non-append mutation (the hole wrap's splice) charges its two halves explicitly. DEPTH_CENSUS
 //! — a source lock in this module's tests, in the shape of CST_FORWARD_CENSUS — fails the build
 //! if a second `events.push` or `events.insert` appears.
+//!
+//! # The pure-`Diag` tail: the second value the same arity makes maintainable
+//!
+//! [`wrap_hole`](Sink::wrap_hole)'s backward scan steps over [`Event::Diag`] *unconditionally* —
+//! that transparency is what lets a recovery hole wrap tokens that already carry diagnostics —
+//! so a `Diag` contributes nothing to the scan's answer but one loop iteration. When a hole's
+//! span matches no buffered token the wrap appends **no structural event**, and the diagnostic
+//! run it leaves behind was then rescanned in full by the next call: `Θ(H²)` event visits for
+//! `H` such holes, **in every profile including release**, measured at exactly `H(H − 1)/2`
+//! (al8n/tokora#305). The ordinary case never had the problem, because a hole that *does* wrap
+//! tokens appends a `StartNode`/`FinishNode` pair and those break the next scan.
+//!
+//! [`diag_tail`](Sink::diag_tail) is the bound that makes the empty case behave like the
+//! ordinary one: the index at which the buffer's **pure-`Diag` tail** begins, so the scan enters
+//! at that index instead of at the length. It skips exactly the iterations that would have
+//! `continue`d and none that would not, so **no wrap is narrowed and no tree changes** — this is
+//! a scan that stops re-deciding what it already decided, not a new boundary on the wrap's
+//! structural authority. The event immediately below the entry point is a non-`Diag` by the
+//! cell's own invariant, so an empty wrap breaks on its first iteration and every scan's run is
+//! disjoint from every other's: `O(1)` per empty hole, `O(len)` over a parse.
+//!
+//! Its restore rule is [`depth`](Sink::depth)'s, verbatim and for the same three reasons — a
+//! truncating rewind to a captured row takes the row's frozen value (the tail of exactly the
+//! prefix that survives), one to the origin takes `0` (an empty log's tail starts at `0`), and
+//! every other rewind truncates nothing. Rewind is where a watermark of this kind usually
+//! breaks; this one inherits a rule the rewind contract had already forced into existence, and
+//! the same one-append-door arity DEPTH_CENSUS pins keeps it from drifting by omission.
+//!
+//! # The open-node chain: what a scalar depth provably cannot answer
+//!
+//! [`cst_demote`](CstEmitter::cst_demote)'s debug wall asks whether the marked node is **still
+//! open**, and used to answer it by recounting `events[index + 1..]` to the end of the buffer,
+//! looking for a running sum that dips below zero — with **no early exit on the success path**.
+//! For `d` nested failing brackets that is `Θ(d × len)`, measured at exactly `d(d − 1)` visits
+//! (al8n/tokora#306).
+//!
+//! **The maintained [`depth`](Sink::depth) cannot supply what that scan wants, and neither can
+//! any early exit.** The scan needs the *running minimum* of the suffix, and a scalar total is
+//! blind to a dip that recovers: `Start(A) … Finish(A) … Start(C) …` ends at the same depth it
+//! started, and the marked node is closed anyway. Nor can the walk stop short — the deltas are
+//! `{-1, 0, +1}`, so from any position both a later dip and no later dip stay reachable with the
+//! events that remain, in either direction of travel. What the *total* does decide, in `O(1)`,
+//! is only the sub-case where the endpoint itself is low; the recovering dip is exactly the
+//! residue, and skipping it would weaken the wall rather than accelerate it.
+//!
+//! So the structure is [`opens`](Sink::opens) + [`open_top`](Sink::open_top): the ordinary
+//! bracket-matching stack, laid out as an append-only vector of parent links so that its
+//! *contents* are a function of the event prefix and its *head* is one restorable scalar.
+//!
+//! **The equivalence.** Write `D(j)` for the depth after event `j`. The chain pushes at every
+//! `+1` and follows `parent` at every `-1` (a `-1` with an empty chain is a no-op, which is the
+//! negative depth the raw surface already admits). An entry pushed at `i` therefore leaves the
+//! chain exactly when `D` first returns to `D(i) − 1` above `i`; and because every delta is in
+//! `{-1, 0, +1}`, `D` cannot pass below `D(i) − 1` without landing on it. Hence
+//!
+//! > `i` is on the chain  ⟺  `min_{j > i} D(j) ≥ D(i)`  ⟺  the old scan finds no dip,
+//!
+//! and the wall's verdict is unchanged on every input, including the interleaved-closings shape
+//! the scan deliberately refuses on the raw surface. The **diagnosis** still comes from the
+//! scan: the failing path runs the old walk to name which of the three shapes it is, where its
+//! cost is the panic's, not the parse's.
+//!
+//! Rewind, again, is the whole risk, and again the answer is the rule that already existed: the
+//! vector is append-only and index-keyed, so the truncation that removes the events removes
+//! their entries and renames none of the survivors, and the head is a frozen row fact copied
+//! back exactly like the depth. Release pays nothing for either — the check, the chain and the
+//! row field are all behind `debug_assertions`, and release's wall is the typed refusal both
+//! finish doors already raise.
 
 use core::{marker::PhantomData, num::NonZeroU32};
 
@@ -136,6 +207,22 @@ struct MarkRow {
   /// leaves exactly the prefix this number describes, so the restore is a copy rather than a
   /// recount (see the depth section in the module docs).
   depth: i64,
+  /// The start of the pure-`Diag` tail at capture time — a frozen fact about the `mark`-length
+  /// prefix, snapshotted from [`Sink::diag_tail`] and never touched again.
+  ///
+  /// The [`depth`](Self::depth) field's twin, and restorable for the identical reason: a
+  /// truncating rewind to this row's mark leaves exactly the prefix this number describes, so
+  /// the restore is a copy rather than a backward rescan (see the `Diag`-tail section in the
+  /// module docs).
+  diag_tail: u64,
+  /// The open-node chain's top slot at capture time — the third frozen fact about the
+  /// `mark`-length prefix, and restored by the same rule as the two above.
+  ///
+  /// Debug-only with the chain it indexes: the only reader is
+  /// [`validate_start_mark`](Sink::validate_start_mark)'s `debug_assertions` wall, and a release
+  /// build must not pay a row field for a check it never runs.
+  #[cfg(debug_assertions)]
+  open_top: Option<u32>,
   /// The inner emitter's own checkpoint reading captured at this sink checkpoint. Handed
   /// back to `inner.rewind` when this row is the rewind target, restoring the inner to
   /// exactly its state when the mark was taken — every forwarded token AND diagnostic before
@@ -167,6 +254,32 @@ struct DegradedRewind {
   mark: u64,
   /// The event-log length at the refused rewind.
   len: u64,
+}
+
+/// One link of the **open-node chain** — the debug-only structure that answers
+/// [`cst_demote`](CstEmitter::cst_demote)'s "is the node this mark opened still open?" without
+/// rescanning the event suffix (al8n/tokora#306).
+///
+/// One entry per depth-increasing event still in the log, appended in event order and dropped by
+/// suffix truncation, so the chain is maintained with the log's own two verbs and needs no undo
+/// journal. The **currently open** nodes are the entries reachable from [`Sink::open_top`]
+/// through `parent`; the rest describe nodes that have since closed, and are kept because a
+/// rewind can reopen one.
+///
+/// **Never reclaimed at a close, and that is load-bearing.** Popping an entry when its node
+/// closes would hold the vector at exactly the live depth for a well-nested document, and it is
+/// unsound: the next open reuses the freed slot, while the frozen [`MarkRow::open_top`] of a
+/// checkpoint taken before the close still names it — a rewind would restore a top pointing at
+/// an unrelated node. A slot is stable for the life of the event it describes, exactly as an
+/// event index is.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenNode {
+  /// The event index of the depth-increasing event that opened this node.
+  start: u64,
+  /// The slot of the node that was innermost-open when this one opened — the chain's next
+  /// link — or `None` when it opened at the log's outermost level.
+  parent: Option<u32>,
 }
 
 /// One undo-journal entry: an in-place `forward_parent` write performed by
@@ -457,6 +570,50 @@ where
   /// value is to see that, and an unsigned cell would wrap instead of showing it. See the
   /// depth section in the module docs for the restore rule and for the recount this replaced.
   depth: i64,
+  /// E6 — the index at which the buffer's **pure-[`Diag`](Event::Diag) tail** begins:
+  /// every event in `[diag_tail, events.len())` is a `Diag`, and `events[diag_tail - 1]` (when
+  /// the tail is not the whole buffer) is not.
+  ///
+  /// The **ceiling** of the hole wrap's backward scan, as [`Sink::floor_mark`] is one term of
+  /// its floor — and the bound that turns al8n/tokora#305's `Θ(H²)` release-profile rescan into
+  /// `O(1)` per empty hole. `Diag` slots are transparent to that scan by design, so the tail
+  /// contributes only loop iterations; entering at this index skips exactly those and nothing
+  /// else, which is why the repair narrows no wrap and changes no tree.
+  ///
+  /// Maintained rather than recounted, in [`Sink::depth`]'s class and under the identical
+  /// restore rule: the ONE append door writes it, the hole wrap's splice charges its own half,
+  /// and a truncating rewind copies it back off the target row's frozen fact (or `0` at the
+  /// origin). See the `Diag`-tail section in the module docs.
+  diag_tail: u64,
+  /// E7 — the open-node chain: one [`OpenNode`] per depth-increasing event still in
+  /// [`Sink::events`], appended in event order.
+  ///
+  /// **Debug builds only.** Its one reader is
+  /// [`validate_start_mark`](Self::validate_start_mark)'s `debug_assertions` wall, whose release
+  /// backstop is a typed refusal at materialization through both finish doors, so a release
+  /// build must pay neither the memory nor the append-path branch.
+  ///
+  /// Same two verbs as the log — append at a `+1` event, suffix-truncate at a rewind — which is
+  /// why it needs no undo journal of its own. See [`OpenNode`] for why a close does not reclaim
+  /// its slot.
+  #[cfg(debug_assertions)]
+  opens: Vec<OpenNode>,
+  /// E8 — the innermost open node's slot in [`Sink::opens`], or `None` when nothing is open.
+  ///
+  /// The chain's head, and [`Sink::depth`]'s structural companion: `depth` counts the open
+  /// nodes, this one names them. Maintained by the same ONE append door (push at a `+1`, follow
+  /// `parent` at a `-1`, and a `-1` with nothing open is the no-op the raw surface's negative
+  /// depth already admits), and **restored at a truncating rewind from the target row's frozen
+  /// value** — E5's rule, third time.
+  ///
+  /// What it buys is al8n/tokora#306: the demote wall used to recount `events[index + 1..]` to
+  /// the end of the buffer with no early exit on the success path, `Θ(d × len)` visits for `d`
+  /// nested failing brackets. The scan wanted a **running minimum** over that suffix, which the
+  /// maintained `depth` cannot supply — a scalar total is blind to a dip that recovers — so the
+  /// answer is this chain, and the query is a walk of at most the current depth. See the
+  /// open-chain section in the module docs for the equivalence.
+  #[cfg(debug_assertions)]
+  open_top: Option<u32>,
   /// The newest *released* row's mark: the youngest committed positional fact the sink holds,
   /// and the floor of the hole wrap's backward scan.
   ///
@@ -548,6 +705,21 @@ where
     // restored at a truncating rewind from the target row's frozen depth (or 0 at the
     // origin). A non-truncating rewind leaves it alone. DEPTH_CENSUS locks the arity.
     depth: _,
+    // — E6, the live start of the pure-Diag tail: the hole wrap's scan ceiling. Written by the
+    // SAME one push helper (to the new length for a non-Diag, left alone for a Diag) and by the
+    // splice's own half, and restored at a truncating rewind from the target row's frozen value
+    // (or 0 at the origin) — E5's rule verbatim, on the arity DEPTH_CENSUS already locks.
+    diag_tail: _,
+    // — E7, the debug-only open-node chain: append + suffix-truncate, the log's own two verbs.
+    // A rewind drops the entries whose start reached the truncated region; a close reclaims
+    // NOTHING, because a reused slot would alias a frozen row's open_top.
+    #[cfg(debug_assertions)]
+      opens: _,
+    // — E8, the debug-only live chain head: pushed/followed by the SAME one push helper, and
+    // restored at a truncating rewind from the target row's frozen value (or None at the
+    // origin) — E5's rule again.
+    #[cfg(debug_assertions)]
+      open_top: _,
     // — derived memo: the newest released row's MARK; reset when a rewind drops below it.
     floor_mark: _,
     // — E3, monotone era source + truncation witness: NEVER rewound.
@@ -638,6 +810,11 @@ where
       journal: Vec::new(),
       rows: Vec::new(),
       depth: 0,
+      diag_tail: 0,
+      #[cfg(debug_assertions)]
+      opens: Vec::new(),
+      #[cfg(debug_assertions)]
+      open_top: None,
       floor_mark: 0,
       ledger: TruncationLedger::new(),
       base_inner: None,
@@ -693,18 +870,93 @@ where
   }
 
   /// DEPTH_CENSUS — the **one** append door of the event log, and the only place
-  /// [`Sink::depth`] is charged for an event.
+  /// [`Sink::depth`] and [`Sink::diag_tail`] are charged for an event.
   ///
-  /// Every `Event` the sink appends goes through here, so the scalar cannot drift by
-  /// omission: a new emission surface that forgets to maintain the depth is not a surface that
+  /// Every `Event` the sink appends goes through here, so neither scalar can drift by
+  /// omission: a new emission surface that forgets to maintain them is not a surface that
   /// forgets — it is a surface that does not compile against `events`, because the field is
   /// private and the source lock in this module's tests pins `self.events.push(` at exactly
   /// one occurrence. The one mutation that is *not* an append — the hole wrap's splice —
-  /// charges its two halves at its own site, and is pinned there by the same lock.
+  /// charges its halves at its own site, and is pinned there by the same lock.
+  ///
+  /// The two charges are read off the event in the same breath, and both are total: `depth`
+  /// takes the event's own `depth_delta`, and `diag_tail` moves to the new length for every
+  /// event that is not a [`Diag`](Event::Diag) — the tail an appended `Diag` extends is the
+  /// tail a non-`Diag` ends.
   #[inline]
   fn push_event(&mut self, event: Event<L::Span>) {
-    self.depth += event.depth_delta();
+    let delta = event.depth_delta();
+    self.depth += delta;
+    let ends_the_diag_tail = !matches!(event, Event::Diag { .. });
+    #[cfg(debug_assertions)]
+    self.charge_open_chain(delta, self.events.len() as u64);
     self.events.push(event);
+    if ends_the_diag_tail {
+      self.diag_tail = self.events.len() as u64;
+    }
+  }
+
+  /// E7/E8's half of a single event's charge: the open-node chain, moved by the event's own
+  /// `depth_delta` and by nothing else.
+  ///
+  /// Called from the ONE append door and from the hole wrap's splice — the same two sites, and
+  /// the same arity lock, that keep [`Sink::depth`] exact. `index` is the position the event is
+  /// about to occupy.
+  ///
+  /// A `-1` with an empty chain is a deliberate no-op rather than an underflow: the buffer is a
+  /// raw surface, `depth` is signed precisely so that a close with nothing open is *visible*
+  /// rather than wrapped, and the chain says the same thing by having no entry to drop. The
+  /// equivalence in the module docs holds through that case.
+  #[cfg(debug_assertions)]
+  #[inline]
+  fn charge_open_chain(&mut self, delta: i64, index: u64) {
+    match delta {
+      1 => {
+        let parent = self.open_top;
+        self.opens.push(OpenNode {
+          start: index,
+          parent,
+        });
+        self.open_top = u32::try_from(self.opens.len() - 1).ok();
+        debug_assert!(
+          self.open_top.is_some(),
+          "the open-node chain exceeded u32::MAX slots: one entry per depth-increasing event \
+           in a log that is itself indexed by u64, so this is a 4-billion-node debug parse"
+        );
+      }
+      -1 => {
+        self.open_top = self
+          .open_top
+          .and_then(|slot| self.opens.get(slot as usize))
+          .and_then(|node| node.parent);
+      }
+      // `depth_delta` is `{-1, 0, +1}`; a tombstone start, a token and a diag slot are all
+      // neutral and open nothing.
+      _ => {}
+    }
+  }
+
+  /// Whether the node opened by the event at `index` is **still open** — the `O(depth)` answer
+  /// that replaced [`validate_start_mark`](Self::validate_start_mark)'s `O(suffix)` recount
+  /// (al8n/tokora#306).
+  ///
+  /// Walks the chain from [`open_top`](Self::open_top) outward. The `start` values strictly
+  /// decrease along `parent` (a node's parent opened before it), so the walk stops as soon as it
+  /// passes `index` rather than running the whole chain.
+  #[cfg(debug_assertions)]
+  fn node_is_open(&self, index: u64) -> bool {
+    let mut slot = self.open_top;
+    while let Some(node) = slot.and_then(|s| self.opens.get(s as usize)) {
+      if node.start == index {
+        return true;
+      }
+      if node.start < index {
+        // The chain descends past the queried index without meeting it.
+        return false;
+      }
+      slot = node.parent;
+    }
+    false
   }
 
   /// The open-node depth of the current buffer, in O(1).
@@ -728,6 +980,57 @@ where
   #[cfg(test)]
   pub(crate) fn recount_depth(&self) -> i64 {
     self.events.iter().map(Event::depth_delta).sum::<i64>()
+  }
+
+  /// The full-recount oracle for [`opens`](Self::opens)/[`open_top`](Self::open_top): the
+  /// open-node stack replayed from an empty one over the whole buffer, outermost first.
+  ///
+  /// Test-only for the same reason as its two siblings, and it is what pins the equivalence the
+  /// demote wall now rests on rather than restating it in prose.
+  #[cfg(all(test, debug_assertions))]
+  pub(crate) fn recount_open_chain(&self) -> std::vec::Vec<u64> {
+    let mut stack = std::vec::Vec::new();
+    for (index, ev) in self.events.iter().enumerate() {
+      match ev.depth_delta() {
+        1 => stack.push(index as u64),
+        -1 => {
+          stack.pop();
+        }
+        _ => {}
+      }
+    }
+    stack
+  }
+
+  /// The maintained chain read out as start indices, outermost first — the shape
+  /// [`recount_open_chain`](Self::recount_open_chain) produces.
+  #[cfg(all(test, debug_assertions))]
+  pub(crate) fn open_chain(&self) -> std::vec::Vec<u64> {
+    let mut out = std::vec::Vec::new();
+    let mut slot = self.open_top;
+    while let Some(node) = slot.and_then(|s| self.opens.get(s as usize)) {
+      out.push(node.start);
+      slot = node.parent;
+    }
+    out.reverse();
+    out
+  }
+
+  /// The full-recount oracle for [`diag_tail`](Self::diag_tail): the length of the buffer with
+  /// its trailing run of `Diag`s removed — which is exactly the index the cell claims.
+  ///
+  /// Test-only for [`recount_depth`](Self::recount_depth)'s reason: running it under
+  /// `debug_assertions` would put back the backward walk over the `Diag` run that
+  /// al8n/tokora#305 is about.
+  #[cfg(test)]
+  pub(crate) fn recount_diag_tail(&self) -> u64 {
+    let kept = self
+      .events
+      .iter()
+      .rev()
+      .take_while(|ev| matches!(ev, Event::Diag { .. }))
+      .count();
+    (self.events.len() - kept) as u64
   }
 
   /// Validates a mark before a spend — the panic-in-every-build wall.
@@ -921,8 +1224,18 @@ where
     // than enumerating all three at the reader. The previous message asserted one shape ("the
     // node was already closed") for a condition with three causes, and misdiagnosed the two it
     // did not name — the defect class this repo keeps closing.
+    //
+    // THE VERDICT IS NO LONGER THE SCAN'S, and the diagnosis still is. The walk below used to
+    // run on EVERY demote, success included, with no early exit — `Theta(d x len)` for `d`
+    // nested failing brackets, measured at exactly `d(d - 1)` visits (al8n/tokora#306). It now
+    // runs only when the open-node chain has already said the node is closed, i.e. only on the
+    // path that is about to panic, where its cost is the panic's. The chain's answer is the
+    // scan's answer on every input — a chain entry survives exactly while the suffix holds no
+    // dip below its own start, proved in the open-chain section of the module docs — so this is
+    // a change of WHEN the suffix is read, not of WHAT is refused. Cases (1), (2) and (3) all
+    // still fire, the interleaved strictness choice included.
     #[cfg(debug_assertions)]
-    {
+    if !self.node_is_open(index) {
       let mut depth: i64 = 0;
       for ev in &self.events[index as usize + 1..] {
         depth += ev.depth_delta();
@@ -955,6 +1268,15 @@ where
           panic!("cst_demote below a closing event this mark's node did not open: {shape}.");
         }
       }
+      // The chain said closed and the suffix holds no dip: the two disagree, which is a defect
+      // in E7/E8 and not in the caller. Loud rather than silent — a chain that drifts towards
+      // "closed" would otherwise turn this wall into a random panic on correct code, and one
+      // that drifts the other way would turn it off.
+      unreachable!(
+        "the open-node chain and the suffix recount disagree at index {index}: the chain says \
+         the marked node is closed and the recount finds no closing event above it. E7/E8 have \
+         drifted from the log (see the open-chain section in the sink's module docs)."
+      );
     }
   }
 
@@ -1045,17 +1367,42 @@ where
       .map_or(0, |row| row.mark)
       .max(self.floor_mark) as usize;
 
+    // ── THE SCAN CEILING — the pure-`Diag` tail is skipped, not re-decided ─────────────
+    //
+    // `Diag` is transparent to this scan by design (that is what lets a hole wrap tokens that
+    // already carry diagnostics), so every event in `[diag_tail, len)` — all of them `Diag`s,
+    // by E6's invariant — would take the `continue` arm and change nothing. Entering at
+    // `diag_tail` drops exactly those iterations and no others, so the wrap this computes is
+    // the wrap the full walk computed: the repair is a scan that stops re-deciding what it
+    // already decided, NOT a new bound on the wrap's structural authority (that is the floor's
+    // job, above).
+    //
+    // What it buys is the al8n/tokora#305 quadratic. A hole whose span matches no buffered
+    // token appends no structural event, so before E6 the diagnostic run left behind — which
+    // grows by at least one per call, since `emit_skipped_region` forwards its own report —
+    // was rescanned in full by every later hole: `H(H - 1)/2` visits for `H` holes, in EVERY
+    // profile, release included. With the ceiling the first index examined is `diag_tail - 1`,
+    // which is a non-`Diag` by the invariant, so an empty wrap breaks on its first iteration.
+    // Every scan's run is then disjoint from every other's — exactly the property the ordinary
+    // case already had from the `StartNode`/`FinishNode` pair it appends.
+    //
+    // Both ends are CLAMPED rather than asserted. `diag_tail <= len` and `floor <= len` both
+    // hold (the cell is only ever set to a length or to a row's frozen value, and a rewind
+    // resets the floor memo it drops below), but the old walk was total over any pair of
+    // values — it iterated the whole log and broke on `idx < floor` — and a bound that is only
+    // in range because of an argument elsewhere in the file is the wrong thing to hand a
+    // slice. `lo <= hi` by construction, so the range is empty exactly where the floored walk
+    // stopped immediately.
+    let hi = (self.diag_tail as usize).min(self.events.len());
+    let lo = floor.min(hi);
     let mut wrap_start: Option<usize> = None;
-    for (idx, ev) in self.events.iter().enumerate().rev() {
-      if idx < floor {
-        break;
-      }
+    for (offset, ev) in self.events[lo..hi].iter().enumerate().rev() {
       match ev {
         Event::Diag { .. } => continue,
         Event::Token { span: s, .. }
           if s.start_ref() >= span.start_ref() && s.end_ref() <= span.end_ref() =>
         {
-          wrap_start = Some(idx);
+          wrap_start = Some(lo + offset);
         }
         _ => break,
       }
@@ -1127,6 +1474,22 @@ where
       forward_parent: None,
     };
     self.depth += start.depth_delta();
+    // E7/E8's half, from the same delta: the spliced start opens a node that the `push_event`
+    // below immediately closes, so the chain ends where it began — but the two halves are
+    // charged, not netted, so a change to either delta cannot silently unbalance them either.
+    // The slot this appends is dead the moment the finish follows it, and stays (see
+    // `OpenNode`). `at` is above every existing entry's `start`: the scan proved every index in
+    // `[at, len)` holds a `Token` or a `Diag`, so no chain entry names one, which is also what
+    // keeps the splice's index shift from renaming any of them.
+    #[cfg(debug_assertions)]
+    self.charge_open_chain(start.depth_delta(), at as u64);
+    // E6's half of the same splice, charged here rather than netted out for the same reason.
+    // The scan proved `events[at]` is a `Token`, so `diag_tail > at` held before the insert and
+    // every event of the tail just moved up one slot. (The `push_event` below then overwrites
+    // this with the final length — a non-`Diag` ends the tail — so the charge is invisible from
+    // outside `wrap_hole`; it is written anyway, because a cell that is only right because the
+    // next statement happens to overwrite it is a cell that breaks the day it does not.)
+    self.diag_tail += 1;
     self.events.insert(at, start);
     self.push_event(Event::FinishNode { kind: error_kind });
   }
@@ -1332,8 +1695,18 @@ where
   fn checkpoint(&mut self) -> u64 {
     let mark = self.events.len() as u64;
     let depth = self.depth();
+    let diag_tail = self.diag_tail;
+    #[cfg(debug_assertions)]
+    let open_top = self.open_top;
     let inner = self.inner.checkpoint();
-    self.rows.push(MarkRow { mark, depth, inner });
+    self.rows.push(MarkRow {
+      mark,
+      depth,
+      diag_tail,
+      #[cfg(debug_assertions)]
+      open_top,
+      inner,
+    });
     mark
   }
 
@@ -1501,6 +1874,25 @@ where
       // (The `mark == 0` half of that is asserted at the inner-target match below, which takes
       // the same two arms; one statement of it is enough.)
       self.depth = target_row.map_or(0, |row| row.depth);
+      // E6 restored by the identical rule and from the identical fact: the spent row froze the
+      // `Diag`-tail start of exactly the prefix that just survived, and `0` is where an empty
+      // log's tail starts. Rewind is the failure mode a scan watermark normally has; this one
+      // has no rule of its own to get wrong, because it reuses E5's.
+      self.diag_tail = target_row.map_or(0, |row| row.diag_tail);
+      // E7/E8, third and last use of the same rule. The chain is index-keyed and append-only,
+      // so dropping the entries whose event just died is a suffix truncation like the log's own
+      // and renames no survivor's slot; `opens` is sorted ascending in `start` (entries are
+      // appended in event order, and the hole wrap's splice appends above every one of them),
+      // so the pop loop removes exactly the entries at or above the mark. The head is a copy
+      // off the frozen row — and every ancestor it reaches has a `start` below the mark, so the
+      // restored head can never name a popped slot.
+      #[cfg(debug_assertions)]
+      {
+        while self.opens.last().is_some_and(|node| node.start >= mark) {
+          self.opens.pop();
+        }
+        self.open_top = target_row.and_then(|row| row.open_top);
+      }
       // Reverse-replay the undo journal: every forward_parent write carried by a
       // truncated StartAt is reversed, newest first, restoring the overwritten value —
       // the Verbose parallel-maps pop discipline lifted to events. A write whose target
