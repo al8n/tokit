@@ -927,19 +927,34 @@ where
   /// The scanner twin of [`trip_snapshot`](Self::trip_snapshot), used identically: take the
   /// baseline once per attempt, hand it back to
   /// [`scanner_tripped_during_attempt`](Self::scanner_tripped_during_attempt) when judging that
-  /// attempt.
+  /// attempt. Everything [`trip_snapshot`](Self::trip_snapshot) says about the value transfers:
+  /// only `!=` is promised about it, the difference of two snapshots is not a published count, a
+  /// baseline belongs to one input session, and the absolute reading (`!= 0`) is a session fact
+  /// rather than the question a consulting site has.
   ///
-  /// **This, and not [`latch_snapshot`](Self::latch_snapshot), is what a recovery gate judges a
-  /// scanner stop with.** The latch is a lineage memo: a [`Checkpoint`](crate::input::Checkpoint)
-  /// carries it and a restore copies it back, so comparing it across a rollback compares a restored
-  /// value against what it was restored to. Reading it inside the attempt fixes one level and the
-  /// level below reopens it — grammar code that catches a stop inside an inner
+  /// **This, and not the poison boundary beside it, is what a recovery gate judges a scanner stop
+  /// with.** The latch is a lineage memo: a [`Checkpoint`](crate::input::Checkpoint) carries it
+  /// and a restore copies it back, so comparing it across a rollback compares a restored value
+  /// against what it was restored to. Reading it inside the attempt fixes one level and the level
+  /// below reopens it — grammar code that catches a stop inside an inner
   /// [`try_attempt`](Self::try_attempt) has that rollback erase the latch before an outer gate
   /// looks. This counter is outside the rollback set entirely and is therefore depth-independent.
   ///
+  /// # Per COLLECTION, where the descent baseline is per ELEMENT
+  ///
+  /// The two facts decay differently, so their baselines belong at different units and neither can
+  /// be derived from the other. A descent trip that grammar code caught and parsed past stops
+  /// being true of the input; a spent scanner budget does not — the token stream ends where it
+  /// ended, and every attempt after it reads a view the stop truncated. So this baseline is taken
+  /// **once per collection**, above the loop, where hoisting the descent one would be the defect:
+  /// taken per element it is re-read after the trip an earlier element caught, and *element 1
+  /// tripped and accepted, element 2 declines* then concludes cleanly over a spent budget. That
+  /// asymmetry is the reason there are two pairs rather than one, and the reason neither can be
+  /// folded into a guard that snapshots on the caller's behalf.
+  ///
   /// Costs one `usize` load per attempt: no scan, no lookahead fill and no token commit reads it.
   #[inline(always)]
-  pub(crate) const fn scanner_trip_snapshot(&self) -> usize {
+  pub const fn scanner_trip_snapshot(&self) -> usize {
     *self.scanner_trips
   }
 
@@ -952,17 +967,25 @@ where
   /// cannot: a *rejecting* emitter reports a scanner trip by returning the value its
   /// `From<<L::Token as Token>::Error>` builds, and nothing on that path constructs an
   /// [`UnexpectedEnd`](crate::error::UnexpectedEnd) for
-  /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) to mark.
+  /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) to mark. That is the same
+  /// shape the descent half has and the reason both are public: terminality is a fact about the
+  /// **event**, this crate enumerates *carriers* of it, and a consumer holding an unmarked carrier
+  /// has no way to tell one from an ordinary failure.
   ///
   /// **Attempt-relative, not session-absolute**, and a **count** rather than a flag — the same two
   /// disciplines [`tripped_during_attempt`](Self::tripped_during_attempt) documents at length, for
-  /// the same two reasons. Its granularity floor is the same as well: this witnesses that *a* trip
-  /// happened while the attempt ran, not that the `Err` in hand *is* that trip, so a unit that
-  /// catches a trip and then fails ordinarily is re-raised. It fails closed, never open.
+  /// the same two reasons, along with the argument for publishing the pair rather than a guard
+  /// that snapshots for you. Its granularity floor is the same as well: this witnesses that *a*
+  /// trip happened while the attempt ran, not that the `Err` in hand *is* that trip, so a unit
+  /// that catches a trip and then fails ordinarily is re-raised. It fails closed, never open.
+  ///
+  /// Its baseline's granularity, though, is **not** the descent one's: see
+  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot), which is per *collection* where the
+  /// descent baseline is per *element*.
   ///
   /// Costs one `usize` load and a comparison, on the failure arm only.
   #[inline(always)]
-  pub(crate) const fn scanner_tripped_during_attempt(&self, since: usize) -> bool {
+  pub const fn scanner_tripped_during_attempt(&self, since: usize) -> bool {
     *self.scanner_trips != since
   }
 

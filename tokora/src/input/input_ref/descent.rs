@@ -182,10 +182,10 @@ where
   /// The cell is monotone and is never cleared, so reading it absolutely would say "this parse has
   /// tripped" forever after the first trip — and refuse recovery, and refuse emit-and-continue, for
   /// every later failure including ordinary syntax errors in unrelated constructs. Each site
-  /// therefore takes a `trip_snapshot` before the attempt it is judging and
-  /// asks `tripped_during_attempt` after it (both crate-internal). A real trip is still
-  /// re-raised wherever it actually happens, including a second one after grammar code caught the
-  /// first.
+  /// therefore takes a [`trip_snapshot`](Self::trip_snapshot) before the attempt it is judging and
+  /// asks [`tripped_during_attempt`](Self::tripped_during_attempt) after it — the same pair a
+  /// consumer outside this crate now reads. A real trip is still re-raised wherever it actually
+  /// happens, including a second one after grammar code caught the first.
   ///
   /// What is recorded is the **fact that the budget was exceeded**, and not the depth. A scanner
   /// limit trip latches the poison boundary because the lexer's tally is monotone in the input;
@@ -288,22 +288,69 @@ where
   /// Snapshots the session's **resource-trip counter** — how many times a resource budget has been
   /// exceeded in this input session so far — for an attempt-relative terminality witness.
   ///
-  /// The descent twin of [`latch_snapshot`](Self::latch_snapshot), and used the same way: take the
-  /// baseline once per attempt, hand it back to
-  /// [`tripped_during_attempt`](Self::tripped_during_attempt) when judging that attempt's failure.
+  /// The descent twin of the scanner's `latch_snapshot`, and used exactly as
+  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) is: take the baseline once per
+  /// attempt, hand it back to [`tripped_during_attempt`](Self::tripped_during_attempt) when
+  /// judging that attempt's failure.
   ///
-  /// The counter itself is a **monotone session fact**, counted up by
-  /// [`raise_level`](Self::raise_level)'s trip arm and never lowered: a
-  /// [`Checkpoint`](crate::input::Checkpoint) does not carry it, a restore does not touch it, and
-  /// [`Descent`]'s `Drop` releases only the depth. Read absolutely, `trip_snapshot() != 0` is the
-  /// answer to "did this parse exceed a budget at all" — a true statement about the session, and
-  /// deliberately *not* the question any consulting site asks. See the
-  /// [field's documentation](crate::input::Input) for why the two come apart.
+  /// The counter itself is a **monotone session fact**, counted up by the trip arm behind
+  /// [`descend`](Self::descend) and never lowered: a [`Checkpoint`](crate::input::Checkpoint) does
+  /// not carry it, a restore does not touch it, and [`Descent`]'s `Drop` releases only the depth.
+  /// That arm is its one writer and no method on this handle hands out a mutable route to the
+  /// cell, so a consumer can read this witness and cannot forge it.
+  ///
+  /// # A baseline, and the only promise about it is `!=`
+  ///
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt) compares two of these for
+  /// inequality, and that comparison is the whole of what the value means. The **difference** of
+  /// two snapshots is not a published trip count: the `usize` is what the counter happens to be,
+  /// and arithmetic on it reads an implementation detail rather than an interface.
+  ///
+  /// It also belongs to **one input session**. A
+  /// [`PartialSession`](crate::input::PartialSession) redrive builds a fresh input and a fresh
+  /// counter starting at zero, so a snapshot carried across one is compared against a different
+  /// cell and answers nothing about either. Nothing in the `usize` says so, which is the one place
+  /// a caller can hold this value wrong that the type does not catch: take the baseline inside the
+  /// attempt it judges and the question does not arise.
+  ///
+  /// **Read absolutely it answers a different question, and asking that one here is the defect the
+  /// baseline exists to prevent.** `trip_snapshot() != 0` is "did this parse exceed a budget at
+  /// all" — a true statement about the session, and deliberately *not* the question any consulting
+  /// site has. It stays true forever once grammar code catches one trip and carries on, so a site
+  /// that reads it mid-parse charges every later failure — an ordinary syntax error in an
+  /// unrelated construct included — with a stop that is already over, and one deep construct early
+  /// in a document suppresses every diagnostic after it. The session-absolute question has a
+  /// published answer where it is sound to ask, which is *after* the parse and on the finished
+  /// tree: `cst::Cst::resource_trips` (feature `rowan`), whose own docs say why the same reading is
+  /// safe there and unsafe here.
+  ///
+  /// # Why a pair, and not one guard that takes the snapshot for you
+  ///
+  /// A guard — one call that opens the attempt, runs it and answers — is harder to misuse, and
+  /// this crate has one: `parser::recovery_gate`'s attempt chokepoint, which owns the closure its
+  /// combinator hands it and therefore owns the unit the baselines belong to. It is not the shape
+  /// this crate's *loops* use. `parser::many`'s twelve drivers take this baseline by hand, inside
+  /// their element loop, and pass it to a chokepoint that reads it — because **the two baselines
+  /// have opposite granularities, and neither can be derived from the other**. This one is per
+  /// *element*: hoisted out of the loop it is arithmetically the session-absolute read above. The
+  /// scanner's is per *collection*: taken per element it is re-read after each trip an element
+  /// caught, so every later exit concludes cleanly over a budget that is spent. Both fusions are
+  /// measured defects, and `parser::many`'s `GATE_CENSUS` pins both placements in both directions.
+  ///
+  /// A guard that snapshots for you fixes both baselines to one unit, which is that fusion. So
+  /// what this crate centralizes is the **verdict**, never the baseline, and the baseline is
+  /// published as a value the caller places. A consumer whose unit *is* a closure can still build
+  /// the guard on top of this pair; a consumer whose unit is a region of its own loop could not
+  /// have built this pair on top of a guard.
+  ///
+  /// # Why it is public
+  ///
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries that argument.
   ///
   /// Costs one `usize` load per attempt and nothing anywhere else: no scan, no lookahead fill and
   /// no token commit reads or writes it.
   #[inline(always)]
-  pub(crate) const fn trip_snapshot(&self) -> usize {
+  pub const fn trip_snapshot(&self) -> usize {
     *self.resource_trips
   }
 
@@ -320,14 +367,14 @@ where
   /// [`RecursionLimitReached`] on conversion — `()` does — still cannot turn a tripped budget into
   /// recovery, nor into a diagnostic the collection keeps parsing past.
   ///
-  /// **Attempt-relative, not session-absolute** — the same discipline
-  /// [`latched_during_attempt`](Self::latched_during_attempt) applies to the scanner's latch, and
-  /// for the same reason. The cell it reads is monotone, so an absolute reading answers "has this
-  /// *parse* ever tripped", which is true forever once grammar code catches a trip and carries on.
-  /// Every later failure in the session — an ordinary syntax error in an unrelated construct
-  /// included — would then be re-raised as though the budget had stopped it, and a single deep
-  /// expression early in a document would suppress every diagnostic after it. Comparing against
-  /// the baseline asks the question the site actually has: *this* attempt, not this parse.
+  /// **Attempt-relative, not session-absolute** — the same discipline the scanner's
+  /// `latched_during_attempt` applies to its latch, and for the same reason. The cell it reads is
+  /// monotone, so an absolute reading answers "has this *parse* ever tripped", which is true
+  /// forever once grammar code catches a trip and carries on. Every later failure in the session —
+  /// an ordinary syntax error in an unrelated construct included — would then be re-raised as
+  /// though the budget had stopped it, and a single deep expression early in a document would
+  /// suppress every diagnostic after it. Comparing against the baseline asks the question the
+  /// site actually has: *this* attempt, not this parse.
   ///
   /// A **count** rather than a `bool` is what makes the comparison hold up a second time. A
   /// set-once flag compares equal to a baseline taken after an earlier caught trip, so the next
@@ -370,9 +417,35 @@ where
   /// pin one cell on this behaviour, paired against the cell that moves the catch outside the unit
   /// and gets the opposite answer.
   ///
+  /// # Why it is public
+  ///
+  /// This crate does not publish API on speculation, and this pair was crate-private for as long
+  /// as the only sites judging an attempt were its own. What changed is a consumer with the
+  /// defect. smear's GraphQL parser catches a failed definition at each document root and has to
+  /// decide whether that failure ends the document (al8n/smear#169); it decided by reading the
+  /// error, which is the decision this counter exists to replace. A nesting refusal that reached a
+  /// root loop as an ordinary error resynchronised, re-read the abandoned nest at document level,
+  /// and reported one diagnostic per remaining token — 67 for one refusal at 66 levels, 804 at
+  /// 800, growing with the document.
+  ///
+  /// That repair took three rounds because every round left the verdict resting on something a
+  /// *caller* implements. [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal) is the
+  /// grammar's own answer, and a `From` that discards [`RecursionLimitReached`] — `()` does —
+  /// answers `false` over a real trip. A latch of the parser's own would have to live in
+  /// `L::State` or beside the poison boundary, and a [`Checkpoint`](crate::input::Checkpoint)
+  /// carries both, so a speculative rollback refunds it. This cell is neither: written by the trip
+  /// arm before any grammar code runs, outside the rollback set, one writer, no mutable route.
+  /// That is the whole reason it exists, and a consumer that cannot read it is left with exactly
+  /// the carriers it was added because they cannot be trusted.
+  ///
+  /// What is published is the **reading**. There is no writer here, no way to lower the counter,
+  /// and no rebaseline: the granularity floor above is the floor for a consumer too.
+  /// `tokora/tests/root_loop_trip_witness.rs` is the outside-the-crate use, including the cell
+  /// that measures what the amplification costs a root loop with no witness.
+  ///
   /// Costs one `usize` load and a comparison, on the failure arm only.
   #[inline(always)]
-  pub(crate) const fn tripped_during_attempt(&self, since: usize) -> bool {
+  pub const fn tripped_during_attempt(&self, since: usize) -> bool {
     *self.resource_trips != since
   }
 }
