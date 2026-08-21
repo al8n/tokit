@@ -703,6 +703,24 @@ and will red until they do.
   `Token::kind`, and kept because the two are independent caller code: a `PartialEq` coarser than
   the classification the parser sees would otherwise pass silently.
 
+- **The combined update-and-check operations moved off `Tracker` and `RecursionTracker` onto
+  `TrackerExt` and `RecursionTrackerExt`** (#265). `Tracker` keeps its four primitives
+  (`increase_token`, `increase_recursion`, `decrease_recursion`, `check`) and `RecursionTracker`
+  its three; `increase_token_and_check`, `increase_token_and_decrease_recursion{,_and_check}`,
+  `increase_both{,_and_check}` and `increase_and_check` are now supplied by a blanket impl over
+  every implementor. Callers add the `…Ext` trait to their imports — rustc names it in the
+  method-not-found note — and get the same behaviour except where their tracker had overridden one
+  of these, which is what **Fixed** covers. Implementors of `Tracker` or `RecursionTracker` that
+  overrode a combined method get `E0119` and must move that logic into `check` or the primitive it
+  belongs to; implementors that did not are unaffected.
+
+  One repair keeps the defect: resolving the `E0119` by moving the override's body into an inherent
+  `impl`. An inherent method with a combined operation's name wins *concrete* dot calls over the
+  blanket — silently; no rustc or clippy lint reports the shadow (`clippy::same_name_method` does
+  not see a blanket impl) — so that tracker's own callers keep the old narrow answer while every
+  trait-resolved path gets the full check. Delete the override; whatever it computed beyond the
+  composition belongs in `check` or a primitive.
+
 - **Only Logos 0.16 is supported now; the `logos_0_14` and `logos_0_15` features, and the
   `logos@0.14`/`logos@0.15` optional dependencies behind them, are removed.** The crate carried
   three simultaneous Logos majors behind a newest-wins precedence chain — `tokora::logos`, the
@@ -1355,6 +1373,38 @@ and will red until they do.
 
   No public API moved. The released-floor memo shrank from a whole mark-stack row to its mark,
   because the depth half stopped having a reader.
+
+- **`Limiter`'s combined update-and-check methods reported `Ok(())` over a recursion depth that
+  was already past its maximum** (#265). `Tracker::check` promises to report whether *any*
+  configured limit is exceeded, and the trait's combined methods were documented and defaulted as
+  "update, then run that check". `Limiter` overrode two of them and ended each with
+  `<Self as TokenTracker>::check`, so `increase_token_and_check` and
+  `increase_token_and_decrease_recursion_and_check` answered `Ok(())` for as long as the token
+  count held — the decrementing form included, whose entire job is to report what is left over
+  after the decrement. When both limits were exceeded the same two returned the *token* error
+  while `Limiter::check` returned the recursion one, so the combined form and the full check
+  disagreed about which limit tripped. Reproduced with a token maximum of `usize::MAX` and a
+  recursion maximum of `1`: `Ok(())` at depth 2, directly and through a `Limiter` installed as
+  `logos` extras, which forwarded the narrowing faithfully.
+
+  Nothing in tokora called these — `ParserContext` and the input layer hold a `RecursionLimiter`
+  directly — so no in-tree grammar's ceiling was evadable through them, and the recursion budget
+  the parser enforces was never affected. The exposure was a downstream parser using the
+  advertised one-call operations as its limit check.
+
+  **The repair is that the composition is no longer a customization point.** Deleting the two
+  overrides would have fixed the two call sites; the methods moved to a blanket-implemented
+  `TrackerExt` / `RecursionTrackerExt` instead (see **Changed (breaking)**), so coherence refuses
+  any impl that could narrow one again — `Limiter`'s, the two `logos` forwarders' (which
+  hand-wrote the same five delegations and are now gone), and any downstream tracker's. The
+  mistake was easy for a structural reason: `Limiter` implements `RecursionTracker`, `TokenTracker`
+  and `Tracker`, so inside `impl Tracker for Limiter` a bare `self.check()` is ambiguous across
+  three candidates and a body there *must* name one. There is now no such body to write.
+  `tests/ui/tracker_combined_check_cannot_be_narrowed.rs` holds the wall, because a narrowed check
+  has no runtime shadow — it is indistinguishable from a tracker that was within its limits.
+
+  Also corrected: `increase_both`'s doc claimed it checked limits (it does not) and
+  `increase_both_and_check`'s claimed it decreased recursion (it increases both).
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 

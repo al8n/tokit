@@ -204,3 +204,107 @@ read_frontier/same_pick
 take_probe/same_pick
 take_probe/later_pick_used
 take_probe/later_pick_discarded
+
+# ── `TrackerExt` / `RecursionTrackerExt` — the SAME rule, TWO independent reasons ──────────
+#
+# tokora's items are `fn increase_token_and_decrease_recursion(&mut self)`,
+# `fn increase_token_and_decrease_recursion_and_check(&mut self) -> Result<..>`,
+# `fn increase_token_and_check(&mut self) -> Result<..>`, `fn increase_both(&mut self)` and
+# `fn increase_both_and_check(&mut self) -> Result<..>` on `TrackerExt`, and
+# `fn increase_and_check(&mut self) -> Result<..>` on `RecursionTrackerExt` — every one of
+# them `&mut self`, with no exception. The `trait_method` template's consumer is
+# `impl<T> ConsumerComb for T`, so it supplies a candidate at EVERY pick, and its three
+# spellings declare `self` (`same_pick`) or `&self` (`later_pick_used`,
+# `later_pick_discarded`). `Limiter` and `RecursionLimiter` are plain structs that deref to
+# nothing, so there is exactly one step and three picks on each: by value, `&`, then `&mut`.
+# The consumer's item sits at the first or the second; tokora's sits at the third. The
+# earlier pick wins, on both sides, and tokora's item is never a candidate — this is
+# `Emitter::commit_lexer_error` and `ErrorContainer::clear` exactly: same rule, same trait
+# shape, same conclusion, and the same #225 foreknown-vacuous class. The consumer that would
+# genuinely compete declares `&mut self`, collides at the same pick, is E0034-loud, and
+# `trait_method` cannot generate it — see #225's ruling before extending the generator to try.
+#
+# Read this as a statement about the SHAPE, never as "these six names cannot be stolen".
+#
+# ── A second, independent reason, which `commit_lexer_error` and `clear` do not have ──────
+#
+# `TrackerExt` and `RecursionTrackerExt` are traits THIS diff adds (tokora#265), so — per the
+# file header's rule for an added trait — each is reached through a glob over its own module
+# rather than a named import: `Tracker` and `RecursionTracker` are pre-existing, so `use
+# tokora::state::tracker::*;` / `use tokora::state::recursion_tracker::*;` resolve on the base
+# ref too, where a direct `use ...::TrackerExt;` would not. But those MODULES are not new —
+# only the trait inside each is — and on the base ref `Tracker` and `RecursionTracker` still
+# declare these same six names as their OWN `&mut self` PROVIDED methods (read directly off
+# the base ref's source, not assumed: tokora#265's whole point is moving them off
+# `Tracker`/`RecursionTracker` — where a type could override one and disambiguate to the
+# wrong trait's `check`, the bug this diff fixes — onto these two blanket-implemented
+# extension traits instead, where that is unrepresentable). So the same glob that reaches
+# `TrackerExt` on head also reaches `Tracker`'s old defaults on base; `Limiter` and
+# `RecursionLimiter` implement `Tracker` and `RecursionTracker` on BOTH sides; and base
+# compiles and runs (`witness=1`) for a reason that has nothing to do with the receiver-kind
+# analysis above.
+#
+# The two reasons are independent and both hold. A reader who repaired only the receiver-kind
+# mismatch — by, say, imagining a future `trait_method` able to generate a `&mut self`
+# consumer — would still find these six rows agreeing, because the old provided methods on
+# `Tracker`/`RecursionTracker` are the SAME NAMES answering on base regardless of what the
+# consumer declares. Do not read a repair of one reason as grounds to expect this row to
+# start probing.
+#
+# ── Control: none exists for this entry, and that is stated rather than left unstated ─────
+#
+# Every entry above this one that can name a control does: `recursion`/`token_budget` point at
+# `descend`/`descending` scoring `loud` on the same owner with matching receivers;
+# `read_frontier`/`take_probe` point at their OWN `later_pick_*` rows, since `read_frontier`
+# itself is `&self` and so has a same-run sibling that goes `loud`; `ErrorContainer::clear`
+# points at `Errors::clear`, the same NAME on a different owner, measured SILENT in
+# `disclosed.txt` because there the receiver kinds do align. None of those three shapes is
+# available here — checked, not assumed:
+#
+#   * no same-run control: EVERY spelling of EVERY one of these six names is `&mut self` in
+#     tokora, so there is no sibling spelling at a matching pick the way `read_frontier`'s
+#     `later_pick_*` rows are for `read_frontier/same_pick`;
+#   * no same-owner sibling control: the other five names on the same trait are in the
+#     identical foreknown-vacuous boat, so none of them can vouch for another;
+#   * no same-name sibling control: grepped the whole crate — none of these six names is
+#     declared anywhere else, inherent or trait, so there is no `Errors::clear`-shaped SILENT
+#     disclosure to point at either.
+#
+# The honest best available is `Emitter::commit_lexer_error`'s own rows, cited above as the
+# mirror — and that is what this paragraph is doing, the same move its own entry makes
+# ("the `InputRef::recursion` rows above with the receiver kinds swapped"). Checked, not
+# assumed, that this is not a lesser standard than `commit_lexer_error` was held to:
+# `commit_lexer_error` names no same-owner, same-subject `loud` row either. `Emitter` has
+# exactly one `&self` item, `bound_source`, and `Emitter::bound_source` — the TRAIT method,
+# as opposed to `EmitterView`'s inherent forwarder of the same name, a different owner and a
+# different template — has never been probed by this harness at all (checked: absent from
+# both `no_collision.txt` and `disclosed.txt` under its bare name), so it cannot serve as a
+# control there either. What `commit_lexer_error` rests on is the GENERAL mechanism — an
+# earlier pick wins — demonstrated on a DIFFERENT owner (`InputRef::recursion`/`descend`) with
+# the receiver kinds swapped; that is the same evidentiary weight this entry rests on, not a
+# step down from it.
+#
+# `recvr` is trusted, not verified (see the file header on `TRAITS`): `Limiter` genuinely
+# implements `Tracker` (`impl Tracker for Limiter` in `state/tracker/mod.rs`) and
+# `RecursionLimiter` genuinely implements `RecursionTracker` (`impl RecursionTracker for
+# RecursionLimiter` in `state/recursion_tracker/mod.rs`) — each is tokora's own, direct
+# implementor from the trait's own module, not a convenient stand-in, and both constructors
+# (`Limiter::new()`, `RecursionLimiter::new()`) are public and argument-free.
+increase_token_and_decrease_recursion/same_pick
+increase_token_and_decrease_recursion/later_pick_used
+increase_token_and_decrease_recursion/later_pick_discarded
+increase_token_and_decrease_recursion_and_check/same_pick
+increase_token_and_decrease_recursion_and_check/later_pick_used
+increase_token_and_decrease_recursion_and_check/later_pick_discarded
+increase_token_and_check/same_pick
+increase_token_and_check/later_pick_used
+increase_token_and_check/later_pick_discarded
+increase_both/same_pick
+increase_both/later_pick_used
+increase_both/later_pick_discarded
+increase_both_and_check/same_pick
+increase_both_and_check/later_pick_used
+increase_both_and_check/later_pick_discarded
+increase_and_check/same_pick
+increase_and_check/later_pick_used
+increase_and_check/later_pick_discarded

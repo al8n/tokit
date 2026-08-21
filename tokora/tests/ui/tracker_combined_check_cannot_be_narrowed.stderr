@@ -1,0 +1,9 @@
+error[E0119]: conflicting implementations of trait `TrackerExt` for type `TwoLimits`
+  --> tests/ui/tracker_combined_check_cannot_be_narrowed.rs:62:1
+   |
+62 | impl TrackerExt for TwoLimits {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: conflicting implementation in crate `tokora`:
+           - impl<T> TrackerExt for T
+             where T: Tracker, T: ?Sized;
