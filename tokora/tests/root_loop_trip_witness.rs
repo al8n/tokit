@@ -61,7 +61,7 @@
 //! invocation. Those are compile-fail doctests on `InputRef::trip_snapshot`; what survives to be
 //! measured at runtime is placement, which no type can decide for a caller.
 //!
-//! # The scanner half, and why this file does not use the scanner counter — section 3
+//! # The scanner half, and why this file does not use the scanner counter — sections 3 and 4
 //!
 //! `try_expect` folds a terminal scanner stop into the same `Ok(None)` it uses for a genuine end of
 //! input, so a root loop reaches its "the document ended" arm holding **no error**. The obvious
@@ -69,10 +69,16 @@
 //! forward-scanning facts and dropping the poison boundary there is the crate's *documented*
 //! limit-recovery path, while the counter is monotone and never cleared. A loop that recovers that
 //! way reads the whole document and the counter still says truncated. That pair is therefore
-//! crate-internal — `InputRef::scanner_trip_snapshot` records the measurement — and the primitive
-//! a consumer should reach for is [`InputRef::try_expect_or_stop`], whose contract is that a
-//! terminal stop is an error and never a decline. Section 3 is the three cells that show it is
-//! right in all three positions: truncated, untruncated, and recovered.
+//! crate-internal, and `InputRef::scanner_trip_snapshot` records the measurement.
+//!
+//! [`InputRef::try_expect_or_stop`] is what a consumer reaches for **on the declining exits**, and
+//! section 3 is the three cells that show it right in all three of those positions: truncated,
+//! untruncated, and recovered. It is **not** a replacement for the input-side witness, and section
+//! 4 is why: a *rejecting* emitter's trip is built and propagated from inside that very call,
+//! before it can raise a terminal stop, so the caller gets an ordinary-looking error over an
+//! exhausted scanner and no delegation in its `MaybeTerminal` can recover the fact. **No public
+//! witness answers that path today.** Section 4 pins it as a defect rather than a feature; the
+//! visibility of the scanner pair has never changed it in either direction.
 //!
 //! [`InputRef::try_expect_or_stop`]: tokora::InputRef::try_expect_or_stop
 
@@ -83,7 +89,7 @@ use std::rc::Rc;
 
 use tokora::{
   Emitter, InputRef, Parse, ParseContext, Parser, ParserContext, Token as TokenTrait,
-  emitter::{Ignored, Silent},
+  emitter::{Fatal, Ignored, Silent},
   error::MaybeTerminal,
   lexer::LogosLexer,
   logos::{self, Logos},
@@ -614,8 +620,11 @@ enum SErr {
   /// Whatever the lexer or the emitter produced.
   Ordinary,
   /// The terminal end-of-input `try_expect_or_stop` raises over a stop — the carrier that makes
-  /// the truncation visible with no input-side witness at all.
+  /// the truncation visible to an **accepting** emitter's caller.
   Eot,
+  /// What the scanner's own limit trip converts to. A *rejecting* emitter returns this value
+  /// instead of a stop, and nothing on that path marks it — see section 4.
+  Limit,
 }
 
 impl From<()> for SErr {
@@ -626,7 +635,23 @@ impl From<()> for SErr {
 
 impl From<ScanLimitExceeded> for SErr {
   fn from(_: ScanLimitExceeded) -> Self {
+    SErr::Limit
+  }
+}
+
+impl<'a, T, K: Clone, S, Lang: ?Sized>
+  From<tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>> for SErr
+{
+  fn from(_: tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>) -> Self {
     SErr::Ordinary
+  }
+}
+
+/// Delegating as carefully as a grammar can: the terminal carrier answers `true`, everything else
+/// `false`. Section 4 is that this is not enough, and that no care here could make it enough.
+impl MaybeTerminal for SErr {
+  fn is_terminal(&self) -> bool {
+    matches!(self, SErr::Eot)
   }
 }
 
@@ -790,5 +815,103 @@ fn a_documented_state_recovery_leaves_or_stop_reporting_a_finished_document() {
     Ok(S_UNITS),
     "the recovery is documented and complete, so the document is finished and not truncated — the \
      verdict a monotone counter cannot reach"
+  );
+}
+
+// ── Section 4: the exit no public witness answers, and it is not this branch's ────
+
+/// A **rejecting** emitter hands a root loop a scanner stop with nothing on it to read.
+///
+/// **This cell pins a known tokora defect, deliberately.** It is not an endorsement and it is not
+/// a regression: the witness that would answer it, `InputRef::scanner_tripped_during_attempt`, is
+/// crate-internal and was crate-internal before this suite existed. When the gap is closed this
+/// cell must change; that is what it is for.
+///
+/// A rejecting (fail-fast) emitter reports a lexer-resource trip by **returning** the value its
+/// `From<<L::Token as Token>::Error>` builds — that `Err` is the report, not a refusal to make one
+/// — and `scan_with(..)?` propagates it from *inside* [`InputRef::try_expect_or_stop`], before the
+/// call can reach the arm that raises a terminal end-of-input. So the caller receives an ordinary
+/// grammar error over an exhausted scanner, and no care in the grammar's `MaybeTerminal` can fix
+/// it: [`SErr`] delegates as carefully as a grammar can and still answers `false`, because there is
+/// nothing terminal-marked anywhere on that path to delegate to.
+///
+/// A root loop that reads only the error value can therefore resynchronise against the same spent
+/// budget, or accept a truncated document. Section 3's cells are all the **accepting** emitter,
+/// where the same stop arrives as a terminal `Eot` — which is why "use `try_expect_or_stop`" is a
+/// statement about *those* exits and not a replacement for the input-side witness.
+///
+/// [`InputRef::try_expect_or_stop`]: tokora::InputRef::try_expect_or_stop
+#[test]
+fn a_rejecting_emitter_hands_the_root_loop_an_unmarked_scanner_stop() {
+  let limiter = ScanLimiter::with_limit(S_TIGHT);
+  let scanned = limiter.counter();
+  let ctx: ParserContext<'_, SLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+  let rejecting =
+    Parser::with_parser_and_context(s_root_or_stop, ctx).parse_str_with_state(S_SRC, limiter);
+
+  assert!(
+    scanned.get() > S_TIGHT,
+    "the fixture must actually trip the scan budget: scanned {}, limit {S_TIGHT}",
+    scanned.get()
+  );
+  assert_eq!(
+    rejecting,
+    Err(SErr::Limit),
+    "the trip arrives as the grammar's own conversion of the lexer error, built and propagated \
+     inside `try_expect_or_stop` before it can raise a terminal stop"
+  );
+  assert!(
+    !rejecting.unwrap_err().is_terminal(),
+    "and it is UNMARKED. This is the gap: a document-root loop reading the error value sees an \
+     ordinary failure over a spent scanner budget, and the input-side witness that would say \
+     otherwise is crate-internal"
+  );
+
+  // The control: the identical fixture under an ACCEPTING emitter, where the stop is marked. The
+  // two differ only in the emitter, which is what makes the gap a property of the channel.
+  let (accepting, _) = s_drive!(S_TIGHT, s_root_or_stop, S_SRC);
+  assert_eq!(
+    accepting,
+    Err(SErr::Eot),
+    "accepting emitter, same source, same budget: the stop is terminal-marked and readable"
+  );
+}
+
+/// The **descent** witness has no such gap, and that is why it is the half this branch publishes.
+///
+/// A resource-limit refusal from [`InputRef::descend`] is *returned*, never routed through the
+/// emitter, so no emitter can unmark it and no emitter can convert it away from the counter that
+/// already recorded it. Section 1's loop under a **rejecting** emitter behaves exactly as it does
+/// under an accepting one: one refusal, one stop, nothing filed.
+///
+/// The error type is still `()`, whose `is_terminal()` is `false` for every value — so what is
+/// measured here is the input-side witness alone, under the emitter that breaks the scanner half.
+#[test]
+fn the_descent_witness_holds_under_a_rejecting_emitter() {
+  const UNITS: usize = 16;
+  let src = document(UNITS);
+
+  reset();
+  let ctx: ParserContext<'_, TestLexer<'_>, Fatal<()>> = ParserContext::new(Fatal::new());
+  let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation(TIGHT));
+  let witnessed = Parser::with_context(ctx)
+    .apply(root_witnessed)
+    .parse_str(&src);
+
+  assert_eq!(
+    trips(),
+    1,
+    "the refusal ends the document on the first definition, exactly as under an accepting emitter"
+  );
+  assert_eq!(
+    witnessed,
+    Err(()),
+    "and the loop stops: the descent trip never reaches the emitter, so the channel that unmarks \
+     the scanner half cannot touch it"
+  );
+  assert_eq!(
+    reports(),
+    0,
+    "nothing is filed, so one refusal is one diagnostic"
   );
 }

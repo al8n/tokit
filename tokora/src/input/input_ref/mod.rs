@@ -998,14 +998,33 @@ where
   /// `skip_then_retry` would inherit. That is a design round, not a visibility change, so the pair
   /// stays crate-internal until it has had one.
   ///
-  /// **A consumer needing this question answered has a better primitive already**, and it is
-  /// better precisely where this one is wrong:
-  /// [`try_expect_or_stop`](Self::try_expect_or_stop), whose contract is that a terminal stop is
-  /// an error and never a decline. It reads the *live* boundary, so the same recovery that leaves
-  /// this counter poisoned correctly stops it reporting a stop. Measured on the same fixture: the
-  /// truncated run raised the terminal end-of-input error with no input-side witness anywhere, the
-  /// widened control returned all eight, and the recovered run also returned all eight.
-  /// `tokora/tests/root_loop_trip_witness.rs`'s section 3 is those three cells.
+  /// # What a consumer can answer today, and what it cannot
+  ///
+  /// [`try_expect_or_stop`](Self::try_expect_or_stop) covers **the declining exits**, and only
+  /// those. Its contract is that a terminal stop is an error and never a decline, and it reads the
+  /// *live* boundary, so it is right where this counter is wrong: the same `set_state` recovery
+  /// that leaves the counter poisoned correctly stops it reporting a stop. Measured on the fixture
+  /// above — the truncated run raises the terminal end-of-input error with no input-side witness
+  /// anywhere, the widened control reads all eight, and the recovered run reads all eight too.
+  /// `tokora/tests/root_loop_trip_witness.rs`'s section 3 is those cells.
+  ///
+  /// **It is not a replacement for this pair, and must not be described as one.** A *rejecting*
+  /// (fail-fast) emitter reports a lexer-resource trip by returning the value its
+  /// `From<<L::Token as Token>::Error>` builds, and `scan_with(..)?` propagates that value from
+  /// **inside** `try_expect_or_stop`, before the call can reach the arm that raises a terminal
+  /// stop. The caller therefore receives an ordinary grammar error over an exhausted scanner, with
+  /// nothing on it to read — and no care in the grammar's
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal) can repair that, because nothing on the path
+  /// is terminal-marked to delegate to. Calling `try_expect_or_stop` does not help, because the
+  /// unmarked error originated inside that call. This is the same fact the twin's own
+  /// documentation states from the other side: this witness *answers where the error value
+  /// cannot*.
+  ///
+  /// So: **no public witness answers the rejecting-emitter path today.** That gap is real, it is
+  /// older than this pair's visibility — the pair has been crate-internal throughout — and closing
+  /// it is the design round above, not a visibility change. `tokora/tests/root_loop_trip_witness.rs`
+  /// section 4 pins it as a defect, beside the control that shows an accepting emitter marks the
+  /// same stop.
   ///
   /// Costs one `usize` load per attempt: no scan, no lookahead fill and no token commit reads it.
   #[inline(always)]

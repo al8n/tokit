@@ -306,13 +306,28 @@ and will red until they do.
   change to this crate's terminal law that all twelve collection drivers, the recovery gate and
   `skip_then_retry` would inherit — a design round, not a visibility change.
 
-  A consumer needing that question answered already has a better primitive, and it is better
-  precisely where the counter is wrong: **`InputRef::try_expect_or_stop`**, whose contract is that a
-  terminal stop is an error and never a decline. It reads the live boundary, so the same recovery
-  that leaves the counter poisoned correctly stops it reporting a stop. All three positions are
-  measured in `tokora/tests/root_loop_trip_witness.rs`. Nothing analogous threatens the descent
-  pair: no public API clears or re-keys that counter, and the one cooperative escape hatch is
-  deliberately not built.
+  On the **declining** exits a consumer has `InputRef::try_expect_or_stop`, whose contract is that
+  a terminal stop is an error and never a decline; it reads the live boundary, so the same recovery
+  that leaves the counter poisoned correctly stops it reporting a stop. All three of those
+  positions are measured in `tokora/tests/root_loop_trip_witness.rs`.
+
+  **It is not a replacement for the withdrawn pair, and this changelog said so earlier in terms
+  that were too strong.** A *rejecting* (fail-fast) emitter reports a lexer-resource trip by
+  returning the value its `From<<L::Token as Token>::Error>` builds, and `scan_with(..)?`
+  propagates it from **inside** `try_expect_or_stop`, before that call can raise a terminal stop.
+  The caller receives an ordinary grammar error over an exhausted scanner, and no delegation in its
+  `MaybeTerminal` can repair it, because nothing on the path is marked to delegate to — the same
+  fact `scanner_tripped_during_attempt` documents from the other side when it says it answers where
+  the error value cannot. **So no public witness answers the rejecting-emitter path today.** That
+  gap is real and it is *older than this release*: the pair has been crate-internal throughout, so
+  its visibility has never changed the answer in either direction. Section 4 of that suite pins the
+  gap as a defect, beside the control that shows an accepting emitter marks the same stop.
+
+  **The descent pair has no such exposure**, and the reason is the channel rather than luck: a
+  descent refusal is *returned* by `InputRef::descend` and never routed through an emitter, so no
+  emitter can unmark it or convert it away from the counter that already recorded it.
+  `the_descent_witness_holds_under_a_rejecting_emitter` runs the amplification loop under a
+  fail-fast emitter and gets one refusal, one stop, nothing filed.
 
   **The baseline is a type, not a `usize`.** `ResourceTripBaseline` is opaque — no accessor, no
   `PartialEq`, no constructor, and a hand-written `Debug` that renders `ResourceTripBaseline(..)`

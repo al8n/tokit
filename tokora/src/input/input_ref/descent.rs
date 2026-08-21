@@ -644,9 +644,16 @@ where
   /// contract it cannot see — [`set_state`](InputRef::set_state) drops the poison boundary as the
   /// crate's *documented* limit-recovery path, and never touches the counter — so a loop following
   /// its own documentation can recover, read a whole document, and still be told it was truncated.
-  /// `InputRef::scanner_trip_snapshot` carries that measurement and the primitive that answers the
-  /// question correctly instead ([`try_expect_or_stop`](InputRef::try_expect_or_stop)). **Nothing
-  /// analogous exists here.** No public API clears or re-keys the descent counter: a budget once
+  /// `InputRef::scanner_trip_snapshot` carries that measurement, and also the narrower statement
+  /// that replaced an earlier overclaim: [`try_expect_or_stop`](InputRef::try_expect_or_stop)
+  /// covers the *declining* exits and is **not** a replacement for that pair, because a rejecting
+  /// emitter's trip is built and propagated from inside it. No public witness answers that path
+  /// today, and none did before this change either. **Nothing analogous exists here**, and the
+  /// reason is the channel: a descent refusal is *returned* by
+  /// [`descend`](Self::descend) and never routed through an emitter, so no emitter can unmark it
+  /// or convert it away from the counter that already recorded it —
+  /// `the_descent_witness_holds_under_a_rejecting_emitter` measures exactly that. No public API
+  /// clears or re-keys the descent counter either: a budget once
   /// exceeded cannot be un-exceeded by more input, by an unwind, or by a rollback, and the one
   /// cooperative escape hatch — the rebaseline above — is deliberately not built. The witness a
   /// consumer can rely on is exactly the one with no second contract to conflict with.
