@@ -1740,6 +1740,34 @@ fn tokenless_hole_makes_no_node() {
   assert!(matches!(sink.events()[0], Event::Diag { .. }));
 }
 
+/// E6's one behavioural risk, met head-on: the scan enters at the start of the pure-`Diag`
+/// tail, so a wrappable token **under** a diagnostic run must still be found and wrapped
+/// (al8n/tokora#305). The ceiling skips exactly the iterations the `Diag` arm would have
+/// `continue`d over; it is not a boundary on how far back the wrap may reach.
+#[test]
+fn hole_wrap_reaches_under_a_diagnostic_run() {
+  let mut sink = verbose_sink("ab");
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  // Three diagnostics with no token between them: the buffer now ends in a pure-`Diag` tail,
+  // which is the shape whose rescan was quadratic.
+  emit_error(&mut sink, 0, 1);
+  emit_error(&mut sink, 0, 2);
+  emit_error(&mut sink, 0, 3);
+
+  Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(0, 1), 1).expect("collects");
+
+  assert!(
+    matches!(sink.events()[0], Event::StartNode { kind: K_ERR, .. }),
+    "the wrap still opens at the token beneath the Diag run: {:?}",
+    sink.events()
+  );
+  assert!(
+    matches!(sink.events()[5], Event::FinishNode { kind: K_ERR }),
+    "…and closes above it: {:?}",
+    sink.events()
+  );
+}
+
 /// The wrap survives a later rewind like any other events: a checkpoint below the hole
 /// unwinds wrap and tokens together.
 #[test]
@@ -8068,7 +8096,14 @@ fn cst_carries_the_trivia_policy_to_materialization() {
 // E5 — the maintained open-node depth (al8n/tokora#253) and the journal theorem (#250)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The scalar against the oracle, after every step of whatever the caller just did.
+/// The maintained scalars against their oracles, after every step of whatever the caller just
+/// did.
+///
+/// E6 (the `Diag`-tail start) rides E5's coverage deliberately: the two are written by the same
+/// one append door and restored by the same rule off the same row, so the paths that can drift
+/// one are the paths that can drift the other — and every caller of this helper already walks
+/// all of them (nesting, tombstones, retro-wraps, demotes, tokens, diagnostics, hole wraps,
+/// checkpoint/release, and all four rewind arms).
 #[track_caller]
 fn depth_matches_oracle(sink: &VerboseSink<'_>, at: &str) {
   assert_eq!(
@@ -8076,6 +8111,35 @@ fn depth_matches_oracle(sink: &VerboseSink<'_>, at: &str) {
     sink.recount_depth(),
     "the maintained depth drifted from a full recount after {at}"
   );
+  assert_eq!(
+    sink.diag_tail,
+    sink.recount_diag_tail(),
+    "the maintained Diag-tail start drifted from a full recount after {at}"
+  );
+  // E7/E8 the same way, and this one carries more than drift detection: the demote wall's
+  // verdict is now the chain's, so this equality IS the equivalence the wall rests on, checked
+  // against a from-scratch replay on every shape these callers build.
+  #[cfg(debug_assertions)]
+  assert_eq!(
+    sink.open_chain(),
+    sink.recount_open_chain(),
+    "the maintained open-node chain drifted from a full replay after {at}"
+  );
+  // …and the chain's SEARCH against the `parent` walk it replaced, at every event index the log
+  // holds — on the chain and off it alike. The two share no code: one follows `parent` a link
+  // at a time, the other takes the skip links, and only the slow one is obviously right. It
+  // rides E5's coverage for E6's reason: every caller of this helper already walks every path
+  // that writes the chain, and a skip link naming the wrong entry surfaces as a membership
+  // answer rather than as a drifted chain.
+  #[cfg(debug_assertions)]
+  for index in 0..=sink.events().len() as u64 {
+    assert_eq!(
+      sink.probe_open_chain(index).0,
+      sink.probe_open_chain_via_parents(index).0,
+      "the open-node chain's skip ladder disagreed with the parent walk at event {index} \
+       after {at}"
+    );
+  }
 }
 
 /// DEPTH_CENSUS — the source lock behind E5's exactness claim. The scalar cannot drift by
@@ -8246,6 +8310,28 @@ fn depth_restores_across_every_rewind_arm() {
   rewind(&mut sink, 999);
   depth_matches_oracle(&sink, "an out-of-range future mark");
   assert_eq!(sink.depth(), 2, "a future mark rewinds nothing");
+
+  // (5) TRUNCATE AND REOPEN — the arm a scalar depth cannot tell from arm (1), and the one
+  // E7/E8 have to get right on their own. The node open at the mark is CLOSED above it and a
+  // different node is opened in its place, so the rewind must reopen the first: same depth,
+  // different node. It is also the case that makes reclaiming a closed node's chain slot
+  // unsound — a reclaiming design hands the freed slot to `K_NODE`, the rewind then drops it as
+  // "above the mark", and the row's frozen head is left naming nothing (see `OpenNode`).
+  let mut sink = verbose_sink("ab");
+  sink.cst_start(K_LIST);
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
+  sink.cst_finish(K_LIST);
+  sink.cst_start(K_NODE);
+  assert_eq!(sink.depth(), 1, "same depth as the mark, a different node");
+  rewind(&mut sink, ckp);
+  depth_matches_oracle(&sink, "a truncate-and-reopen rewind");
+  assert_eq!(sink.depth(), 1);
+  #[cfg(debug_assertions)]
+  assert_eq!(
+    sink.open_chain(),
+    std::vec![0],
+    "the rewind must reopen the node the mark had open, not leave the one that replaced it"
+  );
 }
 
 /// A released row promotes the floor and spends no depth: `release` touches no event, so E5
@@ -8341,4 +8427,278 @@ fn a_hole_wrap_leaves_the_undo_journal_exact_without_a_fixup() {
   rewind(&mut sink, 0);
   assert_eq!(sink.journal_len(), 0);
   assert_eq!(sink.depth(), 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// E7/E8 — the open-node chain's SEARCH: al8n/tokora#306's residue
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The adversarial demote shape, driven to `n` and returning `(skew-binary reads, parent-walk
+/// reads)` for the whole run — the two answers to the same query at the same states.
+///
+/// `n` same-kind starts; then, for `k = 0 ..= n - 2`, a demote of the `k`-th start followed by
+/// a fresh one; then `n` finishes. **Every mark is distinct and live and every lookup
+/// succeeds**, so the wall's early exit never fires and its failing-path suffix scan never
+/// runs: what is left is the membership query, `n - 1` times, against a chain that never gets
+/// shorter. The demotes tombstone the first `n - 1` starts and leave exactly `n` live ones
+/// against the `n` finishes, so the log is balanced at the end.
+///
+/// The counted query is the wall's own — `Sink::node_is_open` is `probe_open_chain` with the
+/// count dropped — read at the state the following `cst_demote` reads it at, and the demote
+/// then asserts the same answer by not panicking.
+///
+/// Debug-only with the chain it probes: a release build has neither, and its wall is the typed
+/// refusal both finish doors raise.
+#[cfg(debug_assertions)]
+fn demote_storm_probe_reads(n: usize) -> (u64, u64) {
+  assert!(n >= 2, "the shape needs at least one demote");
+  let mut sink = verbose_sink("");
+  let marks: std::vec::Vec<EventMark> = (0..n).map(|_| sink.cst_start(K_NODE)).collect();
+
+  let mut skew_reads = 0u64;
+  let mut parent_reads = 0u64;
+  for mark in marks.iter().take(n - 1) {
+    let (open, skew) = sink.probe_open_chain(mark.index());
+    let (open_slow, walked) = sink.probe_open_chain_via_parents(mark.index());
+    assert!(
+      open,
+      "the k-th start is still open when its demote is emitted"
+    );
+    assert_eq!(
+      open, open_slow,
+      "the skew-binary search and the parent walk disagreed mid-storm"
+    );
+    skew_reads += skew;
+    parent_reads += walked;
+
+    sink.cst_demote(*mark, K_NODE);
+    sink.cst_start(K_NODE);
+  }
+  for _ in 0..n {
+    sink.cst_finish(K_NODE);
+  }
+  assert_eq!(sink.depth(), 0, "the storm closes what it opened");
+  depth_matches_oracle(&sink, "the demote storm");
+
+  (skew_reads, parent_reads)
+}
+
+/// al8n/tokora#306's residue, measured. The chain repaired the `O(suffix)` recount with an
+/// `O(depth)` walk, and **the raw event surface has no depth cap** — `RecursionLimiter` bounds
+/// the blessed `node()` combinator and nothing else — so a hand-rolled sequence that keeps the
+/// chain long and queries near its bottom put the wall straight back into `Theta(n^2)`.
+///
+/// The skew-binary skip links are the repair, and this is the pin: the same shape, the same
+/// query, counted both ways at every step. The parent walk is left in as the **plant** — if the
+/// sequence ever stopped exercising the defect the slow side would stop being quadratic, and a
+/// bound the fast side passes vacuously would prove nothing.
+#[test]
+#[cfg(debug_assertions)]
+fn open_chain_search_stays_subquadratic_on_the_raw_demote_shape() {
+  let mut previous: Option<(usize, u64)> = None;
+  for n in [256usize, 512, 1024, 2048] {
+    let (skew, parents) = demote_storm_probe_reads(n);
+    std::eprintln!(
+      "demote storm n = {n:>5}: skew-binary {skew:>9} reads, parent walk {parents:>9} reads"
+    );
+
+    // The plant: the shape really is the adversarial one, so the walk this replaced really is
+    // quadratic on it. `n(n-1)/2` is the floor of the exact count.
+    let quadratic_floor = (n as u64) * (n as u64 - 1) / 2;
+    assert!(
+      parents >= quadratic_floor,
+      "the parent walk did {parents} reads at n = {n}, below the {quadratic_floor} the \
+       adversarial shape must force — the sequence stopped exercising the defect, so the \
+       bound below is vacuous"
+    );
+
+    // The claim itself as a ceiling, rather than a magic constant: `O(log depth)` steps at at
+    // most two entry reads each, over `n - 1` queries against a chain that stays `n` deep.
+    // `4n(log2(n) + 2)` leaves room for the constant and is still an order below the
+    // `n(n - 1)/2` the walk costs.
+    let ceiling = 4 * n as u64 * (u64::from(n.ilog2()) + 2);
+    assert!(
+      skew <= ceiling,
+      "the skew-binary search did {skew} reads at n = {n}, above the {ceiling} an \
+       O(n log n) run allows — the skip ladder is not bounding the search"
+    );
+
+    // And the curve: doubling `n` must not quadruple the work. `O(n log n)` doubles and a
+    // little; `3x` per doubling is comfortably below quadratic and comfortably above that.
+    if let Some((prev_n, prev_skew)) = previous {
+      assert!(
+        skew * 4 <= prev_skew * 11,
+        "the skew-binary search went from {prev_skew} reads at n = {prev_n} to {skew} at \
+         n = {n} — more than 2.75x per doubling, which is not a subquadratic curve"
+      );
+    }
+    previous = Some((n, skew));
+  }
+}
+
+/// The skip ladder against the walk it replaced, over the rewind arms and the emission shapes
+/// that build the awkward chains — including the truncate-and-reopen arm, where a restored head
+/// must resolve skip links that were laid down before the truncation.
+///
+/// Membership is checked at **every event index**, on the chain and off it alike, against two
+/// independent answers: the `parent` walk, and the full replay `recount_open_chain` performs.
+#[test]
+#[cfg(debug_assertions)]
+fn open_chain_search_answers_what_the_parent_walk_answers() {
+  #[track_caller]
+  fn agree(sink: &VerboseSink<'_>, at: &str) {
+    let chain = sink.open_chain();
+    assert_eq!(
+      chain,
+      sink.recount_open_chain(),
+      "the maintained chain drifted from a full replay after {at}"
+    );
+    for index in 0..=sink.events().len() as u64 {
+      assert_eq!(
+        sink.probe_open_chain(index).0,
+        sink.probe_open_chain_via_parents(index).0,
+        "the skip ladder and the parent walk disagreed at event {index} after {at}"
+      );
+      assert_eq!(
+        sink.probe_open_chain(index).0,
+        chain.contains(&index),
+        "the skip ladder disagreed with the replayed chain at event {index} after {at}"
+      );
+    }
+  }
+
+  let mut sink = verbose_sink("abcd");
+  agree(&sink, "construction");
+
+  // A deep left spine: the shape whose skip links do the most composing.
+  for _ in 0..24 {
+    sink.cst_start(K_NODE);
+    agree(&sink, "a nested start");
+  }
+  // Interleave closes and opens so the chain acquires entries whose slots are NOT contiguous.
+  for _ in 0..8 {
+    sink.cst_finish(K_NODE);
+    sink.cst_start(K_LIST);
+    sink.record_token(&MiniTok(b'a'), &span(0, 1));
+    agree(&sink, "a close followed by a fresh open");
+  }
+
+  // Truncate and reopen: the arm the chain has to get right on its own. The node open at the
+  // mark is closed above it and a different one opened in its place, so the rewind must put
+  // back a head whose skip links reach entries the truncation kept.
+  let ckp = Emitter::<MiniLexer<'_>>::checkpoint(&mut sink);
+  sink.cst_finish(K_LIST);
+  sink.cst_start(K_WRAP);
+  for _ in 0..5 {
+    sink.cst_start(K_NODE);
+  }
+  agree(&sink, "a replacement subtree above the mark");
+  rewind(&mut sink, ckp);
+  agree(&sink, "a truncate-and-reopen rewind");
+
+  // Regrowth over the truncated slots: the new entries' skip links are built against the
+  // restored head, and must not name anything the truncation dropped.
+  for _ in 0..12 {
+    sink.cst_start(K_NODE);
+    agree(&sink, "regrowth after a rewind");
+  }
+  rewind(&mut sink, 0);
+  agree(&sink, "a rewind to the origin");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// The #305/#306 wall-clock harnesses — the numbers in the CHANGELOG, reproducible
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// `#[ignore]`d, because a wall time is a measurement and not a gate: the gates are the oracles
+// above, which are exact and profile-independent. They are committed anyway — the figures these
+// print are quoted in the CHANGELOG, and a number whose instrument lives in nobody's tree is a
+// number no later round can compare against.
+//
+//   cargo test -p tokora --features rowan --release --lib \
+//     cst::sink::tests::measure_hole_wrap -- --ignored --nocapture
+//   cargo test -p tokora --features rowan --lib \
+//     cst::sink::tests::measure_demote -- --ignored --nocapture
+//
+// The profiles are NOT interchangeable. #305's scan runs in every build, so its number is a
+// RELEASE number. #306's wall is `debug_assertions`-only and does not exist in release, so its
+// number is a DEV-profile one.
+
+/// al8n/tokora#305 at its recorded size: `H` recovery holes whose span matches no buffered
+/// token, so each wrap appends no structural event and leaves one more slot for the next
+/// backward scan to step over. Release profile.
+///
+/// The figure is what the whole call costs — the scan, the event slot, and the inner emitter's
+/// collected diagnostic — so it is a **ceiling** on the scan rather than the scan alone, and it
+/// is not the same instrument as the figure the CHANGELOG quotes for this shape.
+#[test]
+#[ignore = "wall-time measurement; run with --release --ignored --nocapture"]
+fn measure_hole_wrap_scan_at_the_recorded_size() {
+  const H: usize = 32768;
+  let mut events = 0;
+  // Best of five. The shape allocates — an event per hole and a collected diagnostic per hole —
+  // so a single run reads the allocator's mood as much as the scan's cost; the minimum is the
+  // least-noise estimator of the same quantity, and it is what makes the figure reproducible.
+  let best = (0..5)
+    .map(|_| {
+      let mut sink = verbose_sink("");
+      let started = std::time::Instant::now();
+      for _ in 0..H {
+        Emitter::<MiniLexer<'_>>::emit_skipped_region(&mut sink, span(0, 1), 1).expect("collects");
+      }
+      let elapsed = started.elapsed();
+      events = sink.events().len();
+      elapsed
+    })
+    .min()
+    .expect("five runs");
+  std::eprintln!(
+    "#305 hole wrap: H = {H}, {events} events, best of 5 = {:.3} ms",
+    best.as_secs_f64() * 1e3
+  );
+}
+
+/// al8n/tokora#306 at its recorded size: `d` nested starts closed by `d` demotes, innermost
+/// first — the shape whose suffix recount was `d(d - 1)` event visits. Dev profile, because the
+/// wall it measures is `debug_assertions`-only.
+///
+/// This is also the shape that hid the residue: closing innermost-first means every membership
+/// query hits the chain's own head, so it reads exactly one entry and reports the same `0`
+/// suffix visits whether the search is `O(depth)` or `O(log depth)`. The counter test above is
+/// where the difference shows.
+#[test]
+#[ignore = "wall-time measurement; run with --ignored --nocapture"]
+fn measure_demote_wall_at_the_recorded_size() {
+  const D: usize = 2048;
+  // Best of five, for `measure_hole_wrap_scan_at_the_recorded_size`'s reason.
+  let elapsed = (0..5)
+    .map(|_| {
+      let mut sink = verbose_sink("");
+      let marks: std::vec::Vec<EventMark> = (0..D).map(|_| sink.cst_start(K_NODE)).collect();
+      let started = std::time::Instant::now();
+      for mark in marks.iter().rev() {
+        sink.cst_demote(*mark, K_NODE);
+      }
+      started.elapsed()
+    })
+    .min()
+    .expect("five runs");
+  #[cfg(debug_assertions)]
+  let reads: u64 = {
+    // The same run's query cost, exactly: one entry read per demote on this shape.
+    let mut sink = verbose_sink("");
+    let marks: std::vec::Vec<EventMark> = (0..D).map(|_| sink.cst_start(K_NODE)).collect();
+    let mut reads = 0;
+    for mark in marks.iter().rev() {
+      reads += sink.probe_open_chain(mark.index()).1;
+      sink.cst_demote(*mark, K_NODE);
+    }
+    reads
+  };
+  #[cfg(not(debug_assertions))]
+  let reads = 0u64;
+  std::eprintln!(
+    "#306 demote wall: d = {D}, best of 5 = {:.3} ms, {reads} chain reads, 0 suffix visits",
+    elapsed.as_secs_f64() * 1e3
+  );
 }
