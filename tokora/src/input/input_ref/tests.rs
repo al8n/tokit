@@ -11921,31 +11921,15 @@ fn a_latched_boundary_answers_without_counting_a_second_trip() {
   );
 }
 
-/// A [`ResourceTripBaseline`](crate::input::ResourceTripBaseline) issued by **another live input**
-/// reads as tripped.
+/// Two inputs alive at once, each judging **its own** baseline: quiet, as an attempt that
+/// descended nothing must be.
 ///
-/// The hole the `'closure` brand cannot close. Two inputs alive at once can have their handle
-/// regions unify — they are two locals in one scope here, which is the cheapest way to make that
-/// happen — and both counters start at zero, so a baseline from one compares *equal* against the
-/// other and would certify "nothing happened" over a parse it knows nothing about. That is the
-/// same hole [`SessionPointId`](crate::SessionPointId) carries a nonce for, and this witness
-/// carries one for the same reason.
-///
-/// The verdict **fails closed**: a foreign baseline reads as tripped, never as quiet. Neutering
-/// the nonce term in `tripped_during_attempt` turns the third assertion below red while the first
-/// two stay green, which is what makes the term load-bearing rather than merely present.
+/// The control for the panic cell below. Without it, "cross-feeding panics" is satisfied by a
+/// witness that panics on everything.
 #[test]
-fn a_baseline_from_another_live_input_reads_as_tripped() {
-  fn fresh<'a>(src: &'a str) -> Input<'a, BombLexer<'a>, BombCtx<'a>, ()> {
-    let context = crate::input::InputContext::new(
-      BombEmitter::default(),
-      DefaultCache::<'_, BombLexer<'_>>::default(),
-    );
-    Input::with_state_and_context(src, BombTally::default(), context)
-  }
-
-  let mut one = fresh(REFUSAL_SRC);
-  let mut two = fresh(REFUSAL_SRC);
+fn each_input_judges_its_own_baseline_without_complaint() {
+  let mut one = fresh_trip_input();
+  let mut two = fresh_trip_input();
   let first = one.as_ref();
   let second = two.as_ref();
 
@@ -11960,16 +11944,44 @@ fn a_baseline_from_another_live_input_reads_as_tripped() {
     !second.tripped_during_attempt(from_second),
     "and the same for the other input, so neither is trivially tripped"
   );
-  assert!(
-    second.tripped_during_attempt(from_first),
-    "a baseline the OTHER input issued certifies nothing about this one. Both counters are 0, so \
-     the counts compare equal and only the nonce separates them — and the verdict fails closed, \
-     which is the direction every other reading of this witness fails in"
+}
+
+/// A baseline issued by **another live input** panics, and does not answer.
+///
+/// The hole the `'closure` parameter cannot close, and the one place it cannot: two handles minted
+/// from [`Input::as_ref`] in one scope have ordinary inference regions that unify. Both counters
+/// start at zero, so a cross-fed baseline compares *equal* — the wrong answer is `false` on this
+/// fixture and `true` on a fixture where the counts differ, and both are answers about a parse the
+/// judging handle knows nothing about.
+///
+/// **Why not "fail closed" and answer `true`.** Because a spurious `true` is not a safe failure for
+/// this witness: a root loop told its attempt tripped ends a document that was fine and discards
+/// the valid suffix, and the truncated parse still returns `Ok`, so the mistake survives testing
+/// and points at nothing. That is the same failure shape that kept the scanner twin crate-internal.
+/// A cross-fed baseline is a programmer error rather than a parse outcome — unreachable from
+/// outside this crate, and unreachable from any input — so it announces itself.
+///
+/// The message is asserted, not just the panic: a panic from anywhere else in the fixture would
+/// otherwise satisfy this cell.
+#[test]
+#[should_panic(expected = "came from a different input")]
+fn a_baseline_from_another_live_input_panics_instead_of_answering() {
+  let mut one = fresh_trip_input();
+  let mut two = fresh_trip_input();
+  let first = one.as_ref();
+  let second = two.as_ref();
+
+  let from_first = first.trip_snapshot();
+  let _ = second.tripped_during_attempt(from_first);
+}
+
+/// A bare input with no budget configured — the fixture the two baseline cells above share.
+fn fresh_trip_input<'a>() -> Input<'a, BombLexer<'a>, BombCtx<'a>, ()> {
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
   );
-  assert!(
-    first.tripped_during_attempt(from_second),
-    "and symmetrically, so the answer is not an artefact of which input was built first"
-  );
+  Input::with_state_and_context(REFUSAL_SRC, BombTally::default(), context)
 }
 
 /// The **scanner** baseline belongs to the collection, and taken per element it goes blind to the

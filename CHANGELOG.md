@@ -315,15 +315,32 @@ and will red until they do.
   deliberately not built.
 
   **The baseline is a type, not a `usize`.** `ResourceTripBaseline` is opaque — no accessor, no
-  `PartialEq`, no constructor — so the session-absolute reading (`!= 0`), the difference of two
-  baselines, and "how many trips" are unspellable rather than discouraged, and the scanner
-  baseline's own type makes the two impossible to swap at the sites that take both. It carries the
-  handle's `'closure`, which is what makes it unstorable and so uncarryable across a
-  `PartialSession` redrive whose fresh input starts a fresh counter at zero; a `compile_fail`
-  doctest pins that, with a control beside it that stashes an ordinary `usize` from the same handle
-  and compiles. What the region cannot catch is two inputs alive at once — their handles' regions
-  unify and both counters start at zero — so the baseline also carries the issuing input's nonce
-  and a foreign one **fails closed**, reading as tripped.
+  `PartialEq`, no constructor, and a hand-written `Debug` that renders `ResourceTripBaseline(..)`
+  and nothing else. A derive would have handed the absolute count straight back through `{:?}` in
+  one line, along with the nonce, which is the address of an internal slot; a cell asserts the
+  render carries no ASCII digit at all, and restoring the derive reddens it. `Copy` is deliberate:
+  a driver hands the same baseline to two gates in one loop turn, and duplicating one is harmless
+  because storage is refused by the region parameter rather than by move semantics. The scanner
+  baseline's own type makes the two impossible to swap at the sites that take both.
+
+  **A foreign baseline is refused by the type on every public path, and panics where it is not.**
+  Which mechanism does what was pinned by planting against each, because the plausible story is
+  wrong twice. The `'closure` **parameter** is the whole of the refusal: a baseline cannot be
+  stashed where it outlives the invocation, and it cannot be captured by a closure that must
+  satisfy the `for<'c>` bound a nested parse imposes — which is the realistic cross-wire, a driver
+  holding two inputs alive and judging the inner with the outer's baseline. Both are `compile_fail`
+  doctests, each paired with a control that captures or stashes a region-free `usize` off the same
+  handle and compiles. **Invariance is not what does that**: planted covariant, both shapes are
+  still refused, so the brand is described as the form the crate's other ids use and nothing more.
+  Since `Input` is crate-internal, no consumer can hold two handles whose regions unify at all.
+
+  What is left is crate-internal, and `tripped_during_attempt` **panics** on it rather than
+  answering. An earlier round had it fail closed and answer `true`, and that was wrong for this
+  witness specifically: a spurious `true` tells a root loop its attempt tripped, and such a loop
+  ends a document that was fine and discards the valid suffix — while still returning `Ok`, so the
+  mistake survives testing and points at nothing. That is the same failure shape that kept the
+  scanner twin crate-internal. A cross-fed baseline is a programmer error, unreachable from any
+  input and from any consumer, so it announces itself instead.
 
   What no type can decide is **placement**, and that is the misuse that survives: the descent
   baseline belongs inside the element loop and the scanner one above it, and each taken at the

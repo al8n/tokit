@@ -322,6 +322,15 @@ where
 /// `&mut InputRef<'_, '_, TestLexer<'_>, _>` elides into a higher-ranked bound that asks for
 /// `Lexer<'a>` at *every* pair of lifetimes, which `LogosLexer<'a, Token>` cannot satisfy. Naming
 /// the generic loop at the call site instantiates it at the one context type actually in play.
+/// [`drive`]'s shape for a probe that returns a value rather than a verdict.
+macro_rules! drive_probe {
+  ($limit:expr, $root:ident, $src:expr) => {{
+    let ctx: ParserContext<'_, TestLexer<'_>, Ignored> = ParserContext::new(Ignored::default());
+    let ctx = ctx.with_recursion_limiter(RecursionLimiter::with_limitation($limit));
+    Parser::with_context(ctx).apply($root).parse_str($src)
+  }};
+}
+
 macro_rules! drive {
   ($limit:expr, $root:ident, $src:expr) => {{
     let ctx: ParserContext<'_, TestLexer<'_>, Ignored> = ParserContext::new(Ignored::default());
@@ -410,6 +419,51 @@ fn with_room_to_descend_the_same_loop_parses_the_whole_document() {
   );
   assert_eq!(trips(), 0, "widened budget: nothing refuses");
   assert_eq!(reports(), 0, "widened budget: nothing is filed either");
+}
+
+/// The `Debug` render of a baseline carries **no number at all**.
+///
+/// `trip_snapshot() != 0` does not compile — the session-absolute reading is the one the opaque
+/// type exists to refuse — and a derived `Debug` would hand the same number straight back through
+/// `{:?}`. It would also render the nonce, which is the address of an internal slot. So the impl
+/// is hand-written, and this is what keeps it hand-written: one `#[derive]` and this cell reds.
+///
+/// The assertion is "no ASCII digit anywhere", not "does not contain the count": a consumer cannot
+/// read the count to compare against, and a digit-free render is the stronger property and cannot
+/// be satisfied by a leak that happens to print a value the test did not predict. The baseline is
+/// taken **after** a real refusal, so the counter is off zero and a leak would have something to
+/// leak.
+#[test]
+fn a_baseline_renders_without_any_number_in_it() {
+  reset();
+
+  fn probe<'inp, Ctx>(inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>) -> Result<String, ()>
+  where
+    Ctx: ParseContext<'inp, TestLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
+  {
+    // A real refusal first, so the counter this baseline snapshots is not zero.
+    let _ = ladder(inp, LADDER);
+    Ok(format!("{:?}", inp.trip_snapshot()))
+  }
+
+  let rendered = drive_probe!(TIGHT, probe, "1");
+  assert!(
+    trips() > 0,
+    "the fixture must actually refuse, or there is no count to leak"
+  );
+
+  assert_eq!(
+    rendered.as_deref(),
+    Ok("ResourceTripBaseline(..)"),
+    "the render is a fixed string: no fields, so nothing to leak and nothing to drift"
+  );
+  let rendered = rendered.expect("the probe returns the render");
+  assert!(
+    !rendered.chars().any(|c| c.is_ascii_digit()),
+    "no digit may appear in the render — not the count, which is the reading the type refuses, \
+     and not the nonce, which is an internal address. Rendered: {rendered}"
+  );
 }
 
 // ── Section 2: the absolute reading is available, and it is the wrong question ────

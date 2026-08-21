@@ -19,37 +19,46 @@ use super::*;
 /// underneath, so the difference of two baselines, the comparison of one against zero, and the
 /// question "how many trips" are all unspellable rather than merely discouraged.
 ///
-/// # What the region parameter rules out, and what the nonce does
+/// # What refuses a foreign baseline, measured rather than assumed
 ///
-/// A baseline is meaningful only against the input that issued it, and the two mechanisms here
-/// cover different halves. Which does which was measured rather than assumed, because the
-/// plausible story is wrong in one place.
+/// A baseline means nothing against an input that did not issue it, and the mechanisms here were
+/// each pinned by planting against them, because the plausible story is wrong twice.
 ///
-/// * **The `'closure` parameter** ties a baseline to the handle that issued it, and that is what
-///   makes it **unstorable**: a parser reaches its input through a universally quantified handle
-///   lifetime, so there is no region a caller can name that a baseline could be parked in and
-///   carried out. That is the shape of smuggling one across a
-///   [`PartialSession`](crate::input::PartialSession) redrive, whose fresh input starts a fresh
-///   counter at zero. [`InputRef::trip_snapshot`](InputRef::trip_snapshot) carries the case, with
-///   the control beside it that makes the refusal attributable to this type rather than to the
-///   scaffolding.
+/// * **The `'closure` parameter refuses it outright, on every public path.** A baseline carries
+///   the region of the handle that issued it, and the only way to obtain an [`InputRef`] from
+///   outside this crate is through a closure whose handle lifetime is universally quantified —
+///   `Input` is crate-internal, so there is no other door. A baseline
+///   therefore cannot be parked anywhere that outlives the invocation, and it cannot be carried
+///   into another one. Both shapes were compiled and refused: stashing one in a `Cell`
+///   ([`trip_snapshot`](InputRef::trip_snapshot) pins it, with a control), and the realistic
+///   cross-wire — a parser that runs a nested parse and judges the inner input with the outer
+///   input's baseline, which is the shape a driver holding two inputs alive would write. That one
+///   fails with `E0521: borrowed data escapes outside of function`.
 ///
-///   The parameter is **invariant**, through an `fn(&'closure ()) -> &'closure ()` rather than a
-///   bare reference, and that is prophylaxis and not a load-bearing claim: it matches
-///   `SessionPointId` and `SavepointId`, and
-///   it removes a family of coercions rather than any one demonstrated misuse. The escape above is
-///   refused with either variance.
+/// * **Invariance is not what does that**, and the `fn(&'closure ()) -> &'closure ()` form is
+///   prophylaxis rather than a load-bearing claim. Planted covariant, *both* shapes above are still
+///   refused — the parameter's presence is the whole of it. It is kept because it matches
+///   `SessionPointId` and `SavepointId`, and because it forecloses a family of coercions rather
+///   than any one demonstrated misuse. Saying more than that would be prose a plant has already
+///   contradicted.
 ///
-/// * **The nonce** — the address of the issuing input's own counter slot — is what rules out **two
-///   inputs alive at once**. That one the parameter does *not* catch: two handles in one scope can
-///   have their regions unify, both counters start at zero, so a foreign baseline compares equal
-///   and would certify "nothing happened" over a parse it knows nothing about. Measured, in
-///   `input::input_ref::tests::a_baseline_from_another_live_input_reads_as_tripped`, which
-///   compiles — the brand does not stop it — and which goes red when the nonce term is neutered.
-///   The verdict **fails closed**: a foreign baseline reads as tripped, never as quiet, the
-///   direction every other reading of this witness fails in.
+/// * **The nonce covers what is left, which is inside this crate.** Two handles minted from
+///   `Input::as_ref` in one scope have ordinary inference regions that
+///   unify, and both counters start at zero, so a cross-fed baseline compares *equal*. That is
+///   crate-internal by construction — no consumer can reach `Input` — and it is a programmer
+///   error, not a parse outcome, so
+///   [`tripped_during_attempt`](InputRef::tripped_during_attempt) **panics** on it rather than
+///   answering. See there for why a plausible `true` was the wrong answer.
 ///
-#[derive(Debug, Clone, Copy)]
+/// # `Copy`, and what it is for
+///
+/// Deliberate. A driver reads its baseline more than once per turn — `parser::many`'s element loop
+/// hands the same `trips` to the failure gate and then to the close gate — and a move-only baseline
+/// would push those sites into re-taking it, which is the placement defect the type exists to make
+/// hard. Duplicating one is harmless because storage is refused by the region parameter and not by
+/// move semantics: two copies are as unstorable as one.
+///
+#[derive(Clone, Copy)]
 pub struct ResourceTripBaseline<'closure> {
   /// The counter's value when the baseline was taken.
   count: usize,
@@ -57,9 +66,30 @@ pub struct ResourceTripBaseline<'closure> {
   /// Distinct inputs are distinct structs at distinct addresses, and the slot is a `usize` so it
   /// is never zero-sized.
   nonce: usize,
-  /// Invariant in `'closure`. The fn-pointer form, and not a bare reference, is the point: a
-  /// reference would be covariant and a covariant brand is no brand at all.
+  /// Invariant in `'closure`, through the fn-pointer form rather than a bare reference.
+  ///
+  /// The invariance is **not** what refuses a foreign baseline — planted covariant, every misuse
+  /// this type is meant to refuse is still refused by the parameter's presence alone, and the
+  /// type's own docs record that measurement. It is the form the crate's other branded ids use,
+  /// and it costs nothing to keep; it is not evidence for anything.
   _brand: PhantomData<fn(&'closure ()) -> &'closure ()>,
+}
+
+/// Prints neither field, and that is the point rather than an omission.
+///
+/// A derive would render `count`, which is the session-absolute reading the type exists to make
+/// unspellable — `trip_snapshot() != 0` does not compile, and a derived `Debug` would hand the
+/// same number back through `{:?}` in one line. It would also render `nonce`, which is the address
+/// of an internal slot and belongs in no user-visible output at all. Neither is a fact about the
+/// baseline that a caller is entitled to; the only fact there is is the verdict, and
+/// [`InputRef::tripped_during_attempt`] is the one door onto it.
+///
+/// `a_baseline_debug_render_leaks_neither_the_count_nor_the_nonce` asserts on the rendered string,
+/// because this impl is one `#[derive]` away from regressing.
+impl core::fmt::Debug for ResourceTripBaseline<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("ResourceTripBaseline(..)")
+  }
 }
 
 impl<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl> InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>
@@ -434,10 +464,52 @@ where
   /// }
   /// ```
   ///
-  /// What the region parameter does **not** catch is two inputs alive at once — their handles'
-  /// regions can unify and both counters start at zero — so the baseline also carries the issuing
-  /// input's nonce and a foreign one reads as tripped. [`ResourceTripBaseline`] has both halves
-  /// and says which was measured how.
+  /// **The realistic cross-wire is refused too**, and it is the shape a driver holding two inputs
+  /// alive would actually write: a parser that runs a nested parse and judges the *inner* input
+  /// with the *outer* input's baseline. Compiled and refused with `E0521: borrowed data escapes
+  /// outside of function`. The theorem underneath both refusals is that a baseline fixed at one
+  /// region cannot be handed to a frame that demands every region:
+  ///
+  /// Its control first, again: the same closure capturing a region-free `usize` off the same
+  /// handle satisfies the same bound, so the refusal below is the value's type and not the shape.
+  ///
+  /// ```rust
+  /// use tokora::{InputRef, Lexer, ParseContext};
+  ///
+  /// fn as_a_parser_over_a_number<'inp, 'closure, L, Ctx>(
+  ///   outer: &mut InputRef<'inp, 'closure, L, Ctx>,
+  /// ) -> impl for<'c> FnMut(&mut InputRef<'inp, 'c, L, Ctx>) -> bool
+  /// where
+  ///   L: Lexer<'inp>,
+  ///   Ctx: ParseContext<'inp, L>,
+  /// {
+  ///   let depth: usize = outer.recursion().depth();
+  ///   move |inner: &mut InputRef<'inp, '_, L, Ctx>| inner.recursion().depth() == depth
+  /// }
+  /// ```
+  ///
+  /// ```compile_fail
+  /// use tokora::{InputRef, Lexer, ParseContext, input::ResourceTripBaseline};
+  ///
+  /// /// The closure a nested parse would be handed: it must work at EVERY handle region, and the
+  /// /// captured baseline is fixed at one.
+  /// fn as_a_parser<'inp, 'closure, L, Ctx>(
+  ///   outer: &mut InputRef<'inp, 'closure, L, Ctx>,
+  /// ) -> impl for<'c> FnMut(&mut InputRef<'inp, 'c, L, Ctx>) -> bool
+  /// where
+  ///   L: Lexer<'inp>,
+  ///   Ctx: ParseContext<'inp, L>,
+  /// {
+  ///   let base: ResourceTripBaseline<'closure> = outer.trip_snapshot();
+  ///   move |inner: &mut InputRef<'inp, '_, L, Ctx>| inner.tripped_during_attempt(base)
+  /// }
+  /// ```
+  ///
+  /// What the region parameter does **not** catch is two inputs alive at once *inside this crate*,
+  /// where handles are minted directly and their regions unify. That is a programmer error rather
+  /// than a parse outcome, and
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt) **panics** on it instead of
+  /// answering. [`ResourceTripBaseline`] has every half and says which was measured how.
   ///
   /// # Why a pair, and not one guard that takes the snapshot for you
   ///
@@ -585,14 +657,43 @@ where
   /// that measures what the amplification costs a root loop with no witness and the cell that
   /// measures what a baseline hoisted out of the loop costs one that has it.
   ///
+  /// # A baseline from another input is a panic, not a verdict
+  ///
+  /// It **panics** if `since` was issued by a different [`InputRef`], and the alternative was
+  /// considered and rejected: answering `true` — "fail closed", the direction every *real*
+  /// reading of this witness fails in — is the wrong answer for this one, because the two failures
+  /// do not cost the same thing. A spurious `true` tells a root loop its attempt tripped, and a
+  /// root loop told that **ends a document that was fine and discards the valid suffix**. The
+  /// truncated parse still returns `Ok`, so the mistake survives testing and points at nothing.
+  /// That is the identical failure shape as the state-recovery residue that kept the scanner twin
+  /// crate-internal, and it would be indefensible to build it in here on purpose.
+  ///
+  /// A cross-fed baseline is a **programmer error**, not a parse outcome. It cannot be produced by
+  /// input, hostile or otherwise — only by code that wired two inputs together — and no consumer
+  /// can write it at all: the region parameter refuses every public path, measured, and
+  /// `Input` is crate-internal so there is no other way to hold two
+  /// handles whose regions unify. What the panic guards is this crate's own sites, and any future
+  /// door that hands out a handle outside a closure boundary: it announces itself at the crossing
+  /// instead of silently truncating, and it is distinguishable from a real trip by not being a
+  /// `bool` at all.
+  ///
+  /// The check is one `usize` comparison on a path that already runs one, and its branch is cold.
+  ///
   /// Costs two `usize` comparisons, on the failure arm only.
+  ///
+  /// # Panics
+  ///
+  /// If `since` came from a different input than `self`.
   #[inline(always)]
   pub fn tripped_during_attempt(&self, since: ResourceTripBaseline<'closure>) -> bool {
-    // A baseline from another live input certifies nothing about this one, and this witness fails
-    // closed everywhere else, so it fails closed here: a foreign nonce reads as tripped rather
-    // than as "nothing happened". The brand rules out the cross-invocation shape at compile time;
-    // this is the one it cannot see.
-    since.nonce != self.trip_nonce() || *self.resource_trips != since.count
+    assert!(
+      since.nonce == self.trip_nonce(),
+      "ResourceTripBaseline came from a different input than the one judging it. A baseline is \
+       only meaningful against its own input's counter; comparing it here would answer about a \
+       parse this handle knows nothing about. Take the baseline from the same handle that reads \
+       the verdict."
+    );
+    *self.resource_trips != since.count
   }
 }
 
