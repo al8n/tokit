@@ -35,22 +35,24 @@ fn the_parse_default_depth_is_thirty_two() {
   );
 }
 
-/// The unsegmented default, release build. **256, not 32**, and separately stated because it is a
-/// separate derivation — the release bisection the floor was waiting for now exists.
+/// The unsegmented default, release build — **the same 32**, and still stated separately because it
+/// is still a separate decision.
 ///
-/// Worth reading beside `the_segmented_pratt_depth_is_1024_in_release`: for one revision both the
-/// release parse default and the release segmented budget would have read **1024**, and two
-/// different constants asserting one literal in one profile is a layer that has stopped
-/// discriminating. They differ, and `SEGMENTED_PRATT_RELEASE > PARSE_DEFAULT_RELEASE` compiles it.
+/// It is no longer a *floor waiting on a measurement*: the release bisection exists and says 256.
+/// It is a floor because the selection flag cannot observe the profile that sets the frame price,
+/// and cannot observe the consumer's at all. This cell is what catches the arms diverging by
+/// accident; the const assertion pricing both arms at the debug cost is what catches it on
+/// purpose.
 #[cfg(not(debug_assertions))]
 #[test]
-fn the_parse_default_depth_is_two_hundred_fifty_six_in_release() {
+fn the_parse_default_depth_is_thirty_two_in_release() {
   assert_eq!(
     RecursionLimiter::PARSE_DEFAULT_DEPTH,
-    256,
-    "the shipped release parse default is 256 — a DERIVATION now rather than a floor, fixed by the \
-     fit tier at the heaviest modelled RELEASE per-level cost. Note it is not 1024: that is what \
-     the headroom tier alone would have allowed, and it collides with SEGMENTED_PRATT_RELEASE."
+    32,
+    "the shipped release parse default is the SAME 32 the debug arm holds, and not the 256 the \
+     release rows support. `debug_assertions` cannot observe `opt-level`, and it is per crate \
+     while the frames are the consumer's, so a diverged arm is selectable by a build paying debug \
+     prices. 256 is published as OPTIMIZED_PARSE_DEPTH for a caller to pass instead."
   );
 }
 
@@ -95,24 +97,23 @@ fn the_segmented_pratt_depth_is_1024_in_release() {
 /// `InputRef::descend` / `descending` from a consumer's own productions — frames the segmented
 /// prologue never touches, since its only two callers are tokora's own Pratt engines.
 ///
-/// # Two axes now, and this cell holds one of them fixed
+/// # The literal is bare again, and one guard is why
 ///
-/// It carried a bare literal for as long as both profile arms held one number, and that was enough:
-/// the only axis that could move the value was the feature. The arms differ now, so a bare literal
-/// makes this a statement about the *profile* as well — and a wrong one, which is how it reds in a
-/// release build while the feature it is about is behaving perfectly. **Measured: this cell was the
-/// only failure in an otherwise green `--release` run of the whole suite**, and no leg of the
-/// standard gate matrix runs one.
+/// It was briefly keyed on `debug_assertions`, because for one revision the two profile arms held
+/// different numbers and a bare literal made this a statement about the *profile* as well — a
+/// wrong one, which reddened it in a release build while the feature it is about behaved
+/// perfectly. The arms hold one number again, so the keying is gone.
 ///
-/// So the expected value is selected the way the constant is, and what is left is the claim the
-/// cell is actually for: whatever this profile's number is, `stacker` does not change it.
+/// That is safe to rely on **only** because a `const` assertion prices both arms at the debug
+/// frame cost, so they cannot diverge without failing the build first. A round that finds a way to
+/// diverge them has to re-key this cell, and will meet that assertion before it gets here.
 #[cfg(feature = "stacker")]
 #[test]
 fn enabling_stacker_does_not_move_the_shared_default() {
   // Literals, not `policy::PARSE_DEFAULT`: recomputing the expectation from the derivation is what
   // would make this a tautology. These are the same two numbers the arm cells above state, and
   // they are stated again here because this cell runs in a configuration neither of them can see.
-  let expected = if cfg!(debug_assertions) { 32 } else { 256 };
+  let expected = 32;
   assert_eq!(
     RecursionLimiter::PARSE_DEFAULT_DEPTH,
     expected,
@@ -121,6 +122,33 @@ fn enabling_stacker_does_not_move_the_shared_default() {
      `descend` reads. The figure it does justify is SEGMENTED_PRATT_DEPTH, which a caller opts \
      into."
   );
+}
+
+/// **The figure a release build supports, which is published rather than installed.**
+///
+/// Unconditional: it is the same number in both profiles, because it describes what an optimised
+/// *caller's* frames cost and not what this build of tokora happens to be. That is the whole reason
+/// it is a constant to pass rather than an arm of the default.
+#[test]
+fn the_optimized_opt_in_depth_is_256() {
+  assert_eq!(
+    RecursionLimiter::OPTIMIZED_PARSE_DEPTH,
+    256,
+    "the published opt-in figure is 256 — the two-tier derivation over the release rows. If this \
+     moved, `measured`'s release rows moved with it and this literal is the second half of that \
+     edit."
+  );
+}
+
+/// The opt-in has to be worth opting into, stated from outside the derivation.
+///
+/// The `const` assertions say `OPTIMIZED_PARSE > PARSE_DEFAULT` in whichever arm is compiled. This
+/// says it over the two literals, so a round that moved both by the same factor — leaving every
+/// ratio intact and the shipped depth eight times wrong — still reds.
+#[test]
+fn the_opt_in_is_eight_times_the_shipped_default() {
+  assert_eq!(RecursionLimiter::PARSE_DEFAULT_DEPTH, 32);
+  assert_eq!(RecursionLimiter::OPTIMIZED_PARSE_DEPTH, 256);
 }
 
 #[test]

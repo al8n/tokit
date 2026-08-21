@@ -476,24 +476,21 @@ fn a_leaked_guard_holds_its_level_for_the_rest_of_the_parse() {
 const MEASUREMENT_STACK: usize = 2 * 1024 * 1024;
 
 /// Bytes of native stack each level of [`heavy`] spends, set to the heaviest per-level cost
-/// anybody has measured — **in this build's profile**: ~41 KiB debug, ~4.3 KiB release.
+/// anybody has measured: the consumer's syntactic row, ~41 KiB.
 ///
 /// This is what makes the cell below a statement about a *stack* rather than about a counter. A
 /// frame of a handful of bytes would let any budget whatever fit in 2 MiB, and the cell would pass
 /// for a build in which the shared default was 1024.
 ///
-/// **It is keyed on `debug_assertions` because the budget it is measured against is.** For every
-/// revision before the two arms diverged this was one constant, and it could be: both arms held one
-/// number, so pricing either at the debug cost was the conservative reading. With the release arm
-/// at 256, a fixed debug price would model 10 MiB of frames against a 2 MiB thread and this cell
-/// would red in every release test run — reporting a defect that is an artefact of measuring one
-/// profile's frames against the other profile's budget, which is the very confusion
-/// `state::recursion_tracker` exists to keep out.
-const HEAVY_LEVEL: usize = if cfg!(debug_assertions) {
-  crate::state::recursion_tracker::measured::CONSUMER_SYNTACTIC_BYTES_PER_LEVEL
-} else {
-  crate::state::recursion_tracker::measured::CONSUMER_SYNTACTIC_RELEASE_BYTES_PER_LEVEL
-};
+/// **It is the DEBUG price in every profile, and that is now the correct model rather than the
+/// conservative one.** It was briefly keyed on `debug_assertions`, for the revision in which the
+/// shipped default was keyed on it too. The default holds one number in both arms again — chosen
+/// precisely so that it survives the debug frame price whichever arm a build selects, because that
+/// flag observes neither `opt-level` nor the consumer's compilation — so pricing this cell at the
+/// debug cost in both profiles is what the guarantee actually is. Keying it would make the cell
+/// weaker than the claim it exists to witness.
+const HEAVY_LEVEL: usize =
+  crate::state::recursion_tracker::measured::CONSUMER_SYNTACTIC_BYTES_PER_LEVEL;
 
 /// How deep [`heavy`] is willing to go before giving up and returning `Ok`.
 ///

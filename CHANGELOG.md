@@ -281,15 +281,15 @@ and will red until they do.
 
 ### Changed (breaking)
 
-- **`RecursionLimiter::PARSE_DEFAULT_DEPTH` is 32 in a debug build and 256 in a release one, was 16
-  in both** (#297). Every unconfigured parse gets a deeper budget, and for the first time the two
-  profile arms hold different numbers.
+- **`RecursionLimiter::PARSE_DEFAULT_DEPTH` is 32, in every build, and was 16** (#297). Every
+  unconfigured parse gets twice the depth. The profile arms hold the same number, deliberately, and
+  what a release build actually supports is published separately as the new
+  **`RecursionLimiter::OPTIMIZED_PARSE_DEPTH`** — 256, installed by nothing.
 
   **Why 16 was wrong is measured, not argued.** It came from applying `MIN_HEADROOM` to a consumer
   grammar's abort depth of 51 — a reading of that consumer's *syntactic* door, which takes no
   `InputRef::descend` and therefore spends none of this budget. The door that does spend it aborts
-  at 667 descents. The entry under **Fixed** has the sweep, the axes and the survive/abort pairs;
-  this entry is what was done with them.
+  at 667. The entry under **Fixed** has the sweep, the axes and the survive/abort pairs.
 
   **The criterion is two-tier, and the asymmetry is the decision rather than a convenience.** This
   cell is *shared*: `InputContext::new` seeds it for tokora's two Pratt engines (~16.4 KiB a frame),
@@ -303,47 +303,37 @@ and will red until they do.
 
   **Applying the multiplier to the modelled row as well gives 16; applying only the fit to the
   spending rows gives 128. 32 is exactly the width of that distinction**, and it ships documented as
-  a criterion rather than as a number, because a reader who collapses the two tiers will move the
-  default without noticing.
+  a criterion rather than as a number. 128 is refused by a measurement: it is *above* tokora's own
+  125, so an unconfigured Pratt parse in a debug build would reach the native stack before the
+  limiter — `128 x 16 112 B` measured is 98.3% of a 2 MiB thread.
 
-  **128 was refused, and by a measurement.** It is what the old single-tier formula gives when
-  simply repointed at the right row — and it is *above* tokora's own 125, so an unconfigured Pratt
-  parse in a debug build would reach the native stack before the limiter: `128 x 16 112 B` measured
-  on the same host is 98.3% of a 2 MiB thread. That is the abort the 500 -> 64 -> 16 sequence exists
-  to delete, restated with a bigger number.
+  **The two profile arms hold one number, and the reason is not a missing measurement.** The release
+  sweep exists and says 256. What is missing is any way for this crate to know whether the condition
+  256 rests on holds. `debug_assertions` is not `opt-level`, so `debug-assertions = false` at
+  `opt-level = 0` selects the release arm at unoptimised frame prices; and it is **per crate**,
+  while the frames this budget bounds are the **caller's** — so a build script reading cargo's
+  `OPT_LEVEL` would close the first gap and not the second, and a debug consumer against a release
+  tokora reinstates the mismatch with every signal available here reading "release". **A number
+  only safe when a fact holds, selected by a flag that cannot observe that fact, is not a default.**
+  A `const` assertion now prices *both* arms at the debug cost, which is the guard that held before
+  this campaign and the one whose loss made an intermediate revision unsafe.
 
-  **The release arm, 256, is a derivation and no longer a floor.** The sweep this file has recorded
-  as owed since the arm was written now exists, so the provisional `==` holding it equal to the
-  debug cell is deleted. Same rule over the release rows: the headroom tier would allow 1024, and
-  the fit refuses 512 at ~4.3 KiB a modelled level. So each tier is the binding one in one profile —
-  debug is fixed by headroom, release by the fit — and neither is decoration. 1024 would also have
-  collided exactly with `SEGMENTED_PRATT_RELEASE`, making `stacker` buy zero extra depth in a
-  release build; a `const` assertion catches that and did.
+  **`OPTIMIZED_PARSE_DEPTH` (new, `pub`) is 256** — the same two-tier derivation over the release
+  rows: `256 x 3 = 768 < 3282`, and `256 x 4 452 B = 1.09 MiB < 2 MiB` where `512` needs 2.17 MiB
+  and is refused. **No new API is owed to use it**: `RecursionLimiter::with_limitation`,
+  `InputContext::with_recursion_limiter`, `ParserContext::with_recursion_limiter` and
+  `cst::parse_lossless_with_context` all predate this change. The constant exists because a
+  measurement nobody can reach is not an opt-in — without it a consumer would have to re-run the
+  bisection to arrive at a figure this crate already knows. **The precondition is the caller's to
+  check**: every frame the budget bounds, theirs included, compiled at `opt-level = 3`.
 
-  **The residue, stated because nothing can check it.** With the arms diverged, `debug_assertions`
-  is observable for the first time — and it is a proxy for the profile, not for `opt-level`. **A
-  build with `debug-assertions = false` at `opt-level = 0` takes the 256 arm while paying debug
-  frame prices, and nothing refuses it**: there is no `cfg(opt_level)` for a constant to read,
-  `native_stack`'s red zone is `stacker`-only and sits on the two Pratt prologues rather than on
-  this cell, and `ci/stack_probe.sh` asserts no threshold by design. While both arms held one number
-  this combination was refused at *compile time* by the assertion that priced the release arm at the
-  debug cost; **that refusal is what divergence spends, and it is a downgrade from "refused" to
-  "documented"** rather than a hazard that was already there. It is confined — an ordinary debug and
-  an ordinary release build are each safe at their own price, and a `const` assertion says so — and
-  the same caveat covers a per-package profile override compiling tokora differently from the
-  consumer. The closure exists and has deliberately **not** been taken: cargo passes `OPT_LEVEL` to
-  build scripts and this crate already has one that emits cfgs, so selecting on that instead would
-  make the proxy exact.
+  **What a caller does.** Nothing, unless they relied on 16 as an upper bound — a parse that refused
+  at 17 levels now accepts up to 32. A release deployment that wants the depth its profile supports
+  passes `OPTIMIZED_PARSE_DEPTH` explicitly. Nothing about a *configured* parse changes.
 
-  **What a caller does.** Nothing, unless they were relying on 16 as an upper bound — a parse that
-  refused at 17 levels now accepts up to 32, or 256 in release. A grammar that needs a *different*
-  budget still says so explicitly through `InputContext::with_recursion_limiter`,
-  `ParserContext::with_recursion_limiter` or `cst::parse_lossless_with_context`, and an explicit
-  budget makes the profile question moot. Nothing about a *configured* parse changes.
-
-  `SEGMENTED_PRATT_DEPTH` is unchanged at 1024 in both profiles. A release per-level figure to
-  derive it from now exists and would give 8192; it stays a floor because that is a decision about
-  how much segment *memory* an unconfigured parse may reach, not one the stack sweep licensed.
+  `SEGMENTED_PRATT_DEPTH` is unchanged at 1024. A release per-level figure to derive it from now
+  exists and would give 8192; it stays a floor because that is a decision about how much segment
+  *memory* an unconfigured parse may reach, not one the stack sweep licensed.
 
 - **`TokenBudget` is the ceiling; `input::TokenBudgetTally` is what one `Input` spent against it.**
   `TokenBudget::{spent, is_exhausted, refused_an_item}` are gone from that type and live on the new
