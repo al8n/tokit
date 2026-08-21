@@ -21,31 +21,36 @@ use super::*;
 // literal adds is a statement made from *outside* the derivation, so a derivation that is wrong in
 // its own terms still has something to disagree with.
 
-/// The unsegmented default, debug build.
+/// The unsegmented default, debug build. **32**, from the two-tier rule — see `policy::two_tier`.
 #[cfg(debug_assertions)]
 #[test]
-fn the_parse_default_depth_is_sixteen() {
+fn the_parse_default_depth_is_thirty_two() {
   assert_eq!(
     RecursionLimiter::PARSE_DEFAULT_DEPTH,
-    16,
-    "the shipped debug parse default is 16 — the deepest power of two leaving more than 3x under \
-     the 51 at which a measured consumer grammar aborts on a 2 MiB thread. If this moved on \
-     purpose, the derivation in `policy` moved with it and this literal is the second half of \
-     that edit."
+    32,
+    "the shipped debug parse default is 32 — the deepest power of two leaving MIN_HEADROOM under \
+     the 125 at which tokora's own Pratt driver aborts on a 2 MiB thread AND fitting that thread \
+     at the heaviest modelled per-level cost. If this moved on purpose, the derivation in \
+     `policy` moved with it and this literal is the second half of that edit."
   );
 }
 
-/// The unsegmented default, release build. The same 16, and separately stated because it is a
-/// separate decision: a floor equal to the debug cell until the release bisection exists.
+/// The unsegmented default, release build. **256, not 32**, and separately stated because it is a
+/// separate derivation — the release bisection the floor was waiting for now exists.
+///
+/// Worth reading beside `the_segmented_pratt_depth_is_1024_in_release`: for one revision both the
+/// release parse default and the release segmented budget would have read **1024**, and two
+/// different constants asserting one literal in one profile is a layer that has stopped
+/// discriminating. They differ, and `SEGMENTED_PRATT_RELEASE > PARSE_DEFAULT_RELEASE` compiles it.
 #[cfg(not(debug_assertions))]
 #[test]
-fn the_parse_default_depth_is_sixteen_in_release() {
+fn the_parse_default_depth_is_two_hundred_fifty_six_in_release() {
   assert_eq!(
     RecursionLimiter::PARSE_DEFAULT_DEPTH,
-    16,
-    "the shipped release parse default is a FLOOR equal to the debug one, not a derivation — see \
-     `policy::PARSE_DEFAULT_RELEASE`. Raising it means running the five-axis consumer bisection \
-     against a release build, not extrapolating from debug's ratio."
+    256,
+    "the shipped release parse default is 256 — a DERIVATION now rather than a floor, fixed by the \
+     fit tier at the heaviest modelled RELEASE per-level cost. Note it is not 1024: that is what \
+     the headroom tier alone would have allowed, and it collides with SEGMENTED_PRATT_RELEASE."
   );
 }
 
@@ -82,60 +87,39 @@ fn the_segmented_pratt_depth_is_1024_in_release() {
 /// For one revision `PARSE_DEFAULT_DEPTH` was `if cfg!(feature = "stacker") { 1024 } else { 16 }`,
 /// and the two literal cells above cannot catch that on their own: each one runs in only one
 /// configuration, so each would simply see whichever number its own leg was given. This is the
-/// cross-configuration statement — the same 16 in a `stacker` build as in a plain one — and it is
-/// the runtime twin of the const assertion that prices the default against a 2 MiB thread.
+/// cross-configuration statement — the same number in a `stacker` build as in a plain one — and it
+/// is the runtime twin of the const assertion that prices the default against a 2 MiB thread.
 ///
 /// The reason it holds is not that 1024 is too big for the *Pratt* path. It is that this constant
 /// seeds every `InputContext`, and that cell is read by hand-written descent through
 /// `InputRef::descend` / `descending` from a consumer's own productions — frames the segmented
 /// prologue never touches, since its only two callers are tokora's own Pratt engines.
+///
+/// # Two axes now, and this cell holds one of them fixed
+///
+/// It carried a bare literal for as long as both profile arms held one number, and that was enough:
+/// the only axis that could move the value was the feature. The arms differ now, so a bare literal
+/// makes this a statement about the *profile* as well — and a wrong one, which is how it reds in a
+/// release build while the feature it is about is behaving perfectly. **Measured: this cell was the
+/// only failure in an otherwise green `--release` run of the whole suite**, and no leg of the
+/// standard gate matrix runs one.
+///
+/// So the expected value is selected the way the constant is, and what is left is the claim the
+/// cell is actually for: whatever this profile's number is, `stacker` does not change it.
 #[cfg(feature = "stacker")]
 #[test]
 fn enabling_stacker_does_not_move_the_shared_default() {
+  // Literals, not `policy::PARSE_DEFAULT`: recomputing the expectation from the derivation is what
+  // would make this a tautology. These are the same two numbers the arm cells above state, and
+  // they are stated again here because this cell runs in a configuration neither of them can see.
+  let expected = if cfg!(debug_assertions) { 32 } else { 256 };
   assert_eq!(
     RecursionLimiter::PARSE_DEFAULT_DEPTH,
-    16,
+    expected,
     "the `stacker` feature has moved the SHARED recursion budget. It segments tokora's two Pratt \
      frame prologues and nothing else, so it justifies no change to the cell every unsegmented \
      `descend` reads. The figure it does justify is SEGMENTED_PRATT_DEPTH, which a caller opts \
      into."
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// The number the derivation gives when it is pointed at the door the budget is spent on
-// ══════════════════════════════════════════════════════════════════════════════
-//
-// Same job as the four cells above and for the same reason: `policy` derives these from
-// `measured`, so a literal is the only statement made from OUTSIDE the derivation. It matters more
-// here than for a shipped cell, because nothing else in the tree reads either constant — the
-// compile-time relations beside them pin what the numbers must be *relative to* the measured rows,
-// and these two pin what they are.
-//
-// Unconditional rather than keyed on `debug_assertions`: both are derived from their own measured
-// row in every build, and neither is selected by the profile flag.
-
-/// What repointing [`PARSE_DEFAULT_DEBUG`](super::policy::PARSE_DEFAULT_DEBUG) at the lossless row
-/// produces — and it is not what the issue that found the mis-pointing inferred.
-#[test]
-fn the_repointed_debug_default_is_128() {
-  assert_eq!(
-    super::policy::PARSE_DEFAULT_DEBUG_ON_THE_LOSSLESS_ROW,
-    128,
-    "the derivation over the lossless row no longer produces 128. Either the row was re-measured \
-     — in which case this literal is the second half of that edit — or MIN_HEADROOM moved, in \
-     which case the shipped default moved too and the four cells above should have reddened first."
-  );
-}
-
-/// The release twin, and the first release figure in this file that is a derivation rather than a
-/// floor.
-#[test]
-fn the_repointed_release_default_is_1024() {
-  assert_eq!(
-    super::policy::PARSE_DEFAULT_RELEASE_ON_THE_LOSSLESS_ROW,
-    1024,
-    "the derivation over the release lossless row no longer produces 1024"
   );
 }
 
