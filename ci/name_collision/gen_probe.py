@@ -538,6 +538,62 @@ TRAITS = {
         "scope": "use tokora::error::ErrorContainer;",
         "fixture": None,
     },
+    # ── `TrackerExt` / `RecursionTrackerExt` — tokora#265's split of the combined checks ────
+    #
+    # Both are NEW traits: `Tracker` and `RecursionTracker` are PRE-EXISTING (the four
+    # primitives — `increase_token`/`increase_recursion`/`decrease_recursion`/`check` and
+    # `increase`/`decrease`/`check` respectively), but the *combined* update-and-check
+    # operations used to be `Tracker`'s own provided methods and now live on these two
+    # blanket-implemented extension traits instead — see `TrackerExt`'s own doc for why
+    # (a type could override a provided method and disambiguate to the wrong trait's `check`;
+    # a blanket impl makes that unrepresentable). So `scope` follows the `CastNode` precedent,
+    # not `Emitter`'s: a NEW trait cannot be imported by name — that import does not resolve on
+    # the base ref and the row goes INCONCL — so each is reached through a glob over its own
+    # module instead, which is NOT new (only the trait inside it is), so the glob itself
+    # resolves unchanged on both sides.
+    #
+    # `recvr` is each trait's own module-mate rather than a shared subject reached across a
+    # second module: `RecursionLimiter` (`impl RecursionTracker for RecursionLimiter`) sits in
+    # `state::recursion_tracker` beside `RecursionTrackerExt` itself, and `Limiter`
+    # (`impl Tracker for Limiter`) sits in `state::tracker` beside `TrackerExt`. Either row
+    # could have ridden `Limiter` instead — it implements `Tracker`, `TokenTracker` AND
+    # `RecursionTracker` all at once, constructed with `Limiter::new()` — but that would pull a
+    # second glob into `RecursionTrackerExt`'s scope for no gain: one type per trait, from the
+    # trait's own module, is the simpler, more direct implementor and matches the standing
+    # precedent (`Lexer`'s subject is "the one type in this fixture the trait is demonstrably
+    # implemented for", `State`'s is "tokora's own implementor rather than a stand-in").
+    #
+    # No `let` binding, mutable or otherwise, and none is needed: `recvr` is spliced directly
+    # into `{recvr}.{name}(ARGS)`, so `Limiter::new()` / `RecursionLimiter::new()` is a fresh
+    # temporary at the call site, and Rust lets a `&mut self` method borrow a temporary's place
+    # for that one statement — the identical shape `emitter_value()` and `lexer_value()` already
+    # ride. `fixture` therefore stays absent: no helper function or setup is needed beyond the
+    # glob import, and both constructors are `pub const fn new() -> Self` with no arguments.
+    #
+    # READ THE HEADER ABOVE BEFORE READING A VERDICT HERE. Every item both traits declare takes
+    # `&mut self`, with no other trait-shaped alternative on either subject, so this is the
+    # identical foreknown-vacuous shape `Emitter`'s row is: `trait_method`'s three consumer
+    # spellings declare `self` or `&self`, both strictly EARLIER in the receiver walk than
+    # `&mut self`, and neither subject is a deref target — so the consumer's blanket item wins
+    # at pick one or two on every row, no matter what the receiver is. #225's ruling applies; a
+    # green verdict here is trusted on the written justification, not on having exercised
+    # tokora's item.
+    #
+    # `self_ty` stays absent for both: neither trait declares a receiver-less item (every method
+    # on both takes `&mut self`), so no `trait_assoc_fn` row can arise, and filling it in "just
+    # in case" is how a probe ends up riding a guess.
+    "TrackerExt": {
+        "recvr": "Limiter::new()",
+        "self_ty": None,
+        "scope": "use tokora::state::tracker::*;",
+        "fixture": None,
+    },
+    "RecursionTrackerExt": {
+        "recvr": "RecursionLimiter::new()",
+        "self_ty": None,
+        "scope": "use tokora::state::recursion_tracker::*;",
+        "fixture": None,
+    },
 }
 
 
@@ -1599,6 +1655,18 @@ def trait_method(name, owner, spelling):
         # on `Probe`: a different template and a different row.
         "read_frontier": "",
         "take_probe": "",
+        # tokora#265's `TrackerExt` (five) and `RecursionTrackerExt` (one). Every one of the
+        # six takes `&mut self` and NO further argument — read each signature in
+        # `state/tracker/mod.rs` / `state/recursion_tracker/mod.rs` and there is nothing after
+        # `&mut self` in any of them — so this is the same empty-argument shape `clear`,
+        # `read_frontier` and `take_probe` already ride above, not the multi-argument support
+        # #225 declines: nothing here asks the generator to invent a call it cannot express.
+        "increase_token_and_decrease_recursion": "",
+        "increase_token_and_decrease_recursion_and_check": "",
+        "increase_token_and_check": "",
+        "increase_both": "",
+        "increase_both_and_check": "",
+        "increase_and_check": "",
     }.get(name)
     if args is None:
         # The pointer matters more than the refusal. An author who lands here reads "add a

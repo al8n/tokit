@@ -194,6 +194,17 @@ fn every_ui_case_file_is_registered() {
 /// cases exist — the guarantee lives entirely in the type system, so it needs a test that compiles
 /// nothing.
 ///
+/// `tracker_combined_check_cannot_be_narrowed` pins a **removed customization point**, the mirror
+/// image of that missing default: `TrackerExt`'s five update-and-check operations come from one
+/// blanket impl over every `Tracker`, so coherence — not review — is what stops a tracker
+/// supplying a combined method that checks less than `Tracker::check` does. That is the repair
+/// for #265, where `Limiter` overrode two of them (then `Tracker`'s own provided methods) and
+/// disambiguated to `TokenTracker::check`, so a recursion depth already past its maximum answered
+/// `Ok(())` while the token count held. A narrowed combined check has no runtime shadow either —
+/// it is indistinguishable from a tracker that was within its limits — so the only thing that can
+/// hold the guarantee is a case that compiles nothing, and its teeth point forward the same way:
+/// swap the blanket impl for per-type ones and this file starts compiling.
+///
 /// The last two pin **removed capability**, where a compile failure is not a proxy for the
 /// guarantee but *is* the guarantee. `emitter_ref_cannot_checkpoint` holds the receiver on
 /// `Emitter::checkpoint`: capturing a mark is a capability, so it must not travel on the shared
@@ -216,6 +227,7 @@ const BOUND_CASES: &[&str] = &[
   "tests/ui/emitter_ref_cannot_checkpoint.rs",
   "tests/ui/errors_has_no_structural_mutation_door.rs",
   "tests/ui/diagnose_adapters_are_not_exact_size.rs",
+  "tests/ui/tracker_combined_check_cannot_be_narrowed.rs",
 ];
 
 /// Per case: the ui file, the curated headline its trait's attribute must produce, and

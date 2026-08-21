@@ -569,6 +569,11 @@ impl TokenTracker for Limiter {
 }
 
 /// A tracker that combines both token and recursion tracking.
+///
+/// This trait carries only the four *primitive* operations. The combined update-and-check
+/// operations live on [`TrackerExt`], which is blanket-implemented for every `Tracker` and
+/// therefore cannot be overridden — see that trait for why the composition is deliberately not
+/// a customization point.
 pub trait Tracker {
   /// The error type returned when either limit is exceeded.
   type Error;
@@ -583,37 +588,103 @@ pub trait Tracker {
   fn decrease_recursion(&mut self);
 
   /// Checks if any of the limits have been exceeded.
+  ///
+  /// "Any" is the whole contract: an implementation that tracks several resources must report
+  /// the first one that is over, not merely the one its caller happened to touch last.
   fn check(&self) -> Result<(), Self::Error>;
+}
 
+/// The combined update-and-check operations over a [`Tracker`].
+///
+/// # Why these are not `Tracker`'s own provided methods
+///
+/// Each operation below is exactly *one or two primitive updates followed by
+/// [`Tracker::check`]*, and there is no other thing it could correctly be: the only way an
+/// override can differ from the composition is by checking **less** than the whole tracker, and
+/// a limit check that silently narrows is a limit that does not hold.
+///
+/// That is not hypothetical. These were `Tracker`'s provided methods until tokora#265, and
+/// [`Limiter`] — which implements [`RecursionTracker`], [`TokenTracker`] and [`Tracker`], each
+/// with its own `check` — overrode two of them and disambiguated to the *wrong* trait's `check`.
+/// A recursion depth already past its maximum then answered `Ok(())` through
+/// `increase_token_and_check` and through `increase_token_and_decrease_recursion_and_check` for
+/// as long as the token count held, and when both limits were over, the combined form
+/// contradicted `Limiter::check` about which one to report.
+///
+/// A blanket impl is what makes that unrepresentable rather than merely fixed. Every call that
+/// **resolves to this trait** — fully-qualified and UFCS calls, generic code bounded on `Tracker`,
+/// and `dyn Tracker` — runs the blanket body; the blanket body always ends in
+/// `<Self as Tracker>::check`; and coherence refuses every other impl, so no type can make these
+/// operations check less — or other — than its own `check` does. Specialization stays available
+/// where it is meaningful, on the four primitives.
+///
+/// Two doors stay open, and they are the language's and the contract's, not this trait's.
+/// `Tracker::check` is a required method: these operations inherit whatever it answers, so its
+/// "any limit" contract is the implementor's to keep — what became unwritable is checking
+/// *less than it* in a combined step. And Rust resolves a concrete dot call against inherent
+/// methods first: a type that defines its own inherent `increase_token_and_check` hands *concrete*
+/// callers that body — silently; no rustc or clippy lint reports the shadow — exactly as it already
+/// could against the old provided methods. Migrating an old override into an inherent method is
+/// therefore the one repair that keeps the defect; delete the override instead.
+///
+/// # Which `check` runs
+///
+/// The one belonging to **this** trait's [`Tracker`] impl. On a type that also implements
+/// [`RecursionTracker`] or [`TokenTracker`], those traits have their own narrower checks;
+/// [`RecursionTracker`] additionally has its own combined operation. Reach for the trait whose
+/// scope you want — [`TokenTracker`] has none to reach for.
+pub trait TrackerExt: Tracker {
   /// Increase the token count and decrease recursion depth.
+  fn increase_token_and_decrease_recursion(&mut self);
+
+  /// Increases the token count and decreases the recursion depth, then checks **all** limits.
+  ///
+  /// The check runs after the decrement and reports what is still over, so a depth that the
+  /// decrement leaves above its maximum is an error — leaving a frame does not by itself put
+  /// the tracker back within bounds.
+  fn increase_token_and_decrease_recursion_and_check(&mut self) -> Result<(), Self::Error>;
+
+  /// Increases the token count, then checks **all** limits.
+  ///
+  /// Not just the token limit: a recursion depth that was already over when this was called is
+  /// reported here.
+  fn increase_token_and_check(&mut self) -> Result<(), Self::Error>;
+
+  /// Increases the token count and the recursion depth.
+  fn increase_both(&mut self);
+
+  /// Increases the token count and the recursion depth, then checks **all** limits.
+  fn increase_both_and_check(&mut self) -> Result<(), Self::Error>;
+}
+
+impl<T> TrackerExt for T
+where
+  T: Tracker + ?Sized,
+{
   #[inline(always)]
   fn increase_token_and_decrease_recursion(&mut self) {
     self.increase_token();
     self.decrease_recursion();
   }
 
-  /// Increases the token count and decreases recursion depth and checks limits.
   #[inline(always)]
   fn increase_token_and_decrease_recursion_and_check(&mut self) -> Result<(), Self::Error> {
     self.increase_token_and_decrease_recursion();
     self.check()
   }
 
-  /// Increases the token count and checks limits.
   #[inline(always)]
   fn increase_token_and_check(&mut self) -> Result<(), Self::Error> {
     self.increase_token();
     self.check()
   }
 
-  /// Increases the token count and recursion depth, then checks limits.
   #[inline(always)]
   fn increase_both(&mut self) {
     self.increase_token();
     self.increase_recursion();
   }
 
-  /// Increase the token count, decrease recursion depth, then checks limits.
   #[inline(always)]
   fn increase_both_and_check(&mut self) -> Result<(), Self::Error> {
     self.increase_both();
@@ -637,19 +708,6 @@ impl Tracker for Limiter {
   #[inline(always)]
   fn decrease_recursion(&mut self) {
     self.recursion_tracker.decrease();
-  }
-
-  #[inline(always)]
-  fn increase_token_and_check(&mut self) -> Result<(), Self::Error> {
-    self.token_tracker.increase();
-    <Self as TokenTracker>::check(self)
-  }
-
-  #[inline(always)]
-  fn increase_token_and_decrease_recursion_and_check(&mut self) -> Result<(), Self::Error> {
-    self.token_tracker.increase();
-    self.recursion_tracker.decrease();
-    <Self as TokenTracker>::check(self)
   }
 
   #[inline(always)]
@@ -700,33 +758,6 @@ const _: () = {
         fn check(&self) -> Result<(), Self::Error> {
           self.extras.check()
         }
-
-        #[inline(always)]
-        fn increase_token_and_check(&mut self) -> Result<(), Self::Error> {
-          self.extras.increase_token_and_check()
-        }
-
-        #[inline(always)]
-        fn increase_both(&mut self) {
-          self.extras.increase_both();
-        }
-
-        #[inline(always)]
-        fn increase_both_and_check(&mut self) -> Result<(), Self::Error> {
-          self.extras.increase_both_and_check()
-        }
-
-        #[inline(always)]
-        fn increase_token_and_decrease_recursion(&mut self) {
-          self.extras.increase_token_and_decrease_recursion();
-        }
-
-        #[inline(always)]
-        fn increase_token_and_decrease_recursion_and_check(&mut self) -> Result<(), Self::Error> {
-          self
-            .extras
-            .increase_token_and_decrease_recursion_and_check()
-        }
       }
 
       impl<'a, T> Tracker for LogosLexer<'a, T>
@@ -754,33 +785,6 @@ const _: () = {
         #[inline(always)]
         fn check(&self) -> Result<(), Self::Error> {
           self.inner().check()
-        }
-
-        #[inline(always)]
-        fn increase_token_and_check(&mut self) -> Result<(), Self::Error> {
-          self.inner_mut().increase_token_and_check()
-        }
-
-        #[inline(always)]
-        fn increase_both(&mut self) {
-          self.inner_mut().increase_both();
-        }
-
-        #[inline(always)]
-        fn increase_both_and_check(&mut self) -> Result<(), Self::Error> {
-          self.inner_mut().increase_both_and_check()
-        }
-
-        #[inline(always)]
-        fn increase_token_and_decrease_recursion(&mut self) {
-          self.inner_mut().increase_token_and_decrease_recursion();
-        }
-
-        #[inline(always)]
-        fn increase_token_and_decrease_recursion_and_check(&mut self) -> Result<(), Self::Error> {
-          self
-            .inner_mut()
-            .increase_token_and_decrease_recursion_and_check()
         }
       }
     };

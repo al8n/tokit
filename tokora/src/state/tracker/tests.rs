@@ -178,7 +178,7 @@ fn tracker_increase_token_and_decrease_recursion() {
   let mut limiter = Limiter::new();
   limiter.increase_recursion();
   assert_eq!(limiter.recursion().depth(), 1);
-  Tracker::increase_token_and_decrease_recursion(&mut limiter);
+  TrackerExt::increase_token_and_decrease_recursion(&mut limiter);
   assert_eq!(limiter.token().tokens(), 1);
   assert_eq!(limiter.recursion().depth(), 0);
 }
@@ -187,7 +187,7 @@ fn tracker_increase_token_and_decrease_recursion() {
 fn tracker_increase_token_and_decrease_recursion_and_check() {
   let mut limiter = Limiter::new();
   limiter.increase_recursion();
-  assert!(Tracker::increase_token_and_decrease_recursion_and_check(&mut limiter).is_ok());
+  assert!(TrackerExt::increase_token_and_decrease_recursion_and_check(&mut limiter).is_ok());
   assert_eq!(limiter.token().tokens(), 1);
   assert_eq!(limiter.recursion().depth(), 0);
 }
@@ -195,14 +195,14 @@ fn tracker_increase_token_and_decrease_recursion_and_check() {
 #[test]
 fn tracker_increase_token_and_check() {
   let mut limiter = Limiter::new();
-  assert!(Tracker::increase_token_and_check(&mut limiter).is_ok());
+  assert!(TrackerExt::increase_token_and_check(&mut limiter).is_ok());
   assert_eq!(limiter.token().tokens(), 1);
 }
 
 #[test]
 fn tracker_increase_both() {
   let mut limiter = Limiter::new();
-  Tracker::increase_both(&mut limiter);
+  TrackerExt::increase_both(&mut limiter);
   assert_eq!(limiter.token().tokens(), 1);
   assert_eq!(limiter.recursion().depth(), 1);
 }
@@ -210,7 +210,7 @@ fn tracker_increase_both() {
 #[test]
 fn tracker_increase_both_and_check() {
   let mut limiter = Limiter::new();
-  assert!(Tracker::increase_both_and_check(&mut limiter).is_ok());
+  assert!(TrackerExt::increase_both_and_check(&mut limiter).is_ok());
   assert_eq!(limiter.token().tokens(), 1);
   assert_eq!(limiter.recursion().depth(), 1);
 }

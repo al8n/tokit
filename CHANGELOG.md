@@ -757,6 +757,24 @@ and will red until they do.
   `Token::kind`, and kept because the two are independent caller code: a `PartialEq` coarser than
   the classification the parser sees would otherwise pass silently.
 
+- **The combined update-and-check operations moved off `Tracker` and `RecursionTracker` onto
+  `TrackerExt` and `RecursionTrackerExt`** (#265). `Tracker` keeps its four primitives
+  (`increase_token`, `increase_recursion`, `decrease_recursion`, `check`) and `RecursionTracker`
+  its three; `increase_token_and_check`, `increase_token_and_decrease_recursion{,_and_check}`,
+  `increase_both{,_and_check}` and `increase_and_check` are now supplied by a blanket impl over
+  every implementor. Callers add the `…Ext` trait to their imports — rustc names it in the
+  method-not-found note — and get the same behaviour except where their tracker had overridden one
+  of these, which is what **Fixed** covers. Implementors of `Tracker` or `RecursionTracker` that
+  overrode a combined method get `E0119` and must move that logic into `check` or the primitive it
+  belongs to; implementors that did not are unaffected.
+
+  One repair keeps the defect: resolving the `E0119` by moving the override's body into an inherent
+  `impl`. An inherent method with a combined operation's name wins *concrete* dot calls over the
+  blanket — silently; no rustc or clippy lint reports the shadow (`clippy::same_name_method` does
+  not see a blanket impl) — so that tracker's own callers keep the old narrow answer while every
+  trait-resolved path gets the full check. Delete the override; whatever it computed beyond the
+  composition belongs in `check` or a primitive.
+
 - **Only Logos 0.16 is supported now; the `logos_0_14` and `logos_0_15` features, and the
   `logos@0.14`/`logos@0.15` optional dependencies behind them, are removed.** The crate carried
   three simultaneous Logos majors behind a newest-wins precedence chain — `tokora::logos`, the
@@ -851,6 +869,104 @@ and will red until they do.
   `native_stack::RED_ZONE` and `SEGMENTED_PRATT_DEPTH`, both of which are about the *heaviest* frame
   and would silently drop by 13× and rise by 16× respectively if the repoint had been done by
   moving one constant.
+- **`Verbose` recorded and rewound through two `BTreeMap`s that unwinding caller code could leave
+  disagreeing — twice over a map descent that had not finished, and once over a value the rollback
+  destroyed on the spot** (#249, #254). A `BTreeMap` insertion is two operations, not one: `entry`
+  searches — which is the only part that runs the caller's `S: Ord` — and `or_default` then fills
+  the handle without comparing again. Both write paths fused them, so the *first* map was already
+  mutated when the second descent ran, and a span type whose comparison unwinds tore the pair
+  apart.
+
+  On the record side (#249) the residue was an **empty label group under a span key the payload
+  map does not have**, published through `Verbose::labels`, unreachable by `rewind` because no log
+  entry names it, and left in place by the rewind the previous matrix ran as part of its
+  assertion. Measured over the error, warning and skipped-region channels alike, arming the second
+  descent: `labels={…, BombSpan(25): [], …}` against a payload map still holding four keys. The
+  record path documented itself as leaving "no payload, no label entry and no log entry" two lines
+  above conceding that this residue "is publicly visible"; the code now meets the contract instead
+  of the contract retreating to the code.
+
+  On the rollback side (#254) `rewind_to` popped the log entry **first** and then ran two to four
+  further descents, each of which could unwind after the mark had already moved. The residues were
+  a sheared emitter that no later call repairs — `mark=0` with both maps still full, or a payload
+  group removed while its label group survived — and the shape differed between profiles, because
+  two of the six comparisons were `debug_assert` lookups that release does not run (six armable
+  comparisons in debug against four in release for a group that empties; four against two for one
+  that does not). Popping the log *last* around map work that is still fallible would have been
+  **worse**, not better: it leaves the log naming a slot the payload group no longer has, and
+  `Diagnostics` indexes by that slot. What makes the ordering safe is that the fallible half is
+  hoisted out of it.
+
+  **And hoisting the descents did not make the rest of the rollback infallible.** Taking both
+  handles first removes every comparison and every clone from the commit, but a commit that
+  *destroys* what it removes still runs caller code, because a generic parameter is the caller's
+  type in every position it appears and destruction is one of those positions. Discarding what
+  `Vec::pop` returns runs `Error::drop` after the payload group has been shortened and before the
+  label group has; `btree_map::OccupiedEntry::remove` runs `S::drop` on the key it throws away,
+  after one map has lost the span and before its twin has. Either leaves the log naming a slot or
+  a key that is no longer there, and `Diagnostics` indexes by exactly that — the corruption the
+  descent ordering was fixed to prevent, reached through the one kind of caller code the census
+  had not listed, because the commit had been *defined* as infallible and then not re-derived.
+  Swept across three channels, three rollback shapes and both record shapes, **38 of the 107
+  armed destructor positions corrupted the channel and 0 of the 216 comparison and clone
+  positions did** — the two emptied-group key removals on every channel including the
+  payload-less skipped-region one, and the payload destructor on the error and warning channels.
+  The destructor positions that stay clean are clean for a reason and are pinned as such rather
+  than fixed: the two `S::drop`s that `BTreeMap::entry` runs on a key it did not need to store
+  are above the commit point, and the `S::drop` from popping the log entry is below it.
+
+  Both paths now take **every** map handle before they mutate anything, and the rollback **moves
+  rather than destroys**: `pop_group` hands back the popped element and the whole removed entry
+  (`remove_entry`, not `remove`, so the key returns instead of being dropped), the popped
+  `LogEntry` joins them, and all of it is released only once both maps and the log name the same
+  emissions again. The commit therefore runs no caller code whatsoever — no comparison, no clone,
+  no destructor. The release is **per unwound entry, not per call**: a rollback that collected a
+  whole suffix would satisfy every state assertion while moving its destructors into a later
+  entry's unwind, where a panic is a second panic. A caught panic now leaves a record with
+  nothing written, and a rollback with the entry either untouched (a comparison or clone) or
+  completely unwound (a destructor); a retried `rewind` still reaches the clean result. The
+  rollback resolves its handles through owned keys, so `Store::rewind_to` gains `S: Clone`
+  (already required by the `Emitter` impl, so no public bound moves) and spends two descents per
+  unwound entry rather than two-to-four, dropping the two debug-only lookups as well — which is
+  also why the residue no longer differs by profile: with no `debug_assert` lookup left on the
+  path, the sweep measures identical call counts and identical verdicts in debug and release.
+
+  **The matrix is a sweep now, not a sample, and its axes are what the code does to a caller
+  value rather than what has already gone wrong.** The previous one armed a single hand-picked
+  comparison and then read only `payload_len` — it never looked at the map the failed operation
+  had actually mutated. Each cell now measures how many `S::Ord`, `S::Clone`, `S::drop` and
+  `Error::drop` calls its path makes and arms each of them in turn, comparing both maps, the mark
+  and the replay against what they were:
+  `record_{,warning_,hole_}is_atomic_under_a_panicking_{ord,span_clone}` and
+  `record_is_atomic_under_a_panicking_span_drop` over a fresh span and an existing one, and
+  `rewind_{,warning_,hole_}is_atomic_under_a_panicking_ord`,
+  `rewind_is_atomic_under_a_panicking_span_clone`, `rewind_is_atomic_under_a_panicking_span_drop`
+  and `rewind_is_atomic_under_a_panicking_payload_drop` over three rollback shapes — a group that
+  empties, a group that only shortens, and a multi-entry suffix where a panic can land after
+  earlier entries have already committed. Two things a state oracle cannot see get their own
+  cells. `the_cells_with_no_caller_destructor_have_none` pins at zero the paths that genuinely
+  destroy nothing — a record over a fresh span, a record's payload on any shape, the hole
+  channel's non-existent `Error` — so that "this cell measures nothing" stops being
+  indistinguishable from "this cell measures a property", which is how the destructor axis went
+  missing in the first place. And `an_escaping_panic_destroys_no_payload_on_the_way_out` pins the
+  *timing* of the release: the payload-destructor count sampled when a panic is raised must
+  already equal the count when it is caught, which is false for exactly the collected-suffix
+  shape and true for nothing else the state assertions distinguish.
+
+  **What is not fixed, and cannot be by ordering.** `Emitter::rewind` may run from a guard's
+  `Drop` while a panic is already unwinding, where a second panic aborts the process, and it is
+  reachable for `Verbose` (`ScanScope::drop` → `on_incomplete` → `InputRef::restore_entry`).
+  Atomicity is not totality: a rollback that descends a map keyed by a caller-supplied `S` and
+  destroys values the caller owns runs caller code no matter how it is ordered. Running none of
+  it would take both a group identifier the log carries instead of the span, and somewhere
+  outside the rollback to hand the removed values to — a `rewind` that returns `()` has nowhere.
+  This round does not move that boundary: caller destructors could already escape `rewind_to`
+  before it, they merely corrupted the channel on the way out. `Emitter::rewind`'s clause claimed
+  all built-in emitters were structurally non-panicking there — true of `Fatal`, `Silent` and
+  `Ignored`, whose rollbacks are empty, and never true of `Verbose` — and now says so, naming all
+  four kinds of caller code, as does `Verbose::rewind`'s own documentation. Every span and error
+  type this crate ships, and any user type whose `Ord`, `Clone` and `Drop` are total, is
+  unaffected.
 
 - **An at-limit refusal on a *second* entry could be decided and then not recorded, and the
   analysis that was supposed to have found it looked at the wrong set of sites.** Once the one-shot
@@ -1324,6 +1440,88 @@ and will red until they do.
   `SliceVec` adapters without a heap. Every other `/default` entry in the `std` list was checked
   against its own crate's `default` at the version `Cargo.lock` resolves; tinyvec's was the only
   empty one.
+
+- **Two quadratic scans in the lossless CST sink, one of them in release builds** (#250, #253).
+  Both were `Theta(n^2)` in the size of an ordinary parse, neither needed malformed input,
+  backtracking or the raw surface, and neither was visible to any output-tree test — the first
+  wrote nothing at all and the second recomputed a value it already agreed with.
+
+  **`Sink::wrap_hole` walked the whole retro-wrap undo journal on every recovery hole** (#250),
+  bumping two indices per entry. Both branch conditions are unreachable, and the loop's own comment
+  said so — which is exactly why deleting it needed a proof rather than a quotation, since a wrong
+  proof here does not cost time, it silently renames journal indices. The proof is now written at
+  the site and stands on two facts about the code rather than on today's producers: `cst_start_at`
+  is the only producer and its `validate_mark` in-bounds check makes `index < at_len - 1`
+  structurally, so every live entry has a `StartAt` standing at `at_len - 1`; and the backward scan
+  that computes the splice point `at` breaks on anything that is not a `Token` or a `Diag`, so
+  every index at or above `at` is one of those two and a `StartAt` is neither. Hence
+  `at_len <= at` and `index < at`, for every entry, in every reachable state — recovery inside a
+  Pratt fold, a partial session, a rewound checkpoint. Measured before the fix at exactly `J x H`
+  journal visits with `J` retro-wraps and `H` holes (4.00x per doubling, both profiles); the same
+  shape at `J = H = 4096` is **8.8x faster in release** and **10.9x in debug**, and both curves are
+  now linear. What replaces the loop is a `debug_assert` on the **newest** entry only — `O(1)`, not
+  the `O(J)` an `iter().all()` would cost — which decides the whole journal because `at_len` is
+  strictly increasing, and that ordering is itself now pinned by a `debug_assert` at the push.
+
+  **`Sink::cst_finish` recomputed the open-node depth from the event suffix on every close**
+  (#253), inside its global-underflow `debug_assert!`. The recount is anchored at the newest
+  emitter checkpoint or released floor, and the CST channel mints neither: the blessed `node()`
+  bracket takes no emitter checkpoint, so a predictive grammar of flat sibling nodes rescanned the
+  whole accumulated prefix once per node — `3n(n - 1)/2 + 2n` event visits, measured exactly, both
+  at the sink and end to end through `cst::parse_lossless` (4.00x per doubling). Release builds
+  compiled the assert out, so this was a debug, test, tooling and fuzzing cost, including the
+  default `cargo test` profile — and the fix had to add nothing to release. Depth is now a
+  maintained scalar rather than a recount, restored at a truncating rewind from the frozen depth
+  the target row already carried (or `0` at the origin), and left alone by every rewind that
+  truncates nothing. 16 384 flat siblings went from **2.09 s to 0.58 ms in debug**, curve `3.94x`
+  to `1.99x`; release is unchanged in behaviour and now pays `O(1)` at `Emitter::checkpoint` too,
+  which used to carry the same recount in every build.
+
+  The module's standing claim that depth is *"derived, never cached — a cached counter would need
+  its own restore rule"* is retired with the recount: the restore rule turned out to be three lines
+  the rewind contract had already forced into existence. What keeps the scalar exact is arity, not
+  discipline — **one** helper appends to the event log and charges the event's own `depth_delta`,
+  the one non-append mutation charges its two halves at its own site, and `DEPTH_CENSUS` fails the
+  build if a second `events.push` or `events.insert` appears. The equivalence to a full recount is
+  pinned across nesting, retro-wraps, demotes, hole wraps, raw injection, released floors and all
+  four rewind arms. The global-underflow check stays a `debug_assert` even though it is now free:
+  release refuses the same misuse typed through both finish doors, and a typed refusal a host can
+  catch is a stronger wall for a library than a panic.
+
+  No public API moved. The released-floor memo shrank from a whole mark-stack row to its mark,
+  because the depth half stopped having a reader.
+
+- **`Limiter`'s combined update-and-check methods reported `Ok(())` over a recursion depth that
+  was already past its maximum** (#265). `Tracker::check` promises to report whether *any*
+  configured limit is exceeded, and the trait's combined methods were documented and defaulted as
+  "update, then run that check". `Limiter` overrode two of them and ended each with
+  `<Self as TokenTracker>::check`, so `increase_token_and_check` and
+  `increase_token_and_decrease_recursion_and_check` answered `Ok(())` for as long as the token
+  count held — the decrementing form included, whose entire job is to report what is left over
+  after the decrement. When both limits were exceeded the same two returned the *token* error
+  while `Limiter::check` returned the recursion one, so the combined form and the full check
+  disagreed about which limit tripped. Reproduced with a token maximum of `usize::MAX` and a
+  recursion maximum of `1`: `Ok(())` at depth 2, directly and through a `Limiter` installed as
+  `logos` extras, which forwarded the narrowing faithfully.
+
+  Nothing in tokora called these — `ParserContext` and the input layer hold a `RecursionLimiter`
+  directly — so no in-tree grammar's ceiling was evadable through them, and the recursion budget
+  the parser enforces was never affected. The exposure was a downstream parser using the
+  advertised one-call operations as its limit check.
+
+  **The repair is that the composition is no longer a customization point.** Deleting the two
+  overrides would have fixed the two call sites; the methods moved to a blanket-implemented
+  `TrackerExt` / `RecursionTrackerExt` instead (see **Changed (breaking)**), so coherence refuses
+  any impl that could narrow one again — `Limiter`'s, the two `logos` forwarders' (which
+  hand-wrote the same five delegations and are now gone), and any downstream tracker's. The
+  mistake was easy for a structural reason: `Limiter` implements `RecursionTracker`, `TokenTracker`
+  and `Tracker`, so inside `impl Tracker for Limiter` a bare `self.check()` is ambiguous across
+  three candidates and a body there *must* name one. There is now no such body to write.
+  `tests/ui/tracker_combined_check_cannot_be_narrowed.rs` holds the wall, because a narrowed check
+  has no runtime shadow — it is indistinguishable from a tracker that was within its limits.
+
+  Also corrected: `increase_both`'s doc claimed it checked limits (it does not) and
+  `increase_both_and_check`'s claimed it decreased recursion (it increases both).
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
