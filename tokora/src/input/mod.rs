@@ -244,6 +244,45 @@ pub use cursor::Cursor;
 pub(crate) use input_ref::ClosePayload;
 pub(crate) use input_ref::CloseStatus;
 pub(crate) use input_ref::ScannerTripBaseline;
+
+/// The value both trip counters stop at, and the reading that means "**at least** this many".
+///
+/// The counters saturate here rather than wrapping, and both attempt-relative verdicts answer
+/// `true` unconditionally once a counter holds it. That pairing is the whole of the overflow
+/// contract, and it is the fail-closed direction: past the ceiling the witness over-reports a trip
+/// rather than under-reporting one.
+///
+/// # This is the counter's ceiling, and it is not the one `Cst::resource_trips` clamps at
+///
+/// There are two numbers and they are different things.
+///
+/// * **`u64::MAX` — this one — is where the *counter* gives up.** Past it a trip cannot be
+///   recorded, "did this attempt trip" and "did it not" become one value, and the verdicts fail
+///   closed. Reaching it takes 2^64 refusals inside one input session, on any target.
+/// * **`usize::MAX` is a display clamp**, and only on a target where `usize` is narrower than the
+///   counter. [`Cst::resource_trips`](crate::cst::Cst::resource_trips) returns `usize`, so on a
+///   32-bit target it clamps there and the value it returns is a floor. **Nothing gives up at that
+///   point**: the counter keeps counting and every attempt-relative reading stays exact, so a
+///   quiet attempt at `usize::MAX` underlying trips still reads quiet.
+///
+/// # Why the counters are `u64` and not `usize`
+///
+/// Wrapping was the original choice, for a reason that was sound about *consecutive* values and
+/// wrong about the whole range: an inequality against a per-attempt baseline needs consecutive
+/// values to differ, which wrapping gives, but it also needs the value never to return to a
+/// baseline after a positive number of trips, which wrapping does **not**. At `usize` width a
+/// 32-bit target aliases after 2^32 refusals — a zero recursion limit makes every `descend` a
+/// trip, and four billion of them is a loop, not a lifetime — and the verdict then answered
+/// `false` over an attempt in which every one of them refused. Saturating at `usize::MAX` fixed
+/// that and broke the mirror: at the ceiling the fail-closed disjunct fires whether or not
+/// anything tripped, so a quiet attempt read terminal permanently.
+///
+/// `u64` moves the give-up point out of reach on every target instead of choosing which direction
+/// to be wrong in at a point a loop can reach. The cost is measured rather than assumed — the
+/// per-element snapshot, the per-termination verdict, the baseline's 8→16-byte layout on a 32-bit
+/// target, and two executed workload shapes — and the whole table, with the decision it supports,
+/// is on [`InputRef::trip_snapshot`](InputRef::trip_snapshot).
+pub(crate) const TRIP_COUNTER_EXHAUSTED: u64 = u64::MAX;
 pub(crate) use input_ref::Session;
 pub use input_ref::{
   Balance, Commit, DelimClass, Descent, DropPolicy, Hole, InputRef, ResourceTripBaseline, Rollback,
@@ -862,7 +901,7 @@ where
   /// It is per **input session**, like the budget it guards: a
   /// [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and therefore
   /// a fresh cell, and harvests terminality by its own separate route.
-  resource_trips: usize,
+  resource_trips: u64,
   /// **Where SCANNER terminality is stored**: how many times the scanner has tripped a lexer
   /// resource limit in this input session. The exact twin of
   /// [`resource_trips`](field@Self::resource_trips) one field up, for the other budget —
@@ -915,7 +954,7 @@ where
   /// [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and a fresh
   /// cell, and harvests terminality by its own route (which reads the error value only — see
   /// [`MaybeTerminal`](crate::error::MaybeTerminal)).
-  scanner_trips: usize,
+  scanner_trips: u64,
   /// The **bound emitter** — the one emission log this input's parse writes, owned here for the
   /// input's whole life and paired with it at
   /// [`with_state_and_context`](Self::with_state_and_context).
@@ -1145,7 +1184,7 @@ where
   /// has.
   #[allow(dead_code)]
   #[inline(always)]
-  pub(crate) const fn resource_trips(&self) -> usize {
+  pub(crate) const fn resource_trips(&self) -> u64 {
     self.resource_trips
   }
 

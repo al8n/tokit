@@ -344,18 +344,105 @@ and will red until they do.
   stashed where it outlives the invocation, and it cannot be captured by a closure that must
   satisfy the `for<'c>` bound a nested parse imposes — which is the realistic cross-wire, a driver
   holding two inputs alive and judging the inner with the outer's baseline. Both are `compile_fail`
-  doctests, each paired with a control that captures or stashes a region-free `usize` off the same
-  handle and compiles. **Invariance is not what does that**: planted covariant, both shapes are
-  still refused, so the brand is described as the form the crate's other ids use and nothing more.
-  Since `Input` is crate-internal, no consumer can hold two handles whose regions unify at all.
+  doctests — a `Cell` stash, a closure capture, and a hand-written `ParseInput` impl carrying one
+  in a field — each paired with a control that carries a region-free `usize` in the same position
+  and compiles. Since `Input` is crate-internal, no consumer can hold two handles whose regions
+  unify at all.
 
-  What is left is crate-internal, and `tripped_during_attempt` **panics** on it rather than
-  answering. An earlier round had it fail closed and answer `true`, and that was wrong for this
-  witness specifically: a spurious `true` tells a root loop its attempt tripped, and such a loop
-  ends a document that was fine and discards the valid suffix — while still returning `Ok`, so the
-  mistake survives testing and points at nothing. That is the same failure shape that kept the
-  scanner twin crate-internal. A cross-fed baseline is a programmer error, unreachable from any
-  input and from any consumer, so it announces itself instead.
+  **The brand's invariance is load-bearing, at an identified site.** This sentence was wrong twice
+  before landing here, so it is stated as the measurement: flipping the brand to a bare reference
+  changes these five shapes as follows.
+
+  | shape | invariant | covariant |
+  |---|---|---|
+  | a bare region-shrinking coercion on the type | refused | **accepted** |
+  | a generic adapter: `&mut InputRef<'short>` plus a baseline `<'long>`, `'long: 'short` | refused | **accepted** |
+  | a `Cell` stash | refused | refused |
+  | a closure capture under a `for<'c>` bound | refused | refused |
+  | a hand-written `ParseInput` impl carrying one in a field | refused | refused |
+
+  **The adapter row is the one that decides it**, and it is a *consumption* site — the case an
+  earlier draft of this entry claimed could not exist when it concluded the brand was redundant
+  with `InputRef`'s own invariance in `'closure`. In the last three rows the handle is itself
+  coerced or universally quantified, so its invariance refuses first and the brand's cannot be
+  seen. In the adapter the handle sits at one fixed region and is never coerced; only the baseline
+  moves, and the brand is then the only thing refusing. Under a covariant brand that call compiles
+  and is publicly reachable — carry an outer baseline through an inner parse's context and the
+  nested parse cross-feeds a foreign baseline into the nonce panic. **Do not weaken the brand.**
+
+  Three probes agreed it was inert and all three shared a shape. Agreement between probes that
+  share a shape is not independent evidence.
+
+  **Both trip counters are `u64` and saturate, and the verdicts are exact everywhere a program can
+  reach.** Two defects, and the second was created by the repair for the first. Wrapping aliased:
+  at `usize` width, 2^32 trips return to a baseline exactly on a 32-bit target and the verdict
+  answered `false` over an attempt in which every `descend` refused — a loop rather than a
+  lifetime, since a zero recursion limit makes every `descend` a trip. Saturating at `usize::MAX`
+  with an unconditional "exhausted means tripped" disjunct fixed that and introduced the mirror: at
+  the ceiling the disjunct fires whether or not anything tripped, so an attempt that descended
+  **nothing** read terminal, permanently, for the rest of the session. Wrapping failed open once;
+  saturation failed closed forever.
+
+  The **width** is what resolves it, not the verdict. At `u64` the point a 32-bit loop can drive
+  the counters to — `u32::MAX`, four billion refusals — is nowhere near a ceiling of 2^64, and the
+  reading there is exact in both directions.
+
+  **Two ceilings now, and they are different things.** `u64::MAX` is where the counter gives up,
+  the verdicts fail closed, and no program reaches. `usize::MAX` is a **display clamp** on
+  `Cst::resource_trips`, which returns `usize` — reachable on a 32-bit target, a floor when it
+  fires, and *not* an exhaustion point: the counter keeps counting and attempt-relative readings
+  stay exact past it. `Cst`'s `Debug` renders the underlying value and marks it with a trailing `+`
+  only at the real ceiling, since that was the second public reading of the count and only the
+  accessor had been qualified.
+
+  **The 32-bit cost is measured, and accepted — with the layout in it, and scoped.** `trip_snapshot`
+  is taken per *element*, so it is on the hot path of every successful element.
+  `tripped_during_attempt` is not, and **it has no single frequency**: how often it runs is a
+  property of the termination class, and ranges from neither verdict to both. Three earlier versions
+  of this entry each asserted one number, read off whichever call sites the author had looked at,
+  and each was wrong in a different way. The model is therefore derived from all five sites in the
+  crate that evaluate either verdict and kept in **one** place —
+  `InputRef::tripped_during_attempt` — and this entry deliberately does not reproduce it, because
+  the same sentence living in several places is the defect that produced those three versions.
+
+  `thumbv6m-none-eabi` at `-O`:
+
+  | | `usize` | `u64` | delta | runs |
+  |---|---|---|---|---|
+  | `trip_snapshot` | 5 instr | 7 instr | +2 | per element |
+  | `tripped_during_attempt` | 17 instr | 22 instr | +5 | 0-2 per collection termination, by class |
+  | element loop (N + 1) | 31 instr | 38 instr | +7 | per collection |
+  | that loop's stack frame | 16 B | 24 B | +8 B | per collection |
+  | `ResourceTripBaseline` | 8 B, align 4 | 16 B, align 8 | ×2 | carried per element |
+
+  The layout row is what an instruction count does not show — the baseline is `Copy` and passed by
+  value — and it is here because it was missing the first time this was priced.
+
+  Whole-parse on `wasm32-wasip1`, the widest 32-bit target executable on this host (`i686` cannot
+  link here): a collection-parse binary grew **33 bytes** (120,421 → 120,454, +0.027%), and
+  interleaved executed latency showed **no regression** — one long collection at `-5.8%` min /
+  `-5.3%` median, many short collections at `-0.35%` / `-7.25%`, n=12 each. Both land at or below
+  zero, which is an instrument that cannot resolve the change rather than a speedup.
+
+  **What that measurement covers, stated rather than generalised.** The probe is a non-delimited
+  collection terminating by **decline** — one class of six; the classes and what each evaluates are
+  in the canonical table on `InputRef::tripped_during_attempt`. Four of the five it does not
+  exercise are **cheaper or equal** per termination. The fifth is **not**, and it is the one this
+  entry has to name on its own rather than defer: a `skip_then_retry` workload pays both verdicts
+  per *successful* sync or advance step, and that shape is **unmeasured**.
+
+  Accepted on that scope: two instructions and eight stack bytes per element loop, against an
+  element that has already run a cache probe or a full lex and commit. Keeping `count` at `usize`
+  and moving the exhaustion distinction to a second cell would buy back four bytes and add a load at
+  the same sites, and the executed measurement gives it nothing to recover.
+
+  **The residual is stated rather than hidden**: past 2^64 refusals in one input session the count
+  cannot record another, the two questions become one value, and the verdict fails closed. That
+  state is unreachable and is pinned as a labelled residual rather than as a passing grade.
+
+  Four cells, each with its own discriminating plant, and the quiet-attempt one is written from the
+  side the repair is not — every earlier ceiling cell took its baseline and then drove real trips,
+  which is precisely why none of them could see a verdict that had become permanently `true`.
 
   What no type can decide is **placement**, and that is the misuse that survives: the descent
   baseline belongs inside the element loop and the scanner one above it, and each taken at the
@@ -1750,6 +1837,44 @@ and will red until they do.
   `increase_both_and_check`'s claimed it decreased recursion (it increases both).
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+**`InputRef::trip_snapshot` and `InputRef::tripped_during_attempt` are new inherent methods on a
+type that already shipped.** An inherent item wins the pick over an extension trait's, so a
+consumer who wrote either name on `InputRef` runs their item on the base and tokora's here.
+
+**The form is a decision, not an accident.** `InputRef` carries its whole surface as inherent
+methods; an opt-in trait for these two alone would be the only accessor in the crate reachable
+only after an import, and the witness has to be readable inside a generic production that imports
+nothing. The cost of that choice is this section.
+
+**You are exposed if you wrote a `trip_snapshot` or `tripped_during_attempt` method of your own on
+[`InputRef`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html).** The paired shape is the
+one to look for, because it can compile on **both** revisions and switch both calls silently:
+
+```rust,ignore
+let baseline = inp.trip_snapshot();
+inp.tripped_during_attempt(baseline)
+```
+
+The argument type is inferred, so nothing at the call site names which item won. **The fix is
+UFCS**, which pins the item on either revision:
+
+```rust,ignore
+let baseline = MyExt::trip_snapshot(inp);
+MyExt::tripped_during_attempt(inp, baseline)
+```
+
+`ci/name_collision/` scores the four generated rows `ok*` — justified in `no_collision.txt` — and
+that classification is deliberately narrow. The `inherent_method` template's consumer takes
+`&mut self` while both tokora items take `&self`, so the consumer's item is found one autoref step
+earlier and wins on both sides: the probe is vacuous for these names and says so. **It is not
+evidence that the names cannot be stolen.** A consumer whose extension item takes `&self` competes
+at the same step tokora's does, and the harness cannot generate that consumer. This paragraph is
+the coverage for that case, which is why it is here rather than in the probe's baseline.
+
+`input::ResourceTripBaseline` is a new glob-reachable name in `tokora::input`; the probe scores it
+`glob-err`, the disclosed outcome — a `use tokora::input::*` alongside another glob exporting the
+same name is rejected by the compiler rather than silently resolved.
 
 #247 removes `Errors`' `DerefMut` and replaces the three legitimate uses it served with inherent
 methods. `Errors` has shipped since 0.7.3 **with no inherent item of its own**, so a consumer who

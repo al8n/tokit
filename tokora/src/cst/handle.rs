@@ -132,7 +132,11 @@ where
   sink: Sink<'inp, L, E>,
   /// The parse's descent-trip count, taken off the `Input` the driver was about to drop. See
   /// [`resource_trips`](Cst::resource_trips) for why the handle is the only place it can live.
-  resource_trips: usize,
+  ///
+  /// `u64` and not `usize`, because the counter it is copied from is: a `usize` counter is
+  /// exhaustible on a 32-bit target and this value would then be a floor wearing a tally's
+  /// clothes. See [`TRIP_COUNTER_EXHAUSTED`](crate::input::TRIP_COUNTER_EXHAUSTED).
+  resource_trips: u64,
 }
 
 impl<'inp, L, E> core::fmt::Debug for Cst<'inp, L, E>
@@ -140,11 +144,24 @@ where
   L: Lexer<'inp>,
   E: core::fmt::Debug,
 {
+  /// Renders the trip count as a **floor** where it is one, and exactly where it is not.
+  ///
+  /// [`resource_trips`](Cst::resource_trips) documents that a saturated counter reads "at least
+  /// this many"; this is the second public reading of the same value, and rendering the raw
+  /// number here would state a tally the value cannot support. The suffix is the whole
+  /// difference, and `a_saturated_cst_renders_its_trip_count_as_a_floor` pins it.
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_struct("Cst")
-      .field("sink", &self.sink)
-      .field("resource_trips", &self.resource_trips)
-      .finish()
+    let mut out = f.debug_struct("Cst");
+    out.field("sink", &self.sink);
+    if self.resource_trips == crate::input::TRIP_COUNTER_EXHAUSTED {
+      out.field(
+        "resource_trips",
+        &format_args!("{}+", crate::input::TRIP_COUNTER_EXHAUSTED),
+      );
+    } else {
+      out.field("resource_trips", &self.resource_trips);
+    }
+    out.finish()
   }
 }
 
@@ -163,7 +180,7 @@ where
   /// `resource_trips` comes from `Input::resource_trips`, read **before** `into_emitter` consumes
   /// the input.
   #[inline(always)]
-  pub(crate) const fn from_sink(sink: Sink<'inp, L, E>, resource_trips: usize) -> Self {
+  pub(crate) const fn from_sink(sink: Sink<'inp, L, E>, resource_trips: u64) -> Self {
     Self {
       sink,
       resource_trips,
@@ -207,6 +224,25 @@ where
   /// trips are distinguishable from one, which a flag cannot do — and a grammar that catches a
   /// trip itself and parses on is supported, so more than one is reachable.
   ///
+  /// # Two ceilings, and only one of them is an exhaustion point
+  ///
+  /// The cell behind this is a `u64`, and this reading is a `usize`, so on a target where those
+  /// differ there are two numbers and they mean different things.
+  ///
+  /// * **`usize::MAX` is a display clamp.** On a 32-bit target a count above it is returned as
+  ///   `usize::MAX`, and the value is then a **floor**: *at least this many*. Nothing has given up
+  ///   — the counter is still counting, and every attempt-relative reading inside the parse is
+  ///   still exact at and past that point, so a quiet attempt there still reads quiet.
+  ///   This type's `Debug` renders the underlying value, and marks it
+  ///   with a trailing `+` only at the real ceiling below.
+  /// * **`u64::MAX` is the exhaustion point**, where the counter stops recording and the
+  ///   attempt-relative verdicts fail closed. It takes 2^64 refusals in one input session and no
+  ///   program reaches it. See
+  ///   `input::TRIP_COUNTER_EXHAUSTED`.
+  ///
+  /// A `usize` reading that has clamped is therefore a floor for a *display* reason and not
+  /// because anything was lost; a value at the exhaustion point is a floor because it was.
+  ///
   /// # What it does not tell you
   ///
   /// Not *where*: a descent trip has a control stack rather than a position, and latches no
@@ -221,7 +257,14 @@ where
   /// the deepest *nested* construct that parses clean is `limitation - 1`.
   #[inline(always)]
   pub const fn resource_trips(&self) -> usize {
-    self.resource_trips
+    // The cell is `u64` so that a 32-bit target cannot exhaust it; this reading is `usize` because
+    // it always was. The clamp is therefore reachable only where `usize` is narrower than the
+    // count, and it is a floor there — the same floor the ceiling is, one door earlier.
+    if self.resource_trips > usize::MAX as u64 {
+      usize::MAX
+    } else {
+      self.resource_trips as usize
+    }
   }
 
   /// Sets the materialization-time trivia placement policy (builder form).

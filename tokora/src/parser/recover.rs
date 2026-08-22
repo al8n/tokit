@@ -315,9 +315,17 @@ where
 /// with no [`UnexpectedEnd`](crate::error::UnexpectedEnd) anywhere on that path to mark.
 ///
 /// All four are attempt-relative and all four are *read* on the failure path only. What a
-/// successful attempt pays is the two baselines taken before it: a `usize` load, and one clone of
-/// the latch — the same `Option<L::Offset>` the checkpoint this combinator already saves clones for
-/// its own rollback set.
+/// successful attempt pays is the **three** baselines taken before it, and it is three rather than
+/// two because the two counters are separate cells with separate granularities:
+///
+/// * `InputRef::trip_snapshot` — a `u64` load plus the issuing input's address, which is the
+///   nonce that makes a cross-fed baseline a panic rather than an answer;
+/// * `InputRef::scanner_trip_snapshot` — a second `u64` load;
+/// * `InputRef::latch_snapshot` — one clone of the latch, the same `Option<L::Offset>` the
+///   checkpoint this combinator already saves clones for its own rollback set.
+///
+/// So: two `u64` loads — one machine word each on a 64-bit target, two each on a 32-bit one — one
+/// address read, and one `Option<L::Offset>` clone, per attempt.
 ///
 /// # See Also
 ///

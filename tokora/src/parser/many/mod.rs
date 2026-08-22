@@ -583,7 +583,7 @@ where
 /// `sep/delim`'s epilogue, and `sep_while/delim`'s stall arm. Where a probe instead sits at the TOP
 /// of a cycle — `delim/repeated_while`'s mid-scan arm, and `sep_while/delim`'s front-empty and
 /// `Action::Stop` arms — only an *accepting* element can precede it, this cycle's baseline is taken
-/// a few lines above, and the term is a constant `false`; the call stays anyway, because a `usize`
+/// a few lines above, and the term is a constant `false`; the call stays anyway, because a `u64`
 /// comparison costs less than an exemption table, and because it lets `GATE_CENSUS` scan the
 /// verdict→commit region **per verdict** rather than compare tallies that any arrangement of
 /// needles would satisfy. It also fails closed if a later refactor moves an element attempt above
@@ -1704,7 +1704,7 @@ mod gate_census {
   ///   verdict→commit region *per verdict* instead of comparing two tallies that any arrangement of
   ///   needles would satisfy. Where a probe sits at the TOP of a cycle the gate is a constant
   ///   `false` (this cycle's baseline is taken a few lines above it and nothing since can trip), and
-  ///   it is kept anyway: a `usize` comparison is cheaper than an exemption table, and it fails
+  ///   it is kept anyway: a `u64` comparison is cheaper than an exemption table, and it fails
   ///   closed if a later refactor moves an element attempt above it;
   /// * a **direct** closer is one the driver committed straight from its own scan, with no probe
   ///   verdict at all. There are exactly two in the tree — `sep/delim`'s and `sep_while/delim`'s

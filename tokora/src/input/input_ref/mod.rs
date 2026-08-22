@@ -67,7 +67,7 @@ pub use descent::ResourceTripBaseline;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScannerTripBaseline {
   /// The counter's value when the baseline was taken.
-  count: usize,
+  count: u64,
 }
 
 #[cfg(test)]
@@ -75,7 +75,7 @@ impl ScannerTripBaseline {
   /// The raw count, for the in-crate cells that assert exact trip tallies rather than the
   /// attempt-relative verdict. There is no such door on the public sibling.
   #[inline(always)]
-  pub(crate) const fn count(self) -> usize {
+  pub(crate) const fn count(self) -> u64 {
     self.count
   }
 }
@@ -175,7 +175,7 @@ where
   /// [`raise_level`](Self::raise_level)'s trip arm, which is why grammar code cannot lower it:
   /// no handle method exposes a mutable route to the cell, and the recursion cell it guards is
   /// read-only too.
-  pub(super) resource_trips: &'closure mut usize,
+  pub(super) resource_trips: &'closure mut u64,
   /// The **scanner-trip counter**, borrowed from the owning [`Input`](super::Input) — see that
   /// field for why a monotone counter, and not the rollbackable poison boundary beside it, is what
   /// can witness a scanner stop across a nested speculation.
@@ -184,7 +184,7 @@ where
   /// [`scanner_tripped_during_attempt`](Self::scanner_tripped_during_attempt); its only writer is
   /// [`publish_scanner_trip`](Self::publish_scanner_trip), the infallible half of recording a
   /// terminal scanner stop, and no handle method exposes a mutable route to the cell.
-  pub(super) scanner_trips: &'closure mut usize,
+  pub(super) scanner_trips: &'closure mut u64,
   /// The **session cell**: the input's lineage memos (the live-checkpoint stack, the pin set, and
   /// the cache-push/checkpoint-id/savepoint counters), the handle's **emitter borrow** (the
   /// ground-truth emission log, reached through [`emitter`](Self::emitter)), and the live
@@ -1026,7 +1026,10 @@ where
   /// section 4 pins it as a defect, beside the control that shows an accepting emitter marks the
   /// same stop.
   ///
-  /// Costs one `usize` load per attempt: no scan, no lookahead fill and no token commit reads it.
+  /// Costs one `u64` load per attempt — one machine word on a 64-bit target, two on a 32-bit one
+  /// — and no scan, no lookahead fill and no token commit reads it. Unlike its descent twin this
+  /// baseline is taken **once per collection** rather than per element, so the 32-bit cost lands
+  /// once per driver rather than once per element.
   #[inline(always)]
   pub(crate) const fn scanner_trip_snapshot(&self) -> ScannerTripBaseline {
     ScannerTripBaseline {
@@ -1057,10 +1060,18 @@ where
   /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot), which is per *collection* where the
   /// descent baseline is per *element*.
   ///
-  /// Costs one `usize` load and a comparison, on the failure arm only.
+  /// Costs one `u64` load and a comparison.
+  ///
+  /// **When it runs is not this doc's to state**, and the only thing worth adding here is that it
+  /// is not the same answer as its twin's.
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries the one copy of that model,
+  /// derived from every call site in the crate; this verdict is its **own column** in that table,
+  /// differing from the descent column in both the order it is evaluated in and which closer
+  /// classes reach it. Read the values there rather than here — a copy of them here is how the
+  /// three previous versions of that model each went stale.
   #[inline(always)]
   pub(crate) const fn scanner_tripped_during_attempt(&self, since: ScannerTripBaseline) -> bool {
-    *self.scanner_trips != since.count
+    *self.scanner_trips == super::TRIP_COUNTER_EXHAUSTED || *self.scanner_trips != since.count
   }
 
   /// The **token budget** this parse's lexer produces items against: the ceiling, and what has
@@ -1320,7 +1331,7 @@ where
     // `Offset::Ord` against it, in front of that offset's destructor, and in front of the
     // derivation. See the section above for what each of those cost while they ran first.
     if self.token_budget.limit_probe_spent() {
-      // The witness. A `usize` increment, and nothing consumer-controlled precedes it in this
+      // The witness. A `u64` increment, and nothing consumer-controlled precedes it in this
       // body or in `lex_within_boundary` above it (`reached_boundary` compares only when a
       // boundary is latched, and a latched boundary returns `Stop` from there without reaching
       // this).
@@ -1380,7 +1391,7 @@ where
     // ── the refusal is DECIDED: an item exists and the ceiling refuses it ──
     //
     // Publish all three durable facts here, and nothing consumer-controlled may appear between
-    // this comment and the end of the publication. What runs is a `bool` store, a `usize`
+    // this comment and the end of the publication. What runs is a `bool` store, a `u64`
     // increment and one `mem::replace`; the boundary's derivation and clamp are already done, and
     // the refused item does not exist yet.
     //
@@ -1498,7 +1509,7 @@ where
     if !self.token_budget.is_exhausted() || self.poison_boundary.is_some() {
       return false;
     }
-    // The witness. A `usize` increment, and the driver's front-drain is the only consumer step
+    // The witness. A `u64` increment, and the driver's front-drain is the only consumer step
     // ahead of it.
     self.count_scanner_trip();
     // The memo, second, because deriving it is caller code and no ordering can make it infallible.
@@ -1618,7 +1629,7 @@ where
   /// a sentence in this paragraph, and a bare `enum` in `mod.rs` whose variants every descendant
   /// of `input_ref` could name.
   ///
-  /// What is left is a `usize` increment and one `Option::replace` — which *is* `mem::replace`, a
+  /// What is left is a `u64` increment and one `Option::replace` — which *is* `mem::replace`, a
   /// move, not an assignment. `*self.poison_boundary = Some(..)` would drop the displaced
   /// `Option<L::Offset>` **before** installing the new one, putting caller `Drop` code between the
   /// count and the boundary; the displaced value is returned instead, and `#[must_use]` makes a
@@ -1662,15 +1673,18 @@ where
   /// Counting every detected trip — including one that does not lower an already-latched
   /// boundary — is deliberate: the reading is per attempt, and a second trip inside a later
   /// attempt must not compare equal to that attempt's baseline just because the position it
-  /// latched is one an earlier trip had already reached. `wrapping_add` for the same reason it is
-  /// used for the descent counter: the reading is an inequality against a per-attempt baseline,
-  /// and wrapping is the one overflow behaviour under which consecutive values always differ.
+  /// latched is one an earlier trip had already reached. **Saturating** for the same reason the
+  /// descent counter is, and it used to wrap for the same wrong reason: an inequality against a
+  /// per-attempt baseline needs consecutive values to differ, which wrapping gives, but it also
+  /// needs the value never to return to a baseline after a positive number of trips, which
+  /// wrapping does not. See [`TRIP_COUNTER_EXHAUSTED`](super::TRIP_COUNTER_EXHAUSTED).
   ///
-  /// A `usize` load, an add and a store. It cannot unwind, and it needs no staging: that is what
-  /// lets the already-spent refusal publish it before any consumer step of its own.
+  /// A load, a saturating add and a store, on the `u64` cell — one machine word on a 64-bit
+  /// target and two on a 32-bit one. It cannot unwind, and it needs no staging: that is what lets
+  /// the already-spent refusal publish it before any consumer step of its own.
   #[inline(always)]
   fn count_scanner_trip(&mut self) {
-    *self.scanner_trips = self.scanner_trips.wrapping_add(1);
+    *self.scanner_trips = self.scanner_trips.saturating_add(1);
   }
 
   /// The **memo** half: installs the staged frontier, and hands back the boundary it displaced.

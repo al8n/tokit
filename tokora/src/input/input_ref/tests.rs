@@ -7849,6 +7849,13 @@ impl From<BombTripped> for BombErr {
   }
 }
 
+/// Added for the trip-counter ceiling cells, which need `descend` to build an error.
+impl<O, Lang: ?Sized> From<crate::error::RecursionLimitReached<O, Lang>> for BombErr {
+  fn from(_: crate::error::RecursionLimitReached<O, Lang>) -> Self {
+    BombErr::Limit
+  }
+}
+
 impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, Lang>> for BombErr {
   fn from(_: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
     BombErr::Lex
@@ -10801,7 +10808,7 @@ fn refusal_under_a_panicking_destructor(rounds: usize) -> (usize, usize, usize, 
     lex_calls(),
     inp.token_budget().spent(),
     unwound,
-    inp.scanner_trip_snapshot().count(),
+    inp.scanner_trip_snapshot().count() as usize,
     inp.is_poisoned(),
   )
 }
@@ -10878,7 +10885,7 @@ fn one_refusal_under_a_span_drop(bomb_at: usize) -> (usize, bool, usize, bool, u
   (
     lex_calls(),
     inp.token_budget().limit_probe_spent(),
-    inp.scanner_trip_snapshot().count(),
+    inp.scanner_trip_snapshot().count() as usize,
     inp.is_poisoned(),
     bomb_fired(),
     drops,
@@ -10974,7 +10981,7 @@ fn charge_under_a_panicking_lexer_span(rounds: usize) -> (usize, usize, usize, u
     inp.token_budget().spent(),
     unwound,
     bomb_fired(),
-    inp.scanner_trip_snapshot().count(),
+    inp.scanner_trip_snapshot().count() as usize,
     inp.is_poisoned(),
   )
 }
@@ -11011,7 +11018,7 @@ fn probe_under_a_panicking_lexer_span(rounds: usize) -> (usize, usize, usize, us
     inp.token_budget().spent(),
     unwound,
     bomb_fired(),
-    inp.scanner_trip_snapshot().count(),
+    inp.scanner_trip_snapshot().count() as usize,
     inp.is_poisoned(),
   )
 }
@@ -11048,7 +11055,7 @@ fn a_lexer_that_dies_before_producing(rounds: usize) -> (usize, usize, usize, us
     inp.token_budget().spent(),
     unwound,
     bomb_fired(),
-    inp.scanner_trip_snapshot().count(),
+    inp.scanner_trip_snapshot().count() as usize,
     inp.is_poisoned(),
   )
 }
@@ -11218,7 +11225,7 @@ fn refusal_under_a_panicking_cache_back(bomb_at: usize, exit: CaughtExit) -> (Re
   );
   let mut inp = input.as_ref();
 
-  let base = inp.scanner_trip_snapshot().count();
+  let base = inp.scanner_trip_snapshot().count() as usize;
   let calls = Cell::new(0usize);
   reset_bomb_fired();
   let kept = inp.attempt(|txn| {
@@ -11239,7 +11246,7 @@ fn refusal_under_a_panicking_cache_back(bomb_at: usize, exit: CaughtExit) -> (Re
     (
       kept.unwrap_or(0),
       inp.token_budget().limit_probe_spent(),
-      inp.scanner_trip_snapshot().count() - base,
+      inp.scanner_trip_snapshot().count() as usize - base,
       inp.is_poisoned(),
       bomb_fired(),
     ),
@@ -11263,7 +11270,7 @@ fn refusal_under_a_panicking_offset_clone(bomb_at: usize, exit: CaughtExit) -> (
   );
   let mut inp = input.as_ref();
 
-  let base = inp.scanner_trip_snapshot().count();
+  let base = inp.scanner_trip_snapshot().count() as usize;
   let clones = Cell::new(0usize);
   reset_bomb_fired();
   let kept = inp.attempt(|txn| {
@@ -11284,7 +11291,7 @@ fn refusal_under_a_panicking_offset_clone(bomb_at: usize, exit: CaughtExit) -> (
     (
       kept.unwrap_or(0),
       inp.token_budget().limit_probe_spent(),
-      inp.scanner_trip_snapshot().count() - base,
+      inp.scanner_trip_snapshot().count() as usize - base,
       inp.is_poisoned(),
       bomb_fired(),
     ),
@@ -11513,7 +11520,7 @@ fn refusal_after_the_probe_is_spent(
     Reopened::Rollback => REFUSAL_CEILING,
     Reopened::Rekey => 0,
   };
-  let base = inp.scanner_trip_snapshot().count();
+  let base = inp.scanner_trip_snapshot().count() as usize;
   let steps = Cell::new(0usize);
   reset_bomb_fired();
   let kept = inp.attempt(|txn| {
@@ -11539,7 +11546,7 @@ fn refusal_after_the_probe_is_spent(
     (
       kept.unwrap_or(0),
       inp.token_budget().limit_probe_spent(),
-      inp.scanner_trip_snapshot().count() - base,
+      inp.scanner_trip_snapshot().count() as usize - base,
       inp.is_poisoned(),
       bomb_fired(),
     ),
@@ -11782,7 +11789,7 @@ fn truncation_under_a_panicking_front_drain(how: Reopened, bomb_at: usize) -> Re
     Reopened::Rollback => REFUSAL_CEILING,
     Reopened::Rekey => 0,
   };
-  let base = inp.scanner_trip_snapshot().count();
+  let base = inp.scanner_trip_snapshot().count() as usize;
   reset_bomb_fired();
   let kept = inp.attempt(|txn| {
     let taken = Cell::new(0usize);
@@ -11805,7 +11812,7 @@ fn truncation_under_a_panicking_front_drain(how: Reopened, bomb_at: usize) -> Re
   (
     kept.unwrap_or(0),
     inp.token_budget().refused_an_item(),
-    inp.scanner_trip_snapshot().count() - base,
+    inp.scanner_trip_snapshot().count() as usize - base,
     inp.is_poisoned(),
     bomb_fired(),
   )
@@ -11891,14 +11898,14 @@ fn a_latched_boundary_answers_without_counting_a_second_trip() {
   );
 
   // The boundary SURVIVES: every further ask is the same stop, and the same stop is one stop.
-  let base = inp.scanner_trip_snapshot().count();
+  let base = inp.scanner_trip_snapshot().count() as usize;
   for round in 0..8 {
     assert!(
       matches!(inp.next(), Ok(None)) && inp.is_poisoned(),
       "round {round}: a latched boundary must keep answering terminally"
     );
   }
-  let latched = inp.scanner_trip_snapshot().count() - base;
+  let latched = inp.scanner_trip_snapshot().count() as usize - base;
 
   // The boundary is CLEARED: the ask that finds it gone is a refused entry, and a refused entry is
   // counted — once, and then the memo holds again.
@@ -11910,7 +11917,7 @@ fn a_latched_boundary_answers_without_counting_a_second_trip() {
       "round {round}: a cleared boundary must be re-established terminally"
     );
   }
-  let reopened = inp.scanner_trip_snapshot().count() - base - latched;
+  let reopened = inp.scanner_trip_snapshot().count() as usize - base - latched;
 
   assert_eq!(
     (latched, reopened),
@@ -11973,6 +11980,216 @@ fn a_baseline_from_another_live_input_panics_instead_of_answering() {
 
   let from_first = first.trip_snapshot();
   let _ = second.tripped_during_attempt(from_first);
+}
+
+/// A **quiet attempt reads quiet** at the point a `usize` counter would have been exhausted.
+///
+/// **This cell is written from the side the repair is not.** The first repair here — saturate, and
+/// answer `true` at the ceiling — was proved by cells that take a baseline and then drive real
+/// trips, and every one of them passed while the verdict had become permanently `true`: at the
+/// ceiling the exhausted disjunct fires whether or not anything tripped, so an attempt that
+/// descended *nothing* was classified terminal for the rest of the session. Wrapping failed open
+/// once; saturation failed closed forever. A probe that always trips after taking its baseline
+/// cannot see the second, which is the same shape defect as a suite built from one generator.
+///
+/// The representation is what fixes it: both counters are `u64` rather than `usize`, so the point
+/// a 32-bit loop can drive them to — `usize::MAX`, which is 2^32 refusals and a loop rather than a
+/// lifetime — is nowhere near their ceiling and the reading there is still exact. That is the
+/// state this cell seeds, and it asserts **both** directions from it.
+#[test]
+fn a_quiet_attempt_reads_quiet_where_a_usize_counter_would_have_been_exhausted() {
+  let mut input = fresh_trip_input();
+  let inp = input.as_ref();
+
+  // The point a 32-bit `usize` counter dies at, and a `u64` one does not notice. Written as
+  // `u32::MAX` rather than `usize::MAX` so the cell seeds the SAME state on every host: on a
+  // 64-bit one `usize::MAX` is the absolute ceiling and the state below would be a different
+  // question, which is the next cell's.
+  let practical_ceiling = u64::from(u32::MAX);
+  assert!(
+    crate::input::TRIP_COUNTER_EXHAUSTED > practical_ceiling,
+    "the link this cell rests on: the counters' ceiling is strictly ABOVE the point a 32-bit loop \
+     can drive them to. Narrow them back to `usize` and this fails on a 32-bit target, which is \
+     where the defect lived"
+  );
+  *inp.resource_trips = practical_ceiling;
+  *inp.scanner_trips = practical_ceiling;
+
+  // DESCENT — baseline here, then nothing at all.
+  let quiet = inp.trip_snapshot();
+  assert!(
+    !inp.tripped_during_attempt(quiet),
+    "zero descents after a baseline taken at 2^32 trips: the attempt is quiet and the verdict \
+     must say so. Under the `usize` counter this read `true`, permanently, for the rest of the \
+     session"
+  );
+
+  // SCANNER — the same question of the internal predicate, which had the same defect.
+  let quiet_scan = inp.scanner_trip_snapshot();
+  assert!(
+    !inp.scanner_tripped_during_attempt(quiet_scan),
+    "and the scanner predicate likewise: no scan tripped inside this attempt"
+  );
+
+  // And the other direction still holds from the same state: one real event, one `true`.
+  let before = inp.trip_snapshot();
+  *inp.resource_trips = practical_ceiling + 1;
+  assert!(
+    inp.tripped_during_attempt(before),
+    "a trip from the same state still reads `true` — the fix is a wider counter, not a blunter \
+     verdict"
+  );
+  let before_scan = inp.scanner_trip_snapshot();
+  *inp.scanner_trips = practical_ceiling + 1;
+  assert!(
+    inp.scanner_tripped_during_attempt(before_scan),
+    "and the scanner predicate likewise"
+  );
+}
+
+/// The descent counter **saturates**, and the verdict never answers `false` after a real trip.
+///
+/// The contract the counter has to keep is not "consecutive values differ" — wrapping gives that —
+/// but "the value never returns to a baseline after a positive number of trips", which wrapping
+/// does not. `u64::MAX + 1` trips alias a baseline exactly.
+///
+/// A loop that long is not a test, so the counter is seeded to one below the ceiling and driven
+/// with **real** refusals from there — the arithmetic under test is the real `saturating_add` in
+/// `raise_level` and the real verdict, on the real types.
+/// `a_narrowed_width_model_shows_what_wrapping_did` covers the whole range at a width a test can
+/// walk.
+#[test]
+fn the_descent_counter_saturates_and_the_verdict_never_reads_false_after_a_trip() {
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  )
+  .with_recursion_limiter(crate::state::recursion_tracker::RecursionLimiter::with_limitation(0));
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    REFUSAL_SRC,
+    BombTally::default(),
+    context,
+  );
+  let mut inp = input.as_ref();
+
+  // One below the ceiling. The field is the input's own cell; nothing else writes it.
+  *inp.resource_trips = crate::input::TRIP_COUNTER_EXHAUSTED - 1;
+
+  let below = inp.trip_snapshot();
+  for round in 0..3 {
+    assert!(
+      inp.descend().is_err(),
+      "round {round}: a zero recursion limit refuses every descent"
+    );
+  }
+  assert_eq!(
+    *inp.resource_trips,
+    crate::input::TRIP_COUNTER_EXHAUSTED,
+    "three refusals from one below the ceiling must SATURATE. Wrapping left `1` here, having \
+     passed through the value that aliases this attempt's baseline"
+  );
+  assert!(
+    inp.tripped_during_attempt(below),
+    "and the verdict is `true`: three descents refused inside this attempt"
+  );
+}
+
+/// **A documented residual, not a passing grade.** At the absolute ceiling the witness
+/// over-reports, and it is pinned here so the boundary cannot move silently.
+///
+/// Past `u64::MAX` trips the counter cannot record another and the two questions — "did this
+/// attempt trip" and "did it not" — become one value. Something has to be answered, and this
+/// witness fails closed everywhere else, so it fails closed here: `true`. That is wrong for a
+/// quiet attempt, and it is *unreachable* rather than merely unlikely — 2^64 refusals inside one
+/// input session, which no program reaches and which the cell above shows is not where a 32-bit
+/// loop lands. The state is arrived at here only by writing the cell directly.
+///
+/// If a representation ever makes the distinction survivable past this point, this cell is the one
+/// that must change.
+#[test]
+fn at_the_absolute_ceiling_the_verdict_over_reports_and_that_is_the_documented_residual() {
+  let mut input = fresh_trip_input();
+  let inp = input.as_ref();
+
+  *inp.resource_trips = crate::input::TRIP_COUNTER_EXHAUSTED;
+  *inp.scanner_trips = crate::input::TRIP_COUNTER_EXHAUSTED;
+
+  let quiet = inp.trip_snapshot();
+  assert!(
+    inp.tripped_during_attempt(quiet),
+    "at `u64::MAX` the count can no longer move, so a quiet attempt is indistinguishable from a \
+     tripping one and the verdict fails CLOSED"
+  );
+  let quiet_scan = inp.scanner_trip_snapshot();
+  assert!(
+    inp.scanner_tripped_during_attempt(quiet_scan),
+    "and the scanner predicate answers the same way, for the same reason"
+  );
+}
+
+/// What wrapping did, over a whole range a test can walk.
+///
+/// The real counters are `u64`, so their aliasing point is 2^64 calls away. The
+/// arithmetic is the same at any width, so this walks it at 8 bits: the two expressions below are
+/// the two the crate runs, narrowed, and the model is only worth its assertions insofar as they
+/// stay spelled the same as `raise_level`'s `saturating_add` and the verdict's disjunct.
+///
+/// The property is one-directional on purpose. It is **not** "the verdict is exact" — past the
+/// ceiling it deliberately over-reports — it is "the verdict is never `false` after a positive
+/// number of trips", which is the direction a wrong answer must fail in.
+#[test]
+fn a_narrowed_width_model_shows_what_wrapping_did() {
+  const W: u32 = 8;
+  const CEILING: u32 = (1 << W) - 1;
+
+  // The OLD arithmetic: wrap, and compare for pure inequality.
+  let wrapping = |base: u32, trips: u32| -> bool {
+    let mut c = base;
+    for _ in 0..trips {
+      c = (c + 1) % (1 << W);
+    }
+    c != base
+  };
+  // The NEW arithmetic: saturate, and fail closed at the ceiling.
+  let saturating = |base: u32, trips: u32| -> bool {
+    let mut c = base;
+    for _ in 0..trips {
+      c = (c + 1).min(CEILING);
+    }
+    c == CEILING || c != base
+  };
+
+  assert!(
+    !wrapping(0, 1 << W),
+    "the aliasing itself: 2^{W} trips from a baseline of 0 return to it, and the old verdict \
+     answered `false` over an attempt in which every descent refused"
+  );
+  assert!(
+    saturating(0, 1 << W),
+    "the repair: the same attempt now answers `true`"
+  );
+
+  // The whole range, both mechanisms, in the one direction that matters.
+  let mut wrapping_holes = 0usize;
+  for base in 0..=CEILING {
+    for trips in 1..=(1 << W) {
+      if !wrapping(base, trips) {
+        wrapping_holes += 1;
+      }
+      assert!(
+        saturating(base, trips),
+        "base {base}, {trips} trips: the verdict must never be `false` after a positive number of \
+         trips"
+      );
+    }
+  }
+  assert_eq!(
+    wrapping_holes,
+    (CEILING as usize) + 1,
+    "one hole per baseline under the old arithmetic — every baseline had exactly one trip count \
+     that read clean, which is what makes this a property of the representation and not of one \
+     unlucky value"
+  );
 }
 
 /// A bare input with no budget configured — the fixture the two baseline cells above share.
@@ -12123,7 +12340,7 @@ fn a_lexer_limit_trip_is_terminal_and_the_budget_witness_stays_false() {
   );
   let mut inp = input.as_ref();
 
-  let base = inp.scanner_trip_snapshot().count();
+  let base = inp.scanner_trip_snapshot().count() as usize;
   let mut taken = 0usize;
   while let Ok(Some(_)) = inp.next() {
     taken += 1;
@@ -12132,7 +12349,7 @@ fn a_lexer_limit_trip_is_terminal_and_the_budget_witness_stays_false() {
   assert_eq!(
     (
       taken,
-      inp.scanner_trip_snapshot().count() - base,
+      inp.scanner_trip_snapshot().count() as usize - base,
       inp.is_poisoned(),
       inp.token_budget().refused_an_item(),
       inp.token_budget().is_exhausted(),
@@ -12192,7 +12409,7 @@ fn trip_under_a_panicking_error_drop(bomb_at: usize, exit: CaughtExit) -> (Trip,
   );
   let mut inp = input.as_ref();
 
-  let base = inp.scanner_trip_snapshot().count();
+  let base = inp.scanner_trip_snapshot().count() as usize;
   let drops = Cell::new(0usize);
   let built = Cell::new(0usize);
   reset_bomb_fired();
@@ -12215,7 +12432,7 @@ fn trip_under_a_panicking_error_drop(bomb_at: usize, exit: CaughtExit) -> (Trip,
     (
       kept.unwrap_or(0),
       built.get(),
-      inp.scanner_trip_snapshot().count() - base,
+      inp.scanner_trip_snapshot().count() as usize - base,
       inp.is_poisoned(),
       bomb_fired(),
     ),

@@ -35,12 +35,32 @@ use super::*;
 ///   input's baseline, which is the shape a driver holding two inputs alive would write. That one
 ///   fails with `E0521: borrowed data escapes outside of function`.
 ///
-/// * **Invariance is not what does that**, and the `fn(&'closure ()) -> &'closure ()` form is
-///   prophylaxis rather than a load-bearing claim. Planted covariant, *both* shapes above are still
-///   refused — the parameter's presence is the whole of it. It is kept because it matches
-///   `SessionPointId` and `SavepointId`, and because it forecloses a family of coercions rather
-///   than any one demonstrated misuse. Saying more than that would be prose a plant has already
-///   contradicted.
+/// * **Invariance is load-bearing, at an identified site, and the map is measured rather than
+///   asserted** — this sentence has been wrong twice, so what follows is what flipping the brand
+///   to a bare reference measurably changes and what it does not.
+///
+///   | shape | invariant | covariant |
+///   |---|---|---|
+///   | a bare region-shrinking coercion on this type | refused | **accepted** |
+///   | a generic adapter: `&mut InputRef<'short>` plus a baseline `<'long>`, `'long: 'short` | refused | **accepted** |
+///   | a `Cell` stash | refused | refused |
+///   | a closure capture under a `for<'c>` bound | refused | refused |
+///   | a hand-written [`ParseInput`](crate::ParseInput) impl carrying one in a field | refused | refused |
+///
+///   The **adapter row is the load-bearing one**, and it is a consumption site — which is what an
+///   earlier version of this paragraph got wrong when it concluded from the last three rows that
+///   the brand was redundant with [`InputRef`]'s own invariance in `'closure`. In those three the
+///   handle is itself coerced or universally quantified, so its invariance already refuses and the
+///   brand's cannot be seen. In the adapter the handle sits at **one fixed region and is never
+///   coerced**; only the baseline moves, and then the brand is the only thing refusing. Under a
+///   covariant brand that call compiles, and it is publicly reachable — carry an outer baseline
+///   through an inner parse's context and the nested parse cross-feeds a foreign baseline into the
+///   nonce panic. The brand is what keeps that unreachable from safe code.
+///
+///   Three probes agreed the brand was inert and all three shared a shape: each put the handle
+///   somewhere its own invariance would refuse first. Agreement between probes that share a shape
+///   is not independent evidence.
+///
 ///
 /// * **The nonce covers what is left, which is inside this crate.** Two handles minted from
 ///   `Input::as_ref` in one scope have ordinary inference regions that
@@ -61,17 +81,19 @@ use super::*;
 #[derive(Clone, Copy)]
 pub struct ResourceTripBaseline<'closure> {
   /// The counter's value when the baseline was taken.
-  count: usize,
+  count: u64,
   /// The identity of the input that issued it: the address of that input's resource-trip slot.
-  /// Distinct inputs are distinct structs at distinct addresses, and the slot is a `usize` so it
-  /// is never zero-sized.
+  /// Distinct inputs are distinct structs at distinct addresses, and the slot is a `u64` so it is
+  /// never zero-sized.
   nonce: usize,
   /// Invariant in `'closure`, through the fn-pointer form rather than a bare reference.
   ///
-  /// The invariance is **not** what refuses a foreign baseline — planted covariant, every misuse
-  /// this type is meant to refuse is still refused by the parameter's presence alone, and the
-  /// type's own docs record that measurement. It is the form the crate's other branded ids use,
-  /// and it costs nothing to keep; it is not evidence for anything.
+  /// **Load-bearing**, and the type's own docs carry the measured map of where. Flipping it to a
+  /// bare reference makes two shapes compile that must not: a plain region-shrinking coercion, and
+  /// — the one that matters — a generic adapter holding the handle at one fixed region while only
+  /// the baseline is coerced, which is publicly reachable and would feed a foreign baseline into
+  /// the nonce panic. It is inert only where [`InputRef`]'s own invariance in `'closure` refuses
+  /// first, which is not everywhere.
   _brand: PhantomData<fn(&'closure ()) -> &'closure ()>,
 }
 
@@ -358,11 +380,19 @@ where
       //
       // Counting rather than latching a `bool` is what makes the reading attempt-relative: a
       // consulting site compares the value against the one its attempt started with, and a second
-      // trip after a caught first one must not compare equal to it. `wrapping_add` for the same
-      // reason — the comparison is an inequality, and wrapping is the one overflow behaviour under
-      // which consecutive values always differ (a saturating counter would silently stop reporting
-      // new trips at its ceiling). Reaching the wrap needs `usize::MAX` calls of this function.
-      *self.resource_trips = self.resource_trips.wrapping_add(1);
+      // trip after a caught first one must not compare equal to it.
+      //
+      // SATURATING on a `u64` cell, and this used to be `wrapping_add` on a `usize` one. The
+      // argument for wrapping was that an inequality needs consecutive values to differ, which it
+      // gives — but the reading also needs the value never to RETURN to a baseline after a
+      // positive number of trips, and wrapping is the one behaviour that guarantees it does. At
+      // `usize` width that aliased after 2^32 refusals on a 32-bit target, which is a loop rather
+      // than a lifetime once a zero recursion limit makes every call of this function a trip.
+      // Saturating alone then made the mirror mistake — the verdict's fail-closed disjunct fires
+      // at the ceiling whether or not anything tripped — so the width is what carries the repair
+      // and the disjunct only covers a point no program reaches. See
+      // `crate::input::TRIP_COUNTER_EXHAUSTED` for both ceilings and the measured cost.
+      *self.resource_trips = self.resource_trips.saturating_add(1);
       // Committed consumption, not the cache-front cursor: the same metric the pratt drivers'
       // stall exits report, so the offset does not move with how much lookahead is buffered.
       return Err(RecursionLimitReached::of(self.span().end(), exceeded));
@@ -505,6 +535,110 @@ where
   /// }
   /// ```
   ///
+  /// **A hand-written [`ParseInput`](crate::ParseInput) impl is refused too**, and it is the shape
+  /// a parser combinator carrying a baseline in a field would take. Its control first — the same
+  /// impl carrying a region-free `usize` — which compiles:
+  ///
+  /// ```rust
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext, ParseInput};
+  ///
+  /// struct Control {
+  ///   depth: usize,
+  /// }
+  ///
+  /// impl<'inp, L, Ctx> ParseInput<'inp, L, bool, Ctx> for Control {
+  ///   fn parse_input(
+  ///     &mut self,
+  ///     input: &mut InputRef<'inp, '_, L, Ctx>,
+  ///   ) -> Result<bool, <Ctx::Emitter as Emitter<'inp, L>>::Error>
+  ///   where
+  ///     L: Lexer<'inp>,
+  ///     Ctx: ParseContext<'inp, L>,
+  ///   {
+  ///     Ok(input.recursion().depth() == self.depth)
+  ///   }
+  /// }
+  /// ```
+  ///
+  /// and the baseline in the same field position, which does not — the method's handle region is
+  /// fresh for every call, and the field's is fixed by the struct:
+  ///
+  /// ```compile_fail
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext, ParseInput, input::ResourceTripBaseline};
+  ///
+  /// struct Probe<'closure> {
+  ///   base: ResourceTripBaseline<'closure>,
+  /// }
+  ///
+  /// impl<'inp, 'closure, L, Ctx> ParseInput<'inp, L, bool, Ctx> for Probe<'closure> {
+  ///   fn parse_input(
+  ///     &mut self,
+  ///     input: &mut InputRef<'inp, '_, L, Ctx>,
+  ///   ) -> Result<bool, <Ctx::Emitter as Emitter<'inp, L>>::Error>
+  ///   where
+  ///     L: Lexer<'inp>,
+  ///     Ctx: ParseContext<'inp, L>,
+  ///   {
+  ///     // error: lifetime may not live long enough
+  ///     Ok(input.tripped_during_attempt(self.base))
+  ///   }
+  /// }
+  /// ```
+  ///
+  /// **The invariance rails are different cells**, because the three shapes above are refused
+  /// under either variance — see [`ResourceTripBaseline`] for the measured map. Two shapes the
+  /// brand alone decides. The bare coercion:
+  ///
+  /// ```compile_fail
+  /// use tokora::input::ResourceTripBaseline;
+  ///
+  /// // error: lifetime may not live long enough — invariant, so `'long` cannot shrink
+  /// fn shrink<'long: 'short, 'short>(
+  ///   b: ResourceTripBaseline<'long>,
+  /// ) -> ResourceTripBaseline<'short> {
+  ///   b
+  /// }
+  /// ```
+  ///
+  /// and the one that makes it matter — a generic adapter holding the handle at **one fixed
+  /// region**, so `InputRef`'s own invariance never enters and only the baseline is asked to
+  /// coerce. Its control first, the same adapter over a region-free `usize`:
+  ///
+  /// ```rust
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext};
+  ///
+  /// fn adapt_a_number<'inp, 'short, L, Ctx>(
+  ///   inp: &mut InputRef<'inp, 'short, L, Ctx>,
+  ///   depth: usize,
+  /// ) -> bool
+  /// where
+  ///   L: Lexer<'inp>,
+  ///   Ctx: ParseContext<'inp, L>,
+  /// {
+  ///   inp.recursion().depth() == depth
+  /// }
+  /// ```
+  ///
+  /// and the baseline in the same position, which does not compile — and **would** compile under a
+  /// covariant brand, which is the whole of why the brand is not prophylaxis:
+  ///
+  /// ```compile_fail
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext, input::ResourceTripBaseline};
+  ///
+  /// fn adapt<'inp, 'long: 'short, 'short, L, Ctx>(
+  ///   inp: &mut InputRef<'inp, 'short, L, Ctx>,
+  ///   base: ResourceTripBaseline<'long>,
+  /// ) -> bool
+  /// where
+  ///   L: Lexer<'inp>,
+  ///   Ctx: ParseContext<'inp, L>,
+  /// {
+  ///   // error: lifetime may not live long enough — only the baseline is coerced here, so this is
+  ///   // the brand refusing and not the handle's own invariance
+  ///   inp.tripped_during_attempt(base)
+  /// }
+  /// ```
+  ///
   /// What the region parameter does **not** catch is two inputs alive at once *inside this crate*,
   /// where handles are minted directly and their regions unify. That is a programmer error rather
   /// than a parse outcome, and
@@ -530,12 +664,68 @@ where
   /// the guard on top of this pair; a consumer whose unit is a region of its own loop could not
   /// have built this pair on top of a guard.
   ///
-  /// # Why it is public
+  /// # Why it is public, and why it is inherent
   ///
-  /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries that argument.
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries the first argument.
   ///
-  /// Costs one `usize` load and one address read per attempt, and nothing anywhere else: no scan,
-  /// no lookahead fill and no token commit reads or writes either.
+  /// **Inherent rather than an opt-in trait, deliberately.** An inherent item wins the method pick
+  /// over an extension trait's, so adding these two names to a type that already shipped can take
+  /// a call away from a consumer who wrote either name on [`InputRef`] — silently, where the
+  /// paired `let b = inp.trip_snapshot(); inp.tripped_during_attempt(b)` compiles on both sides
+  /// and infers the argument. A trait would avoid that and cost an import. The form is chosen
+  /// anyway, because `InputRef` carries its whole surface as inherent methods and a witness that
+  /// had to be imported would be unreadable inside a generic production that imports nothing — an
+  /// opt-in trait for these two alone would be the only such accessor in the crate. The cost is
+  /// paid where this crate pays it: disclosed in the CHANGELOG's "no diagnostic at the call site"
+  /// section, with the UFCS spelling that restores the consumer's item, and classified in
+  /// `ci/name_collision/no_collision.txt` with what that classification does *not* establish.
+  ///
+  /// # What it costs, on both word sizes
+  ///
+  /// A `u64` load and one address read per attempt, and nothing anywhere else: no scan, no
+  /// lookahead fill and no token commit reads or writes either. The count is **one machine word on
+  /// a 64-bit target and two on a 32-bit one** — it is `u64` rather than `usize` for the reason
+  /// `input::TRIP_COUNTER_EXHAUSTED` gives, and this is the price
+  /// of it.
+  ///
+  /// **This call is on the hot path of every *successful* element**, because the descent baseline
+  /// is taken per element — so the price was measured rather than argued. Every figure below is
+  /// `thumbv6m-none-eabi` at `-O`, the narrowest supported target, except where it says otherwise.
+  ///
+  /// | | `usize` | `u64` | delta | runs |
+  /// |---|---|---|---|---|
+  /// | this call | 5 instr | 7 instr | **+2** | per element |
+  /// | [`tripped_during_attempt`](Self::tripped_during_attempt) | 17 instr | 22 instr | +5 | 0-2 per collection termination, by class — see its own table |
+  /// | an element loop (N of the first, one of the second) | 31 instr | 38 instr | +7 | per collection |
+  /// | that loop's stack frame | 16 B | 24 B | +8 B | per collection |
+  /// | [`ResourceTripBaseline`] itself | 8 B, align 4 | 16 B, align 8 | **×2** | carried per element |
+  ///
+  /// The **layout** row is the one an instruction count does not show: the baseline is `Copy` and
+  /// passed by value, so a 32-bit element loop carries twice the value it used to. It is in the
+  /// accounting because it was missed the first time this was priced.
+  ///
+  /// Whole-parse, on `wasm32-wasip1` — the widest 32-bit target that can be *executed* here, since
+  /// `i686` cannot link on this host — a collection-parse binary grew **33 bytes** (120,421 →
+  /// 120,454, +0.027%), and interleaved executed latency showed **no regression in either
+  /// workload shape**: a long single collection at `-5.8%` min / `-5.3%` median, and many short
+  /// collections — the shape the per-termination `+5` makes expensive — at `-0.35%` min / `-7.25%`
+  /// median, n=12 each. Both sides land at or below zero, which is an instrument that cannot
+  /// resolve the change rather than a speedup.
+  ///
+  /// **What the executed measurement covers**, stated rather than generalised: the probe is a
+  /// non-delimited collection terminating by **decline** — one of the six classes in the table on
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt). Of the five it does not exercise,
+  /// four are **cheaper or equal** per termination; which they are, and why, is that table's to
+  /// say. The one that is **not** cheaper has to be named here rather than deferred, because it is
+  /// the bound on this measurement: a [`skip_then_retry`](crate::ParseInput::skip_then_retry)
+  /// workload pays both verdicts per **successful** sync or advance step, and that shape is
+  /// unmeasured.
+  ///
+  /// **Accepted on that scope**: two instructions and eight stack bytes per element loop, against
+  /// an element that has already run a cache probe or a full lex and commit, buys a counter a
+  /// 32-bit loop cannot exhaust. Keeping `count` at `usize` and moving the exhaustion distinction
+  /// to a second cell would buy back the four bytes and add a load at the same sites, and the
+  /// executed measurement gives it nothing to recover.
   #[inline(always)]
   pub fn trip_snapshot(&self) -> ResourceTripBaseline<'closure> {
     ResourceTripBaseline {
@@ -550,8 +740,8 @@ where
   ///
   /// The same derivation [`begin_point`](InputRef::begin_point) uses for its session ids, off this
   /// witness's own cell rather than the poison boundary. Two simultaneously-live inputs are
-  /// distinct structs at distinct addresses and the slot is a `usize`, so it is never zero-sized
-  /// and the two can never collide.
+  /// distinct structs at distinct addresses and the slot is a `u64`, so it is never zero-sized and
+  /// the two can never collide.
   #[inline(always)]
   fn trip_nonce(&self) -> usize {
     core::ptr::from_ref(&*self.resource_trips).addr()
@@ -684,9 +874,37 @@ where
   /// instead of silently truncating, and it is distinguishable from a real trip by not being a
   /// `bool` at all.
   ///
-  /// The check is one `usize` comparison on a path that already runs one, and its branch is cold.
+  /// The check is one word-pair comparison on a path that already runs one, and its branch is
+  /// cold.
   ///
-  /// Costs two `usize` comparisons, on the failure arm only.
+  /// # When each verdict runs — the table, derived from every call site
+  ///
+  /// **This is the one copy of this model.** Three previous versions of it were each written from
+  /// the call sites the author happened to look at, and each was wrong in a different way: "on the
+  /// failure arm only" missed the clean exits, "on every normal termination" missed that some
+  /// terminations evaluate nothing and some evaluate only half, and both missed the two
+  /// `recovery_gate` sites entirely. So this is enumerated from the code: there are exactly **five**
+  /// places in the crate that evaluate either verdict, and the six termination classes fall out of
+  /// them rather than being asserted beside them.
+  ///
+  /// | class | site | descent | scanner | reached when |
+  /// |---|---|---|---|---|
+  /// | failed element | `many::file_element_failure` | 4th term | 3rd term | an element returned `Err`. Both sit behind `is_incomplete_error` and `at_committed_boundary`, so either can be short-circuited away |
+  /// | decline or stall | `many::absence_after_element` | 3rd term | **1st term** | a driver concludes absence. The scanner verdict always runs; the descent one only if the scanner and latch reads are both false |
+  /// | probed closer | `many::close_after_element` | only term | **never** | a probe verdict handed over a real closer. The scanner reading is deliberately absent — a pre-trip closer settles the position question and only that |
+  /// | direct closer | the mid-scan arms of `sep/delim` and `sep_while/delim` | **never** | **never** | a closer committed straight from the driver's own scan. The cycle's final `trip_snapshot` is paid and **no verdict is** |
+  /// | recovery failure | `parser::recovery_gate::judge` | 3rd term | 4th term | a recovery attempt returned `Err`. Both sit behind `is_incomplete()` and `is_terminal()` |
+  /// | successful recovery step | `parser::recovery_gate::recovery_step` | **1st term** | 2nd term | a `skip_then_retry` skip or advance **succeeded**. The descent verdict always runs — the one place either runs after something worked |
+  ///
+  /// Two things the table does not contain, because they are what it is *for*. A verdict is
+  /// **absent from an accepted, progressing element** — no row covers that arm, and its absence is
+  /// the point of taking the baseline per element. And there is **no single frequency**: read the
+  /// rows for what each class costs rather than taking a number from here, because anything
+  /// stating one number per collection is describing one row and calling it the model.
+  ///
+  /// Costs a nonce comparison and a `u64` comparison. Measured on `thumbv6m-none-eabi`, `-O`: **17
+  /// instructions at `usize`, 22 at `u64`**. [`trip_snapshot`](Self::trip_snapshot) carries the
+  /// whole cost table and the scope the measurement covers.
   ///
   /// # Panics
   ///
@@ -700,7 +918,8 @@ where
        parse this handle knows nothing about. Take the baseline from the same handle that reads \
        the verdict."
     );
-    *self.resource_trips != since.count
+    *self.resource_trips == crate::input::TRIP_COUNTER_EXHAUSTED
+      || *self.resource_trips != since.count
   }
 }
 
