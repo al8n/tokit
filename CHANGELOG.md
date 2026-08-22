@@ -395,20 +395,23 @@ and will red until they do.
   only at the real ceiling, since that was the second public reading of the count and only the
   accessor had been qualified.
 
-  **The 32-bit cost is measured, and accepted — with the layout in it.** `trip_snapshot` is taken
-  per *element*, so it is on the hot path of every successful element. `tripped_during_attempt` is
-  **not** — it is absent from an accepted progressing element and present on every normal
-  termination (`absence_after_element` at a decline or stall, `close_after_element` at a real
-  closer) as well as on a failed element, so a workload of many short collections pays it roughly
-  per collection. An earlier version of this entry said "failure arm only", which was the right
-  operations attached to the wrong model of when they run.
+  **The 32-bit cost is measured, and accepted — with the layout in it, and scoped.** `trip_snapshot`
+  is taken per *element*, so it is on the hot path of every successful element.
+  `tripped_during_attempt` is not, and it has no single frequency: `InputRef::trip_snapshot` carries
+  the one copy of that model, derived from all five sites in the crate that evaluate either verdict.
+  Three earlier versions of this entry each asserted a frequency read off some call sites — "failure
+  arm only", then "every normal termination" — and each was wrong. From the derived table: a
+  collection ending through a **direct closer** evaluates **neither** verdict, through a **probed
+  closer** the **descent one alone**, through a **decline or stall** both; a failed element and a
+  failed recovery attempt evaluate both behind cheaper reads; and a **successful** `skip_then_retry`
+  step evaluates both, which is the one place either runs after something worked.
 
   `thumbv6m-none-eabi` at `-O`:
 
   | | `usize` | `u64` | delta | runs |
   |---|---|---|---|---|
   | `trip_snapshot` | 5 instr | 7 instr | +2 | per element |
-  | `tripped_during_attempt` | 17 instr | 22 instr | +5 | per terminating exit, and per failed element |
+  | `tripped_during_attempt` | 17 instr | 22 instr | +5 | 0-2 per collection termination, by class |
   | element loop (N + 1) | 31 instr | 38 instr | +7 | per collection |
   | that loop's stack frame | 16 B | 24 B | +8 B | per collection |
   | `ResourceTripBaseline` | 8 B, align 4 | 16 B, align 8 | ×2 | carried per element |
@@ -418,15 +421,21 @@ and will red until they do.
 
   Whole-parse on `wasm32-wasip1`, the widest 32-bit target executable on this host (`i686` cannot
   link here): a collection-parse binary grew **33 bytes** (120,421 → 120,454, +0.027%), and
-  interleaved executed latency showed **no regression in either shape** — one long collection at
-  `-5.8%` min / `-5.3%` median, and many short collections, the shape the per-termination `+5`
-  makes expensive, at `-0.35%` min / `-7.25%` median, n=12 each. Both land at or below zero, which
-  is an instrument that cannot resolve the change rather than a speedup.
+  interleaved executed latency showed **no regression** — one long collection at `-5.8%` min /
+  `-5.3%` median, many short collections at `-0.35%` / `-7.25%`, n=12 each. Both land at or below
+  zero, which is an instrument that cannot resolve the change rather than a speedup.
 
-  Accepted: two instructions and eight stack bytes per element loop, against an element that has
-  already run a cache probe or a full lex and commit. Keeping `count` at `usize` and moving the
-  exhaustion distinction to a second cell would buy back four bytes and add a load at the same
-  sites, and the executed measurement gives it nothing to recover.
+  **What that measurement covers, stated rather than generalised.** The probe is a non-delimited
+  collection terminating by **decline** — one class of six. The five it does not exercise are named
+  on `InputRef::trip_snapshot`; four of them are **cheaper or equal** per termination (both closer
+  classes evaluate less, and the two failure classes sit behind cheaper reads), and the one that is
+  not — a `skip_then_retry` workload paying both verdicts per *successful* sync or advance step —
+  is unmeasured and named as such.
+
+  Accepted on that scope: two instructions and eight stack bytes per element loop, against an
+  element that has already run a cache probe or a full lex and commit. Keeping `count` at `usize`
+  and moving the exhaustion distinction to a second cell would buy back four bytes and add a load at
+  the same sites, and the executed measurement gives it nothing to recover.
 
   **The residual is stated rather than hidden**: past 2^64 refusals in one input session the count
   cannot record another, the two questions become one value, and the verdict fails closed. That

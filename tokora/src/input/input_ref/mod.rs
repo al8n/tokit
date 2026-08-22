@@ -1060,10 +1060,15 @@ where
   /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot), which is per *collection* where the
   /// descent baseline is per *element*.
   ///
-  /// Costs one `u64` load and a comparison. **Not "on the failure arm only"** — like its descent
-  /// twin it is absent from an accepted progressing element and present on every normal
-  /// termination, since `parser::many`'s `absence_after_element` reads it at a decline or a stall.
-  /// A clean collection pays it once, at the exit that ends it.
+  /// Costs one `u64` load and a comparison.
+  ///
+  /// **When it runs is not this doc's to state.**
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries the one copy of that model,
+  /// derived from every call site in the crate, and this verdict is a column in it. Two things
+  /// about that column are worth naming here because they are *this* verdict's and not its twin's:
+  /// it is the **first** term at the absence exit, so unlike the descent verdict it is never
+  /// short-circuited away there — and it is **absent from both closer classes**, the probed one by
+  /// design and the direct one along with every other verdict.
   #[inline(always)]
   pub(crate) const fn scanner_tripped_during_attempt(&self, since: ScannerTripBaseline) -> bool {
     *self.scanner_trips == super::TRIP_COUNTER_EXHAUSTED || *self.scanner_trips != since.count

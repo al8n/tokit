@@ -695,7 +695,7 @@ where
   /// | | `usize` | `u64` | delta | runs |
   /// |---|---|---|---|---|
   /// | this call | 5 instr | 7 instr | **+2** | per element |
-  /// | [`tripped_during_attempt`](Self::tripped_during_attempt) | 17 instr | 22 instr | +5 | per terminating exit, and per failed element |
+  /// | [`tripped_during_attempt`](Self::tripped_during_attempt) | 17 instr | 22 instr | +5 | 0-2 per collection termination, by class — see its own table |
   /// | an element loop (N of the first, one of the second) | 31 instr | 38 instr | +7 | per collection |
   /// | that loop's stack frame | 16 B | 24 B | +8 B | per collection |
   /// | [`ResourceTripBaseline`] itself | 8 B, align 4 | 16 B, align 8 | **×2** | carried per element |
@@ -712,11 +712,20 @@ where
   /// median, n=12 each. Both sides land at or below zero, which is an instrument that cannot
   /// resolve the change rather than a speedup.
   ///
-  /// **Accepted with the layout included**: two instructions and eight stack bytes per element
-  /// loop, against an element that has already run a cache probe or a full lex and commit, buys a
-  /// counter a 32-bit loop cannot exhaust. Keeping `count` at `usize` and moving the exhaustion
-  /// distinction to a second cell would buy back the four bytes and add a load at the same sites,
-  /// and the executed measurement gives it nothing to recover.
+  /// **What the executed measurement covers**, stated rather than generalised: the probe is a
+  /// non-delimited collection terminating by **decline** — one of the six classes in the table
+  /// above. Of the five it does not exercise, four are **cheaper or equal** per termination (a
+  /// direct closer evaluates no verdict, a probed closer only the descent one, and both failure
+  /// classes sit behind cheaper reads that can short-circuit either away). The one that is not
+  /// cheaper is a [`skip_then_retry`](crate::ParseInput::skip_then_retry) workload, which pays both
+  /// verdicts per **successful** sync or advance step through `recovery_step`; that shape is
+  /// unmeasured, and it is named here rather than folded into the number.
+  ///
+  /// **Accepted on that scope**: two instructions and eight stack bytes per element loop, against
+  /// an element that has already run a cache probe or a full lex and commit, buys a counter a
+  /// 32-bit loop cannot exhaust. Keeping `count` at `usize` and moving the exhaustion distinction
+  /// to a second cell would buy back the four bytes and add a load at the same sites, and the
+  /// executed measurement gives it nothing to recover.
   #[inline(always)]
   pub fn trip_snapshot(&self) -> ResourceTripBaseline<'closure> {
     ResourceTripBaseline {
@@ -868,20 +877,35 @@ where
   /// The check is one word-pair comparison on a path that already runs one, and its branch is
   /// cold.
   ///
-  /// # When this runs, which is not only on failure
+  /// # When each verdict runs — the table, derived from every call site
   ///
-  /// It is **absent from an accepted, progressing element** — that is the arm the per-element
-  /// baseline exists to leave alone — and **present on every normal termination**: `parser::many`'s
-  /// `absence_after_element` reads it at a decline or a no-progress stall, `close_after_element`
-  /// reads it at a real closer, and `file_element_failure` reads it on a failed element. So a
-  /// clean collection pays it once, at the exit that ends it, and a workload of many *short*
-  /// collections pays it roughly per collection rather than never. An earlier version of this
-  /// sentence said "on the failure arm only", which was the right operations attached to the wrong
-  /// model of when they run.
+  /// **This is the one copy of this model.** Three previous versions of it were each written from
+  /// the call sites the author happened to look at, and each was wrong in a different way: "on the
+  /// failure arm only" missed the clean exits, "on every normal termination" missed that some
+  /// terminations evaluate nothing and some evaluate only half, and both missed the two
+  /// `recovery_gate` sites entirely. So this is enumerated from the code: there are exactly **five**
+  /// places in the crate that evaluate either verdict, and the six termination classes fall out of
+  /// them rather than being asserted beside them.
+  ///
+  /// | class | site | descent | scanner | reached when |
+  /// |---|---|---|---|---|
+  /// | failed element | `many::file_element_failure` | 4th term | 3rd term | an element returned `Err`. Both sit behind `is_incomplete_error` and `at_committed_boundary`, so either can be short-circuited away |
+  /// | decline or stall | `many::absence_after_element` | 3rd term | **1st term** | a driver concludes absence. The scanner verdict always runs; the descent one only if the scanner and latch reads are both false |
+  /// | probed closer | `many::close_after_element` | only term | **never** | a probe verdict handed over a real closer. The scanner reading is deliberately absent — a pre-trip closer settles the position question and only that |
+  /// | direct closer | the mid-scan arms of `sep/delim` and `sep_while/delim` | **never** | **never** | a closer committed straight from the driver's own scan. The cycle's final `trip_snapshot` is paid and **no verdict is** |
+  /// | recovery failure | `parser::recovery_gate::judge` | 3rd term | 4th term | a recovery attempt returned `Err`. Both sit behind `is_incomplete()` and `is_terminal()` |
+  /// | successful recovery step | `parser::recovery_gate::recovery_step` | **1st term** | 2nd term | a `skip_then_retry` skip or advance **succeeded**. The descent verdict always runs — the one place either runs after something worked |
+  ///
+  /// What follows from the table, and what does not: a verdict is **absent from an accepted,
+  /// progressing element**, which is the arm the per-element baseline exists to leave alone. Beyond
+  /// that there is no single frequency — a collection terminating through a direct closer pays
+  /// **none**, through a probed closer pays the **descent one alone**, and through a decline or
+  /// stall pays **both**. Anything that states one number per collection is describing one class
+  /// and calling it the model.
   ///
   /// Costs a nonce comparison and a `u64` comparison. Measured on `thumbv6m-none-eabi`, `-O`: **17
   /// instructions at `usize`, 22 at `u64`**. [`trip_snapshot`](Self::trip_snapshot) carries the
-  /// whole cost table, including the short-collection workload this `+5` is the price of.
+  /// whole cost table and the scope the measurement covers.
   ///
   /// # Panics
   ///
