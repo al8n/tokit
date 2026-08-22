@@ -260,7 +260,7 @@ pub(crate) use input_ref::ScannerTripBaseline;
 /// `descend` refused. Unreachable at 64 bits and reachable at 32 — a zero recursion limit makes
 /// every `descend` a trip, and 2^32 of them is a loop, not a lifetime. Saturation removes the
 /// return path; the disjunct at each verdict removes the tie at the ceiling itself.
-pub(crate) const TRIP_COUNTER_EXHAUSTED: usize = usize::MAX;
+pub(crate) const TRIP_COUNTER_EXHAUSTED: u64 = u64::MAX;
 pub(crate) use input_ref::Session;
 pub use input_ref::{
   Balance, Commit, DelimClass, Descent, DropPolicy, Hole, InputRef, ResourceTripBaseline, Rollback,
@@ -879,7 +879,7 @@ where
   /// It is per **input session**, like the budget it guards: a
   /// [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and therefore
   /// a fresh cell, and harvests terminality by its own separate route.
-  resource_trips: usize,
+  resource_trips: u64,
   /// **Where SCANNER terminality is stored**: how many times the scanner has tripped a lexer
   /// resource limit in this input session. The exact twin of
   /// [`resource_trips`](field@Self::resource_trips) one field up, for the other budget —
@@ -932,7 +932,7 @@ where
   /// [`PartialSession`](crate::input::PartialSession) attempt builds a fresh input and a fresh
   /// cell, and harvests terminality by its own route (which reads the error value only — see
   /// [`MaybeTerminal`](crate::error::MaybeTerminal)).
-  scanner_trips: usize,
+  scanner_trips: u64,
   /// The **bound emitter** — the one emission log this input's parse writes, owned here for the
   /// input's whole life and paired with it at
   /// [`with_state_and_context`](Self::with_state_and_context).
@@ -1162,7 +1162,7 @@ where
   /// has.
   #[allow(dead_code)]
   #[inline(always)]
-  pub(crate) const fn resource_trips(&self) -> usize {
+  pub(crate) const fn resource_trips(&self) -> u64 {
     self.resource_trips
   }
 

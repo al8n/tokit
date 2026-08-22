@@ -67,7 +67,7 @@ pub use descent::ResourceTripBaseline;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScannerTripBaseline {
   /// The counter's value when the baseline was taken.
-  count: usize,
+  count: u64,
 }
 
 #[cfg(test)]
@@ -75,7 +75,7 @@ impl ScannerTripBaseline {
   /// The raw count, for the in-crate cells that assert exact trip tallies rather than the
   /// attempt-relative verdict. There is no such door on the public sibling.
   #[inline(always)]
-  pub(crate) const fn count(self) -> usize {
+  pub(crate) const fn count(self) -> u64 {
     self.count
   }
 }
@@ -175,7 +175,7 @@ where
   /// [`raise_level`](Self::raise_level)'s trip arm, which is why grammar code cannot lower it:
   /// no handle method exposes a mutable route to the cell, and the recursion cell it guards is
   /// read-only too.
-  pub(super) resource_trips: &'closure mut usize,
+  pub(super) resource_trips: &'closure mut u64,
   /// The **scanner-trip counter**, borrowed from the owning [`Input`](super::Input) — see that
   /// field for why a monotone counter, and not the rollbackable poison boundary beside it, is what
   /// can witness a scanner stop across a nested speculation.
@@ -184,7 +184,7 @@ where
   /// [`scanner_tripped_during_attempt`](Self::scanner_tripped_during_attempt); its only writer is
   /// [`publish_scanner_trip`](Self::publish_scanner_trip), the infallible half of recording a
   /// terminal scanner stop, and no handle method exposes a mutable route to the cell.
-  pub(super) scanner_trips: &'closure mut usize,
+  pub(super) scanner_trips: &'closure mut u64,
   /// The **session cell**: the input's lineage memos (the live-checkpoint stack, the pin set, and
   /// the cache-push/checkpoint-id/savepoint counters), the handle's **emitter borrow** (the
   /// ground-truth emission log, reached through [`emitter`](Self::emitter)), and the live

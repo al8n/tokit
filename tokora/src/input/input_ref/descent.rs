@@ -35,27 +35,32 @@ use super::*;
 ///   input's baseline, which is the shape a driver holding two inputs alive would write. That one
 ///   fails with `E0521: borrowed data escapes outside of function`.
 ///
-/// * **Invariance is load-bearing in one place and redundant in the other, and the boundary is
-///   mapped rather than asserted** — this sentence has been wrong in both directions, so what
-///   follows is what flipping the brand to a bare reference measurably changes.
+/// * **Invariance is load-bearing, at an identified site, and the map is measured rather than
+///   asserted** — this sentence has been wrong twice, so what follows is what flipping the brand
+///   to a bare reference measurably changes and what it does not.
 ///
-///   It changes a **bare region-shrinking coercion** on this type
-///   (`ResourceTripBaseline<'long> -> ResourceTripBaseline<'short>`): refused invariant, accepted
-///   covariant. That is the rail, and `trip_snapshot` pins it.
+///   | shape | invariant | covariant |
+///   |---|---|---|
+///   | a bare region-shrinking coercion on this type | refused | **accepted** |
+///   | a generic adapter: `&mut InputRef<'short>` plus a baseline `<'long>`, `'long: 'short` | refused | **accepted** |
+///   | a `Cell` stash | refused | refused |
+///   | a closure capture under a `for<'c>` bound | refused | refused |
+///   | a hand-written [`ParseInput`](crate::ParseInput) impl carrying one in a field | refused | refused |
 ///
-///   It changes **nothing that reaches**
-///   [`tripped_during_attempt`](InputRef::tripped_during_attempt) — not the `Cell` stash, not a
-///   closure capture, not a hand-written [`ParseInput`](crate::ParseInput) impl carrying one in a
-///   field. All three are refused under either variance, because every consumer goes through
-///   `&InputRef<'inp, 'closure, ..>` and **`InputRef` is itself invariant in `'closure`**; under a
-///   covariant brand the `ParseInput` shape still fails, and rustc's note then names `InputRef`'s
-///   invariance instead of this type's. So the brand is redundant *with another type's* variance
-///   at every site that consumes a baseline, and that redundancy is why two plants aimed at
-///   consumption sites both came back green and both were read as evidence.
+///   The **adapter row is the load-bearing one**, and it is a consumption site — which is what an
+///   earlier version of this paragraph got wrong when it concluded from the last three rows that
+///   the brand was redundant with [`InputRef`]'s own invariance in `'closure`. In those three the
+///   handle is itself coerced or universally quantified, so its invariance already refuses and the
+///   brand's cannot be seen. In the adapter the handle sits at **one fixed region and is never
+///   coerced**; only the baseline moves, and then the brand is the only thing refusing. Under a
+///   covariant brand that call compiles, and it is publicly reachable — carry an outer baseline
+///   through an inner parse's context and the nested parse cross-feeds a foreign baseline into the
+///   nonce panic. The brand is what keeps that unreachable from safe code.
 ///
-///   It is kept for the reason redundancy is not worthlessness: the refusal stays a property of
-///   this type, and does not become a consequence of a variance choice on `InputRef` that could
-///   change without anyone connecting the two. It also matches `SessionPointId` and `SavepointId`.
+///   Three probes agreed the brand was inert and all three shared a shape: each put the handle
+///   somewhere its own invariance would refuse first. Agreement between probes that share a shape
+///   is not independent evidence.
+///
 ///
 /// * **The nonce covers what is left, which is inside this crate.** Two handles minted from
 ///   `Input::as_ref` in one scope have ordinary inference regions that
@@ -76,20 +81,19 @@ use super::*;
 #[derive(Clone, Copy)]
 pub struct ResourceTripBaseline<'closure> {
   /// The counter's value when the baseline was taken.
-  count: usize,
+  count: u64,
   /// The identity of the input that issued it: the address of that input's resource-trip slot.
   /// Distinct inputs are distinct structs at distinct addresses, and the slot is a `usize` so it
   /// is never zero-sized.
   nonce: usize,
   /// Invariant in `'closure`, through the fn-pointer form rather than a bare reference.
   ///
-  /// **Load-bearing on the coercion, redundant at the consumption site**, and the type's own docs
-  /// map which is which. Flipping it to a bare reference makes a plain region-shrinking coercion
-  /// on this type compile; it changes no shape that reaches
-  /// [`InputRef::tripped_during_attempt`](InputRef::tripped_during_attempt), because every one of
-  /// those goes through `&InputRef<'inp, 'closure, ..>` and `InputRef` is itself invariant in
-  /// `'closure`. Keep it: it makes the refusal a property of this type rather than a consequence
-  /// of a variance choice on another one.
+  /// **Load-bearing**, and the type's own docs carry the measured map of where. Flipping it to a
+  /// bare reference makes two shapes compile that must not: a plain region-shrinking coercion, and
+  /// — the one that matters — a generic adapter holding the handle at one fixed region while only
+  /// the baseline is coerced, which is publicly reachable and would feed a foreign baseline into
+  /// the nonce panic. It is inert only where [`InputRef`]'s own invariance in `'closure` refuses
+  /// first, which is not everywhere.
   _brand: PhantomData<fn(&'closure ()) -> &'closure ()>,
 }
 
@@ -582,9 +586,9 @@ where
   /// }
   /// ```
   ///
-  /// **The invariance rail is a different cell**, because that one is refused under either
-  /// variance — see [`ResourceTripBaseline`] for the map. What the brand alone decides is the bare
-  /// coercion:
+  /// **The invariance rails are different cells**, because the three shapes above are refused
+  /// under either variance — see [`ResourceTripBaseline`] for the measured map. Two shapes the
+  /// brand alone decides. The bare coercion:
   ///
   /// ```compile_fail
   /// use tokora::input::ResourceTripBaseline;
@@ -594,6 +598,45 @@ where
   ///   b: ResourceTripBaseline<'long>,
   /// ) -> ResourceTripBaseline<'short> {
   ///   b
+  /// }
+  /// ```
+  ///
+  /// and the one that makes it matter — a generic adapter holding the handle at **one fixed
+  /// region**, so `InputRef`'s own invariance never enters and only the baseline is asked to
+  /// coerce. Its control first, the same adapter over a region-free `usize`:
+  ///
+  /// ```rust
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext};
+  ///
+  /// fn adapt_a_number<'inp, 'short, L, Ctx>(
+  ///   inp: &mut InputRef<'inp, 'short, L, Ctx>,
+  ///   depth: usize,
+  /// ) -> bool
+  /// where
+  ///   L: Lexer<'inp>,
+  ///   Ctx: ParseContext<'inp, L>,
+  /// {
+  ///   inp.recursion().depth() == depth
+  /// }
+  /// ```
+  ///
+  /// and the baseline in the same position, which does not compile — and **would** compile under a
+  /// covariant brand, which is the whole of why the brand is not prophylaxis:
+  ///
+  /// ```compile_fail
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext, input::ResourceTripBaseline};
+  ///
+  /// fn adapt<'inp, 'long: 'short, 'short, L, Ctx>(
+  ///   inp: &mut InputRef<'inp, 'short, L, Ctx>,
+  ///   base: ResourceTripBaseline<'long>,
+  /// ) -> bool
+  /// where
+  ///   L: Lexer<'inp>,
+  ///   Ctx: ParseContext<'inp, L>,
+  /// {
+  ///   // error: lifetime may not live long enough — only the baseline is coerced here, so this is
+  ///   // the brand refusing and not the handle's own invariance
+  ///   inp.tripped_during_attempt(base)
   /// }
   /// ```
   ///
@@ -622,9 +665,21 @@ where
   /// the guard on top of this pair; a consumer whose unit is a region of its own loop could not
   /// have built this pair on top of a guard.
   ///
-  /// # Why it is public
+  /// # Why it is public, and why it is inherent
   ///
-  /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries that argument.
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries the first argument.
+  ///
+  /// **Inherent rather than an opt-in trait, deliberately.** An inherent item wins the method pick
+  /// over an extension trait's, so adding these two names to a type that already shipped can take
+  /// a call away from a consumer who wrote either name on [`InputRef`] — silently, where the
+  /// paired `let b = inp.trip_snapshot(); inp.tripped_during_attempt(b)` compiles on both sides
+  /// and infers the argument. A trait would avoid that and cost an import. The form is chosen
+  /// anyway, because `InputRef` carries its whole surface as inherent methods and a witness that
+  /// had to be imported would be unreadable inside a generic production that imports nothing — an
+  /// opt-in trait for these two alone would be the only such accessor in the crate. The cost is
+  /// paid where this crate pays it: disclosed in the CHANGELOG's "no diagnostic at the call site"
+  /// section, with the UFCS spelling that restores the consumer's item, and classified in
+  /// `ci/name_collision/no_collision.txt` with what that classification does *not* establish.
   ///
   /// Costs one `usize` load and one address read per attempt, and nothing anywhere else: no scan,
   /// no lookahead fill and no token commit reads or writes either.

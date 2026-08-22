@@ -8702,3 +8702,41 @@ fn measure_demote_wall_at_the_recorded_size() {
     elapsed.as_secs_f64() * 1e3
   );
 }
+
+/// [`Cst`]'s `Debug` renders a saturated trip count as a **floor**, and an ordinary one exactly.
+///
+/// There are two public readings of that value and only one of them used to be qualified.
+/// [`Cst::resource_trips`] documents that a saturated counter means "at least this many"; the
+/// derived-shape `Debug` printed the raw number beside it, which states a tally the value cannot
+/// support. Restoring the plain `.field("resource_trips", &self.resource_trips)` reddens the first
+/// half of this cell while leaving the second green, which is what makes the branch load-bearing
+/// rather than merely present.
+#[test]
+fn a_saturated_cst_renders_its_trip_count_as_a_floor() {
+  let saturated =
+    crate::cst::Cst::from_sink(verbose_sink("a"), crate::input::TRIP_COUNTER_EXHAUSTED);
+  let rendered = std::format!("{saturated:?}");
+  assert!(
+    rendered.contains(&std::format!("{}+", crate::input::TRIP_COUNTER_EXHAUSTED)),
+    "at the ceiling the count is a floor and must render as one. Rendered: {rendered}"
+  );
+  assert!(
+    !rendered.contains(&std::format!(
+      "resource_trips: {},",
+      crate::input::TRIP_COUNTER_EXHAUSTED
+    )),
+    "and must NOT render as a bare tally. Rendered: {rendered}"
+  );
+
+  // The control: an ordinary count is not a floor, and is rendered exactly.
+  let ordinary = crate::cst::Cst::from_sink(verbose_sink("a"), 3);
+  let rendered = std::format!("{ordinary:?}");
+  assert!(
+    rendered.contains("resource_trips: 3"),
+    "an unsaturated count is exact and carries no floor marker. Rendered: {rendered}"
+  );
+  assert!(
+    !rendered.contains('+'),
+    "and gains no suffix. Rendered: {rendered}"
+  );
+}

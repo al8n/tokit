@@ -367,21 +367,30 @@ and will red until they do.
   scanner twin crate-internal. A cross-fed baseline is a programmer error, unreachable from any
   input and from any consumer, so it announces itself instead.
 
-  **Both trip counters saturate instead of wrapping, and both verdicts fail closed at the
-  ceiling.** The wrapping increment predates this release; the *public* verdict does not, and
-  publishing the reading is what made the aliasing reachable from outside. An inequality against a
-  per-attempt baseline needs consecutive values to differ — which wrapping gives — but it also
-  needs the value never to **return** to a baseline after a positive number of trips, which
-  wrapping is precisely the behaviour that guarantees it does. `usize::MAX + 1` trips alias the
-  baseline exactly and the verdict answered `false` over an attempt in which every `descend`
-  refused: unreachable at 64 bits, a loop rather than a lifetime at 32, where a zero recursion
-  limit makes every `descend` a trip. `Input::resource_trips` and `Input::scanner_trips` now
-  `saturating_add`, and each verdict answers `true` unconditionally at `usize::MAX` so the tie at
-  the ceiling is not a `false` either. Past the ceiling the witness over-reports a trip rather than
-  under-reporting one, and `Cst::resource_trips` reads *at least this many*. Two cells, each with
-  its own plant: the real counter seeded one below the ceiling and driven with real refusals from
-  both sides of it, and a narrowed-width model that walks the whole range at 8 bits and counts the
-  old arithmetic's one hole per baseline.
+  **Both trip counters are `u64` and saturate, and the verdicts are exact everywhere a program
+  can reach.** Two defects, and the second was created by the repair for the first. Wrapping
+  aliased: `usize::MAX + 1` trips return to a baseline exactly and the verdict answered `false`
+  over an attempt in which every `descend` refused — unreachable at 64 bits, a loop rather than a
+  lifetime at 32, where a zero recursion limit makes every `descend` a trip. Saturating with an
+  unconditional "exhausted means tripped" disjunct fixed that and introduced the mirror: at the
+  ceiling the disjunct fires whether or not anything tripped, so an attempt that descended
+  **nothing** read terminal — permanently, for the rest of the session. Wrapping failed open once;
+  saturation failed closed forever.
+
+  The representation is what resolves it. Both cells are now `u64` rather than `usize`, so the
+  point a 32-bit loop can drive them to is `u32::MAX` — four billion refusals, and nowhere near a
+  ceiling of 2^64 — and the reading there is still exact in both directions. `Cst::resource_trips`
+  keeps its `usize` signature and clamps, documented as a floor where it does; `Cst`'s `Debug`
+  renders the floor as `18446744073709551615+` rather than printing a tally the value cannot
+  support, since that was the second public reading of it and only the first had been qualified.
+
+  **The residual is stated rather than hidden**: past 2^64 refusals in one input session the count
+  cannot record another, the two questions become one value, and the verdict fails closed. That
+  state is unreachable and is pinned as a labelled residual rather than as a passing grade.
+
+  Four cells, each with its own discriminating plant, and the quiet-attempt one is written from the
+  side the repair is not — every earlier ceiling cell took its baseline and then drove real trips,
+  which is precisely why none of them could see a verdict that had become permanently `true`.
 
   What no type can decide is **placement**, and that is the misuse that survives: the descent
   baseline belongs inside the element loop and the scanner one above it, and each taken at the
@@ -1776,6 +1785,44 @@ and will red until they do.
   `increase_both_and_check`'s claimed it decreased recursion (it increases both).
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+**`InputRef::trip_snapshot` and `InputRef::tripped_during_attempt` are new inherent methods on a
+type that already shipped.** An inherent item wins the pick over an extension trait's, so a
+consumer who wrote either name on `InputRef` runs their item on the base and tokora's here.
+
+**The form is a decision, not an accident.** `InputRef` carries its whole surface as inherent
+methods; an opt-in trait for these two alone would be the only accessor in the crate reachable
+only after an import, and the witness has to be readable inside a generic production that imports
+nothing. The cost of that choice is this section.
+
+**You are exposed if you wrote a `trip_snapshot` or `tripped_during_attempt` method of your own on
+[`InputRef`](https://docs.rs/tokora/latest/tokora/struct.InputRef.html).** The paired shape is the
+one to look for, because it can compile on **both** revisions and switch both calls silently:
+
+```rust,ignore
+let baseline = inp.trip_snapshot();
+inp.tripped_during_attempt(baseline)
+```
+
+The argument type is inferred, so nothing at the call site names which item won. **The fix is
+UFCS**, which pins the item on either revision:
+
+```rust,ignore
+let baseline = MyExt::trip_snapshot(inp);
+MyExt::tripped_during_attempt(inp, baseline)
+```
+
+`ci/name_collision/` scores the four generated rows `ok*` — justified in `no_collision.txt` — and
+that classification is deliberately narrow. The `inherent_method` template's consumer takes
+`&mut self` while both tokora items take `&self`, so the consumer's item is found one autoref step
+earlier and wins on both sides: the probe is vacuous for these names and says so. **It is not
+evidence that the names cannot be stolen.** A consumer whose extension item takes `&self` competes
+at the same step tokora's does, and the harness cannot generate that consumer. This paragraph is
+the coverage for that case, which is why it is here rather than in the probe's baseline.
+
+`input::ResourceTripBaseline` is a new glob-reachable name in `tokora::input`; the probe scores it
+`glob-err`, the disclosed outcome — a `use tokora::input::*` alongside another glob exporting the
+same name is rejected by the compiler rather than silently resolved.
 
 #247 removes `Errors`' `DerefMut` and replaces the three legitimate uses it served with inherent
 methods. `Errors` has shipped since 0.7.3 **with no inherent item of its own**, so a consumer who
