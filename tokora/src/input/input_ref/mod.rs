@@ -1060,7 +1060,7 @@ where
   /// Costs one `usize` load and a comparison, on the failure arm only.
   #[inline(always)]
   pub(crate) const fn scanner_tripped_during_attempt(&self, since: ScannerTripBaseline) -> bool {
-    *self.scanner_trips != since.count
+    *self.scanner_trips == super::TRIP_COUNTER_EXHAUSTED || *self.scanner_trips != since.count
   }
 
   /// The **token budget** this parse's lexer produces items against: the ceiling, and what has
@@ -1662,15 +1662,17 @@ where
   /// Counting every detected trip — including one that does not lower an already-latched
   /// boundary — is deliberate: the reading is per attempt, and a second trip inside a later
   /// attempt must not compare equal to that attempt's baseline just because the position it
-  /// latched is one an earlier trip had already reached. `wrapping_add` for the same reason it is
-  /// used for the descent counter: the reading is an inequality against a per-attempt baseline,
-  /// and wrapping is the one overflow behaviour under which consecutive values always differ.
+  /// latched is one an earlier trip had already reached. **Saturating** for the same reason the
+  /// descent counter is, and it used to wrap for the same wrong reason: an inequality against a
+  /// per-attempt baseline needs consecutive values to differ, which wrapping gives, but it also
+  /// needs the value never to return to a baseline after a positive number of trips, which
+  /// wrapping does not. See [`TRIP_COUNTER_EXHAUSTED`](super::TRIP_COUNTER_EXHAUSTED).
   ///
   /// A `usize` load, an add and a store. It cannot unwind, and it needs no staging: that is what
   /// lets the already-spent refusal publish it before any consumer step of its own.
   #[inline(always)]
   fn count_scanner_trip(&mut self) {
-    *self.scanner_trips = self.scanner_trips.wrapping_add(1);
+    *self.scanner_trips = self.scanner_trips.saturating_add(1);
   }
 
   /// The **memo** half: installs the staged frontier, and hands back the boundary it displaced.

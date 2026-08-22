@@ -35,12 +35,27 @@ use super::*;
 ///   input's baseline, which is the shape a driver holding two inputs alive would write. That one
 ///   fails with `E0521: borrowed data escapes outside of function`.
 ///
-/// * **Invariance is not what does that**, and the `fn(&'closure ()) -> &'closure ()` form is
-///   prophylaxis rather than a load-bearing claim. Planted covariant, *both* shapes above are still
-///   refused — the parameter's presence is the whole of it. It is kept because it matches
-///   `SessionPointId` and `SavepointId`, and because it forecloses a family of coercions rather
-///   than any one demonstrated misuse. Saying more than that would be prose a plant has already
-///   contradicted.
+/// * **Invariance is load-bearing in one place and redundant in the other, and the boundary is
+///   mapped rather than asserted** — this sentence has been wrong in both directions, so what
+///   follows is what flipping the brand to a bare reference measurably changes.
+///
+///   It changes a **bare region-shrinking coercion** on this type
+///   (`ResourceTripBaseline<'long> -> ResourceTripBaseline<'short>`): refused invariant, accepted
+///   covariant. That is the rail, and `trip_snapshot` pins it.
+///
+///   It changes **nothing that reaches**
+///   [`tripped_during_attempt`](InputRef::tripped_during_attempt) — not the `Cell` stash, not a
+///   closure capture, not a hand-written [`ParseInput`](crate::ParseInput) impl carrying one in a
+///   field. All three are refused under either variance, because every consumer goes through
+///   `&InputRef<'inp, 'closure, ..>` and **`InputRef` is itself invariant in `'closure`**; under a
+///   covariant brand the `ParseInput` shape still fails, and rustc's note then names `InputRef`'s
+///   invariance instead of this type's. So the brand is redundant *with another type's* variance
+///   at every site that consumes a baseline, and that redundancy is why two plants aimed at
+///   consumption sites both came back green and both were read as evidence.
+///
+///   It is kept for the reason redundancy is not worthlessness: the refusal stays a property of
+///   this type, and does not become a consequence of a variance choice on `InputRef` that could
+///   change without anyone connecting the two. It also matches `SessionPointId` and `SavepointId`.
 ///
 /// * **The nonce covers what is left, which is inside this crate.** Two handles minted from
 ///   `Input::as_ref` in one scope have ordinary inference regions that
@@ -68,10 +83,13 @@ pub struct ResourceTripBaseline<'closure> {
   nonce: usize,
   /// Invariant in `'closure`, through the fn-pointer form rather than a bare reference.
   ///
-  /// The invariance is **not** what refuses a foreign baseline — planted covariant, every misuse
-  /// this type is meant to refuse is still refused by the parameter's presence alone, and the
-  /// type's own docs record that measurement. It is the form the crate's other branded ids use,
-  /// and it costs nothing to keep; it is not evidence for anything.
+  /// **Load-bearing on the coercion, redundant at the consumption site**, and the type's own docs
+  /// map which is which. Flipping it to a bare reference makes a plain region-shrinking coercion
+  /// on this type compile; it changes no shape that reaches
+  /// [`InputRef::tripped_during_attempt`](InputRef::tripped_during_attempt), because every one of
+  /// those goes through `&InputRef<'inp, 'closure, ..>` and `InputRef` is itself invariant in
+  /// `'closure`. Keep it: it makes the refusal a property of this type rather than a consequence
+  /// of a variance choice on another one.
   _brand: PhantomData<fn(&'closure ()) -> &'closure ()>,
 }
 
@@ -358,11 +376,20 @@ where
       //
       // Counting rather than latching a `bool` is what makes the reading attempt-relative: a
       // consulting site compares the value against the one its attempt started with, and a second
-      // trip after a caught first one must not compare equal to it. `wrapping_add` for the same
-      // reason — the comparison is an inequality, and wrapping is the one overflow behaviour under
-      // which consecutive values always differ (a saturating counter would silently stop reporting
-      // new trips at its ceiling). Reaching the wrap needs `usize::MAX` calls of this function.
-      *self.resource_trips = self.resource_trips.wrapping_add(1);
+      // trip after a caught first one must not compare equal to it.
+      //
+      // SATURATING, and this used to be `wrapping_add`. The argument for wrapping was that an
+      // inequality needs consecutive values to differ, which it gives — but the reading also needs
+      // the value never to RETURN to a baseline after a positive number of trips, and wrapping is
+      // the one behaviour that guarantees it does. `usize::MAX + 1` trips alias the baseline
+      // exactly, and the verdict then answers `false` over an attempt in which every `descend`
+      // refused: unreachable at 64 bits, and a loop rather than a lifetime at 32, where a zero
+      // recursion limit makes every call of this function a trip. Saturation removes the return
+      // path, and `tripped_during_attempt` answers `true` unconditionally at the ceiling so the
+      // tie there is not a `false` either. The objection saturation used to draw — that it stops
+      // reporting new trips at its ceiling — is answered by that disjunct rather than by the
+      // arithmetic.
+      *self.resource_trips = self.resource_trips.saturating_add(1);
       // Committed consumption, not the cache-front cursor: the same metric the pratt drivers'
       // stall exits report, so the offset does not move with how much lookahead is buffered.
       return Err(RecursionLimitReached::of(self.span().end(), exceeded));
@@ -502,6 +529,71 @@ where
   /// {
   ///   let base: ResourceTripBaseline<'closure> = outer.trip_snapshot();
   ///   move |inner: &mut InputRef<'inp, '_, L, Ctx>| inner.tripped_during_attempt(base)
+  /// }
+  /// ```
+  ///
+  /// **A hand-written [`ParseInput`](crate::ParseInput) impl is refused too**, and it is the shape
+  /// a parser combinator carrying a baseline in a field would take. Its control first — the same
+  /// impl carrying a region-free `usize` — which compiles:
+  ///
+  /// ```rust
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext, ParseInput};
+  ///
+  /// struct Control {
+  ///   depth: usize,
+  /// }
+  ///
+  /// impl<'inp, L, Ctx> ParseInput<'inp, L, bool, Ctx> for Control {
+  ///   fn parse_input(
+  ///     &mut self,
+  ///     input: &mut InputRef<'inp, '_, L, Ctx>,
+  ///   ) -> Result<bool, <Ctx::Emitter as Emitter<'inp, L>>::Error>
+  ///   where
+  ///     L: Lexer<'inp>,
+  ///     Ctx: ParseContext<'inp, L>,
+  ///   {
+  ///     Ok(input.recursion().depth() == self.depth)
+  ///   }
+  /// }
+  /// ```
+  ///
+  /// and the baseline in the same field position, which does not — the method's handle region is
+  /// fresh for every call, and the field's is fixed by the struct:
+  ///
+  /// ```compile_fail
+  /// use tokora::{Emitter, InputRef, Lexer, ParseContext, ParseInput, input::ResourceTripBaseline};
+  ///
+  /// struct Probe<'closure> {
+  ///   base: ResourceTripBaseline<'closure>,
+  /// }
+  ///
+  /// impl<'inp, 'closure, L, Ctx> ParseInput<'inp, L, bool, Ctx> for Probe<'closure> {
+  ///   fn parse_input(
+  ///     &mut self,
+  ///     input: &mut InputRef<'inp, '_, L, Ctx>,
+  ///   ) -> Result<bool, <Ctx::Emitter as Emitter<'inp, L>>::Error>
+  ///   where
+  ///     L: Lexer<'inp>,
+  ///     Ctx: ParseContext<'inp, L>,
+  ///   {
+  ///     // error: lifetime may not live long enough
+  ///     Ok(input.tripped_during_attempt(self.base))
+  ///   }
+  /// }
+  /// ```
+  ///
+  /// **The invariance rail is a different cell**, because that one is refused under either
+  /// variance — see [`ResourceTripBaseline`] for the map. What the brand alone decides is the bare
+  /// coercion:
+  ///
+  /// ```compile_fail
+  /// use tokora::input::ResourceTripBaseline;
+  ///
+  /// // error: lifetime may not live long enough — invariant, so `'long` cannot shrink
+  /// fn shrink<'long: 'short, 'short>(
+  ///   b: ResourceTripBaseline<'long>,
+  /// ) -> ResourceTripBaseline<'short> {
+  ///   b
   /// }
   /// ```
   ///
@@ -700,7 +792,8 @@ where
        parse this handle knows nothing about. Take the baseline from the same handle that reads \
        the verdict."
     );
-    *self.resource_trips != since.count
+    *self.resource_trips == crate::input::TRIP_COUNTER_EXHAUSTED
+      || *self.resource_trips != since.count
   }
 }
 

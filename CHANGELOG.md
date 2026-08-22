@@ -344,10 +344,20 @@ and will red until they do.
   stashed where it outlives the invocation, and it cannot be captured by a closure that must
   satisfy the `for<'c>` bound a nested parse imposes — which is the realistic cross-wire, a driver
   holding two inputs alive and judging the inner with the outer's baseline. Both are `compile_fail`
-  doctests, each paired with a control that captures or stashes a region-free `usize` off the same
-  handle and compiles. **Invariance is not what does that**: planted covariant, both shapes are
-  still refused, so the brand is described as the form the crate's other ids use and nothing more.
-  Since `Input` is crate-internal, no consumer can hold two handles whose regions unify at all.
+  doctests — a `Cell` stash, a closure capture, and a hand-written `ParseInput` impl carrying one
+  in a field — each paired with a control that carries a region-free `usize` in the same position
+  and compiles. Since `Input` is crate-internal, no consumer can hold two handles whose regions
+  unify at all.
+
+  **Where the brand's invariance matters is mapped rather than asserted**, this sentence having
+  been wrong in both directions before. Flipping it to a bare reference changes a bare
+  region-shrinking coercion on the type — refused invariant, accepted covariant, and that is its
+  own `compile_fail` cell. It changes **nothing** that reaches `tripped_during_attempt`: all three
+  shapes above are refused under either variance, because every consumer goes through
+  `&InputRef<'inp, 'closure, ..>` and `InputRef` is itself invariant in `'closure`. The brand is
+  therefore redundant with *another type's* variance at every consumption site, which is why two
+  plants aimed at those sites came back green and were read as evidence. It is kept so the refusal
+  stays a property of this type rather than a consequence of a choice on `InputRef`.
 
   What is left is crate-internal, and `tripped_during_attempt` **panics** on it rather than
   answering. An earlier round had it fail closed and answer `true`, and that was wrong for this
@@ -356,6 +366,22 @@ and will red until they do.
   mistake survives testing and points at nothing. That is the same failure shape that kept the
   scanner twin crate-internal. A cross-fed baseline is a programmer error, unreachable from any
   input and from any consumer, so it announces itself instead.
+
+  **Both trip counters saturate instead of wrapping, and both verdicts fail closed at the
+  ceiling.** The wrapping increment predates this release; the *public* verdict does not, and
+  publishing the reading is what made the aliasing reachable from outside. An inequality against a
+  per-attempt baseline needs consecutive values to differ — which wrapping gives — but it also
+  needs the value never to **return** to a baseline after a positive number of trips, which
+  wrapping is precisely the behaviour that guarantees it does. `usize::MAX + 1` trips alias the
+  baseline exactly and the verdict answered `false` over an attempt in which every `descend`
+  refused: unreachable at 64 bits, a loop rather than a lifetime at 32, where a zero recursion
+  limit makes every `descend` a trip. `Input::resource_trips` and `Input::scanner_trips` now
+  `saturating_add`, and each verdict answers `true` unconditionally at `usize::MAX` so the tie at
+  the ceiling is not a `false` either. Past the ceiling the witness over-reports a trip rather than
+  under-reporting one, and `Cst::resource_trips` reads *at least this many*. Two cells, each with
+  its own plant: the real counter seeded one below the ceiling and driven with real refusals from
+  both sides of it, and a narrowed-width model that walks the whole range at 8 bits and counts the
+  old arithmetic's one hole per baseline.
 
   What no type can decide is **placement**, and that is the misuse that survives: the descent
   baseline belongs inside the element loop and the scanner one above it, and each taken at the

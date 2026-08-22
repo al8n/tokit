@@ -7849,6 +7849,13 @@ impl From<BombTripped> for BombErr {
   }
 }
 
+/// Added for the trip-counter ceiling cells, which need `descend` to build an error.
+impl<O, Lang: ?Sized> From<crate::error::RecursionLimitReached<O, Lang>> for BombErr {
+  fn from(_: crate::error::RecursionLimitReached<O, Lang>) -> Self {
+    BombErr::Limit
+  }
+}
+
 impl<'a, T, Kind: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, Kind, S, Lang>> for BombErr {
   fn from(_: UnexpectedToken<'a, T, Kind, S, Lang>) -> Self {
     BombErr::Lex
@@ -11973,6 +11980,140 @@ fn a_baseline_from_another_live_input_panics_instead_of_answering() {
 
   let from_first = first.trip_snapshot();
   let _ = second.tripped_during_attempt(from_first);
+}
+
+/// The descent counter **saturates**, and the verdict never answers `false` after a real trip.
+///
+/// The contract the counter has to keep is not "consecutive values differ" — wrapping gives that —
+/// but "the value never returns to a baseline after a positive number of trips", which wrapping
+/// does not. `usize::MAX + 1` trips alias a baseline exactly. That is unreachable at 64 bits and a
+/// loop rather than a lifetime at 32, where a zero recursion limit makes every `descend` a trip.
+///
+/// A 2^32 loop is not a test, so the counter is seeded to one below the ceiling and driven with
+/// **real** refusals from there — the arithmetic under test is the real
+/// `saturating_add` in `raise_level` and the real verdict, on the real types, not a re-spelling of
+/// them. `a_narrowed_width_model_shows_what_wrapping_did` covers the whole range at a width a test
+/// can walk.
+///
+/// Two positions, and wrapping got the second one wrong in the other direction too: from below the
+/// ceiling, and from *at* it, where saturation makes the counter stop moving and only the verdict's
+/// exhausted disjunct keeps the answer honest.
+#[test]
+fn the_descent_counter_saturates_and_the_verdict_never_reads_false_after_a_trip() {
+  let context = crate::input::InputContext::new(
+    BombEmitter::default(),
+    DefaultCache::<'_, BombLexer<'_>>::default(),
+  )
+  .with_recursion_limiter(crate::state::recursion_tracker::RecursionLimiter::with_limitation(0));
+  let mut input = Input::<BombLexer<'_>, BombCtx<'_>, ()>::with_state_and_context(
+    REFUSAL_SRC,
+    BombTally::default(),
+    context,
+  );
+  let mut inp = input.as_ref();
+
+  // One below the ceiling. The field is the input's own cell; nothing else writes it.
+  *inp.resource_trips = crate::input::TRIP_COUNTER_EXHAUSTED - 1;
+
+  // FROM BELOW: a baseline, then real refusals across the ceiling.
+  let below = inp.trip_snapshot();
+  for round in 0..3 {
+    assert!(
+      inp.descend().is_err(),
+      "round {round}: a zero recursion limit refuses every descent"
+    );
+  }
+  assert_eq!(
+    *inp.resource_trips,
+    crate::input::TRIP_COUNTER_EXHAUSTED,
+    "three refusals from one below the ceiling must SATURATE. Wrapping left `1` here, having \
+     passed through the value that aliases this attempt's baseline"
+  );
+  assert!(
+    inp.tripped_during_attempt(below),
+    "and the verdict is `true`: three descents refused inside this attempt"
+  );
+
+  // AT the ceiling: the counter can no longer move, so only the exhausted disjunct is left.
+  let at = inp.trip_snapshot();
+  for round in 0..3 {
+    assert!(inp.descend().is_err(), "round {round}: still refusing");
+  }
+  assert_eq!(
+    *inp.resource_trips,
+    crate::input::TRIP_COUNTER_EXHAUSTED,
+    "saturated, so the count is now a floor rather than a tally"
+  );
+  assert!(
+    inp.tripped_during_attempt(at),
+    "the counts compare EQUAL here and three descents still refused, so the disjunct is the whole \
+     of the answer. Delete it and this is the `false` the repair exists to prevent"
+  );
+}
+
+/// What wrapping did, over a whole range a test can walk.
+///
+/// The real counters are `usize`, so their aliasing point is 2^32 or 2^64 calls away. The
+/// arithmetic is the same at any width, so this walks it at 8 bits: the two expressions below are
+/// the two the crate runs, narrowed, and the model is only worth its assertions insofar as they
+/// stay spelled the same as `raise_level`'s `saturating_add` and the verdict's disjunct.
+///
+/// The property is one-directional on purpose. It is **not** "the verdict is exact" — past the
+/// ceiling it deliberately over-reports — it is "the verdict is never `false` after a positive
+/// number of trips", which is the direction a wrong answer must fail in.
+#[test]
+fn a_narrowed_width_model_shows_what_wrapping_did() {
+  const W: u32 = 8;
+  const CEILING: u32 = (1 << W) - 1;
+
+  // The OLD arithmetic: wrap, and compare for pure inequality.
+  let wrapping = |base: u32, trips: u32| -> bool {
+    let mut c = base;
+    for _ in 0..trips {
+      c = (c + 1) % (1 << W);
+    }
+    c != base
+  };
+  // The NEW arithmetic: saturate, and fail closed at the ceiling.
+  let saturating = |base: u32, trips: u32| -> bool {
+    let mut c = base;
+    for _ in 0..trips {
+      c = (c + 1).min(CEILING);
+    }
+    c == CEILING || c != base
+  };
+
+  assert!(
+    !wrapping(0, 1 << W),
+    "the aliasing itself: 2^{W} trips from a baseline of 0 return to it, and the old verdict \
+     answered `false` over an attempt in which every descent refused"
+  );
+  assert!(
+    saturating(0, 1 << W),
+    "the repair: the same attempt now answers `true`"
+  );
+
+  // The whole range, both mechanisms, in the one direction that matters.
+  let mut wrapping_holes = 0usize;
+  for base in 0..=CEILING {
+    for trips in 1..=(1 << W) {
+      if !wrapping(base, trips) {
+        wrapping_holes += 1;
+      }
+      assert!(
+        saturating(base, trips),
+        "base {base}, {trips} trips: the verdict must never be `false` after a positive number of \
+         trips"
+      );
+    }
+  }
+  assert_eq!(
+    wrapping_holes,
+    (CEILING as usize) + 1,
+    "one hole per baseline under the old arithmetic — every baseline had exactly one trip count \
+     that read clean, which is what makes this a property of the representation and not of one \
+     unlucky value"
+  );
 }
 
 /// A bare input with no budget configured — the fixture the two baseline cells above share.

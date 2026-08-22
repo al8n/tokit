@@ -244,6 +244,23 @@ pub use cursor::Cursor;
 pub(crate) use input_ref::ClosePayload;
 pub(crate) use input_ref::CloseStatus;
 pub(crate) use input_ref::ScannerTripBaseline;
+
+/// The value both trip counters stop at, and the reading that means "**at least** this many".
+///
+/// The counters saturate here rather than wrapping, and both attempt-relative verdicts answer
+/// `true` unconditionally once a counter holds it. That pairing is the whole of the overflow
+/// contract, and it is the fail-closed direction: past the ceiling the witness over-reports a trip
+/// rather than under-reporting one.
+///
+/// Wrapping was the original choice, for a reason that was sound about *consecutive* values and
+/// wrong about the whole range: an inequality against a per-attempt baseline needs consecutive
+/// values to differ, which wrapping gives, but it also needs the value never to return to a
+/// baseline after a positive number of trips, which wrapping does **not**. `usize::MAX + 1` trips
+/// alias the baseline exactly and the verdict answers `false` over a parse in which every single
+/// `descend` refused. Unreachable at 64 bits and reachable at 32 — a zero recursion limit makes
+/// every `descend` a trip, and 2^32 of them is a loop, not a lifetime. Saturation removes the
+/// return path; the disjunct at each verdict removes the tie at the ceiling itself.
+pub(crate) const TRIP_COUNTER_EXHAUSTED: usize = usize::MAX;
 pub(crate) use input_ref::Session;
 pub use input_ref::{
   Balance, Commit, DelimClass, Descent, DropPolicy, Hole, InputRef, ResourceTripBaseline, Rollback,
