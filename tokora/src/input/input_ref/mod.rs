@@ -1060,7 +1060,10 @@ where
   /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot), which is per *collection* where the
   /// descent baseline is per *element*.
   ///
-  /// Costs one `u64` load and a comparison, on the failure arm only.
+  /// Costs one `u64` load and a comparison. **Not "on the failure arm only"** — like its descent
+  /// twin it is absent from an accepted progressing element and present on every normal
+  /// termination, since `parser::many`'s `absence_after_element` reads it at a decline or a stall.
+  /// A clean collection pays it once, at the exit that ends it.
   #[inline(always)]
   pub(crate) const fn scanner_tripped_during_attempt(&self, since: ScannerTripBaseline) -> bool {
     *self.scanner_trips == super::TRIP_COUNTER_EXHAUSTED || *self.scanner_trips != since.count
@@ -1323,7 +1326,7 @@ where
     // `Offset::Ord` against it, in front of that offset's destructor, and in front of the
     // derivation. See the section above for what each of those cost while they ran first.
     if self.token_budget.limit_probe_spent() {
-      // The witness. A `usize` increment, and nothing consumer-controlled precedes it in this
+      // The witness. A `u64` increment, and nothing consumer-controlled precedes it in this
       // body or in `lex_within_boundary` above it (`reached_boundary` compares only when a
       // boundary is latched, and a latched boundary returns `Stop` from there without reaching
       // this).
@@ -1383,7 +1386,7 @@ where
     // ── the refusal is DECIDED: an item exists and the ceiling refuses it ──
     //
     // Publish all three durable facts here, and nothing consumer-controlled may appear between
-    // this comment and the end of the publication. What runs is a `bool` store, a `usize`
+    // this comment and the end of the publication. What runs is a `bool` store, a `u64`
     // increment and one `mem::replace`; the boundary's derivation and clamp are already done, and
     // the refused item does not exist yet.
     //
@@ -1501,7 +1504,7 @@ where
     if !self.token_budget.is_exhausted() || self.poison_boundary.is_some() {
       return false;
     }
-    // The witness. A `usize` increment, and the driver's front-drain is the only consumer step
+    // The witness. A `u64` increment, and the driver's front-drain is the only consumer step
     // ahead of it.
     self.count_scanner_trip();
     // The memo, second, because deriving it is caller code and no ordering can make it infallible.
@@ -1621,7 +1624,7 @@ where
   /// a sentence in this paragraph, and a bare `enum` in `mod.rs` whose variants every descendant
   /// of `input_ref` could name.
   ///
-  /// What is left is a `usize` increment and one `Option::replace` — which *is* `mem::replace`, a
+  /// What is left is a `u64` increment and one `Option::replace` — which *is* `mem::replace`, a
   /// move, not an assignment. `*self.poison_boundary = Some(..)` would drop the displaced
   /// `Option<L::Offset>` **before** installing the new one, putting caller `Drop` code between the
   /// count and the boundary; the displaced value is returned instead, and `#[must_use]` makes a

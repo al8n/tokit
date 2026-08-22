@@ -83,8 +83,8 @@ pub struct ResourceTripBaseline<'closure> {
   /// The counter's value when the baseline was taken.
   count: u64,
   /// The identity of the input that issued it: the address of that input's resource-trip slot.
-  /// Distinct inputs are distinct structs at distinct addresses, and the slot is a `usize` so it
-  /// is never zero-sized.
+  /// Distinct inputs are distinct structs at distinct addresses, and the slot is a `u64` so it is
+  /// never zero-sized.
   nonce: usize,
   /// Invariant in `'closure`, through the fn-pointer form rather than a bare reference.
   ///
@@ -689,14 +689,34 @@ where
   /// of it.
   ///
   /// **This call is on the hot path of every *successful* element**, because the descent baseline
-  /// is taken per element — so the price was measured rather than argued. On
-  /// `thumbv6m-none-eabi`, the narrowest supported target, `-O`: **5 instructions at `usize`, 7 at
-  /// `u64`**, a flat `+2` against an element that has already run a cache probe or a full lex and
-  /// commit. A whole 32-bit collection-parse binary grew **16 bytes** (111,555 → 111,571 on
-  /// `wasm32-wasip1`, the widest 32-bit target that can be executed here), and executed latency on
-  /// that target was **below the instrument's noise floor** — min-of-14 put the change at `+3.2%`
-  /// and the median at `-7.7%`, which is an instrument that cannot resolve it rather than a
-  /// measurement. The `+2` is the number this design accepts.
+  /// is taken per element — so the price was measured rather than argued. Every figure below is
+  /// `thumbv6m-none-eabi` at `-O`, the narrowest supported target, except where it says otherwise.
+  ///
+  /// | | `usize` | `u64` | delta | runs |
+  /// |---|---|---|---|---|
+  /// | this call | 5 instr | 7 instr | **+2** | per element |
+  /// | [`tripped_during_attempt`](Self::tripped_during_attempt) | 17 instr | 22 instr | +5 | per terminating exit, and per failed element |
+  /// | an element loop (N of the first, one of the second) | 31 instr | 38 instr | +7 | per collection |
+  /// | that loop's stack frame | 16 B | 24 B | +8 B | per collection |
+  /// | [`ResourceTripBaseline`] itself | 8 B, align 4 | 16 B, align 8 | **×2** | carried per element |
+  ///
+  /// The **layout** row is the one an instruction count does not show: the baseline is `Copy` and
+  /// passed by value, so a 32-bit element loop carries twice the value it used to. It is in the
+  /// accounting because it was missed the first time this was priced.
+  ///
+  /// Whole-parse, on `wasm32-wasip1` — the widest 32-bit target that can be *executed* here, since
+  /// `i686` cannot link on this host — a collection-parse binary grew **33 bytes** (120,421 →
+  /// 120,454, +0.027%), and interleaved executed latency showed **no regression in either
+  /// workload shape**: a long single collection at `-5.8%` min / `-5.3%` median, and many short
+  /// collections — the shape the per-termination `+5` makes expensive — at `-0.35%` min / `-7.25%`
+  /// median, n=12 each. Both sides land at or below zero, which is an instrument that cannot
+  /// resolve the change rather than a speedup.
+  ///
+  /// **Accepted with the layout included**: two instructions and eight stack bytes per element
+  /// loop, against an element that has already run a cache probe or a full lex and commit, buys a
+  /// counter a 32-bit loop cannot exhaust. Keeping `count` at `usize` and moving the exhaustion
+  /// distinction to a second cell would buy back the four bytes and add a load at the same sites,
+  /// and the executed measurement gives it nothing to recover.
   #[inline(always)]
   pub fn trip_snapshot(&self) -> ResourceTripBaseline<'closure> {
     ResourceTripBaseline {
@@ -711,8 +731,8 @@ where
   ///
   /// The same derivation [`begin_point`](InputRef::begin_point) uses for its session ids, off this
   /// witness's own cell rather than the poison boundary. Two simultaneously-live inputs are
-  /// distinct structs at distinct addresses and the slot is a `usize`, so it is never zero-sized
-  /// and the two can never collide.
+  /// distinct structs at distinct addresses and the slot is a `u64`, so it is never zero-sized and
+  /// the two can never collide.
   #[inline(always)]
   fn trip_nonce(&self) -> usize {
     core::ptr::from_ref(&*self.resource_trips).addr()
@@ -848,10 +868,20 @@ where
   /// The check is one word-pair comparison on a path that already runs one, and its branch is
   /// cold.
   ///
-  /// Costs a nonce comparison and a `u64` comparison, **on the failure arm only** — never on a
-  /// successful element. Measured on `thumbv6m-none-eabi`, `-O`: 19 instructions at `usize`, 24 at
-  /// `u64`. That `+5` is on a path a clean parse does not take; the per-element price is
-  /// [`trip_snapshot`](Self::trip_snapshot)'s `+2`.
+  /// # When this runs, which is not only on failure
+  ///
+  /// It is **absent from an accepted, progressing element** — that is the arm the per-element
+  /// baseline exists to leave alone — and **present on every normal termination**: `parser::many`'s
+  /// `absence_after_element` reads it at a decline or a no-progress stall, `close_after_element`
+  /// reads it at a real closer, and `file_element_failure` reads it on a failed element. So a
+  /// clean collection pays it once, at the exit that ends it, and a workload of many *short*
+  /// collections pays it roughly per collection rather than never. An earlier version of this
+  /// sentence said "on the failure arm only", which was the right operations attached to the wrong
+  /// model of when they run.
+  ///
+  /// Costs a nonce comparison and a `u64` comparison. Measured on `thumbv6m-none-eabi`, `-O`: **17
+  /// instructions at `usize`, 22 at `u64`**. [`trip_snapshot`](Self::trip_snapshot) carries the
+  /// whole cost table, including the short-collection workload this `+5` is the price of.
   ///
   /// # Panics
   ///

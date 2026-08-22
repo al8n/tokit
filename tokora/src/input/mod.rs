@@ -278,11 +278,10 @@ pub(crate) use input_ref::ScannerTripBaseline;
 /// anything tripped, so a quiet attempt read terminal permanently.
 ///
 /// `u64` moves the give-up point out of reach on every target instead of choosing which direction
-/// to be wrong in at a point a loop can reach. The cost is measured rather than assumed: on
-/// `thumbv6m-none-eabi`, `-O`, the per-element snapshot goes from **5 to 7 instructions** and the
-/// failure-arm verdict from **19 to 24**; a whole 32-bit collection-parse binary grew **16 bytes**
-/// (111,555 → 111,571 on `wasm32-wasip1`), and executed latency on that target was below the
-/// instrument's noise floor. See [`InputRef::trip_snapshot`](InputRef::trip_snapshot).
+/// to be wrong in at a point a loop can reach. The cost is measured rather than assumed — the
+/// per-element snapshot, the per-termination verdict, the baseline's 8→16-byte layout on a 32-bit
+/// target, and two executed workload shapes — and the whole table, with the decision it supports,
+/// is on [`InputRef::trip_snapshot`](InputRef::trip_snapshot).
 pub(crate) const TRIP_COUNTER_EXHAUSTED: u64 = u64::MAX;
 pub(crate) use input_ref::Session;
 pub use input_ref::{

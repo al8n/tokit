@@ -12129,7 +12129,7 @@ fn at_the_absolute_ceiling_the_verdict_over_reports_and_that_is_the_documented_r
 
 /// What wrapping did, over a whole range a test can walk.
 ///
-/// The real counters are `usize`, so their aliasing point is 2^32 or 2^64 calls away. The
+/// The real counters are `u64`, so their aliasing point is 2^64 calls away. The
 /// arithmetic is the same at any width, so this walks it at 8 bits: the two expressions below are
 /// the two the crate runs, narrowed, and the model is only worth its assertions insofar as they
 /// stay spelled the same as `raise_level`'s `saturating_add` and the verdict's disjunct.
