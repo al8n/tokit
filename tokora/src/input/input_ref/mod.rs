@@ -1062,13 +1062,13 @@ where
   ///
   /// Costs one `u64` load and a comparison.
   ///
-  /// **When it runs is not this doc's to state.**
+  /// **When it runs is not this doc's to state**, and the only thing worth adding here is that it
+  /// is not the same answer as its twin's.
   /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries the one copy of that model,
-  /// derived from every call site in the crate, and this verdict is a column in it. Two things
-  /// about that column are worth naming here because they are *this* verdict's and not its twin's:
-  /// it is the **first** term at the absence exit, so unlike the descent verdict it is never
-  /// short-circuited away there — and it is **absent from both closer classes**, the probed one by
-  /// design and the direct one along with every other verdict.
+  /// derived from every call site in the crate; this verdict is its **own column** in that table,
+  /// differing from the descent column in both the order it is evaluated in and which closer
+  /// classes reach it. Read the values there rather than here — a copy of them here is how the
+  /// three previous versions of that model each went stale.
   #[inline(always)]
   pub(crate) const fn scanner_tripped_during_attempt(&self, since: ScannerTripBaseline) -> bool {
     *self.scanner_trips == super::TRIP_COUNTER_EXHAUSTED || *self.scanner_trips != since.count

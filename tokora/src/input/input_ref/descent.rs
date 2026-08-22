@@ -713,13 +713,13 @@ where
   /// resolve the change rather than a speedup.
   ///
   /// **What the executed measurement covers**, stated rather than generalised: the probe is a
-  /// non-delimited collection terminating by **decline** — one of the six classes in the table
-  /// above. Of the five it does not exercise, four are **cheaper or equal** per termination (a
-  /// direct closer evaluates no verdict, a probed closer only the descent one, and both failure
-  /// classes sit behind cheaper reads that can short-circuit either away). The one that is not
-  /// cheaper is a [`skip_then_retry`](crate::ParseInput::skip_then_retry) workload, which pays both
-  /// verdicts per **successful** sync or advance step through `recovery_step`; that shape is
-  /// unmeasured, and it is named here rather than folded into the number.
+  /// non-delimited collection terminating by **decline** — one of the six classes in the table on
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt). Of the five it does not exercise,
+  /// four are **cheaper or equal** per termination; which they are, and why, is that table's to
+  /// say. The one that is **not** cheaper has to be named here rather than deferred, because it is
+  /// the bound on this measurement: a [`skip_then_retry`](crate::ParseInput::skip_then_retry)
+  /// workload pays both verdicts per **successful** sync or advance step, and that shape is
+  /// unmeasured.
   ///
   /// **Accepted on that scope**: two instructions and eight stack bytes per element loop, against
   /// an element that has already run a cache probe or a full lex and commit, buys a counter a
@@ -896,12 +896,11 @@ where
   /// | recovery failure | `parser::recovery_gate::judge` | 3rd term | 4th term | a recovery attempt returned `Err`. Both sit behind `is_incomplete()` and `is_terminal()` |
   /// | successful recovery step | `parser::recovery_gate::recovery_step` | **1st term** | 2nd term | a `skip_then_retry` skip or advance **succeeded**. The descent verdict always runs — the one place either runs after something worked |
   ///
-  /// What follows from the table, and what does not: a verdict is **absent from an accepted,
-  /// progressing element**, which is the arm the per-element baseline exists to leave alone. Beyond
-  /// that there is no single frequency — a collection terminating through a direct closer pays
-  /// **none**, through a probed closer pays the **descent one alone**, and through a decline or
-  /// stall pays **both**. Anything that states one number per collection is describing one class
-  /// and calling it the model.
+  /// Two things the table does not contain, because they are what it is *for*. A verdict is
+  /// **absent from an accepted, progressing element** — no row covers that arm, and its absence is
+  /// the point of taking the baseline per element. And there is **no single frequency**: read the
+  /// rows for what each class costs rather than taking a number from here, because anything
+  /// stating one number per collection is describing one row and calling it the model.
   ///
   /// Costs a nonce comparison and a `u64` comparison. Measured on `thumbv6m-none-eabi`, `-O`: **17
   /// instructions at `usize`, 22 at `u64`**. [`trip_snapshot`](Self::trip_snapshot) carries the
