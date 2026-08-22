@@ -158,6 +158,7 @@ use crate::{
 };
 
 use super::*;
+use crate::input::{ResourceTripBaseline, ScannerTripBaseline};
 use handler::*;
 
 pub use delim::*;
@@ -376,8 +377,8 @@ pub(super) fn file_element_failure<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
   err: <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
   since: &Cursor<'inp, 'closure, L>,
-  scans: usize,
-  trips: usize,
+  scans: ScannerTripBaseline,
+  trips: ResourceTripBaseline<'closure>,
 ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
 where
   L: Lexer<'inp>,
@@ -516,11 +517,11 @@ where
 /// `cargo test -p tokora --all-features --no-fail-fast`. The suite named for that witness must go
 /// red and the census must stay green. Repeat per witness.
 #[inline(always)]
-pub(super) fn absence_after_element<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
-  inp: &InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
+pub(super) fn absence_after_element<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>(
+  inp: &InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
   latch: &Option<L::Offset>,
-  scans: usize,
-  trips: usize,
+  scans: ScannerTripBaseline,
+  trips: ResourceTripBaseline<'closure>,
 ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
 where
   L: Lexer<'inp>,
@@ -616,9 +617,9 @@ where
 /// Neuter the term (`let _ = inp.tripped_during_attempt(trips);` above the `if`) and that section
 /// reds while the census stays green.
 #[inline(always)]
-pub(super) fn close_after_element<'inp, L, Ctx, Lang: ?Sized, Cmpl>(
-  inp: &InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
-  trips: usize,
+pub(super) fn close_after_element<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>(
+  inp: &InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
+  trips: ResourceTripBaseline<'closure>,
 ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
 where
   L: Lexer<'inp>,

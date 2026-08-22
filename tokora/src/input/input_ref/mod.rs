@@ -51,6 +51,34 @@ mod transaction;
 mod try_expect;
 
 pub use descent::Descent;
+pub use descent::ResourceTripBaseline;
+
+/// The baseline half of the **scanner-trip witness**, and the reason the swap with
+/// [`ResourceTripBaseline`] does not compile.
+///
+/// Crate-internal, like the pair that issues it — [`InputRef::scanner_trip_snapshot`] records why.
+/// A distinct type rather than a bare `usize` because the two baselines have **opposite**
+/// granularities (this one per collection, the descent one per element) and every site that reads
+/// both takes both, so an argument swap was a plausible boolean and a silent wrong answer. It is
+/// a compile error now. The `'closure` brand its public sibling carries is deliberately absent:
+/// the impl block that issues this one elides the handle lifetime, and the misuse the brand rules
+/// out — a baseline escaping the handle — is not reachable from outside a crate that does not
+/// publish the pair.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScannerTripBaseline {
+  /// The counter's value when the baseline was taken.
+  count: usize,
+}
+
+#[cfg(test)]
+impl ScannerTripBaseline {
+  /// The raw count, for the in-crate cells that assert exact trip tallies rather than the
+  /// attempt-relative verdict. There is no such door on the public sibling.
+  #[inline(always)]
+  pub(crate) const fn count(self) -> usize {
+    self.count
+  }
+}
 pub use drop_policy::{Commit, DropPolicy, Rollback};
 pub use sync_balanced::{Balance, DelimClass, Hole};
 pub use transaction::Transaction;
@@ -929,18 +957,81 @@ where
   /// [`scanner_tripped_during_attempt`](Self::scanner_tripped_during_attempt) when judging that
   /// attempt.
   ///
-  /// **This, and not [`latch_snapshot`](Self::latch_snapshot), is what a recovery gate judges a
-  /// scanner stop with.** The latch is a lineage memo: a [`Checkpoint`](crate::input::Checkpoint)
-  /// carries it and a restore copies it back, so comparing it across a rollback compares a restored
-  /// value against what it was restored to. Reading it inside the attempt fixes one level and the
-  /// level below reopens it — grammar code that catches a stop inside an inner
+  /// **This, and not the poison boundary beside it, is what a recovery gate judges a scanner stop
+  /// with.** The latch is a lineage memo: a [`Checkpoint`](crate::input::Checkpoint) carries it
+  /// and a restore copies it back, so comparing it across a rollback compares a restored value
+  /// against what it was restored to. Reading it inside the attempt fixes one level and the level
+  /// below reopens it — grammar code that catches a stop inside an inner
   /// [`try_attempt`](Self::try_attempt) has that rollback erase the latch before an outer gate
   /// looks. This counter is outside the rollback set entirely and is therefore depth-independent.
   ///
+  /// # Per COLLECTION, where the descent baseline is per ELEMENT
+  ///
+  /// The two facts decay differently, so their baselines belong at different units and neither can
+  /// be derived from the other. A descent trip that grammar code caught and parsed past stops
+  /// being true of the input; a spent scanner budget does not — the token stream ends where it
+  /// ended, and every attempt after it reads a view the stop truncated. So this baseline is taken
+  /// **once per collection**, above the loop, where hoisting the descent one would be the defect:
+  /// taken per element it is re-read after the trip an earlier element caught, and *element 1
+  /// tripped and accepted, element 2 declines* then concludes cleanly over a spent budget. That
+  /// asymmetry is why the two baselines are two **types**: the swap does not compile, in either
+  /// direction, at any of the sites that take both.
+  ///
+  /// # Why this pair is NOT public, where the descent pair is
+  ///
+  /// It was published for one round and withdrawn before release, and the reason is a second
+  /// public contract it cannot see. [`set_state`](Self::set_state) and
+  /// [`state_mut`](Self::state_mut) re-key the input's forward-scanning facts, and dropping the
+  /// poison boundary there is **the documented limit-recovery path** — swap in a fresh or
+  /// bigger-budget state and scanning resumes past the old boundary. Neither touches this counter,
+  /// which is monotone and never cleared. So a loop doing exactly what the section above
+  /// prescribes — one baseline, taken above the loop — can trip, recover through the documented
+  /// path, read the rest of the document and reach a genuine end of input with this witness still
+  /// answering `true`, rejecting a fully recovered parse as truncated. Measured, not reasoned
+  /// about: an eight-token source under a scan budget of three, recovered with `set_state`,
+  /// consumed all eight and the witness still said tripped.
+  ///
+  /// That is correct use under two conflicting public contracts rather than caller misuse, and
+  /// making the verdict account for a state-regime recovery is a change to this crate's terminal
+  /// law — a recovery generation ordered against the trip, in a cell whose own rollback behaviour
+  /// has to be settled — which every one of the twelve collection drivers, the recovery gate and
+  /// `skip_then_retry` would inherit. That is a design round, not a visibility change, so the pair
+  /// stays crate-internal until it has had one.
+  ///
+  /// # What a consumer can answer today, and what it cannot
+  ///
+  /// [`try_expect_or_stop`](Self::try_expect_or_stop) covers **the declining exits**, and only
+  /// those. Its contract is that a terminal stop is an error and never a decline, and it reads the
+  /// *live* boundary, so it is right where this counter is wrong: the same `set_state` recovery
+  /// that leaves the counter poisoned correctly stops it reporting a stop. Measured on the fixture
+  /// above — the truncated run raises the terminal end-of-input error with no input-side witness
+  /// anywhere, the widened control reads all eight, and the recovered run reads all eight too.
+  /// `tokora/tests/root_loop_trip_witness.rs`'s section 3 is those cells.
+  ///
+  /// **It is not a replacement for this pair, and must not be described as one.** A *rejecting*
+  /// (fail-fast) emitter reports a lexer-resource trip by returning the value its
+  /// `From<<L::Token as Token>::Error>` builds, and `scan_with(..)?` propagates that value from
+  /// **inside** `try_expect_or_stop`, before the call can reach the arm that raises a terminal
+  /// stop. The caller therefore receives an ordinary grammar error over an exhausted scanner, with
+  /// nothing on it to read — and no care in the grammar's
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal) can repair that, because nothing on the path
+  /// is terminal-marked to delegate to. Calling `try_expect_or_stop` does not help, because the
+  /// unmarked error originated inside that call. This is the same fact the twin's own
+  /// documentation states from the other side: this witness *answers where the error value
+  /// cannot*.
+  ///
+  /// So: **no public witness answers the rejecting-emitter path today.** That gap is real, it is
+  /// older than this pair's visibility — the pair has been crate-internal throughout — and closing
+  /// it is the design round above, not a visibility change. `tokora/tests/root_loop_trip_witness.rs`
+  /// section 4 pins it as a defect, beside the control that shows an accepting emitter marks the
+  /// same stop.
+  ///
   /// Costs one `usize` load per attempt: no scan, no lookahead fill and no token commit reads it.
   #[inline(always)]
-  pub(crate) const fn scanner_trip_snapshot(&self) -> usize {
-    *self.scanner_trips
+  pub(crate) const fn scanner_trip_snapshot(&self) -> ScannerTripBaseline {
+    ScannerTripBaseline {
+      count: *self.scanner_trips,
+    }
   }
 
   /// Whether the **scanner tripped a resource limit during the attempt** that took `since` as its
@@ -958,12 +1049,18 @@ where
   /// disciplines [`tripped_during_attempt`](Self::tripped_during_attempt) documents at length, for
   /// the same two reasons. Its granularity floor is the same as well: this witnesses that *a* trip
   /// happened while the attempt ran, not that the `Err` in hand *is* that trip, so a unit that
-  /// catches a trip and then fails ordinarily is re-raised. It fails closed, never open.
+  /// catches a trip and then fails ordinarily is re-raised. It fails closed, never open — with the
+  /// one exception [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) records, which is a
+  /// state-regime recovery it cannot see, and which is why that pair is crate-internal.
+  ///
+  /// Its baseline's granularity is **not** the descent one's: see
+  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot), which is per *collection* where the
+  /// descent baseline is per *element*.
   ///
   /// Costs one `usize` load and a comparison, on the failure arm only.
   #[inline(always)]
-  pub(crate) const fn scanner_tripped_during_attempt(&self, since: usize) -> bool {
-    *self.scanner_trips != since
+  pub(crate) const fn scanner_tripped_during_attempt(&self, since: ScannerTripBaseline) -> bool {
+    *self.scanner_trips != since.count
   }
 
   /// The **token budget** this parse's lexer produces items against: the ceiling, and what has

@@ -279,6 +279,90 @@ and will red until they do.
   the input module's own docs already warn about, "counts replay as input and trips on valid
   documents"), not the cost of an item, and not a session. Calibrate against produce-events.
 
+- **`InputRef::trip_snapshot` / `tripped_during_attempt` are public, and the baseline is an opaque
+  `input::ResourceTripBaseline`.** They were `pub(crate)`, so a **descent** budget trip was
+  answerable outside this crate only through carriers the grammar supplies — `MaybeTerminal` on an
+  error type whose `From` may discard the trip, and a latch a `Checkpoint` refunds — which are the
+  two carriers this counter was added because they cannot be trusted. The bodies and every in-crate
+  call site are unchanged; what moved is the visibility and the baseline's type.
+
+  **The consumer, and what not having them cost it.** al8n/smear#169. A hand-written document-root
+  loop catches a failed definition and decides whether that failure ends the document; deciding by
+  reading the error, a nesting refusal reached the loop looking ordinary, the loop resynchronised
+  and re-read the abandoned nest at document level, and one refusal became one diagnostic per
+  remaining unit — 67 at 66 levels, 804 at 800, growing with the document. This crate does not
+  publish API on speculation and these sat crate-private for that reason; a real consumer with a
+  real defect is the argument that was missing.
+
+  **The scanner twin stays crate-internal, and that is a measurement rather than a scoping
+  choice.** `scanner_trip_snapshot` / `scanner_tripped_during_attempt` were published in the same
+  change and withdrawn before release. `set_state` and `state_mut` re-key the input's
+  forward-scanning facts, and dropping the poison boundary there is the crate's **documented**
+  limit-recovery path, while that counter is monotone and never cleared — so a loop doing exactly
+  what the witness's own documentation prescribes can trip, recover, read the whole document, reach
+  a genuine end of input, and still be told it was truncated. Measured: eight tokens under a scan
+  budget of three, recovered with `set_state`, consumed all eight with the witness still answering
+  `true`. That is correct use under two conflicting public contracts, and reconciling them is a
+  change to this crate's terminal law that all twelve collection drivers, the recovery gate and
+  `skip_then_retry` would inherit — a design round, not a visibility change.
+
+  On the **declining** exits a consumer has `InputRef::try_expect_or_stop`, whose contract is that
+  a terminal stop is an error and never a decline; it reads the live boundary, so the same recovery
+  that leaves the counter poisoned correctly stops it reporting a stop. All three of those
+  positions are measured in `tokora/tests/root_loop_trip_witness.rs`.
+
+  **It is not a replacement for the withdrawn pair, and this changelog said so earlier in terms
+  that were too strong.** A *rejecting* (fail-fast) emitter reports a lexer-resource trip by
+  returning the value its `From<<L::Token as Token>::Error>` builds, and `scan_with(..)?`
+  propagates it from **inside** `try_expect_or_stop`, before that call can raise a terminal stop.
+  The caller receives an ordinary grammar error over an exhausted scanner, and no delegation in its
+  `MaybeTerminal` can repair it, because nothing on the path is marked to delegate to — the same
+  fact `scanner_tripped_during_attempt` documents from the other side when it says it answers where
+  the error value cannot. **So no public witness answers the rejecting-emitter path today.** That
+  gap is real and it is *older than this release*: the pair has been crate-internal throughout, so
+  its visibility has never changed the answer in either direction. Section 4 of that suite pins the
+  gap as a defect, beside the control that shows an accepting emitter marks the same stop.
+
+  **The descent pair has no such exposure**, and the reason is the channel rather than luck: a
+  descent refusal is *returned* by `InputRef::descend` and never routed through an emitter, so no
+  emitter can unmark it or convert it away from the counter that already recorded it.
+  `the_descent_witness_holds_under_a_rejecting_emitter` runs the amplification loop under a
+  fail-fast emitter and gets one refusal, one stop, nothing filed.
+
+  **The baseline is a type, not a `usize`.** `ResourceTripBaseline` is opaque — no accessor, no
+  `PartialEq`, no constructor, and a hand-written `Debug` that renders `ResourceTripBaseline(..)`
+  and nothing else. A derive would have handed the absolute count straight back through `{:?}` in
+  one line, along with the nonce, which is the address of an internal slot; a cell asserts the
+  render carries no ASCII digit at all, and restoring the derive reddens it. `Copy` is deliberate:
+  a driver hands the same baseline to two gates in one loop turn, and duplicating one is harmless
+  because storage is refused by the region parameter rather than by move semantics. The scanner
+  baseline's own type makes the two impossible to swap at the sites that take both.
+
+  **A foreign baseline is refused by the type on every public path, and panics where it is not.**
+  Which mechanism does what was pinned by planting against each, because the plausible story is
+  wrong twice. The `'closure` **parameter** is the whole of the refusal: a baseline cannot be
+  stashed where it outlives the invocation, and it cannot be captured by a closure that must
+  satisfy the `for<'c>` bound a nested parse imposes — which is the realistic cross-wire, a driver
+  holding two inputs alive and judging the inner with the outer's baseline. Both are `compile_fail`
+  doctests, each paired with a control that captures or stashes a region-free `usize` off the same
+  handle and compiles. **Invariance is not what does that**: planted covariant, both shapes are
+  still refused, so the brand is described as the form the crate's other ids use and nothing more.
+  Since `Input` is crate-internal, no consumer can hold two handles whose regions unify at all.
+
+  What is left is crate-internal, and `tripped_during_attempt` **panics** on it rather than
+  answering. An earlier round had it fail closed and answer `true`, and that was wrong for this
+  witness specifically: a spurious `true` tells a root loop its attempt tripped, and such a loop
+  ends a document that was fine and discards the valid suffix — while still returning `Ok`, so the
+  mistake survives testing and points at nothing. That is the same failure shape that kept the
+  scanner twin crate-internal. A cross-fed baseline is a programmer error, unreachable from any
+  input and from any consumer, so it announces itself instead.
+
+  What no type can decide is **placement**, and that is the misuse that survives: the descent
+  baseline belongs inside the element loop and the scanner one above it, and each taken at the
+  other's unit is a measured defect. Both directions are now behavioural cells rather than prose —
+  the hoisted descent baseline in `tokora/tests/root_loop_trip_witness.rs`, the per-element scanner
+  baseline in `input::input_ref::tests`.
+
 ### Changed (breaking)
 
 - **`RecursionLimiter::PARSE_DEFAULT_DEPTH` is 32, in every build, and was 16** (#297). Every
