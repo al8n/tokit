@@ -349,40 +349,60 @@ and will red until they do.
   and compiles. Since `Input` is crate-internal, no consumer can hold two handles whose regions
   unify at all.
 
-  **Where the brand's invariance matters is mapped rather than asserted**, this sentence having
-  been wrong in both directions before. Flipping it to a bare reference changes a bare
-  region-shrinking coercion on the type — refused invariant, accepted covariant, and that is its
-  own `compile_fail` cell. It changes **nothing** that reaches `tripped_during_attempt`: all three
-  shapes above are refused under either variance, because every consumer goes through
-  `&InputRef<'inp, 'closure, ..>` and `InputRef` is itself invariant in `'closure`. The brand is
-  therefore redundant with *another type's* variance at every consumption site, which is why two
-  plants aimed at those sites came back green and were read as evidence. It is kept so the refusal
-  stays a property of this type rather than a consequence of a choice on `InputRef`.
+  **The brand's invariance is load-bearing, at an identified site.** This sentence was wrong twice
+  before landing here, so it is stated as the measurement: flipping the brand to a bare reference
+  changes these five shapes as follows.
 
-  What is left is crate-internal, and `tripped_during_attempt` **panics** on it rather than
-  answering. An earlier round had it fail closed and answer `true`, and that was wrong for this
-  witness specifically: a spurious `true` tells a root loop its attempt tripped, and such a loop
-  ends a document that was fine and discards the valid suffix — while still returning `Ok`, so the
-  mistake survives testing and points at nothing. That is the same failure shape that kept the
-  scanner twin crate-internal. A cross-fed baseline is a programmer error, unreachable from any
-  input and from any consumer, so it announces itself instead.
+  | shape | invariant | covariant |
+  |---|---|---|
+  | a bare region-shrinking coercion on the type | refused | **accepted** |
+  | a generic adapter: `&mut InputRef<'short>` plus a baseline `<'long>`, `'long: 'short` | refused | **accepted** |
+  | a `Cell` stash | refused | refused |
+  | a closure capture under a `for<'c>` bound | refused | refused |
+  | a hand-written `ParseInput` impl carrying one in a field | refused | refused |
 
-  **Both trip counters are `u64` and saturate, and the verdicts are exact everywhere a program
-  can reach.** Two defects, and the second was created by the repair for the first. Wrapping
-  aliased: `usize::MAX + 1` trips return to a baseline exactly and the verdict answered `false`
-  over an attempt in which every `descend` refused — unreachable at 64 bits, a loop rather than a
-  lifetime at 32, where a zero recursion limit makes every `descend` a trip. Saturating with an
-  unconditional "exhausted means tripped" disjunct fixed that and introduced the mirror: at the
-  ceiling the disjunct fires whether or not anything tripped, so an attempt that descended
-  **nothing** read terminal — permanently, for the rest of the session. Wrapping failed open once;
+  **The adapter row is the one that decides it**, and it is a *consumption* site — the case an
+  earlier draft of this entry claimed could not exist when it concluded the brand was redundant
+  with `InputRef`'s own invariance in `'closure`. In the last three rows the handle is itself
+  coerced or universally quantified, so its invariance refuses first and the brand's cannot be
+  seen. In the adapter the handle sits at one fixed region and is never coerced; only the baseline
+  moves, and the brand is then the only thing refusing. Under a covariant brand that call compiles
+  and is publicly reachable — carry an outer baseline through an inner parse's context and the
+  nested parse cross-feeds a foreign baseline into the nonce panic. **Do not weaken the brand.**
+
+  Three probes agreed it was inert and all three shared a shape. Agreement between probes that
+  share a shape is not independent evidence.
+
+  **Both trip counters are `u64` and saturate, and the verdicts are exact everywhere a program can
+  reach.** Two defects, and the second was created by the repair for the first. Wrapping aliased:
+  at `usize` width, 2^32 trips return to a baseline exactly on a 32-bit target and the verdict
+  answered `false` over an attempt in which every `descend` refused — a loop rather than a
+  lifetime, since a zero recursion limit makes every `descend` a trip. Saturating at `usize::MAX`
+  with an unconditional "exhausted means tripped" disjunct fixed that and introduced the mirror: at
+  the ceiling the disjunct fires whether or not anything tripped, so an attempt that descended
+  **nothing** read terminal, permanently, for the rest of the session. Wrapping failed open once;
   saturation failed closed forever.
 
-  The representation is what resolves it. Both cells are now `u64` rather than `usize`, so the
-  point a 32-bit loop can drive them to is `u32::MAX` — four billion refusals, and nowhere near a
-  ceiling of 2^64 — and the reading there is still exact in both directions. `Cst::resource_trips`
-  keeps its `usize` signature and clamps, documented as a floor where it does; `Cst`'s `Debug`
-  renders the floor as `18446744073709551615+` rather than printing a tally the value cannot
-  support, since that was the second public reading of it and only the first had been qualified.
+  The **width** is what resolves it, not the verdict. At `u64` the point a 32-bit loop can drive
+  the counters to — `u32::MAX`, four billion refusals — is nowhere near a ceiling of 2^64, and the
+  reading there is exact in both directions.
+
+  **Two ceilings now, and they are different things.** `u64::MAX` is where the counter gives up,
+  the verdicts fail closed, and no program reaches. `usize::MAX` is a **display clamp** on
+  `Cst::resource_trips`, which returns `usize` — reachable on a 32-bit target, a floor when it
+  fires, and *not* an exhaustion point: the counter keeps counting and attempt-relative readings
+  stay exact past it. `Cst`'s `Debug` renders the underlying value and marks it with a trailing `+`
+  only at the real ceiling, since that was the second public reading of the count and only the
+  accessor had been qualified.
+
+  **The 32-bit cost is measured, and accepted.** `trip_snapshot` is taken per *element*, so it is
+  on the hot path of every successful element. On `thumbv6m-none-eabi`, `-O`: the snapshot goes
+  **5 → 7 instructions**, and the failure-arm verdict **19 → 24** — the latter on a path a clean
+  parse never takes. A whole 32-bit collection-parse binary grew **16 bytes** (111,555 → 111,571,
+  `wasm32-wasip1`), and executed latency on that target was below the instrument's noise floor
+  (min-of-14 `+3.2%`, median `-7.7%` — an instrument that cannot resolve it, not a measurement).
+  Two instructions per element, against an element that has already run a cache probe or a full lex
+  and commit, is the price this design pays for a counter a loop cannot exhaust.
 
   **The residual is stated rather than hidden**: past 2^64 refusals in one input session the count
   cannot record another, the two questions become one value, and the verdict fails closed. That

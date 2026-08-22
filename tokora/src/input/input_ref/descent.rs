@@ -382,17 +382,16 @@ where
       // consulting site compares the value against the one its attempt started with, and a second
       // trip after a caught first one must not compare equal to it.
       //
-      // SATURATING, and this used to be `wrapping_add`. The argument for wrapping was that an
-      // inequality needs consecutive values to differ, which it gives — but the reading also needs
-      // the value never to RETURN to a baseline after a positive number of trips, and wrapping is
-      // the one behaviour that guarantees it does. `usize::MAX + 1` trips alias the baseline
-      // exactly, and the verdict then answers `false` over an attempt in which every `descend`
-      // refused: unreachable at 64 bits, and a loop rather than a lifetime at 32, where a zero
-      // recursion limit makes every call of this function a trip. Saturation removes the return
-      // path, and `tripped_during_attempt` answers `true` unconditionally at the ceiling so the
-      // tie there is not a `false` either. The objection saturation used to draw — that it stops
-      // reporting new trips at its ceiling — is answered by that disjunct rather than by the
-      // arithmetic.
+      // SATURATING on a `u64` cell, and this used to be `wrapping_add` on a `usize` one. The
+      // argument for wrapping was that an inequality needs consecutive values to differ, which it
+      // gives — but the reading also needs the value never to RETURN to a baseline after a
+      // positive number of trips, and wrapping is the one behaviour that guarantees it does. At
+      // `usize` width that aliased after 2^32 refusals on a 32-bit target, which is a loop rather
+      // than a lifetime once a zero recursion limit makes every call of this function a trip.
+      // Saturating alone then made the mirror mistake — the verdict's fail-closed disjunct fires
+      // at the ceiling whether or not anything tripped — so the width is what carries the repair
+      // and the disjunct only covers a point no program reaches. See
+      // `crate::input::TRIP_COUNTER_EXHAUSTED` for both ceilings and the measured cost.
       *self.resource_trips = self.resource_trips.saturating_add(1);
       // Committed consumption, not the cache-front cursor: the same metric the pratt drivers'
       // stall exits report, so the offset does not move with how much lookahead is buffered.
@@ -681,8 +680,23 @@ where
   /// section, with the UFCS spelling that restores the consumer's item, and classified in
   /// `ci/name_collision/no_collision.txt` with what that classification does *not* establish.
   ///
-  /// Costs one `usize` load and one address read per attempt, and nothing anywhere else: no scan,
-  /// no lookahead fill and no token commit reads or writes either.
+  /// # What it costs, on both word sizes
+  ///
+  /// A `u64` load and one address read per attempt, and nothing anywhere else: no scan, no
+  /// lookahead fill and no token commit reads or writes either. The count is **one machine word on
+  /// a 64-bit target and two on a 32-bit one** — it is `u64` rather than `usize` for the reason
+  /// `input::TRIP_COUNTER_EXHAUSTED` gives, and this is the price
+  /// of it.
+  ///
+  /// **This call is on the hot path of every *successful* element**, because the descent baseline
+  /// is taken per element — so the price was measured rather than argued. On
+  /// `thumbv6m-none-eabi`, the narrowest supported target, `-O`: **5 instructions at `usize`, 7 at
+  /// `u64`**, a flat `+2` against an element that has already run a cache probe or a full lex and
+  /// commit. A whole 32-bit collection-parse binary grew **16 bytes** (111,555 → 111,571 on
+  /// `wasm32-wasip1`, the widest 32-bit target that can be executed here), and executed latency on
+  /// that target was **below the instrument's noise floor** — min-of-14 put the change at `+3.2%`
+  /// and the median at `-7.7%`, which is an instrument that cannot resolve it rather than a
+  /// measurement. The `+2` is the number this design accepts.
   #[inline(always)]
   pub fn trip_snapshot(&self) -> ResourceTripBaseline<'closure> {
     ResourceTripBaseline {
@@ -831,9 +845,13 @@ where
   /// instead of silently truncating, and it is distinguishable from a real trip by not being a
   /// `bool` at all.
   ///
-  /// The check is one `usize` comparison on a path that already runs one, and its branch is cold.
+  /// The check is one word-pair comparison on a path that already runs one, and its branch is
+  /// cold.
   ///
-  /// Costs two `usize` comparisons, on the failure arm only.
+  /// Costs a nonce comparison and a `u64` comparison, **on the failure arm only** — never on a
+  /// successful element. Measured on `thumbv6m-none-eabi`, `-O`: 19 instructions at `usize`, 24 at
+  /// `u64`. That `+5` is on a path a clean parse does not take; the per-element price is
+  /// [`trip_snapshot`](Self::trip_snapshot)'s `+2`.
   ///
   /// # Panics
   ///

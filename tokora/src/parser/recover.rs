@@ -315,9 +315,10 @@ where
 /// with no [`UnexpectedEnd`](crate::error::UnexpectedEnd) anywhere on that path to mark.
 ///
 /// All four are attempt-relative and all four are *read* on the failure path only. What a
-/// successful attempt pays is the two baselines taken before it: a `usize` load, and one clone of
-/// the latch — the same `Option<L::Offset>` the checkpoint this combinator already saves clones for
-/// its own rollback set.
+/// successful attempt pays is the two baselines taken before it: a `u64` load — one machine word
+/// on a 64-bit target, two on a 32-bit one — and one clone of the latch, the same
+/// `Option<L::Offset>` the checkpoint this combinator already saves clones for its own rollback
+/// set.
 ///
 /// # See Also
 ///

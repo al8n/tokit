@@ -252,14 +252,37 @@ pub(crate) use input_ref::ScannerTripBaseline;
 /// contract, and it is the fail-closed direction: past the ceiling the witness over-reports a trip
 /// rather than under-reporting one.
 ///
+/// # This is the counter's ceiling, and it is not the one `Cst::resource_trips` clamps at
+///
+/// There are two numbers and they are different things.
+///
+/// * **`u64::MAX` — this one — is where the *counter* gives up.** Past it a trip cannot be
+///   recorded, "did this attempt trip" and "did it not" become one value, and the verdicts fail
+///   closed. Reaching it takes 2^64 refusals inside one input session, on any target.
+/// * **`usize::MAX` is a display clamp**, and only on a target where `usize` is narrower than the
+///   counter. [`Cst::resource_trips`](crate::cst::Cst::resource_trips) returns `usize`, so on a
+///   32-bit target it clamps there and the value it returns is a floor. **Nothing gives up at that
+///   point**: the counter keeps counting and every attempt-relative reading stays exact, so a
+///   quiet attempt at `usize::MAX` underlying trips still reads quiet.
+///
+/// # Why the counters are `u64` and not `usize`
+///
 /// Wrapping was the original choice, for a reason that was sound about *consecutive* values and
 /// wrong about the whole range: an inequality against a per-attempt baseline needs consecutive
 /// values to differ, which wrapping gives, but it also needs the value never to return to a
-/// baseline after a positive number of trips, which wrapping does **not**. `usize::MAX + 1` trips
-/// alias the baseline exactly and the verdict answers `false` over a parse in which every single
-/// `descend` refused. Unreachable at 64 bits and reachable at 32 — a zero recursion limit makes
-/// every `descend` a trip, and 2^32 of them is a loop, not a lifetime. Saturation removes the
-/// return path; the disjunct at each verdict removes the tie at the ceiling itself.
+/// baseline after a positive number of trips, which wrapping does **not**. At `usize` width a
+/// 32-bit target aliases after 2^32 refusals — a zero recursion limit makes every `descend` a
+/// trip, and four billion of them is a loop, not a lifetime — and the verdict then answered
+/// `false` over an attempt in which every one of them refused. Saturating at `usize::MAX` fixed
+/// that and broke the mirror: at the ceiling the fail-closed disjunct fires whether or not
+/// anything tripped, so a quiet attempt read terminal permanently.
+///
+/// `u64` moves the give-up point out of reach on every target instead of choosing which direction
+/// to be wrong in at a point a loop can reach. The cost is measured rather than assumed: on
+/// `thumbv6m-none-eabi`, `-O`, the per-element snapshot goes from **5 to 7 instructions** and the
+/// failure-arm verdict from **19 to 24**; a whole 32-bit collection-parse binary grew **16 bytes**
+/// (111,555 → 111,571 on `wasm32-wasip1`), and executed latency on that target was below the
+/// instrument's noise floor. See [`InputRef::trip_snapshot`](InputRef::trip_snapshot).
 pub(crate) const TRIP_COUNTER_EXHAUSTED: u64 = u64::MAX;
 pub(crate) use input_ref::Session;
 pub use input_ref::{

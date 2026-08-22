@@ -224,11 +224,24 @@ where
   /// trips are distinguishable from one, which a flag cannot do — and a grammar that catches a
   /// trip itself and parses on is supported, so more than one is reachable.
   ///
-  /// It **saturates** at `usize::MAX` rather than wrapping, so at the ceiling it reads *at least
-  /// this many* rather than a small number that would look like a quiet parse. Reaching it takes
-  /// `usize::MAX` refusals, which is a loop rather than a lifetime only on a 32-bit target under a
-  /// zero recursion limit; the attempt-relative readings inside the parse fail closed there, and
-  /// this one degrades to a floor.
+  /// # Two ceilings, and only one of them is an exhaustion point
+  ///
+  /// The cell behind this is a `u64`, and this reading is a `usize`, so on a target where those
+  /// differ there are two numbers and they mean different things.
+  ///
+  /// * **`usize::MAX` is a display clamp.** On a 32-bit target a count above it is returned as
+  ///   `usize::MAX`, and the value is then a **floor**: *at least this many*. Nothing has given up
+  ///   — the counter is still counting, and every attempt-relative reading inside the parse is
+  ///   still exact at and past that point, so a quiet attempt there still reads quiet.
+  ///   This type's `Debug` renders the underlying value, and marks it
+  ///   with a trailing `+` only at the real ceiling below.
+  /// * **`u64::MAX` is the exhaustion point**, where the counter stops recording and the
+  ///   attempt-relative verdicts fail closed. It takes 2^64 refusals in one input session and no
+  ///   program reaches it. See
+  ///   `input::TRIP_COUNTER_EXHAUSTED`.
+  ///
+  /// A `usize` reading that has clamped is therefore a floor for a *display* reason and not
+  /// because anything was lost; a value at the exhaustion point is a floor because it was.
   ///
   /// # What it does not tell you
   ///

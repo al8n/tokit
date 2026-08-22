@@ -1026,7 +1026,10 @@ where
   /// section 4 pins it as a defect, beside the control that shows an accepting emitter marks the
   /// same stop.
   ///
-  /// Costs one `usize` load per attempt: no scan, no lookahead fill and no token commit reads it.
+  /// Costs one `u64` load per attempt — one machine word on a 64-bit target, two on a 32-bit one
+  /// — and no scan, no lookahead fill and no token commit reads it. Unlike its descent twin this
+  /// baseline is taken **once per collection** rather than per element, so the 32-bit cost lands
+  /// once per driver rather than once per element.
   #[inline(always)]
   pub(crate) const fn scanner_trip_snapshot(&self) -> ScannerTripBaseline {
     ScannerTripBaseline {
@@ -1057,7 +1060,7 @@ where
   /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot), which is per *collection* where the
   /// descent baseline is per *element*.
   ///
-  /// Costs one `usize` load and a comparison, on the failure arm only.
+  /// Costs one `u64` load and a comparison, on the failure arm only.
   #[inline(always)]
   pub(crate) const fn scanner_tripped_during_attempt(&self, since: ScannerTripBaseline) -> bool {
     *self.scanner_trips == super::TRIP_COUNTER_EXHAUSTED || *self.scanner_trips != since.count
@@ -1668,8 +1671,9 @@ where
   /// needs the value never to return to a baseline after a positive number of trips, which
   /// wrapping does not. See [`TRIP_COUNTER_EXHAUSTED`](super::TRIP_COUNTER_EXHAUSTED).
   ///
-  /// A `usize` load, an add and a store. It cannot unwind, and it needs no staging: that is what
-  /// lets the already-spent refusal publish it before any consumer step of its own.
+  /// A load, a saturating add and a store, on the `u64` cell — one machine word on a 64-bit
+  /// target and two on a 32-bit one. It cannot unwind, and it needs no staging: that is what lets
+  /// the already-spent refusal publish it before any consumer step of its own.
   #[inline(always)]
   fn count_scanner_trip(&mut self) {
     *self.scanner_trips = self.scanner_trips.saturating_add(1);

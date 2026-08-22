@@ -1704,7 +1704,7 @@ mod gate_census {
   ///   verdict→commit region *per verdict* instead of comparing two tallies that any arrangement of
   ///   needles would satisfy. Where a probe sits at the TOP of a cycle the gate is a constant
   ///   `false` (this cycle's baseline is taken a few lines above it and nothing since can trip), and
-  ///   it is kept anyway: a `usize` comparison is cheaper than an exemption table, and it fails
+  ///   it is kept anyway: a `u64` comparison is cheaper than an exemption table, and it fails
   ///   closed if a later refactor moves an element attempt above it;
   /// * a **direct** closer is one the driver committed straight from its own scan, with no probe
   ///   verdict at all. There are exactly two in the tree — `sep/delim`'s and `sep_while/delim`'s
