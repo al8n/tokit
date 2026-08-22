@@ -397,14 +397,13 @@ and will red until they do.
 
   **The 32-bit cost is measured, and accepted — with the layout in it, and scoped.** `trip_snapshot`
   is taken per *element*, so it is on the hot path of every successful element.
-  `tripped_during_attempt` is not, and it has no single frequency: `InputRef::trip_snapshot` carries
-  the one copy of that model, derived from all five sites in the crate that evaluate either verdict.
-  Three earlier versions of this entry each asserted a frequency read off some call sites — "failure
-  arm only", then "every normal termination" — and each was wrong. From the derived table: a
-  collection ending through a **direct closer** evaluates **neither** verdict, through a **probed
-  closer** the **descent one alone**, through a **decline or stall** both; a failed element and a
-  failed recovery attempt evaluate both behind cheaper reads; and a **successful** `skip_then_retry`
-  step evaluates both, which is the one place either runs after something worked.
+  `tripped_during_attempt` is not, and **it has no single frequency**: how often it runs is a
+  property of the termination class, and ranges from neither verdict to both. Three earlier versions
+  of this entry each asserted one number, read off whichever call sites the author had looked at,
+  and each was wrong in a different way. The model is therefore derived from all five sites in the
+  crate that evaluate either verdict and kept in **one** place —
+  `InputRef::tripped_during_attempt` — and this entry deliberately does not reproduce it, because
+  the same sentence living in several places is the defect that produced those three versions.
 
   `thumbv6m-none-eabi` at `-O`:
 
@@ -426,11 +425,11 @@ and will red until they do.
   zero, which is an instrument that cannot resolve the change rather than a speedup.
 
   **What that measurement covers, stated rather than generalised.** The probe is a non-delimited
-  collection terminating by **decline** — one class of six. The five it does not exercise are named
-  on `InputRef::trip_snapshot`; four of them are **cheaper or equal** per termination (both closer
-  classes evaluate less, and the two failure classes sit behind cheaper reads), and the one that is
-  not — a `skip_then_retry` workload paying both verdicts per *successful* sync or advance step —
-  is unmeasured and named as such.
+  collection terminating by **decline** — one class of six; the classes and what each evaluates are
+  in the canonical table on `InputRef::tripped_during_attempt`. Four of the five it does not
+  exercise are **cheaper or equal** per termination. The fifth is **not**, and it is the one this
+  entry has to name on its own rather than defer: a `skip_then_retry` workload pays both verdicts
+  per *successful* sync or advance step, and that shape is **unmeasured**.
 
   Accepted on that scope: two instructions and eight stack bytes per element loop, against an
   element that has already run a cache probe or a full lex and commit. Keeping `count` at `usize`
