@@ -74,6 +74,73 @@ trip_snapshot/discarded
 tripped_during_attempt/used
 tripped_during_attempt/discarded
 
+# ── `InputRef::at_scanner_stop` — the `recursion` shape, fourth time ─────────────────────
+#
+# `pub fn at_scanner_stop(&self) -> bool` on `InputRef`, so the analysis on `recursion` above
+# transfers unamended: the `inherent_method` template's consumer is `fn NAME(&mut self) -> u8`, the
+# probe's receiver expression already has type `&mut InputRef<..>`, and the consumer's item is
+# found at the FIRST step of the receiver walk while tokora's `&self` item is one autoref step
+# later. The earlier pick wins on both sides and tokora's item is never a candidate. Same controls:
+# `recursion` / `token_budget` / the `trip_snapshot` pair for the shape, `descend` / `descending`
+# on the same owner as the counter-control that scores `loud` when the receivers agree.
+#
+# Read these two rows exactly as those: **"the `&mut self` consumer keeps its call"**, never as
+# "this name cannot be stolen". It can, by a consumer whose extension item takes `&self`, and the
+# harness cannot generate that consumer. That case is disclosed in the CHANGELOG's "Source-breaking
+# additions that can change behaviour with no diagnostic at the call site" section, with the UFCS
+# spelling that restores the consumer's item.
+#
+# This one takes NO argument where `tripped_during_attempt` takes one, so there is no inferred
+# argument type to hide which item won — the disclosure is written against a `bool` in a boolean
+# position, which is the shape that can still switch silently.
+at_scanner_stop/used
+at_scanner_stop/discarded
+
+# ── `InputRef::scanner_trip_snapshot` / `scanner_stopped_during_attempt` — the same shape ─
+#
+# `pub fn scanner_trip_snapshot(&self) -> ScannerTripBaseline<'_>` and
+# `pub fn scanner_stopped_during_attempt(&self, since: ScannerTripBaseline<'_>) -> bool`, both
+# `&self` on `InputRef`, so the `recursion` analysis transfers unamended for the fifth and sixth
+# time: the `inherent_method` template's consumer is `fn NAME(&mut self) -> u8`, the probe's
+# receiver expression already has type `&mut InputRef<..>`, the consumer's item is found at the
+# FIRST step of the receiver walk and tokora's `&self` item one autoref step later. The earlier
+# pick wins on both sides. Same controls as the descent twins directly above — `recursion` /
+# `token_budget` for the shape, `descend` / `descending` on the same owner as the counter-control
+# that scores `loud` when the receivers agree.
+#
+# These are the **scanner** twins of `trip_snapshot` / `tripped_during_attempt`, and the paragraph
+# on those rows applies word for word, including the part that matters: the paired call passes the
+# baseline through inference, so a consumer whose extension item takes `&self` could take the call
+# with no diagnostic. That is disclosed in the CHANGELOG's "Source-breaking additions that can
+# change behaviour with no diagnostic at the call site" section, with the UFCS spelling that
+# restores the consumer's item — the two new names are added to the same entry rather than given
+# one of their own, because the analysis and the remedy are identical.
+scanner_trip_snapshot/used
+scanner_trip_snapshot/discarded
+scanner_stopped_during_attempt/used
+scanner_stopped_during_attempt/discarded
+
+# ── `InputRef::scanner_attempt` / `scanner_outcome` — the same shape, seventh and eighth ──
+#
+# `pub fn scanner_attempt(&self) -> ScannerAttempt<'_, '_, L>` and
+# `pub fn scanner_outcome(&self, since: &ScannerAttempt<'_, '_, L>) -> ScannerOutcome`, both `&self`
+# on `InputRef`. The `recursion` analysis transfers unamended once more: the `inherent_method`
+# template's consumer is `fn NAME(&mut self) -> u8`, the probe's receiver expression already has
+# type `&mut InputRef<..>`, the consumer's item is found at the FIRST step of the receiver walk and
+# tokora's `&self` item one autoref step later, so the earlier pick wins on both sides and tokora's
+# item is never a candidate. Same controls as the four rows above.
+#
+# `scanner_outcome` returns an ENUM rather than a `bool` or a `u8`, so a consumer's `-> u8`
+# extension item would be a type mismatch at most call sites rather than a silent steal — but the
+# paired call passes the capture through inference exactly as the two pairs above do, which is the
+# shape that can still switch with no diagnostic. Disclosed with them in the CHANGELOG's
+# "Source-breaking additions that can change behaviour with no diagnostic at the call site" section,
+# with the UFCS spellings that restore the consumer's items.
+scanner_attempt/used
+scanner_attempt/discarded
+scanner_outcome/used
+scanner_outcome/discarded
+
 # ── `Emitter::commit_lexer_error` — the SAME rule, in the mirror ──────────────────────────
 #
 # tokora's is `fn commit_lexer_error(&mut self, ..)` on the `Emitter` trait. The

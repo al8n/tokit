@@ -243,7 +243,6 @@ pub use cursor::Cursor;
 #[cfg(all(test, feature = "logos_0_16", feature = "std", feature = "combinators"))]
 pub(crate) use input_ref::ClosePayload;
 pub(crate) use input_ref::CloseStatus;
-pub(crate) use input_ref::ScannerTripBaseline;
 
 /// The value both trip counters stop at, and the reading that means "**at least** this many".
 ///
@@ -283,10 +282,44 @@ pub(crate) use input_ref::ScannerTripBaseline;
 /// target, and two executed workload shapes — and the whole table, with the decision it supports,
 /// is on [`InputRef::trip_snapshot`](InputRef::trip_snapshot).
 pub(crate) const TRIP_COUNTER_EXHAUSTED: u64 = u64::MAX;
+
+/// The value the regime-id allocator stops at, and the one id that is equal to **nothing**.
+///
+/// Its siblings above saturate into a value that keeps answering the *conservative* question
+/// correctly — a trip counter pinned at the ceiling still reads "tripped". An id cannot do that,
+/// because the reading it feeds is an **equality**, and a saturating id compares *equal* across a
+/// re-key: the very shape a regime id exists to tell apart, silently answering
+/// [`ScannerOutcome::Stalled`](crate::input::ScannerOutcome::Stalled) — *repeating reproduces the
+/// trip* — over an input whose regime the caller has just replaced. That is a false **stop**, the
+/// harmful direction.
+///
+/// So exhaustion is handled rather than saturated into: this sentinel is excluded from equality by
+/// [`InputRef::scanner_outcome`](crate::InputRef::scanner_outcome)'s comparison, so once the
+/// allocator reaches it every regime reads as *changed*. A parse that re-keys 2^64 times then
+/// stops being able to report a stall and reports a re-key instead, which costs it the guard and
+/// keeps it correct.
+pub(crate) const REGIME_EXHAUSTED: u64 = u64::MAX;
+
+/// Whether two regime ids name the **same** regime.
+///
+/// Equality, minus the one id that names nothing. [`REGIME_EXHAUSTED`] is what the allocator hands
+/// out once it can no longer climb, so two regimes really can wear it at once; excluding it here is
+/// how exhaustion degrades. Every comparison against it is `false`, so
+/// [`InputRef::scanner_outcome`] answers
+/// [`ScannerOutcome::ReKeyed`](crate::input::ScannerOutcome::ReKeyed) and never
+/// [`ScannerOutcome::Stalled`](crate::input::ScannerOutcome::Stalled). A parse that has re-keyed
+/// 2^64 times loses the guard; it does not gain a false stop.
+///
+/// A free function rather than a method because the property is about two numbers and nothing
+/// else, and that is what makes exhaustion testable without a 2^64-step parse.
+#[inline(always)]
+pub(crate) const fn same_regime(a: u64, b: u64) -> bool {
+  a == b && a != REGIME_EXHAUSTED
+}
 pub(crate) use input_ref::Session;
 pub use input_ref::{
   Balance, Commit, DelimClass, Descent, DropPolicy, Hole, InputRef, ResourceTripBaseline, Rollback,
-  Transaction,
+  ScannerAttempt, ScannerOutcome, ScannerTripBaseline, Transaction,
 };
 pub(crate) use lineage::Lineage;
 pub use session::{Budget, PartialSession, RedriveFromBase, ReplayMode, SessionRefusal};
@@ -692,6 +725,13 @@ where
   /// but through [`scanner_trips`](Self::scanner_trips), *not* through this cell, and the
   /// difference is the whole reason that cell exists.
   ///
+  /// A **root loop** outside this crate asks a different question and gets this cell as half the
+  /// answer. [`InputRef::at_scanner_stop`] reads it positionally, at the committed cursor, together
+  /// with the token budget's recorded refusal beside it — not against a baseline, which is what
+  /// makes the rollback argument below irrelevant to it and what lets it be published where the
+  /// counter cannot be. A restore that puts this field back puts back a live stop, and that reading
+  /// then reports a live stop, which is what the next scan will do.
+  ///
   /// This one is **inside the rollback set**, and a witness inside it cannot answer a question
   /// asked from outside it. A speculating attempt restores this field on `Err`, so a snapshot taken
   /// before the attempt and compared after it compares a restored value against the value it was
@@ -715,6 +755,58 @@ where
   /// [the law](crate::input#terminal-beats-incomplete-and-they-never-substitute) for why the ranking
   /// is total, and what an attacker could do without it.
   poison_boundary: Option<L::Offset>,
+  /// The identity of the **lexer regime** installed now — a generation stamped on every state
+  /// surgery, and the third determinism input made comparable.
+  ///
+  /// [`Lexer`](crate::Lexer)'s determinism clause says a scan is decided by source, offset and
+  /// [`State`](crate::state::State). The first two are readable; the third is not — `State` is
+  /// bounded `Debug + Clone` and nothing more, so no handle can compare two of them. This counts
+  /// the one class of event that replaces a regime rather than advancing it.
+  ///
+  /// **Three writers of `*state`, and only one of them lands here.** A *commit* threads the lexer's
+  /// own post-token state forward and advances the committed span with it; a *restore* installs a
+  /// checkpoint's saved pair; a *surgery* ([`InputRef::set_state`], [`InputRef::state_mut`])
+  /// replaces the regime outright through `install_rekey`, which is the sole allocation site. So
+  /// **equal id and equal committed offset together imply an equal `State`**: a commit would have
+  /// moved the offset, and a restore carries the id of the regime it puts back. That pair is what
+  /// [`InputRef::scanner_outcome`] tests, and it is why it can say a repeat reproduces a trip
+  /// without running one.
+  ///
+  /// **That is a claim about values, so a census of assignment sites is not enough to make it.**
+  /// It also needs there to be no public path to the *live* `State` at all — a `State` may hold
+  /// interior mutability, and a `&L::State` handed to safe code is a way to change what a scan
+  /// sees without touching any of the three writers. [`InputRef::state`] therefore returns an
+  /// owned clone, and so does [`Checkpoint::state`]. The remaining shape is a `Clone` that
+  /// **shares** its interior mutability, which is the determinism clause's own named violation.
+  ///
+  /// **A lineage memo, not a session fact**: a [`Checkpoint`] carries it and a restore pure-copies
+  /// it back, exactly like the `poison_boundary` above — because it describes the same thing that
+  /// boundary does, the regime that produced it, and a restore that puts back a regime must put
+  /// back its name. The **source** it is allocated from is the opposite class and sits directly
+  /// below; the two must not be confused, and deriving one from the other is the defect that
+  /// split them.
+  ///
+  /// Not in `ThroughEntry`. The sync family's positional rewind restores a `State` it captured
+  /// inside one scan call, and no surgery door is reachable from there — the predicates it hands
+  /// out take `&Token`, never `&mut InputRef` — so the generation cannot have moved across the
+  /// pair it rewinds.
+  regime: u64,
+  /// The **allocator** the regime ids above come from: monotone, and **outside the rollback set**.
+  ///
+  /// The distinction between this and the cell above is the whole of what makes a regime id an
+  /// identity rather than a depth counter. Deriving the next id from the *current* — checkpointed
+  /// — value is not injective, and the counterexample is public: save at `g`, install regime B
+  /// (`g + 1`), roll back to `g`, install regime C (`g + 1` again). B and C are different regimes
+  /// wearing one name, and a reader comparing names calls them the same. The same shape as the
+  /// checkpoint ids in [`Lineage`](super::Lineage), which are allocated from a monotone source
+  /// for the identical reason — *a reissued id could collide*.
+  ///
+  /// So this only ever climbs, a restore never touches it, and it is what `install_rekey` reads.
+  /// At `REGIME_EXHAUSTED` it stops climbing and every id from then on
+  /// is that sentinel, which no comparison treats as equal to anything — including itself. An
+  /// exhausted allocator therefore forces *"the regime changed"*, never *"the regime is the
+  /// same"*: the safe direction, because the unsafe one is a false stall.
+  regime_seq: u64,
   /// The **recursion budget** this parse descends against: live descent depth plus the limit it
   /// may not exceed, configured at [`with_state_and_context`](Self::with_state_and_context) from
   /// [`InputContext::with_recursion_limiter`] and defaulting to
@@ -1117,6 +1209,10 @@ where
       emitted_error_end: L::Offset::default(),
       front_reported_end: None,
       poison_boundary: None,
+      // Generation zero: the regime the caller handed in, before any surgery has replaced it.
+      regime: 0,
+      // …and the allocator agrees with it, so the first surgery hands out 1.
+      regime_seq: 0,
       // The caller's budget, moved in as given. Every constructor of `RecursionLimiter` starts
       // at depth 0, so this is depth 0 for every context the crate or a caller can build without
       // deliberately walking one deeper first — and a deliberately-deep one is a caller stating
@@ -1280,6 +1376,12 @@ where
       emitted_error_end: &mut self.emitted_error_end,
       front_reported_end: &mut self.front_reported_end,
       poison_boundary: &mut self.poison_boundary,
+      // The regime generation, borrowed beside the boundary it shares a restore group with: a
+      // surgery through this handle replaces the regime for the session, not for the handle.
+      regime: &mut self.regime,
+      // The allocator, borrowed for the reason the trip counters are: an id it hands out is a fact
+      // about the session, so it must outlive the handle that asked for one.
+      regime_seq: &mut self.regime_seq,
       // The recursion budget, borrowed like the ground-truth cells above rather than snapshotted
       // like `finality`: a handle's frames raise and lower it, and the value must outlive them.
       recursion: &mut self.recursion,

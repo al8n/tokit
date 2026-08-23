@@ -279,7 +279,8 @@ fn parse_state_accessors_via_map() {
         // Exercise all parse_state accessors
         let _span = ps.span();
         let _emitter = ps.emitter_ref();
-        let _state = ps.state();
+        // An owned clone now, and this lexer's state is `()`; the call is the subject here.
+        ps.state();
         let _state_mut = ps.state_mut();
         let _slice = ps.slice();
         tok

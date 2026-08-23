@@ -407,7 +407,10 @@ impl TokenBudgetTally {
   ///   in-crate reader of terminality uses and what this deliberately is not. In band, on the paths
   ///   that do not unwind, the signal a caller already has is the terminal-marked
   ///   [`UnexpectedEot`](crate::error::UnexpectedEot) the `*_or_stop` family raises, read through
-  ///   [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal);
+  ///   [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal) — and, where a *rejecting*
+  ///   emitter's `Err` overtakes that carrier,
+  ///   [`InputRef::at_scanner_stop`](crate::InputRef::at_scanner_stop), which reads this bit as
+  ///   one of its two halves so a caller does not have to combine them;
   /// - **it does not survive a [`PartialSession`](super::PartialSession) redrive.** A redrive
   ///   builds a fresh `Input`, and an input's tally is constructed from the attempt context's
   ///   [`TokenBudget`] and from nothing else — so it is at zero. Nothing a caller can hold carries

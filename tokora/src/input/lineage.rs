@@ -117,6 +117,8 @@
 //! | `emitted_error_end` (dedup watermark) | `Input` | lineage memo | pure-copy the saved value |
 //! | `front_reported_end` (front-report watermark) | `Input` | lineage memo | pure-copy the saved value — beside the emitter rewind, so the witness and the report it names move as one |
 //! | `poison_boundary` (sticky terminal frontier) | `Input` | lineage memo | pure-copy the saved value |
+//! | `regime_seq` (the id source those names come from) | `Input` | monotone session fact | **nothing** — a restored source would reissue a name, and two regimes sharing one name is exactly what an id must not allow |
+//! | `regime` (the installed lexer regime's name) | `Input` | lineage memo | pure-copy the saved value — a restore that puts a `State` back puts its name back with it, which is what lets a reader compare two regimes that `State`'s own bounds cannot |
 //! | [`cache_pushes`](Lineage::cache_pushes) | `Lineage` | lineage memo | pure-copy the saved value — the copy is what makes nested restores compose; see below |
 //! | [`live_ckpts`](Lineage) | `Lineage` | lineage memo | pop through the restored id |
 //! | [`pinned`](Lineage) | `Lineage` | lineage memo | nothing (a restore does not change which guards are live) |
@@ -184,6 +186,28 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     //   witnesses. A witness that did not would be unable to see a rollback at all.
     front_reported_end: _,
     poison_boundary: _,
+    // — lineage memo: restore PURE-COPIES the saved value, and it is in the same group as the
+    //   boundary above for one reason — it is that boundary's regime's NAME. `Lexer`'s determinism
+    //   clause makes a scan a function of source, offset and `State`, and `State` is bounded
+    //   `Debug + Clone`, so nothing can compare two of them; this counts the one class of event
+    //   that REPLACES a regime rather than advancing it (`install_rekey`, the sole bump site,
+    //   reached only from `set_state` and `state_mut`). A restore that puts a `State` back must
+    //   put its name back with it, or a rolled-back surgery would leave the saved regime wearing a
+    //   post-surgery generation. Equal generation plus equal committed offset therefore implies an
+    //   equal `State` — the other two writers of `*state` are a commit, which moves the offset,
+    //   and a restore, which carries its own saved generation — and that pair is what
+    //   `InputRef::scanner_outcome` tests. Not in `ThroughEntry`: no surgery door is reachable
+    //   from inside a scan, whose predicates take `&Token` and never `&mut InputRef`, so the
+    //   generation cannot move across the pair that rewind restores.
+    regime: _,
+    // — MONOTONE SESSION FACT: restore does NOT touch it, and must not — the same class, and the
+    //   same argument, as `next_ckp_id` below. It is the SOURCE the cell above is allocated from,
+    //   and a source a restore rewound would reissue a name two different regimes then share:
+    //   save at `g`, install B, roll back, install C, and a reader comparing names calls B and C
+    //   the same regime. Climbs only, at `install_rekey`; stops at `REGIME_EXHAUSTED`, which the
+    //   reading excludes from equality so an exhausted allocator forces "changed" rather than
+    //   "same".
+    regime_seq: _,
     // — CONTROL-STACK FACT: restore does NOT touch it, and must not. Depth is a property of the
     //   live frames, not of input progress: a save and the restore returning to it happen at the
     //   same depth by construction, so nothing observable changes across the pair; and an unwind
@@ -271,6 +295,12 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     emitted_error_end: _,
     front_reported_end: _,
     poison_boundary: _,
+    // — lineage memo (borrowed): pure-copied by a restore, bumped by `install_rekey`. Same class
+    //   as the `Input` field above it.
+    regime: _,
+    // — MONOTONE SESSION FACT (borrowed): the id source, climbed by `install_rekey`, never lowered
+    //   and never restored. Same class as the `Input` field above it.
+    regime_seq: _,
     // — CONTROL-STACK FACT (borrowed): raised by `descend`, lowered by the `Descent` guard's
     //   drop, never restored. Same class as the `Input` field above it.
     recursion: _,

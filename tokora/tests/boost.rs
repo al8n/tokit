@@ -339,7 +339,9 @@ fn state_and_state_mut_accessible() {
     Ctx: ParseContext<'inp, TestLexer<'inp>>,
     Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = ()>,
   {
-    let _s = inp.state();
+    // `state()` hands back an owned clone now, and this lexer's state is `()` — so a binding here
+    // would be a unit binding. The call itself is what this cell is about.
+    inp.state();
     let _sm = inp.state_mut();
     Ok(())
   }

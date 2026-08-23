@@ -1772,14 +1772,14 @@ fn state_state_and_state_mut() {
       probe_token
         .map_with(move |(), mut state: ProbeSt<'_, '_, '_>| {
           assert_eq!(
-            *state.state(),
+            state.state(),
             ENTRY,
             "`ParseState::state` must read the parse's own lexer state, which this parse was \
              entered with"
           );
           *state.state_mut() = WRITTEN;
           assert_eq!(
-            *state.state(),
+            state.state(),
             WRITTEN,
             "`ParseState::state_mut` must hand back the same lexer state `state` reads — a \
              write through the mutable door is invisible through the shared one only if the two \

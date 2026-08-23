@@ -523,6 +523,51 @@ impl<T, State, Span> PeekedTokenExt<T, Span>
 }
 
 /// A cached token with its associated state.
+///
+/// # The `State` is a payload, not a projection
+///
+/// Every public surface that hands out a lookahead token hands out this type —
+/// [`InputRef::cache`](crate::InputRef::cache) and the [`Cache`] views behind it,
+/// [`InputRef::peek_one`](crate::InputRef::peek_one), and every `peek` / `sync_*_then_peek`
+/// result. The `State` it carries is the lexer regime that produced the token, and the input
+/// **installs** that regime when the token is consumed — so a public way to reach it is a public
+/// way to reach a regime the input will later make live. See the `state` accessor's own note for what that
+/// buys an adversary.
+///
+/// So the regime is carried, never read. What is public is everything that does not touch it:
+///
+/// ```rust
+/// use tokora::{cache::CachedToken, span::Spanned};
+///
+/// fn read_the_token<T, S, Sp>(cached: &CachedToken<T, S, Sp>) -> Spanned<&T, &Sp> {
+///   cached.token()
+/// }
+/// ```
+///
+/// Reading the regime does not compile:
+///
+/// ```compile_fail
+/// use tokora::cache::CachedToken;
+///
+/// fn read_the_regime<T, S, Sp>(cached: &CachedToken<T, S, Sp>) -> &S {
+///   // error[E0624]: method `state` is private
+///   cached.state()
+/// }
+/// ```
+///
+/// Neither does taking it apart to get at it:
+///
+/// ```compile_fail
+/// use tokora::cache::CachedToken;
+///
+/// fn split_out_the_regime<T, S, Sp>(cached: CachedToken<T, S, Sp>) -> S {
+///   // error[E0624]: method `into_components` is private
+///   cached.into_components().1
+/// }
+/// ```
+///
+/// Nor can one be **fabricated** — the constructor is crate-internal, so a [`Cache`]
+/// implementation can only ever hand back entries it was given.
 pub struct CachedToken<T, State, Span> {
   pub(crate) token: Spanned<T, Span>,
   pub(crate) state: State,
@@ -583,16 +628,49 @@ impl<T, State, Span> CachedToken<T, State, Span> {
     }
   }
 
-  /// Returns a reference to the state.
+  /// Returns a reference to the state — **crate-internal**.
+  ///
+  /// # The state a cached token carries is an opaque payload, and that is a wall
+  ///
+  /// A cached token's `State` is the lexer regime that produced it, and the input **installs** it
+  /// when the token is consumed. A public projection of it would therefore be a public path to a
+  /// regime the input will later make live — and [`State`](crate::state::State) is bounded
+  /// `Debug + Clone` and nothing more, so a perfectly valid one may hold interior mutability. A
+  /// grammar handed `&L::State` from the cache could flip a `Cell<Mode>` inside a token's
+  /// post-state, consume that token to install the altered regime, and have a rollback restore the
+  /// live state, the regime id and the offset while the consumed entry stays absent — the retry
+  /// then re-lexes from an unaltered state and can succeed, over an input
+  /// [`InputRef::scanner_outcome`](crate::InputRef::scanner_outcome) has just called
+  /// [`Stalled`](crate::input::ScannerOutcome::Stalled).
+  ///
+  /// **This is the one type through which that can happen**, so it is where the cut is made rather
+  /// than at each door. Every public surface that hands out a cached token —
+  /// [`InputRef::cache`](crate::InputRef::cache) and the [`Cache`] views behind it,
+  /// [`InputRef::peek_one`](crate::InputRef::peek_one), every `peek` and `sync_*_then_peek`
+  /// result — hands out this type, so closing it here closes all of them at once, including the
+  /// ones nobody has written yet.
+  ///
+  /// What survives is everything that does not read the regime: [`token`](Self::token),
+  /// [`into_token`](Self::into_token), [`as_ref`](Self::as_ref), [`map_token`](Self::map_token)
+  /// and [`Clone`]. A [`Cache`] implementation therefore still stores, returns, splits and clones
+  /// entries exactly as before — it never needed to read one — while nothing downstream can read
+  /// or fabricate a regime, since [`new`](Self::new) is crate-internal too.
+  // Every reader is feature-gated — the `conformance` cache kit and the in-crate suites — so the
+  // bare configuration has none, and the crate's `#![deny(warnings)]` calls that dead. It is kept
+  // rather than folded into the `pub(crate)` field it wraps because this is where the wall above
+  // is documented, and a field access is not a place to hang that.
+  #[allow(dead_code)]
   #[inline(always)]
-  pub const fn state(&self) -> &State {
+  pub(crate) const fn state(&self) -> &State {
     &self.state
   }
 
-  /// Consumes the cached token and returns the extras.
+  /// Consumes the cached token and returns the extras — **crate-internal**, for
+  /// [`state`](Self::state)'s reason. [`into_token`](Self::into_token) is the public half, and it
+  /// hands back exactly the part that is not a regime.
   #[inline(always)]
   #[allow(clippy::type_complexity)]
-  pub fn into_components(self) -> (Spanned<T, Span>, State) {
+  pub(crate) fn into_components(self) -> (Spanned<T, Span>, State) {
     (self.token, self.state)
   }
 }
