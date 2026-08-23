@@ -678,6 +678,38 @@ and will red until they do.
 
 ### Changed (breaking)
 
+- **`CachedToken::state` and `CachedToken::into_components` are crate-internal** (#311). The regime
+  a cached token carries is now an opaque payload: carried, cloned and moved, never read.
+
+  **This is the same hole as the accessor above, reached through the cache.** A cached token's
+  `State` is the regime that produced it, and the input **installs** it when the token is consumed.
+  Prefill a token, capture a scanner attempt, flip a `Cell<Mode>` in that token's post-state through
+  `InputRef::cache()`, then consume it inside a failing `try_attempt`: the scan trips under the
+  altered mode, the rollback restores the live state, the regime id and the offset **while the
+  consumed pre-save entry stays absent**, and the retry re-lexes from an unaltered state and can
+  succeed — over an input `scanner_outcome` has just called `Stalled`. That is a legitimately
+  deep-cloned `State`, not the shared-counter violation, so it was inside the boundary the previous
+  entry drew.
+
+  **The cut is at the type, not at the doors.** Every public surface that hands out lookahead hands
+  out a `CachedToken` — `InputRef::cache()` and the `Cache` views behind it, `peek_one`, every
+  `peek*` and `sync_*_then_peek*` — so closing the projection closes all of them at once, including
+  the ones nobody has written yet. `token`, `into_token`, `as_ref`, `map_token` and `Clone` stay
+  public, so a `Cache` implementation stores, returns, splits and clones entries exactly as before;
+  it never needed to read one. `CachedToken::new` was already crate-internal, so a regime cannot be
+  fabricated either — a cache can only hand back entries it was given.
+
+  **Blast radius: nothing in this workspace changed.** `cargo check --all-features --all-targets`
+  is clean without a single call-site edit — the conformance kit, the fuzz harness, the benches and
+  every test compile untouched, because the projection had no consumer outside `cache` itself.
+  A downstream consumer that read a peeked token's post-state loses that; `into_token` gives the
+  token and span.
+
+  `InputRef::cache()` itself is **kept**. With the regime unprojectable it exposes nothing unsound,
+  and withdrawing a diagnostic accessor that no longer leaks would be breakage bought for nothing.
+  The full per-projection enumeration, derived from the types that hold an `L::State` rather than
+  from the doors that were found, is on `InputRef::scanner_outcome`.
+
 - **`InputRef::state`, `ParseState::state` and `Checkpoint::state` return the state BY VALUE**
   (#311). They handed out `&L::State`; they now hand out an owned clone.
 

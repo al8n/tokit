@@ -1334,17 +1334,42 @@ where
   ///   both from one saved pair. The destructuring census in `input::lineage` is what keeps that
   ///   trichotomy from silently gaining a fourth member.
   ///
-  ///   **And there is no public path to the live `State` at all.** A census of *assignment sites*
-  ///   is a claim about writes, and the conclusion needed is about **values** — the two coincide
-  ///   only for a type that cannot be mutated through a shared reference, which `Debug + Clone`
-  ///   does not give. A `State` holding a `Cell<Mode>` is perfectly valid, and a `&L::State`
-  ///   handed to safe code would let a grammar flip it at the same offset with no writer involved,
-  ///   leaving this reading to answer `Stalled` over an input where a repeat now succeeds.
-  ///   [`state`](Self::state) and [`Checkpoint::state`](crate::input::Checkpoint::state)
-  ///   therefore hand back **owned clones**; the capability is gone rather than deprecated. What
-  ///   is left is a `Clone` that *shares* its interior mutability rather than deep-copying it,
-  ///   which is the [`Lexer`](crate::Lexer) determinism clause's own named violation and out of
-  ///   scope here as everywhere else on this reading.
+  ///   **And no public projection reaches a live-or-installable `State` at all.** A census of
+  ///   *assignment sites* is a claim about writes, and the conclusion needed is about **values** —
+  ///   the two coincide only for a type that cannot be mutated through a shared reference, which
+  ///   `Debug + Clone` does not give. A `State` holding a `Cell<Mode>` is perfectly valid, so any
+  ///   `&L::State` handed to safe code lets a grammar flip it with no writer involved. The
+  ///   enumeration below is derived from the **types that hold one**, not from the doors that were
+  ///   found:
+  ///
+  ///   | holder | public projection | verdict |
+  ///   |---|---|---|
+  ///   | `Input` | none; fields private, not constructible while a handle lives | closed by construction |
+  ///   | [`InputRef`] | [`state`](Self::state) | owned clone |
+  ///   | [`InputRef`] | [`state_mut`](Self::state_mut), [`set_state`](Self::set_state) | **tracked** — both allocate a new regime id |
+  ///   | [`InputRef`] | [`lexer`](Self::lexer) | an owned `L` built from a clone; its `Lexer::state` is the caller's own copy |
+  ///   | [`InputRef`] | [`cache`](Self::cache), and every [`Cache`](crate::cache::Cache) view behind it | reaches only [`CachedToken`](crate::cache::CachedToken), whose regime is not projectable |
+  ///   | [`InputRef`] | every `peek*` and `sync_*_then_peek*` result | same — they are all `CachedToken` |
+  ///   | [`InputRef`] | `next`, `try_expect*`, `consume_cached_*` | yield `Spanned<L::Token, L::Span>` — provably state-free |
+  ///   | [`ParseState`](crate::ParseState) | `state` / `state_mut` | forward the two rows above |
+  ///   | [`Checkpoint`](crate::input::Checkpoint) | `state` | owned clone |
+  ///   | [`Checkpoint`](crate::input::Checkpoint) | `cursor` | an offset — provably state-free |
+  ///   | [`CachedToken`](crate::cache::CachedToken) | `state`, `into_components`, `new` | crate-internal: not readable, not fabricable |
+  ///   | [`CachedToken`](crate::cache::CachedToken) | `token`, `into_token`, `as_ref`, `map_token`, `Clone` | carry the regime as an opaque payload |
+  ///   | `PeekedTokenExt` | `token`, `span` | state-free |
+  ///   | `ThroughEntry`, `AtFrontier`, `Resume`, `Session` | not public | closed by visibility |
+  ///
+  ///   The cut for the whole cache/peek family is made at **`CachedToken`**, not at each door,
+  ///   because every one of those doors hands out that one type — so it holds for the doors that
+  ///   do not exist yet as well.
+  ///
+  ///   Two things sit **outside** this table rather than in it, both by the same rule the crate
+  ///   already applies to a lexer. [`Cache`](crate::cache::Cache) and [`Lexer`](crate::Lexer) are
+  ///   *caller-implemented infrastructure*: a cache owns the entries it stores and can hand back
+  ///   the wrong one, which is a cache-conformance violation, and a `Clone` that **shares** its
+  ///   interior mutability rather than deep-copying it is the determinism clause's own named
+  ///   violation. Under either, this crate's behaviour is unspecified-but-bounded — the same
+  ///   posture, and the same boundary, as everywhere else on this reading.
   ///
   ///   **The id is allocated, not derived.** Its source is monotone and outside the rollback set,
   ///   because deriving the next id from the checkpointed cell is not injective: save at `g`,
