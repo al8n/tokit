@@ -692,6 +692,13 @@ where
   /// but through [`scanner_trips`](Self::scanner_trips), *not* through this cell, and the
   /// difference is the whole reason that cell exists.
   ///
+  /// A **root loop** outside this crate asks a different question and gets this cell as half the
+  /// answer. [`InputRef::at_scanner_stop`] reads it positionally, at the committed cursor, together
+  /// with the token budget's recorded refusal beside it — not against a baseline, which is what
+  /// makes the rollback argument below irrelevant to it and what lets it be published where the
+  /// counter cannot be. A restore that puts this field back puts back a live stop, and that reading
+  /// then reports a live stop, which is what the next scan will do.
+  ///
   /// This one is **inside the rollback set**, and a witness inside it cannot answer a question
   /// asked from outside it. A speculating attempt restores this field on `Err`, so a snapshot taken
   /// before the attempt and compared after it compares a restored value against the value it was

@@ -56,7 +56,8 @@ pub use descent::ResourceTripBaseline;
 /// The baseline half of the **scanner-trip witness**, and the reason the swap with
 /// [`ResourceTripBaseline`] does not compile.
 ///
-/// Crate-internal, like the pair that issues it — [`InputRef::scanner_trip_snapshot`] records why.
+/// Crate-internal, like the pair that issues it — [`InputRef::scanner_trip_snapshot`] records why,
+/// and names [`InputRef::at_scanner_stop`] as the public reading a consumer takes instead.
 /// A distinct type rather than a bare `usize` because the two baselines have **opposite**
 /// granularities (this one per collection, the descent one per element) and every site that reads
 /// both takes both, so an argument swap was a plausible boolean and a silent wrong answer. It is
@@ -910,6 +911,107 @@ where
     self.reached_boundary(self.cursor().as_inner())
   }
 
+  /// Returns whether a **terminal scanner stop is in force at the committed cursor** — the input
+  /// has spent a scanner resource budget it cannot get past, and the parse has consumed up to it.
+  ///
+  /// This is the public answer to *"did this failure end the document, or is it an ordinary
+  /// grammar error?"* for the **scanner** half of terminality. Its descent half is
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt), and neither subsumes the other: a
+  /// descent trip latches no boundary — it has a control stack rather than a position — so this
+  /// reads `false` for one, exactly as the crate's own positional scanner witness does.
+  ///
+  /// ```text
+  /// loop {
+  ///   let trips = inp.trip_snapshot();
+  ///   match definition(inp) {
+  ///     Ok(true)  => {}
+  ///     Ok(false) => return Ok(()),
+  ///     Err(e) => {
+  ///       if e.is_terminal() || inp.tripped_during_attempt(trips) || inp.at_scanner_stop() {
+  ///         return Err(e);                 // the document is over
+  ///       }
+  ///       report();                        // an ordinary syntax error: file it and carry on
+  ///     }
+  ///   }
+  /// }
+  /// ```
+  ///
+  /// # The exit no other public reading covers
+  ///
+  /// [`try_expect_or_stop`](Self::try_expect_or_stop) raises a terminal-marked
+  /// [`UnexpectedEot`](crate::error::UnexpectedEot) on **the declining exits**, and that is the
+  /// whole answer wherever the caller reaches one. A *rejecting* (fail-fast)
+  /// [`Emitter`](crate::Emitter) does not let it: it reports a lexer-resource trip by **returning**
+  /// the value its `From<<L::Token as Token>::Error>` builds — that `Err` *is* the report, not a
+  /// refusal to make one — and the scan propagates it from **inside** that very call, before the
+  /// arm that would raise the terminal stop can run. The caller receives an ordinary grammar error
+  /// over an exhausted scanner, and no care in the grammar's
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal) repairs it, because nothing on that path is
+  /// terminal-marked to delegate to.
+  ///
+  /// The stop is nonetheless already **recorded** when that `Err` arrives: the boundary is latched
+  /// inside the crate's terminal predicate, ahead of the diagnostic ever being offered to the
+  /// emitter, precisely so that the emitter's answer cannot decide whether the input remembers its
+  /// own stop. This reads that record.
+  ///
+  /// # It is a reading of NOW, which is what makes it right across the recovery path
+  ///
+  /// It takes no baseline and witnesses no event. It answers *"will a scan from here yield the
+  /// stop rather than a token?"*, and the two facts it reads are the two the scanner itself
+  /// refuses on:
+  ///
+  /// - [`TokenBudgetTally::refused_an_item`](crate::input::TokenBudgetTally::refused_an_item) — the
+  ///   input-layer budget's recorded refusal. No [`Checkpoint`](crate::input::Checkpoint) carries
+  ///   it, no re-key clears it and no `token_budget_mut` exists, so once an item has been refused
+  ///   it is refused for the life of the input;
+  /// - the **poison boundary**, positionally, at the committed cursor — the lexer's own limit trip,
+  ///   which lives in `L::State` and therefore travels with the regime that produced it.
+  ///
+  /// Reading the boundary *live* rather than against a baseline is the whole of why this can be
+  /// published where the session's scanner-trip counter cannot.
+  /// [`set_state`](Self::set_state) / [`state_mut`](Self::state_mut) drop the boundary, and
+  /// **dropping it is the documented limit-recovery path** — swap in a fresh or bigger-budget state
+  /// and scanning resumes past the old boundary. A monotone counter is never cleared by either, so
+  /// a loop that recovers exactly as documented reads the rest of the document and a counter-based
+  /// verdict still answers "truncated": measured at eight tokens under a scan budget of three,
+  /// recovered with `set_state`, all eight consumed and the witness still `true`. This reading goes
+  /// `false` the moment the regime that owned the stop dies, because there is nothing left to read.
+  ///
+  /// For the same reason it needs no rollback proof at any nesting depth. A witness that *compares*
+  /// a rollbackable cell across an attempt compares a restored value against what it was restored
+  /// to; this one is not a comparison. A [`Checkpoint`](crate::input::Checkpoint) that puts the
+  /// boundary back puts back a live stop, and this then reports a live stop — which is what the
+  /// next scan will do.
+  ///
+  /// # What a `false` does not promise
+  ///
+  /// Two residues, named rather than implied, and both are **bounded by real progress** rather than
+  /// by a caller's discipline:
+  ///
+  /// - **the cursor rewound behind a live boundary.** An element may latch a trip, open an
+  ///   [`attempt`](Self::attempt), consume the cached pre-trip tokens and decline; the restore
+  ///   rewinds the cursor behind the boundary while the latch survives. Every positional witness
+  ///   reads clean there. Lexing *strictly before* the frontier still proceeds, so the loop that
+  ///   carries on re-parses a prefix that really is there and re-reaches the stop — it does not
+  ///   loop over a spent scanner;
+  /// - **a met ceiling with the one-shot probe unspent.** A budget of `N` over a document of `N`
+  ///   items has met its ceiling and refused nothing, and *"would an item be refused?"* is not
+  ///   *"is there an item?"* — only running the lexer separates them, which is what the probe is
+  ///   for. Until it has run, this reads `false`; the entry that spends it records the refusal and
+  ///   this reads `true` from then on. Answering `true` at the met ceiling instead would report a
+  ///   fully-parsed document as truncated, which is the defect the probe exists to avoid.
+  ///
+  /// Costs a `bool` load, and — only if that is `false` — one `Offset::Ord` comparison against a
+  /// latch that is `None` on every input that has never tripped.
+  #[inline(always)]
+  pub fn at_scanner_stop(&self) -> bool {
+    // The durable half first: a `bool` on a crate-owned struct, false on every input that never
+    // configured a token budget, and true forever once one has refused. The positional half is
+    // asked only when it is not already settled, and it is the one that costs consumer code
+    // (`Offset::Ord`, through `reached_boundary`).
+    self.token_budget.refused_an_item() || self.reached_boundary(self.cursor().as_inner())
+  }
+
   /// Snapshots the terminal-stop latch for an attempt-relative absence witness.
   ///
   /// The latch is not monotone: a trip raises it (keeping the most-poisoned, smallest boundary), a
@@ -998,33 +1100,40 @@ where
   /// `skip_then_retry` would inherit. That is a design round, not a visibility change, so the pair
   /// stays crate-internal until it has had one.
   ///
-  /// # What a consumer can answer today, and what it cannot
+  /// # What a consumer reads instead, and why it is not this
   ///
-  /// [`try_expect_or_stop`](Self::try_expect_or_stop) covers **the declining exits**, and only
-  /// those. Its contract is that a terminal stop is an error and never a decline, and it reads the
-  /// *live* boundary, so it is right where this counter is wrong: the same `set_state` recovery
-  /// that leaves the counter poisoned correctly stops it reporting a stop. Measured on the fixture
-  /// above — the truncated run raises the terminal end-of-input error with no input-side witness
-  /// anywhere, the widened control reads all eight, and the recovered run reads all eight too.
-  /// `tokora/tests/root_loop_trip_witness.rs`'s section 3 is those cells.
+  /// [`at_scanner_stop`](Self::at_scanner_stop) is the public scanner verdict, and it is a reading
+  /// of **now** rather than a comparison against a baseline: the input-layer budget's recorded
+  /// refusal, or the poison boundary at the committed cursor. That is what lets it be published
+  /// where this pair cannot be. It goes clean across the `set_state` recovery, because the boundary
+  /// dies with the regime that owned it and there is nothing left to read — where this counter,
+  /// being monotone, keeps answering `true` over a document the recovery finished. Planting the
+  /// counter reading in its place reds
+  /// `a_documented_widening_leaves_the_witness_reporting_a_finished_document`, at `Err(Eot)` for an
+  /// `Ok(7)`: a fully recovered document reported as truncated.
   ///
-  /// **It is not a replacement for this pair, and must not be described as one.** A *rejecting*
-  /// (fail-fast) emitter reports a lexer-resource trip by returning the value its
-  /// `From<<L::Token as Token>::Error>` builds, and `scan_with(..)?` propagates that value from
-  /// **inside** `try_expect_or_stop`, before the call can reach the arm that raises a terminal
-  /// stop. The caller therefore receives an ordinary grammar error over an exhausted scanner, with
-  /// nothing on it to read — and no care in the grammar's
-  /// [`MaybeTerminal`](crate::error::MaybeTerminal) can repair that, because nothing on the path
-  /// is terminal-marked to delegate to. Calling `try_expect_or_stop` does not help, because the
-  /// unmarked error originated inside that call. This is the same fact the twin's own
-  /// documentation states from the other side: this witness *answers where the error value
-  /// cannot*.
+  /// It answers the **rejecting-emitter** path this pair exists for, and answers it without a
+  /// baseline. A rejecting (fail-fast) emitter reports a lexer-resource trip by returning the value
+  /// its `From<<L::Token as Token>::Error>` builds, and `scan_with(..)?` propagates that value from
+  /// **inside** [`try_expect_or_stop`](Self::try_expect_or_stop), before the call can reach the arm
+  /// that raises a terminal stop; no care in the grammar's
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal) repairs that, because nothing on the path is
+  /// terminal-marked to delegate to. The **boundary is latched anyway** — inside the crate's
+  /// terminal predicate, ahead of the diagnostic ever being offered to the emitter — so the stop is
+  /// on record when the rejection arrives, and the live reading finds it.
+  /// `tokora/tests/root_loop_trip_witness.rs` section 4 is the measurement, including the growth
+  /// the reading removes: without it a re-keying root loop files one diagnostic per remaining
+  /// token, at three document lengths.
   ///
-  /// So: **no public witness answers the rejecting-emitter path today.** That gap is real, it is
-  /// older than this pair's visibility — the pair has been crate-internal throughout — and closing
-  /// it is the design round above, not a visibility change. `tokora/tests/root_loop_trip_witness.rs`
-  /// section 4 pins it as a defect, beside the control that shows an accepting emitter marks the
-  /// same stop.
+  /// [`try_expect_or_stop`](Self::try_expect_or_stop) still covers **the declining exits** and is
+  /// still the primitive to build a decline on: its contract is that a terminal stop is an error
+  /// and never a decline, and it reads the same live boundary. What it cannot do is speak on the
+  /// path where the emitter's `Err` overtakes it, which is why the verdict above exists beside it.
+  ///
+  /// None of that changes this pair's own answer or its visibility. An **attempt-relative** verdict
+  /// is a different question from a live one — this one is what a *driver* judging one element or
+  /// one speculative parse needs, where the live reading is what a *root loop* holding an `Err`
+  /// needs — and the `set_state` false positive above is the reason it stays where it is.
   ///
   /// Costs one `u64` load per attempt — one machine word on a 64-bit target, two on a 32-bit one
   /// — and no scan, no lookahead fill and no token commit reads it. Unlike its descent twin this
@@ -1047,6 +1156,13 @@ where
   /// `From<<L::Token as Token>::Error>` builds, and nothing on that path constructs an
   /// [`UnexpectedEnd`](crate::error::UnexpectedEnd) for
   /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) to mark.
+  ///
+  /// It is not the only thing that answers there any more, and it is not the public one:
+  /// [`at_scanner_stop`](Self::at_scanner_stop) reads the same fact **live** — no baseline, no
+  /// placement — which is what makes it publishable where this is not. The two are different
+  /// questions, not two spellings of one: this is *did a trip happen inside the attempt I am
+  /// judging*, which is what a driver needs; that is *is the scanner stopped here now*, which is
+  /// what a root loop holding an `Err` needs.
   ///
   /// **Attempt-relative, not session-absolute**, and a **count** rather than a flag — the same two
   /// disciplines [`tripped_during_attempt`](Self::tripped_during_attempt) documents at length, for

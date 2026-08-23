@@ -302,6 +302,23 @@ where
   /// itself). This is the primitive an attempt/decline caller should build on
   /// when a decline commits it to a different parse — see the `try_*` delimited
   /// shapes.
+  ///
+  /// # The one exit this cannot mark, and what reads it
+  ///
+  /// The parenthesis above is a gap, not a footnote. A **rejecting** (fail-fast)
+  /// [`Emitter`](crate::Emitter) reports the trip by *returning* the value its
+  /// `From<<L::Token as Token>::Error>` builds — that `Err` **is** the report — and the scan
+  /// propagates it before this body can reach the arm that raises the terminal end-of-input.
+  /// The caller then holds an ordinary-looking grammar error over an exhausted scanner, and no
+  /// delegation in its [`MaybeTerminal`](crate::error::MaybeTerminal) recovers the fact, because
+  /// nothing on that path is terminal-marked.
+  ///
+  /// The stop is on record anyway — the boundary is latched inside the crate's terminal predicate,
+  /// ahead of the diagnostic ever being offered to the emitter — so
+  /// [`at_scanner_stop`](Self::at_scanner_stop) answers there. A root loop deciding *"does this
+  /// failure end the document"* reads it beside
+  /// [`is_terminal`](crate::error::MaybeTerminal::is_terminal); every other caller of this method
+  /// can keep reading the error value alone.
   #[inline]
   pub fn try_expect_or_stop<F>(
     &mut self,

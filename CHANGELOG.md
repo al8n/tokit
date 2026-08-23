@@ -66,6 +66,56 @@ and will red until they do.
   Read it through `InputRef::token_budget`, which is already `pub`; there is still no
   `token_budget_mut`.
 
+- **`InputRef::at_scanner_stop` — the scanner half of "does this failure end the document",
+  readable on the one exit no error value reaches** (#311). A **rejecting** (fail-fast) `Emitter`
+  reports a lexer-resource trip by *returning* the value its `From<<L::Token as Token>::Error>`
+  builds — that `Err` **is** the report, not a refusal to make one — and `scan_with(..)?`
+  propagates it from **inside** `try_expect_or_stop`, before that call can reach the arm raising a
+  terminal-marked `UnexpectedEot`. A document-root loop then holds an ordinary-looking grammar
+  error over an exhausted scanner, and **no care in the grammar's `MaybeTerminal` repairs it**:
+  there is nothing terminal-marked on that path to delegate to, and calling `try_expect_or_stop`
+  does not help because the unmarked error originates inside that call.
+
+  The stop is nonetheless already **on record** when that `Err` arrives. The poison boundary is
+  latched inside the crate's terminal predicate, ahead of the diagnostic ever being offered to the
+  emitter — that ordering exists precisely so an emitter's answer cannot decide whether the input
+  remembers its own stop. This method reads it, together with the input-layer `TokenBudget`'s
+  recorded refusal (`TokenBudgetTally::refused_an_item`, in the entry above) which no re-key can
+  clear.
+
+  **It is a reading of *now*, not a baseline-and-compare, and that is the whole design.** It takes
+  no argument, so there is no placement for a caller to get wrong, and it witnesses no event, so it
+  needs no rollback proof at any nesting depth: a `Checkpoint` that puts the boundary back puts back
+  a live stop, and the reading then reports a live stop — which is what the next scan will do.
+
+  **Publishing `scanner_trip_snapshot` / `scanner_tripped_during_attempt` would not have closed
+  this, and the entry above records why.** `set_state` / `state_mut` re-key the input's
+  forward-scanning facts, and dropping the poison boundary there is the **documented**
+  limit-recovery path; the counter is monotone and neither touches it, so a fully recovered document
+  reads as truncated. That is now pinned, not argued: planting the counter reading in this method's
+  place reds `a_documented_widening_leaves_the_witness_reporting_a_finished_document` at `Err(Eot)`
+  for an `Ok(7)`. The live reading goes clean there because the regime that owned the stop is gone.
+
+  **Measured in both directions**, in `tokora/tests/root_loop_trip_witness.rs` section 4. Without
+  the reading, a root loop that meets an ordinary-looking failure by re-keying the lexer regime —
+  which is what `state_mut` is for, and which drops the boundary — retries against a tally that is
+  still spent and files **one diagnostic per remaining token**, at three document lengths; with it,
+  zero at every length, and the loop ends the document on the same turn. The non-vacuity control is
+  the same pair under a budget nothing reaches: both loops read the whole document and file nothing.
+  The two halves are pinned by disjoint cells — removing the boundary read reds the
+  rejecting-emitter cells, removing the budget read reds
+  `a_token_budget_refusal_outlives_the_re_key_that_clears_a_lexer_trip`.
+
+  **What a `false` does not promise** is stated on the method: a cursor rewound behind a live
+  boundary by a rollback reads clean (the region behind the frontier is replayable, so the loop that
+  carries on makes real progress and re-reaches the stop), and a *met* ceiling whose one-shot probe
+  has not run yet reads clean (only running the lexer separates "would an item be refused" from "is
+  there an item", and answering `true` there would report a fully-parsed document as truncated).
+
+  The `scanner_trip_snapshot` pair stays crate-internal. It answers a different question — *did a
+  trip happen inside the attempt I am judging*, which is what a driver needs — and that question
+  still has the `set_state` false positive.
+
 - **`ErrorContainer::clear`.** `Errors` is now the only door onto its container (#247), so it has
   to serve the removals that door used to reach through `DerefMut`. The method is defaulted
   through `pop`, so an existing implementation keeps compiling unchanged; the four built-in
@@ -318,16 +368,17 @@ and will red until they do.
   The caller receives an ordinary grammar error over an exhausted scanner, and no delegation in its
   `MaybeTerminal` can repair it, because nothing on the path is marked to delegate to — the same
   fact `scanner_tripped_during_attempt` documents from the other side when it says it answers where
-  the error value cannot. **So no public witness answers the rejecting-emitter path today.** That
-  gap is real and it is *older than this release*: the pair has been crate-internal throughout, so
-  its visibility has never changed the answer in either direction. Section 4 of that suite pins the
-  gap as a defect, beside the control that shows an accepting emitter marks the same stop.
+  the error value cannot. That exit is answered by `InputRef::at_scanner_stop`, in the entry above;
+  it is not answered by publishing the withdrawn pair, and that entry says why.
 
   **The descent pair has no such exposure**, and the reason is the channel rather than luck: a
   descent refusal is *returned* by `InputRef::descend` and never routed through an emitter, so no
   emitter can unmark it or convert it away from the counter that already recorded it.
   `the_descent_witness_holds_under_a_rejecting_emitter` runs the amplification loop under a
   fail-fast emitter and gets one refusal, one stop, nothing filed.
+
+  Its **scanner** counterpart is `InputRef::at_scanner_stop`, in the entry above. It is not this
+  pair's twin made public — it is a different reading, and that is what closed the gap.
 
   **The baseline is a type, not a `usize`.** `ResourceTripBaseline` is opaque — no accessor, no
   `PartialEq`, no constructor, and a hand-written `Debug` that renders `ResourceTripBaseline(..)`
@@ -1875,6 +1926,16 @@ the coverage for that case, which is why it is here rather than in the probe's b
 `input::ResourceTripBaseline` is a new glob-reachable name in `tokora::input`; the probe scores it
 `glob-err`, the disclosed outcome — a `use tokora::input::*` alongside another glob exporting the
 same name is rejected by the compiler rather than silently resolved.
+
+**`InputRef::at_scanner_stop` is a third new inherent method on the same type**, and every word
+above transfers: it is `pub fn at_scanner_stop(&self) -> bool`, so a consumer who wrote that name
+on `InputRef` as an extension item runs their item on the base and tokora's here. It takes **no
+argument**, so unlike the pair above there is no inferred type to make the switch invisible — but
+`bool` is the sort of return an extension would also have, so a call in a boolean position can
+still compile on both revisions. **The fix is the same UFCS**: `MyExt::at_scanner_stop(inp)`.
+`ci/name_collision/` scores its two rows `ok*` for the same narrow reason as the four above (the
+template's consumer takes `&mut self`; tokora's item takes `&self`), which is why this paragraph
+exists rather than the probe's baseline standing in for it.
 
 #247 removes `Errors`' `DerefMut` and replaces the three legitimate uses it served with inherent
 methods. `Errors` has shipped since 0.7.3 **with no inherent item of its own**, so a consumer who

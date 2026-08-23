@@ -1,19 +1,21 @@
 #![cfg(all(feature = "std", feature = "logos_0_16"))]
 
-//! The four **trip-witness** methods, used the way a consumer outside this crate uses them.
+//! The input-side **terminality readings**, used the way a consumer outside this crate uses them.
 //!
 //! `InputRef::trip_snapshot` / `tripped_during_attempt` and their scanner twins
 //! `scanner_trip_snapshot` / `scanner_tripped_during_attempt` were crate-private for as long as the
-//! only sites judging an attempt were this crate's own. They are public now because a consumer
-//! acquired the defect they exist for: a **hand-written document-root loop** that catches a failed
-//! definition and has to decide whether that failure ends the document.
+//! only sites judging an attempt were this crate's own. The descent pair is public now because a
+//! consumer acquired the defect they exist for: a **hand-written document-root loop** that catches
+//! a failed definition and has to decide whether that failure ends the document. The scanner pair
+//! is still crate-internal, and the public scanner verdict is `InputRef::at_scanner_stop` — a
+//! reading of the live stop rather than a baseline-and-compare, for the reason section 4 measures.
 //!
 //! Every other suite that touches these counters drives them through a *combinator* —
 //! `tokora/tests/collection_resource_trip.rs` through the collection drivers,
 //! `tokora/tests/collection_terminal_stop.rs` through the same four families under a scanner
-//! limiter. None of them proves what publishing the methods is for, which is that a loop this crate
-//! did not write can take the baseline and read the verdict. That is what this file drives, and it
-//! drives it from `tokora/tests/`, so nothing here can reach a `pub(crate)` item.
+//! limiter. None of them proves what publishing these readings is for, which is that a loop this
+//! crate did not write can judge its own failure. That is what this file drives, and it drives it
+//! from `tokora/tests/`, so nothing here can reach a `pub(crate)` item.
 //!
 //! # The shape, and the amplification it prevents
 //!
@@ -61,25 +63,31 @@
 //! invocation. Those are compile-fail doctests on `InputRef::trip_snapshot`; what survives to be
 //! measured at runtime is placement, which no type can decide for a caller.
 //!
-//! # The scanner half, and why this file does not use the scanner counter — sections 3 and 4
+//! # The scanner half, and why it is not a counter — sections 3 and 4
 //!
 //! `try_expect` folds a terminal scanner stop into the same `Ok(None)` it uses for a genuine end of
 //! input, so a root loop reaches its "the document ended" arm holding **no error**. The obvious
-//! answer is the input-side scanner counter, and it is the wrong one: `set_state` re-keys the
-//! forward-scanning facts and dropping the poison boundary there is the crate's *documented*
-//! limit-recovery path, while the counter is monotone and never cleared. A loop that recovers that
-//! way reads the whole document and the counter still says truncated. That pair is therefore
-//! crate-internal, and `InputRef::scanner_trip_snapshot` records the measurement.
+//! answer is the input-side scanner *counter*, and it is the wrong one: `set_state` / `state_mut`
+//! re-key the forward-scanning facts and dropping the poison boundary there is the crate's
+//! *documented* limit-recovery path, while the counter is monotone and never cleared. A loop that
+//! recovers that way reads the whole document and the counter still says truncated. That pair is
+//! therefore crate-internal, and `InputRef::scanner_trip_snapshot` records the measurement.
 //!
 //! [`InputRef::try_expect_or_stop`] is what a consumer reaches for **on the declining exits**, and
 //! section 3 is the three cells that show it right in all three of those positions: truncated,
-//! untruncated, and recovered. It is **not** a replacement for the input-side witness, and section
-//! 4 is why: a *rejecting* emitter's trip is built and propagated from inside that very call,
-//! before it can raise a terminal stop, so the caller gets an ordinary-looking error over an
-//! exhausted scanner and no delegation in its `MaybeTerminal` can recover the fact. **No public
-//! witness answers that path today.** Section 4 pins it as a defect rather than a feature; the
-//! visibility of the scanner pair has never changed it in either direction.
+//! untruncated, and recovered.
 //!
+//! It is not the whole answer, and section 4 is the exit it cannot reach: a *rejecting* emitter's
+//! trip is built and propagated from inside that very call, before it can raise a terminal stop, so
+//! the caller gets an ordinary-looking error over an exhausted scanner and no delegation in its
+//! `MaybeTerminal` can recover the fact. [`InputRef::at_scanner_stop`] is what a root loop reads
+//! there — the **live** stop, at the committed cursor, taking no baseline. Section 4 measures both
+//! directions of it: without the reading a re-keying root loop files one diagnostic per remaining
+//! token at three document lengths, and with it the *documented* recovery still finishes the
+//! document — the row a monotone counter answers wrongly, and the reason the counter pair is not
+//! what was published.
+//!
+//! [`InputRef::at_scanner_stop`]: tokora::InputRef::at_scanner_stop
 //! [`InputRef::try_expect_or_stop`]: tokora::InputRef::try_expect_or_stop
 
 mod common;
@@ -91,6 +99,7 @@ use tokora::{
   Emitter, InputRef, Parse, ParseContext, Parser, ParserContext, Token as TokenTrait,
   emitter::{Fatal, Ignored, Silent},
   error::MaybeTerminal,
+  input::TokenBudget,
   lexer::LogosLexer,
   logos::{self, Logos},
   state::{State, recursion_tracker::RecursionLimiter},
@@ -818,14 +827,175 @@ fn a_documented_state_recovery_leaves_or_stop_reporting_a_finished_document() {
   );
 }
 
-// ── Section 4: the exit no public witness answers, and it is not this branch's ────
+// ── Section 4: the exit the error value cannot answer, and the witness that does ────
 
-/// A **rejecting** emitter hands a root loop a scanner stop with nothing on it to read.
+/// A document of `units` numbers, so a report count can be measured as a *growth* rather than as
+/// one number.
+fn s_document(units: usize) -> String {
+  (1..=units)
+    .map(|n| n.to_string())
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+/// The brake. The defect the cells below measure is an unbounded report stream, and a fixture that
+/// hangs reports nothing — so the loop stops itself and the *count* is what fails the assertion.
+const S_REPORT_CAP: usize = 256;
+
+/// The root loop a context-sensitive grammar writes: an ordinary failure is met by **re-keying the
+/// lexer regime** and retrying, which is [`InputRef::state_mut`]'s documented effect — the token
+/// cache is dropped and the poison boundary with it.
 ///
-/// **This cell pins a known tokora defect, deliberately.** It is not an endorsement and it is not
-/// a regression: the witness that would answer it, `InputRef::scanner_tripped_during_attempt`, is
-/// crate-internal and was crate-internal before this suite existed. When the gap is closed this
-/// cell must change; that is what it is for.
+/// `witness` is the whole variable. With it, the loop asks the input whether the scanner has
+/// stopped before it decides the failure was ordinary; without it, the error value is all it has.
+///
+/// The re-key carries the **same** limiter — same shared counter, same limit. That is not a
+/// contrived recovery: [`InputRef::state_mut`] hands out `&mut L::State` for a mode switch, and a
+/// grammar that switches lexing modes on a syntax error has no reason to touch a resource tally it
+/// did not know was spent. Widening the budget is the *other* recovery, and it is
+/// [`s_root_widening`].
+///
+/// [`InputRef::state_mut`]: tokora::InputRef::state_mut
+fn s_root_rekeying<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>,
+  witness: bool,
+) -> Result<usize, SErr>
+where
+  Ctx: ParseContext<'inp, SLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
+{
+  let mut parsed = 0usize;
+  loop {
+    match inp.try_expect_or_stop(|_| true) {
+      Ok(Some(_)) => parsed += 1,
+      Ok(None) => return Ok(parsed),
+      Err(e) => {
+        // The root loop's one decision: does this failure end the document?
+        if e.is_terminal() || (witness && inp.at_scanner_stop()) {
+          return Err(e);
+        }
+        note_report();
+        if reports() >= S_REPORT_CAP {
+          return Ok(parsed);
+        }
+        // An ordinary syntax error, as far as this loop can tell: re-key and carry on. The
+        // boundary goes with the regime, so the next turn re-lexes against a tally that is still
+        // spent.
+        inp.state_mut();
+      }
+    }
+  }
+}
+
+/// [`s_root_rekeying`] reading the witness. A plain `fn` item, not a closure: the parser entry
+/// point is higher-ranked in `'inp`, and only a `fn` item generalises there without annotation.
+fn s_root_rekeying_witnessed<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>,
+) -> Result<usize, SErr>
+where
+  Ctx: ParseContext<'inp, SLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
+{
+  s_root_rekeying(inp, true)
+}
+
+/// [`s_root_rekeying`] reading only the error value — the loop that has nothing to read.
+fn s_root_rekeying_unwitnessed<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>,
+) -> Result<usize, SErr>
+where
+  Ctx: ParseContext<'inp, SLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
+{
+  s_root_rekeying(inp, false)
+}
+
+/// The same loop, recovering the way the limit-recovery path is *documented*: swap in a state whose
+/// budget is not spent.
+///
+/// The witness is read on every failure after the widening, and it must **not** fire — the recovery
+/// is complete and the document is finished, not truncated. This is the row a monotone trip counter
+/// gets wrong.
+fn s_root_widening<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>,
+) -> Result<usize, SErr>
+where
+  Ctx: ParseContext<'inp, SLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
+{
+  let mut parsed = 0usize;
+  let mut widened = false;
+  loop {
+    match inp.try_expect_or_stop(|_| true) {
+      Ok(Some(_)) => parsed += 1,
+      // The end of the document, and the loop asks the witness whether it is a *truncated* one.
+      // This is where a monotone trip counter answers wrongly and the live reading does not: the
+      // counter still carries the trip the widening recovered from.
+      Ok(None) => {
+        return if inp.at_scanner_stop() {
+          Err(SErr::Eot)
+        } else {
+          Ok(parsed)
+        };
+      }
+      Err(e) => {
+        if widened {
+          if e.is_terminal() || inp.at_scanner_stop() {
+            return Err(e);
+          }
+          note_report();
+          return Ok(parsed);
+        }
+        inp.set_state(ScanLimiter::with_limit(S_ROOMY));
+        widened = true;
+      }
+    }
+  }
+}
+
+/// Reads the witness on the far side of a re-key, and hands the reading back as the parse's output.
+///
+/// Two budgets stop a scanner and they decay differently. The **lexer's** limit lives in `L::State`
+/// and the boundary it latches is a per-regime memo, so a re-key really does recover it. The
+/// **input's** [`TokenBudget`] refusal is recorded on the input's own tally, which no
+/// [`Checkpoint`] carries, no re-key touches and no mutator lowers. A witness that read only the
+/// boundary would answer clean on the far side of a re-key over an input that is stopped for good.
+///
+/// [`TokenBudget`]: tokora::input::TokenBudget
+/// [`Checkpoint`]: tokora::input::Checkpoint
+fn s_probe_after_rekey<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>,
+) -> Result<bool, SErr>
+where
+  Ctx: ParseContext<'inp, SLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
+{
+  loop {
+    match inp.try_expect_or_stop(|_| true) {
+      Ok(Some(_)) => {}
+      Ok(None) => return Ok(inp.at_scanner_stop()),
+      Err(_) => {
+        inp.state_mut();
+        return Ok(inp.at_scanner_stop());
+      }
+    }
+  }
+}
+
+/// Section 4's driver: the verdict, and how many items the lexer actually scanned, under the
+/// **rejecting** emitter. `s_drive!`'s twin, and a macro for the same reason.
+macro_rules! s_drive_fatal {
+  ($limit:expr, $root:ident, $src:expr) => {{
+    let limiter = ScanLimiter::with_limit($limit);
+    let scanned = limiter.counter();
+    let ctx: ParserContext<'_, SLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+    let out = Parser::with_parser_and_context($root, ctx).parse_str_with_state($src, limiter);
+    (out, scanned.get())
+  }};
+}
+
+/// A **rejecting** emitter hands a root loop a scanner stop with nothing on the error value to
+/// read — and [`InputRef::at_scanner_stop`] is what the loop reads instead.
 ///
 /// A rejecting (fail-fast) emitter reports a lexer-resource trip by **returning** the value its
 /// `From<<L::Token as Token>::Error>` builds — that `Err` is the report, not a refusal to make one
@@ -833,13 +1003,16 @@ fn a_documented_state_recovery_leaves_or_stop_reporting_a_finished_document() {
 /// call can reach the arm that raises a terminal end-of-input. So the caller receives an ordinary
 /// grammar error over an exhausted scanner, and no care in the grammar's `MaybeTerminal` can fix
 /// it: [`SErr`] delegates as carefully as a grammar can and still answers `false`, because there is
-/// nothing terminal-marked anywhere on that path to delegate to.
+/// nothing terminal-marked anywhere on that path to delegate to. **That half is unchanged, and this
+/// cell still measures it** — closing al8n/tokora#311 put nothing on the value.
 ///
-/// A root loop that reads only the error value can therefore resynchronise against the same spent
-/// budget, or accept a truncated document. Section 3's cells are all the **accepting** emitter,
-/// where the same stop arrives as a terminal `Eot` — which is why "use `try_expect_or_stop`" is a
-/// statement about *those* exits and not a replacement for the input-side witness.
+/// What it changed is that the loop can read the stop off the *input*. The boundary is latched
+/// inside the crate's terminal predicate, ahead of the diagnostic ever being offered to the
+/// emitter, so it is already on record when the rejection arrives. The two emitters therefore now
+/// agree about whether the document ended, which they did not before: the accepting one says so
+/// through the error value, the rejecting one through the input.
 ///
+/// [`InputRef::at_scanner_stop`]: tokora::InputRef::at_scanner_stop
 /// [`InputRef::try_expect_or_stop`]: tokora::InputRef::try_expect_or_stop
 #[test]
 fn a_rejecting_emitter_hands_the_root_loop_an_unmarked_scanner_stop() {
@@ -862,18 +1035,192 @@ fn a_rejecting_emitter_hands_the_root_loop_an_unmarked_scanner_stop() {
   );
   assert!(
     !rejecting.unwrap_err().is_terminal(),
-    "and it is UNMARKED. This is the gap: a document-root loop reading the error value sees an \
-     ordinary failure over a spent scanner budget, and the input-side witness that would say \
-     otherwise is crate-internal"
+    "and it is still UNMARKED: nothing on that path constructs a terminal carrier for \
+     `MaybeTerminal` to delegate to, so the fix could not be on the value"
   );
 
   // The control: the identical fixture under an ACCEPTING emitter, where the stop is marked. The
-  // two differ only in the emitter, which is what makes the gap a property of the channel.
+  // two differ only in the emitter, which is what made the gap a property of the channel.
   let (accepting, _) = s_drive!(S_TIGHT, s_root_or_stop, S_SRC);
   assert_eq!(
     accepting,
     Err(SErr::Eot),
     "accepting emitter, same source, same budget: the stop is terminal-marked and readable"
+  );
+
+  // And the reading that is the same on both channels: the loop asks the INPUT.
+  reset();
+  let (witnessed, scanned) = s_drive_fatal!(S_TIGHT, s_root_rekeying_witnessed, S_SRC);
+  assert!(scanned > S_TIGHT, "the witnessed run must trip too");
+  assert_eq!(
+    witnessed,
+    Err(SErr::Limit),
+    "the witnessed loop ends the document holding the unmarked value, because `at_scanner_stop` \
+     answered where `is_terminal` could not"
+  );
+  assert_eq!(
+    reports(),
+    0,
+    "one stop is one stop: nothing was filed as an ordinary syntax error"
+  );
+}
+
+/// Without the witness the same loop turns one spent budget into one diagnostic **per remaining
+/// token**, and the count grows with the document.
+///
+/// This is the amplification shape of al8n/smear#169, reached here through the *other* public
+/// contract: the loop reads the unmarked value, concludes "ordinary syntax error", re-keys — which
+/// drops the poison boundary, because that is what a re-key does — and retries against a tally that
+/// is still spent. The crate's own [`InputRef::try_expect_or_stop`] gate cannot stop it, since the
+/// re-key removes the very latch that gate reads.
+///
+/// Three lengths, so what is pinned is the growth and not one number.
+///
+/// [`InputRef::try_expect_or_stop`]: tokora::InputRef::try_expect_or_stop
+#[test]
+fn without_the_witness_a_re_keying_root_loop_files_one_report_per_remaining_token() {
+  for units in [4usize, 8, 16] {
+    let src = s_document(units);
+
+    reset();
+    let (unwitnessed, scanned) = s_drive_fatal!(S_TIGHT, s_root_rekeying_unwitnessed, &src);
+    assert!(
+      scanned > S_TIGHT,
+      "units={units}: the fixture must trip: scanned {scanned}, limit {S_TIGHT}"
+    );
+    assert_eq!(
+      reports(),
+      units - S_TIGHT,
+      "units={units}: one spent budget filed {} diagnostics — the growth the witness removes. \
+       Verdict was {unwitnessed:?}",
+      units - S_TIGHT
+    );
+    assert_eq!(
+      unwitnessed,
+      Ok(S_TIGHT),
+      "units={units}: and the run it finally reports is the truncated one — everything the \
+       re-keys crossed was consumed by the trips that ate it"
+    );
+
+    reset();
+    let (witnessed, scanned) = s_drive_fatal!(S_TIGHT, s_root_rekeying_witnessed, &src);
+    assert!(
+      scanned > S_TIGHT,
+      "units={units}: the witnessed run must trip too"
+    );
+    assert_eq!(
+      witnessed,
+      Err(SErr::Limit),
+      "units={units}: the witnessed loop ends the document at the stop"
+    );
+    assert_eq!(
+      reports(),
+      0,
+      "units={units}: and files nothing, at every length"
+    );
+  }
+}
+
+/// Non-vacuity for the pair above: with a budget nothing reaches, the two loops agree.
+///
+/// Without this cell, "the witnessed loop files nothing" is satisfiable by a loop that does nothing
+/// at all.
+#[test]
+fn with_scan_budget_to_spare_the_witness_costs_the_parse_nothing() {
+  for units in [4usize, 8, 16] {
+    let src = s_document(units);
+
+    reset();
+    let (out, scanned) = s_drive_fatal!(S_ROOMY, s_root_rekeying_unwitnessed, &src);
+    assert!(
+      scanned <= S_ROOMY,
+      "units={units}: the control must not trip: scanned {scanned}"
+    );
+    assert_eq!(out, Ok(units), "units={units}: the whole document");
+    assert_eq!(reports(), 0, "units={units}: nothing filed");
+
+    reset();
+    let (out, scanned) = s_drive_fatal!(S_ROOMY, s_root_rekeying_witnessed, &src);
+    assert!(
+      scanned <= S_ROOMY,
+      "units={units}: the witnessed control must not trip either: scanned {scanned}"
+    );
+    assert_eq!(
+      out,
+      Ok(units),
+      "units={units}: the whole document, with the witness read at every failure — and there are \
+       none"
+    );
+    assert_eq!(reports(), 0, "units={units}: nothing filed");
+  }
+}
+
+/// The row a **monotone** trip counter gets wrong, and this witness does not: a documented recovery
+/// finishes the document, and the witness says so.
+///
+/// `set_state` drops the poison boundary — that *is* the documented limit-recovery path — while the
+/// session's scanner-trip counter is monotone and never cleared. Measured on this exact fixture,
+/// a counter-based verdict answers `true` here over a fully recovered parse; the live reading
+/// answers `false`, because the regime that owned the stop is gone.
+#[test]
+fn a_documented_widening_leaves_the_witness_reporting_a_finished_document() {
+  reset();
+  let (out, scanned) = s_drive_fatal!(S_TIGHT, s_root_widening, S_SRC);
+  assert!(
+    scanned > S_TIGHT,
+    "the fixture must actually trip before recovering: scanned {scanned}, limit {S_TIGHT}"
+  );
+  assert_eq!(
+    out,
+    Ok(S_UNITS - 1),
+    "the recovery is documented and complete, so the document is finished and not truncated. One \
+     token short of the source because the trip that provoked the recovery consumed the token it \
+     tripped on — that loss is the trip's, not the witness's"
+  );
+  assert_eq!(
+    reports(),
+    0,
+    "no failure after the widening: the loop reached a genuine end of input, and the witness — \
+     read on every one of those turns — never fired"
+  );
+}
+
+/// The **other** budget the witness answers for: the input-layer [`TokenBudget`], whose refusal no
+/// re-key can clear.
+///
+/// The pair is the measurement. Same probe, same re-key, and the two stops answer differently on
+/// the far side of it because they are recorded in different places — which is why the witness
+/// reads both and not just the boundary.
+///
+/// [`TokenBudget`]: tokora::input::TokenBudget
+#[test]
+fn a_token_budget_refusal_outlives_the_re_key_that_clears_a_lexer_trip() {
+  const BUDGET: usize = 3;
+  let src = s_document(S_UNITS);
+
+  // The lexer's own limit: the boundary is a per-regime memo, so the re-key really recovers it.
+  let (lexer_side, scanned) = s_drive_fatal!(S_TIGHT, s_probe_after_rekey, &src);
+  assert!(
+    scanned > S_TIGHT,
+    "the lexer-side cell must actually trip: scanned {scanned}, limit {S_TIGHT}"
+  );
+  assert_eq!(
+    lexer_side,
+    Ok(false),
+    "a re-key drops the poison boundary — the documented limit-recovery path — so the witness \
+     reads clean on the far side of it"
+  );
+
+  // The input's own budget: recorded on the tally, which the re-key does not touch.
+  let ctx: ParserContext<'_, SLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+  let ctx = ctx.with_token_budget(TokenBudget::with_limitation(BUDGET));
+  let budget_side = Parser::with_parser_and_context(s_probe_after_rekey, ctx)
+    .parse_str_with_state(&src, ScanLimiter::with_limit(S_ROOMY));
+  assert_eq!(
+    budget_side,
+    Ok(true),
+    "the token budget's refusal is not a per-regime memo: no `Checkpoint` carries it, no re-key \
+     touches it and no mutator lowers it, so the witness still reads stopped"
   );
 }
 

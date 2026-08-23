@@ -74,6 +74,28 @@ trip_snapshot/discarded
 tripped_during_attempt/used
 tripped_during_attempt/discarded
 
+# ── `InputRef::at_scanner_stop` — the `recursion` shape, fourth time ─────────────────────
+#
+# `pub fn at_scanner_stop(&self) -> bool` on `InputRef`, so the analysis on `recursion` above
+# transfers unamended: the `inherent_method` template's consumer is `fn NAME(&mut self) -> u8`, the
+# probe's receiver expression already has type `&mut InputRef<..>`, and the consumer's item is
+# found at the FIRST step of the receiver walk while tokora's `&self` item is one autoref step
+# later. The earlier pick wins on both sides and tokora's item is never a candidate. Same controls:
+# `recursion` / `token_budget` / the `trip_snapshot` pair for the shape, `descend` / `descending`
+# on the same owner as the counter-control that scores `loud` when the receivers agree.
+#
+# Read these two rows exactly as those: **"the `&mut self` consumer keeps its call"**, never as
+# "this name cannot be stolen". It can, by a consumer whose extension item takes `&self`, and the
+# harness cannot generate that consumer. That case is disclosed in the CHANGELOG's "Source-breaking
+# additions that can change behaviour with no diagnostic at the call site" section, with the UFCS
+# spelling that restores the consumer's item.
+#
+# This one takes NO argument where `tripped_during_attempt` takes one, so there is no inferred
+# argument type to hide which item won — the disclosure is written against a `bool` in a boolean
+# position, which is the shape that can still switch silently.
+at_scanner_stop/used
+at_scanner_stop/discarded
+
 # ── `Emitter::commit_lexer_error` — the SAME rule, in the mirror ──────────────────────────
 #
 # tokora's is `fn commit_lexer_error(&mut self, ..)` on the `Emitter` trait. The
